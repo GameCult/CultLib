@@ -628,7 +628,10 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Creates a raw document snapshot bounded to one shard.
+        /// Creates a raw document snapshot bounded to one shard. Answers through the one evaluator
+        /// (<see cref="CultNetSelectionEvaluator"/>, via <see cref="CultNetDocumentRegistry.SelectPage"/>),
+        /// binding-alias expansion included, with the shard membership check as the row filter -
+        /// no loop of its own (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22, S2-3).
         /// </summary>
         public CultNetSnapshotResponseRawMessage CreateShardSnapshotResponse(
             CultNetShardDescriptor shard,
@@ -638,26 +641,25 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (shard == null) throw new ArgumentNullException(nameof(shard));
 
-            var requestedSchemaIds = filter?.SchemaIds;
-            var requestedRecordKeys = filter?.RecordKeys != null
-                ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
-                : null;
-            var documents = new List<CultNetRawDocumentRecord>();
-            foreach (var document in _cache.AllEntries)
+            var selection = new CultNetSelection
             {
-                var documentType = document.GetType();
-                var descriptor = _cache.Registry.GetRequired(documentType);
-                var key = GetTrackedKey(document, documentType);
-                if (string.IsNullOrWhiteSpace(key.Value) ||
-                    !shard.Matches(descriptor.SchemaId, key) ||
-                    (requestedSchemaIds != null && !CultNetSchemaAliasMatching.MatchesAny(requestedSchemaIds, descriptor)) ||
-                    (requestedRecordKeys != null && !requestedRecordKeys.Contains(key.Value)))
-                {
-                    continue;
-                }
+                Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
+                Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
+                Projection = CultNetSelectionProjections.Document,
+                Limit = CultNetSelectionEvaluator.LimitMax
+            };
+            bool RowFilter(CultDocumentDescriptor descriptor, CultRecordKey key) =>
+                !string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key);
 
-                documents.Add(CreateRawDocumentRecord(key, document));
-            }
+            var documents = new List<CultNetRawDocumentRecord>();
+            string? cursor = null;
+            do
+            {
+                selection.Cursor = cursor;
+                var page = _documents.SelectPage(_cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, validate: false, options: null, rowFilter: RowFilter);
+                documents.AddRange(page.Documents ?? Array.Empty<CultNetRawDocumentRecord>());
+                cursor = page.Next;
+            } while (cursor != null);
 
             return new CultNetSnapshotResponseRawMessage
             {

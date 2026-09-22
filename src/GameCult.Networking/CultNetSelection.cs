@@ -195,6 +195,31 @@ namespace GameCult.Networking
         public bool HasHop => Cites != null || Cited != null;
     }
 
+    /// <summary>
+    /// Lowers a v0 <c>schemaIds</c>/<c>recordKeys</c> filter into cultnet.selection.v1's null-means-
+    /// every vocabulary (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): v0's old cleaning
+    /// carried over as the one place that decides it. An absent list, an empty one, or one made only
+    /// of blank entries all lower to null; a mixed list keeps its non-blank entries, deduplicated.
+    /// This is a v0-compatibility rule, not a meaning <see cref="CultNetSelectionEvaluator"/> or
+    /// <see cref="CultNetSelectionValidation"/> carries - v1 selections are refused at the door
+    /// instead (S1).
+    /// </summary>
+    public static class CultNetV0SelectionLowering
+    {
+        /// <summary>Lowers one v0 filter list; see the type summary.</summary>
+        public static string[]? Lower(IReadOnlyList<string>? values)
+        {
+            if (values is not { Count: > 0 })
+                return null;
+
+            var filtered = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            return filtered.Length == 0 ? null : filtered;
+        }
+    }
+
     /// <summary>The two wire values <see cref="CultNetSelection.Projection"/> may carry.</summary>
     public static class CultNetSelectionProjections
     {
@@ -302,6 +327,22 @@ namespace GameCult.Networking
                 throw new CultNetSelectionInvalidException("schemas", null, "selection.schemas is present and empty; omit it to reach every schema.");
             if (selection.Keys != null && selection.Keys.Length == 0)
                 throw new CultNetSelectionInvalidException("keys", null, "selection.keys is present and empty; omit it to reach every key.");
+            if (selection.Schemas != null)
+            {
+                foreach (var schema in selection.Schemas)
+                {
+                    if (string.IsNullOrWhiteSpace(schema))
+                        throw new CultNetSelectionInvalidException("schemas", schema, "selection.schemas carries an empty or whitespace entry.");
+                }
+            }
+            if (selection.Keys != null)
+            {
+                foreach (var key in selection.Keys)
+                {
+                    if (string.IsNullOrWhiteSpace(key))
+                        throw new CultNetSelectionInvalidException("keys", key, "selection.keys carries an empty or whitespace entry.");
+                }
+            }
             if (selection.Projection is not (CultNetSelectionProjections.Header or CultNetSelectionProjections.Document))
                 throw new CultNetSelectionInvalidException("projection", selection.Projection, $"selection.projection \"{selection.Projection}\" is neither \"header\" nor \"document\".");
 

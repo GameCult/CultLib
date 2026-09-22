@@ -1,17 +1,19 @@
-# Entries for scripts/mutate-dotnet.ps1: CultNet typed selection, Cut 1, commit 2d - the CultMesh
-# collapse (docs/cultnet-selection-cut.md, sections 4/7/11). Targets: src/GameCult.Mesh/CultMesh.cs
+# Entries for scripts/mutate-dotnet.ps1: CultNet typed selection, Cut 1, commit 2 fix batch
+# (docs/cultnet-selection-cut.md, sections 4/7/11). Targets: src/GameCult.Mesh/CultMesh.cs
 # (ReadDocumentFromSnapshotResponse's one exact read) and src/GameCult.Mesh/CultMeshSnapshots.cs
 # (ResolveDefaultSelection's "no schema filter when keys are given" rule). Test project:
 # tests/GameCult.Mesh.Tests.
 #
 # Every entry below carries its own File, so this runs as one invocation with both -Target paths.
 #
-# Two of the three loosening entries here SURVIVED against the current fixtures (recorded, not
-# swapped for an easier mutant): MESH-DEFAULT-Loosening and MESH-KEY-Loosening. Both are genuine
-# weaker readings of the rule they sit beside; no test in tests/GameCult.Mesh.Tests exercises an
-# explicit empty (non-null) recordKeys array or a record-key case variation, so nothing currently
-# distinguishes the loosened behavior from the correct one. That is a fixture gap in
-# CultMeshStreamingTests.cs, not evidence the mutant is unreachable in principle.
+# There are two loosening entries here (MESH-DEFAULT-Loosening and MESH-KEY-Loosening); the header
+# above this line previously miscounted them as "two of three" (S2-9/S2-10). Both were genuine
+# weaker readings of the rule they sit beside and both SURVIVED against the pre-fix-batch fixtures,
+# because nothing in tests/GameCult.Mesh.Tests exercised an explicit empty (non-null) recordKeys
+# array or a record-key case variation. CultMeshStreamingTests.cs now carries
+# FetchDocumentsAsync_WithExplicitEmptyRecordKeys_StillDefaultsToOwnSchema (MESH-DEFAULT) and the
+# case-variant-key block appended to DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments
+# (MESH-KEY); both mutants below now die.
 
 @(
     @{
@@ -20,18 +22,20 @@
         Mutant = 'revert'
         File   = 'src/GameCult.Mesh/CultMeshSnapshots.cs'
         Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshStreamingTests.SnapshotEndpoint_ProvidesTypedHandlesAndSchemaAliases'
-        Old    = 'var schemas = schemaIds != null
+        Old    = 'var cleanedKeys = Clean(recordKeys);
+            var schemas = schemaIds != null
                 ? Clean(schemaIds)
-                : (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });'
-        New    = 'var schemas = schemaIds != null ? Clean(schemaIds) : new[] { descriptor.SchemaId };'
+                : (cleanedKeys != null ? null : new[] { descriptor.SchemaId });'
+        New    = 'var cleanedKeys = Clean(recordKeys);
+            var schemas = schemaIds != null ? Clean(schemaIds) : new[] { descriptor.SchemaId };'
     },
     @{
         Id     = 'MESH-DEFAULT-Loosening'
-        Rule   = 'ResolveDefaultSelection: the no-schema-filter branch triggers on a non-empty recordKeys, not merely a non-null one.'
+        Rule   = 'ResolveDefaultSelection: the no-schema-filter branch triggers on a non-empty (post-cleaning) recordKeys, not merely a non-null one - an explicit empty recordKeys array still defaults to the document type''s own schema (docs/cultnet-selection-cut.md, S2-7/rule 1''s v0 lowering).'
         Mutant = 'loosening'
         File   = 'src/GameCult.Mesh/CultMeshSnapshots.cs'
-        Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshStreamingTests.SnapshotEndpoint_ProvidesTypedHandlesAndSchemaAliases'
-        Old    = 'recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId }'
+        Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshStreamingTests.FetchDocumentsAsync_WithExplicitEmptyRecordKeys_StillDefaultsToOwnSchema'
+        Old    = 'cleanedKeys != null ? null : new[] { descriptor.SchemaId }'
         New    = 'recordKeys != null ? null : new[] { descriptor.SchemaId }'
     },
     @{
@@ -55,14 +59,14 @@
     },
     @{
         Id     = 'MESH-FOREIGN-Revert'
-        Rule   = 'ReadDocumentFromSnapshotResponse: a foreign/runtime-generated schema id at the right recordKey still matches when its payload decodes as TDocument.'
+        Rule   = 'ReadDocumentFromSnapshotResponse: a foreign/runtime-generated schema id at the right recordKey still matches when its payload''s embedded schema (read by the registry''s shared TryReadSchemaVersion) alias-matches the caller''s own descriptor.'
         Mutant = 'revert'
         File   = 'src/GameCult.Mesh/CultMesh.cs'
         Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshStreamingTests.DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments'
-        Old    = 'if (string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) ||
-                    CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor) ||
-                    TryDecodeAsMessagePack<TDocument>(candidate, out _))'
-        New    = 'if (string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) ||
-                    CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor))'
+        Old    = 'else if (byPayload == null &&
+                         CultNetDocumentRegistry.TryReadSchemaVersion(candidate.Payload) is { } payloadSchemaVersion &&
+                         CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor))
+                    byPayload = candidate;'
+        New    = ''
     }
 )

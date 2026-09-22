@@ -188,7 +188,7 @@ namespace GameCult.Mesh
             SubscriptionId = Require(subscriptionId, nameof(subscriptionId));
             ConsumerRuntimeId = Require(consumerRuntimeId, nameof(consumerRuntimeId));
             BodyId = Require(bodyId, nameof(bodyId));
-            Selection = new CultNetSelection
+            _selection = new CultNetSelection
             {
                 Keys = new[]
                     {
@@ -215,8 +215,19 @@ namespace GameCult.Mesh
         public string ConsumerRuntimeId { get; }
         public string BodyId { get; }
 
-        /// <summary>The view record, the body's latest-publication record, and any additional keys/schemas, as one selection.</summary>
-        public CultNetSelection Selection { get; }
+        private readonly CultNetSelection _selection;
+
+        /// <summary>
+        /// The view record, the body's latest-publication record, and any additional keys/schemas, as
+        /// one selection. Returns a fresh copy on every read: <see cref="CultNetSelection"/>'s arrays
+        /// are wire-mutable by design, and this contract does not let a caller mutate them out from
+        /// under it (docs/cultnet-selection-cut.md, S2-8).
+        /// </summary>
+        public CultNetSelection Selection => new()
+        {
+            Schemas = (string[]?)_selection.Schemas?.Clone(),
+            Keys = (string[]?)_selection.Keys?.Clone()
+        };
 
         private static string Require(string value, string parameterName) =>
             string.IsNullOrWhiteSpace(value)

@@ -148,6 +148,7 @@ namespace GameCult.Mesh
                         (_client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                     .ConfigureAwait(false);
                 var selection = CultMesh.OverlaySelection(_defaults.Selection, schemaIds, recordKeys);
+                CultMesh.EnsureV0Compatible(selection);
                 var options = _defaults with { Selection = selection };
                 var messageId = CultMesh.CreateSnapshotMessageId(options);
                 var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
@@ -729,6 +730,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
 
             var resolvedOptions = options ?? new CultMeshSnapshotRequestOptions();
+            EnsureV0Compatible(resolvedOptions.Selection);
             var messageId = CreateSnapshotMessageId(resolvedOptions);
             var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -820,6 +822,34 @@ namespace GameCult.Mesh
         }
 
         /// <summary>
+        /// Refuses, loudly and typed, any selection term the v0 CultNet wire cannot carry. Mesh keeps
+        /// sending v0 in this cut (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): only
+        /// <c>schemas</c> and <c>keys</c> reach the wire message, so <c>fields</c>, <c>cites</c>,
+        /// <c>cited</c>, <c>limit</c>, <c>cursor</c>, <c>descending</c>, and any non-default
+        /// <c>projection</c> are refused here instead of being silently dropped. A v1-carrying Mesh
+        /// transport is FU-Mesh-v1, not this cut.
+        /// </summary>
+        internal static void EnsureV0Compatible(CultNetSelection? selection)
+        {
+            if (selection == null)
+                return;
+            if (selection.Fields != null)
+                throw new CultNetSelectionInvalidException("fields", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.fields cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cites != null)
+                throw new CultNetSelectionInvalidException("cites", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cites cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cited != null)
+                throw new CultNetSelectionInvalidException("cited", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cited cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Limit != null)
+                throw new CultNetSelectionInvalidException("limit", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.limit cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cursor != null)
+                throw new CultNetSelectionInvalidException("cursor", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cursor cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Descending)
+                throw new CultNetSelectionInvalidException("descending", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.descending cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Projection != CultNetSelectionProjections.Header)
+                throw new CultNetSelectionInvalidException("projection", selection.Projection, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.projection cannot reach the wire (FU-Mesh-v1).");
+        }
+
+        /// <summary>
         /// Resolves one selection for a typed convenience call: explicit <paramref name="schemaIds"/>
         /// win; otherwise an explicit, non-empty <paramref name="recordKeys"/> means no schema filter;
         /// otherwise the selection defaults to the document type's own schema. The one owner of that
@@ -830,36 +860,37 @@ namespace GameCult.Mesh
             IReadOnlyList<string>? recordKeys,
             CultDocumentDescriptor descriptor)
         {
+            var cleanedKeys = Clean(recordKeys);
             var schemas = schemaIds != null
                 ? Clean(schemaIds)
-                : (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });
-            return new CultNetSelection { Schemas = schemas, Keys = Clean(recordKeys) };
+                : (cleanedKeys != null ? null : new[] { descriptor.SchemaId });
+            return new CultNetSelection { Schemas = schemas, Keys = cleanedKeys };
         }
 
-        /// <summary>Overlays explicit schema/record-key overrides onto a default selection.</summary>
+        /// <summary>
+        /// Overlays explicit schema/record-key overrides onto a default selection: the caller's
+        /// selection replaces the default wholesale rather than merging field by field, so neither
+        /// side decides what a missing override means (docs/cultnet-selection-cut.md, Self's rulings
+        /// 2026-09-22, S2-7). No override at all keeps the default selection untouched.
+        /// </summary>
         internal static CultNetSelection OverlaySelection(
             CultNetSelection? defaults,
             IReadOnlyList<string>? schemaIds,
             IReadOnlyList<string>? recordKeys)
         {
+            if (schemaIds == null && recordKeys == null)
+                return defaults ?? new CultNetSelection();
+
             return new CultNetSelection
             {
-                Schemas = schemaIds != null ? Clean(schemaIds) : defaults?.Schemas,
-                Keys = recordKeys != null ? Clean(recordKeys) : defaults?.Keys
+                Schemas = Clean(schemaIds),
+                Keys = Clean(recordKeys)
             };
         }
 
-        private static string[]? Clean(IReadOnlyList<string>? values)
-        {
-            if (values is not { Count: > 0 })
-                return null;
-
-            var filtered = values
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            return filtered.Length == 0 ? null : filtered;
-        }
+        // The v0-compatibility list cleaning is CultNetV0SelectionLowering's, not a second copy here
+        // (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22).
+        private static string[]? Clean(IReadOnlyList<string>? values) => CultNetV0SelectionLowering.Lower(values);
 
         internal static string CreateSnapshotMessageId(CultMeshSnapshotRequestOptions options)
         {
@@ -943,7 +974,8 @@ namespace GameCult.Mesh
                 var canDeserializeAsSchemaAlias =
                     CultNetSchemaAliasMatching.Matches(record.SchemaId, descriptor) ||
                     (binding != null && CultNetSchemaAliasMatching.Matches(binding.SchemaId, descriptor)) ||
-                    RawSnapshotPayloadMatchesSchema(record.Payload, descriptor);
+                    (CultNetDocumentRegistry.TryReadSchemaVersion(record.Payload) is { } payloadSchemaVersion &&
+                     CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor));
                 if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
 
@@ -967,48 +999,6 @@ namespace GameCult.Mesh
             }
 
             return documents;
-        }
-
-        // Decode-time fallback for a wire schemaId this runtime does not recognize by any alias
-        // (e.g. a foreign/runtime-generated id): trust the payload's own embedded schemaVersion
-        // instead. This is a decode concern, not a selector engine — the server's answer is not
-        // re-filtered here, and schema identity itself still goes through the one alias matcher.
-        private static bool RawSnapshotPayloadMatchesSchema(
-            byte[] payload,
-            CultDocumentDescriptor descriptor)
-        {
-            var schemaVersion = TryReadSchemaVersion(payload);
-            return !string.IsNullOrWhiteSpace(schemaVersion) &&
-                   CultNetSchemaAliasMatching.Matches(schemaVersion!, descriptor);
-        }
-
-        private static string? TryReadSchemaVersion(byte[] payload)
-        {
-            try
-            {
-                var array = MessagePackSerializer.Deserialize<object[]>(payload, CultNetSchemaMessageSerialization.Options);
-                if (array.Length > 0 && array[0] is string schemaVersion)
-                    return schemaVersion;
-            }
-            catch (Exception)
-            {
-                // Fall through to map decoding; different runtimes may encode object-like payloads.
-            }
-
-            try
-            {
-                var map = MessagePackSerializer.Deserialize<IReadOnlyDictionary<string, object?>>(payload, CultNetSchemaMessageSerialization.Options);
-                if (map.TryGetValue("schemaVersion", out var schemaVersion) && schemaVersion is string schemaVersionText)
-                    return schemaVersionText;
-                if (map.TryGetValue("schema_version", out var snakeSchemaVersion) && snakeSchemaVersion is string snakeSchemaVersionText)
-                    return snakeSchemaVersionText;
-            }
-            catch (Exception)
-            {
-                return null;
-            }
-
-            return null;
         }
     }
 }

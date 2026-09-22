@@ -79,9 +79,13 @@ namespace GameCult.Networking
 
         private static bool MatchesSchemaKeysFields(CultDocumentDescriptor descriptor, CultRecordKey key, object? document, CultNetSelection selection)
         {
-            if (selection.Schemas is { Length: > 0 } && !CultNetSchemaAliasMatching.MatchesAny(selection.Schemas, descriptor))
+            // The door (CultNetSelectionValidation.Validate) refuses an empty schemas/keys list before
+            // a selection ever reaches evaluation, so a non-null array here is always non-empty; the
+            // evaluator does not special-case [] as "no filter" (docs/cultnet-selection-cut.md,
+            // Self's rulings 2026-09-22, S2-3).
+            if (selection.Schemas != null && !CultNetSchemaAliasMatching.MatchesAny(selection.Schemas, descriptor))
                 return false;
-            if (selection.Keys is { Length: > 0 } && !selection.Keys.Contains(key.Value, StringComparer.Ordinal))
+            if (selection.Keys != null && !selection.Keys.Contains(key.Value, StringComparer.Ordinal))
                 return false;
             if (selection.Fields == null)
                 return true;

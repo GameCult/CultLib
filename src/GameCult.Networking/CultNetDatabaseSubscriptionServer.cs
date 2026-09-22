@@ -251,6 +251,9 @@ namespace GameCult.Networking
                 ? CreateProjectedSnapshot(request, key.Peer)
                 : ProjectedSnapshot.Empty;
 
+            // With _projectRecord gone (docs/cultnet-selection-cut.md, S2-2), a projection's dictionary
+            // key is always the record's own RecordKey/SchemaId, so the two can never disagree here;
+            // the identity branch that used to catch a re-projected key is dead and deleted.
             foreach (var previous in projection.DeliveredBySourceRecordKey.ToArray())
             {
                 if (!next.BySourceRecordKey.TryGetValue(previous.Key, out var current))
@@ -258,13 +261,7 @@ namespace GameCult.Networking
                     SendRemoval(key.Peer, key.Id, previous.Value);
                     continue;
                 }
-                if (!string.Equals(previous.Value.RecordKey, current.RecordKey, StringComparison.Ordinal) ||
-                    !string.Equals(previous.Value.SchemaId, current.SchemaId, StringComparison.Ordinal))
-                {
-                    SendRemoval(key.Peer, key.Id, previous.Value);
-                    SendUpsert(key.Peer, key.Id, current, added: true);
-                }
-                else if (!Equivalent(previous.Value, current))
+                if (!Equivalent(previous.Value, current))
                 {
                     SendUpsert(key.Peer, key.Id, current, added: false);
                 }
@@ -299,16 +296,15 @@ namespace GameCult.Networking
                     SchemaIds = request.SchemaIds,
                     RecordKeys = request.RecordKeys
                 });
+            // The snapshot is one row per record key by construction, so the duplicate-key throw this
+            // used to guard can no longer fire (docs/cultnet-selection-cut.md, S2-2); deleted rather
+            // than tested around.
             var bySourceRecordKey = new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal);
-            var matchedRecordKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var source in snapshot.Documents)
             {
                 var sourceRecordKey = source.RecordKey;
                 if (_authorizeRecord?.Invoke(request, peer, sourceRecordKey, source.SchemaId) == false)
                     continue;
-                if (!matchedRecordKeys.Add(source.RecordKey))
-                    throw new InvalidOperationException(
-                        $"Database subscription snapshot produced duplicate record key '{source.RecordKey}'.");
                 bySourceRecordKey[sourceRecordKey] = source;
             }
             return new ProjectedSnapshot(bySourceRecordKey);
@@ -337,14 +333,8 @@ namespace GameCult.Networking
                 SendUpsert(peer, subscriptionId, current, added: true);
                 return;
             }
-            if (!string.Equals(previous.RecordKey, current.RecordKey, StringComparison.Ordinal) ||
-                !string.Equals(previous.SchemaId, current.SchemaId, StringComparison.Ordinal))
-            {
-                SendRemoval(peer, subscriptionId, previous);
-                projection.DeliveredBySourceRecordKey[sourceRecordKey] = current;
-                SendUpsert(peer, subscriptionId, current, added: true);
-                return;
-            }
+            // Same S2-2 fact as Reconcile: previous/current are looked up by the record's own key, so
+            // they can never disagree in RecordKey/SchemaId here either.
             if (!Equivalent(previous, current))
             {
                 projection.DeliveredBySourceRecordKey[sourceRecordKey] = current;

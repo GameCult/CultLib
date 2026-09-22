@@ -1425,6 +1425,7 @@ namespace GameCult.Networking.Tests
 
             var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-host-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.host"));
@@ -1488,6 +1489,7 @@ namespace GameCult.Networking.Tests
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
             await FetchOnce("second");
             cancellation.Cancel();
+            serverThread.Join();
         }
 
         // A batch is a value: nothing staged in it reaches CultNet observers before the store commits it. A put made
@@ -1577,6 +1579,7 @@ namespace GameCult.Networking.Tests
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(update.SubscriptionId, Is.EqualTo("note"));
             Assert.That(update.ChangeKind, Is.EqualTo("added"));
             Assert.That(update.Document, Is.Not.Null);
@@ -1654,6 +1657,7 @@ namespace GameCult.Networking.Tests
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
         }
@@ -1749,9 +1753,96 @@ namespace GameCult.Networking.Tests
             });
             await Task.Delay(100);
             cancellation.Cancel();
+            serverThread.Join();
 
             Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
             Assert.That(targetCache.Get(new CultRecordKey(recordKeyTwo)), Is.Null);
+        }
+
+        // Reconcile's remaining responsibility after the S2-2 deletion (docs/cultnet-selection-cut.md,
+        // Self's rulings 2026-09-22): flip authorizeRecord's answer per key while the whole request
+        // stays authorized (so DemandActive never toggles), and prove both halves of the diff -
+        // removing a now-unauthorized key and the add loop picking up a newly-authorized one.
+        [Test]
+        public async Task DatabaseSubscriptionServer_Reconcile_FlipsPerRecordAuthorizationWithoutChangingRequestAuthority()
+        {
+            const string schemaId = "tests.networking_note";
+            const string recordKeyA = "tests:record-authority:a";
+            const string recordKeyB = "tests:record-authority:b";
+            var authorizedKeys = new HashSet<string>(StringComparer.Ordinal) { recordKeyA };
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey(recordKeyA), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "a"
+            });
+            await database.PutAsync(new CultRecordKey(recordKeyB), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "b"
+            });
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-record-authority-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (_, _) => true,
+                authorizeRecord: (_, _, recordKey, _) => authorizedKeys.Contains(recordKey));
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-record-authority-subscription-client");
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+                client.SendCultNet(new CultNetDatabaseSubscribeMessage
+                {
+                    MessageId = "subscribe-record-authority",
+                    SubscriptionId = "record-authority",
+                    ConsumerRuntimeId = "record-authority-client",
+                    SchemaIds = new[] { schemaId },
+                    IncludeSnapshot = true
+                });
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { recordKeyA }));
+
+                authorizedKeys.Clear();
+                authorizedKeys.Add(recordKeyB);
+                subscriptions.Reconcile();
+
+                // SendRemoval carries the removed key on the message's own RecordKey field (no
+                // Document); SendUpsert carries the full record under Document.
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKeyA) &&
+                          changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == recordKeyB),
+                    TimeSpan.FromSeconds(2));
+
+                Assert.That(changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKeyA), Is.True);
+                Assert.That(changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == recordKeyB), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1814,6 +1905,7 @@ namespace GameCult.Networking.Tests
             });
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(removed.Active, Is.False);
         }
@@ -1962,6 +2054,7 @@ namespace GameCult.Networking.Tests
 
             var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(observed.RecordKeys, Is.EqualTo(new[] { "world:field:fog" }));
             Assert.That(observed.SchemaIds, Is.EqualTo(new[] { "gamecult.fields.splats.v1" }));
             Assert.That(observed.BodyIds, Is.Empty);
@@ -2015,6 +2108,7 @@ namespace GameCult.Networking.Tests
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
             cancellation.Cancel();
+            serverThread.Join();
 
             Assert.That(removed.SubscriptionId, Is.EqualTo("disconnect-world-body"));
             Assert.That(removed.Active, Is.False);
@@ -2072,6 +2166,7 @@ namespace GameCult.Networking.Tests
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(update.SubscriptionId, Is.EqualTo("notes"));
             Assert.That(update.Document, Is.TypeOf<NetworkSchemaNote>());
             Assert.That(((NetworkSchemaNote)targetCache.Get(new CultRecordKey(recordKey))!).Text, Is.EqualTo("live"));
@@ -2132,6 +2227,7 @@ namespace GameCult.Networking.Tests
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("live"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
         }
@@ -2196,6 +2292,7 @@ namespace GameCult.Networking.Tests
             update = await AwaitWithTimeout(updated.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(update.Text, Is.EqualTo("updated"));
             Assert.That(value.Current.Text, Is.EqualTo("updated"));
         }
@@ -2246,6 +2343,7 @@ namespace GameCult.Networking.Tests
             await WaitUntilAsync(() => value.HasValue, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(value.Current.Text, Is.EqualTo("materialized-on-demand"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
         }
@@ -2300,6 +2398,7 @@ namespace GameCult.Networking.Tests
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
 
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(update.SchemaId, Is.EqualTo(wireSchema));
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("wire-live"));
         }
@@ -2418,6 +2517,7 @@ namespace GameCult.Networking.Tests
                 () => server.Peers.Count == 1 && server.Peers.Single().PendingReliablePacketCount == 0,
                 TimeSpan.FromSeconds(2));
             cancellation.Cancel();
+            serverThread.Join();
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].Payload, Has.Length.EqualTo(128 * 1024));
             Assert.That(server.Stats.BytesSent, Is.LessThan(512 * 1024),
@@ -2498,6 +2598,7 @@ namespace GameCult.Networking.Tests
             if (completed != receivedAll.Task)
                 Assert.Fail($"Concurrent publish timed out after receiving {receivedIds.Count} of {expectedMessages} logical messages.");
             cancellation.Cancel();
+            serverThread.Join();
 
             Assert.That(receivedIds.Count, Is.EqualTo(expectedMessages));
         }
@@ -3225,6 +3326,100 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
         }
 
+        // S2-3 (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): the shard snapshot answers
+        // through the same evaluator as the non-shard path, no loop of its own. An unfiltered request
+        // ({schemas:null, keys:null}) must return the same rows from both.
+        [Test]
+        public async Task CultNetDatabase_ShardAndNonShardSnapshot_AgreeOnUnfilteredRequest()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "unfiltered-notes",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "unfiltered-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3080"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            await database.PutAsync(new CultRecordKey("unfiltered-note:one"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "one"
+            });
+            await database.PutAsync(new CultRecordKey("unfiltered-note:two"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "two"
+            });
+            // Outside the shard's key prefix: must reach the non-shard snapshot but never the
+            // shard-scoped one, so an unfiltered request still proves shard membership is enforced.
+            await database.PutAsync(new CultRecordKey("other-note:outside-shard"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "outside"
+            });
+
+            var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-unfiltered", filter: null);
+            var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-unfiltered", filter: null);
+
+            Assert.That(
+                shardScoped.Documents.Select(document => document.RecordKey).OrderBy(value => value, StringComparer.Ordinal),
+                Is.EqualTo(new[] { "unfiltered-note:one", "unfiltered-note:two" }));
+            Assert.That(
+                nonShard.Documents.Select(document => document.RecordKey).OrderBy(value => value, StringComparer.Ordinal),
+                Is.EqualTo(new[] { "other-note:outside-shard", "unfiltered-note:one", "unfiltered-note:two" }));
+            Assert.That(shardScoped.Documents, Has.Length.EqualTo(2));
+        }
+
+        // S2-3, second probe: an override of the binding schema id (rather than the descriptor's own)
+        // must match on both the shard and non-shard paths - both run binding-alias expansion.
+        [Test]
+        public async Task CultNetDatabase_ShardAndNonShardSnapshot_AgreeOnBindingSchemaIdOverride()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "override-notes",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "override-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3081"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("override-note:one");
+            await database.PutAsync(key, new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "override"
+            });
+
+            var request = registry.CreateSnapshotRequest(
+                "snapshot-override-request",
+                schemaIds: ["tests.networking_note.v1"],
+                recordKeys: [key.Value]);
+            var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-override", request);
+            var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-override", request);
+
+            Assert.That(nonShard.Documents, Has.Length.EqualTo(1));
+            Assert.That(shardScoped.Documents, Has.Length.EqualTo(1));
+            Assert.That(shardScoped.Documents[0].RecordKey, Is.EqualTo(nonShard.Documents[0].RecordKey));
+        }
+
         [Test]
         public async Task CultNetDatabase_Routes_TypedWrite_ToShardSchemaAlias()
         {
@@ -3596,6 +3791,7 @@ namespace GameCult.Networking.Tests
 
             var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-client-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.test"));
@@ -3665,6 +3861,7 @@ namespace GameCult.Networking.Tests
             });
             var response = await client.FetchAsync($"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}");
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.Verses.Single().VerseId, Is.EqualTo("rudp-verse"));
         }
@@ -3734,6 +3931,7 @@ namespace GameCult.Networking.Tests
                 $"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}",
                 new CultMeshPeerExchangeRequestMessage { VerseId = "local" });
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.Peers.Single().PeerId, Is.EqualTo("rudp-peer"));
         }

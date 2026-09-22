@@ -93,21 +93,24 @@
         New    = 'return;'
     },
     @{
-        Id     = 'NET-D4-FourthMatcher-Revert'
-        Rule   = 'D4/Self''s ruling 2026-09-22: CreateShardSnapshotResponse''s schema filter is the one alias matcher (CultNetSchemaAliasMatching.MatchesAny), not a private fourth copy.'
+        # S2-3 (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22, commit 2 fix batch):
+        # CreateShardSnapshotResponse no longer carries its own schema/key filter at all - it went
+        # through CultNetSelectionEvaluator.SelectPage, with the shard's own row filter as the only
+        # thing this method still owns. NET-D4-FourthMatcher-Revert's original anchor
+        # ("requestedSchemaIds != null && !CultNetSchemaAliasMatching.MatchesAny(...)") was the private
+        # loop this fix batch deleted, not merely refactored; the schema-matching mutants it proved are
+        # now covered by this file's CultNetSelectionEvaluator.cs entries (NET-S1/S2 etc.) plus
+        # tests/GameCult.Networking.Tests.NetworkingTests.CultNetDatabase_ShardAndNonShardSnapshot_*.
+        # This entry now proves the one thing CreateShardSnapshotResponse still owns: the shard
+        # membership check.
+        Id     = 'NET-D4-ShardMembership-Revert'
+        Rule   = 'CreateShardSnapshotResponse''s row filter still enforces shard membership (shard.Matches), even though schema/key filtering is now entirely the evaluator''s.'
         Mutant = 'revert'
         File   = 'src/GameCult.Networking/CultNetDatabase.cs'
-        Killer = 'FullyQualifiedName=GameCult.Networking.Tests.NetworkingTests.CultNetDatabase_Creates_ShardSnapshotResponse_ForCompatibleSchemaAlias'
-        Old    = '(requestedSchemaIds != null && !CultNetSchemaAliasMatching.MatchesAny(requestedSchemaIds, descriptor)) ||'
-        New    = '(requestedSchemaIds != null) ||'
+        Killer = 'FullyQualifiedName=GameCult.Networking.Tests.NetworkingTests.CultNetDatabase_ShardAndNonShardSnapshot_AgreeOnUnfilteredRequest'
+        Old    = '!string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key);'
+        New    = '!string.IsNullOrWhiteSpace(key.Value);'
     }
-    # A loosening mutant here ('(requestedSchemaIds != null && requestedSchemaIds.Length == 0) ||',
-    # i.e. reject only an empty-but-non-null list rather than "no requested id matches") was run by
-    # hand against CultNetDatabase_Creates_ShardSnapshotResponse_ForCompatibleSchemaAlias and
-    # SURVIVED: the fixture puts exactly one document in the whole cache, so an over-permissive
-    # filter still returns the same single row. This is a finding about the fixture, not a defended
-    # rule - a second document of a different schema in the same shard is needed to make the
-    # loosening fail, and is not added here (no easier mutant substituted per the Hands brief).
     #
     # Q-J (docs/cultnet-selection-cut.md section 2 "Numbers", 2026-09-22): the door's canonical-decimal
     # grammar (CultNetSelection.cs) and the comparator that reads it (CultNetSelectionEvaluator.cs's

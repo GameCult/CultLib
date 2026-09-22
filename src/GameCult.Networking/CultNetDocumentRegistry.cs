@@ -285,8 +285,8 @@ namespace GameCult.Networking
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             var selection = new CultNetSelection
             {
-                Schemas = filter?.SchemaIds,
-                Keys = filter?.RecordKeys,
+                Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
+                Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
                 Projection = CultNetSelectionProjections.Document,
                 Limit = CultNetSelectionEvaluator.LimitMax
             };
@@ -350,15 +350,19 @@ namespace GameCult.Networking
             Func<string, CultRecordKey, long> ordinalOf,
             ulong asOf,
             bool validate,
-            CultNetDocumentMessageOptions? options)
+            CultNetDocumentMessageOptions? options,
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null)
         {
             selection = ExpandSchemaBindingAliases(selection);
             if (validate)
                 selection.Validate(_documents.AllDescriptors.ToArray());
 
-            var rows = cache.AllStoredDocuments
-                .Select(stored => new CultNetSelectionEvaluator.Row(
-                    stored.Descriptor, stored.Key, stored.Document, ordinalOf(stored.Descriptor.SchemaId, stored.Key), stored.StoredAt))
+            var stored = cache.AllStoredDocuments;
+            if (rowFilter != null)
+                stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
+            var rows = stored
+                .Select(entry => new CultNetSelectionEvaluator.Row(
+                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
             var evaluation = CultNetSelectionEvaluator.Select(_documents, rows, selection, asOf);
             var records = evaluation.Rows.Select(row => ToRawRecord(row, options)).ToArray();
@@ -593,7 +597,19 @@ namespace GameCult.Networking
                     string.Equals(candidate.SchemaName, schemaName, StringComparison.Ordinal));
         }
 
-        private CultDocumentDescriptor? TryResolveDescriptorByPayloadSchema(byte[] payload)
+        /// <summary>
+        /// Resolves the descriptor this registry's own bindings (or every registered descriptor, when
+        /// none are bound) associate with a raw payload's embedded schema version, when exactly one
+        /// registered type owns that schema string. Used by <see cref="ResolveDescriptorForRawDocument"/>
+        /// to recover a document's type from a foreign/runtime-generated schema id. Ambiguous - and
+        /// so not the right tool - when the caller already knows the target descriptor and two
+        /// registered types alias the same schema id: match <see cref="TryReadSchemaVersion"/>'s
+        /// result against that descriptor with <see cref="CultNetSchemaAliasMatching"/> directly
+        /// instead (docs/cultnet-selection-cut.md, section 4/S2-5; this is what CultMesh's
+        /// foreign-schema decode does). Trusts the payload's own schema stamp; it does not re-run a
+        /// selection or re-check authorization.
+        /// </summary>
+        public CultDocumentDescriptor? TryResolveDescriptorByPayloadSchema(byte[] payload)
         {
             var schemaVersion = TryReadSchemaVersion(payload);
             if (string.IsNullOrWhiteSpace(schemaVersion))
@@ -624,7 +640,16 @@ namespace GameCult.Networking
                 .Select(group => group.First());
         }
 
-        private static string? TryReadSchemaVersion(byte[] payload)
+        /// <summary>
+        /// Reads a raw payload's embedded <c>schemaVersion</c> stamp, when it carries one - the parse
+        /// step of the registry's payload-schema decode rule, shared with
+        /// <see cref="TryResolveDescriptorByPayloadSchema"/> and every "foreign schema id" fallback in
+        /// CultNet and CultMesh (docs/cultnet-selection-cut.md, section 4/S2-5). A caller matching
+        /// against one already-known descriptor (rather than resolving "whichever registered type owns
+        /// this schema string", which is ambiguous when two document types alias the same schema id)
+        /// should alias-match this string with <see cref="CultNetSchemaAliasMatching"/> directly.
+        /// </summary>
+        public static string? TryReadSchemaVersion(byte[] payload)
         {
             try
             {

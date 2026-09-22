@@ -2745,6 +2745,94 @@ public sealed class CultMeshStreamingTests
             CultMesh.Verse("starbridge", "unity-pilot"));
 
         (await mixedAliasSchemaHandle.LatestAsync()).Text.Should().Be("compatible-record-key");
+
+        // MESH-KEY-Loosening (docs/cultnet-selection-cut.md, section 4/S2-4): the recordKey match is
+        // exact (ordinal), not case-insensitive. A case-variant key must not win even when it appears
+        // first in the response.
+        var caseVariantKey = key.Value.ToUpperInvariant();
+        var caseVariantKeyHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
+            _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "case-variant-key",
+                Documents = new[]
+                {
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId,
+                        RecordKey = caseVariantKey,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "wrong-case-key",
+                                Revision = 13
+                            },
+                            typeof(MeshNoteDocument))
+                    },
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId,
+                        RecordKey = key.Value,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "right-case-key",
+                                Revision = 14
+                            },
+                            typeof(MeshNoteDocument))
+                    }
+                }
+            }),
+            key.Value,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+
+        (await caseVariantKeyHandle.LatestAsync()).Text.Should().Be("right-case-key");
+    }
+
+    // MESH-DEFAULT-Loosening (docs/cultnet-selection-cut.md, section 4/S2-7): ResolveDefaultSelection's
+    // no-schema-filter branch must trigger on a non-empty recordKeys, not merely a non-null one. An
+    // explicit empty recordKeys array is a v0-compatible list that lowers to null (rule 1's v0
+    // lowering), so it does not suppress the type's own schema default - the wire must carry
+    // [T.SchemaId], not schemas=null.
+    [Test]
+    public async Task FetchDocumentsAsync_WithExplicitEmptyRecordKeys_StillDefaultsToOwnSchema()
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("mesh-note:empty-keys-default");
+        await cache.UpsertAsync(new MeshNoteDocument
+        {
+            Schema = "tests.mesh_note.v1",
+            Text = "empty-keys-default",
+            Revision = 1
+        }, new CultRecordHandle<MeshNoteDocument>(key));
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
+            .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+
+        using var session = CultMesh.SnapshotSession(
+            "cultnet://empty-keys-default.test:3075",
+            new CultMeshSnapshotRequestOptions
+            {
+                CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                {
+                    requests.Add(request);
+                    return registry.CreateRawSnapshotResponse(cache, request.MessageId, request);
+                })
+            },
+            registry);
+
+        var documents = await session.FetchDocumentsAsync<MeshNoteDocument>(recordKeys: Array.Empty<string>());
+
+        documents.Should().ContainSingle().Which.Text.Should().Be("empty-keys-default");
+        requests.Should().ContainSingle();
+        requests[0].SchemaIds.Should().ContainSingle().Which
+            .Should().Be(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId);
+        requests[0].RecordKeys.Should().BeNull();
     }
 
     [Test]

@@ -2723,10 +2723,16 @@ namespace GameCult.Mesh
         }
 
         // One exact read (docs/cultnet-selection-cut.md, section 4/7): the record this recordKey
-        // names, decoded as TDocument when its schema is this schema, a declared alias of it, or
-        // (a foreign/runtime-generated schema id this runtime does not recognize by any alias) its
-        // payload decodes as TDocument. No re-filter of the server's answer by schema alone, and no
-        // fallback that returns a record under the wrong key.
+        // names, decoded as TDocument. Candidates at that key are searched in one order - exact
+        // schema, then a declared alias of it, then (a foreign/runtime-generated schema id this
+        // runtime does not recognize by any alias) its payload's own embedded schema stamp,
+        // alias-matched against TDocument's descriptor. The parse step
+        // (CultNetDocumentRegistry.TryReadSchemaVersion) is the one decode rule shared with
+        // DecodeSnapshotDocuments; the match itself stays a direct alias-match against the caller's
+        // own descriptor rather than a global "which registered type owns this schema string" lookup,
+        // because that lookup is ambiguous when two document types alias the same schema id (as
+        // MeshNoteDocument/MeshNoteAliasDocument do in tests/GameCult.Mesh.Tests). No re-filter of the
+        // server's answer by schema alone, and no fallback that returns a record under the wrong key.
         private static TDocument ReadDocumentFromSnapshotResponse<TDocument>(
             CultNetSnapshotResponseRawMessage response,
             string schemaId,
@@ -2735,20 +2741,27 @@ namespace GameCult.Mesh
         {
             if (response == null) throw new ArgumentNullException(nameof(response));
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            CultNetRawDocumentRecord? record = null;
+
+            CultNetRawDocumentRecord? exact = null;
+            CultNetRawDocumentRecord? aliased = null;
+            CultNetRawDocumentRecord? byPayload = null;
+
             foreach (var candidate in response.Documents)
             {
                 if (!string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal))
                     continue;
-                if (string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) ||
-                    CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor) ||
-                    TryDecodeAsMessagePack<TDocument>(candidate, out _))
-                {
-                    record = candidate;
-                    break;
-                }
+
+                if (exact == null && string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal))
+                    exact = candidate;
+                else if (aliased == null && CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor))
+                    aliased = candidate;
+                else if (byPayload == null &&
+                         CultNetDocumentRegistry.TryReadSchemaVersion(candidate.Payload) is { } payloadSchemaVersion &&
+                         CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor))
+                    byPayload = candidate;
             }
 
+            var record = exact ?? aliased ?? byPayload;
             if (record == null)
             {
                 throw new InvalidOperationException(
@@ -2762,23 +2775,6 @@ namespace GameCult.Mesh
             }
 
             return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), record.Payload);
-        }
-
-        private static bool TryDecodeAsMessagePack<TDocument>(CultNetRawDocumentRecord record, out TDocument? document)
-            where TDocument : class
-        {
-            document = null;
-            if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))
-                return false;
-            try
-            {
-                document = (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), record.Payload);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         /// <summary>

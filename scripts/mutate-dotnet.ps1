@@ -58,7 +58,25 @@ function Get-SidecarPath([string]$path) { "$path.mutation-original" }
 function Run-Tests([string]$filter) {
     $args = @('test', $testProjectPath, '-c', 'Debug', '--nologo')
     if ($filter) { $args += @('--filter', $filter) }
-    $output = & dotnet @args 2>&1 | Out-String
+    # A test-host crash (e.g. S2-1's disposed-socket race on a background poll thread) can write to
+    # stderr; under PowerShell 5.1, `2>&1` on a native command wraps each stderr line in a
+    # NativeCommandError, and with the script's own $ErrorActionPreference = 'Stop' that becomes a
+    # terminating error that would otherwise throw the whole run away. Run this one call under
+    # 'Continue' and catch anything that still throws, so a host crash is captured as output and
+    # classified as NO VERDICT by the caller instead of aborting every remaining entry.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $crashed = $false
+    try {
+        $output = & dotnet @args 2>&1 | Out-String
+    }
+    catch {
+        $output = "$_"
+        $crashed = $true
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
     Write-Host $output
     $passedMatch = [regex]::Match($output, 'Passed:\s+(\d+)')
     $failedMatch = [regex]::Match($output, 'Failed:\s+(\d+)')
@@ -67,7 +85,8 @@ function Run-Tests([string]$filter) {
     $failedLine = $output -match 'Failed!'
     [pscustomobject]@{
         Compiled = $compiled
-        Green    = $compiled -and $passedLine -and -not $failedLine -and $passedMatch.Success -and [int]$passedMatch.Groups[1].Value -ge 1
+        Crashed  = $crashed
+        Green    = (-not $crashed) -and $compiled -and $passedLine -and -not $failedLine -and $passedMatch.Success -and [int]$passedMatch.Groups[1].Value -ge 1
         Passed   = if ($passedMatch.Success) { [int]$passedMatch.Groups[1].Value } else { 0 }
         Failed   = if ($failedMatch.Success) { [int]$failedMatch.Groups[1].Value } else { 0 }
     }
@@ -169,9 +188,17 @@ foreach ($mutation in $mutations) {
     try {
         foreach ($file in $files) { Write-Text $targets[$file] $texts[$file] }
         $run = Run-Tests $mutation.Killer
-        if (-not $run.Compiled) { $verdict = 'NO VERDICT (did not compile)' }
+        if ($run.Crashed) { $verdict = 'NO VERDICT (test host crashed)' }
+        elseif (-not $run.Compiled) { $verdict = 'NO VERDICT (did not compile)' }
         elseif ($run.Failed -ge 1) { $verdict = 'KILLED' }
         else { $verdict = 'SURVIVED' }
+    }
+    catch {
+        # Not yet reached by Run-Tests itself (it no longer throws on a host crash), but a defensive
+        # backstop: any other exception during this entry's run is recorded and the campaign continues
+        # rather than aborting every remaining entry, never labeled "unreachable".
+        Write-Host "NO VERDICT: $($mutation.Id) - test run threw: $_"
+        $verdict = 'NO VERDICT (harness exception)'
     }
     finally {
         foreach ($file in $files) {
