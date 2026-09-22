@@ -494,9 +494,11 @@ public sealed class MathTests
         }
     }
 
-    // The consumer-level property that actually matters: fire control turns adjacent erf
-    // values into a cell's probability mass, so a backward step in erf would show up as a
-    // negative mass. Soul checked these geometries clean: 16/64/256/1024/4096 cells over
+    // One property the consumer needs, not the whole of correctness: fire control turns
+    // adjacent erf values into a cell's probability mass, so a backward step in erf would
+    // show up as a negative mass. An erf that returned a constant would pass this and is
+    // caught by ErfMatchesReferenceValues instead.
+    // Soul checked these geometries clean: 16/64/256/1024/4096 cells over
     // +-4 sigma, plus a tight 1 sigma spread and a very tight 0.25 sigma spread.
     [Theory]
     [InlineData(16, 4f)]
