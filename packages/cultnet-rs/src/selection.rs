@@ -441,33 +441,53 @@ pub mod canonical_number {
 // ---------------------------------------------------------------------------------------------
 
 /// The one schema-identity rule (R-E), ported from the C# reference's
-/// `CultNetSchemaAliasMatching.Matches(string, string)` / `MatchesAny`. `selection.schemas` and
-/// `cites.target.schemaId` both go through this - D7: Rust carries no `CultDocumentDescriptor`
-/// knowledge, so (unlike the C# reference's richer descriptor-aware overload) this only ever
-/// compares two schema-id strings, exactly or by their inferred name (the part before a trailing
-/// `.v<digits>`).
+/// `CultNetSchemaAliasMatching.Matches(string, CultDocumentDescriptor)` / `MatchesAny` -
+/// **Self's ruling, 2026-09-22 ("the C# reference's alias rule is the rule")**: an alias is a
+/// schema *name* with a trailing `.v<digits>` suffix, resolved against the schema's declared name,
+/// never against its hash id. C#'s production call sites (`CultNetSelection.cs:438`,
+/// `CultNetSelectionEvaluator.cs:88,340`) all use the descriptor overload, never the bare
+/// `Matches(string, string)` id-vs-id overload, so that is the behaviour this module ports. D7
+/// still holds: Rust carries no `CultDocumentDescriptor` type, so `RowSet::schema_name`/
+/// `Row::schema_name` stand in for it - the consumer supplies a schema's declared name the same way
+/// it supplies everything else `Row`/`RowSet` expose.
 pub mod schema_alias {
-    /// `true` when `candidate` names `schema_id` exactly, or the two share an inferred name.
-    /// Mirrors `CultNetSchemaAliasMatching.Matches(string candidate, string schemaId)`.
-    pub fn matches(candidate: &str, schema_id: &str) -> bool {
-        if candidate == schema_id {
+    /// `true` when `candidate` names `schema_id` exactly, names `schema_name` exactly, or
+    /// `candidate`'s inferred name (the part before a trailing `.v<digits>` marker, or the whole of
+    /// `candidate` when it carries no such marker) equals `schema_name` exactly. Ordinal
+    /// (case-sensitive) comparison throughout, matching C#'s `StringComparison.Ordinal`. Mirrors
+    /// `CultNetSchemaAliasMatching.Matches(string candidate, CultDocumentDescriptor descriptor)`
+    /// (`CultNetDatabase.cs:71-84`) with its `SchemaVersion`/`CompatibleSchemaIds` checks folded
+    /// away: this crate's `Row`/`RowSet` expose no equivalent of either, and no fixture or call site
+    /// needs them (`CultNetSelection.cs:438` and `CultNetSelectionEvaluator.cs:88,340` are this
+    /// port's only production callers, and neither reaches for a schema's version string or its
+    /// compatibility list).
+    pub fn matches(candidate: &str, schema_id: &str, schema_name: &str) -> bool {
+        if candidate == schema_id || candidate == schema_name {
             return true;
         }
         let candidate_name = infer_schema_name(candidate).unwrap_or(candidate);
-        let schema_name = infer_schema_name(schema_id).unwrap_or(schema_id);
         candidate_name == schema_name
     }
 
-    /// `true` when `candidates` is empty (no filter) or any candidate matches `schema_id`.
-    /// Mirrors `CultNetSchemaAliasMatching.MatchesAny(IReadOnlyList<string>, string)`.
-    pub fn matches_any(candidates: &[String], schema_id: &str) -> bool {
-        candidates.is_empty() || candidates.iter().any(|candidate| matches(candidate, schema_id))
+    /// `true` when `candidates` is empty (no filter) or any candidate matches `schema_id`/
+    /// `schema_name`. Mirrors `CultNetSchemaAliasMatching.MatchesAny(IReadOnlyList<string>,
+    /// CultDocumentDescriptor)`.
+    pub fn matches_any(candidates: &[String], schema_id: &str, schema_name: &str) -> bool {
+        candidates.is_empty()
+            || candidates
+                .iter()
+                .any(|candidate| matches(candidate, schema_id, schema_name))
     }
 
     /// The part of `schema_id` before a trailing `.v<digits>` marker, or `None` when `schema_id`
-    /// carries no such marker (real hashed ids, e.g. `"sha256:<hex>"`, carry none on their own -
-    /// aliasing only bridges two ids that share the same unversioned name). Mirrors
-    /// `CultNetSchemaAliasMatching.InferSchemaName`.
+    /// carries no such marker: the marker is absent, sits at position 0 (`".v5"`, C#'s `marker <= 0`
+    /// refusing a zero index too), has nothing after it (`"a.v"`), or what follows `.v` is not every
+    /// byte a digit (`"a.vx"`, `"a.v5x"`). A `schema_id` with more than one `.v<digits>` marker
+    /// resolves at the *last* one (`"a.v5.v2"` -> `Some("a.v5")`), matching C#'s
+    /// `LastIndexOf(".v", Ordinal)`. Byte-for-byte port of ASCII digit classification: C#'s
+    /// `char.IsDigit` is Unicode-aware but every marker byte here is ASCII, so `is_ascii_digit`
+    /// agrees on every input this rule ever sees. Mirrors
+    /// `CultNetSchemaAliasMatching.InferSchemaName` (`CultNetDatabase.cs:86-96`).
     fn infer_schema_name(schema_id: &str) -> Option<&str> {
         let marker = schema_id.rfind(".v")?;
         if marker == 0 {
@@ -486,25 +506,68 @@ pub mod schema_alias {
 
         #[test]
         fn matches_exact_ids() {
-            assert!(matches("sha256:abc", "sha256:abc"));
-            assert!(!matches("sha256:abc", "sha256:def"));
+            assert!(matches("sha256:abc", "sha256:abc", "leaf_a"));
+            assert!(!matches("sha256:abc", "sha256:def", "leaf_a"));
         }
 
         #[test]
-        fn matches_by_inferred_name_across_versions() {
-            assert!(matches("sha256:abc.v1", "sha256:abc.v2"));
-            assert!(matches("sha256:abc", "sha256:abc.v1"));
-            assert!(matches("sha256:abc.v1", "sha256:abc"));
+        fn matches_exact_name() {
+            assert!(matches("leaf_a", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_b", "sha256:abc", "leaf_a"));
+        }
+
+        #[test]
+        fn matches_by_inferred_name_alias_against_the_declared_name() {
+            assert!(matches("leaf_a.v9", "sha256:abc", "leaf_a"));
+            assert!(matches("leaf_a.v0", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_b.v9", "sha256:abc", "leaf_a"));
+        }
+
+        // R-E, the confirmed cross-runtime defect this cut fixes: a hash with a synthetic ".v1"
+        // appended is not a wire form C#'s production rule ever resolves (it strips the ".v1" and
+        // compares the bare hash text against the declared *name*, "leaf_a" - never equal to a
+        // hash). Sections of docs/cultnet-selection-cut.md call this "hashAlias"; it is a negative
+        // check in both runtimes now, not an alias either one resolves.
+        #[test]
+        fn does_not_match_a_hash_shaped_alias() {
+            assert!(!matches("sha256:abc.v1", "sha256:abc", "leaf_a"));
         }
 
         #[test]
         fn does_not_match_a_real_hashed_id_with_no_shared_name() {
-            assert!(!matches("sha256:abc", "sha256:xyz"));
+            assert!(!matches("sha256:abc", "sha256:xyz", "leaf_a"));
         }
 
         #[test]
         fn matches_any_empty_candidates_matches_everything() {
-            assert!(matches_any(&[], "sha256:anything"));
+            assert!(matches_any(&[], "sha256:anything", "leaf_a"));
+        }
+
+        // Case sensitivity: C#'s StringComparison.Ordinal is case-sensitive throughout, on the
+        // exact-id check, the exact-name check and the inferred-name comparison alike.
+        #[test]
+        fn every_comparison_is_case_sensitive() {
+            assert!(!matches("SHA256:ABC", "sha256:abc", "leaf_a"));
+            assert!(!matches("LEAF_A", "sha256:abc", "leaf_a"));
+            assert!(!matches("LEAF_A.v9", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_a.V9", "sha256:abc", "leaf_a")); // ".V9", not ".v9" - no marker
+        }
+
+        // Edge handling of ".v" with no digits after it: InferSchemaName returns None, so the
+        // candidate falls back to itself, verbatim - it only matches a schema whose *name* equals
+        // that literal string.
+        #[test]
+        fn a_trailing_dot_v_with_no_digits_falls_back_to_the_literal_candidate() {
+            assert!(!matches("leaf_a.v", "sha256:abc", "leaf_a"));
+            assert!(matches("leaf_a.v", "sha256:abc", "leaf_a.v"));
+        }
+
+        // Edge handling of multiple dots: the *last* ".v<digits>" marker wins, matching C#'s
+        // LastIndexOf(".v", Ordinal) - not the first.
+        #[test]
+        fn multiple_dot_v_markers_resolve_at_the_last_one() {
+            assert!(matches("a.v5.v2", "sha256:abc", "a.v5"));
+            assert!(!matches("a.v5.v2", "sha256:abc", "a"));
         }
 
         #[test]
@@ -868,6 +931,16 @@ impl From<SelectionInvalid> for SelectionRefusal {
 /// surface supplies the C# evaluator.
 pub trait Row {
     fn schema_id(&self) -> &str;
+    /// This row's declared schema *name* (C#'s `CultDocumentDescriptor.SchemaName`) - the alias
+    /// matcher's name-comparison target (R-E, `schema_alias::matches`). A row whose owner supplies
+    /// no separate name (e.g. a raw wire record with only a hash id) falls back to `schema_id()`,
+    /// which is the same "no name known" behaviour the C# reference has none of: every C# document
+    /// descriptor always carries a real `SchemaName`, so this default exists only for Rust rows
+    /// that genuinely have nothing better, and it costs them nothing they had before (the fallback
+    /// still matches an exact id, just never a name alias).
+    fn schema_name(&self) -> &str {
+        self.schema_id()
+    }
     fn record_key(&self) -> &str;
     /// The sequence of the commit that last wrote this row. The row owner supplies it; the
     /// evaluator never reads a clock.
@@ -887,6 +960,9 @@ pub trait Row {
 impl<T: Row + ?Sized> Row for &T {
     fn schema_id(&self) -> &str {
         (**self).schema_id()
+    }
+    fn schema_name(&self) -> &str {
+        (**self).schema_name()
     }
     fn record_key(&self) -> &str {
         (**self).record_key()
@@ -910,6 +986,9 @@ impl<T: Row + ?Sized> Row for &T {
 pub trait RowSet {
     /// Every schema id this row set knows about - the universe `selection.schemas` narrows.
     fn all_schema_ids(&self) -> Vec<String>;
+    /// `schema_id`'s declared name (C#'s `CultDocumentDescriptor.SchemaName`) - the alias matcher's
+    /// name-comparison target (R-E). `None` when `schema_id` is not one of `all_schema_ids()`.
+    fn schema_name(&self, schema_id: &str) -> Option<String>;
     /// The declared index aliases a schema carries (inherited or own).
     fn declared_indexes(&self, schema_id: &str) -> Vec<String>;
     /// The declared reference roles a schema carries.
@@ -1003,11 +1082,10 @@ pub fn validate(selection: &Selection, row_set: &impl RowSet) -> Result<(), Sele
         }
         // R-E: cites.target.schemaId goes through the one schema-identity rule too. An unmatched
         // target is refused at the door, never silently answered with an empty page.
-        if !row_set
-            .all_schema_ids()
-            .iter()
-            .any(|schema_id| schema_alias::matches(&cites.target.schema_id, schema_id))
-        {
+        if !row_set.all_schema_ids().iter().any(|schema_id| {
+            let name = row_set.schema_name(schema_id).unwrap_or_else(|| schema_id.clone());
+            schema_alias::matches(&cites.target.schema_id, schema_id, &name)
+        }) {
             return Err(SelectionInvalid::new(
                 "cites.target.schemaId",
                 Some(cites.target.schema_id.clone()),
@@ -1059,7 +1137,10 @@ pub fn reachable_schemas(selection: &Selection, row_set: &impl RowSet) -> Vec<St
         // R-E: reachability goes through the alias matcher, not exact equality.
         Some(schemas) => all
             .into_iter()
-            .filter(|id| schema_alias::matches_any(schemas, id))
+            .filter(|id| {
+                let name = row_set.schema_name(id).unwrap_or_else(|| id.clone());
+                schema_alias::matches_any(schemas, id, &name)
+            })
             .collect(),
     }
 }
@@ -1220,7 +1301,9 @@ fn matches_schema_keys_fields<R: Row>(row: &R, selection: &Selection) -> bool {
     // `false` (matches nothing), which is what a present-but-empty list must do until something
     // upstream (the v1 door, or v0's own lowering) turns it into `None` or refuses it outright.
     if let Some(schemas) = &selection.schemas
-        && !schemas.iter().any(|candidate| schema_alias::matches(candidate, row.schema_id()))
+        && !schemas
+            .iter()
+            .any(|candidate| schema_alias::matches(candidate, row.schema_id(), row.schema_name()))
     {
         return false;
     }
@@ -1593,7 +1676,10 @@ fn matches_citation<R: Row + Clone>(
         };
         ensure_within_declared_target(row_set, &role, citer, *resolved)?;
         // R-E: the target's schema id is matched through the one alias rule, not exact equality.
-        if !schema_alias::matches(&citation.target.schema_id, resolved.schema_id()) {
+        let resolved_name = row_set
+            .schema_name(resolved.schema_id())
+            .unwrap_or_else(|| resolved.schema_id().to_string());
+        if !schema_alias::matches(&citation.target.schema_id, resolved.schema_id(), &resolved_name) {
             continue;
         }
         edge_sink.push(EdgeMatch {

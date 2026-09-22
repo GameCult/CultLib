@@ -111,15 +111,30 @@ fn leaf_b() -> &'static str {
 fn citer() -> &'static str {
     &fixture_schema("citer").schema_id
 }
-// The alias form cultnet_rs::selection::schema_alias resolves (a synthetic ".v1" appended to the
-// real hash - see the module comment above).
+// R-E/shared-fixture ruling: the fixture's map key ("leaf_a", "leaf_b", "citer") *is* each
+// schema's declared name (C#'s CultDocumentDescriptor.SchemaName) - what RowSet::schema_name/
+// Row::schema_name now expose, and what nameAlias's ".v9" suffix resolves against.
+fn leaf_a_name() -> &'static str {
+    "leaf_a"
+}
+fn leaf_b_name() -> &'static str {
+    "leaf_b"
+}
+fn citer_name() -> &'static str {
+    "citer"
+}
+const NARROW_CITER_NAME: &str = "narrow_citer";
+// R-E, Self's ruling 2026-09-22 ("the C# reference's alias rule is the rule"): a hash id with a
+// synthetic ".v1" appended is not a wire form either runtime's production rule resolves -
+// CultNetSchemaAliasMatching's descriptor overload strips the ".v1" and compares the bare hash
+// text against the declared *name* ("leaf_a"), never equal. This is now a shared negative check
+// (see does_not_match_a_hash_shaped_alias below and the parity vectors this file writes).
 fn leaf_a_hash_alias() -> &'static str {
     &fixture_schema("leaf_a").hash_alias
 }
-// The alias form only CultNetSchemaAliasMatching's descriptor overload resolves ("leaf_a.v9") -
-// this crate's schema_alias never sees a descriptor's human name, so a vector built with this
-// alias is expected to fail here even though the C# reference resolves it for real (the report's
-// confirmed defect).
+// The alias form the C# reference's descriptor overload resolves ("leaf_a.v9") - and, as of this
+// cut's fix, the alias form this crate's schema_alias resolves too, through Row::schema_name/
+// RowSet::schema_name now standing in for CultDocumentDescriptor.SchemaName.
 fn leaf_a_name_alias() -> &'static str {
     &fixture_schema("leaf_a").name_alias
 }
@@ -193,9 +208,28 @@ impl FixtureRow {
     }
 }
 
+// Shared by Row::schema_name and RowSet::schema_name below - one place that knows which fixture
+// schema id carries which declared name.
+fn schema_name_for(schema_id: &str) -> Option<&'static str> {
+    if schema_id == leaf_a() {
+        Some(leaf_a_name())
+    } else if schema_id == leaf_b() {
+        Some(leaf_b_name())
+    } else if schema_id == citer() {
+        Some(citer_name())
+    } else if schema_id == NARROW_CITER {
+        Some(NARROW_CITER_NAME)
+    } else {
+        None
+    }
+}
+
 impl Row for FixtureRow {
     fn schema_id(&self) -> &str {
         self.schema_id
+    }
+    fn schema_name(&self) -> &str {
+        schema_name_for(self.schema_id).unwrap_or(self.schema_id)
     }
     fn record_key(&self) -> &str {
         self.record_key
@@ -231,6 +265,9 @@ impl RowSet for FixtureRowSet {
             citer().into(),
             NARROW_CITER.into(),
         ]
+    }
+    fn schema_name(&self, schema_id: &str) -> Option<String> {
+        schema_name_for(schema_id).map(str::to_string)
     }
     fn declared_indexes(&self, schema_id: &str) -> Vec<String> {
         if schema_id == leaf_a() || schema_id == leaf_b() {
@@ -1039,17 +1076,22 @@ fn write_selection_vectors_for_the_reference() {
                 ..Selection::default()
             },
         ),
-        // R-E: the same citation, but the target is named by this crate's own resolvable alias
-        // (leaf_a_hash_alias(): the real hash with a synthetic ".v1" appended) rather than the exact
-        // id - schema_alias strips the trailing ".v1" from either side and compares the bare hash.
+        // R-E: the same citation, but the target is named by the alias form C#'s production rule
+        // resolves ("leaf_a.v9", stripped to "leaf_a" and compared against the schema's declared
+        // name) - as of this cut's fix, Row::schema_name/RowSet::schema_name give this crate's own
+        // schema_alias the same name to resolve against, so this now agrees with the reference too.
         (
-            "hop_by_role_cites_hash_alias",
+            "hop_by_role_cites_name_alias",
             Selection {
-                cites: Some(Citation { target: rr(leaf_a_hash_alias(), "a-eq"), role: Some("Design".into()) }),
+                cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
                 ..Selection::default()
             },
         ),
-        // R-E: `schemas` reaches a schema by the same hash alias.
+        // R-E, Self's ruling 2026-09-22 ("the C# reference's alias rule is the rule"): a hash id
+        // with a synthetic ".v1" appended is not a wire form either runtime's production rule
+        // resolves - it strips the ".v1" and compares the bare hash text against the schema's
+        // declared *name* ("leaf_a"), never equal. This is a shared negative check now: both
+        // runtimes give an empty reachable set for `schemas`, hence empty expected_ids here.
         (
             "schemas_by_hash_alias",
             Selection {
@@ -1057,15 +1099,12 @@ fn write_selection_vectors_for_the_reference() {
                 ..Selection::default()
             },
         ),
-        // R-E, the reverse probe of SelectionParityVectorTests.Cases's schemas_by_name_alias:
-        // schema_alias has no concept of a schema's human name, only its hash id
-        // (Row::schema_id()), so "leaf_a.v9" resolves to nothing here and this vector's
-        // expected_ids come out empty even though CultNetSchemaAliasMatching's descriptor overload
-        // (the only overload any C# call site uses) really does resolve it - it strips the ".v9" and
-        // compares "leaf_a" to ParityLeafA's descriptor.SchemaName. The C# reader
-        // (SelectionVectorsWrittenByRustDecodeAndEvaluateIdenticallyInTheReference) therefore
-        // disagrees with this file's empty expected_ids: confirmed cross-runtime defect: see the
-        // report.
+        // R-E: `schemas` reaches a schema by its name alias - as of this cut's fix, this crate's
+        // schema_alias resolves it the same way CultNetSchemaAliasMatching's descriptor overload
+        // does (the only overload any C# call site uses): strip the trailing ".v9" and compare
+        // "leaf_a" to the schema's declared name. Previously this crate's alias matcher had no
+        // concept of a schema's name at all and gave an empty result here, disagreeing with the
+        // reference - that cross-runtime defect is what this cut fixes.
         (
             "schemas_by_name_alias",
             Selection {
@@ -1166,6 +1205,20 @@ fn write_selection_vectors_for_the_reference() {
             Selection {
                 cites: Some(Citation {
                     target: rr("sha256:not-a-known-schema", "a-eq"),
+                    role: Some("Design".into()),
+                }),
+                ..Selection::default()
+            },
+            "cites.target.schemaId",
+        ),
+        // R-E, Self's ruling 2026-09-22: a hash-shaped alias resolves to no known schema in either
+        // runtime now (see schemas_by_hash_alias above), so naming one as a cites.target is the
+        // same "unmatched target" refusal as any other unresolvable schema id.
+        (
+            "refuses_cites_target_by_hash_shaped_alias",
+            Selection {
+                cites: Some(Citation {
+                    target: rr(leaf_a_hash_alias(), "a-eq"),
                     role: Some("Design".into()),
                 }),
                 ..Selection::default()
@@ -1293,16 +1346,31 @@ fn cursor_digest_does_not_collide_on_differently_split_lists() {
 // ------------------------------------------------------------------------------------------
 
 #[test]
-fn schemas_reaches_a_schema_by_its_unversioned_alias() {
+fn schemas_reaches_a_schema_by_its_unversioned_name_alias() {
+    let rows = base_rows();
+    let selection = Selection {
+        schemas: Some(vec![leaf_a_name_alias().into()]),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["a-eq", "a-lo", "shared-1", "shared-3"], "every leaf_a row, by name alias");
+}
+
+// R-E, Self's ruling 2026-09-22: a hash-shaped alias ("<hash>.v1") is not a wire form the C#
+// reference's production rule ever resolves - it strips the ".v1" and compares the bare hash text
+// against the schema's declared *name*, never equal. `schemas` never refuses (unlike cites.target
+// below), so an unresolved alias just narrows reachability to nothing.
+#[test]
+fn schemas_does_not_reach_a_schema_by_a_hash_shaped_alias() {
     let rows = base_rows();
     let selection = Selection {
         schemas: Some(vec![leaf_a_hash_alias().into()]),
         ..Selection::default()
     };
     let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
-    let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
-    ids.sort_unstable();
-    assert_eq!(ids, vec!["a-eq", "a-lo", "shared-1", "shared-3"], "every leaf_a row, by alias");
+    assert!(evaluation.rows.is_empty(), "a hash-shaped alias must not resolve to leaf_a");
 }
 
 // R-E, at the fast path `matches()` uses directly (the v0 snapshot server's own caller,
@@ -1323,14 +1391,27 @@ fn matches_treats_an_empty_but_present_schemas_list_as_matching_nothing() {
 }
 
 #[test]
-fn cites_target_resolves_through_the_alias_matcher() {
+fn cites_target_resolves_through_the_name_alias_matcher() {
     let rows = base_rows();
     let selection = Selection {
-        cites: Some(Citation { target: rr(leaf_a_hash_alias(), "a-eq"), role: Some("Design".into()) }),
+        cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
         ..Selection::default()
     };
     let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
     assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
+}
+
+// R-E, Self's ruling 2026-09-22: a hash-shaped alias resolves to no known schema (see
+// schemas_does_not_reach_a_schema_by_a_hash_shaped_alias above), so a cites.target naming one is
+// refused at the door (R-E's unmatched-target rule), not silently answered with an empty page.
+#[test]
+fn cites_target_by_a_hash_shaped_alias_is_refused_as_unmatched() {
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a_hash_alias(), "a-eq"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let error = validate(&selection, &FixtureRowSet).expect_err("hash-shaped alias must be refused");
+    assert_eq!(error.field, "cites.target.schemaId");
 }
 
 #[test]
@@ -1348,8 +1429,9 @@ fn validate_refuses_a_cites_target_schema_that_matches_no_known_schema() {
 
 #[test]
 fn schema_alias_module_is_reachable_from_the_crate_root() {
-    assert!(schema_alias::matches(leaf_a_hash_alias(), leaf_a()));
-    assert!(!schema_alias::matches(leaf_a_hash_alias(), leaf_b()));
+    assert!(schema_alias::matches(leaf_a_name_alias(), leaf_a(), leaf_a_name()));
+    assert!(!schema_alias::matches(leaf_a_name_alias(), leaf_a(), leaf_b_name()));
+    assert!(!schema_alias::matches(leaf_a_hash_alias(), leaf_a(), leaf_a_name()));
 }
 
 // ------------------------------------------------------------------------------------------
