@@ -135,7 +135,10 @@ namespace GameCult.Networking
                 // one shard's log is refused rather than answered against a watermark that is not
                 // exact for all of them.
                 shardIdOf: (schemaId, key) => _database.ResolveShard(schemaId, key).ShardId,
-                cursorKey: _database.CursorKey);
+                cursorKey: _database.CursorKey,
+                // S-9: once the matched rows resolve to one shard, asOf is that shard's own watermark,
+                // not CurrentAsOf()'s database-wide maximum across every shard.
+                asOfForShard: _database.CurrentAsOf);
         }
 
         /// <summary>
@@ -377,22 +380,9 @@ namespace GameCult.Networking
                 return Task.CompletedTask;
             }
 
-            // This server delivers live changes through the single-row fast path (CreateChangeMessage /
-            // CultNetSelectionEvaluator.Matches), which is set-independent by construction - the same
-            // ceiling v0 subscriptions on this server already have. A hop-bearing selection is
-            // set-dependent (D6) and needs the subscription server's reconcile loop instead, so it is
-            // refused here rather than reaching Matches' own InvalidOperationException on the first change.
-            if (message.Selection.HasHop)
-            {
-                peer.SendCultNet(new CultNetErrorMessage
-                {
-                    Error = "selection_invalid: selection.cites/selection.cited need the subscription server's reconcile loop (D6); this server only fast-matches a single row.",
-                    Code = "selection_invalid",
-                    Details = new CultNetErrorDetails { Field = "cites" }
-                });
-                return Task.CompletedTask;
-            }
-
+            // S-11: the door runs first, unconditionally (R-F) - a selection that is invalid for reasons
+            // unrelated to its hop (an empty keys list, an undeclared index, ...) reports that refusal,
+            // not a hop refusal that has nothing to do with why it was actually rejected.
             try
             {
                 message.Selection.Validate(_database.Cache.Registry.AllDescriptors.ToArray());
@@ -400,6 +390,25 @@ namespace GameCult.Networking
             catch (CultNetSelectionInvalidException ex)
             {
                 peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+                return Task.CompletedTask;
+            }
+
+            // This server delivers live changes through the single-row fast path (CreateChangeMessage /
+            // CultNetSelectionEvaluator.Matches), which is set-independent by construction - the same
+            // ceiling v0 subscriptions on this server already have. A hop-bearing selection is
+            // set-dependent (D6) and needs the subscription server's reconcile loop instead, so it is
+            // refused here, after the door, rather than reaching Matches' own InvalidOperationException
+            // on the first change. The refused field names whichever hop is actually set - cited, not
+            // always cites - so the refusal describes the selection that was actually sent.
+            if (message.Selection.HasHop)
+            {
+                var hopField = message.Selection.Cites != null ? "cites" : "cited";
+                peer.SendCultNet(new CultNetErrorMessage
+                {
+                    Error = $"selection_invalid: selection.{hopField} needs the subscription server's reconcile loop (D6); this server only fast-matches a single row.",
+                    Code = "selection_invalid",
+                    Details = new CultNetErrorDetails { Field = hopField }
+                });
                 return Task.CompletedTask;
             }
 

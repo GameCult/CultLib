@@ -5637,6 +5637,55 @@ namespace GameCult.Networking.Tests
             Assert.That(ex!.Field, Is.EqualTo("asOf"));
         }
 
+        // S-9 (docs/cultnet-selection-cut.md, fix batch 4): asOf is the watermark of the shard(s) the
+        // selection's matched rows actually come from, not CurrentAsOf()'s database-wide maximum across
+        // every shard - a shard-log sequence is a per-shard counter, so a selection matching only
+        // shard-a's row must not claim exactness as of a sequence shard-b's unrelated writes advanced to.
+        [Test]
+        public async Task CultNetDatabaseServer_SelectionResponseAsOf_IsTheMatchedShardsOwnWatermarkNotTheDatabaseWideMaximum()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor("shard-a", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "a:"),
+                    new CultNetShardDescriptor("shard-b", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "b:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            await database.PutAsync(
+                new CultRecordKey("a:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "A" });
+            // shard-b takes several more writes than shard-a, so the database-wide maximum runs well
+            // ahead of shard-a's own watermark.
+            for (var i = 0; i < 4; i++)
+            {
+                await database.PutAsync(
+                    new CultRecordKey("b:one"),
+                    new PlayerData { PlayerId = Guid.NewGuid(), Email = $"b{i}@example.test", PasswordHash = "hash", Username = "B" });
+            }
+
+            Assert.That(database.CurrentAsOf(), Is.EqualTo(4UL), "sanity: the database-wide maximum is shard-b's watermark");
+            Assert.That(database.CurrentAsOf("shard-a"), Is.EqualTo(1UL), "sanity: shard-a's own watermark is unaffected by shard-b's writes");
+
+            var response = databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                Selection = new CultNetSelection { Keys = ["a:one"] }
+            });
+
+            Assert.That(response.AsOf, Is.EqualTo(1UL));
+        }
+
         [Test]
         public async Task CultNetDatabase_Predicts_ClientOwnedInput_AndReconciles_AuthoritativeLog()
         {

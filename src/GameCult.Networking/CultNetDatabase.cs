@@ -1303,13 +1303,30 @@ namespace GameCult.Networking
             _lastWriteSequence.TryGetValue((schemaId, key.Value), out var sequence) ? sequence : null;
 
         /// <summary>
-        /// The current write-sequence watermark this database can present an exact snapshot for (R-A):
-        /// the highest <see cref="LastWriteSequence"/> assigned to any row, 0 when nothing has been
-        /// committed yet. This is the evaluator's <c>asOf</c> for a v1 snapshot or subscription page - it
-        /// advances on every committed write, so a cursor minted against an older watermark refuses as
-        /// <c>cursor_stale</c> once a page's answer could differ.
+        /// The current write-sequence watermark across every shard this database holds, 0 when nothing
+        /// has been committed yet. Only meaningful for an answer that is not scoped to any particular
+        /// shard's log - a selection's own <c>asOf</c> must use <see cref="CurrentAsOf(string)"/> instead
+        /// (S-9): the shard-log sequence is a per-shard counter (<see cref="NextMutationLogSequence"/>),
+        /// so taking the maximum across every shard's rows mixes counters that do not compare to one
+        /// another and can report a page as exact "as of" a sequence another, unrelated shard advanced to
+        /// while the page's own shard sat still.
         /// </summary>
         public ulong CurrentAsOf() => _lastWriteSequence.Count == 0 ? 0UL : (ulong)_lastWriteSequence.Values.Max();
+
+        /// <summary>
+        /// The write-sequence watermark of one shard's own log (S-9): the sequence of the last commit
+        /// that shard's log recorded, or 0 when the shard has never taken a write. This is the evaluator's
+        /// <c>asOf</c> for a v1 snapshot or subscription page whose matched rows all come from one shard
+        /// (<see cref="CultNetDocumentRegistry"/>'s single-shard check) - it advances only when that
+        /// shard's own log advances, so a cursor minted against it refuses <c>cursor_stale</c> exactly
+        /// when that shard's log has moved, never because an unrelated shard elsewhere took a write the
+        /// selection never touched.
+        /// </summary>
+        public ulong CurrentAsOf(string shardId)
+        {
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            return _nextLogSequences.TryGetValue(shardId, out var next) ? (ulong)(next - 1) : 0UL;
+        }
 
         private void RecordMutationLogEntry(
             CultNetShardMutationLogEntry entry,

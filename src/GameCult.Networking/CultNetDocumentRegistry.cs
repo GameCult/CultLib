@@ -336,7 +336,8 @@ namespace GameCult.Networking
         /// Evaluates a typed selection against the cache and returns its page
         /// (docs/cultnet-selection-cut.md, section 2/6). <paramref name="ordinalOf"/> supplies each
         /// row's ordinal (the reference: <see cref="CultNetDatabase.LastWriteSequence"/>); <paramref name="asOf"/>
-        /// is the snapshot the page is exact for.
+        /// is the snapshot the page is exact for when the selection is not shard-scoped, or the fallback
+        /// used only when <paramref name="asOfForShard"/> is null or the selection matches no rows (S-9).
         /// </summary>
         public CultNetSnapshotResponseRawV1Message CreateSelectionResponse(
             CultCache cache,
@@ -346,13 +347,14 @@ namespace GameCult.Networking
             ulong asOf,
             CultNetDocumentMessageOptions? options = null,
             Func<string, CultRecordKey, string>? shardIdOf = null,
-            CultNetSelectionCursorKey? cursorKey = null)
+            CultNetSelectionCursorKey? cursorKey = null,
+            Func<string, ulong>? asOfForShard = null)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
 
-            var page = SelectPage(cache, selection, ordinalOf, asOf, options, shardIdOf: shardIdOf, cursorKey: cursorKey);
+            var page = SelectPage(cache, selection, ordinalOf, asOf, options, shardIdOf: shardIdOf, cursorKey: cursorKey, asOfForShard: asOfForShard);
             return new CultNetSnapshotResponseRawV1Message
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
@@ -378,7 +380,8 @@ namespace GameCult.Networking
             CultNetDocumentMessageOptions? options,
             Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null,
             Func<string, CultRecordKey, string>? shardIdOf = null,
-            CultNetSelectionCursorKey? cursorKey = null)
+            CultNetSelectionCursorKey? cursorKey = null,
+            Func<string, ulong>? asOfForShard = null)
         {
             selection = ExpandSchemaBindingAliases(selection);
             // R-F: CultNetSelectionEvaluator.Select validates first, every time - there is no separate
@@ -399,7 +402,16 @@ namespace GameCult.Networking
             // single shard by construction) passes null and skips the check rather than pay for it.
             if (shardIdOf != null)
             {
-                EnsureSingleShard(full.Ordered, shardIdOf);
+                var shardId = EnsureSingleShard(full.Ordered, shardIdOf);
+                // S-9: asOf is the watermark of the shard the selection's matched rows actually come
+                // from, not the database-wide maximum across every shard - a selection matching only one
+                // shard's rows must not claim exactness as of a sequence a different, untouched shard
+                // happened to advance to. A selection matching no rows has no shard to scope to, so it
+                // keeps the caller-supplied fallback.
+                if (shardId != null && asOfForShard != null)
+                {
+                    asOf = asOfForShard(shardId);
+                }
             }
 
             var evaluation = CultNetSelectionEvaluator.Page(full, selection, asOf, cursorKey);
@@ -428,7 +440,8 @@ namespace GameCult.Networking
         /// than adding a second refusal shape for what is, from the wire's point of view, the same
         /// "this selection cannot be answered as asked" refusal a bad field or an empty list gets.
         /// </summary>
-        private static void EnsureSingleShard(
+        /// <summary>Returns the one shard every matched row belongs to, or null when the selection matched no rows.</summary>
+        private static string? EnsureSingleShard(
             IReadOnlyList<CultNetSelectionEvaluator.Row> rows,
             Func<string, CultRecordKey, string> shardIdOf)
         {
@@ -448,6 +461,8 @@ namespace GameCult.Networking
                         $"The selection matches rows from more than one shard's log (at least '{shardId}' and '{rowShardId}'); asOf is not defined for a shard-spanning page.");
                 }
             }
+
+            return shardId;
         }
 
         /// <summary>
