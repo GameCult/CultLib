@@ -1,0 +1,98 @@
+{
+  "vectors": [
+    {
+      "name": "any_of_plus_ge_conjunction",
+      "selectionMessagePackBase64": "g6ZmaWVsZHOSg6VpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORpndlYXBvboOlaW5kZXikbWFzc6JvcKJnZaZudW1iZXKhNapwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwg==",
+      "asOf": 1,
+      "expectedIds": [
+        "leaf_a/a-eq"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "descending_with_limit",
+      "selectionMessagePackBase64": "g6pwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nw6VsaW1pdAM=",
+      "asOf": 1,
+      "expectedIds": [
+        "citer/citer-1",
+        "leaf_a/shared-3",
+        "leaf_b/shared-2"
+      ],
+      "matched": 3,
+      "hasNext": true,
+      "expectedEdges": []
+    },
+    {
+      "name": "gt_numeric_boundary",
+      "selectionMessagePackBase64": "g6ZmaWVsZHORg6VpbmRleKRtYXNzom9womd0pm51bWJlcqExqnByb2plY3Rpb26maGVhZGVyqmRlc2NlbmRpbmfC",
+      "asOf": 1,
+      "expectedIds": [
+        "leaf_a/a-lo",
+        "leaf_a/a-eq",
+        "leaf_b/b-hi"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "incoming_exists_true",
+      "selectionMessagePackBase64": "hKdzY2hlbWFzkaZsZWFmX2GlY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8OqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8I=",
+      "asOf": 1,
+      "expectedIds": [
+        "leaf_a/a-eq"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "incoming_negation",
+      "selectionMessagePackBase64": "hKdzY2hlbWFzkaZsZWFmX2GlY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8KqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8I=",
+      "asOf": 1,
+      "expectedIds": [
+        "leaf_a/a-lo",
+        "leaf_a/shared-1",
+        "leaf_a/shared-3"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "shared_index_value_three_rows",
+      "selectionMessagePackBase64": "g6ZmaWVsZHORg6VpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORpnNoYXJlZKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwg==",
+      "asOf": 1,
+      "expectedIds": [
+        "leaf_a/shared-1",
+        "leaf_b/shared-2",
+        "leaf_a/shared-3"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "refuses_empty_schemas_list",
+      "selectionMessagePackBase64": "g6dzY2hlbWFzkKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwg==",
+      "asOf": 1,
+      "expectedRefusalField": "schemas",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "refuses_blank_key_entry",
+      "selectionMessagePackBase64": "g6RrZXlzkqRhLWVxoyAgIKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwg==",
+      "asOf": 1,
+      "expectedRefusalField": "keys",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
+    }
+  ]
+}

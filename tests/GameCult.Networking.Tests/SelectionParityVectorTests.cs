@@ -89,7 +89,7 @@ namespace GameCult.Networking.Tests
         private static IEnumerable<(string Name, CultNetSelection Selection, string ExpectedField)> RefusalCases()
         {
             yield return ("refuses_empty_schemas_list", new CultNetSelection { Schemas = Array.Empty<string>() }, "schemas");
-            yield return ("refuses_blank_key_entry", new CultNetSelection { Keys = new[] { "a-eq", "   " } }, "keys[1]");
+            yield return ("refuses_blank_key_entry", new CultNetSelection { Keys = new[] { "a-eq", "   " } }, "keys");
         }
 
         private static string RowId(CultNetSelectionEvaluator.Row row) => $"{row.Descriptor.SchemaName}/{row.Key.Value}";

@@ -270,6 +270,35 @@ fn hops_one_edge_by_declared_role() {
     assert_eq!(evaluation.edges[0].role, "Design");
 }
 
+// S6, isolated: a citer with two references at the *same* target under different roles - the
+// role filter must exclude the one the caller did not ask for. base_rows()'s citer-1 only ever
+// carries one reference, so a mutant that drops the role filter entirely is invisible there (it
+// has nothing else to wrongly match); this fixture gives it something to wrongly match.
+#[test]
+fn cites_role_excludes_a_second_reference_at_the_same_target() {
+    let rows = vec![
+        FixtureRow::leaf("leaf_a", "a-eq", 1, "weapon", "5"),
+        FixtureRow::citer(
+            "double-citer",
+            2,
+            vec![
+                ("Design".to_string(), rr("leaf_a", "a-eq"), None),
+                ("OtherRole".to_string(), rr("leaf_a", "a-eq"), None),
+            ],
+        ),
+    ];
+    let selection = Selection {
+        cites: Some(Citation {
+            target: rr("leaf_a", "a-eq"),
+            role: Some("Design".into()),
+        }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    assert_eq!(evaluation.edges.len(), 1, "OtherRole's reference must not also match");
+    assert_eq!(evaluation.edges[0].role, "Design");
+}
+
 // S7: cited { exists } is the one negation, and the two directions answer opposite sets.
 #[test]
 fn cited_exists_is_the_one_negation() {
@@ -484,13 +513,13 @@ fn validation_refuses_a_blank_entry_in_schemas_or_keys() {
         schemas: Some(vec!["leaf_a".into(), "  ".into()]),
         ..Selection::default()
     };
-    assert_eq!(validate(&blank_schema, &FixtureRowSet).unwrap_err().field, "schemas[1]");
+    assert_eq!(validate(&blank_schema, &FixtureRowSet).unwrap_err().field, "schemas");
 
     let blank_key = Selection {
         keys: Some(vec!["".into()]),
         ..Selection::default()
     };
-    assert_eq!(validate(&blank_key, &FixtureRowSet).unwrap_err().field, "keys[0]");
+    assert_eq!(validate(&blank_key, &FixtureRowSet).unwrap_err().field, "keys");
 }
 
 // Q-J: the door refuses every named non-canonical spelling of a comparison number.
@@ -854,7 +883,7 @@ fn write_selection_vectors_for_the_reference() {
                 keys: Some(vec!["a-eq".into(), "   ".into()]),
                 ..Selection::default()
             },
-            "keys[1]",
+            "keys",
         ),
     ];
     for (name, selection, expected_field) in refusal_cases {

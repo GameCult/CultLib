@@ -2098,6 +2098,27 @@ fn serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_fi
         );
     }
 
+    // A mixed list keeps its non-blank entries, deduplicated (matches
+    // CultNetV0SelectionLowering.Lower exactly, 568e8e3: Distinct(StringComparer.Ordinal)).
+    let mixed_request = CultNetMessage::SnapshotRequest {
+        message_id: "req-2".to_string(),
+        schema_ids: Some(vec![
+            "ghostlight.agent-state".to_string(),
+            "  ".to_string(),
+            "ghostlight.agent-state".to_string(),
+        ]),
+        record_keys: None,
+    };
+    let mixed_response = serve_read_only_raw_snapshot(&registry, &policy, &source, &mixed_request)?;
+    let CultNetMessage::SnapshotResponseRaw { documents, .. } = mixed_response else {
+        panic!("expected a raw snapshot response");
+    };
+    assert_eq!(
+        documents.len(),
+        2,
+        "a mixed list keeps its one distinct non-blank schema id, still selecting both rows of that schema"
+    );
+
     Ok(())
 }
 

@@ -367,15 +367,20 @@ fn require_non_empty(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-/// v0's own cleaning (Self's ruling, 2026-09-22): an absent list, an empty list, or a list made
-/// only of blank entries all lower to `None` (no filter) - a v0 compatibility rule the lowering
-/// owns, not a meaning the door or the evaluator carries for v1's own lists (those refuse `[]`
-/// and any blank entry outright, in `selection::validate`).
+/// v0's own cleaning, matching the reference's `CultNetV0SelectionLowering.Lower` exactly
+/// (568e8e3): an absent list, an empty list, or a list made only of blank entries all lower to
+/// `None` (no filter); a mixed list keeps its non-blank entries, deduplicated (order-preserving,
+/// first occurrence wins - `Distinct(StringComparer.Ordinal)`'s behaviour). A v0 compatibility
+/// rule the lowering owns, not a meaning the door or the evaluator carries for v1's own lists
+/// (those refuse `[]` and any blank entry outright, in `selection::validate`).
 fn lower_v0_list(list: &Option<Vec<String>>) -> Option<Vec<String>> {
-    match list {
-        Some(values) if !values.is_empty() && values.iter().any(|value| !value.trim().is_empty()) => {
-            Some(values.clone())
-        }
-        _ => None,
-    }
+    let Some(values) = list else { return None };
+    let mut seen = std::collections::HashSet::new();
+    let filtered: Vec<String> = values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| seen.insert(value.as_str()))
+        .cloned()
+        .collect();
+    if filtered.is_empty() { None } else { Some(filtered) }
 }

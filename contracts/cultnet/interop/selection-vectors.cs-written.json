@@ -1,0 +1,104 @@
+{
+  "vectors": [
+    {
+      "name": "any_of_plus_ge_conjunction",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHOShKVpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORpndlYXBvbqZudW1iZXLAhKVpbmRleKRtYXNzom9womdlpnZhbHVlc8CmbnVtYmVyoTWlY2l0ZXPApWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywA==",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/a-eq"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "descending_with_limit",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8OlbGltaXQDpmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "citer/citer-1",
+        "leaf_a/shared-3",
+        "leaf_b/shared-2"
+      ],
+      "matched": 3,
+      "hasNext": true,
+      "expectedEdges": []
+    },
+    {
+      "name": "gt_numeric_boundary",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRtYXNzom9womd0pnZhbHVlc8CmbnVtYmVyoTGlY2l0ZXPApWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywA==",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/a-lo",
+        "leaf_a/a-eq",
+        "leaf_b/b-hi"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "incoming_exists_true",
+      "selectionMessagePackBase64": "iadzY2hlbWFzkaZsZWFmX2Gka2V5c8CmZmllbGRzwKVjaXRlc8ClY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8OqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/a-eq"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "incoming_negation",
+      "selectionMessagePackBase64": "iadzY2hlbWFzkaZsZWFmX2Gka2V5c8CmZmllbGRzwKVjaXRlc8ClY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8KqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/a-lo",
+        "leaf_a/shared-1",
+        "leaf_a/shared-3"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "shared_index_value_three_rows",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORpnNoYXJlZKZudW1iZXLApWNpdGVzwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/shared-1",
+        "leaf_b/shared-2",
+        "leaf_a/shared-3"
+      ],
+      "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "refuses_empty_schemas_list",
+      "selectionMessagePackBase64": "iadzY2hlbWFzkKRrZXlzwKZmaWVsZHPApWNpdGVzwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": "schemas",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "refuses_blank_key_entry",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzkqRhLWVxoyAgIKZmaWVsZHPApWNpdGVzwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": "keys",
+      "expectedIds": [],
+      "matched": 0,
+      "hasNext": false,
+      "expectedEdges": []
+    }
+  ]
+}

@@ -185,6 +185,26 @@
         New    = 'return value.to_string();'
     },
     @{
+        Id     = 'RS-S2-Revert'
+        Rule   = 'S2: an any_of predicate matches row-value membership, not "any value at all".'
+        Test   = 'conjoins_any_of_and_comparison_predicates'
+        Command = 'cargo test --test selection'
+        File   = 'src/selection.rs'
+        Old    = 'if !values.iter().any(|v| wanted.iter().any(|w| w == v)) {'
+        New    = 'if false {'
+    },
+    @{
+        Id     = 'RS-S6-Revert'
+        Rule   = 'S6: cites.role, when present, filters which declared reference the hop follows.'
+        Test   = 'cites_role_excludes_a_second_reference_at_the_same_target'
+        Command = 'cargo test --test selection'
+        File   = 'src/selection.rs'
+        Old    = "if let Some(wanted_role) = &citation.role
+            && *wanted_role != role
+        {"
+        New    = 'if false {'
+    },
+    @{
         Id     = 'RS-EmptySchemas-Revert'
         Rule   = 'S1: an empty (but present) schemas list is refused, never answered as an empty page.'
         Test   = 'validation_refuses_undeclared_index_role_and_empty_lists'
@@ -225,9 +245,16 @@
         Id     = 'RS-V0Lowering-Revert'
         Rule   = 'v0''s own cleaning: an empty or all-blank v0 list lowers to null (no filter), not to a list the door or the evaluator would have to refuse or misread.'
         Test   = 'serve_read_only_raw_snapshot_lowers_an_empty_or_blank_v0_schema_list_to_no_filter'
-        Command = 'cargo test --test cultnet'
+        # Narrowed to this test alone, not the whole tests/cultnet.rs binary: that binary carries
+        # reactive_document_coalesces_direct_same_schema_alias_member_writes, a pre-existing test
+        # unrelated to this campaign that fails under a full-binary run (both parallel and
+        # RUST_TEST_THREADS=1) but passes every time in isolation - state pollution from another
+        # test in that binary, not a correctness question this entry is about. Filtering M0 and
+        # the entry run to this test's own name keeps this suite from depending on that binary's
+        # unrelated health; the flake itself is a separate finding, not fixed here.
+        Command = 'cargo test --test cultnet serve_read_only_raw_snapshot'
         File   = 'src/snapshot_query.rs'
-        Old    = 'Some(values) if !values.is_empty() && values.iter().any(|value| !value.trim().is_empty()) => {'
-        New    = 'Some(values) => {'
+        Old    = 'if filtered.is_empty() { None } else { Some(filtered) }'
+        New    = 'Some(filtered)'
     }
 )

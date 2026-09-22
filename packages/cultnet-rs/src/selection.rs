@@ -774,24 +774,27 @@ pub fn validate(selection: &Selection, row_set: &impl RowSet) -> Result<(), Sele
     // `null` (Rust: `None`) means no filter, everywhere - an empty-or-blank list is never
     // silently treated as "no filter" by the evaluator (that was CultNetSelectionEvaluator.cs's
     // pre-fix bug, section 2's S2-3 finding, and this Rust evaluator never had it).
+    // Field name matches the C# reference exactly (568e8e3): plain "schemas"/"keys", not an
+    // indexed "schemas[i]" - CultNetSelectionInvalidException("schemas", schema, ...) names the
+    // list, not the position, and the parity vectors compare this string.
     if let Some(schemas) = &selection.schemas {
-        for (index, schema) in schemas.iter().enumerate() {
+        for schema in schemas {
             if schema.trim().is_empty() {
                 return Err(SelectionInvalid::new(
-                    format!("schemas[{index}]"),
+                    "schemas",
                     Some(schema.clone()),
-                    format!("schemas[{index}] is empty or whitespace."),
+                    "selection.schemas carries an empty or whitespace entry.",
                 ));
             }
         }
     }
     if let Some(keys) = &selection.keys {
-        for (index, key) in keys.iter().enumerate() {
+        for key in keys {
             if key.trim().is_empty() {
                 return Err(SelectionInvalid::new(
-                    format!("keys[{index}]"),
+                    "keys",
                     Some(key.clone()),
-                    format!("keys[{index}] is empty or whitespace."),
+                    "selection.keys carries an empty or whitespace entry.",
                 ));
             }
         }
