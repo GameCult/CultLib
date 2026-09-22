@@ -2936,7 +2936,7 @@ public sealed class CultMeshStreamingTests
         var endpoint = "cultnet://snapshot-helper.test:3075";
         var options = new CultMeshSnapshotRequestOptions
         {
-            RecordKeys = new[] { key.Value },
+            Selection = new CultNetSelection { Keys = new[] { key.Value } },
             ShardId = "primary",
             ShardEpoch = 7,
             MessageIdPrefix = "mesh-test-scoped-snapshot",
@@ -2986,7 +2986,7 @@ public sealed class CultMeshStreamingTests
         var options = new CultMeshSnapshotRequestOptions
         {
             ResponseTimeout = TimeSpan.FromSeconds(30),
-            RecordKeys = new[] { "eve:surface:test" },
+            Selection = new CultNetSelection { Keys = new[] { "eve:surface:test" } },
             CreateClient = () => new FailedBackgroundSchemaClient(
                 new FormatException("malformed fragment"))
         };
@@ -3051,7 +3051,7 @@ public sealed class CultMeshStreamingTests
             "cultnet://foreign-schema.test:3075",
             new CultMeshSnapshotRequestOptions
             {
-                RecordKeys = new[] { key.Value },
+                Selection = new CultNetSelection { Keys = new[] { key.Value } },
                 CreateClient = () => new MeshSnapshotSchemaClient(request =>
                 {
                     snapshot.MessageId = request.MessageId;
@@ -3236,7 +3236,7 @@ public sealed class CultMeshStreamingTests
             endpoint,
             new CultMeshSnapshotRequestOptions
             {
-                RecordKeys = new[] { key.Value },
+                Selection = new CultNetSelection { Keys = new[] { key.Value } },
                 CreateClient = () => new MeshSnapshotSchemaClient(request =>
                     networkRegistry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
             },

@@ -13,13 +13,10 @@ namespace GameCult.Mesh
     /// <summary>
     /// Options for one scoped CultNet snapshot request.
     /// </summary>
-    public sealed class CultMeshSnapshotRequestOptions
+    public sealed record CultMeshSnapshotRequestOptions
     {
-        /// <summary>Gets or sets schema ids to request. Empty means no schema filter.</summary>
-        public IReadOnlyList<string>? SchemaIds { get; set; }
-
-        /// <summary>Gets or sets record keys to request. Empty means no record-key filter.</summary>
-        public IReadOnlyList<string>? RecordKeys { get; set; }
+        /// <summary>Gets or sets the selection to request. Absent selects every schema and key.</summary>
+        public CultNetSelection? Selection { get; set; }
 
         /// <summary>Gets or sets the target shard id, when the endpoint is shard-aware.</summary>
         public string? ShardId { get; set; }
@@ -87,7 +84,7 @@ namespace GameCult.Mesh
             _endpoint = string.IsNullOrWhiteSpace(endpoint)
                 ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
                 : endpoint;
-            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _defaults = options with { };
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = CultMesh.CreateSnapshotClient(endpoint, _defaults)();
             _client.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
@@ -103,7 +100,7 @@ namespace GameCult.Mesh
         {
             _sharedSession = session ?? throw new ArgumentNullException(nameof(session));
             _endpoint = session.State.Path?.Endpoint ?? session.Target.AuthorityRuntimeId;
-            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _defaults = options with { };
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = session.Channel;
             _responseSubscription = session.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
@@ -150,9 +147,8 @@ namespace GameCult.Mesh
                         _defaults.ConnectTimeout,
                         (_client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                     .ConfigureAwait(false);
-                var options = CultMesh.CloneSnapshotRequestOptions(_defaults);
-                options.SchemaIds = schemaIds ?? options.SchemaIds;
-                options.RecordKeys = recordKeys ?? options.RecordKeys;
+                var selection = CultMesh.OverlaySelection(_defaults.Selection, schemaIds, recordKeys);
+                var options = _defaults with { Selection = selection };
                 var messageId = CultMesh.CreateSnapshotMessageId(options);
                 var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
                     TaskCreationOptions.RunContinuationsAsynchronously);
@@ -164,8 +160,8 @@ namespace GameCult.Mesh
                 _client.SendCultNet(new CultNetSnapshotRequestMessage
                 {
                     MessageId = messageId,
-                    SchemaIds = CultMesh.CleanSnapshotFilter(options.SchemaIds),
-                    RecordKeys = CultMesh.CleanSnapshotFilter(options.RecordKeys),
+                    SchemaIds = selection.Schemas,
+                    RecordKeys = selection.Keys,
                     ShardId = string.IsNullOrWhiteSpace(options.ShardId) ? null : options.ShardId,
                     ShardEpoch = options.ShardEpoch
                 });
@@ -195,8 +191,8 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            var resolvedSchemas = schemaIds ?? (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });
-            var snapshot = await FetchSnapshotAsync(resolvedSchemas, recordKeys).ConfigureAwait(false);
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
+            var snapshot = await FetchSnapshotAsync(selection.Schemas, selection.Keys).ConfigureAwait(false);
             return CultMesh.DecodeSnapshotDocuments<TDocument>(snapshot, _registry);
         }
 
@@ -397,7 +393,7 @@ namespace GameCult.Mesh
             var resolvedOptions = options ?? new CultMeshSnapshotEndpointOptions();
             Context = resolvedOptions.Context ?? CultMesh.Verse("remote", "cultmesh-snapshot-client").Context;
             DocumentRegistry = resolvedOptions.DocumentRegistry ?? new CultNetDocumentRegistry();
-            Request = CloneSnapshotRequestOptions(resolvedOptions.Request);
+            Request = resolvedOptions.Request is null ? new CultMeshSnapshotRequestOptions() : resolvedOptions.Request with { };
             RouteHint = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Network, Endpoint);
             SourceId = string.IsNullOrWhiteSpace(resolvedOptions.SourceId) ? Endpoint : resolvedOptions.SourceId!;
             PollInterval = resolvedOptions.PollInterval;
@@ -463,9 +459,10 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
             return CultMesh.FetchSnapshotDocumentsAsync<TDocument>(
                 Endpoint,
-                CreateRequest(ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor), recordKeys),
+                CreateRequest(selection.Schemas, selection.Keys),
                 DocumentRegistry);
         }
 
@@ -480,10 +477,11 @@ namespace GameCult.Mesh
             if (node == null) throw new ArgumentNullException(nameof(node));
 
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
             var result = await SyncSnapshotAsync(
                     node,
-                    ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor),
-                    recordKeys,
+                    selection.Schemas,
+                    selection.Keys,
                     flush)
                 .ConfigureAwait(false);
             return CultMesh.DecodeSnapshotDocuments<TDocument>(result.Snapshot, DocumentRegistry);
@@ -612,52 +610,12 @@ namespace GameCult.Mesh
             IReadOnlyList<string>? schemaIds,
             IReadOnlyList<string>? recordKeys)
         {
-            var request = CloneSnapshotRequestOptions(Request);
-            request.SchemaIds = schemaIds ?? request.SchemaIds;
-            request.RecordKeys = recordKeys ?? request.RecordKeys;
+            var request = Request with { Selection = CultMesh.OverlaySelection(Request.Selection, schemaIds, recordKeys) };
             if (string.IsNullOrWhiteSpace(request.RudpRuntimeId))
                 request.RudpRuntimeId = Context.RuntimeId;
             if (string.IsNullOrWhiteSpace(request.MessageIdPrefix))
                 request.MessageIdPrefix = $"cultmesh:{Context.RuntimeId}:snapshot";
             return request;
-        }
-
-        private static IReadOnlyList<string>? ResolveDefaultSchemaFilter(
-            IReadOnlyList<string>? schemaIds,
-            IReadOnlyList<string>? recordKeys,
-            CultDocumentDescriptor descriptor)
-        {
-            if (schemaIds != null)
-                return schemaIds;
-
-            return recordKeys is { Count: > 0 }
-                ? null
-                : new[] { descriptor.SchemaId };
-        }
-
-        private static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(CultMeshSnapshotRequestOptions? source)
-        {
-            if (source == null)
-                return new CultMeshSnapshotRequestOptions();
-
-            return new CultMeshSnapshotRequestOptions
-            {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
-            };
         }
     }
 
@@ -733,7 +691,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
 
-            var request = CloneSnapshotFacadeRequestOptions(options?.Request);
+            var request = options?.Request is null ? new CultMeshSnapshotRequestOptions() : options.Request with { };
             request.CreateClient = createClient;
             var resolvedOptions = new CultMeshSnapshotEndpointOptions
             {
@@ -745,31 +703,6 @@ namespace GameCult.Mesh
                 PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250)
             };
             return SnapshotEndpoint(endpoint, resolvedOptions).SyncDocumentAsync<TDocument>(node, recordKey, flush);
-        }
-
-        private static CultMeshSnapshotRequestOptions CloneSnapshotFacadeRequestOptions(CultMeshSnapshotRequestOptions? source)
-        {
-            if (source == null)
-                return new CultMeshSnapshotRequestOptions();
-
-            return new CultMeshSnapshotRequestOptions
-            {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
-            };
         }
 
         /// <summary>
@@ -819,8 +752,8 @@ namespace GameCult.Mesh
             client.SendCultNet(new CultNetSnapshotRequestMessage
             {
                 MessageId = messageId,
-                SchemaIds = CleanSnapshotFilter(resolvedOptions.SchemaIds),
-                RecordKeys = CleanSnapshotFilter(resolvedOptions.RecordKeys),
+                SchemaIds = resolvedOptions.Selection?.Schemas,
+                RecordKeys = resolvedOptions.Selection?.Keys,
                 ShardId = string.IsNullOrWhiteSpace(resolvedOptions.ShardId) ? null : resolvedOptions.ShardId,
                 ShardEpoch = resolvedOptions.ShardEpoch
             });
@@ -886,28 +819,46 @@ namespace GameCult.Mesh
             };
         }
 
-        internal static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(
-            CultMeshSnapshotRequestOptions? source)
+        /// <summary>
+        /// Resolves one selection for a typed convenience call: explicit <paramref name="schemaIds"/>
+        /// win; otherwise an explicit, non-empty <paramref name="recordKeys"/> means no schema filter;
+        /// otherwise the selection defaults to the document type's own schema. The one owner of that
+        /// rule (docs/cultnet-selection-cut.md, section 4).
+        /// </summary>
+        internal static CultNetSelection ResolveDefaultSelection(
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys,
+            CultDocumentDescriptor descriptor)
         {
-            if (source == null) return new CultMeshSnapshotRequestOptions();
-            return new CultMeshSnapshotRequestOptions
+            var schemas = schemaIds != null
+                ? Clean(schemaIds)
+                : (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });
+            return new CultNetSelection { Schemas = schemas, Keys = Clean(recordKeys) };
+        }
+
+        /// <summary>Overlays explicit schema/record-key overrides onto a default selection.</summary>
+        internal static CultNetSelection OverlaySelection(
+            CultNetSelection? defaults,
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys)
+        {
+            return new CultNetSelection
             {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
+                Schemas = schemaIds != null ? Clean(schemaIds) : defaults?.Schemas,
+                Keys = recordKeys != null ? Clean(recordKeys) : defaults?.Keys
             };
+        }
+
+        private static string[]? Clean(IReadOnlyList<string>? values)
+        {
+            if (values is not { Count: > 0 })
+                return null;
+
+            var filtered = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            return filtered.Length == 0 ? null : filtered;
         }
 
         internal static string CreateSnapshotMessageId(CultMeshSnapshotRequestOptions options)
@@ -963,23 +914,11 @@ namespace GameCult.Mesh
             {
                 throw new TimeoutException(
                     $"Timed out waiting for CultNet snapshot response '{messageId}' from {endpoint} " +
-                    $"for schemas [{string.Join(", ", CleanSnapshotFilter(options.SchemaIds) ?? Array.Empty<string>())}] " +
-                    $"and records [{string.Join(", ", CleanSnapshotFilter(options.RecordKeys) ?? Array.Empty<string>())}].");
+                    $"for schemas [{string.Join(", ", options.Selection?.Schemas ?? Array.Empty<string>())}] " +
+                    $"and records [{string.Join(", ", options.Selection?.Keys ?? Array.Empty<string>())}].");
             }
 
             return await responseTask.ConfigureAwait(false);
-        }
-
-        internal static string[]? CleanSnapshotFilter(IReadOnlyList<string>? values)
-        {
-            if (values is not { Count: > 0 })
-                return null;
-
-            var filtered = values
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            return filtered.Length == 0 ? null : filtered;
         }
 
         internal static IReadOnlyList<TDocument> DecodeSnapshotDocuments<TDocument>(

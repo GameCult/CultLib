@@ -188,31 +188,35 @@ namespace GameCult.Mesh
             SubscriptionId = Require(subscriptionId, nameof(subscriptionId));
             ConsumerRuntimeId = Require(consumerRuntimeId, nameof(consumerRuntimeId));
             BodyId = Require(bodyId, nameof(bodyId));
-            RecordKeys = new[]
-                {
-                    Require(viewRecordKey, nameof(viewRecordKey)),
-                    CultMeshBodyPublicationDocument.CreateLatestRecordKey(bodyId).Value
-                }
-                .Concat(additionalRecordKeys ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            SchemaIds = new[]
-                {
-                    Require(viewSchemaId, nameof(viewSchemaId)),
-                    CultMeshBodyPublicationSchemaVersions.Publication
-                }
-                .Concat(additionalSchemaIds ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
+            Selection = new CultNetSelection
+            {
+                Keys = new[]
+                    {
+                        Require(viewRecordKey, nameof(viewRecordKey)),
+                        CultMeshBodyPublicationDocument.CreateLatestRecordKey(bodyId).Value
+                    }
+                    .Concat(additionalRecordKeys ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                Schemas = new[]
+                    {
+                        Require(viewSchemaId, nameof(viewSchemaId)),
+                        CultMeshBodyPublicationSchemaVersions.Publication
+                    }
+                    .Concat(additionalSchemaIds ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray()
+            };
         }
 
         public string SubscriptionId { get; }
         public string ConsumerRuntimeId { get; }
         public string BodyId { get; }
-        public IReadOnlyList<string> RecordKeys { get; }
-        public IReadOnlyList<string> SchemaIds { get; }
+
+        /// <summary>The view record, the body's latest-publication record, and any additional keys/schemas, as one selection.</summary>
+        public CultNetSelection Selection { get; }
 
         private static string Require(string value, string parameterName) =>
             string.IsNullOrWhiteSpace(value)

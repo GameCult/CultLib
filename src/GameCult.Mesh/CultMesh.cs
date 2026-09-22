@@ -112,7 +112,7 @@ namespace GameCult.Mesh
     /// <summary>
     /// Options for opening one typed document from a remote CultNet snapshot endpoint.
     /// </summary>
-    public sealed class CultMeshPeerSnapshotDocumentOptions
+    public sealed record CultMeshPeerSnapshotDocumentOptions
     {
         /// <summary>Gets or sets the semantic document id. Defaults to the record key.</summary>
         public string? DocumentId { get; set; }
@@ -135,8 +135,8 @@ namespace GameCult.Mesh
         /// <summary>Gets or sets the message id prefix used for snapshot requests.</summary>
         public string? MessageIdPrefix { get; set; }
 
-        /// <summary>Gets or sets schema ids to request. Empty means the document type schema is requested.</summary>
-        public IReadOnlyList<string>? SchemaIds { get; set; }
+        /// <summary>Gets or sets the selection to request. Absent means the document type's own schema.</summary>
+        public CultNetSelection? Selection { get; set; }
 
         /// <summary>Gets or sets the target shard id, when the endpoint is shard-aware.</summary>
         public string? ShardId { get; set; }
@@ -1944,28 +1944,12 @@ namespace GameCult.Mesh
             string? documentId,
             string? sourceId)
         {
-            return new CultMeshPeerSnapshotDocumentOptions
-            {
-                DocumentId = string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId,
-                SourceId = string.IsNullOrWhiteSpace(sourceId)
-                    ? (string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId)
-                    : sourceId,
-                RouteHint = options?.RouteHint,
-                ResponseTimeout = options?.ResponseTimeout ?? TimeSpan.FromSeconds(5),
-                ConnectTimeout = options?.ConnectTimeout ?? TimeSpan.FromSeconds(5),
-                PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250),
-                MessageIdPrefix = options?.MessageIdPrefix,
-                SchemaIds = options?.SchemaIds,
-                ShardId = options?.ShardId,
-                ShardEpoch = options?.ShardEpoch,
-                Security = options?.Security,
-                ConfigureClient = options?.ConfigureClient,
-                RudpRuntimeId = options?.RudpRuntimeId,
-                RudpConnectionId = options?.RudpConnectionId ?? 0x43554c54,
-                RudpConnectPayload = options?.RudpConnectPayload ?? "cultnet-schema-rudp",
-                RudpMaxFragmentBytes = options?.RudpMaxFragmentBytes ?? 1024,
-                RudpResendDelayMs = options?.RudpResendDelayMs ?? 25
-            };
+            var resolved = options is null ? new CultMeshPeerSnapshotDocumentOptions() : options with { };
+            resolved.DocumentId = string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId;
+            resolved.SourceId = string.IsNullOrWhiteSpace(sourceId)
+                ? (string.IsNullOrWhiteSpace(documentId) ? key.Value : documentId)
+                : sourceId;
+            return resolved;
         }
 
         /// <summary>
@@ -2707,46 +2691,42 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var selection = new CultNetSelection
+            {
+                Schemas = options.Selection?.Schemas ?? new[] { descriptor.SchemaId },
+                Keys = new[] { recordKey }
+            };
             return await FetchSnapshotAsync(
                     createClient,
                     endpoint,
-                    ToSnapshotRequestOptions(
-                        options,
-                        context,
-                        options.SchemaIds ?? new[] { descriptor.SchemaId },
-                        new[] { recordKey }))
+                    new CultMeshSnapshotRequestOptions
+                    {
+                        Selection = selection,
+                        ShardId = options.ShardId,
+                        ShardEpoch = options.ShardEpoch,
+                        ResponseTimeout = options.ResponseTimeout,
+                        ConnectTimeout = options.ConnectTimeout,
+                        MessageIdPrefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
+                            ? $"cultmesh:{context.RuntimeId}:snapshot"
+                            : options.MessageIdPrefix,
+                        Security = options.Security,
+                        ConfigureClient = options.ConfigureClient,
+                        RudpRuntimeId = string.IsNullOrWhiteSpace(options.RudpRuntimeId)
+                            ? context.RuntimeId
+                            : options.RudpRuntimeId,
+                        RudpConnectionId = options.RudpConnectionId,
+                        RudpConnectPayload = options.RudpConnectPayload,
+                        RudpMaxFragmentBytes = options.RudpMaxFragmentBytes,
+                        RudpResendDelayMs = options.RudpResendDelayMs
+                    })
                 .ConfigureAwait(false);
         }
 
-        private static CultMeshSnapshotRequestOptions ToSnapshotRequestOptions(
-            CultMeshPeerSnapshotDocumentOptions options,
-            CultMeshQueryContext context,
-            IReadOnlyList<string>? schemaIds,
-            IReadOnlyList<string>? recordKeys)
-        {
-            return new CultMeshSnapshotRequestOptions
-            {
-                SchemaIds = schemaIds,
-                RecordKeys = recordKeys,
-                ShardId = options.ShardId,
-                ShardEpoch = options.ShardEpoch,
-                ResponseTimeout = options.ResponseTimeout,
-                ConnectTimeout = options.ConnectTimeout,
-                MessageIdPrefix = string.IsNullOrWhiteSpace(options.MessageIdPrefix)
-                    ? $"cultmesh:{context.RuntimeId}:snapshot"
-                    : options.MessageIdPrefix,
-                Security = options.Security,
-                ConfigureClient = options.ConfigureClient,
-                RudpRuntimeId = string.IsNullOrWhiteSpace(options.RudpRuntimeId)
-                    ? context.RuntimeId
-                    : options.RudpRuntimeId,
-                RudpConnectionId = options.RudpConnectionId,
-                RudpConnectPayload = options.RudpConnectPayload,
-                RudpMaxFragmentBytes = options.RudpMaxFragmentBytes,
-                RudpResendDelayMs = options.RudpResendDelayMs
-            };
-        }
-
+        // One exact read (docs/cultnet-selection-cut.md, section 4/7): the record this recordKey
+        // names, decoded as TDocument when its schema is this schema, a declared alias of it, or
+        // (a foreign/runtime-generated schema id this runtime does not recognize by any alias) its
+        // payload decodes as TDocument. No re-filter of the server's answer by schema alone, and no
+        // fallback that returns a record under the wrong key.
         private static TDocument ReadDocumentFromSnapshotResponse<TDocument>(
             CultNetSnapshotResponseRawMessage response,
             string schemaId,
@@ -2754,16 +2734,21 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             if (response == null) throw new ArgumentNullException(nameof(response));
-            var record = response.Documents.FirstOrDefault(candidate =>
-                    string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) &&
-                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal))
-                ?? response.Documents.FirstOrDefault(candidate =>
-                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal) &&
-                    TryDecodeSnapshotDocument(candidate, out TDocument? _))
-                ?? response.Documents.FirstOrDefault(candidate =>
-                    string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal))
-                ?? response.Documents.FirstOrDefault(candidate =>
-                    string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal));
+            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            CultNetRawDocumentRecord? record = null;
+            foreach (var candidate in response.Documents)
+            {
+                if (!string.Equals(candidate.RecordKey, recordKey, StringComparison.Ordinal))
+                    continue;
+                if (string.Equals(candidate.SchemaId, schemaId, StringComparison.Ordinal) ||
+                    CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor) ||
+                    TryDecodeAsMessagePack<TDocument>(candidate, out _))
+                {
+                    record = candidate;
+                    break;
+                }
+            }
+
             if (record == null)
             {
                 throw new InvalidOperationException(
@@ -2776,35 +2761,24 @@ namespace GameCult.Mesh
                     $"CultNet raw document payloadEncoding must be \"messagepack\", not \"{record.PayloadEncoding}\".");
             }
 
-            return DecodeSnapshotDocument<TDocument>(record);
+            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), record.Payload);
         }
 
-        private static bool TryDecodeSnapshotDocument<TDocument>(
-            CultNetRawDocumentRecord record,
-            out TDocument? document)
+        private static bool TryDecodeAsMessagePack<TDocument>(CultNetRawDocumentRecord record, out TDocument? document)
             where TDocument : class
         {
             document = null;
             if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))
                 return false;
-
             try
             {
-                document = DecodeSnapshotDocument<TDocument>(record);
+                document = (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), record.Payload);
                 return true;
             }
             catch
             {
                 return false;
             }
-        }
-
-        private static TDocument DecodeSnapshotDocument<TDocument>(CultNetRawDocumentRecord record)
-            where TDocument : class
-        {
-            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(
-                typeof(TDocument),
-                record.Payload);
         }
 
         /// <summary>
@@ -2849,8 +2823,8 @@ namespace GameCult.Mesh
                 throw new ArgumentException("At least one readable body transport is required.", nameof(supportedBodyTransports));
             return subscriptions.SubscribeAsync(
                 subscription.SubscriptionId,
-                recordKeys: subscription.RecordKeys,
-                schemaIds: subscription.SchemaIds,
+                recordKeys: subscription.Selection.Keys,
+                schemaIds: subscription.Selection.Schemas,
                 consumerRuntimeId: subscription.ConsumerRuntimeId,
                 bodyIds: new[] { subscription.BodyId },
                 supportedBodyTransports: transports.Select(value => value.ToString()),
