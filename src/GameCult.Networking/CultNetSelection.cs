@@ -210,17 +210,26 @@ namespace GameCult.Networking
     /// </summary>
     public static class CultNetV0SelectionLowering
     {
-        /// <summary>Lowers one v0 filter list; see the type summary.</summary>
+        /// <summary>
+        /// Lowers one v0 filter list; see the type summary. R-R (2026-09-22): a <c>null</c> list means
+        /// "no filter" and stays <c>null</c>; a non-null list, even one that filters down to nothing,
+        /// stays a real (possibly empty) array. Collapsing an explicit empty list to "no filter" was
+        /// wrong - the pre-cut reference (<c>CultNetDatabase.CreateShardSnapshotResponse</c> at
+        /// <c>b3d9cf7</c>) tests <c>filter?.RecordKeys != null</c>, not a length, so
+        /// <c>recordKeys: []</c> always answered empty. The evaluator already honours that distinction
+        /// (<c>CultNetSelectionEvaluator</c>: a non-null <c>Keys</c> array excludes every row when it
+        /// is empty); only this lowering used to erase it before the selection ever reached the
+        /// evaluator.
+        /// </summary>
         public static string[]? Lower(IReadOnlyList<string>? values)
         {
-            if (values is not { Count: > 0 })
+            if (values == null)
                 return null;
 
-            var filtered = values
+            return values
                 .Where(value => !string.IsNullOrWhiteSpace(value))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
-            return filtered.Length == 0 ? null : filtered;
         }
     }
 

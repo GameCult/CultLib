@@ -283,14 +283,32 @@ namespace GameCult.Networking
             CultNetDocumentMessageOptions? options = null)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
+            var lowKeys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys);
             var selection = new CultNetSelection
             {
                 Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
-                Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
+                Keys = lowKeys,
                 Projection = CultNetSelectionProjections.Document
             };
 
-            var page = SelectAll(cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, options);
+            // R-R: v0's pre-cut CreateRawSnapshotResponse (b3d9cf7) iterated the requested record keys
+            // in the order the caller sent them (a HashSet<string> built from the array, enumerated in
+            // insertion order). The evaluator's own tiebreak (schema then key) only applies when the
+            // caller did not name keys.
+            Func<string, CultRecordKey, long> ordinalOf;
+            if (lowKeys is { Length: > 0 })
+            {
+                var order = new Dictionary<string, long>(StringComparer.Ordinal);
+                for (var i = 0; i < lowKeys.Length; i++)
+                    order.TryAdd(lowKeys[i], i);
+                ordinalOf = (_, key) => order.TryGetValue(key.Value, out var index) ? index : lowKeys.Length;
+            }
+            else
+            {
+                ordinalOf = static (_, _) => 0;
+            }
+
+            var page = SelectAll(cache, selection, ordinalOf, asOf: 0, options);
 
             return new CultNetSnapshotResponseRawMessage
             {

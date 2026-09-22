@@ -2746,9 +2746,8 @@ public sealed class CultMeshStreamingTests
 
         (await mixedAliasSchemaHandle.LatestAsync()).Text.Should().Be("compatible-record-key");
 
-        // MESH-KEY-Loosening (docs/cultnet-selection-cut.md, section 4/S2-4): the recordKey match is
-        // exact (ordinal), not case-insensitive. A case-variant key must not win even when it appears
-        // first in the response.
+        // The recordKey match is exact (ordinal), not case-insensitive. A case-variant key must not
+        // win even when it appears first in the response.
         var caseVariantKey = key.Value.ToUpperInvariant();
         var caseVariantKeyHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
@@ -2794,13 +2793,14 @@ public sealed class CultMeshStreamingTests
         (await caseVariantKeyHandle.LatestAsync()).Text.Should().Be("right-case-key");
     }
 
-    // MESH-DEFAULT-Loosening (docs/cultnet-selection-cut.md, section 4/S2-7): ResolveDefaultSelection's
-    // no-schema-filter branch must trigger on a non-empty recordKeys, not merely a non-null one. An
-    // explicit empty recordKeys array is a v0-compatible list that lowers to null (rule 1's v0
-    // lowering), so it does not suppress the type's own schema default - the wire must carry
-    // [T.SchemaId], not schemas=null.
+    // R-R (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22) corrects the earlier commit-2
+    // ruling this test used to pin: an explicit empty recordKeys array is a real filter, not "no
+    // filter". ResolveDefaultSelection must not fall back to the type's own schema default just
+    // because the caller's recordKeys happened to be empty - the wire must carry recordKeys=[] and
+    // no schema default, and the answer is empty, exactly as v0 answered before this cut
+    // (CultNetDatabase.CreateShardSnapshotResponse at b3d9cf7 tests RecordKeys != null, not a length).
     [Test]
-    public async Task FetchDocumentsAsync_WithExplicitEmptyRecordKeys_StillDefaultsToOwnSchema()
+    public async Task FetchDocumentsAsync_WithExplicitEmptyRecordKeys_AnswersEmpty()
     {
         var cache = new CultCache();
         var key = new CultRecordKey("mesh-note:empty-keys-default");
@@ -2828,11 +2828,11 @@ public sealed class CultMeshStreamingTests
 
         var documents = await session.FetchDocumentsAsync<MeshNoteDocument>(recordKeys: Array.Empty<string>());
 
-        documents.Should().ContainSingle().Which.Text.Should().Be("empty-keys-default");
+        documents.Should().BeEmpty();
         requests.Should().ContainSingle();
-        requests[0].SchemaIds.Should().ContainSingle().Which
-            .Should().Be(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId);
-        requests[0].RecordKeys.Should().BeNull();
+        requests[0].SchemaIds.Should().BeNull();
+        requests[0].RecordKeys.Should().NotBeNull();
+        requests[0].RecordKeys.Should().BeEmpty();
     }
 
     [Test]

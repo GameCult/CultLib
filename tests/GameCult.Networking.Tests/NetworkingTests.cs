@@ -3284,6 +3284,63 @@ namespace GameCult.Networking.Tests
             Assert.That(SerializePlayerDataPayload(replicated!), Is.EqualTo(expectedPayload));
         }
 
+        // R-R (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): v0 lowering preserves v0's
+        // pre-cut answers exactly. recordKeys: [] answers empty - it does not lower to "no filter".
+        [Test]
+        public async Task CultNetDocumentRegistry_RawSnapshot_ExplicitEmptyRecordKeys_AnswersEmpty()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            await cache.AddAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@test", PasswordHash = "x", Username = "A" });
+
+            var request = registry.CreateSnapshotRequest("request-empty", recordKeys: Array.Empty<string>());
+            var response = registry.CreateRawSnapshotResponse(cache, "snapshot-empty", request);
+
+            Assert.That(response.Documents, Is.Empty);
+        }
+
+        // R-R: v0's pre-cut CreateRawSnapshotResponse iterated the requested record keys in the order
+        // the caller sent them, not in schema-and-key sort order. This pins that order survives the
+        // move to the shared evaluator.
+        [Test]
+        public async Task CultNetDocumentRegistry_RawSnapshot_KeepsRequestedRecordKeyOrder()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+
+            var players = new[] { "zeta", "alpha", "mid" }
+                .Select(name => new PlayerData { PlayerId = Guid.NewGuid(), Email = $"{name}@test", PasswordHash = "x", Username = name })
+                .ToArray();
+            var handles = new List<CultRecordHandle<PlayerData>>();
+            foreach (var player in players)
+                handles.Add(await cache.AddAsync(player));
+
+            // Request in an order that matches neither the insertion order nor the ordinal-sorted
+            // record-key order, so a schema-and-key sort would visibly reorder the response.
+            var requestedOrder = new[] { handles[2].Key.Value, handles[0].Key.Value, handles[1].Key.Value };
+            var request = registry.CreateSnapshotRequest("request-order", recordKeys: requestedOrder);
+            var response = registry.CreateRawSnapshotResponse(cache, "snapshot-order", request);
+
+            Assert.That(response.Documents.Select(d => d.RecordKey), Is.EqualTo(requestedOrder));
+        }
+
+        [Test]
+        public void CultNetV0SelectionLowering_Lower_DistinguishesNullFromExplicitEmpty()
+        {
+            Assert.That(CultNetV0SelectionLowering.Lower(null), Is.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(Array.Empty<string>()), Is.Not.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(Array.Empty<string>()), Is.Empty);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "", "  " }), Is.Not.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "", "  " }), Is.Empty);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "b", "a", "b" }), Is.EqualTo(new[] { "b", "a" }));
+        }
+
         [Test]
         public async Task CultNetDatabase_PutGet_AndWatchByIndex_Uses_PrimaryShard()
         {

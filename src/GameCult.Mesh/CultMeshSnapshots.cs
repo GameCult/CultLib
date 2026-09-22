@@ -857,9 +857,11 @@ namespace GameCult.Mesh
 
         /// <summary>
         /// Resolves one selection for a typed convenience call: explicit <paramref name="schemaIds"/>
-        /// win; otherwise an explicit, non-empty <paramref name="recordKeys"/> means no schema filter;
-        /// otherwise the selection defaults to the document type's own schema. The one owner of that
-        /// rule (docs/cultnet-selection-cut.md, section 4).
+        /// win; otherwise an explicit <paramref name="recordKeys"/> - including one that lowers to an
+        /// empty array - means no schema filter; otherwise the selection defaults to the document
+        /// type's own schema. R-R (2026-09-22): an empty <paramref name="recordKeys"/> is a real filter
+        /// (answers nothing), not "no filter", so it must not fall through to the schema default
+        /// either. The one owner of that rule (docs/cultnet-selection-cut.md, section 4).
         /// </summary>
         internal static CultNetSelection ResolveDefaultSelection(
             IReadOnlyList<string>? schemaIds,
