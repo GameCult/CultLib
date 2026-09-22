@@ -2795,21 +2795,18 @@ public sealed class CultMeshStreamingTests
 
     // R-R (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22) corrects the earlier commit-2
     // ruling this test used to pin: an explicit empty recordKeys array is a real filter, not "no
-    // filter". ResolveDefaultSelection must not fall back to the type's own schema default just
-    // because the caller's recordKeys happened to be empty - the wire must carry recordKeys=[] and
-    // no schema default, and the answer is empty, exactly as v0 answered before this cut
-    // (CultNetDatabase.CreateShardSnapshotResponse at b3d9cf7 tests RecordKeys != null, not a length).
+    // filter" that falls back to the type's own schema default. Discrepancy against R-R's prose,
+    // reported rather than silently resolved: at CultMesh's typed convenience layer this selection
+    // never reaches the wire at all. ResolveDefaultSelection now produces Keys=[] instead of Keys=null,
+    // and EnsureV0Compatible - CultMesh's own client-side door, landed under the earlier ruling R-F -
+    // already refuses an empty selection.keys before any request is sent ("Keys=[]/[\"\"] is refused
+    // rather than silently lowered to 'every key'", CultMeshSnapshots.cs:836-841). R-R's "recordKeys:
+    // [] answers empty" therefore only holds for the raw v0 wire protocol server, which any v0 peer
+    // can call directly without CultMesh's typed wrapper - see
+    // CultNetDocumentRegistry_RawSnapshot_ExplicitEmptyRecordKeys_AnswersEmpty in NetworkingTests.cs.
     [Test]
-    public async Task FetchDocumentsAsync_WithExplicitEmptyRecordKeys_AnswersEmpty()
+    public void FetchDocumentsAsync_WithExplicitEmptyRecordKeys_IsRefusedClientSide()
     {
-        var cache = new CultCache();
-        var key = new CultRecordKey("mesh-note:empty-keys-default");
-        await cache.UpsertAsync(new MeshNoteDocument
-        {
-            Schema = "tests.mesh_note.v1",
-            Text = "empty-keys-default",
-            Revision = 1
-        }, new CultRecordHandle<MeshNoteDocument>(key));
         var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
             .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
         var requests = new List<CultNetSnapshotRequestMessage>();
@@ -2821,18 +2818,14 @@ public sealed class CultMeshStreamingTests
                 CreateClient = () => new MeshSnapshotSchemaClient(request =>
                 {
                     requests.Add(request);
-                    return registry.CreateRawSnapshotResponse(cache, request.MessageId, request);
+                    return registry.CreateRawSnapshotResponse(new CultCache(), request.MessageId, request);
                 })
             },
             registry);
 
-        var documents = await session.FetchDocumentsAsync<MeshNoteDocument>(recordKeys: Array.Empty<string>());
-
-        documents.Should().BeEmpty();
-        requests.Should().ContainSingle();
-        requests[0].SchemaIds.Should().BeNull();
-        requests[0].RecordKeys.Should().NotBeNull();
-        requests[0].RecordKeys.Should().BeEmpty();
+        Assert.ThrowsAsync<CultNetSelectionInvalidException>(
+            () => session.FetchDocumentsAsync<MeshNoteDocument>(recordKeys: Array.Empty<string>()));
+        requests.Should().BeEmpty();
     }
 
     [Test]
