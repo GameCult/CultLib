@@ -668,6 +668,50 @@ the observation where the rule is decided.
 
 To Hands (Sonnet) as the seventh fix batch.
 
+**The seventh fix batch landed** (Sonnet), `66830e9` and `b8fad13`.
+
+What was added:
+
+- **`waitseam`** checks the wait by equality. A dev-only seam, gated like the
+  hold seam and folded away in release, records the timeout the bridge hands
+  its condition wait. The scenario asserts it equals the host's argument for
+  0 to `INT32_MAX` and over 40 polls on a single runtime. For
+  `timeout_ms <= 0` the bridge never reaches the wait, so the scenario asserts
+  the seam was left untouched. That is also what kills the loosening "records
+  unconditionally". The bridge documents no maximum below `INT32_MAX`.
+- **`pollhammer`** covers the predicate. It runs every gate-touching entry
+  point in a yield loop, both on a clean runtime and after a recorded error.
+
+What was removed:
+
+- the fastest-of-ten mechanism;
+- the tight tolerances, replaced by one generous 800 ms margin;
+- the stated-limits table;
+- **the Windows priority raise.**
+
+Which scenario kills which mutant:
+
+- K1, K2 and the "returns on any wake" revert die on `pollhammer`.
+- Every derived wait from passes 5 to 7 dies on `waitseam`. That includes the
+  quantum rounds, the small-timeout zero, doubling after the 12th poll,
+  `t+25` and `min(t,7275)`. All of them are now deterministic.
+- S5's `>1500` hold guard dies on `holdtimeout`, with a probe at 1600 ms.
+- The seam's revert and loosening die on `waitseam`.
+
+Harness results, with restores matching `checkout-index`:
+
+| Target | Killed | Survived | Skipped | Control |
+|---|---|---|---|---|
+| win32-x64 | 39 | 0 | 2 | green |
+| linux-x64 | 41 | 0 | 0 | green |
+
+Stress: 5 rounds with 16 burners on each target, all green. Worst overshoot
+was 325 ms on Windows and 26 ms on Linux.
+
+**Scar:** the stress cleanup used `taskkill /IM node.exe /T`. That killed every
+Node process on the shared host. The rule now in the Eureka skill is to kill
+by PID. **Soul's eighth pass dispatched** (Opus).
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
