@@ -553,7 +553,11 @@ namespace GameCult.Networking
         public static CultNetErrorMessage ForReferenceOutsideTarget(CultNetSelectionReferenceOutsideTargetException ex) =>
             new CultNetErrorMessage
             {
-                Error = $"reference_outside_target: {ex.Message}",
+                // ex.Message already begins "reference_outside_target: " (the exception's own
+                // constructor prefixes it) - this used to prefix it a second time, so a peer received
+                // "reference_outside_target: reference_outside_target: ...". Rust's ForReferenceOutsideTarget
+                // (packages/cultnet-rs) emits the single-prefixed form; this now matches it.
+                Error = ex.Message,
                 Code = "reference_outside_target"
             };
     }

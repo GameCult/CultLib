@@ -130,7 +130,12 @@ namespace GameCult.Networking
                 string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
                 request.Selection,
                 ordinalOf: (schemaId, key) => _database.LastWriteSequence(schemaId, key) ?? 0,
-                asOf: _database.CurrentAsOf());
+                asOf: _database.CurrentAsOf(),
+                // R-Q: asOf is one shard-log watermark, so a selection whose matched rows span more than
+                // one shard's log is refused rather than answered against a watermark that is not
+                // exact for all of them.
+                shardIdOf: (schemaId, key) => _database.ResolveShard(schemaId, key).ShardId,
+                cursorKey: _database.CursorKey);
         }
 
         /// <summary>

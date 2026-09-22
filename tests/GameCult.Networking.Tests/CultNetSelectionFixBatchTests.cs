@@ -190,6 +190,95 @@ namespace GameCult.Networking.Tests
             Assert.That(CultNetSelectionCursor.ComputeDigest(valuesOne), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(valuesTwo)));
         }
 
+        // S5-DigestNoFields (fix batch 3 "Surviving mutants"): the digest reads selection.Fields - a
+        // mutant that drops the fields loop would digest two selections identically as long as their
+        // schemas/keys/hop/projection agree, letting a cursor minted for one selection page a
+        // differently-fielded one.
+        [Test]
+        public void ComputeDigest_DiffersWhenOnlyFieldsDiffer()
+        {
+            var withFieldA = new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "a" } } } };
+            var withFieldB = new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "b" } } } };
+            var noFields = new CultNetSelection();
+
+            Assert.That(CultNetSelectionCursor.ComputeDigest(withFieldA), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(withFieldB)));
+            Assert.That(CultNetSelectionCursor.ComputeDigest(withFieldA), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(noFields)));
+        }
+
+        // R-O (fix batch 3, F6 "cursors are keyed"): a cursor's digest is an HMAC under the answering
+        // process's key - a page request carrying a cursor minted under a different key (forged, or
+        // minted by a different process) is refused cursor_invalid, never answered.
+        [Test]
+        public void Page_RefusesACursorMintedUnderADifferentKey()
+        {
+            var registry = Registry();
+            var rows = Enumerable.Range(0, 3)
+                .Select(i => Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = $"n{i}", Kind = "k", Mass = i }, $"k{i}", i))
+                .ToArray();
+            var selection = new CultNetSelection { Limit = 1 };
+            var mintingKey = CultNetSelectionCursorKey.Random();
+            var otherKey = CultNetSelectionCursorKey.Random();
+
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: mintingKey);
+            Assert.That(first.NextCursor, Is.Not.Null);
+
+            selection.Cursor = first.NextCursor;
+            var ex = Assert.Throws<CultNetSelectionCursorException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: otherKey));
+            Assert.That(ex!.Code, Is.EqualTo("cursor_invalid"));
+        }
+
+        // R-O: a cursor minted before a (simulated) restart does not verify against the restarted
+        // process's fresh key - the same refusal as a forged cursor, because from the answering
+        // process's point of view they are indistinguishable (F6: "not surviving a restart is the
+        // accepted cost, not a bug").
+        [Test]
+        public void Page_RefusesACursorMintedBeforeARestart()
+        {
+            var registry = Registry();
+            var rows = Enumerable.Range(0, 3)
+                .Select(i => Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = $"n{i}", Kind = "k", Mass = i }, $"k{i}", i))
+                .ToArray();
+            var selection = new CultNetSelection { Limit = 1 };
+            var preRestartKey = CultNetSelectionCursorKey.Random();
+
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: preRestartKey);
+            Assert.That(first.NextCursor, Is.Not.Null);
+
+            // A restart is a fresh process key, exactly as CultNetDatabase's constructor mints a fresh
+            // CursorKey per instance unless one is supplied.
+            var postRestartKey = CultNetSelectionCursorKey.Random();
+            selection.Cursor = first.NextCursor;
+            var ex = Assert.Throws<CultNetSelectionCursorException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: postRestartKey));
+            Assert.That(ex!.Code, Is.EqualTo("cursor_invalid"));
+        }
+
+        // R-O: the cursor body is length-prefixed, not delimiter-joined, so a record key carrying any
+        // character at all - including U+241F, which broke the pre-fix delimiter-split parse - round-trips.
+        [Test]
+        public void Cursor_RoundTripsARecordKeyContainingU241F()
+        {
+            var registry = Registry();
+            var weirdKey = "row-␟-two";
+            var rows = new[]
+            {
+                Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a", Kind = "k", Mass = 0 }, "a-first", 0),
+                Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "b", Kind = "k", Mass = 1 }, weirdKey, 1)
+            };
+            var selection = new CultNetSelection { Limit = 1 };
+            var key = CultNetSelectionCursorKey.Random();
+
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: key);
+            Assert.That(first.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "a-first" }));
+            Assert.That(first.NextCursor, Is.Not.Null);
+
+            selection.Cursor = first.NextCursor;
+            var second = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: key);
+            Assert.That(second.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { weirdKey }));
+            Assert.That(second.NextCursor, Is.Null);
+        }
+
         // R-J: any_of on a numeric alias compares TryGetIndexNumber's canonical rendering, not the
         // string getter's culture-dependent ToString() - a float large enough that .NET's default
         // ToString() renders exponent notation ("1E+21") must still match its canonical decimal form.

@@ -246,6 +246,11 @@ namespace GameCult.Networking.Tests
 
             Assert.That(decoded.Code, Is.EqualTo("reference_outside_target"));
             Assert.That(decoded.Details, Is.Null);
+            // ForReferenceOutsideTarget used to prefix "reference_outside_target: " a second time on
+            // top of the exception's own message, which already carries it - a peer received the code
+            // name twice. One prefix only, on the wire bytes a peer actually decodes.
+            Assert.That(decoded.Error, Does.StartWith("reference_outside_target: "));
+            Assert.That(decoded.Error, Does.Not.Contain("reference_outside_target: reference_outside_target:"));
         }
 
         // S6: the hop follows one declared reference by role; a second role is not followed.
@@ -439,6 +444,46 @@ namespace GameCult.Networking.Tests
                 asOf: 1);
 
             Assert.That(evaluation.Rows.Select(r => r.Key.Value).OrderBy(k => k, StringComparer.Ordinal), Is.EqualTo(new[] { "1", "2", "3" }));
+        }
+
+        // S1-Loose (docs/cultnet-selection-cut.md, "Self's rulings for fix batch 3" -> "Surviving
+        // mutants"): ReachableSchemas narrows to the schemas selection.schemas actually names; a mutant
+        // that widens it back to every registered descriptor lets a predicate on an index only an
+        // EXCLUDED schema declares reach the door silently (matching nothing, never refusing), instead
+        // of the typed "not declared by any schema this selection can reach" refusal. "kind" is declared
+        // on SelLeafA/SelLeafB, not on SelCiter; Schemas here names only SelCiter.
+        [Test]
+        public void ValidationRefusesAnIndexDeclaredOnlyOnASchemaTheSelectionDoesNotReach()
+        {
+            var registry = Registry();
+            var descriptors = registry.AllDescriptors.ToArray();
+            var selection = new CultNetSelection
+            {
+                Schemas = new[] { registry.GetRequired<SelCiter>().SchemaId },
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "x" } } }
+            };
+
+            var ex = Assert.Throws<CultNetSelectionInvalidException>(() => selection.Validate(descriptors));
+            Assert.That(ex!.Field, Is.EqualTo("fields[0].index"));
+        }
+
+        // S2-AllOf (fix batch 3 "Surviving mutants"): any_of matches when the row's declared value
+        // equals ANY one of the predicate's values, not when it equals every one of them - impossible
+        // for a single-valued index whenever Values carries more than one entry, so a mutant that
+        // requires all of them makes a real multi-value any_of predicate match nothing.
+        [Test]
+        public void EvaluatorAnyOfMatchesWhenTheRowsValueIsAnyOneOfSeveralPredicateValues()
+        {
+            var registry = Registry();
+            var row = Row(registry, new SelLeafA { Name = "a", Kind = "weapon", Mass = 1 }, "a", 1);
+            var selection = new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "armor", "weapon" } } }
+            };
+
+            var evaluation = CultNetSelectionEvaluator.Select(registry, new[] { row }, selection, asOf: 1);
+
+            Assert.That(evaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "a" }));
         }
 
         public abstract class SelFixtureMiddle

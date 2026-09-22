@@ -305,6 +305,12 @@ namespace GameCult.Networking
         /// Gets or sets the durable store for accepted shard mutation logs.
         /// </summary>
         public ICultNetShardMutationLogStore? MutationLogStore { get; set; }
+        /// <summary>
+        /// Gets or sets the process cursor key (R-O). Omitted in production, where a fresh random key
+        /// per <see cref="CultNetDatabase"/> is exactly the point; a test that must mint a cursor under a
+        /// known key, or reuse the pre-restart key deliberately, sets this explicitly.
+        /// </summary>
+        public CultNetSelectionCursorKey? CursorKey { get; set; }
     }
 
     /// <summary>
@@ -494,9 +500,24 @@ namespace GameCult.Networking
                     : options.Shards)
                 .ToList();
             _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
+            CursorKey = options.CursorKey ?? CultNetSelectionCursorKey.Random();
             InitializeLogSequencesFromStore();
             _cache.OnUpdate += PublishCacheUpdate;
         }
+
+        /// <summary>
+        /// This process's cursor key (R-O): random per instance unless <see cref="CultNetDatabaseOptions.CursorKey"/>
+        /// supplies one, so a page minted by this database cannot be answered by a differently-keyed one,
+        /// and a fresh <see cref="CultNetDatabase"/> - a real process restart, or a simulated one in tests -
+        /// mints under a fresh key that a prior cursor's digest does not verify against.
+        /// </summary>
+        public CultNetSelectionCursorKey CursorKey { get; }
+
+        /// <summary>
+        /// Resolves the shard that owns a record key (R-Q: whether a matched selection's rows span more
+        /// than one shard's log, and so whether the page's <c>asOf</c> is well defined).
+        /// </summary>
+        public CultNetShardDescriptor ResolveShard(string schemaId, CultRecordKey key) => ResolveShardInternal(schemaId, key);
 
         /// <summary>
         /// Gets the local cache backing this database surface.
@@ -1337,15 +1358,46 @@ namespace GameCult.Networking
 
             foreach (var shard in _shards)
             {
-                var highest = _mutationLogStore.Read(shard.ShardId)
-                    .Select(entry => entry.Sequence)
-                    .DefaultIfEmpty(0)
-                    .Max();
+                // R-Q: the log is the durable record of every commit, replica-applied ones included, so
+                // the last-write sequence a restart resumes with is rebuilt from it exactly as
+                // AppendMutationLogEntry/the replica apply paths maintain it live - a row's ordinal for
+                // the selection evaluator's order and cursor must not reset to "never written" on restart.
+                var entries = _mutationLogStore.Read(shard.ShardId);
+                var highest = 0L;
+                foreach (var entry in entries)
+                {
+                    if (entry.Sequence > highest)
+                    {
+                        highest = entry.Sequence;
+                    }
+
+                    var (schemaId, recordKey) = KeyOf(entry);
+                    if (schemaId != null && recordKey != null)
+                    {
+                        _lastWriteSequence[(schemaId, recordKey)] = entry.Sequence;
+                    }
+                }
+
                 if (highest > 0)
                 {
                     _nextLogSequences[shard.ShardId] = highest + 1;
                 }
             }
+        }
+
+        private static (string? SchemaId, string? RecordKey) KeyOf(CultNetShardLogEntryMessage entry)
+        {
+            if (entry.Put?.Document != null)
+            {
+                return (entry.Put.Document.SchemaId, entry.Put.Document.RecordKey);
+            }
+
+            if (entry.Delete != null)
+            {
+                return (entry.Delete.SchemaId, entry.Delete.RecordKey);
+            }
+
+            return (null, null);
         }
 
         private async Task ApplyCommittedShardLogEntryAsync(
@@ -1416,6 +1468,11 @@ namespace GameCult.Networking
                 document,
                 previous),
                 entry);
+            // R-Q: a replica apply is a commit path too - the last-write sequence this row now carries
+            // is the entry's own sequence, exactly like AppendMutationLogEntry's local-commit path sets
+            // it, so the selection evaluator's order and cursor agree whether a row's most recent write
+            // landed locally or arrived through replication.
+            _lastWriteSequence[(descriptor.SchemaId, key.Value)] = entry.Sequence;
             PublishUntyped(
                 descriptor.DocumentType,
                 kind,
@@ -1459,6 +1516,8 @@ namespace GameCult.Networking
                 document: null,
                 previousDocument: previous),
                 entry);
+            // R-Q: see ApplyCommittedPutAsync - a replica-applied delete is a commit too.
+            _lastWriteSequence[(descriptor.SchemaId, key.Value)] = entry.Sequence;
             PublishUntyped(
                 descriptor.DocumentType,
                 CultNetDatabaseChangeKind.Removed,

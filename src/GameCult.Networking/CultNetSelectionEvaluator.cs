@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -221,10 +221,11 @@ namespace GameCult.Networking
             CultDocumentRegistry registry,
             IReadOnlyList<Row> allRows,
             CultNetSelection selection,
-            ulong asOf)
+            ulong asOf,
+            CultNetSelectionCursorKey? cursorKey = null)
         {
             var full = EvaluateAll(registry, allRows, selection);
-            return Page(full, selection, asOf);
+            return Page(full, selection, asOf, cursorKey);
         }
 
         /// <summary>
@@ -232,17 +233,25 @@ namespace GameCult.Networking
         /// v0/shard full walk calls this once per 200-row chunk of a single <see cref="EvaluateAll"/>
         /// result instead of re-evaluating per page.
         /// </summary>
-        public static Evaluation Page(FullEvaluation full, CultNetSelection selection, ulong asOf)
+        /// <param name="cursorKey">
+        /// The answering process's cursor key (R-O). Defaults to a key generated once per process the
+        /// first time this method runs, so a caller that never sets up its own <see cref="CultNetDatabase"/>
+        /// still gets a keyed digest; <see cref="CultNetDatabase"/> holds and passes its own instance so a
+        /// fresh database (a simulated restart in tests, a real process restart in production) mints
+        /// under a fresh key and a prior cursor's digest stops verifying.
+        /// </param>
+        public static Evaluation Page(FullEvaluation full, CultNetSelection selection, ulong asOf, CultNetSelectionCursorKey? cursorKey = null)
         {
             if (full == null) throw new ArgumentNullException(nameof(full));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
 
+            var key = cursorKey ?? CultNetSelectionCursorKey.ProcessDefault;
             var ordered = full.Ordered;
             var startIndex = 0;
             if (!string.IsNullOrEmpty(selection.Cursor))
             {
                 var cursor = CultNetSelectionCursor.Parse(selection.Cursor!);
-                if (cursor.Digest != CultNetSelectionCursor.ComputeDigest(selection))
+                if (!cursor.VerifyDigest(selection, key))
                     throw new CultNetSelectionCursorException("cursor_invalid", "The cursor's selection digest does not match this selection.");
                 if (cursor.AsOf != asOf)
                     throw new CultNetSelectionCursorException(
@@ -257,7 +266,7 @@ namespace GameCult.Networking
             var page = ordered.Skip(startIndex).Take(limit).ToArray();
             var hasNext = startIndex + page.Length < ordered.Count;
             var nextCursor = hasNext && page.Length > 0
-                ? CultNetSelectionCursor.Mint(asOf, page[^1], selection)
+                ? CultNetSelectionCursor.Mint(asOf, page[^1], selection, key)
                 : null;
 
             var pageEdges = selection.HasHop
@@ -439,8 +448,49 @@ namespace GameCult.Networking
     }
 
     /// <summary>
-    /// The opaque cursor: asOf, the last (ordinal, schemaId, recordKey), and a digest of the selection
-    /// with cursor and limit cleared (section 2). Minted only by the answering server.
+    /// The answering process's key for cursor digests (R-O, F6: "cursors are keyed"). A digest is an
+    /// HMAC-SHA256 under this key, so a cursor cannot be forged without it and cannot be verified by
+    /// a different key. <see cref="Random"/> is never persisted or serialized; the answering server
+    /// holds one instance for its process lifetime (<see cref="CultNetDatabase.CursorKey"/>), so a
+    /// cursor minted before a restart carries a digest the new process's key does not produce, and
+    /// the restart's first page for it answers <c>cursor_invalid</c> - acceptable, because cursors are
+    /// short-lived and section 2 already calls them "minted by the answering server".
+    /// </summary>
+    public sealed class CultNetSelectionCursorKey
+    {
+        /// <summary>
+        /// The key <see cref="CultNetSelectionEvaluator.Page"/>/<see cref="CultNetSelectionEvaluator.Select"/>
+        /// fall back to when no caller-owned key is supplied - generated once, the first time this type
+        /// is touched in the process, so a caller that evaluates selections without wiring up its own
+        /// <see cref="CultNetDatabase"/> (most unit tests) still gets a keyed, per-process digest instead
+        /// of an unkeyed one.
+        /// </summary>
+        internal static readonly CultNetSelectionCursorKey ProcessDefault = Random();
+
+        private readonly byte[] _key;
+
+        public CultNetSelectionCursorKey(byte[] key)
+        {
+            if (key == null) throw new ArgumentNullException(nameof(key));
+            if (key.Length == 0) throw new ArgumentException("Value must be non-empty.", nameof(key));
+            _key = key;
+        }
+
+        /// <summary>A fresh 32-byte key from the OS RNG.</summary>
+        public static CultNetSelectionCursorKey Random()
+        {
+            var bytes = new byte[32];
+            RandomNumberGenerator.Fill(bytes);
+            return new CultNetSelectionCursorKey(bytes);
+        }
+
+        internal byte[] KeyBytes => _key;
+    }
+
+    /// <summary>
+    /// The opaque cursor: asOf, the last (ordinal, schemaId, recordKey), and an HMAC digest of the
+    /// selection with cursor and limit cleared, keyed under the answering process's
+    /// <see cref="CultNetSelectionCursorKey"/> (R-O). Minted only by the answering server.
     /// </summary>
     public readonly struct CultNetSelectionCursor
     {
@@ -459,50 +509,67 @@ namespace GameCult.Networking
         public string RecordKey { get; }
         public string Digest { get; }
 
-        public static string Mint(ulong asOf, CultNetSelectionEvaluator.Row lastRow, CultNetSelection selection)
+        public static string Mint(ulong asOf, CultNetSelectionEvaluator.Row lastRow, CultNetSelection selection, CultNetSelectionCursorKey key)
         {
-            var digest = ComputeDigest(selection);
-            var raw = string.Join(
-                "",
-                asOf.ToString(CultureInfo.InvariantCulture),
-                lastRow.Ordinal.ToString(CultureInfo.InvariantCulture),
-                lastRow.Descriptor.SchemaId,
-                lastRow.Key.Value,
-                digest);
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));
+            var digest = ComputeDigest(selection, key);
+            // R-O: the cursor body is length-prefixed fields, not a delimiter-joined string - a record
+            // key carrying any character at all, including whatever delimiter an earlier scheme would
+            // have chosen (Soul found a key containing U+241F broke a delimiter split), round-trips.
+            var body = new StringBuilder();
+            AppendString(body, asOf.ToString(CultureInfo.InvariantCulture));
+            AppendString(body, lastRow.Ordinal.ToString(CultureInfo.InvariantCulture));
+            AppendString(body, lastRow.Descriptor.SchemaId);
+            AppendString(body, lastRow.Key.Value);
+            AppendString(body, digest);
+            return Base64UrlEncode(Encoding.UTF8.GetBytes(body.ToString()));
         }
 
         public static CultNetSelectionCursor Parse(string cursor)
         {
-            string raw;
+            byte[] bytes;
             try
             {
-                raw = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+                bytes = Base64UrlDecode(cursor);
             }
             catch (FormatException)
             {
                 throw new CultNetSelectionCursorException("cursor_invalid", "The cursor does not decode.");
             }
 
-            var parts = raw.Split('');
-            if (parts.Length != 5 ||
-                !ulong.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var asOf) ||
-                !long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal))
+            var fields = ReadLengthPrefixedFields(bytes, 5);
+            if (fields == null ||
+                !ulong.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var asOf) ||
+                !long.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var ordinal))
             {
                 throw new CultNetSelectionCursorException("cursor_invalid", "The cursor does not decode.");
             }
 
-            return new CultNetSelectionCursor(asOf, ordinal, parts[2], parts[3], parts[4]);
+            return new CultNetSelectionCursor(asOf, ordinal, fields[2], fields[3], fields[4]);
         }
 
         /// <summary>
-        /// A digest of the selection with cursor and limit cleared, so a cursor is bound to the
-        /// selection that minted it. R-H: every string and list is length-prefixed, so no delimiter
-        /// choice can make two different selections collide - the prior delimiter-joined form digested
+        /// Verifies this cursor's digest against <paramref name="selection"/> under <paramref name="key"/>
+        /// in fixed time (R-O): a cursor forged without the key, or minted under a different process's
+        /// key (a restart), does not verify.
+        /// </summary>
+        public bool VerifyDigest(CultNetSelection selection, CultNetSelectionCursorKey key)
+        {
+            var expected = ComputeDigest(selection, key);
+            return CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(Digest),
+                Encoding.UTF8.GetBytes(expected));
+        }
+
+        /// <summary>
+        /// An HMAC-SHA256 digest, keyed under <paramref name="key"/>, of the selection with cursor and
+        /// limit cleared, so a cursor is bound both to the selection that minted it and to the process
+        /// that minted it (R-O). R-H: every string and list is length-prefixed, so no delimiter choice
+        /// can make two different selections collide - a delimiter-joined form used to digest
         /// values ["a|b"] the same as ["a","b"], and keys ["a,b"] the same as ["a","b"].
         /// </summary>
-        public static string ComputeDigest(CultNetSelection selection)
+        public static string ComputeDigest(CultNetSelection selection, CultNetSelectionCursorKey? key = null)
         {
+            key ??= CultNetSelectionCursorKey.ProcessDefault;
             var sb = new StringBuilder();
             AppendList(sb, selection.Schemas);
             AppendList(sb, selection.Keys);
@@ -545,8 +612,8 @@ namespace GameCult.Networking
             AppendString(sb, selection.Projection);
             sb.Append(selection.Descending ? '1' : '0');
 
-            using var sha = SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            using var hmac = new HMACSHA256(key.KeyBytes);
+            var bytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
             var hex = new StringBuilder(bytes.Length * 2);
             foreach (var b in bytes) hex.Append(b.ToString("x2", CultureInfo.InvariantCulture));
             return hex.ToString();
@@ -565,6 +632,49 @@ namespace GameCult.Networking
             sb.Append(ordered.Length).Append(':');
             foreach (var value in ordered)
                 AppendString(sb, value);
+        }
+
+        private static string Base64UrlEncode(byte[] bytes) =>
+            Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        private static byte[] Base64UrlDecode(string value)
+        {
+            var padded = value.Replace('-', '+').Replace('_', '/');
+            switch (padded.Length % 4)
+            {
+                case 2: padded += "=="; break;
+                case 3: padded += "="; break;
+                case 0: break;
+                default: throw new FormatException("Invalid base64url string length.");
+            }
+
+            return Convert.FromBase64String(padded);
+        }
+
+        /// <summary>
+        /// Reads exactly <paramref name="count"/> length-prefixed fields written by
+        /// <see cref="AppendString"/> back out of <paramref name="bytes"/>, in order. Null on any
+        /// malformed length, a truncated value, a non-UTF-8 value, or leftover bytes after the last
+        /// field - the cursor body has no field this reader may skip.
+        /// </summary>
+        private static List<string>? ReadLengthPrefixedFields(byte[] bytes, int count)
+        {
+            var fields = new List<string>(count);
+            var pos = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var colon = Array.IndexOf(bytes, (byte)':', pos);
+                if (colon < 0) return null;
+                var lengthText = Encoding.UTF8.GetString(bytes, pos, colon - pos);
+                if (!int.TryParse(lengthText, NumberStyles.None, CultureInfo.InvariantCulture, out var length))
+                    return null;
+                pos = colon + 1;
+                if (length < 0 || pos + length > bytes.Length) return null;
+                fields.Add(Encoding.UTF8.GetString(bytes, pos, length));
+                pos += length;
+            }
+
+            return pos == bytes.Length ? fields : null;
         }
     }
 

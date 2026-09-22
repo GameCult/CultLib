@@ -344,13 +344,15 @@ namespace GameCult.Networking
             CultNetSelection selection,
             Func<string, CultRecordKey, long> ordinalOf,
             ulong asOf,
-            CultNetDocumentMessageOptions? options = null)
+            CultNetDocumentMessageOptions? options = null,
+            Func<string, CultRecordKey, string>? shardIdOf = null,
+            CultNetSelectionCursorKey? cursorKey = null)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
 
-            var page = SelectPage(cache, selection, ordinalOf, asOf, options);
+            var page = SelectPage(cache, selection, ordinalOf, asOf, options, shardIdOf: shardIdOf, cursorKey: cursorKey);
             return new CultNetSnapshotResponseRawV1Message
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
@@ -374,7 +376,9 @@ namespace GameCult.Networking
             Func<string, CultRecordKey, long> ordinalOf,
             ulong asOf,
             CultNetDocumentMessageOptions? options,
-            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null)
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null,
+            Func<string, CultRecordKey, string>? shardIdOf = null,
+            CultNetSelectionCursorKey? cursorKey = null)
         {
             selection = ExpandSchemaBindingAliases(selection);
             // R-F: CultNetSelectionEvaluator.Select validates first, every time - there is no separate
@@ -388,7 +392,17 @@ namespace GameCult.Networking
                 .Select(entry => new CultNetSelectionEvaluator.Row(
                     entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
-            var evaluation = CultNetSelectionEvaluator.Select(_documents, rows, selection, asOf);
+            var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
+            // R-Q: a page's asOf is exact only when every matched row is committed through one shard's
+            // log - a caller that knows about shards (CultNetDatabaseServer) supplies shardIdOf; one
+            // that does not (the raw v0/shard-scoped rowFilter paths, which are already bounded to a
+            // single shard by construction) passes null and skips the check rather than pay for it.
+            if (shardIdOf != null)
+            {
+                EnsureSingleShard(full.Ordered, shardIdOf);
+            }
+
+            var evaluation = CultNetSelectionEvaluator.Page(full, selection, asOf, cursorKey);
             var records = evaluation.Rows.Select(row => ToRawRecord(row, options)).ToArray();
             var wantDocument = selection.Projection == CultNetSelectionProjections.Document;
 
@@ -402,6 +416,38 @@ namespace GameCult.Networking
                 Headers = wantDocument ? null : records.Select(CultNetRawDocumentHeader.FromRecord).ToArray(),
                 Edges = selection.HasHop ? evaluation.Edges.Select(edge => ToEdge(edge, wantDocument)).ToArray() : null
             };
+        }
+
+        /// <summary>
+        /// Refuses a selection whose matched rows come from more than one shard's mutation log (R-Q):
+        /// <c>asOf</c> is one shard-log watermark (<see cref="CultNetDatabase.CurrentAsOf"/> is a single
+        /// number today, not one per shard), so a page spanning two shards' logs cannot honestly claim
+        /// to be exact as of it. Refused door-side, the same as an unreachable index or an empty
+        /// <c>keys</c> list (R-F), rather than answered with an <c>asOf</c> that is not really defined -
+        /// reusing <see cref="CultNetSelectionInvalidException"/>/<c>selection_invalid</c> (R-N) rather
+        /// than adding a second refusal shape for what is, from the wire's point of view, the same
+        /// "this selection cannot be answered as asked" refusal a bad field or an empty list gets.
+        /// </summary>
+        private static void EnsureSingleShard(
+            IReadOnlyList<CultNetSelectionEvaluator.Row> rows,
+            Func<string, CultRecordKey, string> shardIdOf)
+        {
+            string? shardId = null;
+            foreach (var row in rows)
+            {
+                var rowShardId = shardIdOf(row.Descriptor.SchemaId, row.Key);
+                if (shardId == null)
+                {
+                    shardId = rowShardId;
+                }
+                else if (!string.Equals(shardId, rowShardId, StringComparison.Ordinal))
+                {
+                    throw new CultNetSelectionInvalidException(
+                        "asOf",
+                        null,
+                        $"The selection matches rows from more than one shard's log (at least '{shardId}' and '{rowShardId}'); asOf is not defined for a shard-spanning page.");
+                }
+            }
         }
 
         /// <summary>

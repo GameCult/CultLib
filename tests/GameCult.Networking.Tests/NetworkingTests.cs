@@ -5493,6 +5493,148 @@ namespace GameCult.Networking.Tests
             Assert.That(replicated, Is.Not.Null);
             Assert.That(replicated!.Username, Is.EqualTo("Replica"));
             Assert.That(targetDatabase.GetMutationLog("players-replica"), Has.Count.EqualTo(1));
+            // R-Q (docs/cultnet-selection-cut.md, fix batch 3): a replica apply is a commit path too -
+            // it must set LastWriteSequence exactly like a local commit does (CultNetDatabase.cs, the
+            // ApplyCommittedPutAsync/ApplyCommittedDelete gap), or the selection evaluator's order and
+            // cursor treat a replicated row as never written.
+            Assert.That(targetDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_ReplicaApply_DeleteSetsLastWriteSequence()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var targetRegistry = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    targetCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = sourceCache.Registry.GetRequired<PlayerData>().SchemaId;
+            CultNetShardDescriptor Shard(bool isPrimary) => new(
+                "players-replica-delete",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: isPrimary,
+                schemaIds: [schemaId],
+                keyPrefix: "player:");
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                Shards = [Shard(true)]
+            });
+            var targetDatabase = new CultNetDatabase(targetCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = targetRegistry,
+                Shards = [Shard(false)]
+            });
+            using var server = new Server(sourceCache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, sourceDatabase);
+            var key = new CultRecordKey("player:replica-delete");
+            var player = new PlayerData { PlayerId = Guid.NewGuid(), Email = "d@example.test", PasswordHash = "hash", Username = "D" };
+
+            await sourceDatabase.PutAsync(key, player);
+            await sourceDatabase.DeleteAsync<PlayerData>(key);
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-replica-delete",
+                ShardEpoch = 1
+            });
+
+            await targetDatabase.ApplyShardLogResponseAsync(response);
+
+            Assert.That(targetCache.Get<PlayerData>(key), Is.Null);
+            Assert.That(targetDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(2));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_RebuildsLastWriteSequence_FromTheDurableLogAfterRestart()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "shard-logs", Guid.NewGuid().ToString("N"));
+            var schemaId = new CultCache().Registry.GetRequired<PlayerData>().SchemaId;
+            var shard = new CultNetShardDescriptor(
+                "players-durable-sequence",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [schemaId],
+                keyPrefix: "player:");
+
+            var sourceCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("player:durable-sequence");
+            var player = new PlayerData { PlayerId = Guid.NewGuid(), Email = "r@example.test", PasswordHash = "hash", Username = "R" };
+            await sourceDatabase.PutAsync(key, player);
+            Assert.That(sourceDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+            sourceDatabase.Dispose();
+
+            // R-Q: a restart is a fresh CultNetDatabase instance over the same durable log - the
+            // sequence InitializeLogSequencesFromStore used to rebuild only _nextLogSequences
+            // (what the next local commit gets), never _lastWriteSequence (what a row's own last
+            // write was), so a selection evaluated right after restart would order/page the row as
+            // "never written" until it was written again.
+            var restartedCache = new CultCache();
+            var restartedDatabase = new CultNetDatabase(restartedCache, new CultNetDatabaseOptions
+            {
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+
+            Assert.That(restartedDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task CultNetDatabaseServer_RefusesASelectionSpanningMoreThanOneShardsLog()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor("shard-a", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "a:"),
+                    new CultNetShardDescriptor("shard-b", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "b:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            await database.PutAsync(
+                new CultRecordKey("a:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "A" });
+            await database.PutAsync(
+                new CultRecordKey("b:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "b@example.test", PasswordHash = "hash", Username = "B" });
+
+            // R-Q: asOf is one shard-log watermark - a selection whose matched rows span shard-a's log
+            // and shard-b's log cannot honestly claim to be exact as of it, so it is refused rather than
+            // answered, reusing the selection_invalid door refusal (R-N) rather than a second shape.
+            var ex = Assert.Throws<CultNetSelectionInvalidException>(() => databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                Selection = new CultNetSelection { Schemas = [schemaId] }
+            }));
+            Assert.That(ex!.Field, Is.EqualTo("asOf"));
         }
 
         [Test]
