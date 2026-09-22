@@ -81,7 +81,21 @@ if(CULTMESH_QUIC_BUILD_TESTS)
   endif()
   set_target_properties(cultmesh_quic_native_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-  if(NOT WIN32)
+  if(WIN32)
+    # gamecult_mesh_quic_native.dll imports msquic.dll, and the scenario
+    # runner loads it from its own directory (or PATH) at process start, not
+    # from MSQUIC_ROOT. build-quic-native.ps1's packaged output gets a copy
+    # from its own recipe; a test build has no packaging step, so without this
+    # the loader falls through to whatever msquic.dll happens to already be on
+    # PATH — silently running the scenarios against an unpinned, wrong-version
+    # MsQuic instead of failing to start. CMake already knows MSQUIC_ROOT, so
+    # it places the pinned DLL itself instead of leaving the reader to guess
+    # why a scenario passed against the wrong binary.
+    add_custom_command(TARGET cultmesh_quic_native_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy
+        "${MSQUIC_ROOT}/bin/x64/msquic.dll"
+        "$<TARGET_FILE_DIR:cultmesh_quic_native_tests>/msquic.dll")
+  else()
     target_link_libraries(cultmesh_quic_native_tests PRIVATE pthread)
     # The linker resolves the bridge's own NEEDED libmsquic.so.2 while linking
     # this executable, and the runtime copy only lands beside the binaries after
