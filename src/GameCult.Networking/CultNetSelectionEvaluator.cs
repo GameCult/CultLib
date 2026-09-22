@@ -174,9 +174,19 @@ namespace GameCult.Networking
             // to gate it - a public entry point that answers an unvalidated selection does not exist.
             selection.Validate(registry.AllDescriptors.ToArray());
 
-            var byKey = new Dictionary<string, Row>(StringComparer.Ordinal);
+            // R-V: a row's identity is (schemaId, recordKey), never the record key alone. A bare-key
+            // dictionary here silently let one schema's row displace another's at the same key (last
+            // writer wins), so a hop resolving "the row at this key" picked whichever schema happened
+            // to insert last instead of the schema the reference/citation actually declares. Every key
+            // that appears on more than one schema's row is kept, not collapsed, so hop resolution can
+            // still tell them apart.
+            var byKey = new Dictionary<string, List<Row>>(StringComparer.Ordinal);
             foreach (var row in allRows)
-                byKey[row.Key.Value] = row;
+            {
+                if (!byKey.TryGetValue(row.Key.Value, out var rowsAtKey))
+                    byKey[row.Key.Value] = rowsAtKey = new List<Row>();
+                rowsAtKey.Add(row);
+            }
 
             var candidates = allRows.Where(row => MatchesSchemaKeysFields(row.Descriptor, row.Key, row.Document, selection));
 
@@ -187,9 +197,9 @@ namespace GameCult.Networking
             var citedEdges = new List<EdgeMatch>();
             if (selection.Cited != null)
             {
-                var incoming = BuildIncomingIndex(registry, byKey, selection.Cited.Role, citedEdges);
+                var incoming = BuildIncomingIndex(registry, allRows, byKey, selection.Cited.Role, citedEdges);
                 var exists = selection.Cited.Exists;
-                candidates = candidates.Where(row => incoming.Contains(row.Key.Value) == exists);
+                candidates = candidates.Where(row => incoming.Contains((row.Descriptor.SchemaId, row.Key.Value)) == exists);
             }
 
             var citesEdges = new List<EdgeMatch>();
@@ -283,13 +293,17 @@ namespace GameCult.Networking
         // answering every page) reports edges against its whole matched set, not one 200-row page.
         public static EdgeMatch[] EdgesFor(IReadOnlyList<Row> rows, FullEvaluation full)
         {
-            var pageRowIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+            // R-V: the anchor lookup is keyed by (schemaId, recordKey), not the bare key - two schemas'
+            // rows sharing one record key can both legitimately be on the same page now that the hop
+            // resolves rows by identity, and a bare-key index would let one silently steal the other's
+            // edges.
+            var pageRowIndex = new Dictionary<(string SchemaId, string RecordKey), int>();
             for (var i = 0; i < rows.Count; i++)
-                pageRowIndex[rows[i].Key.Value] = i;
+                pageRowIndex[(rows[i].Descriptor.SchemaId, rows[i].Key.Value)] = i;
 
             return full.Edges
-                .Where(pair => pageRowIndex.ContainsKey(pair.Anchor.Key.Value))
-                .OrderBy(pair => pageRowIndex[pair.Anchor.Key.Value])
+                .Where(pair => pageRowIndex.ContainsKey((pair.Anchor.Descriptor.SchemaId, pair.Anchor.Key.Value)))
+                .OrderBy(pair => pageRowIndex[(pair.Anchor.Descriptor.SchemaId, pair.Anchor.Key.Value)])
                 .ThenBy(pair => pair.Edge.From.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
                 .ThenBy(pair => pair.Edge.From.Key.Value, CultNetCodePointComparer.Instance)
                 .ThenBy(pair => pair.Edge.Role, CultNetCodePointComparer.Instance)
@@ -324,39 +338,74 @@ namespace GameCult.Networking
 
         // D9: a reference's target set is every registered leaf assignable to its declared target type.
         // A stored edge naming a row whose schema is outside that set refuses the selection (S18).
-        // R-T(b): this runs for every edge, including one whose member carries no declared target type
-        // (CultDocumentRegistry.PersistedMember.TargetType is null only for a shape the cache could not
-        // infer a target from - it no longer special-cases that away here without checking anything;
-        // typeof(object) is every registered leaf, which is the correct target set for a genuinely
-        // unconstrained reference and keeps this the one path, not a skip plus a duplicate path.
-        private static void EnsureWithinDeclaredTarget(CultDocumentRegistry registry, Type? targetType, Row from, string role, Row to)
+        // S-8: targetType is never null here - D11 (CultCache's DiscoverMembers) refuses every reference
+        // shape whose target the cache could not infer (a bare ICultRecordRef, scalar or many) at
+        // registration, before a document carrying one can ever reach the evaluator. The old
+        // `targetType ?? typeof(object)` fallback had no fixture that could reach it and is deleted
+        // rather than kept as an unreachable branch.
+        //
+        // R-V: a reference's stored target is a bare record key - the wire carries no schema for it -
+        // so resolving "the row this edge names" means searching every row sharing that key (byKey) for
+        // the one whose schema falls inside the reference's declared leaf set, not grabbing whichever
+        // row a bare-key dictionary happened to keep. Two schemas legitimately sharing one record key
+        // resolve to two different rows depending on which reference declared which target (Soul's P2).
+        //
+        // R-W: this is called for every stored edge a reference member carries, unconditionally, before
+        // any citation- or role-specific filtering decides whether that edge is the one the caller
+        // asked about - a many-reference edge into a schema outside its declared target refuses the
+        // selection even when the caller's own key/role filter would otherwise have skipped past it
+        // without ever looking at it (Soul's P3).
+        private static bool TryResolveReferenceTarget(
+            CultDocumentRegistry registry,
+            IReadOnlyDictionary<string, List<Row>> byKey,
+            Type targetType,
+            Row from,
+            string role,
+            string recordKey,
+            out Row resolved)
         {
-            var leaves = registry.ResolveTargetLeaves(targetType ?? typeof(object));
-            if (leaves.Any(leaf => leaf.SchemaId == to.Descriptor.SchemaId)) return;
-            throw new CultNetSelectionReferenceOutsideTargetException(from.Descriptor.SchemaId, from.Key.Value, role, to.Descriptor.SchemaId, to.Key.Value);
+            resolved = default;
+            if (!byKey.TryGetValue(recordKey, out var candidates) || candidates.Count == 0)
+                return false; // a dangling reference - no row at all exists at this key (R-T(b) style: not an error).
+
+            var leaves = registry.ResolveTargetLeaves(targetType);
+            foreach (var candidate in candidates)
+            {
+                if (leaves.Any(leaf => leaf.SchemaId == candidate.Descriptor.SchemaId))
+                {
+                    resolved = candidate;
+                    return true;
+                }
+            }
+
+            // Every row sharing this record key falls outside the reference's declared target: refuse
+            // deterministically (by schema id, code-point order) rather than let insertion order decide
+            // which of them the refusal names (R-V: "both row orders give the same answer").
+            var outside = candidates.OrderBy(c => c.Descriptor.SchemaId, CultNetCodePointComparer.Instance).First();
+            throw new CultNetSelectionReferenceOutsideTargetException(from.Descriptor.SchemaId, from.Key.Value, role, outside.Descriptor.SchemaId, outside.Key.Value);
         }
 
         private static bool MatchesCitation(
             CultDocumentRegistry registry,
-            IReadOnlyDictionary<string, Row> byKey,
+            IReadOnlyDictionary<string, List<Row>> byKey,
             Row citer,
             CultNetCitation citation,
             List<EdgeMatch> edgeSink)
         {
-            if (!byKey.TryGetValue(citation.Target.RecordKey, out var target))
-                return false;
-
             var found = false;
             foreach (var member in ReferenceMembers(citer.Descriptor, citation.Role))
             {
                 var role = member.IndexAlias ?? member.MemberName;
                 foreach (var (targetKey, payload) in citer.Descriptor.ReferencesOf(citer.Document, role))
                 {
+                    // R-W: resolve and check the edge's own declared target first, for every edge this
+                    // reference carries - before the citation's key/schema decides whether this is the
+                    // edge the caller asked about.
+                    if (!TryResolveReferenceTarget(registry, byKey, member.TargetType!, citer, role, targetKey.Value, out var resolved))
+                        continue;
+
                     if (!string.Equals(targetKey.Value, citation.Target.RecordKey, StringComparison.Ordinal))
                         continue;
-                    if (!byKey.TryGetValue(targetKey.Value, out var resolved))
-                        continue;
-                    EnsureWithinDeclaredTarget(registry, member.TargetType, citer, role, resolved);
                     // R-E: one schema-identity rule everywhere - a cites target goes through the alias
                     // matcher, the same as `schemas`, instead of an exact CultDocumentDescriptor.SchemaId
                     // compare that a schema alias or version string could never satisfy.
@@ -370,24 +419,27 @@ namespace GameCult.Networking
             return found;
         }
 
-        private static HashSet<string> BuildIncomingIndex(
+        private static HashSet<(string SchemaId, string RecordKey)> BuildIncomingIndex(
             CultDocumentRegistry registry,
-            IReadOnlyDictionary<string, Row> byKey,
+            IReadOnlyList<Row> allRows,
+            IReadOnlyDictionary<string, List<Row>> byKey,
             string role,
             List<EdgeMatch> edgeSink)
         {
-            var incoming = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var citer in byKey.Values)
+            // R-V: iterate every row directly, not byKey.Values - a bare-key index collapses two
+            // schemas' rows sharing a key into one slot, which used to silently drop one of them from
+            // consideration as a citer entirely.
+            var incoming = new HashSet<(string, string)>();
+            foreach (var citer in allRows)
             {
                 foreach (var member in ReferenceMembers(citer.Descriptor, role))
                 {
                     var memberRole = member.IndexAlias ?? member.MemberName;
                     foreach (var (targetKey, payload) in citer.Descriptor.ReferencesOf(citer.Document, memberRole))
                     {
-                        if (!byKey.TryGetValue(targetKey.Value, out var resolved))
+                        if (!TryResolveReferenceTarget(registry, byKey, member.TargetType!, citer, memberRole, targetKey.Value, out var resolved))
                             continue;
-                        EnsureWithinDeclaredTarget(registry, member.TargetType, citer, memberRole, resolved);
-                        incoming.Add(targetKey.Value);
+                        incoming.Add((resolved.Descriptor.SchemaId, resolved.Key.Value));
                         edgeSink.Add(new EdgeMatch(citer, memberRole, resolved, payload));
                     }
                 }
@@ -488,9 +540,10 @@ namespace GameCult.Networking
     }
 
     /// <summary>
-    /// The opaque cursor: asOf, the last (ordinal, schemaId, recordKey), and an HMAC digest of the
-    /// selection with cursor and limit cleared, keyed under the answering process's
-    /// <see cref="CultNetSelectionCursorKey"/> (R-O). Minted only by the answering server.
+    /// The opaque cursor: asOf, the last (ordinal, schemaId, recordKey), and an HMAC digest that covers
+    /// that same body as well as the selection (with cursor and limit cleared), keyed under the
+    /// answering process's <see cref="CultNetSelectionCursorKey"/> (R-O/R-Y). Minted only by the
+    /// answering server.
     /// </summary>
     public readonly struct CultNetSelectionCursor
     {
@@ -511,7 +564,7 @@ namespace GameCult.Networking
 
         public static string Mint(ulong asOf, CultNetSelectionEvaluator.Row lastRow, CultNetSelection selection, CultNetSelectionCursorKey key)
         {
-            var digest = ComputeDigest(selection, key);
+            var digest = ComputeDigest(asOf, lastRow.Ordinal, lastRow.Descriptor.SchemaId, lastRow.Key.Value, selection, key);
             // R-O: the cursor body is length-prefixed fields, not a delimiter-joined string - a record
             // key carrying any character at all, including whatever delimiter an earlier scheme would
             // have chosen (Soul found a key containing U+241F broke a delimiter split), round-trips.
@@ -550,27 +603,46 @@ namespace GameCult.Networking
         /// <summary>
         /// Verifies this cursor's digest against <paramref name="selection"/> under <paramref name="key"/>
         /// in fixed time (R-O): a cursor forged without the key, or minted under a different process's
-        /// key (a restart), does not verify.
+        /// key (a restart), does not verify. R-Y: the digest is recomputed over this cursor's own body
+        /// (<see cref="AsOf"/>, <see cref="Ordinal"/>, <see cref="SchemaId"/>, <see cref="RecordKey"/>)
+        /// as well as the selection, so a cursor whose body was rewritten after minting - the ordinal or
+        /// record key edited underneath a digest that was still legitimately minted for this selection -
+        /// no longer verifies either (Soul's P4: "forged cursor position, reused digest").
         /// </summary>
         public bool VerifyDigest(CultNetSelection selection, CultNetSelectionCursorKey key)
         {
-            var expected = ComputeDigest(selection, key);
+            var expected = ComputeDigest(AsOf, Ordinal, SchemaId, RecordKey, selection, key);
             return CryptographicOperations.FixedTimeEquals(
                 Encoding.UTF8.GetBytes(Digest),
                 Encoding.UTF8.GetBytes(expected));
         }
 
         /// <summary>
-        /// An HMAC-SHA256 digest, keyed under <paramref name="key"/>, of the selection with cursor and
-        /// limit cleared, so a cursor is bound both to the selection that minted it and to the process
-        /// that minted it (R-O). R-H: every string and list is length-prefixed, so no delimiter choice
+        /// An HMAC-SHA256 digest, keyed under <paramref name="key"/>, of the cursor's own body
+        /// (<paramref name="asOf"/>, <paramref name="ordinal"/>, <paramref name="schemaId"/>,
+        /// <paramref name="recordKey"/>) plus the selection with cursor and limit cleared, so a cursor is
+        /// bound to the exact position it was minted at as well as to the selection and the process that
+        /// minted it (R-O/R-Y). R-H: every string and list is length-prefixed, so no delimiter choice
         /// can make two different selections collide - a delimiter-joined form used to digest
         /// values ["a|b"] the same as ["a","b"], and keys ["a,b"] the same as ["a","b"].
         /// </summary>
-        public static string ComputeDigest(CultNetSelection selection, CultNetSelectionCursorKey? key = null)
+        public static string ComputeDigest(
+            ulong asOf,
+            long ordinal,
+            string schemaId,
+            string recordKey,
+            CultNetSelection selection,
+            CultNetSelectionCursorKey? key = null)
         {
             key ??= CultNetSelectionCursorKey.ProcessDefault;
             var sb = new StringBuilder();
+            // R-Y: the body is part of what the HMAC signs - without this, a forged cursor could keep a
+            // legitimately minted digest and rewrite the ordinal or record key underneath it, since
+            // nothing about the body itself was ever authenticated.
+            AppendString(sb, asOf.ToString(CultureInfo.InvariantCulture));
+            AppendString(sb, ordinal.ToString(CultureInfo.InvariantCulture));
+            AppendString(sb, schemaId);
+            AppendString(sb, recordKey);
             AppendList(sb, selection.Schemas);
             AppendList(sb, selection.Keys);
 

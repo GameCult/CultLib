@@ -183,11 +183,15 @@ namespace GameCult.Networking.Tests
         {
             var keysOne = new CultNetSelection { Keys = new[] { "a,b" } };
             var keysTwo = new CultNetSelection { Keys = new[] { "a", "b" } };
-            Assert.That(CultNetSelectionCursor.ComputeDigest(keysOne), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(keysTwo)));
+            Assert.That(
+                CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", keysOne),
+                Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", keysTwo)));
 
             var valuesOne = new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "a|b" } } } };
             var valuesTwo = new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "a", "b" } } } };
-            Assert.That(CultNetSelectionCursor.ComputeDigest(valuesOne), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(valuesTwo)));
+            Assert.That(
+                CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", valuesOne),
+                Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", valuesTwo)));
         }
 
         // S5-DigestNoFields (fix batch 3 "Surviving mutants"): the digest reads selection.Fields - a
@@ -201,8 +205,12 @@ namespace GameCult.Networking.Tests
             var withFieldB = new CultNetSelection { Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "b" } } } };
             var noFields = new CultNetSelection();
 
-            Assert.That(CultNetSelectionCursor.ComputeDigest(withFieldA), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(withFieldB)));
-            Assert.That(CultNetSelectionCursor.ComputeDigest(withFieldA), Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(noFields)));
+            Assert.That(
+                CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", withFieldA),
+                Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", withFieldB)));
+            Assert.That(
+                CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", withFieldA),
+                Is.Not.EqualTo(CultNetSelectionCursor.ComputeDigest(0, 0, "s", "k", noFields)));
         }
 
         // R-O (fix batch 3, F6 "cursors are keyed"): a cursor's digest is an HMAC under the answering
@@ -254,6 +262,52 @@ namespace GameCult.Networking.Tests
             Assert.That(ex!.Code, Is.EqualTo("cursor_invalid"));
         }
 
+        // R-Y (fix batch 4, Soul's P4 "forged cursor position, reused digest"): before this, the HMAC
+        // covered only the selection, not the cursor's own body - so a forged cursor could keep a
+        // legitimately minted digest and rewrite the ordinal (or schemaId/recordKey) underneath it, and
+        // the server would page from wherever the forged position named instead of refusing it.
+        [Test]
+        public void Page_RefusesAForgedCursorThatReusesALegitimateDigestUnderARewrittenOrdinal()
+        {
+            var registry = Registry();
+            var rows = Enumerable.Range(0, 3)
+                .Select(i => Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = $"n{i}", Kind = "k", Mass = i }, $"k{i}", i))
+                .ToArray();
+            var selection = new CultNetSelection { Limit = 1 };
+            var key = CultNetSelectionCursorKey.Random();
+
+            var first = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: key);
+            Assert.That(first.NextCursor, Is.Not.Null);
+            var legitimate = CultNetSelectionCursor.Parse(first.NextCursor!);
+
+            var forged = ForgeCursorBody(legitimate.AsOf, ordinal: 999, legitimate.SchemaId, legitimate.RecordKey, legitimate.Digest);
+            Assert.That(forged, Is.Not.EqualTo(first.NextCursor), "the forged cursor must actually differ from the legitimate one");
+
+            selection.Cursor = forged;
+            var ex = Assert.Throws<CultNetSelectionCursorException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1, cursorKey: key));
+            Assert.That(ex!.Code, Is.EqualTo("cursor_invalid"));
+        }
+
+        /// <summary>
+        /// Builds a cursor string carrying an arbitrary body under a caller-supplied digest, the same
+        /// wire shape <see cref="CultNetSelectionCursor.Mint"/> produces - used to simulate a forged
+        /// cursor that reuses a legitimately minted digest under a rewritten body (R-Y).
+        /// </summary>
+        private static string ForgeCursorBody(ulong asOf, long ordinal, string schemaId, string recordKey, string digest)
+        {
+            var body = new System.Text.StringBuilder();
+            void AppendString(string value) =>
+                body.Append(System.Text.Encoding.UTF8.GetByteCount(value)).Append(':').Append(value);
+            AppendString(asOf.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendString(ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendString(schemaId);
+            AppendString(recordKey);
+            AppendString(digest);
+            var bytes = System.Text.Encoding.UTF8.GetBytes(body.ToString());
+            return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
+
         // R-O: the cursor body is length-prefixed, not delimiter-joined, so a record key carrying any
         // character at all - including U+241F, which broke the pre-fix delimiter-split parse - round-trips.
         [Test]
@@ -303,6 +357,85 @@ namespace GameCult.Networking.Tests
             var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
 
             Assert.That(evaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "big" }));
+        }
+
+        private static CultDocumentRegistry NarrowAndManyRegistry() => CultDocumentRegistry.ForTypes(new[]
+        {
+            typeof(CultNetSelectionEvaluatorTests.SelLeafA),
+            typeof(CultNetSelectionEvaluatorTests.SelLeafB),
+            typeof(CultNetSelectionEvaluatorTests.SelCiterNarrow),
+            typeof(CultNetSelectionEvaluatorTests.SelCiterManyUntyped)
+        });
+
+        // R-V (S-1, Soul's P2 "two schemas at one key"): a row's identity is (schemaId, recordKey), not
+        // the record key alone. SelLeafA and SelLeafB rows both live at key "k"; SelCiterNarrow's
+        // NarrowRef is declared to SelLeafA only, so it must always resolve to the SelLeafA row at "k",
+        // never the SelLeafB one - regardless of which of the two same-keyed rows a bare-key dictionary
+        // would have kept. Before this, byKey was a bare-key dictionary that kept only one of them (last
+        // writer wins), so which row NarrowRef resolved to - and therefore whether the selection matched
+        // or refused reference_outside_target - depended on row insertion order.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Evaluator_CitedResolvesARowSharingItsKeyWithAnotherSchema_ByDeclaredTargetNotInsertionOrder(bool reverseRowOrder)
+        {
+            var registry = NarrowAndManyRegistry();
+            var leafA = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a", Kind = "k", Mass = 1 }, "k", 0);
+            var leafB = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "b", Kind = "k", Mass = 1 }, "k", 1);
+            var citer = Row(registry, new CultNetSelectionEvaluatorTests.SelCiterNarrow
+            {
+                Name = "citer",
+                NarrowRef = new CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA>(new CultRecordKey("k"))
+            }, "citer", 2);
+
+            var rows = reverseRowOrder
+                ? new[] { citer, leafB, leafA }
+                : new[] { citer, leafA, leafB };
+
+            var selection = new CultNetSelection { Cited = new CultNetIncoming { Role = "NarrowRef", Exists = true } };
+            var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+
+            // Only the SelLeafA row at "k" is cited - SelLeafB's row at the same key is a different
+            // identity and must not match, in either row order.
+            Assert.That(evaluation.Rows.Select(r => (r.Descriptor.SchemaId, r.Key.Value)),
+                Is.EqualTo(new[] { (registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId, "k") }));
+        }
+
+        // R-W (S-2, Soul's P3): EnsureWithinDeclaredTarget's equivalent check must run for every edge a
+        // many-reference carries, before the citation's own key filters that edge out - not only for the
+        // edge the citation happens to be asking about. SelCiterManyUntyped.ManyRefs is (by inference,
+        // R-T(b)) declared to SelLeafA alone; one element points at a SelLeafA row (in-target) and a
+        // second at a SelLeafB row (out-of-target). Querying `cites` for a record key neither element
+        // carries must still refuse: the out-of-target edge is wrong regardless of what the caller asked.
+        [Test]
+        public void Evaluator_CitesRefusesAnOutOfTargetEdgeEvenWhenTheQueriedKeyMatchesNeitherEdge()
+        {
+            var registry = NarrowAndManyRegistry();
+            var leafA = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a", Kind = "k", Mass = 1 }, "a", 0);
+            var leafB = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "b", Kind = "k", Mass = 1 }, "b", 1);
+            var citer = Row(registry, new CultNetSelectionEvaluatorTests.SelCiterManyUntyped
+            {
+                Name = "citer",
+                ManyRefs = new[]
+                {
+                    new CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA>(new CultRecordKey("a")),
+                    new CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA>(new CultRecordKey("b"))
+                }
+            }, "citer", 2);
+            var rows = new[] { leafA, leafB, citer };
+
+            var selection = new CultNetSelection
+            {
+                Cites = new CultNetCitation
+                {
+                    Target = new CultNetRecordRef { SchemaId = registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId, RecordKey = "does-not-exist" },
+                    Role = "ManyRefs"
+                }
+            };
+
+            var ex = Assert.Throws<CultNetSelectionReferenceOutsideTargetException>(
+                () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1));
+            Assert.That(ex!.ToSchemaId, Is.EqualTo(registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafB>().SchemaId));
+            Assert.That(ex.ToKey, Is.EqualTo("b"));
         }
     }
 }
