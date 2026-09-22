@@ -290,6 +290,9 @@ impl RowSet for FixtureRowSet {
                 "related".into(),
                 "components".into(),
                 "Design".into(),
+                // R-W: a citer-to-citer role, so a both-hops selection can page a citer row that
+                // is itself cited by another citer (rather than only ever by a leaf).
+                "peer".into(),
             ]
         } else if schema_id == NARROW_CITER {
             vec!["narrow_ref".into()]
@@ -306,6 +309,7 @@ impl RowSet for FixtureRowSet {
                 vec![leaf_a().into(), leaf_b().into()]
             }
             "narrow_ref" => vec![leaf_a().into()],
+            "peer" => vec![citer().into()],
             _ => Vec::new(),
         }
     }
@@ -514,6 +518,91 @@ fn cited_exists_is_the_one_negation() {
     let mut ids: Vec<&str> = uncited.rows.iter().map(Row::record_key).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec!["a-lo", "shared-1", "shared-3"]);
+}
+
+// R-V (S-1): a row's identity is `(schemaId, recordKey)`, never the key alone. CultCache keys are
+// unique per schema, so two schemas can share one record key. Before the fix, `byKey` kept only
+// the last row seen at a key, so which schema's row a `cites` edge resolved to - and whether a
+// `cited` selection counted a row as cited at all - depended on row order.
+#[test]
+fn row_identity_is_schema_and_key_not_key_alone_in_either_row_order() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "shared-key", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "shared-key", 2, "shield", "2");
+    let citer_row =
+        FixtureRow::citer("citer-1", 3, vec![("Design".to_string(), rr(leaf_a(), "shared-key"), None)]);
+
+    let cites_selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "shared-key"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let cited_selection = Selection {
+        cited: Some(Incoming { role: "Design".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    for rows in [
+        vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()],
+        vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()],
+    ] {
+        let cites_eval = select(&FixtureRowSet, &rows, &cites_selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(
+            cites_eval.rows.iter().map(Row::record_key).collect::<Vec<_>>(),
+            vec!["citer-1"],
+            "row order must not change whether the citation resolves"
+        );
+        assert_eq!(cites_eval.edges.len(), 1);
+        assert_eq!(
+            cites_eval.edges[0].to.schema_id(),
+            leaf_a(),
+            "the edge must resolve to leaf_a's row, never leaf_b's, regardless of row order"
+        );
+
+        let cited_eval = select(&FixtureRowSet, &rows, &cited_selection, 1, test_cursor_key()).unwrap();
+        let cited_pairs: Vec<(&str, &str)> =
+            cited_eval.rows.iter().map(|r| (r.schema_id(), r.record_key())).collect();
+        assert_eq!(
+            cited_pairs,
+            vec![(leaf_a(), "shared-key")],
+            "cited membership is (schemaId, recordKey) - leaf_b's row at the same key must not \
+             count as cited just because leaf_a's row at that key is"
+        );
+    }
+}
+
+// R-W (S-3), Rust half: a selection carrying both `cites` and `cited` anchors each edge by its
+// own hop, so it returns both sets of edges rather than one flag deciding the direction for the
+// whole batch. Shape from Soul's probe (soul-sel-final-notes.md): a page row "ca" that cites a
+// leaf via "Design" and is itself cited by another citer "cb" via "peer" - the answer must carry
+// both `cb --peer--> ca` (anchored on the citee) and `ca --Design--> leaf` (anchored on the
+// citer).
+#[test]
+fn a_selection_with_both_hops_returns_both_directions_edges() {
+    let leaf = FixtureRow::leaf(leaf_a(), "leaf-row", 1, "weapon", "5");
+    let ca = FixtureRow::citer("ca", 2, vec![("Design".to_string(), rr(leaf_a(), "leaf-row"), None)]);
+    let cb = FixtureRow::citer("cb", 3, vec![("peer".to_string(), rr(citer(), "ca"), None)]);
+    let rows = vec![leaf, ca, cb];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "leaf-row"), role: Some("Design".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["ca"]);
+    assert_eq!(
+        evaluation.edges.len(),
+        2,
+        "both the cites edge (ca->leaf) and the cited edge (cb->ca) must survive - not just one"
+    );
+
+    let mut seen: Vec<(&str, &str, &str)> = evaluation
+        .edges
+        .iter()
+        .map(|edge| (edge.from.record_key(), edge.role.as_str(), edge.to.record_key()))
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, vec![("ca", "Design", "leaf-row"), ("cb", "peer", "ca")]);
 }
 
 // S16: the four comparisons at the boundary, including the row whose value equals the compared

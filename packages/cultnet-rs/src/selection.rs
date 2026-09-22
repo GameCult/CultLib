@@ -1426,6 +1426,20 @@ pub struct EdgeMatch<R: Row + Clone> {
     pub role: String,
     pub to: R,
     pub payload: Option<Vec<u8>>,
+    /// R-W: which end of this edge is the page row that produced it - `cites` anchors on the
+    /// citer (`from`), `cited` anchors on the citee (`to`). A selection carrying both hops mixes
+    /// edges from both sources in one `Vec`, so each edge must carry its own anchor rather than
+    /// the whole batch being filtered by one shared direction.
+    pub anchor: EdgeAnchor,
+}
+
+/// Which end of an [`EdgeMatch`] is the page row it was found through (R-W).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeAnchor {
+    /// Produced by `cites`: the page row is the citer, `from`.
+    Citer,
+    /// Produced by `cited`: the page row is the citee, `to`.
+    Citee,
 }
 
 /// Evaluated, ordered, paged rows plus the edges a hop traversed.
@@ -1454,7 +1468,12 @@ pub fn select<R: Row + Clone>(
 ) -> Result<Evaluation<R>, SelectionRefusal> {
     validate(selection, row_set)?;
 
-    let by_key: HashMap<&str, &R> = all_rows.iter().map(|row| (row.record_key(), row)).collect();
+    // R-V: a row's identity is `(schemaId, recordKey)`, never the key alone - CultCache keys are
+    // unique per schema, so two schemas can share one record key and must not collide here.
+    let by_key: HashMap<(&str, &str), &R> = all_rows
+        .iter()
+        .map(|row| ((row.schema_id(), row.record_key()), row))
+        .collect();
 
     let mut candidates: Vec<&R> = all_rows
         .iter()
@@ -1466,7 +1485,11 @@ pub fn select<R: Row + Clone>(
     if let Some(cited) = &selection.cited {
         let incoming = build_incoming_index(row_set, all_rows, &by_key, &cited.role, &mut edges)?;
         let exists = cited.exists;
-        candidates.retain(|row| incoming.contains(row.record_key()) == exists);
+        // R-V: membership is by (schemaId, recordKey) - a row of one schema is not "cited"
+        // merely because some other row cites a different schema sharing its record key.
+        candidates.retain(|row| {
+            incoming.contains(&(row.schema_id().to_string(), row.record_key().to_string())) == exists
+        });
     }
 
     if let Some(cites) = &selection.cites {
@@ -1526,31 +1549,31 @@ pub fn select<R: Row + Clone>(
         None
     };
 
-    // R-B: hop edges follow the hop's direction. Under `cites`, the edges are the ones *from*
-    // page rows (the citer is what is paged); under `cited`, they are the ones *into* page rows
-    // (the citee is what is paged). Order is deterministic: page-row order, then (from, role, to)
+    // R-B/R-W: hop edges follow the hop's own direction, per edge - not one direction for the
+    // whole batch. A selection carrying both `cites` and `cited` puts edges from both functions
+    // into one `Vec`, and each edge already knows which end (R-V: (schemaId, recordKey)) is the
+    // page row that produced it (`EdgeAnchor`): `cites` anchors on the citer (`from`), `cited`
+    // anchors on the citee (`to`). Order is deterministic: page-row order, then (from, role, to)
     // in code-point order - never a `HashMap`'s iteration order.
     let page_edges = if selection.has_hop() {
-        let page_position: HashMap<&str, usize> = page
+        let page_position: HashMap<(&str, &str), usize> = page
             .iter()
             .enumerate()
-            .map(|(index, row)| (row.record_key(), index))
+            .map(|(index, row)| ((row.schema_id(), row.record_key()), index))
             .collect();
-        let cited_direction = selection.cited.is_some();
+        fn owner_ref<'a, R: Row + Clone>(edge: &'a EdgeMatch<R>) -> (&'a str, &'a str) {
+            match edge.anchor {
+                EdgeAnchor::Citee => (edge.to.schema_id(), edge.to.record_key()),
+                EdgeAnchor::Citer => (edge.from.schema_id(), edge.from.record_key()),
+            }
+        }
         let mut kept: Vec<EdgeMatch<R>> = edges
             .into_iter()
-            .filter(|edge| {
-                let owner = if cited_direction { edge.to.record_key() } else { edge.from.record_key() };
-                page_position.contains_key(owner)
-            })
+            .filter(|edge| page_position.contains_key(&owner_ref(edge)))
             .collect();
         kept.sort_by(|a, b| {
-            let owner = |edge: &EdgeMatch<R>| -> usize {
-                let key = if cited_direction { edge.to.record_key() } else { edge.from.record_key() };
-                page_position[key]
-            };
-            owner(a)
-                .cmp(&owner(b))
+            page_position[&owner_ref(a)]
+                .cmp(&page_position[&owner_ref(b)])
                 .then_with(|| a.from.schema_id().cmp(b.from.schema_id()))
                 .then_with(|| a.from.record_key().cmp(b.from.record_key()))
                 .then_with(|| a.role.cmp(&b.role))
@@ -1730,14 +1753,17 @@ fn ensure_within_declared_target<R: Row>(
 
 fn matches_citation<R: Row + Clone>(
     row_set: &impl RowSet,
-    by_key: &HashMap<&str, &R>,
+    by_key: &HashMap<(&str, &str), &R>,
     citer: &R,
     citation: &Citation,
     edge_sink: &mut Vec<EdgeMatch<R>>,
 ) -> Result<bool, SelectionRefusal> {
     let mut found = false;
     for (role, target, payload) in citer.references() {
-        let Some(resolved) = by_key.get(target.record_key.as_str()) else {
+        // R-V: the edge's own declared target is resolved by (schemaId, recordKey), not the key
+        // alone, so a row of the wrong schema sharing this record key can never stand in for it.
+        let Some(resolved) = by_key.get(&(target.schema_id.as_str(), target.record_key.as_str()))
+        else {
             continue;
         };
         // R-T: every resolvable edge is checked against its declared target, not only the ones
@@ -1765,6 +1791,7 @@ fn matches_citation<R: Row + Clone>(
             role,
             to: (*resolved).clone(),
             payload,
+            anchor: EdgeAnchor::Citer,
         });
         found = true;
     }
@@ -1777,26 +1804,30 @@ fn matches_citation<R: Row + Clone>(
 fn build_incoming_index<R: Row + Clone>(
     row_set: &impl RowSet,
     all_rows: &[R],
-    by_key: &HashMap<&str, &R>,
+    by_key: &HashMap<(&str, &str), &R>,
     role: &str,
     edge_sink: &mut Vec<EdgeMatch<R>>,
-) -> Result<HashSet<String>, SelectionRefusal> {
+) -> Result<HashSet<(String, String)>, SelectionRefusal> {
     let mut incoming = HashSet::new();
     for citer in all_rows {
         for (edge_role, target, payload) in citer.references() {
             if edge_role != role {
                 continue;
             }
-            let Some(resolved) = by_key.get(target.record_key.as_str()) else {
+            // R-V: resolved by (schemaId, recordKey) - see the matching comment in
+            // `matches_citation`.
+            let Some(resolved) = by_key.get(&(target.schema_id.as_str(), target.record_key.as_str()))
+            else {
                 continue;
             };
             ensure_within_declared_target(row_set, &edge_role, citer, *resolved)?;
-            incoming.insert(target.record_key.clone());
+            incoming.insert((resolved.schema_id().to_string(), resolved.record_key().to_string()));
             edge_sink.push(EdgeMatch {
                 from: citer.clone(),
                 role: edge_role,
                 to: (*resolved).clone(),
                 payload,
+                anchor: EdgeAnchor::Citee,
             });
         }
     }
