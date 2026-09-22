@@ -231,17 +231,26 @@ namespace GameCult.Networking.Tests
         // either side - only decoded and handed to Validate/validate, which must refuse at exactly
         // the named field. Mirrors packages/cultnet-rs/tests/selection.rs's refusal_cases.
         //
-        // Not mirrored here: cultnet-rs's refuses_unmatched_cites_target_schema. R-E says an
-        // unresolved cites.target.schemaId "is refused at the door, never answered with an empty
-        // page", but CultNetSelection.Validate (CultNetSelection.cs:361-391) never checks that
-        // cites.target.schemaId resolves to any known schema at all - only that it is present. Adding
-        // that vector here would make this file's own Assert.Throws fail before a vector could ever be
-        // written, so it stays Rust-only; the report below covers the resulting cross-runtime failure
-        // when this file's reader judges it.
-        private static IEnumerable<(string Name, CultNetSelection Selection, string ExpectedField)> RefusalCases()
+        // refuses_unmatched_cites_target_schema and refuses_cites_target_by_hash_shaped_alias now
+        // land here too: the C# matrix Hands pass added the door check
+        // (CultNetSelection.cs:389-394) that CultNetSelection.Validate refuses a cites.target.schemaId
+        // that CultNetSchemaAliasMatching cannot resolve to any declared schema. Under Self's ruling
+        // 2026-09-22 ("the C# reference's alias rule is the rule"), C# only ever resolves a name-form
+        // alias, never a hash-shaped one, so a hash-shaped cites.target.schemaId is exactly such an
+        // unresolved target and is refused at the same field.
+        private static IEnumerable<(string Name, CultNetSelection Selection, string ExpectedField)> RefusalCases(
+            IReadOnlyDictionary<string, FixtureSchema> schemas)
         {
             yield return ("refuses_empty_schemas_list", new CultNetSelection { Schemas = Array.Empty<string>() }, "schemas");
             yield return ("refuses_blank_key_entry", new CultNetSelection { Keys = new[] { "a-eq", "   " } }, "keys");
+            yield return ("refuses_unmatched_cites_target_schema", new CultNetSelection
+            {
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = "sha256:not-a-declared-schema", RecordKey = "a-eq" } }
+            }, "cites.target.schemaId");
+            yield return ("refuses_cites_target_by_hash_shaped_alias", new CultNetSelection
+            {
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].HashAlias, RecordKey = "a-eq" } }
+            }, "cites.target.schemaId");
         }
 
         // R-E: id, not name - a row's cross-runtime identity is its real schema id plus its key, the
@@ -387,7 +396,7 @@ namespace GameCult.Networking.Tests
             // Self's ruling, 2026-09-22 (commit 2 fix batch): door-refusal vectors. Never
             // evaluated on either side - only decoded and handed to Validate, which must refuse
             // at exactly the named field.
-            foreach (var (name, selection, expectedField) in RefusalCases())
+            foreach (var (name, selection, expectedField) in RefusalCases(schemas))
             {
                 var error = Assert.Throws<CultNetSelectionInvalidException>(
                     () => selection.Validate(registry.AllDescriptors.ToArray()),
