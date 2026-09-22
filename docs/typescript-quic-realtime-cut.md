@@ -712,6 +712,69 @@ was 325 ms on Windows and 26 ms on Linux.
 Node process on the shared host. The rule now in the Eureka skill is to kill
 by PID. **Soul's eighth pass dispatched** (Opus).
 
+**Soul's eighth pass, 2026-09-22** (Opus). Hands' numbers reproduced: 39 killed
+on Windows and 41 on Linux. Restores matched `checkout-index`. A forced red
+control was reported red. The seam records the same evaluation that the wait
+receives, and it folds out of release: there are no debug exports, and the
+release macro is plain `(timeout_ms)`. The wall-clock layer is not vacuous. It
+kills every shortening, and on `pollhammer` it kills K1, K2 and Soul's new P2
+and P3. **Cut 3 still does not close.** The method moved the gaps outward.
+
+- **F1, medium: nothing runs the timeout rule against the release build.**
+  The only configuration without asserts runs `closerace` alone, and no CI
+  builds the bridge. The seam macro creates a release-only site at `:108`.
+  Mutant R1 changes the `#else` to `((timeout_ms)/10)` and survives by
+  construction. Run against the release build, `polltimeout`, `pollbusy` and
+  `pollhammer` each kill it.
+- **F2, medium: the seam records the integer, not the duration handed to
+  `wait_for`** (`:1201-1202`). Each of these survives on both targets:
+  - `ms(RECORD(t)) + 600ms`;
+  - `max(ms(RECORD(t)), 500ms)`, which turns a 15 ms realtime poll into
+    500 ms;
+  - a 1/909 duration ratio.
+
+  Only lengthening survives, since the timed layer's early tolerance kills
+  any shortening.
+- **F3, medium: the predicate is covered only on a runtime with no live
+  objects.** `|| !runtime->connections.empty()` survives on both targets. With
+  one open connection, an idle `poll(1000)` returns in 0 ms, so any host with a
+  connection busy-spins.
+- **F4, low-medium: a zero-timeout poll is never timed.** `sleep_for(500ms)`
+  on `timeout_ms == 0` survives, as does a 300 ms spin. A game loop that polls
+  with 0 every frame would stall. No negative timeout is probed, and -1 would
+  collide with the seam's sentinel value.
+- **F5, plausible, low:** `closerace` goes red under load on Windows in 4 of 5
+  rounds. It is starved of CPU, not the bridge. It fails loud, but it makes
+  the control flaky.
+- **F6, low:** stale prose: the 1300 ms history at `mutate-cultmesh.mjs:763`,
+  a scenario list missing `pollhammer`, and a header §7 intro that still says
+  "quiesce only".
+
+**Self's rulings, 2026-09-22:**
+
+1. **F1.** The harness gains a plain **release** configuration on both
+   targets. It runs `polltimeout`, `pollbusy`, `pollhammer` and the new
+   zero-timeout check against the release library, and R1 goes in as an
+   entry. The release build is the thing that ships, so a rule the release
+   build never runs is not pinned.
+2. **F2.** The seam wraps **the whole argument to `wait_for`**, meaning the
+   duration expression. It records that duration's count, and `waitseam`
+   asserts it equals `milliseconds(host argument)`. W1, W2 and W3 go in as
+   entries.
+3. **F3.** `pollhammer` also runs against a runtime that holds live objects:
+   an open connection to an unroutable address, plus a listener and a stream
+   where the fixture can make them. P1 goes in as an entry.
+4. **F4.** Any `timeout_ms <= 0` returns within a small bound, timed with a
+   generous margin. A negative timeout is probed. The seam's sentinel moves to
+   a value that cannot collide, or becomes a separate "recorded" flag. Z1 and
+   Z2 go in as entries.
+5. **F5.** `closerace`'s fixture gets whatever it needs to survive
+   starvation, such as barriers or longer windows, without weakening what it
+   checks. Prove it with 5 rounds under 16 burners on Windows.
+6. **F6.** Fix the prose.
+
+To Hands (Sonnet) as the eighth fix batch.
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
