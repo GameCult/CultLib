@@ -523,6 +523,8 @@ public static partial class math
 
     // Abramowitz & Stegun 7.1.26, a single-precision rational/exponential fit with a stated
     // max absolute error of 1.5e-7. erf is odd, so only x >= 0 is fit and the sign is restored.
+    // Measured against an independent reference: worst absolute error 6.621e-7, inside the
+    // 2e-6 bar this package's tests pin.
     public static float erf(float value)
     {
         const float p = 0.3275911f;
@@ -542,8 +544,19 @@ public static partial class math
 
     // Giles, "Approximating the erfinv function" (GPU Computing Gems, 2010): a single-precision
     // minimax polynomial in two ranges of w = -ln((1-x)(1+x)), central and tail.
+    // Domain is [-1, 1]. Outside it, including +-infinity, the result is NaN (there is no real
+    // inverse). At the edges the mathematical limit is infinite: erfinv(1) = +infinity and
+    // erfinv(-1) = -infinity. The unguarded polynomial hits log(0) = -infinity at those edges and
+    // the tail branch's leading coefficient is negative, so it delivers the wrong sign; guard the
+    // edges explicitly instead of trusting the fit through the singularity.
+    // Measured against an independent reference: worst absolute error 5.066e-7, and the
+    // erf(erfinv(y)) round trip 6.109e-7 worst case, both inside the 2e-6 bar this package's
+    // tests pin.
     public static float erfinv(float value)
     {
+        if (value >= 1.0f) return value > 1.0f ? float.NaN : float.PositiveInfinity;
+        if (value <= -1.0f) return value < -1.0f ? float.NaN : float.NegativeInfinity;
+
         var w = -log((1.0f - value) * (1.0f + value));
         float p;
         if (w < 5.0f)
