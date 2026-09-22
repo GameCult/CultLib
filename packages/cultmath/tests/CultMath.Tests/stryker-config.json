@@ -8,6 +8,7 @@
     ],
     "mutation-level": "Standard",
     "reporters": [ "progress", "html", "json" ],
-    "thresholds": { "high": 80, "low": 60, "break": 0 }
+    "thresholds": { "high": 80, "low": 60, "break": 0 },
+    "test-runner": "mtp"
   }
 }
