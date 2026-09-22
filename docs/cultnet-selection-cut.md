@@ -297,7 +297,10 @@ merge.** The notes are in the session scratchpad at `soul-ss4-notes.md`.
   - **Float rendering at ties.** 394 `f32` and 48 `f64` values out of 200k
     render differently, because .NET rounds half to even and Rust does not.
     A shortest form is a stand-in for the value in any case: an `f32` of 3e20
-    is stored as 300000002010536247296.
+    is stored as 300000006012263202816, bits `0x61821ab1`. (Corrected
+    2026-09-22. Soul's report and this map first gave 300000002010536247296.
+    The Rust Hands and an independent Python `Decimal` check both give
+    ...6012263202816.)
   - **`schemas`.** C# matches through the alias matcher and Rust matches exact
     ids. `["leaf_a"]` gives 8 rows against 0.
   - **Tiebreak.** C# compares UTF-16 code units and Rust compares UTF-8
