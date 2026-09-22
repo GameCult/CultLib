@@ -732,6 +732,16 @@ merge.**
   cross-runtime defect, which the alias port fixed. Rust's port also drops
   `SchemaVersion` and `CompatibleSchemaIds`, so R-E is two rules agreeing on a
   subset.
+- **Where the evidence lives.** The pass ran against `52082ec`. Its nine hand
+  probes — eight C# and the Rust both-hops probe that proved S-3 on a matched
+  pair — are on branch `soul-probe` in the scratch clone `C:\ss5`
+  (`e0fd672..107ff5f`), **unpushed**. Nothing reached origin and the pinned
+  checkout at `F:\Projects\CultLib` was never touched. Notes are at
+  `scratchpad/soul-sel-final-notes.md`. Probes are scratch by doctrine and are
+  meant to be thrown away; this pointer exists because S-1 through S-3 were
+  proven there and fix batch 4's tests have to reproduce them independently. If
+  `C:\ss5` is gone, the probes are gone with it, and that is acceptable — the
+  findings are recorded here, which is the durable copy.
 - **Soul's own corrections, same pass.** It first reported a wedged
   `cargo mutants` job on Yggdrasil and asked for it to be killed. Checking the
   box rather than its log, the work directory was already gone: what it had
