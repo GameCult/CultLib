@@ -105,17 +105,32 @@ A Linux host still needs MsQuic's own runtime dependencies present:
 The development loop for it is one committed image,
 [`scripts/quic-native-linux-dev.Dockerfile`](../../scripts/quic-native-linux-dev.Dockerfile),
 pinned to the same `debian:13` digest the release workflow builds in. It carries
-the toolchain, MsQuic's runtime dependencies, `setarch`, and Node, because the
-mutation harness that drives the runtime-lifetime scenarios is a Node script and
-a container that cannot run it cannot check the bridge it just built:
+the toolchain, MsQuic's runtime dependencies, and `setarch`, because a
+sanitizer build of the runtime-lifetime scenarios needs `personality(ADDR_NO_RANDOMIZE)`
+and a container that cannot ask for that cannot run them:
 
     docker build -t cultlib-quic-native-dev -f scripts/quic-native-linux-dev.Dockerfile scripts
-    docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src cultlib-quic-native-dev bash -lc "scripts/build-quic-native.sh && node scripts/mutate-cultmesh.mjs native"
+    docker run --rm --security-opt seccomp=unconfined -v "${PWD}:/src" -w /src cultlib-quic-native-dev bash -lc "
+      scripts/build-quic-native.sh
+      cmake -S native/GameCult.Mesh.Quic.Native -B artifacts/quic-native-tests/linux-x64 -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCULTMESH_QUIC_BUILD_TESTS=ON -DCULTMESH_QUIC_DEBUG_ASSERTS=ON \
+        -DMSQUIC_INCLUDE_DIR=artifacts/dependencies/msquic-linux-2.5.9/include \
+        -DMSQUIC_LIB_DIR=artifacts/dependencies/msquic-linux-2.5.9/package/usr/lib/x86_64-linux-gnu
+      cmake --build artifacts/quic-native-tests/linux-x64
+      for scenario in closerace holdclose holdtimeout polltimeout pollbusy pollhammer zerotimeout payloadfit latecall waitseam; do
+        setarch -R artifacts/quic-native-tests/linux-x64/bin/cultmesh_quic_native_tests \"\${scenario}\" || exit 1
+      done
+    "
 
 Both lines are run from the repository root, and the mount is that root wherever
-it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. The second is one line
-because the shell it is offered to is not decided here; a continuation would have
-to pick one, and a backtick pasted into a POSIX shell is not a continuation.
+it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. `CULTMESH_QUIC_BUILD_TESTS`
+is off in the shipped configuration (see the CMakeLists.txt option comment); it
+turns on the scenario runner `tests/cultmesh_quic_native_tests.cpp` compiles into,
+and `CULTMESH_QUIC_DEBUG_ASSERTS` turns on both the bridge's internal invariant
+assertions and the four scenarios (`holdclose`, `latecall`, `holdtimeout`,
+`waitseam`) that need the development seam in section 7 of the header. Each
+scenario name is a positional argument to the built binary; run them individually
+to bisect a failure, or all ten as shown to cover the runtime-lifetime rules.
 
 A Windows clone made before `.gitattributes` kept shell scripts at LF still has
 `scripts/build-quic-native.sh` with carriage returns, and pulling does not fix
@@ -126,21 +141,18 @@ current attributes:
 
     git rm --cached -q scripts/build-quic-native.sh; git checkout HEAD -- scripts/build-quic-native.sh
 
-`--security-opt seccomp=unconfined` is load-bearing, not caution. The
+`--security-opt seccomp=unconfined` is load-bearing, not caution. A
 ThreadSanitizer configuration needs the process's address space where it expects
-it, so `scripts/mutate-cultmesh.mjs` re-executes those runs under `setarch -R`,
-which asks the kernel for `personality(ADDR_NO_RANDOMIZE)`. Docker's default
-seccomp profile denies that call. Without it ThreadSanitizer dies before `main`
-with "unexpected memory mapping" — a configuration that never starts, which a
-mutation harness would otherwise read as every mutant being killed. The harness
-stops with that diagnosis rather than reporting kills it did not earn.
+it, so a TSan run must be re-executed under `setarch -R`, which asks the kernel
+for `personality(ADDR_NO_RANDOMIZE)`. Docker's default seccomp profile denies
+that call. Without it ThreadSanitizer dies before `main` with "unexpected memory
+mapping" — a configuration that never starts, not a scenario that passed.
 
-The win32-x64 half of the harness needs the checkout somewhere short — near a
-drive root rather than under a deep temporary directory. MSVC builds the bridge
-and its scenario runner through MSBuild, whose file tracker gives out on long
-paths, and the build then fails for every mutant including the no-op control.
-The harness stops on a red control rather than reporting a table of kills, so
-the failure is loud, but it names MSBuild and not the path.
+A win32-x64 build of the scenario runner needs the checkout somewhere short —
+near a drive root rather than under a deep temporary directory. MSVC builds the
+bridge and its scenario runner through MSBuild, whose file tracker gives out on
+long paths, and the build then fails outright rather than naming the path as the
+cause.
 
 Where an artifact was built is part of what it is. The Linux binary is linked
 against Debian 13's glibc, so a build from anywhere else is a different artifact
