@@ -59,14 +59,33 @@
     },
     @{
         Id     = 'MESH-FOREIGN-Revert'
-        Rule   = 'ReadDocumentFromSnapshotResponse: a foreign/runtime-generated schema id at the right recordKey still matches when its payload''s embedded schema (read by the registry''s shared TryReadSchemaVersion) alias-matches the caller''s own descriptor.'
+        Rule   = 'ReadDocumentFromSnapshotResponse: a foreign/runtime-generated schema id at the right recordKey still matches when its payload''s embedded schema (read by the registry''s shared resolver, now CultNetDocumentRegistry.PayloadMatchesSchema after the R-L rename of TryReadSchemaVersion back to internal) alias-matches the caller''s own descriptor.'
         Mutant = 'revert'
         File   = 'src/GameCult.Mesh/CultMesh.cs'
         Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshStreamingTests.DocumentHandle_ReadsRemotePeerSnapshotsAsTypedDocuments'
-        Old    = 'else if (byPayload == null &&
-                         CultNetDocumentRegistry.TryReadSchemaVersion(candidate.Payload) is { } payloadSchemaVersion &&
-                         CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor))
+        Old    = 'else if (byPayload == null && CultNetDocumentRegistry.PayloadMatchesSchema(candidate.Payload, descriptor))
                     byPayload = candidate;'
         New    = ''
+    },
+    @{
+        # R-F (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch): the door is
+        # inside select in both runtimes, and Mesh's EnsureV0Compatible runs the declaration-independent
+        # half of it (CultNetSelectionValidation.ValidateShape) before its own v0 transport refusals, so
+        # Keys=[]/[""] is refused there too instead of silently lowering to "every key".
+        Id     = 'MESH-RF-Door-Revert'
+        Rule   = 'R-F: EnsureV0Compatible runs the door (ValidateShape) before its own v0 term refusals, so Keys=[] is refused there, not only inside CultNetSelectionEvaluator.Select.'
+        Mutant = 'revert'
+        File   = 'src/GameCult.Mesh/CultMeshSnapshots.cs'
+        Killer = 'FullyQualifiedName=GameCult.Mesh.Tests.CultMeshSnapshotOptionsTests.FetchSnapshotAsync_RefusesAnEmptyKeysListBeforeTouchingTheClient'
+        Old    = 'if (selection == null)
+                return;
+            // The door runs first (docs/cultnet-selection-cut.md, R-F): Mesh has no descriptor list to
+            // check field/role reachability against, but the declaration-independent half of the door -
+            // an empty or blank-only schemas/keys list, an unrecognised projection - applies here just
+            // as it does inside CultNetSelectionEvaluator.Select, so Keys=[]/[""] is refused rather than
+            // silently lowered to "every key".
+            CultNetSelectionValidation.ValidateShape(selection);'
+        New    = 'if (selection == null)
+                return;'
     }
 )

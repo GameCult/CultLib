@@ -71,11 +71,17 @@
         New    = ''
     },
     @{
-        Id     = 'CACHE-QJ-ExponentExpansion-Revert'
-        Rule   = 'Q-J: a double/float that .NET would render in exponent notation is rewritten to positional digits before canonicalizing.'
+        # R-D (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch): a double/float
+        # renders as its exact decimal expansion (RenderExactDouble/RenderExactFloat via BigInteger),
+        # never .NET's shortest round-trip form - the two runtimes' shortest forms round a tie the
+        # opposite way at some values (394/200k f32, 48/200k f64 in the parity vectors). This anchor
+        # replaces the pre-R-D CACHE-QJ-ExponentExpansion-Revert, whose ExpandScientificNotation callee
+        # R-D deleted outright.
+        Id     = 'CACHE-RD-ExactExpansion-Revert'
+        Rule   = 'R-D: a double renders its exact decimal expansion via RenderExactDouble/BigInteger, not .NET''s shortest round-trip ToString().'
         Mutant = 'revert'
         Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberRewritesADoublesExponentNotationToPositionalDigits'
-        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
+        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : RenderExactDouble(d),'
         New    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(d.ToString(CultureInfo.InvariantCulture)),'
     },
     @{
@@ -83,7 +89,19 @@
         Rule   = 'Q-J: a NaN or infinite member matches no comparison - TryGetIndexNumber must answer false, not a garbage rendering of the value.'
         Mutant = 'revert'
         Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberReturnsFalseForNaNAndInfinity'
-        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
-        New    = 'double d => CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),'
+        Old    = 'double d => double.IsNaN(d) || double.IsInfinity(d) ? null : RenderExactDouble(d),'
+        New    = 'double d => RenderExactDouble(d),'
+    },
+    @{
+        # R-D loosening: RenderExactDecimal's fraction-digit placement is off by one (a plausible
+        # fencepost slip in the BigInteger-to-string split), so every rendered fraction is 10x too
+        # large - still "exact-looking" digits, still no exponent, but the wrong value. Caught by the
+        # same test's pinned exact string for 1e-7's nearest double.
+        Id     = 'CACHE-RD-FractionSplit-Loosening'
+        Rule   = 'R-D: RenderExactDecimal splits the digit string at exactly fractionDigits from the right - not fractionDigits-1, which would shift the whole fractional rendering by a power of ten.'
+        Mutant = 'loosening'
+        Killer = 'FullyQualifiedName=GameCult.Caching.Tests.CultDocumentSelectionSurfaceTests.TryGetIndexNumberRewritesADoublesExponentNotationToPositionalDigits'
+        Old    = 'var splitAt = digits.Length - fractionDigits;'
+        New    = 'var splitAt = digits.Length - fractionDigits + 1;'
     }
 )
