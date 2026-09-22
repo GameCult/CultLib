@@ -2,44 +2,58 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.snapshot-response-raw.v1.schema.json",
   "title": "CultNet Snapshot Response Raw Message v1",
+  "description": "R-S (docs/cultnet-selection-cut.md, fix batch 3): matches MessagePack-CSharp's map-mode output for CultNetSnapshotResponseRawV1Message - every declared key is written, nil included, so every property is `required` (present on the wire) even where its value may be null. `headers`/`documents` are still exactly one populated by projection (C5), but the OTHER key is present too, as an explicit null, not absent - the prior `oneOf: [{required:[headers]},{required:[documents]}]` matched both branches on every real page (both keys always present) and so never validated at all.",
   "type": "object",
-  "required": ["schemaVersion", "messageId", "matched", "asOf"],
+  "required": [
+    "schemaVersion", "messageId", "matched", "asOf", "next",
+    "headers", "documents", "edges", "shardId", "shardEpoch", "shardLogSequence"
+  ],
   "additionalProperties": false,
   "oneOf": [
-    { "required": ["headers"] },
-    { "required": ["documents"] }
+    {
+      "required": ["headers", "documents"],
+      "properties": { "headers": { "type": "array" }, "documents": { "type": "null" } }
+    },
+    {
+      "required": ["headers", "documents"],
+      "properties": { "headers": { "type": "null" }, "documents": { "type": "array" } }
+    }
   ],
   "properties": {
     "schemaVersion": { "const": "cultnet.snapshot_response_raw.v1" },
     "messageId": { "type": "string", "minLength": 1 },
     "matched": { "type": "integer", "minimum": 0 },
     "asOf": { "type": "integer", "minimum": 0 },
-    "next": { "type": "string" },
+    "next": { "type": ["string", "null"] },
     "headers": {
-      "type": "array",
-      "items": { "$ref": "cultnet.raw-document-record.schema.json" }
+      "type": ["array", "null"],
+      "items": { "$ref": "cultnet.raw-document-header.schema.json" }
     },
     "documents": {
-      "type": "array",
+      "type": ["array", "null"],
       "items": { "$ref": "cultnet.raw-document-record.schema.json" }
     },
     "edges": {
-      "type": "array",
+      "type": ["array", "null"],
       "items": {
         "type": "object",
-        "required": ["from", "role", "to"],
+        "required": ["from", "role", "to", "payloadEncoding", "payload"],
         "additionalProperties": false,
         "properties": {
           "from": { "$ref": "cultnet.selection.schema.json#/$defs/recordRef" },
           "role": { "type": "string", "minLength": 1 },
           "to": { "$ref": "cultnet.selection.schema.json#/$defs/recordRef" },
-          "payloadEncoding": { "type": "string" },
-          "payload": { "type": "string" }
+          "payloadEncoding": { "type": ["string", "null"] },
+          "payload": {
+            "type": ["string", "null"],
+            "contentEncoding": "base64",
+            "x-cult-runtime-type": "bytes"
+          }
         }
       }
     },
-    "shardId": { "type": "string", "minLength": 1 },
-    "shardEpoch": { "type": "integer" },
-    "shardLogSequence": { "type": "integer" }
+    "shardId": { "type": ["string", "null"], "minLength": 1 },
+    "shardEpoch": { "type": ["integer", "null"] },
+    "shardLogSequence": { "type": ["integer", "null"] }
   }
 }

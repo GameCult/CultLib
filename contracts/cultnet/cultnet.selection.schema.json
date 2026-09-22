@@ -66,8 +66,16 @@
         }
       },
       "oneOf": [
-        { "required": ["values"], "properties": { "op": { "const": "any_of" } } },
-        { "required": ["number"], "properties": { "op": { "enum": ["lt", "le", "ge", "gt"] } } }
+        {
+          "required": ["values"],
+          "not": { "required": ["number"] },
+          "properties": { "op": { "const": "any_of" } }
+        },
+        {
+          "required": ["number"],
+          "not": { "required": ["values"] },
+          "properties": { "op": { "enum": ["lt", "le", "ge", "gt"] } }
+        }
       ]
     },
     "citation": {
