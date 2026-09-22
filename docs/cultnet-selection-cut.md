@@ -233,6 +233,39 @@ files, and both Mesh survivors now die. Delta: Mesh −3, Networking +62.
 - The anchor-matching fragility of `mutate-dotnet.ps1` (separator spelling) is
   recorded, not fixed.
 
+**Commit 4 landed** (Sonnet) at `00f4c02`, completing Cut 1's execution.
+- **Parity vectors (S12):** `contracts/cultnet/interop/selection-vectors.{cs,rs}-written.json`,
+  8 vectors each, read in both directions. Six are evaluated selections. Two
+  are door refusals: `schemas: []`, and a blank key.
+- **Door:** `keys: []` and `schemas: []` **are** refused (`CultNetSelection.cs:326/328`),
+  as ruled.
+- **Tests:** cultnet-rs 111 → 174, cultcache-rs 64 (unchanged), Networking
+  196 + 1 skip, Caching 192, Mesh 252/253.
+- **Mutation entries**, all killed:
+  - Rust 23/23;
+  - Caching 10/10, including 4 Q-J;
+  - Networking 15/15, including 5 Q-J.
+
+  S6 first survived. Its fixture now carries two references to the same
+  target under different roles. S9–S15 and S17 do not apply to Rust
+  (Rust has no subscription client).
+- **Open for Soul, highest first:**
+  - **No `cites` vectors cross the runtimes.** Hands says C#'s
+    `MatchesCitation` compares `Citation.Target.SchemaId` against the real
+    SHA-256 schema id with no alias fallback, so "this fixture pair cannot
+    agree". That is either a fixture limit or **a wire-parity gap in the
+    hop**, and parity is this cut's invariant. Soul settles which.
+  - **Size:** `selection.rs` is 1,407 lines and `contracts.rs` +595, about
+    2,000 in all against §14's roughly 430.
+  - Hands calls S20 "structurally vacuous" and S23 without a surface in Rust.
+    Both are claims, not yet reached, and need checking.
+- **A flaky test, recorded as a follow-up.**
+  `reactive_document_coalesces_direct_same_schema_alias_member_writes`
+  (`packages/cultnet-rs/tests/cultnet.rs`) fails under the harness's
+  invocation of the full binary and passes in isolation. The v0-lowering entry's
+  command was narrowed around it. It is not this cut's code. Its owner is the
+  reactive-document path.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
