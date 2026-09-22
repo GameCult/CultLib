@@ -42,6 +42,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# R-L: an entry's `File` (from -Entries, often written with forward slashes) is looked up against the
+# $targets dictionary keyed by -Target's own spelling. A bare string-key mismatch ("a\b.cs" vs
+# "a/b.cs") doesn't throw at the lookup - $targets[$file] just silently returns $null - so the crash
+# happens one call later, deep inside a .NET path/string API, as a null-argument error that reads
+# nothing like "unknown target". Normalizing both sides to '/' up front turns that into either a
+# clean match or an honest "Target ... does not exist" at line 99, never a null-argument surprise.
+function Normalize-TargetPath([string]$path) { $path -replace '\\', '/' }
+$Target = @($Target | ForEach-Object { Normalize-TargetPath $_ })
+
 $repo = if ($Repo) { (Resolve-Path -LiteralPath $Repo).Path } else { (Resolve-Path (Join-Path $PSScriptRoot '..')).Path }
 $testProjectPath = Join-Path $repo $TestProject
 $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -165,11 +174,11 @@ foreach ($mutation in $mutations) {
 
     Write-Host "--- $($mutation.Id) ($($mutation.Mutant)): $($mutation.Rule)"
     $texts = @{}
-    $files = @($edits | ForEach-Object { if ($_.File) { $_.File } elseif ($Target.Count -eq 1) { $Target[0] } else { throw "$($mutation.Id): an edit names no File and there is more than one target." } } | Select-Object -Unique)
+    $files = @($edits | ForEach-Object { if ($_.File) { Normalize-TargetPath $_.File } elseif ($Target.Count -eq 1) { $Target[0] } else { throw "$($mutation.Id): an edit names no File and there is more than one target." } } | Select-Object -Unique)
     foreach ($file in $files) { $texts[$file] = $utf8.GetString($originalBytes[$file]) }
 
     foreach ($edit in $edits) {
-        $file = if ($edit.File) { $edit.File } else { $Target[0] }
+        $file = if ($edit.File) { Normalize-TargetPath $edit.File } else { $Target[0] }
         $text = $texts[$file]
         $eol = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
         $old = ($edit.Old -replace "`r`n", "`n")

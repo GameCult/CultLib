@@ -7,11 +7,15 @@
   "properties": {
     "schemas": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "Absent means every schema. Present and empty is refused at the door (selection_invalid), never treated as \"every schema\": omit the field instead."
     },
     "keys": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "description": "Absent means every key. Present and empty is refused at the door (selection_invalid), never treated as \"every key\": omit the field instead."
     },
     "fields": {
       "type": "array",
@@ -25,7 +29,12 @@
       "default": "header"
     },
     "descending": { "type": "boolean", "default": false },
-    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "Clamped to 1..=200 by the answering server, not refused outside that range: an absent value or one outside the bound is treated as the nearer bound (absent = 200)."
+    },
     "cursor": { "type": "string" }
   },
   "$defs": {

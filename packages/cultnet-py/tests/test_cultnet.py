@@ -1954,11 +1954,19 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:logged"])
 
     def test_python_interop_peer_refuses_v1_selection_messages(self) -> None:
-        # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): a v0-only peer refuses a v1
-        # message loudly - cultnet.error.v0 { code: "unsupported_schema_version" } - rather than
+        # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): a v0-only peer refuses any
+        # non-v0 message loudly - cultnet.error.v0 { code: "unsupported_schema_version" } - rather than
         # silently answering with an empty list. handle_server_message never touches `state` before
-        # this refusal fires, so no PeerState fixture is needed here.
-        for schema_version in ("cultnet.snapshot_request.v1", "cultnet.database_subscribe.v1"):
+        # this refusal fires, so no PeerState fixture is needed here. R-L: the original check matched
+        # only ".v1" exactly, so v2+ silently fell through to an empty list instead of being refused -
+        # this covers v2 and v10 (double-digit) too, not only the exact v1 spelling.
+        for schema_version in (
+            "cultnet.snapshot_request.v1",
+            "cultnet.database_subscribe.v1",
+            "cultnet.snapshot_request.v2",
+            "cultnet.database_subscribe.v2",
+            "cultnet.snapshot_request.v10",
+        ):
             with self.subTest(schema_version=schema_version):
                 responses = handle_server_message(
                     None,  # type: ignore[arg-type]
