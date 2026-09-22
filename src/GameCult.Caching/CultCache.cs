@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
@@ -1230,44 +1231,105 @@ namespace GameCult.Caching
         // "a NaN or infinite member matches no comparison."
         private static string? RenderCanonicalNumber(object raw) => raw switch
         {
-            float f => float.IsNaN(f) || float.IsInfinity(f) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(f.ToString(CultureInfo.InvariantCulture))),
-            double d => double.IsNaN(d) || double.IsInfinity(d) ? null : CanonicalizeDecimalDigits(ExpandScientificNotation(d.ToString(CultureInfo.InvariantCulture))),
+            float f => float.IsNaN(f) || float.IsInfinity(f) ? null : RenderExactFloat(f),
+            double d => double.IsNaN(d) || double.IsInfinity(d) ? null : RenderExactDouble(d),
             decimal m => CanonicalizeDecimalDigits(m.ToString(CultureInfo.InvariantCulture)),
             _ => CanonicalizeDecimalDigits(Convert.ToString(raw, CultureInfo.InvariantCulture)!)
         };
 
-        // double/float's default ToString(CultureInfo.InvariantCulture) is .NET's shortest round-trip
-        // form since .NET Core 3.0, but it uses exponent notation outside a middle magnitude range
-        // ("1E+20", "1.5E-05"). Rewritten to positional digits before CanonicalizeDecimalDigits runs, so
-        // the wire never carries an exponent (S16's float64-rendering mutant: a long of 2^53+1 must
-        // compare greater than "9007199254740992", which a double-precision render would fail).
-        private static string ExpandScientificNotation(string value)
+        // R-D (docs/cultnet-selection-cut.md): the wire's canonical decimal is the value's exact decimal
+        // expansion, not a shortest round-trip form. .NET's default float/double ToString has used the
+        // shortest round-trip form since .NET Core 3.0, which rounds a tie between two decimals to
+        // whichever is "shorter" - Rust's shortest form breaks the same tie the other way at some
+        // values, so the two runtimes rendered different strings for the same bit pattern (394/200k f32,
+        // 48/200k f64 in the parity vectors). Every finite float and double is an exact dyadic rational
+        // (significand * 2^exponent for an integer significand and exponent), so it has a finite exact
+        // decimal expansion computed with BigInteger: multiply the significand by 5^-exponent when the
+        // exponent is negative (1/2^k == 5^k/10^k) to get the exact digits, and place the decimal point.
+        // No CLR floating-point arithmetic and no string round-tripping is on this path.
+        private static string RenderExactFloat(float value)
         {
-            var eIndex = value.IndexOfAny(ExponentMarkers);
-            if (eIndex < 0) return value;
+            var bits = BitConverter.SingleToInt32Bits(value);
+            var negative = bits < 0;
+            var biasedExponent = (bits >> 23) & 0xFF;
+            var mantissaBits = bits & 0x7FFFFF;
+            if (biasedExponent == 0 && mantissaBits == 0)
+                return "0"; // canonical zero: a single "0", never "-0" (Q-J).
 
-            var negative = value.Length > 0 && value[0] == '-';
-            var unsigned = negative ? value.Substring(1) : value;
-            eIndex = unsigned.IndexOfAny(ExponentMarkers);
-            var mantissa = unsigned.Substring(0, eIndex);
-            var exponent = int.Parse(unsigned.Substring(eIndex + 1), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
-
-            var dot = mantissa.IndexOf('.');
-            var digits = dot < 0 ? mantissa : mantissa.Remove(dot, 1);
-            var pointPosition = (dot < 0 ? digits.Length : dot) + exponent;
-
-            string expanded;
-            if (pointPosition <= 0)
-                expanded = "0." + new string('0', -pointPosition) + digits;
-            else if (pointPosition >= digits.Length)
-                expanded = digits + new string('0', pointPosition - digits.Length);
+            BigInteger significand;
+            int exponent;
+            if (biasedExponent == 0)
+            {
+                significand = mantissaBits;
+                exponent = -126 - 23; // subnormal: no implicit leading 1, minimum exponent.
+            }
             else
-                expanded = digits.Substring(0, pointPosition) + "." + digits.Substring(pointPosition);
+            {
+                significand = mantissaBits | (1 << 23);
+                exponent = biasedExponent - 127 - 23;
+            }
 
-            return negative ? "-" + expanded : expanded;
+            return RenderExactDecimal(negative, significand, exponent);
         }
 
-        private static readonly char[] ExponentMarkers = { 'E', 'e' };
+        private static string RenderExactDouble(double value)
+        {
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            var negative = bits < 0;
+            var biasedExponent = (int)((bits >> 52) & 0x7FF);
+            var mantissaBits = bits & 0xFFFFFFFFFFFFFL;
+            if (biasedExponent == 0 && mantissaBits == 0)
+                return "0"; // canonical zero: a single "0", never "-0" (Q-J).
+
+            BigInteger significand;
+            int exponent;
+            if (biasedExponent == 0)
+            {
+                significand = mantissaBits;
+                exponent = -1022 - 52; // subnormal: no implicit leading 1, minimum exponent.
+            }
+            else
+            {
+                significand = mantissaBits | (1L << 52);
+                exponent = biasedExponent - 1023 - 52;
+            }
+
+            return RenderExactDecimal(negative, significand, exponent);
+        }
+
+        // value = significand * 2^exponent, significand > 0. exponent >= 0 is an exact integer shift;
+        // exponent < 0 rewrites 2^exponent as 5^-exponent / 10^-exponent, so the digits are exact and
+        // the decimal point lands -exponent places from the right - no precision limit, no rounding.
+        private static string RenderExactDecimal(bool negative, BigInteger significand, int exponent)
+        {
+            string digits;
+            int fractionDigits;
+            if (exponent >= 0)
+            {
+                digits = (significand << exponent).ToString(CultureInfo.InvariantCulture);
+                fractionDigits = 0;
+            }
+            else
+            {
+                fractionDigits = -exponent;
+                digits = (significand * BigInteger.Pow(5, fractionDigits)).ToString(CultureInfo.InvariantCulture);
+            }
+
+            string positional;
+            if (fractionDigits == 0)
+            {
+                positional = digits;
+            }
+            else
+            {
+                if (digits.Length <= fractionDigits)
+                    digits = digits.PadLeft(fractionDigits + 1, '0');
+                var splitAt = digits.Length - fractionDigits;
+                positional = digits.Substring(0, splitAt) + "." + digits.Substring(splitAt);
+            }
+
+            return CanonicalizeDecimalDigits(negative ? "-" + positional : positional);
+        }
 
         // The one canonicalizer every rendered number passes through: strips leading integer zeros and
         // trailing fractional zeros, and collapses a negative value that reduces to zero into "0" - the

@@ -98,36 +98,9 @@ namespace GameCult.Networking
                 : null;
         }
 
-        /// <summary>
-        /// A selection whose schema filter also matches a document's wire binding id, when it carries
-        /// one different from its descriptor's own. <see cref="CultDocumentDescriptor"/> knows nothing
-        /// of <c>CultNetDocumentBinding</c>'s optional schema-id override, so a caller that has both in
-        /// hand (the two subscription servers) reconciles them here rather than in the evaluator, which
-        /// stays decoupled from CultNetDocumentRegistry by design.
-        /// </summary>
-        public static CultNetSelection WithBindingSchemaAlias(CultNetSelection selection, CultDocumentDescriptor descriptor, string? bindingSchemaId)
-        {
-            if (selection.Schemas is not { Length: > 0 } ||
-                string.IsNullOrEmpty(bindingSchemaId) ||
-                !selection.Schemas.Contains(bindingSchemaId, StringComparer.Ordinal) ||
-                MatchesAny(selection.Schemas, descriptor))
-            {
-                return selection;
-            }
-
-            return new CultNetSelection
-            {
-                Schemas = null,
-                Keys = selection.Keys,
-                Fields = selection.Fields,
-                Cites = selection.Cites,
-                Cited = selection.Cited,
-                Projection = selection.Projection,
-                Descending = selection.Descending,
-                Limit = selection.Limit,
-                Cursor = selection.Cursor
-            };
-        }
+        // R-M: WithBindingSchemaAlias (a second binding-alias reconciler, scoped to one descriptor) is
+        // deleted - CultNetDocumentRegistry.ExpandSchemaBindingAliases is the one copy every caller
+        // uses, CultNetDatabaseServer and CultNetDatabaseSubscriptionServer included.
     }
 
     /// <summary>
@@ -645,26 +618,19 @@ namespace GameCult.Networking
             {
                 Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
                 Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
-                Projection = CultNetSelectionProjections.Document,
-                Limit = CultNetSelectionEvaluator.LimitMax
+                Projection = CultNetSelectionProjections.Document
             };
             bool RowFilter(CultDocumentDescriptor descriptor, CultRecordKey key) =>
                 !string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key);
 
-            var documents = new List<CultNetRawDocumentRecord>();
-            string? cursor = null;
-            do
-            {
-                selection.Cursor = cursor;
-                var page = _documents.SelectPage(_cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, validate: false, options: null, rowFilter: RowFilter);
-                documents.AddRange(page.Documents ?? Array.Empty<CultNetRawDocumentRecord>());
-                cursor = page.Next;
-            } while (cursor != null);
+            // R-G: one evaluation answers the whole shard snapshot, not a loop that re-filters and
+            // re-sorts the shard's row set once per 200-row page.
+            var page = _documents.SelectAll(_cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, options: null, rowFilter: RowFilter);
 
             return new CultNetSnapshotResponseRawMessage
             {
                 MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
-                Documents = documents.ToArray(),
+                Documents = page.Documents ?? Array.Empty<CultNetRawDocumentRecord>(),
                 ShardId = shard.ShardId,
                 ShardEpoch = shard.Epoch,
                 ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
@@ -1303,6 +1269,15 @@ namespace GameCult.Networking
         /// </summary>
         public long? LastWriteSequence(string schemaId, CultRecordKey key) =>
             _lastWriteSequence.TryGetValue((schemaId, key.Value), out var sequence) ? sequence : null;
+
+        /// <summary>
+        /// The current write-sequence watermark this database can present an exact snapshot for (R-A):
+        /// the highest <see cref="LastWriteSequence"/> assigned to any row, 0 when nothing has been
+        /// committed yet. This is the evaluator's <c>asOf</c> for a v1 snapshot or subscription page - it
+        /// advances on every committed write, so a cursor minted against an older watermark refuses as
+        /// <c>cursor_stale</c> once a page's answer could differ.
+        /// </summary>
+        public ulong CurrentAsOf() => _lastWriteSequence.Count == 0 ? 0UL : (ulong)_lastWriteSequence.Values.Max();
 
         private void RecordMutationLogEntry(
             CultNetShardMutationLogEntry entry,

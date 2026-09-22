@@ -2755,9 +2755,7 @@ namespace GameCult.Mesh
                     exact = candidate;
                 else if (aliased == null && CultNetSchemaAliasMatching.Matches(candidate.SchemaId, descriptor))
                     aliased = candidate;
-                else if (byPayload == null &&
-                         CultNetDocumentRegistry.TryReadSchemaVersion(candidate.Payload) is { } payloadSchemaVersion &&
-                         CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor))
+                else if (byPayload == null && CultNetDocumentRegistry.PayloadMatchesSchema(candidate.Payload, descriptor))
                     byPayload = candidate;
             }
 

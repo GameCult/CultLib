@@ -18,11 +18,13 @@ namespace GameCult.Networking
         private readonly CultNetDatabase _database;
         private readonly CultNetDatabaseServerOptions _options;
         private readonly Func<CultNetSnapshotRequestMessage, CultNetServerPeer, Task> _snapshotHandler;
+        private readonly Func<CultNetSnapshotRequestV1Message, CultNetServerPeer, Task> _snapshotHandlerV1;
         private readonly Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task> _deleteHandler;
         private readonly Func<CultNetShardCatalogRequestMessage, CultNetServerPeer, Task> _shardCatalogHandler;
         private readonly Func<CultNetShardLogRequestMessage, CultNetServerPeer, Task> _shardLogHandler;
         private readonly Func<CultNetDatabaseSubscribeMessage, CultNetServerPeer, Task> _subscribeHandler;
+        private readonly Func<CultNetDatabaseSubscribeV1Message, CultNetServerPeer, Task> _subscribeHandlerV1;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, CultNetServerPeer, Task> _unsubscribeHandler;
         private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
         private bool _disposed;
@@ -39,19 +41,23 @@ namespace GameCult.Networking
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _options = options ?? new CultNetDatabaseServerOptions();
             _snapshotHandler = HandleSnapshotRequestAsync;
+            _snapshotHandlerV1 = HandleSnapshotRequestV1Async;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
             _shardCatalogHandler = HandleShardCatalogRequestAsync;
             _shardLogHandler = HandleShardLogRequestAsync;
             _subscribeHandler = HandleSubscribeAsync;
+            _subscribeHandlerV1 = HandleSubscribeV1Async;
             _unsubscribeHandler = HandleUnsubscribeAsync;
 
             _server.OnCultNet(_snapshotHandler);
+            _server.OnCultNet(_snapshotHandlerV1);
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
             _server.OnCultNet(_shardCatalogHandler);
             _server.OnCultNet(_shardLogHandler);
             _server.OnCultNet(_subscribeHandler);
+            _server.OnCultNet(_subscribeHandlerV1);
             _server.OnCultNet(_unsubscribeHandler);
         }
 
@@ -109,6 +115,22 @@ namespace GameCult.Networking
                 _database.Cache,
                 string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
                 request);
+        }
+
+        /// <summary>
+        /// Answers a typed-selection snapshot request (R-A, docs/cultnet-selection-cut.md): the door,
+        /// then one evaluation over the database's rows in last-write order, through
+        /// <see cref="CultNetDocumentRegistry.CreateSelectionResponse"/>.
+        /// </summary>
+        public CultNetSnapshotResponseRawV1Message CreateSelectionResponse(CultNetSnapshotRequestV1Message request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            return _database.Documents.CreateSelectionResponse(
+                _database.Cache,
+                string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
+                request.Selection,
+                ordinalOf: (schemaId, key) => _database.LastWriteSequence(schemaId, key) ?? 0,
+                asOf: _database.CurrentAsOf());
         }
 
         /// <summary>
@@ -193,11 +215,13 @@ namespace GameCult.Networking
 
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultNetSnapshotRequestMessage>(_snapshotHandler);
+            _server.RemoveCultNetMessageListener<CultNetSnapshotRequestV1Message>(_snapshotHandlerV1);
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
             _server.RemoveCultNetMessageListener<CultNetShardCatalogRequestMessage>(_shardCatalogHandler);
             _server.RemoveCultNetMessageListener<CultNetShardLogRequestMessage>(_shardLogHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
+            _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeV1Message>(_subscribeHandlerV1);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribeHandler);
             foreach (var subscription in _subscriptions.Values)
             {
@@ -210,6 +234,28 @@ namespace GameCult.Networking
         private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, CultNetServerPeer peer)
         {
             peer.SendCultNet(CreateSnapshotResponse(request));
+            return Task.CompletedTask;
+        }
+
+        private Task HandleSnapshotRequestV1Async(CultNetSnapshotRequestV1Message request, CultNetServerPeer peer)
+        {
+            try
+            {
+                peer.SendCultNet(CreateSelectionResponse(request));
+            }
+            catch (CultNetSelectionInvalidException ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+            }
+            catch (CultNetSelectionCursorException ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = $"{ex.Code}: {ex.Message}" });
+            }
+            catch (CultNetSelectionReferenceOutsideTargetException ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = $"reference_outside_target: {ex.Message}" });
+            }
+
             return Task.CompletedTask;
         }
 
@@ -315,6 +361,68 @@ namespace GameCult.Networking
             return Task.CompletedTask;
         }
 
+        private Task HandleSubscribeV1Async(CultNetDatabaseSubscribeV1Message message, CultNetServerPeer peer)
+        {
+            var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
+                ? message.MessageId
+                : message.SubscriptionId;
+            if (string.IsNullOrWhiteSpace(subscriptionId))
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                return Task.CompletedTask;
+            }
+
+            // This server delivers live changes through the single-row fast path (CreateChangeMessage /
+            // CultNetSelectionEvaluator.Matches), which is set-independent by construction - the same
+            // ceiling v0 subscriptions on this server already have. A hop-bearing selection is
+            // set-dependent (D6) and needs the subscription server's reconcile loop instead, so it is
+            // refused here rather than reaching Matches' own InvalidOperationException on the first change.
+            if (message.Selection.HasHop)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "selection_invalid: selection.cites/selection.cited need the subscription server's reconcile loop (D6); this server only fast-matches a single row." });
+                return Task.CompletedTask;
+            }
+
+            try
+            {
+                message.Selection.Validate(_database.Cache.Registry.AllDescriptors.ToArray());
+            }
+            catch (CultNetSelectionInvalidException ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+                return Task.CompletedTask;
+            }
+
+            var key = SubscriptionKey(peer.Peer, subscriptionId);
+            _subscriptions.AddOrUpdate(
+                key,
+                _ => CreateSubscription(message.Selection, subscriptionId, peer),
+                (_, existing) =>
+                {
+                    existing.Dispose();
+                    return CreateSubscription(message.Selection, subscriptionId, peer);
+                });
+
+            if (message.IncludeSnapshot)
+            {
+                peer.SendCultNet(CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+                {
+                    MessageId = message.MessageId,
+                    Selection = message.Selection
+                }));
+            }
+            else
+            {
+                peer.SendCultNet(new CultNetSnapshotResponseRawV1Message
+                {
+                    MessageId = message.MessageId,
+                    AsOf = _database.CurrentAsOf()
+                });
+            }
+
+            return Task.CompletedTask;
+        }
+
         private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage message, CultNetServerPeer peer)
         {
             var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
@@ -335,13 +443,21 @@ namespace GameCult.Networking
             CultNetServerPeer peer)
         {
             // v0 has no engine of its own (docs/cultnet-selection-cut.md, D3/D4): it lowers into a
-            // Selection and is matched by the one evaluator, same as a v1 subscribe would be.
+            // Selection and is matched by the one evaluator, same as a v1 subscribe.
             var selection = new CultNetSelection
             {
                 Schemas = request.SchemaIds,
                 Keys = request.RecordKeys,
                 Projection = CultNetSelectionProjections.Document
             };
+            return CreateSubscription(selection, subscriptionId, peer);
+        }
+
+        private IDisposable CreateSubscription(
+            CultNetSelection selection,
+            string subscriptionId,
+            CultNetServerPeer peer)
+        {
             return _database.WatchAllChanges().Subscribe(change =>
             {
                 var outbound = CreateChangeMessage(change, subscriptionId, selection);
@@ -370,8 +486,8 @@ namespace GameCult.Networking
                 return null;
             }
 
-            var binding = _database.Documents.GetByDocumentType(descriptor.DocumentType);
-            var effectiveSelection = CultNetSchemaAliasMatching.WithBindingSchemaAlias(selection, descriptor, binding?.SchemaId);
+            // R-M: the one binding-alias reconciler (CultNetDocumentRegistry.ExpandSchemaBindingAliases).
+            var effectiveSelection = _database.Documents.ExpandSchemaBindingAliases(selection);
             if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
             {
                 return null;

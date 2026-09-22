@@ -63,6 +63,8 @@ namespace GameCult.Networking
             public IReadOnlyList<Row> Rows { get; set; } = Array.Empty<Row>();
             public IReadOnlyList<EdgeMatch> Edges { get; set; } = Array.Empty<EdgeMatch>();
             public string? NextCursor { get; set; }
+            /// <summary>The selection's whole matching count, not this page's row count (R-G/C5).</summary>
+            public int TotalMatched { get; set; }
         }
 
         /// <summary>
@@ -96,10 +98,15 @@ namespace GameCult.Networking
                     return false;
                 if (op == CultNetSelectionOperator.AnyOf)
                 {
-                    if (!descriptor.TryGetIndexValue(document, field.Index, out var value) ||
-                        value == null ||
-                        field.Values == null ||
-                        !field.Values.Contains(value, StringComparer.Ordinal))
+                    // R-J: on a numeric alias, any_of compares the canonical rendering
+                    // (TryGetIndexNumber), not the string getter's culture-dependent ToString() - the
+                    // same rendering a comparison operator uses, so a numeric member's any_of and its
+                    // comparisons agree on what the row's value spells.
+                    var isNumeric = descriptor.DeclaredMembers.Any(member => member.IndexAlias == field.Index && member.IsNumeric);
+                    var value = isNumeric
+                        ? (descriptor.TryGetIndexNumber(document, field.Index, out var numeric) ? numeric : null)
+                        : (descriptor.TryGetIndexValue(document, field.Index, out var raw) ? raw : null);
+                    if (value == null || field.Values == null || !field.Values.Contains(value, StringComparer.Ordinal))
                         return false;
                 }
                 else
@@ -131,20 +138,35 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>One evaluation's full matching, ordered row set, with the edges its hop traversed anchored to the row that carries each one.</summary>
+        public sealed class FullEvaluation
+        {
+            /// <summary>Every matching row, in order, with no cursor or limit applied.</summary>
+            public IReadOnlyList<Row> Ordered { get; set; } = Array.Empty<Row>();
+            /// <summary>Every edge the hop traversed, each paired with the page-eligible row it is reported against: the citer under <c>cites</c>, the cited row under <c>cited</c> (R-B).</summary>
+            public IReadOnlyList<(EdgeMatch Edge, Row Anchor)> Edges { get; set; } = Array.Empty<(EdgeMatch, Row)>();
+        }
+
         /// <summary>
-        /// Evaluates a selection over the full row set: schemas/keys/fields, the hop (cites/cited,
-        /// with its edges and the reference_outside_target refusal), order, cursor and paging. The
-        /// caller projects the result to wire records (<see cref="CultNetDocumentRegistry"/> owns that).
+        /// Evaluates a selection's full matching, ordered row set and the edges its hop traversed, with
+        /// no cursor or limit applied - the door (R-F), schemas/keys/fields, the hop (cites/cited, with
+        /// the reference_outside_target refusal) and order all run exactly once here. This is the one
+        /// evaluation both a single v1 page (<see cref="Select"/>) and a v0/shard full walk page over,
+        /// instead of each page re-filtering and re-sorting the whole row set (R-G).
         /// </summary>
-        public static Evaluation Select(
+        public static FullEvaluation EvaluateAll(
             CultDocumentRegistry registry,
             IReadOnlyList<Row> allRows,
-            CultNetSelection selection,
-            ulong asOf)
+            CultNetSelection selection)
         {
             if (registry == null) throw new ArgumentNullException(nameof(registry));
             if (allRows == null) throw new ArgumentNullException(nameof(allRows));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
+
+            // R-F: the door is inside select. This is the one public entry point that evaluates a
+            // selection over a full row set, so validation cannot be skipped by a caller that forgets
+            // to gate it - a public entry point that answers an unvalidated selection does not exist.
+            selection.Validate(registry.AllDescriptors.ToArray());
 
             var byKey = new Dictionary<string, Row>(StringComparer.Ordinal);
             foreach (var row in allRows)
@@ -152,25 +174,64 @@ namespace GameCult.Networking
 
             var candidates = allRows.Where(row => MatchesSchemaKeysFields(row.Descriptor, row.Key, row.Document, selection));
 
-            var edges = new List<EdgeMatch>();
+            // R-B: cites and cited are opposite hop directions, and each keeps its own edge sink so an
+            // edge is always anchored to the row it will be reported against - the citer under cites,
+            // the cited row under cited - never filtered by "From is on the page" regardless of which
+            // direction the hop ran.
+            var citedEdges = new List<EdgeMatch>();
             if (selection.Cited != null)
             {
-                var incoming = BuildIncomingIndex(registry, byKey, selection.Cited.Role, edges);
+                var incoming = BuildIncomingIndex(registry, byKey, selection.Cited.Role, citedEdges);
                 var exists = selection.Cited.Exists;
                 candidates = candidates.Where(row => incoming.Contains(row.Key.Value) == exists);
             }
 
+            var citesEdges = new List<EdgeMatch>();
             if (selection.Cites != null)
             {
-                candidates = candidates.Where(row => MatchesCitation(registry, byKey, row, selection.Cites, edges));
+                candidates = candidates.Where(row => MatchesCitation(registry, byKey, row, selection.Cites, citesEdges));
             }
 
             var matched = candidates.ToArray();
             var ordered = (selection.Descending
-                    ? matched.OrderByDescending(row => row.Ordinal).ThenByDescending(row => row.Descriptor.SchemaId, StringComparer.Ordinal).ThenByDescending(row => row.Key.Value, StringComparer.Ordinal)
-                    : matched.OrderBy(row => row.Ordinal).ThenBy(row => row.Descriptor.SchemaId, StringComparer.Ordinal).ThenBy(row => row.Key.Value, StringComparer.Ordinal))
+                    ? matched.OrderByDescending(row => row.Ordinal).ThenByDescending(row => row.Descriptor.SchemaId, CultNetCodePointComparer.Instance).ThenByDescending(row => row.Key.Value, CultNetCodePointComparer.Instance)
+                    : matched.OrderBy(row => row.Ordinal).ThenBy(row => row.Descriptor.SchemaId, CultNetCodePointComparer.Instance).ThenBy(row => row.Key.Value, CultNetCodePointComparer.Instance))
                 .ToArray();
 
+            var edges = new List<(EdgeMatch, Row)>(citesEdges.Count + citedEdges.Count);
+            foreach (var edge in citesEdges) edges.Add((edge, edge.From));
+            foreach (var edge in citedEdges) edges.Add((edge, edge.To));
+
+            return new FullEvaluation { Ordered = ordered, Edges = edges };
+        }
+
+        /// <summary>
+        /// Evaluates a selection over the full row set and returns one cursor/limit page of it
+        /// (docs/cultnet-selection-cut.md, section 2/6). <see cref="Evaluation.TotalMatched"/> is the
+        /// selection's whole matching count, not this page's length (R-G/C5). The caller projects the
+        /// result to wire records (<see cref="CultNetDocumentRegistry"/> owns that).
+        /// </summary>
+        public static Evaluation Select(
+            CultDocumentRegistry registry,
+            IReadOnlyList<Row> allRows,
+            CultNetSelection selection,
+            ulong asOf)
+        {
+            var full = EvaluateAll(registry, allRows, selection);
+            return Page(full, selection, asOf);
+        }
+
+        /// <summary>
+        /// Slices one cursor/limit page out of an already-evaluated, already-ordered row set (R-G): the
+        /// v0/shard full walk calls this once per 200-row chunk of a single <see cref="EvaluateAll"/>
+        /// result instead of re-evaluating per page.
+        /// </summary>
+        public static Evaluation Page(FullEvaluation full, CultNetSelection selection, ulong asOf)
+        {
+            if (full == null) throw new ArgumentNullException(nameof(full));
+            if (selection == null) throw new ArgumentNullException(nameof(selection));
+
+            var ordered = full.Ordered;
             var startIndex = 0;
             if (!string.IsNullOrEmpty(selection.Cursor))
             {
@@ -184,17 +245,39 @@ namespace GameCult.Networking
 
             var limit = (int)Math.Clamp(selection.Limit ?? LimitMax, LimitMin, LimitMax);
             var page = ordered.Skip(startIndex).Take(limit).ToArray();
-            var hasNext = startIndex + page.Length < ordered.Length;
+            var hasNext = startIndex + page.Length < ordered.Count;
             var nextCursor = hasNext && page.Length > 0
                 ? CultNetSelectionCursor.Mint(asOf, page[^1], selection)
                 : null;
 
-            var pageKeys = new HashSet<string>(page.Select(row => row.Key.Value), StringComparer.Ordinal);
             var pageEdges = selection.HasHop
-                ? edges.Where(edge => pageKeys.Contains(edge.From.Key.Value)).ToArray()
+                ? EdgesFor(page, full)
                 : Array.Empty<EdgeMatch>();
 
-            return new Evaluation { Rows = page, Edges = pageEdges, NextCursor = nextCursor };
+            return new Evaluation { Rows = page, Edges = pageEdges, NextCursor = nextCursor, TotalMatched = ordered.Count };
+        }
+
+        // R-B: the order is deterministic - the page-row order, then (from, role, to) in code-point
+        // order. Grouping by the row an edge is anchored to (LINQ's OrderBy is stable, so the given
+        // rows' own order survives as the primary key) and breaking ties by the edge's own identity
+        // gives both without a second pass. Public because a v0/shard full walk (R-G, one evaluation
+        // answering every page) reports edges against its whole matched set, not one 200-row page.
+        public static EdgeMatch[] EdgesFor(IReadOnlyList<Row> rows, FullEvaluation full)
+        {
+            var pageRowIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (var i = 0; i < rows.Count; i++)
+                pageRowIndex[rows[i].Key.Value] = i;
+
+            return full.Edges
+                .Where(pair => pageRowIndex.ContainsKey(pair.Anchor.Key.Value))
+                .OrderBy(pair => pageRowIndex[pair.Anchor.Key.Value])
+                .ThenBy(pair => pair.Edge.From.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
+                .ThenBy(pair => pair.Edge.From.Key.Value, CultNetCodePointComparer.Instance)
+                .ThenBy(pair => pair.Edge.Role, CultNetCodePointComparer.Instance)
+                .ThenBy(pair => pair.Edge.To.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
+                .ThenBy(pair => pair.Edge.To.Key.Value, CultNetCodePointComparer.Instance)
+                .Select(pair => pair.Edge)
+                .ToArray();
         }
 
         private static int FindCursorPosition(IReadOnlyList<Row> ordered, CultNetSelectionCursor cursor, bool descending)
@@ -216,8 +299,8 @@ namespace GameCult.Networking
         {
             var ordinal = row.Ordinal.CompareTo(cursor.Ordinal);
             if (ordinal != 0) return ordinal;
-            var schema = string.CompareOrdinal(row.Descriptor.SchemaId, cursor.SchemaId);
-            return schema != 0 ? schema : string.CompareOrdinal(row.Key.Value, cursor.RecordKey);
+            var schema = CultNetCodePointComparer.Instance.Compare(row.Descriptor.SchemaId, cursor.SchemaId);
+            return schema != 0 ? schema : CultNetCodePointComparer.Instance.Compare(row.Key.Value, cursor.RecordKey);
         }
 
         // D9: a reference's target set is every registered leaf assignable to its declared target type.
@@ -251,7 +334,10 @@ namespace GameCult.Networking
                     if (!byKey.TryGetValue(targetKey.Value, out var resolved))
                         continue;
                     EnsureWithinDeclaredTarget(registry, member.TargetType, citer, role, resolved);
-                    if (resolved.Descriptor.SchemaId != citation.Target.SchemaId)
+                    // R-E: one schema-identity rule everywhere - a cites target goes through the alias
+                    // matcher, the same as `schemas`, instead of an exact CultDocumentDescriptor.SchemaId
+                    // compare that a schema alias or version string could never satisfy.
+                    if (!CultNetSchemaAliasMatching.Matches(citation.Target.SchemaId, resolved.Descriptor))
                         continue;
                     edgeSink.Add(new EdgeMatch(citer, role, resolved, payload));
                     found = true;
@@ -386,24 +472,129 @@ namespace GameCult.Networking
             return new CultNetSelectionCursor(asOf, ordinal, parts[2], parts[3], parts[4]);
         }
 
-        /// <summary>A digest of the selection with cursor and limit cleared, so a cursor is bound to the selection that minted it.</summary>
+        /// <summary>
+        /// A digest of the selection with cursor and limit cleared, so a cursor is bound to the
+        /// selection that minted it. R-H: every string and list is length-prefixed, so no delimiter
+        /// choice can make two different selections collide - the prior delimiter-joined form digested
+        /// values ["a|b"] the same as ["a","b"], and keys ["a,b"] the same as ["a","b"].
+        /// </summary>
         public static string ComputeDigest(CultNetSelection selection)
         {
-            var canonical = string.Join(
-                "",
-                string.Join(",", (selection.Schemas ?? Array.Empty<string>()).OrderBy(v => v, StringComparer.Ordinal)),
-                string.Join(",", (selection.Keys ?? Array.Empty<string>()).OrderBy(v => v, StringComparer.Ordinal)),
-                string.Join(";", (selection.Fields ?? Array.Empty<CultNetFieldPredicate>())
-                    .Select(f => $"{f.Index}:{f.Op}:{string.Join("|", f.Values ?? Array.Empty<string>())}:{f.Number}")),
-                selection.Cites == null ? "" : $"{selection.Cites.Target.SchemaId}/{selection.Cites.Target.RecordKey}:{selection.Cites.Role}",
-                selection.Cited == null ? "" : $"{selection.Cited.Role}:{selection.Cited.Exists}",
-                selection.Projection,
-                selection.Descending.ToString());
+            var sb = new StringBuilder();
+            AppendList(sb, selection.Schemas);
+            AppendList(sb, selection.Keys);
+
+            var fields = selection.Fields ?? Array.Empty<CultNetFieldPredicate>();
+            sb.Append(fields.Length).Append(':');
+            foreach (var field in fields)
+            {
+                AppendString(sb, field.Index);
+                AppendString(sb, field.Op);
+                AppendList(sb, field.Values);
+                AppendString(sb, field.Number ?? string.Empty);
+                sb.Append(field.Number == null ? '0' : '1');
+            }
+
+            if (selection.Cites != null)
+            {
+                sb.Append('1');
+                AppendString(sb, selection.Cites.Target.SchemaId);
+                AppendString(sb, selection.Cites.Target.RecordKey);
+                AppendString(sb, selection.Cites.Role ?? string.Empty);
+                sb.Append(selection.Cites.Role == null ? '0' : '1');
+            }
+            else
+            {
+                sb.Append('0');
+            }
+
+            if (selection.Cited != null)
+            {
+                sb.Append('1');
+                AppendString(sb, selection.Cited.Role);
+                sb.Append(selection.Cited.Exists ? '1' : '0');
+            }
+            else
+            {
+                sb.Append('0');
+            }
+
+            AppendString(sb, selection.Projection);
+            sb.Append(selection.Descending ? '1' : '0');
+
             using var sha = SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(canonical));
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
             var hex = new StringBuilder(bytes.Length * 2);
             foreach (var b in bytes) hex.Append(b.ToString("x2", CultureInfo.InvariantCulture));
             return hex.ToString();
+        }
+
+        /// <summary>Appends one length-prefixed string: unambiguous regardless of what the string itself contains.</summary>
+        private static void AppendString(StringBuilder sb, string value)
+        {
+            sb.Append(value.Length).Append(':').Append(value);
+        }
+
+        /// <summary>Appends a count-prefixed list of length-prefixed strings, sorted by code point so the digest does not depend on wire order.</summary>
+        private static void AppendList(StringBuilder sb, IReadOnlyList<string>? values)
+        {
+            var ordered = (values ?? Array.Empty<string>()).OrderBy(v => v, CultNetCodePointComparer.Instance).ToArray();
+            sb.Append(ordered.Length).Append(':');
+            foreach (var value in ordered)
+                AppendString(sb, value);
+        }
+    }
+
+    /// <summary>
+    /// Compares two strings by Unicode code point, not UTF-16 code unit (R-C, docs/cultnet-selection-cut.md).
+    /// .NET's ordinal comparers (StringComparer.Ordinal, string.CompareOrdinal) compare UTF-16 code
+    /// units, which sorts every astral character (encoded as a surrogate pair whose high half is in
+    /// U+D800-U+DBFF) before every BMP character at or above U+E000 - the opposite of code-point order,
+    /// and the opposite of what Rust gets by comparing UTF-8 bytes. Every ordered comparison the
+    /// selection vocabulary makes - the row tiebreak, the cursor position, and edge order - uses this
+    /// instead, so an astral key sorts the same way in both runtimes.
+    /// </summary>
+    public sealed class CultNetCodePointComparer : IComparer<string>
+    {
+        public static readonly CultNetCodePointComparer Instance = new();
+
+        private CultNetCodePointComparer() { }
+
+        public int Compare(string? x, string? y)
+        {
+            if (ReferenceEquals(x, y)) return 0;
+            if (x == null) return -1;
+            if (y == null) return 1;
+
+            var xi = 0;
+            var yi = 0;
+            while (xi < x.Length && yi < y.Length)
+            {
+                var xCodePoint = CodePointAt(x, xi, out var xSize);
+                var yCodePoint = CodePointAt(y, yi, out var ySize);
+                if (xCodePoint != yCodePoint)
+                    return xCodePoint < yCodePoint ? -1 : 1;
+                xi += xSize;
+                yi += ySize;
+            }
+
+            return (x.Length - xi).CompareTo(y.Length - yi);
+        }
+
+        // A lone (unpaired) surrogate is not valid UTF-16, but a comparer must not throw on it - it is
+        // treated as its own code unit value. It never round-trips to the wire as anything but
+        // well-formed text, so this only has to not crash.
+        private static int CodePointAt(string value, int index, out int size)
+        {
+            var unit = value[index];
+            if (char.IsHighSurrogate(unit) && index + 1 < value.Length && char.IsLowSurrogate(value[index + 1]))
+            {
+                size = 2;
+                return char.ConvertToUtf32(unit, value[index + 1]);
+            }
+
+            size = 1;
+            return unit;
         }
     }
 }

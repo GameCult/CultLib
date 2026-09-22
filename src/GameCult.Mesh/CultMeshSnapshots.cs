@@ -833,6 +833,12 @@ namespace GameCult.Mesh
         {
             if (selection == null)
                 return;
+            // The door runs first (docs/cultnet-selection-cut.md, R-F): Mesh has no descriptor list to
+            // check field/role reachability against, but the declaration-independent half of the door -
+            // an empty or blank-only schemas/keys list, an unrecognised projection - applies here just
+            // as it does inside CultNetSelectionEvaluator.Select, so Keys=[]/[""] is refused rather than
+            // silently lowered to "every key".
+            CultNetSelectionValidation.ValidateShape(selection);
             if (selection.Fields != null)
                 throw new CultNetSelectionInvalidException("fields", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.fields cannot reach the wire (FU-Mesh-v1).");
             if (selection.Cites != null)
@@ -974,8 +980,7 @@ namespace GameCult.Mesh
                 var canDeserializeAsSchemaAlias =
                     CultNetSchemaAliasMatching.Matches(record.SchemaId, descriptor) ||
                     (binding != null && CultNetSchemaAliasMatching.Matches(binding.SchemaId, descriptor)) ||
-                    (CultNetDocumentRegistry.TryReadSchemaVersion(record.Payload) is { } payloadSchemaVersion &&
-                     CultNetSchemaAliasMatching.Matches(payloadSchemaVersion, descriptor));
+                    CultNetDocumentRegistry.PayloadMatchesSchema(record.Payload, descriptor);
                 if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
 

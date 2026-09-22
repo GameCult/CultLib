@@ -70,8 +70,12 @@ namespace GameCult.Networking
         /// <summary>
         /// Forbids leading zeros, a trailing fractional zero or bare point, an explicit '+', exponent
         /// notation, and whitespace. Does not by itself forbid "-0"; <see cref="IsCanonical"/> does.
+        /// Anchored with <c>\z</c>, not <c>$</c>: .NET's <c>$</c> matches immediately before a single
+        /// trailing newline even without <see cref="System.Text.RegularExpressions.RegexOptions.Multiline"/>,
+        /// so a naive <c>$</c> here would accept "5\n" as canonical (R-D/Q-J; the JSON schema's ECMA-262
+        /// <c>$</c> has no such exception and already refused it).
         /// </summary>
-        public const string Pattern = @"^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$";
+        public const string Pattern = @"\A-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?\z";
 
         private static readonly Regex CanonicalRegex = new(Pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -318,10 +322,17 @@ namespace GameCult.Networking
     /// </summary>
     public static class CultNetSelectionValidation
     {
-        public static void Validate(this CultNetSelection selection, IReadOnlyList<CultDocumentDescriptor> allDescriptors)
+        /// <summary>
+        /// The declaration-independent half of the door: empty/blank <c>schemas</c>/<c>keys</c> and an
+        /// unrecognised <c>projection</c>. Runs first inside <see cref="Validate"/>, and is also the
+        /// whole door for a caller with no descriptor list in hand - CultMesh's
+        /// <c>EnsureV0Compatible</c> (docs/cultnet-selection-cut.md, R-F) runs this before its own v0
+        /// transport refusals, so <c>Keys=[]</c>/<c>[""]</c> is refused there too, not only in the
+        /// reference runtime's full evaluator path.
+        /// </summary>
+        public static void ValidateShape(CultNetSelection selection)
         {
             if (selection == null) throw new ArgumentNullException(nameof(selection));
-            if (allDescriptors == null) throw new ArgumentNullException(nameof(allDescriptors));
 
             if (selection.Schemas != null && selection.Schemas.Length == 0)
                 throw new CultNetSelectionInvalidException("schemas", null, "selection.schemas is present and empty; omit it to reach every schema.");
@@ -345,6 +356,13 @@ namespace GameCult.Networking
             }
             if (selection.Projection is not (CultNetSelectionProjections.Header or CultNetSelectionProjections.Document))
                 throw new CultNetSelectionInvalidException("projection", selection.Projection, $"selection.projection \"{selection.Projection}\" is neither \"header\" nor \"document\".");
+        }
+
+        public static void Validate(this CultNetSelection selection, IReadOnlyList<CultDocumentDescriptor> allDescriptors)
+        {
+            if (allDescriptors == null) throw new ArgumentNullException(nameof(allDescriptors));
+
+            ValidateShape(selection);
 
             var reachable = ReachableSchemas(selection, allDescriptors);
             if (selection.Fields != null)

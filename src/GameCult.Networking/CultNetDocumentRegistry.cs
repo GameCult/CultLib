@@ -273,8 +273,8 @@ namespace GameCult.Networking
         /// <summary>
         /// Creates a raw snapshot response from the cache. v0 has no selector engine of its own
         /// (docs/cultnet-selection-cut.md, D3/D4): the filter lowers into a <see cref="CultNetSelection"/>
-        /// and is answered by <see cref="CultNetSelectionEvaluator"/>, walking every page it returns so a
-        /// v0 caller still sees its whole matching set in one message.
+        /// and is answered by <see cref="CultNetSelectionEvaluator"/> in one evaluation (R-G), so a v0
+        /// caller sees its whole matching set in one message without re-filtering the cache per page.
         /// </summary>
         public CultNetSnapshotResponseRawMessage CreateRawSnapshotResponse(
             CultCache cache,
@@ -287,24 +287,15 @@ namespace GameCult.Networking
             {
                 Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
                 Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
-                Projection = CultNetSelectionProjections.Document,
-                Limit = CultNetSelectionEvaluator.LimitMax
+                Projection = CultNetSelectionProjections.Document
             };
 
-            var documents = new List<CultNetRawDocumentRecord>();
-            string? cursor = null;
-            do
-            {
-                selection.Cursor = cursor;
-                var page = SelectPage(cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, validate: false, options);
-                documents.AddRange(page.Documents ?? Array.Empty<CultNetRawDocumentRecord>());
-                cursor = page.Next;
-            } while (cursor != null);
+            var page = SelectAll(cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, options);
 
             return new CultNetSnapshotResponseRawMessage
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
-                Documents = documents.ToArray()
+                Documents = page.Documents ?? Array.Empty<CultNetRawDocumentRecord>()
             };
         }
 
@@ -326,7 +317,7 @@ namespace GameCult.Networking
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
 
-            var page = SelectPage(cache, selection, ordinalOf, asOf, validate: true, options);
+            var page = SelectPage(cache, selection, ordinalOf, asOf, options);
             return new CultNetSnapshotResponseRawV1Message
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),
@@ -349,13 +340,13 @@ namespace GameCult.Networking
             CultNetSelection selection,
             Func<string, CultRecordKey, long> ordinalOf,
             ulong asOf,
-            bool validate,
             CultNetDocumentMessageOptions? options,
             Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null)
         {
             selection = ExpandSchemaBindingAliases(selection);
-            if (validate)
-                selection.Validate(_documents.AllDescriptors.ToArray());
+            // R-F: CultNetSelectionEvaluator.Select validates first, every time - there is no separate
+            // validate flag here any more, because a public evaluation path that can skip the door is
+            // exactly what R-F closes.
 
             var stored = cache.AllStoredDocuments;
             if (rowFilter != null)
@@ -370,7 +361,8 @@ namespace GameCult.Networking
 
             return new CultNetSelectionPage
             {
-                Matched = (uint)records.Length,
+                // R-G/C5: the selection's whole matching count, not this page's row count.
+                Matched = (uint)evaluation.TotalMatched,
                 AsOf = asOf,
                 Next = evaluation.NextCursor,
                 Documents = wantDocument ? records : null,
@@ -379,12 +371,56 @@ namespace GameCult.Networking
             };
         }
 
+        /// <summary>
+        /// Evaluates a selection over every row the cache holds and projects every matched row - no
+        /// cursor, no 200-row cap. The v0 lowering and the shard-bounded snapshot both answer their
+        /// whole matching set in one message, so they call this once instead of paging through
+        /// <see cref="SelectPage"/> in a loop that re-filters and re-sorts the same row set per page
+        /// (R-G: "answer v0 and shard paging from one evaluation").
+        /// </summary>
+        internal CultNetSelectionPage SelectAll(
+            CultCache cache,
+            CultNetSelection selection,
+            Func<string, CultRecordKey, long> ordinalOf,
+            ulong asOf,
+            CultNetDocumentMessageOptions? options,
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null)
+        {
+            selection = ExpandSchemaBindingAliases(selection);
+
+            var stored = cache.AllStoredDocuments;
+            if (rowFilter != null)
+                stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
+            var rows = stored
+                .Select(entry => new CultNetSelectionEvaluator.Row(
+                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
+                .ToArray();
+
+            var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
+            var records = full.Ordered.Select(row => ToRawRecord(row, options)).ToArray();
+            var wantDocument = selection.Projection == CultNetSelectionProjections.Document;
+            var edges = selection.HasHop
+                ? CultNetSelectionEvaluator.EdgesFor(full.Ordered, full).Select(edge => ToEdge(edge, wantDocument)).ToArray()
+                : null;
+
+            return new CultNetSelectionPage
+            {
+                Matched = (uint)full.Ordered.Count,
+                AsOf = asOf,
+                Next = null,
+                Documents = wantDocument ? records : null,
+                Headers = wantDocument ? null : records.Select(CultNetRawDocumentHeader.FromRecord).ToArray(),
+                Edges = edges
+            };
+        }
+
         // A CultDocumentDescriptor knows nothing of CultNetDocumentBinding's optional schema-id
         // override; a caller filtering by that wire id (rather than the descriptor's own) needs the
         // descriptor's own id present in the selection too, since CultNetSelectionEvaluator only ever
-        // reads descriptors. Mirrors CultNetSchemaAliasMatching.WithBindingSchemaAlias, at the layer
-        // that owns every binding rather than one row's.
-        private CultNetSelection ExpandSchemaBindingAliases(CultNetSelection selection)
+        // reads descriptors. R-M: this is the one copy - both CultNetDatabaseServer's and
+        // CultNetDatabaseSubscriptionServer's single-change fast path call this too instead of carrying
+        // their own CultNetSchemaAliasMatching.WithBindingSchemaAlias (deleted).
+        internal CultNetSelection ExpandSchemaBindingAliases(CultNetSelection selection)
         {
             if (selection.Schemas is not { Length: > 0 } || _bindingsByType.Count == 0)
                 return selection;
@@ -459,20 +495,30 @@ namespace GameCult.Networking
 
         private CultNetEdge ToEdge(CultNetSelectionEvaluator.EdgeMatch edge, bool wantDocument)
         {
+            // R-E: ToRawRecord and ToEdge emit the same id for the same row - the wire schema id a
+            // binding overrides to (WireSchemaId), never the descriptor's own id when the two differ.
             var wire = new CultNetEdge
             {
-                From = new CultNetRecordRef { SchemaId = edge.From.Descriptor.SchemaId, RecordKey = edge.From.Key.Value },
+                From = new CultNetRecordRef { SchemaId = WireSchemaId(edge.From.Descriptor), RecordKey = edge.From.Key.Value },
                 Role = edge.Role,
-                To = new CultNetRecordRef { SchemaId = edge.To.Descriptor.SchemaId, RecordKey = edge.To.Key.Value }
+                To = new CultNetRecordRef { SchemaId = WireSchemaId(edge.To.Descriptor), RecordKey = edge.To.Key.Value }
             };
             if (wantDocument && edge.Payload != null)
             {
                 wire.PayloadEncoding = "messagepack";
-                wire.Payload = CultDocumentMessagePackSerialization.SerializeUntyped(edge.Payload, edge.Payload.GetType(), _documents);
+                // A dictionary reference's payload is typed by the member's declared value type (D11) -
+                // routinely a plain value like float, not a registered CultDocument - so this serializes
+                // it directly rather than through CultDocumentMessagePackSerialization.SerializeUntyped,
+                // which requires the type to be a registered document and throws otherwise.
+                wire.Payload = MessagePackSerializer.Serialize(edge.Payload.GetType(), edge.Payload, CultNetSchemaMessageSerialization.Options);
             }
 
             return wire;
         }
+
+        /// <summary>The wire schema id this registry answers with for a descriptor - its binding's override when one is registered, else the descriptor's own id (R-E: the same id <see cref="ToRawRecord(CultNetSelectionEvaluator.Row, CultNetDocumentMessageOptions?)"/> emits).</summary>
+        private string WireSchemaId(CultDocumentDescriptor descriptor) =>
+            GetByDocumentType(descriptor.DocumentType)?.SchemaId ?? descriptor.SchemaId;
 
         /// <summary>
         /// Applies a raw document put message to a cache.
@@ -641,15 +687,27 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// True when a raw payload's embedded <c>schemaVersion</c> stamp (when it carries one) aliases
+        /// the given descriptor - the "foreign schema id" fallback shared by CultMesh's peer-snapshot
+        /// read and its typed-document decode (docs/cultnet-selection-cut.md, R-L: one registry method
+        /// taking the descriptor, replacing two call sites that each read the payload and alias-matched
+        /// it by hand). <see cref="TryReadSchemaVersion"/> stays internal: a caller with an already-known
+        /// descriptor never needs the raw schema-version string itself, only this answer.
+        /// </summary>
+        public static bool PayloadMatchesSchema(byte[] payload, CultDocumentDescriptor descriptor) =>
+            TryReadSchemaVersion(payload) is { } schemaVersion &&
+            CultNetSchemaAliasMatching.Matches(schemaVersion, descriptor);
+
+        /// <summary>
         /// Reads a raw payload's embedded <c>schemaVersion</c> stamp, when it carries one - the parse
         /// step of the registry's payload-schema decode rule, shared with
-        /// <see cref="TryResolveDescriptorByPayloadSchema"/> and every "foreign schema id" fallback in
-        /// CultNet and CultMesh (docs/cultnet-selection-cut.md, section 4/S2-5). A caller matching
-        /// against one already-known descriptor (rather than resolving "whichever registered type owns
-        /// this schema string", which is ambiguous when two document types alias the same schema id)
-        /// should alias-match this string with <see cref="CultNetSchemaAliasMatching"/> directly.
+        /// <see cref="TryResolveDescriptorByPayloadSchema"/> and <see cref="PayloadMatchesSchema"/>
+        /// (docs/cultnet-selection-cut.md, section 4/S2-5, R-L). Internal: a caller outside this
+        /// assembly matching against one already-known descriptor uses <see cref="PayloadMatchesSchema"/>;
+        /// resolving "whichever registered type owns this schema string" (ambiguous when two document
+        /// types alias the same schema id) is <see cref="TryResolveDescriptorByPayloadSchema"/>'s job.
         /// </summary>
-        public static string? TryReadSchemaVersion(byte[] payload)
+        internal static string? TryReadSchemaVersion(byte[] payload)
         {
             try
             {

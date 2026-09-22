@@ -22,14 +22,15 @@ namespace GameCult.Networking
         private readonly ICultNetSchemaServer _server;
         private readonly CultNetDatabase _database;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, Task> _subscribe;
+        private readonly Func<CultNetDatabaseSubscribeV1Message, ICultNetSchemaServerPeer, Task> _subscribeV1;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? _authorizeRequest;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? _authorizeRecord;
         private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
-        private readonly ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage> _requests =
-            new ConcurrentDictionary<SubscriptionKey, CultNetDatabaseSubscribeMessage>(SubscriptionKeyComparer.Instance);
+        private readonly ConcurrentDictionary<SubscriptionKey, SubscriptionRequest> _requests =
+            new ConcurrentDictionary<SubscriptionKey, SubscriptionRequest>(SubscriptionKeyComparer.Instance);
         private readonly ConcurrentDictionary<SubscriptionKey, SubscriptionProjectionState> _projections =
             new ConcurrentDictionary<SubscriptionKey, SubscriptionProjectionState>(SubscriptionKeyComparer.Instance);
         private readonly object _lifecycleGate = new();
@@ -47,8 +48,10 @@ namespace GameCult.Networking
             _authorizeRequest = authorizeRequest;
             _authorizeRecord = authorizeRecord;
             _subscribe = HandleSubscribeAsync;
+            _subscribeV1 = HandleSubscribeV1Async;
             _unsubscribe = HandleUnsubscribeAsync;
             _server.OnCultNet(_subscribe);
+            _server.OnCultNet(_subscribeV1);
             _server.OnCultNet(_unsubscribe);
             _peerLifecycle = server as ICultNetSchemaServerPeerLifecycle;
             if (_peerLifecycle != null)
@@ -86,6 +89,7 @@ namespace GameCult.Networking
                 if (_disposed) return;
                 _disposed = true;
                 _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribe);
+                _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeV1Message>(_subscribeV1);
                 _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribe);
                 if (_peerLifecycle != null)
                     _peerLifecycle.PeerDisconnected -= HandlePeerDisconnected;
@@ -109,6 +113,33 @@ namespace GameCult.Networking
 
         private Task HandleSubscribeAsync(CultNetDatabaseSubscribeMessage request, ICultNetSchemaServerPeer peer)
         {
+            // v0 has no engine of its own (docs/cultnet-selection-cut.md, D3/D4): it lowers into a
+            // Selection and is matched by the one evaluator, same as a v1 subscribe.
+            var selection = new CultNetSelection
+            {
+                Schemas = request.SchemaIds,
+                Keys = request.RecordKeys,
+                Projection = CultNetSelectionProjections.Document
+            };
+            var subscriptionRequest = new SubscriptionRequest(
+                selection, request.MessageId, request.SubscriptionId, request.IncludeSnapshot,
+                request.ConsumerRuntimeId, request.BodyIds, request.SupportedBodyTransports, isV1: false);
+            return Subscribe(subscriptionRequest, peer);
+        }
+
+        private Task HandleSubscribeV1Async(CultNetDatabaseSubscribeV1Message request, ICultNetSchemaServerPeer peer)
+        {
+            var subscriptionRequest = new SubscriptionRequest(
+                request.Selection, request.MessageId, request.SubscriptionId, request.IncludeSnapshot,
+                request.ConsumerRuntimeId, request.BodyIds, request.SupportedBodyTransports, isV1: true);
+            return Subscribe(subscriptionRequest, peer);
+        }
+
+        // R-A: the one subscribe core both v0 (lowered) and v1 selections run through - the door
+        // (validate), the watch (D6: reconcile on every change for a hop-bearing selection, the fast
+        // single-row path otherwise), the initial snapshot in each version's own wire shape, and demand.
+        private Task Subscribe(SubscriptionRequest request, ICultNetSchemaServerPeer peer)
+        {
             var subscriptionId = string.IsNullOrWhiteSpace(request.SubscriptionId)
                 ? request.MessageId
                 : request.SubscriptionId;
@@ -117,7 +148,19 @@ namespace GameCult.Networking
                 peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
                 return Task.CompletedTask;
             }
-            if (_authorizeRequest?.Invoke(request, peer) == false)
+
+            try
+            {
+                request.Selection.Validate(_database.Cache.Registry.AllDescriptors.ToArray());
+            }
+            catch (CultNetSelectionInvalidException ex)
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = $"selection_invalid: {ex.Message}" });
+                return Task.CompletedTask;
+            }
+
+            var legacyRequest = request.ToLegacyShape(subscriptionId);
+            if (_authorizeRequest?.Invoke(legacyRequest, peer) == false)
             {
                 peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription is not authorized for this peer." });
                 return Task.CompletedTask;
@@ -138,19 +181,11 @@ namespace GameCult.Networking
                         var snapshot = CreateProjectedSnapshot(request, peer);
                         foreach (var entry in snapshot.BySourceRecordKey)
                             projection.DeliveredBySourceRecordKey[entry.Key] = entry.Value;
-                        peer.SendCultNet(new CultNetSnapshotResponseRawMessage
-                        {
-                            MessageId = request.MessageId,
-                            Documents = snapshot.Documents
-                        });
+                        SendSnapshot(peer, request, snapshot);
                     }
                     else
                     {
-                        peer.SendCultNet(new CultNetSnapshotResponseRawMessage
-                        {
-                            MessageId = request.MessageId,
-                            Documents = Array.Empty<CultNetRawDocumentRecord>()
-                        });
+                        SendSnapshot(peer, request, ProjectedSnapshot.Empty);
                     }
                     PublishDemand(request, key, active: true);
                     projection.DemandActive = true;
@@ -162,6 +197,30 @@ namespace GameCult.Networking
                 }
             }
             return Task.CompletedTask;
+        }
+
+        private static void SendSnapshot(ICultNetSchemaServerPeer peer, SubscriptionRequest request, ProjectedSnapshot snapshot)
+        {
+            if (request.IsV1)
+            {
+                var wantDocument = request.Selection.Projection == CultNetSelectionProjections.Document;
+                peer.SendCultNet(new CultNetSnapshotResponseRawV1Message
+                {
+                    MessageId = request.MessageId,
+                    Matched = (uint)snapshot.Documents.Length,
+                    Documents = wantDocument ? snapshot.Documents : null,
+                    Headers = wantDocument ? null : snapshot.Documents.Select(CultNetRawDocumentHeader.FromRecord).ToArray(),
+                    Edges = request.Selection.HasHop ? snapshot.Edges : null
+                });
+            }
+            else
+            {
+                peer.SendCultNet(new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = request.MessageId,
+                    Documents = snapshot.Documents
+                });
+            }
         }
 
         private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage request, ICultNetSchemaServerPeer peer)
@@ -179,18 +238,18 @@ namespace GameCult.Networking
         }
 
         private void PublishDemand(
-            CultNetDatabaseSubscribeMessage request,
+            SubscriptionRequest request,
             SubscriptionKey key,
             bool active)
         {
             DemandChanged?.Invoke(new CultNetDatabaseSubscriptionDemand(
                 string.IsNullOrWhiteSpace(request.ConsumerRuntimeId) ? key.Id : request.ConsumerRuntimeId!,
                 key.Id,
-                (request.RecordKeys ?? Array.Empty<string>())
+                (request.Selection.Keys ?? Array.Empty<string>())
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Distinct(StringComparer.Ordinal)
                     .ToArray(),
-                (request.SchemaIds ?? Array.Empty<string>())
+                (request.Selection.Schemas ?? Array.Empty<string>())
                     .Where(value => !string.IsNullOrWhiteSpace(value))
                     .Distinct(StringComparer.Ordinal)
                     .ToArray(),
@@ -214,18 +273,28 @@ namespace GameCult.Networking
         }
 
         private IDisposable Watch(
-            CultNetDatabaseSubscribeMessage request,
+            SubscriptionRequest request,
             string subscriptionId,
             ICultNetSchemaServerPeer peer,
             SubscriptionKey key)
         {
+            var legacyRequest = request.ToLegacyShape(subscriptionId);
             return _database.WatchAllChanges().Subscribe(change =>
             {
                 lock (_lifecycleGate)
                 {
                     if (_disposed || !_requests.ContainsKey(key) || !_projections.TryGetValue(key, out var projection))
                         return;
-                    if (_authorizeRequest?.Invoke(request, peer) == false)
+                    if (_authorizeRequest?.Invoke(legacyRequest, peer) == false)
+                    {
+                        Reconcile(key, request);
+                        return;
+                    }
+
+                    // D6: cites/cited are set-dependent - a change to row B can change whether row A
+                    // matches - so a hop-bearing selection runs the full diff-against-delivered
+                    // reconcile on every change instead of the single-row fast path.
+                    if (request.Selection.HasHop)
                     {
                         Reconcile(key, request);
                         return;
@@ -243,10 +312,11 @@ namespace GameCult.Networking
             });
         }
 
-        private void Reconcile(SubscriptionKey key, CultNetDatabaseSubscribeMessage request)
+        private void Reconcile(SubscriptionKey key, SubscriptionRequest request)
         {
             if (!_projections.TryGetValue(key, out var projection)) return;
-            var authorized = _authorizeRequest?.Invoke(request, key.Peer) != false;
+            var legacyRequest = request.ToLegacyShape(key.Id);
+            var authorized = _authorizeRequest?.Invoke(legacyRequest, key.Peer) != false;
             var next = authorized
                 ? CreateProjectedSnapshot(request, key.Peer)
                 : ProjectedSnapshot.Empty;
@@ -284,30 +354,40 @@ namespace GameCult.Networking
         }
 
         private ProjectedSnapshot CreateProjectedSnapshot(
-            CultNetDatabaseSubscribeMessage request,
+            SubscriptionRequest request,
             ICultNetSchemaServerPeer peer)
         {
-            var snapshot = _database.Documents.CreateRawSnapshotResponse(
+            var legacyRequest = request.ToLegacyShape(request.SubscriptionId);
+            // Both v0 (lowered) and v1 selections evaluate through SelectAll: one evaluation over the
+            // whole matching set (R-G), documents always (this projects the wire record regardless of
+            // the selection's own header/document projection - SendSnapshot applies that afterward).
+            var documentSelection = new CultNetSelection
+            {
+                Schemas = request.Selection.Schemas,
+                Keys = request.Selection.Keys,
+                Fields = request.Selection.Fields,
+                Cites = request.Selection.Cites,
+                Cited = request.Selection.Cited,
+                Projection = CultNetSelectionProjections.Document
+            };
+            var page = _database.Documents.SelectAll(
                 _database.Cache,
-                request.MessageId,
-                new CultNetSnapshotRequestMessage
-                {
-                    MessageId = request.MessageId,
-                    SchemaIds = request.SchemaIds,
-                    RecordKeys = request.RecordKeys
-                });
+                documentSelection,
+                ordinalOf: (schemaId, key) => _database.LastWriteSequence(schemaId, key) ?? 0,
+                asOf: _database.CurrentAsOf(),
+                options: null);
             // The snapshot is one row per record key by construction, so the duplicate-key throw this
             // used to guard can no longer fire (docs/cultnet-selection-cut.md, S2-2); deleted rather
             // than tested around.
             var bySourceRecordKey = new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal);
-            foreach (var source in snapshot.Documents)
+            foreach (var source in page.Documents ?? Array.Empty<CultNetRawDocumentRecord>())
             {
                 var sourceRecordKey = source.RecordKey;
-                if (_authorizeRecord?.Invoke(request, peer, sourceRecordKey, source.SchemaId) == false)
+                if (_authorizeRecord?.Invoke(legacyRequest, peer, sourceRecordKey, source.SchemaId) == false)
                     continue;
                 bySourceRecordKey[sourceRecordKey] = source;
             }
-            return new ProjectedSnapshot(bySourceRecordKey);
+            return new ProjectedSnapshot(bySourceRecordKey, page.Edges ?? Array.Empty<CultNetEdge>());
         }
 
         private void ApplyProjectedChange(
@@ -406,10 +486,12 @@ namespace GameCult.Networking
 
         // One evaluator (docs/cultnet-selection-cut.md, D3/D4): a v0 subscribe request lowers into a
         // Selection with no engine of its own, matched and projected exactly as a v1 request would be.
+        // Only called for a non-hop selection (Watch routes a hop-bearing one to Reconcile instead, per
+        // D6) - CultNetSelectionEvaluator.Matches refuses a hop-bearing selection on this fast path.
         // Record-level authorization (_authorizeRecord) is not selection and stays layered on top.
         private CultNetRawDocumentRecord? CreateMatchedRecord(
             object change,
-            CultNetDatabaseSubscribeMessage request,
+            SubscriptionRequest request,
             ICultNetSchemaServerPeer peer)
         {
             var changeType = change.GetType();
@@ -423,21 +505,73 @@ namespace GameCult.Networking
             var descriptor = _database.Cache.Registry.GetRequired(forDescriptor.GetType());
             var selection = new CultNetSelection
             {
-                Schemas = request.SchemaIds,
-                Keys = request.RecordKeys,
+                Schemas = request.Selection.Schemas,
+                Keys = request.Selection.Keys,
+                Fields = request.Selection.Fields,
                 Projection = CultNetSelectionProjections.Document
             };
-            var binding = _database.Documents.GetByDocumentType(descriptor.DocumentType);
-            var effectiveSelection = CultNetSchemaAliasMatching.WithBindingSchemaAlias(selection, descriptor, binding?.SchemaId);
+            // R-M: the one binding-alias reconciler (CultNetDocumentRegistry.ExpandSchemaBindingAliases).
+            var effectiveSelection = _database.Documents.ExpandSchemaBindingAliases(selection);
             if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
                 return null;
-            if (_authorizeRecord?.Invoke(request, peer, key.Value, descriptor.SchemaId) == false)
+            var legacyRequest = request.ToLegacyShape(request.SubscriptionId);
+            if (_authorizeRecord?.Invoke(legacyRequest, peer, key.Value, descriptor.SchemaId) == false)
                 return null;
 
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
                 return null;
 
             return _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"));
+        }
+
+        // R-A: the one internal shape both a lowered v0 subscribe and a v1 subscribe carry through
+        // Subscribe/Watch/Reconcile/CreateProjectedSnapshot/CreateMatchedRecord/PublishDemand. The
+        // authorize/authorizeRecord delegates keep their existing public constructor contract (typed
+        // against the v0 message) rather than becoming a breaking API change in this fix batch;
+        // ToLegacyShape carries every field those delegates read (schemas/keys/consumer/body demand) -
+        // fields/cites/cited reach neither delegate under v0 today either, so nothing regresses.
+        private sealed class SubscriptionRequest
+        {
+            public SubscriptionRequest(
+                CultNetSelection selection,
+                string messageId,
+                string subscriptionId,
+                bool includeSnapshot,
+                string? consumerRuntimeId,
+                string[]? bodyIds,
+                string[]? supportedBodyTransports,
+                bool isV1)
+            {
+                Selection = selection;
+                MessageId = messageId;
+                SubscriptionId = subscriptionId;
+                IncludeSnapshot = includeSnapshot;
+                ConsumerRuntimeId = consumerRuntimeId;
+                BodyIds = bodyIds;
+                SupportedBodyTransports = supportedBodyTransports;
+                IsV1 = isV1;
+            }
+
+            public CultNetSelection Selection { get; }
+            public string MessageId { get; }
+            public string SubscriptionId { get; }
+            public bool IncludeSnapshot { get; }
+            public string? ConsumerRuntimeId { get; }
+            public string[]? BodyIds { get; }
+            public string[]? SupportedBodyTransports { get; }
+            public bool IsV1 { get; }
+
+            public CultNetDatabaseSubscribeMessage ToLegacyShape(string subscriptionId) => new()
+            {
+                MessageId = MessageId,
+                SubscriptionId = subscriptionId,
+                SchemaIds = Selection.Schemas,
+                RecordKeys = Selection.Keys,
+                IncludeSnapshot = IncludeSnapshot,
+                ConsumerRuntimeId = ConsumerRuntimeId,
+                BodyIds = BodyIds,
+                SupportedBodyTransports = SupportedBodyTransports
+            };
         }
 
         private sealed class SubscriptionProjectionState
@@ -449,15 +583,17 @@ namespace GameCult.Networking
 
         private sealed class ProjectedSnapshot
         {
-            public ProjectedSnapshot(Dictionary<string, CultNetRawDocumentRecord> bySourceRecordKey)
+            public ProjectedSnapshot(Dictionary<string, CultNetRawDocumentRecord> bySourceRecordKey, CultNetEdge[]? edges = null)
             {
                 BySourceRecordKey = bySourceRecordKey;
                 Documents = bySourceRecordKey.Values.ToArray();
+                Edges = edges ?? Array.Empty<CultNetEdge>();
             }
 
             public static ProjectedSnapshot Empty { get; } =
                 new(new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal));
             public Dictionary<string, CultNetRawDocumentRecord> BySourceRecordKey { get; }
+            public CultNetEdge[] Edges { get; }
             public CultNetRawDocumentRecord[] Documents { get; }
         }
 
