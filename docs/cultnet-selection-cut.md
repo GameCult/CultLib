@@ -641,6 +641,38 @@ edit `src/` at the same time.
     `reference_outside_target: reference_outside_target: …`.
   - The parity-vector machinery carries no concept of an error message, so
     R-N's parity lives in its own byte-level test. That is the right home.
+- **C# pass B landed** (`a4cf54f`..`52082ec`): R-O, R-Q, R-S and R-U, plus the
+  doubled `reference_outside_target` prefix.
+  - Networking 238 pass and 2 skip; Mesh 255.
+  - **Hand probes: six of seven killed.** S1-Loose, S2-AllOf, S17, S5-DigestNoFields,
+    Auth-LiveSchemaId and S4 all die.
+  - **QL-OutOfTargetCites is a genuine gap.** Since pass A fixed
+    `CultCache.ResolveReferenceTarget`, the fixture's many-reference gets an
+    inferred target type, so the guard never fires for it. `TargetType` is now
+    null only for a scalar reference typed as the bare `ICultRecordRef`, and
+    no fixture reaches that shape. **Open for Soul:** is that shape
+    registerable at all? If it is, pin it. If it is not, the null branch is
+    dead and goes.
+  - **Two fixes found while writing the tests:**
+    - the cursor's length prefix counted UTF-16 chars, so an astral key did
+      not round-trip;
+    - `MiniJsonSchemaValidator` had no `not`, so the exclusivity test found
+      nothing.
+  - **`cultnet.raw-document-record.schema.json` was missing `schemaName`,
+    `schemaVersion` and `schemaContentHash` entirely.** Any real C# page would
+    have failed it on `additionalProperties: false` before R-S's own bugs even
+    mattered.
+  - **Self's correction: cursors need no cross-runtime byte parity.** The
+    brief for pass B said Rust and C# must encode a cursor identically, on the
+    premise that one runtime parses another's cursor. **That premise is
+    wrong.** A cursor is opaque, minted by the answering server and echoed
+    back by the caller, and the digests cannot verify across processes because
+    each server holds its own key. Both encodings are length-prefixed
+    five-field bodies with an HMAC-SHA256 digest, and they differ in base64
+    flavour and separators. That is correct and stays. Rust's own doc said so
+    first.
+  - **To check:** pass B reports three Caching failures as pre-existing, where
+    pass A reported one. Soul settles it against `main`.
 
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
