@@ -18,9 +18,9 @@
       "asOf": 1,
       "expectedRefusalField": null,
       "expectedIds": [
-        "citer/citer-1",
-        "leaf_a/shared-3",
-        "leaf_b/shared-2"
+        "leaf_a/\uD83D\uDE02-row",
+        "leaf_a/\uE000-row",
+        "leaf_a/tie-mass"
       ],
       "matched": 3,
       "hasNext": true,
@@ -34,9 +34,10 @@
       "expectedIds": [
         "leaf_a/a-lo",
         "leaf_a/a-eq",
-        "leaf_b/b-hi"
+        "leaf_b/b-hi",
+        "leaf_a/tie-mass"
       ],
-      "matched": 3,
+      "matched": 4,
       "hasNext": false,
       "expectedEdges": []
     },
@@ -50,7 +51,14 @@
       ],
       "matched": 1,
       "hasNext": false,
-      "expectedEdges": []
+      "expectedEdges": [
+        {
+          "fromId": "citer/citer-1",
+          "role": "Design",
+          "toId": "leaf_a/a-eq",
+          "payloadBase64": null
+        }
+      ]
     },
     {
       "name": "incoming_negation",
@@ -60,9 +68,12 @@
       "expectedIds": [
         "leaf_a/a-lo",
         "leaf_a/shared-1",
-        "leaf_a/shared-3"
+        "leaf_a/shared-3",
+        "leaf_a/tie-mass",
+        "leaf_a/\uE000-row",
+        "leaf_a/\uD83D\uDE02-row"
       ],
-      "matched": 3,
+      "matched": 6,
       "hasNext": false,
       "expectedEdges": []
     },
@@ -77,6 +88,76 @@
         "leaf_a/shared-3"
       ],
       "matched": 3,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "float_tie_exact_ge",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRtYXNzom9womdlpnZhbHVlc8CmbnVtYmVyqjIyMzM3NTkuMjWlY2l0ZXPApWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywA==",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/tie-mass"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "cites_target_by_alias",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlkpmxlYWZfYalyZWNvcmRLZXmkYS1lcaRyb2xlwKVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "citer/citer-1"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": [
+        {
+          "fromId": "citer/citer-1",
+          "role": "Design",
+          "toId": "leaf_a/a-eq",
+          "payloadBase64": null
+        }
+      ]
+    },
+    {
+      "name": "astral_key_code_point_order",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORp3VuaWNvZGWmbnVtYmVywKVjaXRlc8ClY2l0ZWTAqnByb2plY3Rpb26maGVhZGVyqmRlc2NlbmRpbmfCpWxpbWl0wKZjdXJzb3LA",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/\uE000-row",
+        "leaf_a/\uD83D\uDE02-row"
+      ],
+      "matched": 2,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "header_projection",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORp3VuaWNvZGWmbnVtYmVywKVjaXRlc8ClY2l0ZWTAqnByb2plY3Rpb26maGVhZGVyqmRlc2NlbmRpbmfCpWxpbWl0wKZjdXJzb3LA",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/\uE000-row",
+        "leaf_a/\uD83D\uDE02-row"
+      ],
+      "matched": 2,
+      "hasNext": false,
+      "expectedEdges": []
+    },
+    {
+      "name": "document_projection",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHORhKVpbmRleKRraW5kom9wpmFueV9vZqZ2YWx1ZXORp3VuaWNvZGWmbnVtYmVywKVjaXRlc8ClY2l0ZWTAqnByb2plY3Rpb26oZG9jdW1lbnSqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedIds": [
+        "leaf_a/\uE000-row",
+        "leaf_a/\uD83D\uDE02-row"
+      ],
+      "matched": 2,
       "hasNext": false,
       "expectedEdges": []
     },

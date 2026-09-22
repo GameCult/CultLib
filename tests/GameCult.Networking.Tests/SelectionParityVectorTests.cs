@@ -32,6 +32,20 @@ namespace GameCult.Networking.Tests
         private static CultNetSelectionEvaluator.Row Row(CultDocumentRegistry registry, object document, string key, long ordinal) =>
             new(registry.GetRequired(document.GetType()), new CultRecordKey(key), document, ordinal);
 
+        // R-C: two rows sharing one ordinal so the tiebreak - not the ordinal - decides their order.
+        // U+E000 is a BMP private-use character (code point 0xE000); U+1F602 is astral, encoded as the
+        // surrogate pair 😂 whose high half (0xD83D) is less than 0xE000. A UTF-16 code-unit
+        // compare (the pre-R-C bug) therefore sorts the astral key first; code-point order sorts it
+        // after, since 0x1F602 > 0xE000.
+        private const string BmpPrivateUseKey = "-row";
+        private const string AstralKey = "😂-row";
+
+        // Unchanged: this exact row set is what the committed selection-vectors.rs-written.json was
+        // computed against on the Rust side (an independently constructed but value-identical fixture,
+        // per the comment on Cases() below) - SelectionVectorsWrittenByRustDecodeAndEvaluateIdenticallyInTheReference
+        // reads that committed file, so this fixture cannot grow without breaking that comparison until
+        // the Rust side's own fixture grows to match. New rows for the fix-batch vectors live in
+        // BuildExtendedFixture, used only by WriteSelectionVectors (this cut's own cs-written.json).
         private static (CultDocumentRegistry registry, CultNetSelectionEvaluator.Row[] rows) BuildFixture()
         {
             var registry = Registry();
@@ -43,9 +57,31 @@ namespace GameCult.Networking.Tests
                 Row(registry, new ParityLeafA { Name = "shared-1", Kind = "shared", Mass = 1 }, "shared-1", 4),
                 Row(registry, new ParityLeafB { Name = "shared-2", Kind = "shared", Mass = 1 }, "shared-2", 5),
                 Row(registry, new ParityLeafA { Name = "shared-3", Kind = "shared", Mass = 1 }, "shared-3", 6),
-                Row(registry, new ParityCiter { Name = "citer-1", Design = new CultRecordRef<ParityMiddle>(new CultRecordKey("a-eq")) }, "citer-1", 7)
+                Row(registry, new ParityCiter { Name = "citer-1", Design = new CultRecordRef<ParityMiddle>(new CultRecordKey("a-eq")) }, "citer-1", 7),
             };
             return (registry, rows);
+        }
+
+        // R-B/R-C/R-D/R-E/R-I fix-batch rows, additive over BuildFixture so every pre-existing
+        // selection's match set is unchanged (a new row reachable by an unfiltered or loosely filtered
+        // case, such as descending_with_limit or gt_numeric_boundary, would otherwise silently change
+        // that case's expected page). Only WriteSelectionVectors (this cut's cs-written.json) uses this.
+        private static (CultDocumentRegistry registry, CultNetSelectionEvaluator.Row[] rows) BuildExtendedFixture()
+        {
+            var (registry, baseRows) = BuildFixture();
+            var extraRows = new[]
+            {
+                // R-D: 2233759.25f is exactly representable and sits on a round-to-even tie between two
+                // .NET-shortest-form spellings ("2233759.2" vs "2233759.3" between runtimes/versions);
+                // its exact canonical decimal is "2233759.25" either way. Kind "tie" so it cannot be
+                // swept up by an existing weapon/armor/shared-kind case.
+                Row(registry, new ParityLeafA { Name = "tie-mass", Kind = "tie", Mass = 2233759.25f }, "tie-mass", 8),
+                // R-C fixture rows: same ordinal, astral vs BMP-private-use keys (see the constants
+                // above). Kind "unicode" and Mass 0 so neither an unfiltered nor a mass>1 case reaches them.
+                Row(registry, new ParityLeafA { Name = "bmp", Kind = "unicode", Mass = 0 }, BmpPrivateUseKey, 9),
+                Row(registry, new ParityLeafA { Name = "astral", Kind = "unicode", Mass = 0 }, AstralKey, 9),
+            };
+            return (registry, baseRows.Concat(extraRows).ToArray());
         }
 
         // The same six selections packages/cultnet-rs/tests/selection.rs's
@@ -80,6 +116,36 @@ namespace GameCult.Networking.Tests
             yield return ("shared_index_value_three_rows", new CultNetSelection
             {
                 Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "shared" } } }
+            });
+            // R-D: the row's canonical rendering of 2233759.25f is its exact decimal expansion, not a
+            // shortest round-trip form that could round the tie the other way - ge against the exact
+            // value must match.
+            yield return ("float_tie_exact_ge", new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "ge", Number = "2233759.25" } }
+            });
+            // R-E: cites.target.schemaId goes through the alias matcher, so "leaf_a" (ParityLeafA's
+            // SchemaName) matches a-eq's real content-hash SchemaId, same as `schemas` already does.
+            yield return ("cites_target_by_alias", new CultNetSelection
+            {
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = "leaf_a", RecordKey = "a-eq" } }
+            });
+            // R-C: BmpPrivateUseKey (U+E000) sorts before AstralKey (U+1F602) in code-point order,
+            // despite AstralKey's leading UTF-16 code unit (0xD83D) being numerically smaller.
+            yield return ("astral_key_code_point_order", new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "unicode" } } }
+            });
+            // R-I: page bytes under each projection, over the same match set.
+            yield return ("header_projection", new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "unicode" } } },
+                Projection = CultNetSelectionProjections.Header
+            });
+            yield return ("document_projection", new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "unicode" } } },
+                Projection = CultNetSelectionProjections.Document
             });
         }
 
@@ -157,7 +223,7 @@ namespace GameCult.Networking.Tests
             if (Environment.GetEnvironmentVariable("CULTNET_WRITE_VECTORS") != "1")
                 Assert.Ignore("Set CULTNET_WRITE_VECTORS=1 to (re)write the committed vector file.");
 
-            var (registry, rows) = BuildFixture();
+            var (registry, rows) = BuildExtendedFixture();
             var vectors = new List<object>();
             foreach (var (name, selection) in Cases())
             {
