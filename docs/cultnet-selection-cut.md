@@ -82,6 +82,119 @@ and calls it pre-existing. Networking was 162/162 at `17d10e0`, so that claim
 must be checked against `17d10e0` and `main` before anyone believes it. It goes
 to Soul by name.
 
+**Q-J fix landed** at `e5348d3` (commit 2f, C#). The Rust runtime is next.
+
+**Soul on commit 2, 2026-09-22** (Opus, pinned at `4c33a62`). **Commit 2 does
+not pass.**
+
+- **S2-1, medium, predates the range.** The crash is real, and Hands was right
+  that it is older than this commit. It is a disposed-socket race: the ack
+  `SendTo` at `CultNetTransport.cs:2549/2593` runs on a test's background poll
+  thread. About 18 tests start `IsBackground` poll threads, and only one of
+  them (`:1885`) joins its thread before the server disposes. Crash rates:
+
+  | Checkout | Suite | Crashes |
+  |---|---|---|
+  | `17d10e0` | full | 1 of 6 |
+  | `17d10e0` | subscription subset | 5 of 12 |
+  | `main` | subscription subset | 1 of 12 |
+
+  "162/162" was luck. A second defect sits in the harness:
+  `mutate-dotnet.ps1:43/61`, under `$ErrorActionPreference='Stop'` on
+  PowerShell 5.1, throws the whole run away when a host crash writes to
+  stderr, where it should record the mutant as NO VERDICT.
+- **S2-2, high: the rewritten reconcile tests lost what the old ones proved.**
+  With `_projectRecord` gone, a source key always equals its record key, and
+  the delete-then-put now arrives through the live `Watch` path, so
+  `Reconcile()` has nothing left to do.
+  - Two mutants that `17d10e0` killed now survive: dropping Reconcile's
+    identity branch (`:261`), and returning early from Reconcile.
+  - Dropping the add loop (`:274`) and dropping the live identity branch
+    (`:340`) survive both before and after the rewrite.
+  - The `RecordKey` comparisons at `:261` and `:340`, and the throw at
+    `:311`, are now **dead code**.
+- **S2-3, high: the fourth matcher was collapsed into the alias matcher, not
+  into the evaluator.** `CreateShardSnapshotResponse`
+  (`CultNetDatabase.cs:633-670`) still loops on its own.
+  - A probe sent `{schemas:[], keys:[]}` to both paths: the shard path
+    returned 0 rows, `CreateRawSnapshotResponse` returned 2.
+  - The binding-alias expansion does not run on the shard path either. That
+    part is plausible, not probed.
+  - §2 says an empty list is **refused at the door**. The evaluator reads `[]`
+    as "no filter" (`CultNetSelectionEvaluator.cs:84`) and the shard path
+    reads it as "nothing". Neither follows the map.
+- **S2-4, medium-high: the Mesh one-pass read returns the wrong schema's
+  record.** At `CultMesh.cs:2730-2750`, the first candidate at the key that
+  passes the exact match, the alias match or a trial decode wins. With
+  `[MeshOther, MeshNote]` at one key, a MeshNote read returned MeshOther.
+  Before `5ba48f0`, the exact schema was searched first.
+- **S2-5, medium: Mesh has two decode rules that disagree.** The read accepts
+  a record by trial decode. `DecodeSnapshotDocuments` rejects the same record
+  by payload sniff. `RawSnapshotPayloadMatchesSchema` is a real decode
+  capability, since both of its tests are keys-only. **It is not a second
+  selection decision.** It is, though, a second copy of the registry's
+  resolver (`CultNetDocumentRegistry.TryResolveDescriptorByPayloadSchema` /
+  `TryReadSchemaVersion` / `InferSchemaName`, `:596-670`).
+- **S2-6, high: the public `CultMeshSnapshotRequestOptions.Selection` honours
+  only `Schemas` and `Keys`.** Mesh sends v0 only. A request with a limit, a
+  field predicate and a header projection went out as `schemas=null
+  keys=null`, and two full rows came back. A caller's `Selection` also skips
+  the old cleaning, so `Keys=[""]` now returns nothing where it used to return
+  everything.
+- **S2-7, low, predates the range: selection meaning is decided in two more
+  places.** `ResolveDefaultSelection` (`:835`) checks the raw `Count` before
+  cleaning, so `[" "]` selects everything. `ResolveDefaultSelection` reads
+  null as "no filter", and `OverlaySelection` (`:840`) reads it as "inherit".
+- **S2-8, low.** Both options types changed from `class` to `record`, which
+  gives them value equality and is acceptable.
+  `CultMeshHotBodySubscription.Selection` exposes mutable arrays on a contract
+  that was immutable. The prebuilt Unity `GameCult.Mesh.dll` carries the old
+  API: a release-time follow-up, rebuilt at the next release cut.
+- **S2-9 and S2-10:** a miscount in the entries header. For the two Mesh
+  survivors, Soul's fixtures kill both.
+- **Held:** Mesh 3 killed and 2 survived, as reported. Networking 10 of 10
+  killed. Every restore verified by hash. The alias-matcher routing is right.
+  `IsSameCultDocumentSchema` delegates.
+
+**Self's rulings, 2026-09-22, for the commit 2 fix batch:**
+
+- **Empty lists and blank keys are refused at the one door, as §2 already
+  says.** `CultNetSelection.Validate` refuses `keys: []`, `schemas: []`, and
+  any key or schema that is empty or whitespace, with `selection_invalid`.
+  `null` means no filter, everywhere. The evaluator never sees `[]`. v0
+  lowering carries over v0's old cleaning: an empty v0 list, or one made only
+  of blanks, lowers to `null`. That is a v0 compatibility rule the lowering
+  owns, not a meaning the evaluator carries. `ResolveDefaultSelection` and
+  `OverlaySelection` stop deciding what null means. They build a
+  `CultNetSelection` and let the door decide. Overlay means "the caller's
+  selection replaces the default wholesale".
+- **The shard snapshot answers through the evaluator**, binding aliases
+  included, with no loop of its own.
+- **Mesh keeps sending v0 in this cut.** §9 says v0-only peers refuse v1, and
+  FU-v0 retires v0 later. So `CultMeshSnapshotRequestOptions` refuses, loudly
+  and typed at construction or send, any `Selection` term v0 cannot carry:
+  `fields`, `cites`, `cited`, `limit`, `cursor`, `descending`, `projection`
+  other than the default. **Refused, never silently dropped.** Mesh sending v1
+  is a follow-up, **FU-Mesh-v1**, triggered by the first Mesh caller that
+  needs a term beyond schemas and keys, most likely the Huginn consumer or
+  Cut 2.
+- **The Mesh read searches the exact schema first,** then the alias match,
+  then a foreign id decoded by payload. It uses **one** decode rule shared
+  with `DecodeSnapshotDocuments`, and that rule is the registry's resolver.
+  The Mesh copy in `CultMeshSnapshots.cs` is deleted in favour of
+  `CultNetDocumentRegistry`'s.
+- **The dead identity code is deleted, not tested around.** `:261`, `:340`
+  and `:311` can no longer fire. Reconcile gets a test for what it still owns
+  after the deletion: flipping `authorizeRecord` per key while the request
+  stays authorized, and the add loop. Both surviving mutants must die.
+- **Test hygiene belongs to this batch, because a flaky M0 is not a
+  control.** Every test that starts a background poll thread joins it before
+  its server is disposed. `mutate-dotnet.ps1` records a host crash as NO
+  VERDICT and carries on.
+- **Also owed by Cut 1 and not yet done: R-2.** Python replies
+  `unsupported_schema_version` to v1 (§9, `interop_peer.py:360-387`,
+  `cultmesh_py/server.py:341`), with one test per site.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
