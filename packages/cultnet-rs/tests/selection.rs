@@ -92,14 +92,52 @@ struct FixtureFile {
 
 static FIXTURE: std::sync::OnceLock<FixtureFile> = std::sync::OnceLock::new();
 
+// R-AB: `fixture()` used to read only `contracts_dir()` (the canonical, repo-root
+// `contracts/cultnet/interop/`), which is outside `packages/cultnet-rs` and escapes any tool that
+// copies just this package's directory - the same failure shape `schema_discovery.rs`'s
+// `include_str!`s had. `selection-vectors.fixture.json` is a checked-in input, not a generated
+// artifact (unlike `*-written.json` below, which each runtime produces from the *other* runtime's
+// output and cannot be vendored the same way), so it gets the same vendored-copy treatment: a
+// byte-identical copy lives under `packages/cultnet-rs/contracts/cultnet/interop/`, checked by the
+// drift test right below, and the loader reads the vendored copy unconditionally so it works the
+// same way whether or not the wider repo is checked out beside the package.
+fn vendored_fixture_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts").join("cultnet").join("interop")
+}
+
 fn fixture() -> &'static FixtureFile {
     FIXTURE.get_or_init(|| {
-        let path = contracts_dir().join("selection-vectors.fixture.json");
+        let path = vendored_fixture_dir().join("selection-vectors.fixture.json");
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{} is missing or unreadable: {error}", path.display()));
         serde_json::from_str(&text)
             .unwrap_or_else(|error| panic!("{} is not valid fixture JSON: {error}", path.display()))
     })
+}
+
+// The drift guard for the vendored fixture, mirroring
+// `schema_discovery_contracts.rs`'s vendored-schema check: skips (not fails) when the canonical
+// repo-root tree is not present beside the package, which is exactly the isolated-copy case the
+// vendored copy exists to survive.
+#[test]
+fn fixture_contract_matches_the_canonical_source() {
+    let canonical = contracts_dir().join("selection-vectors.fixture.json");
+    if !canonical.is_file() {
+        eprintln!(
+            "skipping: {canonical:?} not present beside the package (isolated build, the case \
+             the vendored fixture copy is for)"
+        );
+        return;
+    }
+    let canonical_text = fs::read_to_string(&canonical).expect("reading canonical fixture");
+    let vendored_text = fs::read_to_string(vendored_fixture_dir().join("selection-vectors.fixture.json"))
+        .expect("reading vendored fixture");
+    assert_eq!(
+        canonical_text, vendored_text,
+        "packages/cultnet-rs/contracts/cultnet/interop/selection-vectors.fixture.json has \
+         drifted from the canonical contracts/cultnet/interop/selection-vectors.fixture.json - \
+         re-copy it"
+    );
 }
 
 fn fixture_schema(name: &str) -> &'static FixtureSchemaDef {
@@ -1036,6 +1074,20 @@ fn assert_refusal_vector(vector: &Vector, expected_field: &str) {
 /// Vectors written by the reference (C#) decode and evaluate identically in Rust.
 #[test]
 fn selection_vectors_written_by_the_reference_decode_and_evaluate_identically_in_rust() {
+    if !contracts_dir().is_dir() {
+        // R-AB: cs-written.json is the C# reference's own generated output - there is nothing to
+        // vendor (it is not a checked-in input like the fixture; it exists only once the C# side
+        // has actually run its writer against a real checkout of both runtimes). An isolated
+        // Rust-only copy, such as cargo-mutants' baseline build, can never satisfy this test's
+        // premise no matter what this crate does with its own files, so it skips rather than
+        // failing the whole suite over a cross-runtime artifact the isolated copy cannot produce.
+        eprintln!(
+            "skipping: {:?} not present beside the package (isolated build, no C# checkout to \
+             have written cs-written.json against)",
+            contracts_dir()
+        );
+        return;
+    }
     let path = contracts_dir().join("selection-vectors.cs-written.json");
     let Ok(text) = fs::read_to_string(&path) else {
         panic!(
