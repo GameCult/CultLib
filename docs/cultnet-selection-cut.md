@@ -5,6 +5,49 @@ No code in this document has been written; nothing here is committed by
 Imagination. This is its own campaign with its own map; it does not touch
 `docs/typescript-quic-realtime-cut.md` or any code in that tree.
 
+**Progress, 2026-09-22.** Cut 1 is running (Hands, Sonnet) on the branch
+`cultnet/selection-cut1`. It will not merge to `main` until Soul has passed it.
+
+- **Commit 0, `e420410`:** the cache's public read surface. Twelve tests, six
+  mutation entries, all killed.
+- **Commit 1, `17d10e0`:** `CultNetSelection` and its evaluator, the three v1
+  messages, and the three §1 selector engines deleted. v0 now lowers into a
+  selection. Test results: Networking 162/162, Mesh 252/253 (one skip that was
+  already there), Caching 188/188. Nine networking mutation entries, all killed.
+- **Mutation harness:** `scripts/mutate-dotnet.ps1` is a shared dotnet/NUnit
+  harness and works for any NUnit project in this repository.
+- **Not run through mutations yet:** S1, S2, S6, S9–S15, S17, S20 and S23. A
+  test pins each one, but none has a mutation entry.
+
+Two things were found that this map did not name:
+
+- **`CultNetDocumentBinding` can carry a schema id that differs from its
+  descriptor's.** The deleted engines checked for this; the evaluator reads
+  only the descriptor and cannot see it. The fix is at the call sites
+  (`WithBindingSchemaAlias`, `ExpandSchemaBindingAliases`), so the evaluator
+  stays independent of the registry.
+- **A fourth copy of schema matching, at `CultNetDatabase.cs:1707`**, which
+  serves `CreateShardSnapshotResponse`. §1 counted three engines; there are four.
+  **Self's ruling, 2026-09-22: it collapses into the evaluator in commit 2.**
+  Leaving it would make the claim of one evaluator false. It is a deletion and
+  takes a mutation entry like the others.
+
+**Ledger correction.** Commits 0 and 1 came in at about twice the §14
+estimate:
+
+| Package | Actual (net) | §14 estimate |
+|---|---|---|
+| Caching | +297 | about +150 |
+| Networking | +851 | about +400 |
+| contracts | 163 | about 200 |
+
+The two new Networking files alone are 714 lines, against about 360. The hop's
+incoming index, the cursor's digest and mint, and the per-field door messages
+all cost more than the prose assumed. The binding-alias fix was not in the
+ledger at all. The estimate was wrong; the scope did not grow. The deletions
+in commits 2 to 4 (Mesh collapse, `_projectRecord`, the Rust
+`snapshot_query.rs`) are still to be counted against the total.
+
 Status: cut map for two cuts. **Cut 1: the selection vocabulary in the C#
 reference runtime and the Rust runtime** (sections 1-17), with the
 follow-on runtime cuts and the Huginn consumer cut named and not mapped.
