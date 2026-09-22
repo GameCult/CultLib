@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -13,15 +14,16 @@ namespace GameCult.Networking.Tests
     // CultNet typed selection, Cut 1 commit 3/4 (docs/cultnet-selection-cut.md section 6/10, S12):
     // the C#<->Rust parity vectors. New file; no existing C# source is modified.
     //
-    // "schemaId" inside the committed vector files is each fixture document's *SchemaName*
-    // ("leaf_a", "leaf_b", "citer"), never CultDocumentDescriptor.SchemaId - a SHA-256 content
-    // hash over the type's canonical shape that Rust has no way to reproduce independently, and
-    // that the reference itself does not run through alias matching everywhere (MatchesCitation
-    // compares Citation.Target.SchemaId against the real hash exactly, with no SchemaName
-    // fallback). The vectors below therefore only exercise `cited` (role/existence, matched by
-    // record key alone - no schema id comparison at all) for the hop, never `cites` (which would
-    // need a real cross-runtime-agreed schema id this fixture pair cannot produce). This is a
-    // fixture-identity convention local to these vectors, not a claim about the real wire.
+    // Self's ruling, 2026-09-22 (shared-fixture ruling, on top of the Cut 1 fix batch): both this
+    // writer and packages/cultnet-rs/tests/selection.rs's write_selection_vectors_for_the_reference
+    // build their rows from the one shared
+    // contracts/cultnet/interop/selection-vectors.fixture.json, keyed by each schema's real
+    // SHA-256 content-hash id, exactly as CultDocumentRegistry computes it for the fixture's own
+    // document types below - never by schema *name* as a stand-in id, which let every vector that
+    // carried an id decode on the wrong runtime's terms (Soul's whole-cut pass, F3: a name-as-id
+    // fixture masked the real alias-matching gap between CultNetSchemaAliasMatching and
+    // cultnet_rs::selection::schema_alias). AssertSchemaIdMatches below fails loudly, not silently,
+    // if this file's reflected shape ever drifts from the committed fixture.
     public sealed class SelectionParityVectorTests
     {
         private static CultDocumentRegistry Registry() => CultDocumentRegistry.ForTypes(new[]
@@ -32,63 +34,122 @@ namespace GameCult.Networking.Tests
         private static CultNetSelectionEvaluator.Row Row(CultDocumentRegistry registry, object document, string key, long ordinal) =>
             new(registry.GetRequired(document.GetType()), new CultRecordKey(key), document, ordinal);
 
-        // R-C: two rows sharing one ordinal so the tiebreak - not the ordinal - decides their order.
-        // U+E000 is a BMP private-use character (code point 0xE000); U+1F602 is astral, encoded as the
-        // surrogate pair 😂 whose high half (0xD83D) is less than 0xE000. A UTF-16 code-unit
-        // compare (the pre-R-C bug) therefore sorts the astral key first; code-point order sorts it
-        // after, since 0x1F602 > 0xE000.
-        private const string BmpPrivateUseKey = "-row";
-        private const string AstralKey = "😂-row";
+        // ----------------------------------------------------------------------------------------
+        // The shared fixture: contracts/cultnet/interop/selection-vectors.fixture.json. Holds the
+        // real schema ids (and their unversioned aliases) and every row either runtime needs:
+        // astral/BMP-private-use keys (R-C), a float tie (R-D), a cites/cited pair, and a cites
+        // target reached by alias (R-E). Both writers build from it; neither hand-rolls its own row
+        // set any more.
+        // ----------------------------------------------------------------------------------------
 
-        // Unchanged: this exact row set is what the committed selection-vectors.rs-written.json was
-        // computed against on the Rust side (an independently constructed but value-identical fixture,
-        // per the comment on Cases() below) - SelectionVectorsWrittenByRustDecodeAndEvaluateIdenticallyInTheReference
-        // reads that committed file, so this fixture cannot grow without breaking that comparison until
-        // the Rust side's own fixture grows to match. New rows for the fix-batch vectors live in
-        // BuildExtendedFixture, used only by WriteSelectionVectors (this cut's own cs-written.json).
-        private static (CultDocumentRegistry registry, CultNetSelectionEvaluator.Row[] rows) BuildFixture()
+        // R-E: two alias forms, because the two runtimes' schema-alias matchers key off different
+        // attributes and no candidate resolves through both (see the fixture file's "//aliases"
+        // note and this file's report of the confirmed defect). NameAlias is what
+        // CultNetSchemaAliasMatching's descriptor overload (the only one any C# call site uses)
+        // can resolve; HashAlias is what cultnet_rs::selection::schema_alias can resolve.
+        private sealed record FixtureSchema(string SchemaId, string NameAlias, string HashAlias);
+
+        private sealed record FixtureReference(string Role, string TargetSchema, string TargetKey);
+
+        private sealed record FixtureRow(
+            string Schema, string Key, long Ordinal,
+            IReadOnlyDictionary<string, string> Fields,
+            IReadOnlyList<FixtureReference> References);
+
+        private static string FixturePath() =>
+            Path.Combine(RepoRoot(), "contracts", "cultnet", "interop", "selection-vectors.fixture.json");
+
+        private static (IReadOnlyDictionary<string, FixtureSchema> Schemas, IReadOnlyList<FixtureRow> Rows) LoadFixture()
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(FixturePath()));
+            var root = document.RootElement;
+
+            var schemas = new Dictionary<string, FixtureSchema>(StringComparer.Ordinal);
+            foreach (var entry in root.GetProperty("schemas").EnumerateObject())
+            {
+                schemas[entry.Name] = new FixtureSchema(
+                    entry.Value.GetProperty("schemaId").GetString()!,
+                    entry.Value.GetProperty("nameAlias").GetString()!,
+                    entry.Value.GetProperty("hashAlias").GetString()!);
+            }
+
+            var rows = new List<FixtureRow>();
+            foreach (var row in root.GetProperty("rows").EnumerateArray())
+            {
+                var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+                if (row.TryGetProperty("fields", out var fieldsElement))
+                {
+                    foreach (var field in fieldsElement.EnumerateObject())
+                        fields[field.Name] = field.Value.GetString()!;
+                }
+
+                var references = new List<FixtureReference>();
+                if (row.TryGetProperty("references", out var referencesElement))
+                {
+                    foreach (var reference in referencesElement.EnumerateArray())
+                    {
+                        references.Add(new FixtureReference(
+                            reference.GetProperty("role").GetString()!,
+                            reference.GetProperty("targetSchema").GetString()!,
+                            reference.GetProperty("targetKey").GetString()!));
+                    }
+                }
+
+                rows.Add(new FixtureRow(
+                    row.GetProperty("schema").GetString()!,
+                    row.GetProperty("key").GetString()!,
+                    row.GetProperty("ordinal").GetInt64(),
+                    fields,
+                    references));
+            }
+
+            return (schemas, rows);
+        }
+
+        private static void AssertSchemaIdMatches(CultDocumentRegistry registry, Type type, string expected)
+        {
+            var actual = registry.GetRequired(type).SchemaId;
+            Assert.That(actual, Is.EqualTo(expected),
+                $"{type.Name}'s real schema id drifted from contracts/cultnet/interop/selection-vectors.fixture.json - " +
+                "regenerate the fixture (its schemas.*.schemaId/alias fields) from CultDocumentRegistry before trusting these vectors.");
+        }
+
+        private static object BuildDocument(FixtureRow row) => row.Schema switch
+        {
+            "leaf_a" => new ParityLeafA
+            {
+                Name = row.Key, Kind = row.Fields["kind"], Mass = float.Parse(row.Fields["mass"], CultureInfo.InvariantCulture)
+            },
+            "leaf_b" => new ParityLeafB
+            {
+                Name = row.Key, Kind = row.Fields["kind"], Mass = float.Parse(row.Fields["mass"], CultureInfo.InvariantCulture)
+            },
+            "citer" => new ParityCiter
+            {
+                Name = row.Key,
+                Design = new CultRecordRef<ParityMiddle>(new CultRecordKey(
+                    row.References.Single(reference => reference.Role == "Design").TargetKey))
+            },
+            _ => throw new InvalidOperationException($"selection-vectors.fixture.json: unknown schema '{row.Schema}'")
+        };
+
+        // The one row set: both SelectionVectorsWrittenByRustDecodeAndEvaluateIdenticallyInTheReference
+        // (reading rs-written) and WriteSelectionVectors (writing cs-written) build from it, so both
+        // committed vector files are regenerated together whenever the fixture changes.
+        private static (CultDocumentRegistry registry, CultNetSelectionEvaluator.Row[] rows, IReadOnlyDictionary<string, FixtureSchema> schemas) BuildFixture()
         {
             var registry = Registry();
-            var rows = new[]
-            {
-                Row(registry, new ParityLeafA { Name = "a-lo", Kind = "weapon", Mass = 4 }, "a-lo", 1),
-                Row(registry, new ParityLeafA { Name = "a-eq", Kind = "weapon", Mass = 5 }, "a-eq", 2),
-                Row(registry, new ParityLeafB { Name = "b-hi", Kind = "armor", Mass = 6 }, "b-hi", 3),
-                Row(registry, new ParityLeafA { Name = "shared-1", Kind = "shared", Mass = 1 }, "shared-1", 4),
-                Row(registry, new ParityLeafB { Name = "shared-2", Kind = "shared", Mass = 1 }, "shared-2", 5),
-                Row(registry, new ParityLeafA { Name = "shared-3", Kind = "shared", Mass = 1 }, "shared-3", 6),
-                Row(registry, new ParityCiter { Name = "citer-1", Design = new CultRecordRef<ParityMiddle>(new CultRecordKey("a-eq")) }, "citer-1", 7),
-            };
-            return (registry, rows);
+            var (schemas, fixtureRows) = LoadFixture();
+
+            AssertSchemaIdMatches(registry, typeof(ParityLeafA), schemas["leaf_a"].SchemaId);
+            AssertSchemaIdMatches(registry, typeof(ParityLeafB), schemas["leaf_b"].SchemaId);
+            AssertSchemaIdMatches(registry, typeof(ParityCiter), schemas["citer"].SchemaId);
+
+            var rows = fixtureRows.Select(row => Row(registry, BuildDocument(row), row.Key, row.Ordinal)).ToArray();
+            return (registry, rows, schemas);
         }
 
-        // R-B/R-C/R-D/R-E/R-I fix-batch rows, additive over BuildFixture so every pre-existing
-        // selection's match set is unchanged (a new row reachable by an unfiltered or loosely filtered
-        // case, such as descending_with_limit or gt_numeric_boundary, would otherwise silently change
-        // that case's expected page). Only WriteSelectionVectors (this cut's cs-written.json) uses this.
-        private static (CultDocumentRegistry registry, CultNetSelectionEvaluator.Row[] rows) BuildExtendedFixture()
-        {
-            var (registry, baseRows) = BuildFixture();
-            var extraRows = new[]
-            {
-                // R-D: 2233759.25f is exactly representable and sits on a round-to-even tie between two
-                // .NET-shortest-form spellings ("2233759.2" vs "2233759.3" between runtimes/versions);
-                // its exact canonical decimal is "2233759.25" either way. Kind "tie" so it cannot be
-                // swept up by an existing weapon/armor/shared-kind case.
-                Row(registry, new ParityLeafA { Name = "tie-mass", Kind = "tie", Mass = 2233759.25f }, "tie-mass", 8),
-                // R-C fixture rows: same ordinal, astral vs BMP-private-use keys (see the constants
-                // above). Kind "unicode" and Mass 0 so neither an unfiltered nor a mass>1 case reaches them.
-                Row(registry, new ParityLeafA { Name = "bmp", Kind = "unicode", Mass = 0 }, BmpPrivateUseKey, 9),
-                Row(registry, new ParityLeafA { Name = "astral", Kind = "unicode", Mass = 0 }, AstralKey, 9),
-            };
-            return (registry, baseRows.Concat(extraRows).ToArray());
-        }
-
-        // The same six selections packages/cultnet-rs/tests/selection.rs's
-        // write_selection_vectors_for_the_reference builds against its own fixture rows (which
-        // carry the same schema names, record keys, ordinals and declared values as BuildFixture
-        // above, independently constructed - a within-runtime round trip pins nothing, section 10).
-        private static IEnumerable<(string Name, CultNetSelection Selection)> Cases()
+        private static IEnumerable<(string Name, CultNetSelection Selection)> Cases(IReadOnlyDictionary<string, FixtureSchema> schemas)
         {
             yield return ("any_of_plus_ge_conjunction", new CultNetSelection
             {
@@ -103,14 +164,16 @@ namespace GameCult.Networking.Tests
             {
                 Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "gt", Number = "1" } }
             });
+            // R-E: the exact real schema id - matches on both runtimes' first (exact string)
+            // comparison branch, independent of the alias-matching gap below.
             yield return ("incoming_exists_true", new CultNetSelection
             {
-                Schemas = new[] { "leaf_a" },
+                Schemas = new[] { schemas["leaf_a"].SchemaId },
                 Cited = new CultNetIncoming { Role = "Design", Exists = true }
             });
             yield return ("incoming_negation", new CultNetSelection
             {
-                Schemas = new[] { "leaf_a" },
+                Schemas = new[] { schemas["leaf_a"].SchemaId },
                 Cited = new CultNetIncoming { Role = "Design", Exists = false }
             });
             yield return ("shared_index_value_three_rows", new CultNetSelection
@@ -124,12 +187,27 @@ namespace GameCult.Networking.Tests
             {
                 Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "ge", Number = "2233759.25" } }
             });
-            // R-E: cites.target.schemaId goes through the alias matcher, so "leaf_a" (ParityLeafA's
-            // SchemaName) matches a-eq's real content-hash SchemaId, same as `schemas` already does.
-            yield return ("cites_target_by_alias", new CultNetSelection
+            // R-E: the exact real schema id, mirroring cultnet-rs's hop_by_role_cites_exact_id.
+            yield return ("hop_by_role_cites_exact_id", new CultNetSelection
             {
-                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = "leaf_a", RecordKey = "a-eq" } }
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "a-eq" } }
             });
+            // R-E: the same citation, but the target is named by its C#-resolvable alias
+            // ("leaf_a.v9") rather than the exact id. CultNetSchemaAliasMatching's descriptor overload
+            // (CultNetDatabase.cs:74-87, the only overload any `schemas`/`cites.target.schemaId` call
+            // site in src/ uses) strips the trailing ".v9" and compares "leaf_a" to
+            // ParityLeafA's descriptor.SchemaName - a real match here, in the reference. Rust's
+            // schema_alias has no concept of a schema's human name at all - it only ever sees the raw
+            // hash id (Row::schema_id()) - so this vector's expectedIds are real and non-empty here,
+            // but when cultnet-rs's reader judges this same vector it cannot resolve "leaf_a.v9" to
+            // anything (packages/cultnet-rs/src/selection.rs:452-459) and gets zero rows instead.
+            // Confirmed cross-runtime defect; see the report.
+            yield return ("cites_target_by_name_alias", new CultNetSelection
+            {
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].NameAlias, RecordKey = "a-eq" } }
+            });
+            // R-E: `schemas` reached by the same name alias. Same one-sided-match caveat as above.
+            yield return ("schemas_by_name_alias", new CultNetSelection { Schemas = new[] { schemas["leaf_a"].NameAlias } });
             // R-C: BmpPrivateUseKey (U+E000) sorts before AstralKey (U+1F602) in code-point order,
             // despite AstralKey's leading UTF-16 code unit (0xD83D) being numerically smaller.
             yield return ("astral_key_code_point_order", new CultNetSelection
@@ -152,13 +230,23 @@ namespace GameCult.Networking.Tests
         // Self's ruling, 2026-09-22 (commit 2 fix batch): door-refusal vectors. Never evaluated on
         // either side - only decoded and handed to Validate/validate, which must refuse at exactly
         // the named field. Mirrors packages/cultnet-rs/tests/selection.rs's refusal_cases.
+        //
+        // Not mirrored here: cultnet-rs's refuses_unmatched_cites_target_schema. R-E says an
+        // unresolved cites.target.schemaId "is refused at the door, never answered with an empty
+        // page", but CultNetSelection.Validate (CultNetSelection.cs:361-391) never checks that
+        // cites.target.schemaId resolves to any known schema at all - only that it is present. Adding
+        // that vector here would make this file's own Assert.Throws fail before a vector could ever be
+        // written, so it stays Rust-only; the report below covers the resulting cross-runtime failure
+        // when this file's reader judges it.
         private static IEnumerable<(string Name, CultNetSelection Selection, string ExpectedField)> RefusalCases()
         {
             yield return ("refuses_empty_schemas_list", new CultNetSelection { Schemas = Array.Empty<string>() }, "schemas");
             yield return ("refuses_blank_key_entry", new CultNetSelection { Keys = new[] { "a-eq", "   " } }, "keys");
         }
 
-        private static string RowId(CultNetSelectionEvaluator.Row row) => $"{row.Descriptor.SchemaName}/{row.Key.Value}";
+        // R-E: id, not name - a row's cross-runtime identity is its real schema id plus its key, the
+        // same shape cultnet-rs's row_id() produces.
+        private static string RowId(CultNetSelectionEvaluator.Row row) => $"{row.Descriptor.SchemaId}/{row.Key.Value}";
 
         // Vectors written by Rust (packages/cultnet-rs/tests/selection.rs,
         // write_selection_vectors_for_the_reference) decode and evaluate identically here.
@@ -169,11 +257,16 @@ namespace GameCult.Networking.Tests
             if (!File.Exists(path))
                 Assert.Inconclusive($"{path} is missing - run cargo test -p cultnet-rs --test selection with CULTNET_WRITE_VECTORS=1 first.");
 
-            var (registry, rows) = BuildFixture();
+            var (registry, rows, _) = BuildFixture();
             using var document = JsonDocument.Parse(File.ReadAllText(path));
             var vectors = document.RootElement.GetProperty("vectors");
             Assert.That(vectors.GetArrayLength(), Is.GreaterThan(0), "the vector file must carry at least one vector");
 
+            // Self's ruling, 2026-09-22 (shared-fixture ruling): a real parity defect is reported in
+            // full, not truncated by whichever vector happened to come first in the file - every
+            // vector is judged and every mismatch collected before the test fails once, mirroring
+            // packages/cultnet-rs/tests/selection.rs's own reader.
+            var failures = new List<string>();
             foreach (var vector in vectors.EnumerateArray())
             {
                 var name = vector.GetProperty("name").GetString();
@@ -183,34 +276,71 @@ namespace GameCult.Networking.Tests
 
                 if (vector.TryGetProperty("expectedRefusalField", out var refusalField) && refusalField.ValueKind != JsonValueKind.Null)
                 {
-                    var error = Assert.Throws<CultNetSelectionInvalidException>(() => selection.Validate(registry.AllDescriptors.ToArray()), $"vector {name} must be refused");
-                    Assert.That(error!.Field, Is.EqualTo(refusalField.GetString()), $"vector {name}: refusal field");
+                    try
+                    {
+                        selection.Validate(registry.AllDescriptors.ToArray());
+                        failures.Add($"{name}: expected refusal at '{refusalField.GetString()}' but the reference accepted it");
+                    }
+                    catch (CultNetSelectionInvalidException error)
+                    {
+                        if (error.Field != refusalField.GetString())
+                            failures.Add($"{name}: refusal field - expected '{refusalField.GetString()}', got '{error.Field}'");
+                    }
                     continue;
                 }
 
-                var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf);
+                CultNetSelectionEvaluator.Evaluation evaluation;
+                try
+                {
+                    evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf);
+                }
+                catch (Exception error)
+                {
+                    var expectedIds = vector.GetProperty("expectedIds").EnumerateArray().Select(e => e.GetString()).ToArray();
+                    failures.Add($"{name}: expected real evaluation (expectedIds=[{string.Join(", ", expectedIds)}]) but Select threw {error.GetType().Name}: {error.Message}");
+                    continue;
+                }
 
-                var expectedIds = vector.GetProperty("expectedIds").EnumerateArray().Select(e => e.GetString()).ToArray();
-                Assert.That(evaluation.Rows.Select(RowId).ToArray(), Is.EqualTo(expectedIds), $"vector {name}: row ids");
-                Assert.That((uint)evaluation.Rows.Count, Is.EqualTo(vector.GetProperty("matched").GetUInt32()), $"vector {name}: matched");
-                Assert.That(evaluation.NextCursor != null, Is.EqualTo(vector.GetProperty("hasNext").GetBoolean()), $"vector {name}: hasNext");
+                var expectedIdsList = vector.GetProperty("expectedIds").EnumerateArray().Select(e => e.GetString()).ToArray();
+                var actualIds = evaluation.Rows.Select(RowId).ToArray();
+                if (!actualIds.SequenceEqual(expectedIdsList))
+                    failures.Add($"{name}: row ids - expected [{string.Join(", ", expectedIdsList)}], got [{string.Join(", ", actualIds)}]");
+
+                var expectedMatched = vector.GetProperty("matched").GetUInt32();
+                if ((uint)evaluation.TotalMatched != expectedMatched)
+                    failures.Add($"{name}: matched - expected {expectedMatched}, got {evaluation.TotalMatched}");
+
+                var expectedHasNext = vector.GetProperty("hasNext").GetBoolean();
+                if ((evaluation.NextCursor != null) != expectedHasNext)
+                    failures.Add($"{name}: hasNext - expected {expectedHasNext}, got {evaluation.NextCursor != null}");
 
                 var expectedEdges = vector.GetProperty("expectedEdges").EnumerateArray().ToArray();
-                Assert.That(evaluation.Edges.Count, Is.EqualTo(expectedEdges.Length), $"vector {name}: edge count");
+                if (evaluation.Edges.Count != expectedEdges.Length)
+                {
+                    failures.Add($"{name}: edge count - expected {expectedEdges.Length}, got {evaluation.Edges.Count}");
+                    continue;
+                }
                 for (var i = 0; i < expectedEdges.Length; i++)
                 {
                     var edge = evaluation.Edges[i];
                     var expectedEdge = expectedEdges[i];
-                    Assert.That(RowId(edge.From), Is.EqualTo(expectedEdge.GetProperty("fromId").GetString()), $"vector {name}: edge[{i}].from");
-                    Assert.That(edge.Role, Is.EqualTo(expectedEdge.GetProperty("role").GetString()), $"vector {name}: edge[{i}].role");
-                    Assert.That(RowId(edge.To), Is.EqualTo(expectedEdge.GetProperty("toId").GetString()), $"vector {name}: edge[{i}].to");
                     var expectedPayload = expectedEdge.GetProperty("payloadBase64");
-                    if (expectedPayload.ValueKind == JsonValueKind.Null)
-                        Assert.That(edge.Payload, Is.Null, $"vector {name}: edge[{i}].payload");
-                    else
-                        Assert.That(Convert.ToBase64String((byte[])edge.Payload!), Is.EqualTo(expectedPayload.GetString()), $"vector {name}: edge[{i}].payload");
+                    var actualPayload = edge.Payload == null ? null : Convert.ToBase64String((byte[])edge.Payload);
+                    var payloadMatches = expectedPayload.ValueKind == JsonValueKind.Null
+                        ? actualPayload == null
+                        : actualPayload == expectedPayload.GetString();
+                    if (RowId(edge.From) != expectedEdge.GetProperty("fromId").GetString() ||
+                        edge.Role != expectedEdge.GetProperty("role").GetString() ||
+                        RowId(edge.To) != expectedEdge.GetProperty("toId").GetString() ||
+                        !payloadMatches)
+                    {
+                        failures.Add($"{name}: edge[{i}] mismatch");
+                    }
                 }
             }
+
+            Assert.That(failures, Is.Empty,
+                $"{failures.Count} of {vectors.GetArrayLength()} vectors disagreed with the reference:\n" + string.Join("\n", failures));
         }
 
         // Writes contracts/cultnet/interop/selection-vectors.cs-written.json for Rust's
@@ -223,9 +353,9 @@ namespace GameCult.Networking.Tests
             if (Environment.GetEnvironmentVariable("CULTNET_WRITE_VECTORS") != "1")
                 Assert.Ignore("Set CULTNET_WRITE_VECTORS=1 to (re)write the committed vector file.");
 
-            var (registry, rows) = BuildExtendedFixture();
+            var (registry, rows, schemas) = BuildFixture();
             var vectors = new List<object>();
-            foreach (var (name, selection) in Cases())
+            foreach (var (name, selection) in Cases(schemas))
             {
                 var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
                 var selectionBytes = MessagePackSerializer.Serialize(selection, CultNetSchemaMessageSerialization.Options);
@@ -237,16 +367,16 @@ namespace GameCult.Networking.Tests
                     asOf = 1UL,
                     expectedRefusalField = (string?)null,
                     expectedIds = evaluation.Rows.Select(RowId).ToArray(),
-                    matched = (uint)evaluation.Rows.Count,
+                    matched = (uint)evaluation.TotalMatched,
                     hasNext = evaluation.NextCursor != null,
                     expectedEdges = evaluation.Edges.Select(edge => new
                     {
                         fromId = RowId(edge.From),
                         role = edge.Role,
                         toId = RowId(edge.To),
-                        // None of this file's six vectors hop through a many-dictionary reference
-                        // (the only shape D11 gives a non-null payload), so this is always null
-                        // here; packages/cultnet-rs/tests/selection.rs's
+                        // None of this file's cases hop through a many-dictionary reference (the only
+                        // shape D11 gives a non-null payload), so this is always null here;
+                        // packages/cultnet-rs/tests/selection.rs's
                         // dictionary_reference_entries_keep_distinct_payload_bytes pins the
                         // payload-carrying case directly against Row::references() instead.
                         payloadBase64 = edge.Payload == null ? null : Convert.ToBase64String((byte[])edge.Payload)
@@ -282,6 +412,22 @@ namespace GameCult.Networking.Tests
             Directory.CreateDirectory(directory);
             var json = JsonSerializer.Serialize(new { vectors }, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(Path.Combine(directory, "selection-vectors.cs-written.json"), json);
+        }
+
+        // Dumps each fixture schema's real, reference-computed id (and lets a maintainer derive the
+        // unversioned alias by stripping the trailing ".v1") so
+        // contracts/cultnet/interop/selection-vectors.fixture.json can be regenerated after a shape
+        // change. Not part of the parity contract itself.
+        [Test]
+        public void DumpFixtureSchemaIds()
+        {
+            if (Environment.GetEnvironmentVariable("CULTNET_DUMP_SCHEMA_IDS") != "1")
+                Assert.Ignore("Set CULTNET_DUMP_SCHEMA_IDS=1 to print the fixture's real schema ids.");
+
+            var registry = Registry();
+            Console.WriteLine("SCHEMA_ID leaf_a=" + registry.GetRequired(typeof(ParityLeafA)).SchemaId);
+            Console.WriteLine("SCHEMA_ID leaf_b=" + registry.GetRequired(typeof(ParityLeafB)).SchemaId);
+            Console.WriteLine("SCHEMA_ID citer=" + registry.GetRequired(typeof(ParityCiter)).SchemaId);
         }
 
         private static string RepoRoot()
