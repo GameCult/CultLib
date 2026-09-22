@@ -731,12 +731,18 @@ std::string LateCallOnce() {
     return {};
 }
 
-// How long `holdtimeout`'s poll asks for, and how long the hold stays armed
-// under it. The gap between them is the whole measurement: a poll the hold
-// parks leaves when the hold is released, so its elapsed time lands at the
-// second number instead of the first.
+// How long `holdtimeout`'s two polls ask for, and how long the hold stays armed
+// under them. The gap between each poll and the hold is the whole measurement:
+// a poll the hold parks leaves when the hold is released, so its elapsed time
+// lands at the last number instead of its own.
+//
+// Two polls, a short one and a long one, because a guard that tests the timeout
+// instead of the wake — park it unless it was short — is identity on any single
+// value on one side of its threshold. The long one sits above the thresholds
+// such a guard would plausibly carry.
 constexpr int32_t kHeldTimeoutPollMs = 150;
-constexpr int kHoldArmedMs = 800;
+constexpr int32_t kHeldLongTimeoutPollMs = 1300;
+constexpr int kHoldArmedMs = 2200;
 
 // The seam's own rule, and the only scenario that can see it: the hold parks a
 // call the wait woke, and not one whose own timeout expired.
@@ -745,14 +751,14 @@ constexpr int kHoldArmedMs = 800;
 // nothing either of them observes — the timeout scenario never arms the hold,
 // and the hold scenarios never let a timeout expire, so nothing was ever in
 // both states at once and the guard could be deleted with every scenario still
-// green. This puts one call in both states: the hold is armed, and the runtime
-// is idle, so the wait ends on the timeout and the call is on its way out.
+// green. This puts calls in both states: the hold is armed, and the runtime is
+// idle, so each wait ends on its timeout and the call is on its way out.
 //
 // It matters because a scenario that parked such a call would then report the
 // bridge keeping a host call inside the library when what kept it was the
 // fixture — the quiesce numbers `holdclose` asserts would be the seam's, not
 // the bridge's.
-std::string HoldTimeoutOnce() {
+std::string HoldTimeoutOnce(std::array<Overshoot, 2>& overshoot) {
     cultmesh_quic_debug_hold_calls(1);
     void* runtime = nullptr;
     const int32_t opened = cultmesh_quic_runtime_open("cultmesh-quic-native-tests", &runtime);
@@ -761,37 +767,49 @@ std::string HoldTimeoutOnce() {
         return "cultmesh_quic_runtime_open returned " + std::to_string(opened);
     }
 
-    // On a thread of its own, because a parked call does not come back until the
-    // release below and this thread is what releases it.
-    TimedPoll poll{};
-    std::thread poller([runtime, &poll] { poll = PollFor(runtime, kHeldTimeoutPollMs); });
+    // Each on a thread of its own, because a parked call does not come back until
+    // the release below and this thread is what releases it.
+    constexpr std::array<int32_t, 2> timeouts{kHeldTimeoutPollMs, kHeldLongTimeoutPollMs};
+    std::array<TimedPoll, 2> polls{};
+    std::array<std::thread, 2> pollers;
+    for (size_t index = 0; index < timeouts.size(); ++index)
+        pollers[index] = std::thread([runtime, &polls, &timeouts, index] {
+            polls[index] = PollFor(runtime, timeouts[index]);
+        });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(kHoldArmedMs));
     cultmesh_quic_debug_hold_calls(0);
-    poller.join();
+    for (auto& poller : pollers) poller.join();
     cultmesh_quic_runtime_close(runtime);
 
-    if (poll.result != 0)
-        return "a poll ended by its own timeout returned " + std::to_string(poll.result) +
-            ", not the 0 an idle runtime owes it";
-    if (poll.elapsed_ms < kHeldTimeoutPollMs - kEarlyToleranceMs)
-        return "a poll asking for " + std::to_string(kHeldTimeoutPollMs) + " ms returned after " +
-            std::to_string(poll.elapsed_ms) + " ms, so the fixture never let its timeout run out";
-    if (poll.elapsed_ms > kHeldTimeoutPollMs + LateToleranceMs(kHeldTimeoutPollMs))
-        return "a poll asking for " + std::to_string(kHeldTimeoutPollMs) + " ms returned after " +
-            std::to_string(poll.elapsed_ms) + " ms: the hold parked a call its own timeout had "
-            "already ended, and it left when the hold did";
+    for (size_t index = 0; index < timeouts.size(); ++index) {
+        const TimedPoll& poll = polls[index];
+        const int32_t timeout_ms = timeouts[index];
+        overshoot[index].Record(poll, timeout_ms);
+        if (poll.result != 0)
+            return "a poll ended by its own timeout returned " + std::to_string(poll.result) +
+                ", not the 0 an idle runtime owes it";
+        if (poll.elapsed_ms < timeout_ms - kEarlyToleranceMs)
+            return "a poll asking for " + std::to_string(timeout_ms) + " ms returned after " +
+                std::to_string(poll.elapsed_ms) + " ms, so the fixture never let its timeout run out";
+        if (poll.elapsed_ms > timeout_ms + LateToleranceMs(timeout_ms))
+            return "a poll asking for " + std::to_string(timeout_ms) + " ms returned after " +
+                std::to_string(poll.elapsed_ms) + " ms: the hold parked a call its own timeout had "
+                "already ended, and it left when the hold did";
+    }
     return {};
 }
 
 int HoldTimeout(int iterations) {
     MeasureAboveTheLoad();
+    std::array<Overshoot, 2> overshoot{};
     for (int iteration = 0; iteration < iterations; ++iteration) {
-        const std::string failure = HoldTimeoutOnce();
+        const std::string failure = HoldTimeoutOnce(overshoot);
         if (!failure.empty())
             return Fail("holdtimeout iteration " + std::to_string(iteration) + ": " + failure);
     }
-    std::printf("holdtimeout %dx: ok\n", iterations);
+    std::printf("holdtimeout %dx: ok (worst overshoot %lld ms at %d, %lld ms at %d)\n", iterations,
+        overshoot[0].worst_ms, kHeldTimeoutPollMs, overshoot[1].worst_ms, kHeldLongTimeoutPollMs);
     return 0;
 }
 

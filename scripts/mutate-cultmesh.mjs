@@ -615,6 +615,16 @@ const mutations = [
     old: "        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
     new: "        if (CULTMESH_QUIC_DEBUG_HELD(lock) && woken) return 0;\n",
   },
+  {
+    target: "native",
+    honestOn: ["linux-x64", "win32-x64"],
+    // A guard that reads the input instead of the wake: a long wait is surely a
+    // wake worth holding. It is the identity on any poll under its threshold, and
+    // `holdtimeout`'s second, longer poll is what sits above it.
+    rule: "the hold parks only a call the wait woke (loosening: it also parks any long wait)",
+    old: "        if (woken && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
+    new: "        if ((woken || timeout_ms > 1000) && CULTMESH_QUIC_DEBUG_HELD(lock)) return 0;\n",
+  },
   // The close's wake. It was defended by committed code and had no entry, so the
   // table understated what `closerace` covers; these say it.
   {
