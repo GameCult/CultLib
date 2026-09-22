@@ -614,10 +614,27 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (shard == null) throw new ArgumentNullException(nameof(shard));
 
+            var lowSchemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds);
+            var lowKeys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys);
+
+            // R-R: an explicit empty schemas or keys list is v0's own "answer nothing" - it must not
+            // reach the v1 door, which refuses an empty selection.schemas/keys outright.
+            if (lowSchemas is { Length: 0 } || lowKeys is { Length: 0 })
+            {
+                return new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
+                    Documents = Array.Empty<CultNetRawDocumentRecord>(),
+                    ShardId = shard.ShardId,
+                    ShardEpoch = shard.Epoch,
+                    ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
+                };
+            }
+
             var selection = new CultNetSelection
             {
-                Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
-                Keys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys),
+                Schemas = lowSchemas,
+                Keys = lowKeys,
                 Projection = CultNetSelectionProjections.Document
             };
             bool RowFilter(CultDocumentDescriptor descriptor, CultRecordKey key) =>

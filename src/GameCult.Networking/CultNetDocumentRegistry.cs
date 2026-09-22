@@ -283,10 +283,25 @@ namespace GameCult.Networking
             CultNetDocumentMessageOptions? options = null)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
+            var lowSchemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds);
             var lowKeys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys);
+
+            // R-R: an explicit empty schemas or keys list is v0's own "answer nothing" - it must not
+            // reach the v1 door, which refuses an empty selection.schemas/keys outright
+            // (CultNetSelectionValidation.ValidateShape). v0 and v1 disagree about what an empty list
+            // means, so v0 decides this before the v1 evaluator ever sees the selection.
+            if (lowSchemas is { Length: 0 } || lowKeys is { Length: 0 })
+            {
+                return new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = RequireNonEmpty(messageId, nameof(messageId)),
+                    Documents = Array.Empty<CultNetRawDocumentRecord>()
+                };
+            }
+
             var selection = new CultNetSelection
             {
-                Schemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds),
+                Schemas = lowSchemas,
                 Keys = lowKeys,
                 Projection = CultNetSelectionProjections.Document
             };
