@@ -836,9 +836,47 @@ argument to the binary. **The release configuration is therefore owed again as
 a plain build, not as a harness target**, and R1's substance — that the
 release macro is unexercised — is a Soul hand probe now.
 
-**Outstanding for Cut 3: the Linux leg.** Every scenario, asserts and release,
-in the committed `debian:13` dev image, run on Yggdrasil. Windows is the
-workstation's only remaining QUIC work.
+**The Linux leg ran on Yggdrasil, 2026-09-22** (Sonnet), against
+`hands/cultmath-erf` HEAD, in an image built from the committed
+`scripts/quic-native-linux-dev.Dockerfile` (pinned `debian:13`, tagged by
+content hash `cultlib-quic-native-dev:13d7fbd109fc`). No repo change was
+needed and none was made.
+
+- **Asserts build, all ten scenarios pass**, 20 rounds each: `closerace`,
+  `holdclose`, `holdtimeout`, `polltimeout`, `pollbusy`, `pollhammer`,
+  `zerotimeout`, `payloadfit`, `latecall`, `waitseam` (11 probes, 40 repeated
+  polls on one runtime).
+- **Release build, asserts off, all four required scenarios pass**:
+  `polltimeout`, `pollbusy`, `pollhammer`, `zerotimeout`.
+- Worst overshoot anywhere was 4 ms, against `kGenerousLateToleranceMs` of
+  400 ms. **F1 is closed on Linux**: the build that ships now runs the timeout
+  rule.
+
+**A defect in the README's own worked example, found by running it.** The
+example builds the test binary and runs it directly, and every scenario dies
+with `libmsquic.so.2: cannot open shared object file`. Both the bridge and the
+test executable carry `INSTALL_RPATH "$ORIGIN"` and expect the MsQuic runtime
+beside them in `bin/`, but nothing puts it there for a test build — only
+`build-quic-native.sh`'s packaged output directory gets that copy. Hands
+worked around it with a `cp` after each build and correctly did not treat it
+as a bridge defect. **This is the documented path, written in `796433f` when
+the harness was deleted, and it has never worked.** A documented path that
+fails on first use is worse than no documentation: it was published in the
+same commit that removed the working one.
+
+**Still outstanding for Cut 3:**
+
+- The **Windows release configuration**. It lived inside the harness and left
+  with it, exactly as Linux's did; Linux has now been re-run without the
+  harness and Windows has not.
+- **F5's stress under load cannot be run on Windows at all.** It wants five
+  rounds with sixteen CPU burners, and those burners are what froze the
+  operator's workstation on 2026-09-22. `closerace` is Windows-sensitive (it
+  went red under load there in four of five rounds), so the check matters most
+  on the platform where it is now forbidden. **This is an operator fork, not
+  something to route around:** either Windows stress finds a host that is not
+  Starfire, or the check is accepted as unproven on Windows and recorded that
+  way.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
