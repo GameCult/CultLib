@@ -15,13 +15,21 @@
 //! the comparator; it is a pure string algorithm with no `f64`/`f32` anywhere on the comparison path.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::Hmac;
+use hmac::Mac;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+
+use crate::CultNetMessage;
+use crate::security::constant_time_eq;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------------------------
 // Canonical decimal numbers (Q-J)
@@ -923,6 +931,70 @@ impl From<SelectionInvalid> for SelectionRefusal {
 }
 
 // ---------------------------------------------------------------------------------------------
+// R-N (docs/cultnet-selection-cut.md, fix batch 3): refusals are wire messages
+// ---------------------------------------------------------------------------------------------
+
+impl SelectionRefusal {
+    /// The wire `code` this refusal carries on `cultnet.error.v0` (R-N). Mirrors the C#
+    /// reference's mapping from `CultNetSelectionInvalidException` and the cursor/reference
+    /// refusals to the same string.
+    pub fn wire_code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "selection_invalid",
+            Self::CursorStale { .. } => "cursor_stale",
+            Self::CursorInvalid { .. } => "cursor_invalid",
+            Self::ReferenceOutsideTarget { .. } => "reference_outside_target",
+        }
+    }
+
+    /// The wire `details` this refusal carries alongside `code` (R-N): a flat string map, so the
+    /// shape stays additive over the pre-cut `error` string on every transport this crate speaks.
+    pub fn wire_details(&self) -> BTreeMap<String, String> {
+        let mut details = BTreeMap::new();
+        match self {
+            Self::Invalid(inner) => {
+                details.insert("field".to_string(), inner.field.clone());
+                if let Some(value) = &inner.value {
+                    details.insert("value".to_string(), value.clone());
+                }
+            }
+            Self::CursorStale { as_of, current } => {
+                details.insert("asOf".to_string(), as_of.to_string());
+                details.insert("current".to_string(), current.to_string());
+            }
+            Self::CursorInvalid { message } => {
+                details.insert("message".to_string(), message.clone());
+            }
+            Self::ReferenceOutsideTarget {
+                from_schema_id,
+                from_key,
+                role,
+                to_schema_id,
+                to_key,
+            } => {
+                details.insert("fromSchemaId".to_string(), from_schema_id.clone());
+                details.insert("fromKey".to_string(), from_key.clone());
+                details.insert("role".to_string(), role.clone());
+                details.insert("toSchemaId".to_string(), to_schema_id.clone());
+                details.insert("toKey".to_string(), to_key.clone());
+            }
+        }
+        details
+    }
+
+    /// This refusal as the `cultnet.error.v0` message a peer actually receives (R-N): `error`
+    /// stays the human string every peer already reads, `code`/`details` are additive.
+    pub fn to_wire_message(&self) -> CultNetMessage {
+        let details = self.wire_details();
+        CultNetMessage::Error {
+            error: self.to_string(),
+            code: Some(self.wire_code().to_string()),
+            details: if details.is_empty() { None } else { Some(details) },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Row / RowSet (D7): the consumer's declarations and values, reflected over nothing
 // ---------------------------------------------------------------------------------------------
 
@@ -1385,6 +1457,7 @@ pub fn select<R: Row + Clone>(
     all_rows: &[R],
     selection: &Selection,
     as_of: u64,
+    cursor_key: &CursorKey,
 ) -> Result<Evaluation<R>, SelectionRefusal> {
     validate(selection, row_set)?;
 
@@ -1422,7 +1495,9 @@ pub fn select<R: Row + Clone>(
         && !cursor_text.is_empty()
     {
         let cursor = Cursor::parse(cursor_text)?;
-        if cursor.digest != Cursor::compute_digest(selection) {
+        // R-O: a forged cursor, or one minted under a different process's key, fails this check -
+        // digest equality alone used to be enough to mint one; now the key is required too.
+        if !cursor.verify_digest(selection, cursor_key) {
             return Err(SelectionRefusal::CursorInvalid {
                 message: "The cursor's selection digest does not match this selection.".into(),
             });
@@ -1448,7 +1523,12 @@ pub fn select<R: Row + Clone>(
         .collect();
     let has_next = start_index + page.len() < matched.len();
     let next_cursor = if has_next && !page.is_empty() {
-        Some(Cursor::mint(as_of, page.last().expect("checked non-empty"), selection))
+        Some(Cursor::mint(
+            as_of,
+            page.last().expect("checked non-empty"),
+            selection,
+            cursor_key,
+        ))
     } else {
         None
     };
@@ -1531,9 +1611,10 @@ pub fn select_page<R: Row + Clone>(
     all_rows: &[R],
     selection: &Selection,
     as_of: u64,
+    cursor_key: &CursorKey,
     document_record: impl Fn(&R) -> SelectionDocumentRecord,
 ) -> Result<SelectionPage, SelectionRefusal> {
-    let evaluation = select(row_set, all_rows, selection, as_of)?;
+    let evaluation = select(row_set, all_rows, selection, as_of, cursor_key)?;
     let want_document = selection.projection == PROJECTION_DOCUMENT;
 
     let (headers, documents) = if want_document {
@@ -1663,6 +1744,14 @@ fn matches_citation<R: Row + Clone>(
 ) -> Result<bool, SelectionRefusal> {
     let mut found = false;
     for (role, target, payload) in citer.references() {
+        let Some(resolved) = by_key.get(target.record_key.as_str()) else {
+            continue;
+        };
+        // R-T: every resolvable edge is checked against its declared target, not only the ones
+        // the citation's own role/key filters happen to ask about - a corrupt edge must not hide
+        // behind an unrelated filter (F15: the pre-fix evaluator skipped this check for every
+        // edge that did not point at the requested key).
+        ensure_within_declared_target(row_set, &role, citer, *resolved)?;
         if let Some(wanted_role) = &citation.role
             && *wanted_role != role
         {
@@ -1671,10 +1760,6 @@ fn matches_citation<R: Row + Clone>(
         if target.record_key != citation.target.record_key {
             continue;
         }
-        let Some(resolved) = by_key.get(target.record_key.as_str()) else {
-            continue;
-        };
-        ensure_within_declared_target(row_set, &role, citer, *resolved)?;
         // R-E: the target's schema id is matched through the one alias rule, not exact equality.
         let resolved_name = row_set
             .schema_name(resolved.schema_id())
@@ -1729,34 +1814,61 @@ fn build_incoming_index<R: Row + Clone>(
 // Cursor (section 2: "Snapshot")
 // ---------------------------------------------------------------------------------------------
 
-/// The opaque cursor: `asOf`, the last `(ordinal, schemaId, recordKey)`, and a digest of the
-/// selection with `cursor`/`limit` cleared. Minted only by the answering server. This runtime's own
-/// mint/parse/digest algorithm is internal to it - a cursor is never handed across runtimes (each
-/// server answers its own pages), so it need not (and does not) byte-match the C# reference's; the
-/// *rule* it enforces (section 2 "Snapshot") does.
+/// Random per-process key the answering server holds for minting and verifying its own cursors
+/// (R-O). A cursor minted under one process's key is refused `cursor_invalid` by any other key,
+/// including the same server's own key after a restart - cursors are short-lived and minted only
+/// by the answering server (section 2, "Snapshot"), so not surviving a restart is the accepted
+/// cost, not a bug. Never serialized and never persisted; hold one instance for the process's
+/// lifetime and share it across every `select`/`select_page` call that process answers.
+#[derive(Clone)]
+pub struct CursorKey(Vec<u8>);
+
+impl CursorKey {
+    /// A fresh 32-byte key from the OS RNG.
+    pub fn random() -> Self {
+        let mut bytes = vec![0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for CursorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CursorKey(..)")
+    }
+}
+
+/// The opaque cursor: `asOf`, the last `(ordinal, schemaId, recordKey)`, and an HMAC digest of the
+/// selection with `cursor`/`limit` cleared, keyed under the answering process's [`CursorKey`]
+/// (R-O). Minted only by the answering server. This runtime's own mint/parse/digest algorithm is
+/// internal to it - a cursor is never handed across runtimes (each server answers its own pages),
+/// so it need not (and does not) byte-match the C# reference's; the *rule* it enforces (section 2
+/// "Snapshot") does.
+///
+/// `parse` decodes the cursor's body and exposes `as_of` without the answering server's key -
+/// Huginn depends on reading `as_of` this way, and a cursor's shape does not need the key to
+/// decode, only its digest needs the key to *verify* (done by [`select`], which holds the key).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub as_of: u64,
     pub ordinal: i64,
     pub schema_id: String,
     pub record_key: String,
-    pub digest: String,
+    digest: String,
 }
 
-const CURSOR_FIELD_SEPARATOR: char = '\u{1}';
-
 impl Cursor {
-    pub fn mint<R: Row>(as_of: u64, last_row: &R, selection: &Selection) -> String {
-        let digest = Self::compute_digest(selection);
-        let raw = [
-            as_of.to_string(),
-            last_row.ordinal().to_string(),
-            last_row.schema_id().to_string(),
-            last_row.record_key().to_string(),
-            digest,
-        ]
-        .join(&CURSOR_FIELD_SEPARATOR.to_string());
-        URL_SAFE_NO_PAD.encode(raw.as_bytes())
+    pub fn mint<R: Row>(as_of: u64, last_row: &R, selection: &Selection, key: &CursorKey) -> String {
+        let digest = Self::compute_digest(selection, key);
+        // R-O: the cursor body uses length-prefixed fields, not a delimiter - a record key
+        // carrying any character, including the pre-fix delimiter itself (F6), round-trips.
+        let mut body = String::new();
+        write_length_prefixed(&mut body, &as_of.to_string());
+        write_length_prefixed(&mut body, &last_row.ordinal().to_string());
+        write_length_prefixed(&mut body, last_row.schema_id());
+        write_length_prefixed(&mut body, last_row.record_key());
+        write_length_prefixed(&mut body, &digest);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
     }
 
     pub fn parse(cursor: &str) -> Result<Self, SelectionRefusal> {
@@ -1764,31 +1876,38 @@ impl Cursor {
             message: "The cursor does not decode.".into(),
         };
         let bytes = URL_SAFE_NO_PAD.decode(cursor).map_err(|_| invalid())?;
-        let raw = String::from_utf8(bytes).map_err(|_| invalid())?;
-        let parts: Vec<&str> = raw.split(CURSOR_FIELD_SEPARATOR).collect();
-        if parts.len() != 5 {
-            return Err(invalid());
-        }
-        let as_of: u64 = parts[0].parse().map_err(|_| invalid())?;
-        let ordinal: i64 = parts[1].parse().map_err(|_| invalid())?;
+        let mut fields = read_length_prefixed_fields(&bytes, 5).ok_or_else(invalid)?;
+        let digest = fields.pop().unwrap();
+        let record_key = fields.pop().unwrap();
+        let schema_id = fields.pop().unwrap();
+        let ordinal: i64 = fields.pop().unwrap().parse().map_err(|_| invalid())?;
+        let as_of: u64 = fields.pop().unwrap().parse().map_err(|_| invalid())?;
         Ok(Self {
             as_of,
             ordinal,
-            schema_id: parts[2].to_string(),
-            record_key: parts[3].to_string(),
-            digest: parts[4].to_string(),
+            schema_id,
+            record_key,
+            digest,
         })
     }
 
-    /// A digest of the selection with `cursor` and `limit` cleared, so a cursor is bound to the
-    /// selection that minted it.
+    /// Verifies this cursor's digest against `selection` under `key` in constant time (R-O): a
+    /// cursor forged without the key, or minted by a different process's key, is refused.
+    fn verify_digest(&self, selection: &Selection, key: &CursorKey) -> bool {
+        let expected = Self::compute_digest(selection, key);
+        constant_time_eq(self.digest.as_bytes(), expected.as_bytes())
+    }
+
+    /// An HMAC-SHA256 digest, keyed under `key`, of the selection with `cursor` and `limit`
+    /// cleared, so a cursor is bound to the selection that minted it and to the process that
+    /// minted it.
     ///
-    /// R-H: every string and list is length-prefixed, so no separator character can ever make two
-    /// distinct selections collide (Soul found `["a|b"]` and `["a","b"]` digesting the same under
-    /// the previous separator-joined scheme). This need not (and does not) byte-match the C#
-    /// reference's own digest - each server answers its own pages (see this type's doc comment) -
-    /// only the collision-freedom is load-bearing.
-    pub fn compute_digest(selection: &Selection) -> String {
+    /// R-H: every string and list inside the selection is length-prefixed, so no separator
+    /// character can ever make two distinct selections collide (Soul found `["a|b"]` and
+    /// `["a","b"]` digesting the same under a separator-joined scheme). This need not (and does
+    /// not) byte-match the C# reference's own digest - each server answers its own pages (see this
+    /// type's doc comment) - only the collision-freedom and the keying are load-bearing.
+    pub fn compute_digest(selection: &Selection, key: &CursorKey) -> String {
         let mut sorted_schemas = selection.schemas.clone().unwrap_or_default();
         sorted_schemas.sort();
         let mut sorted_keys = selection.keys.clone().unwrap_or_default();
@@ -1831,10 +1950,11 @@ impl Cursor {
         write_length_prefixed(&mut canonical, &selection.projection);
         canonical.push(if selection.descending { 'D' } else { 'A' });
 
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        hasher
-            .finalize()
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key.0)
+            .expect("HMAC-SHA256 accepts a key of any length");
+        mac.update(canonical.as_bytes());
+        mac.finalize()
+            .into_bytes()
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
@@ -1857,4 +1977,26 @@ fn write_length_prefixed_list(buffer: &mut String, values: &[String]) {
         write_length_prefixed(buffer, value);
     }
     buffer.push(']');
+}
+
+/// Reads exactly `count` `<byte length>:<value>` fields written by [`write_length_prefixed`] back
+/// out of `bytes`, in order. `None` on any malformed length, a truncated value, a non-UTF-8 value,
+/// or leftover bytes after the last field - the cursor body has no field this reader may skip.
+fn read_length_prefixed_fields(bytes: &[u8], count: usize) -> Option<Vec<String>> {
+    let mut fields = Vec::with_capacity(count);
+    let mut pos = 0usize;
+    for _ in 0..count {
+        let colon = bytes[pos..].iter().position(|&b| b == b':')?;
+        let len: usize = std::str::from_utf8(&bytes[pos..pos + colon]).ok()?.parse().ok()?;
+        pos += colon + 1;
+        if pos + len > bytes.len() {
+            return None;
+        }
+        fields.push(std::str::from_utf8(&bytes[pos..pos + len]).ok()?.to_string());
+        pos += len;
+    }
+    if pos != bytes.len() {
+        return None;
+    }
+    Some(fields)
 }

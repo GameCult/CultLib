@@ -8,11 +8,18 @@ use std::fs;
 use std::path::Path;
 
 use cultnet_rs::{
-    Citation, Cursor, CultNetMessage, CultNetWireContract, Edge, FieldPredicate, Incoming,
+    Citation, Cursor, CursorKey, CultNetMessage, CultNetWireContract, Edge, FieldPredicate, Incoming,
     RawDocumentHeader, RecordRef, Row, RowSet, Selection, SelectionDocumentRecord, SelectionOperator,
     SelectionPage, SelectionRefusal, canonical_number, decode_cultnet_message_from_slice,
     encode_cultnet_message_to_vec, schema_alias, select, select_page, validate,
 };
+
+/// R-O: one process-lifetime key shared by every test in this binary, so a cursor minted in one
+/// `select`/`select_page` call verifies in a later call of the same test.
+fn test_cursor_key() -> &'static CursorKey {
+    static KEY: std::sync::OnceLock<CursorKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(CursorKey::random)
+}
 
 // ------------------------------------------------------------------------------------------
 // The fixture: two leaves under a conceptual abstract middle (mass declared on both,
@@ -342,7 +349,7 @@ fn conjoins_any_of_and_comparison_predicates() {
         ]),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).expect("selection is valid");
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).expect("selection is valid");
     let ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
     assert_eq!(ids, vec!["a-eq"]);
 }
@@ -351,7 +358,7 @@ fn conjoins_any_of_and_comparison_predicates() {
 #[test]
 fn orders_by_ordinal_then_identity_and_reverses() {
     let rows = base_rows();
-    let ascending = select(&FixtureRowSet, &rows, &Selection::default(), 1).unwrap();
+    let ascending = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
     assert_eq!(
         ascending.rows.iter().map(Row::record_key).collect::<Vec<_>>(),
         vec!["a-lo", "a-eq", "b-hi", "shared-1", "shared-2", "shared-3", "citer-1"]
@@ -365,6 +372,7 @@ fn orders_by_ordinal_then_identity_and_reverses() {
             ..Selection::default()
         },
         1,
+        test_cursor_key(),
     )
     .unwrap();
     assert_eq!(
@@ -384,7 +392,7 @@ fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
     };
     let mut seen = Vec::new();
     for _ in 0..10 {
-        let page = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+        let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
         seen.extend(page.rows.iter().map(|r| r.record_key.to_string()));
         match page.next_cursor {
             Some(cursor) => selection.cursor = Some(cursor),
@@ -396,7 +404,7 @@ fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
         vec!["a-lo", "a-eq", "b-hi", "shared-1", "shared-2", "shared-3", "citer-1"]
     );
 
-    let first = select(&FixtureRowSet, &rows, &Selection { limit: Some(1), ..Selection::default() }, 1).unwrap();
+    let first = select(&FixtureRowSet, &rows, &Selection { limit: Some(1), ..Selection::default() }, 1, test_cursor_key()).unwrap();
     let cursor = first.next_cursor.expect("more than one row");
 
     let stale = select(
@@ -404,6 +412,7 @@ fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
         &rows,
         &Selection { limit: Some(1), cursor: Some(cursor.clone()), ..Selection::default() },
         2,
+        test_cursor_key(),
     );
     assert!(matches!(stale, Err(SelectionRefusal::CursorStale { .. })));
 
@@ -412,6 +421,7 @@ fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
         &rows,
         &Selection { limit: Some(1), cursor: Some(cursor), descending: true, ..Selection::default() },
         1,
+        test_cursor_key(),
     );
     assert!(matches!(mismatched, Err(SelectionRefusal::CursorInvalid { .. })));
 
@@ -420,6 +430,7 @@ fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
         &rows,
         &Selection { cursor: Some("not-base64!!".into()), ..Selection::default() },
         1,
+        test_cursor_key(),
     );
     assert!(matches!(garbage, Err(SelectionRefusal::CursorInvalid { .. })));
 }
@@ -435,7 +446,7 @@ fn hops_one_edge_by_declared_role() {
         }),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
     assert_eq!(evaluation.edges.len(), 1);
     assert_eq!(evaluation.edges[0].role, "Design");
@@ -465,7 +476,7 @@ fn cites_role_excludes_a_second_reference_at_the_same_target() {
         }),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.edges.len(), 1, "OtherRole's reference must not also match");
     assert_eq!(evaluation.edges[0].role, "Design");
 }
@@ -483,6 +494,7 @@ fn cited_exists_is_the_one_negation() {
             ..Selection::default()
         },
         1,
+        test_cursor_key(),
     )
     .unwrap();
     assert_eq!(cited.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["a-eq"]);
@@ -496,6 +508,7 @@ fn cited_exists_is_the_one_negation() {
             ..Selection::default()
         },
         1,
+        test_cursor_key(),
     )
     .unwrap();
     let mut ids: Vec<&str> = uncited.rows.iter().map(Row::record_key).collect();
@@ -522,7 +535,7 @@ fn compares_numbers_at_the_boundary_for_all_four_operators() {
             }]),
             ..Selection::default()
         };
-        let mut ids: Vec<String> = select(&FixtureRowSet, &rows, &selection, 1)
+        let mut ids: Vec<String> = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key())
             .unwrap()
             .rows
             .iter()
@@ -555,7 +568,36 @@ fn refuses_an_edge_outside_its_declared_target() {
         cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
         ..Selection::default()
     };
-    let result = select(&FixtureRowSet, &rows, &selection, 1);
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
+}
+
+// R-T/F15: `cites` checks every edge a citer carries against its declared target, not only the
+// one the citation's own role/key filters ask about. Before the fix, a `cites` selection that
+// asked about the citer's legitimate "Design" edge never looked at its "narrow_ref" edge, so a
+// corrupt "narrow_ref" (pointed at a schema outside its declared target) hid behind the filter.
+#[test]
+fn cites_refuses_a_row_carrying_an_unrelated_edge_outside_its_declared_target() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        FixtureRow::leaf(leaf_b(), "b-hi", 2, "shield", "9"),
+        FixtureRow {
+            schema_id: NARROW_CITER,
+            record_key: "bad-citer",
+            ordinal: 3,
+            kind: None,
+            mass: None,
+            references: vec![
+                ("Design".to_string(), rr(leaf_a(), "a-eq"), None),
+                ("narrow_ref".to_string(), rr(leaf_b(), "b-hi"), None),
+            ],
+        },
+    ];
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
     assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
 }
 
@@ -598,7 +640,7 @@ fn cited_selections_page_the_citee_and_their_edges_survive_the_page_filter() {
         cited: Some(Incoming { role: "components".into(), exists: true }),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["part-1"]);
     assert_eq!(evaluation.edges.len(), 1, "the citee (part-1) is on the page, so its incoming edge survives");
     assert_eq!(evaluation.edges[0].from.record_key, "assembly");
@@ -619,7 +661,7 @@ fn cites_selections_still_page_the_citer_and_key_edges_off_it() {
         cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
     assert_eq!(evaluation.edges.len(), 1);
     assert_eq!(evaluation.edges[0].from.record_key, "citer-1");
@@ -640,7 +682,7 @@ fn matches_every_row_sharing_an_index_value() {
         }]),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec!["shared-1", "shared-2", "shared-3"]);
@@ -859,7 +901,7 @@ fn evaluate_vector(vector: &Vector) -> Result<(Vec<String>, u32, bool, Vec<Vecto
     let selection: Selection =
         rmp_serde::from_slice(&bytes).expect("vector selection bytes decode as MessagePack");
     let rows = all_fixture_rows();
-    let evaluation = select(&FixtureRowSet, &rows, &selection, vector.as_of)
+    let evaluation = select(&FixtureRowSet, &rows, &selection, vector.as_of, test_cursor_key())
         .map_err(|refusal| format!("select() refused: {refusal:?}"))?;
     let ids: Vec<String> = evaluation
         .rows
@@ -1147,7 +1189,7 @@ fn write_selection_vectors_for_the_reference() {
     for (name, selection) in cases {
         let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
         let rows = all_fixture_rows();
-        let evaluation = select(&FixtureRowSet, &rows, &selection, 1).expect("valid selection");
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).expect("valid selection");
         let ids: Vec<String> = evaluation
             .rows
             .iter()
@@ -1284,7 +1326,7 @@ fn unused_operator_reference(op: SelectionOperator) -> &'static str {
 fn select_refuses_an_invalid_selection_instead_of_evaluating_it() {
     let rows = base_rows();
     let selection = Selection { schemas: Some(Vec::new()), ..Selection::default() };
-    let result = select(&FixtureRowSet, &rows, &selection, 1);
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
     assert!(matches!(result, Err(SelectionRefusal::Invalid(ref invalid)) if invalid.field == "schemas"));
 }
 
@@ -1330,14 +1372,195 @@ fn cursor_digest_does_not_collide_on_differently_split_lists() {
         ..Selection::default()
     };
     assert_ne!(
-        Cursor::compute_digest(&one_joined_value),
-        Cursor::compute_digest(&two_split_values),
+        Cursor::compute_digest(&one_joined_value, test_cursor_key()),
+        Cursor::compute_digest(&two_split_values, test_cursor_key()),
         "a length-prefixed digest must not let list-splitting collide"
     );
 
     let one_key = Selection { keys: Some(vec!["a,b".into()]), ..Selection::default() };
     let two_keys = Selection { keys: Some(vec!["a".into(), "b".into()]), ..Selection::default() };
-    assert_ne!(Cursor::compute_digest(&one_key), Cursor::compute_digest(&two_keys));
+    assert_ne!(
+        Cursor::compute_digest(&one_key, test_cursor_key()),
+        Cursor::compute_digest(&two_keys, test_cursor_key())
+    );
+}
+
+// ------------------------------------------------------------------------------------------
+// R-O: the cursor is keyed. A forged cursor, a cursor minted by another process, and a record
+// key carrying the pre-fix delimiter character are all refused or round-trip correctly under the
+// keyed, length-prefixed cursor.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn cursor_forged_without_the_key_is_refused() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let genuine = page.next_cursor.expect("more than one row");
+
+    // A forgery attempt: decode the genuine cursor, flip one byte inside its digest (the tail of
+    // the length-prefixed body), and re-encode - the shape (five length-prefixed fields) stays
+    // valid, only the digest content is wrong, exactly what an attacker guessing the selection's
+    // shape without the key would produce.
+    let mut bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &genuine,
+    )
+    .expect("genuine cursor decodes");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    let forged = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes);
+
+    let result = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(forged), ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(result, Err(SelectionRefusal::CursorInvalid { .. })));
+}
+
+#[test]
+fn cursor_minted_by_another_process_is_refused() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let matched = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let last_row = matched.rows.last().expect("more than one row");
+
+    // A different process holds a different random key (R-O) - this cursor is genuine, just not
+    // minted under the key the answering server in this test holds.
+    let other_process_key = CursorKey::random();
+    let cursor = Cursor::mint(1, last_row, &selection, &other_process_key);
+
+    let result = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(cursor), ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(result, Err(SelectionRefusal::CursorInvalid { .. })));
+}
+
+// F6: the pre-fix C# cursor used U+241F as its field delimiter, so a record key carrying that
+// exact character broke the server's own cursor. R-O's length-prefixed body has no delimiter
+// character at all, so this (and any other character a record key might carry) round-trips.
+#[test]
+fn cursor_round_trips_a_record_key_carrying_the_pre_fix_delimiter_character() {
+    let row = FixtureRow::leaf(leaf_a(), "row-\u{241F}-with-the-old-delimiter", 7, "weapon", "5");
+    let selection = Selection::default();
+    let cursor_text = Cursor::mint(9, &row, &selection, test_cursor_key());
+    let cursor = Cursor::parse(&cursor_text).expect("length-prefixed body decodes");
+    assert_eq!(cursor.as_of, 9);
+    assert_eq!(cursor.ordinal, 7);
+    assert_eq!(cursor.schema_id, leaf_a());
+    assert_eq!(cursor.record_key, "row-\u{241F}-with-the-old-delimiter");
+}
+
+// ------------------------------------------------------------------------------------------
+// R-N: refusals are wire messages. `error` stays the human string every peer already reads;
+// `code`/`details` are additive, decoded from the bytes a peer actually receives.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn selection_invalid_refusal_carries_its_code_and_field_on_the_wire() {
+    let refusal = SelectionRefusal::from(
+        validate(&Selection { schemas: Some(vec![]), ..Selection::default() }, &FixtureRowSet)
+            .expect_err("empty schemas is refused"),
+    );
+    let message = refusal.to_wire_message();
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    match decoded {
+        CultNetMessage::Error { error, code, details } => {
+            assert!(!error.is_empty());
+            assert_eq!(code.as_deref(), Some("selection_invalid"));
+            assert_eq!(details.as_ref().and_then(|d| d.get("field")).map(String::as_str), Some("schemas"));
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn cursor_stale_refusal_carries_its_code_and_as_of_on_the_wire() {
+    let refusal = SelectionRefusal::CursorStale { as_of: 1, current: 2 };
+    let message = refusal.to_wire_message();
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    match decoded {
+        CultNetMessage::Error { code, details, .. } => {
+            assert_eq!(code.as_deref(), Some("cursor_stale"));
+            let details = details.expect("cursor_stale carries details");
+            assert_eq!(details.get("asOf").map(String::as_str), Some("1"));
+            assert_eq!(details.get("current").map(String::as_str), Some("2"));
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn cursor_invalid_refusal_carries_its_code_on_the_wire() {
+    let refusal = SelectionRefusal::CursorInvalid { message: "The cursor does not decode.".into() };
+    let message = refusal.to_wire_message();
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    match decoded {
+        CultNetMessage::Error { code, .. } => assert_eq!(code.as_deref(), Some("cursor_invalid")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn reference_outside_target_refusal_carries_its_code_and_edge_on_the_wire() {
+    let refusal = SelectionRefusal::ReferenceOutsideTarget {
+        from_schema_id: citer().to_string(),
+        from_key: "citer-1".to_string(),
+        role: "narrow_ref".to_string(),
+        to_schema_id: leaf_b().to_string(),
+        to_key: "b-hi".to_string(),
+    };
+    let message = refusal.to_wire_message();
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)
+        .expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    match decoded {
+        CultNetMessage::Error { code, details, .. } => {
+            assert_eq!(code.as_deref(), Some("reference_outside_target"));
+            let details = details.expect("reference_outside_target carries details");
+            assert_eq!(details.get("role").map(String::as_str), Some("narrow_ref"));
+            assert_eq!(details.get("toSchemaId").map(String::as_str), Some(leaf_b()));
+            assert_eq!(details.get("toKey").map(String::as_str), Some("b-hi"));
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+// A v0 peer that has never heard of `code`/`details` must still decode `error` unchanged - the
+// legacy array wire has no slot for the new fields at all (R-N).
+#[test]
+fn error_message_stays_decodable_on_the_legacy_array_wire_without_code_or_details() {
+    let refusal = SelectionRefusal::CursorInvalid { message: "The cursor does not decode.".into() };
+    let message = refusal.to_wire_message();
+    let bytes = encode_cultnet_message_to_vec(&message, CultNetWireContract::GameCultNetworkingV0)
+        .expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::GameCultNetworkingV0)
+        .expect("decodes");
+    match decoded {
+        CultNetMessage::Error { error, code, details } => {
+            assert!(!error.is_empty());
+            assert_eq!(code, None);
+            assert_eq!(details, None);
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1352,7 +1575,7 @@ fn schemas_reaches_a_schema_by_its_unversioned_name_alias() {
         schemas: Some(vec![leaf_a_name_alias().into()]),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec!["a-eq", "a-lo", "shared-1", "shared-3"], "every leaf_a row, by name alias");
@@ -1369,7 +1592,7 @@ fn schemas_does_not_reach_a_schema_by_a_hash_shaped_alias() {
         schemas: Some(vec![leaf_a_hash_alias().into()]),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert!(evaluation.rows.is_empty(), "a hash-shaped alias must not resolve to leaf_a");
 }
 
@@ -1397,7 +1620,7 @@ fn cites_target_resolves_through_the_name_alias_matcher() {
         cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
         ..Selection::default()
     };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
 }
 
@@ -1442,7 +1665,7 @@ fn schema_alias_module_is_reachable_from_the_crate_root() {
 fn matched_is_the_total_count_not_the_page_count() {
     let rows = base_rows();
     let selection = Selection { limit: Some(2), ..Selection::default() };
-    let evaluation = select(&FixtureRowSet, &rows, &selection, 1).unwrap();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
     assert_eq!(evaluation.rows.len(), 2, "the page is clipped to the limit");
     assert_eq!(evaluation.matched, 7, "matched counts every row base_rows() carries");
 }
@@ -1481,7 +1704,7 @@ fn select_page_header_projection_carries_no_payload_in_rows_or_edges() {
         ..Selection::default()
     };
     let page: SelectionPage =
-        select_page(&FixtureRowSet, &rows, &selection, 1, document_record_for).unwrap();
+        select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
     assert!(page.documents.is_none());
     let headers = page.headers.expect("header projection carries headers");
     assert_eq!(headers.len(), 1);
@@ -1504,7 +1727,7 @@ fn select_page_document_projection_carries_payload_in_rows_and_edges() {
         ..Selection::default()
     };
     let page: SelectionPage =
-        select_page(&FixtureRowSet, &rows, &selection, 1, document_record_for).unwrap();
+        select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
     assert!(page.headers.is_none());
     let documents = page.documents.expect("document projection carries documents");
     assert_eq!(documents.len(), 1);
@@ -1518,7 +1741,7 @@ fn select_page_document_projection_carries_payload_in_rows_and_edges() {
 fn select_page_matched_is_the_total_count() {
     let rows = base_rows();
     let selection = Selection { limit: Some(2), ..Selection::default() };
-    let page: SelectionPage = select_page(&FixtureRowSet, &rows, &selection, 1, document_record_for).unwrap();
+    let page: SelectionPage = select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
     assert_eq!(page.matched, 7);
     assert_eq!(page.headers.unwrap().len(), 2);
 }
