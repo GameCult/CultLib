@@ -671,8 +671,111 @@ edit `src/` at the same time.
     five-field bodies with an HMAC-SHA256 digest, and they differ in base64
     flavour and separators. That is correct and stays. Rust's own doc said so
     first.
-  - **To check:** pass B reports three Caching failures as pre-existing, where
-    pass A reported one. Soul settles it against `main`.
+  - **Settled by Soul:** three Caching failures, identical at `b3d9cf7` and
+    `52082ec`. All three expect a write to a read-only directory to fail, and
+    the container is root. **Environmental.** Pass B's count was right.
+
+**Soul's whole-cut pass, 2026-09-22** (Opus, at `52082ec`). **Cut 1 may not
+merge.**
+
+- **Held:** Networking 238 and 2 skips, Mesh 255, cultnet-rs 213. R-Q holds
+  (both replica applies, the startup rebuild, and a shard-spanning refusal).
+  R-O holds against a stranger and across a restart, and the astral key
+  round-trips. R-H's digest covers every selection term. R-R holds and is
+  honest. R-A holds. R-F's door is inside `EvaluateAll`, which every path
+  reaches. The canonical-number door is anchored `\A..\z`.
+- **S-1, high: the hop indexes rows by record key alone.** `byKey`
+  (`CultNetSelectionEvaluator.cs:176-178`) and Rust's `HashMap<&str, &R>`
+  (`selection.rs:1457`) both keep the last row at a key. CultCache keys are
+  unique **per schema**, and the Mesh tests already put two schemas at one
+  key. With rows in one order the selection refuses valid data as
+  `reference_outside_target`; in the other order it succeeds. Under `cited`
+  the index is a set of bare keys, so a row of one schema counts as cited
+  because something cites another schema at the same key.
+- **S-2, high: R-T's `cites` half did not land in C#.** C# filters edges by
+  the citation's key (`:355`) **before** `EnsureWithinDeclaredTarget` (`:359`);
+  Rust checks first. A many-reference declared to one leaf but holding an edge
+  into another is refused by Rust and accepted by C#.
+- **S-3, high: a selection with both hops loses its `cites` edges in Rust.**
+  `selection.rs:1541` computes one direction for every edge; C# anchors each
+  edge by its own hop. No vector covers both hops.
+- **S-4, high: the error message fails its own schema.** Nothing decodes real
+  `CultNetErrorMessage` bytes against `cultnet.error.schema.json`.
+  `routingHint` is undeclared under `additionalProperties: false`, and nil
+  `details.asOf`, `details.current`, `code` and `details` all fail their
+  declared types. The header schema shows the nullable pattern was understood
+  and simply not applied here.
+- **S-5, medium: Stryker leaves 85 survivors** over the cut's two core files:
+  396 mutants, 310 killed, 85 survived, **75 with no coverage at all**, score
+  66%. The old "every entry killed" was an artifact of a hand-picked list.
+- **S-6, medium: the cursor is malleable in its own position.** The digest
+  covers the selection but not the body's `asOf`, `ordinal`, `schemaId` or
+  `recordKey`. A caller holding one valid cursor can rewrite its position and
+  reuse the digest.
+- **S-7, medium: R-I's claim is false.** The vectors compare ids, `matched`,
+  `hasNext` and edges. They never compare page bytes, `asOf`, `next`, or a
+  refusal's code, and `rs-written.json` carries no projection vector at all.
+- **S-8, low: the out-of-target null branch is dead.** D11 refuses a bare
+  `ICultRecordRef` in both scalar and many form, so every surviving shape has
+  a non-null target.
+- **S-9, low: `asOf` is the maximum across all shards**, so a single-shard
+  page advertises another shard's number, and an unrelated write invalidates
+  a live cursor.
+- **S-10, low: `MiniJsonSchemaValidator` silently ignores** `minimum`,
+  `maximum`, `maxLength`, `maxItems`, `anyOf`, `allOf`, `if/then/else`,
+  `uniqueItems` and `format`. The committed schemas use `minimum` 34 times,
+  including `limit`'s bound. Its `pattern` also runs through .NET `Regex`,
+  whose `$` accepts a trailing newline.
+- **S-11, low:** the v1 subscribe refuses a hop before running the door and
+  always names field `cites`.
+- **S-12, low:** the fixture's prose still calls the alias vectors a
+  cross-runtime defect, which the alias port fixed. Rust's port also drops
+  `SchemaVersion` and `CompatibleSchemaIds`, so R-E is two rules agreeing on a
+  subset.
+- **cargo-mutants cannot run on `cultnet-rs` at all.** `schema_discovery.rs`
+  uses `include_str!("../../../contracts/…")`, which escapes the package, so
+  the tool's copied tree fails its baseline build. **There is no mutation
+  evidence for the Rust half**, and the package's own source shape is why.
+
+**Self's rulings for fix batch 4, 2026-09-22:**
+
+- **R-V (S-1). A row's identity is `(schemaId, recordKey)`, never the key
+  alone.** Both runtimes index rows and incoming edges by the pair. `RecordRef`
+  already carries both. Tests: two schemas at one key, in both row orders,
+  give the same answer; `cited` does not match a row of another schema at the
+  same key.
+- **R-W (S-2 and S-3). The hop behaves identically in both runtimes.** The
+  target check runs **before** any key filtering, and each edge is anchored by
+  its own hop, so a selection carrying both `cites` and `cited` returns both
+  sets. C# adopts Rust's ordering for the first; Rust adopts C#'s per-edge
+  anchoring for the second. Vectors cover both.
+- **R-X (S-4 and S-10). A message that fails its own schema is a defect.**
+  `cultnet.error.schema.json` declares `routingHint` and every nullable field
+  the way the header schema does. A test decodes real bytes for every code.
+  `MiniJsonSchemaValidator` **refuses a schema containing a keyword it does
+  not implement**, rather than ignoring it, and implements `minimum`,
+  `maximum`, `maxLength` and `maxItems`. Its `pattern` anchors so a trailing
+  newline cannot pass.
+- **R-Y (S-6).** The cursor's HMAC covers the body as well as the selection,
+  so the position cannot be rewritten. Test: a rewritten ordinal or key is
+  refused.
+- **R-Z (S-7).** The vectors compare **page bytes**, plus `asOf`, `next` and a
+  refusal's code, and carry a header-projection and a document-projection
+  vector on both sides. Where a field is legitimately per-server, such as a
+  cursor, the vector states that and compares the rest.
+- **R-AA (S-5).** Triage all 85 survivors by name. The 75 uncovered mutants
+  mean whole regions have no test; write behavioural tests for them. A
+  survivor that is genuinely equivalent gets a one-line reason in the report.
+- **R-AB. Make `cultnet-rs` self-contained enough to mutate.** Replace the
+  escaping `include_str!` with a build script that stages the contracts into
+  `OUT_DIR`, or another route that keeps every source path inside the package.
+  Prove it by running cargo-mutants on the crate.
+- **S-8:** delete the dead branch.
+- **S-9:** `asOf` is the watermark of the shards the selection actually
+  covers.
+- **S-11:** run the door first, and name the field that is actually set.
+- **S-12:** correct the fixture's prose, and state Rust's alias reduction
+  where R-E is described.
 
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
