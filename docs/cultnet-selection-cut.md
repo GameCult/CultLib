@@ -195,6 +195,44 @@ not pass.**
   `unsupported_schema_version` to v1 (§9, `interop_peer.py:360-387`,
   `cultmesh_py/server.py:341`), with one test per site.
 
+**Rust commit 3 landed** at `b090ca9`. Its parity vectors wait on the fix
+batch below.
+
+**The commit 2 fix batch landed** (Sonnet), `568e8e3` and `021e3f1`:
+
+- **Door and lowering.** The door refuses blank and whitespace entries, and
+  `CultNetV0SelectionLowering` owns the v0 cleaning.
+- **Shard snapshot.** It answers through the evaluator
+  (`NET-D4-ShardMembership-Revert`), with a fixture for exclusion outside the
+  shard's prefix.
+- **Mesh v0 terms.** `CultMeshSnapshotRequestOptions` refuses any term v0 cannot
+  carry, and `HotBodySubscription.Selection` returns a copy.
+- **Mesh read order.** The read goes exact, then alias, then payload, under one
+  decode rule, and the Mesh copy of the resolver is deleted. The shared rule
+  is `CultNetDocumentRegistry.TryReadSchemaVersion`, now public, matched against
+  the caller's own descriptor. `TryResolveDescriptorByPayloadSchema` is
+  ambiguous when two CLR types alias one schema id, which the foreign-id
+  fixture does on purpose.
+- **Dead code and test hygiene.** The dead identity code in Reconcile is
+  deleted, and the poll threads are joined.
+- **Harness.** `mutate-dotnet.ps1` records a host crash as NO VERDICT.
+- **R-2.** The Python v0 peer refuses v1.
+
+Tests: Networking 195/195 over ten consecutive runs, with no crash. Mesh
+253/254 with one skip that was already there. Caching 192/192. cultnet-py
+54/54. Mutation entries 22/22 killed across the fix-batch, Mesh and Networking
+files, and both Mesh survivors now die. Delta: Mesh −3, Networking +62.
+
+**Open for Soul:**
+
+- It is unclear whether the door now refuses `[]`, as ruled, or only blank
+  entries. The report names blank entries only.
+- Seven `cultmesh-py` daemon tests fail on `ModuleNotFoundError: cultcache_py`
+  in a spawned child process. Hands calls this pre-existing; `main` must
+  confirm it.
+- The anchor-matching fragility of `mutate-dotnet.ps1` (separator spelling) is
+  recorded, not fixed.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
