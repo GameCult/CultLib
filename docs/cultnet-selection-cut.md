@@ -849,6 +849,43 @@ merge.**
 - **S-12:** correct the fixture's prose, and state Rust's alias reduction
   where R-E is described.
 
+**Fix batch 4, C# half, landed** (Sonnet) on `cultnet/selection-cut1`,
+`52082ec..b7d77b7`:
+
+- `e99bf46` — R-V, R-W, S-8, R-Y: row identity is `(schemaId, recordKey)`; the
+  cursor's HMAC covers its own body.
+- `b3a8f6d` — S-9, S-11: `asOf` is scoped to the shards the selection covers;
+  the v1 subscribe door runs before the hop refusal.
+- `b7d77b7` — R-X, S-4, S-10: the error schema matches the wire; the validator
+  refuses keywords it does not implement.
+
+Counts on Yggdrasil: Networking 247 pass / 2 skip (was 238, so +9 tests), Mesh
+255 pass. Caching's three failures are the read-only-directory tests that
+cannot fail under the stopgap's root container — unproven, not passing.
+
+**R-V proven in both row orders.** Before the fix, a narrow reference declared
+to `SelLeafA` resolving a key shared with a `SelLeafB` row depended on
+insertion order: one order refused a valid reference as `reference_outside_target`,
+the other silently resolved to the wrong schema's row for `cited` membership.
+After it, both orders resolve through the leaf set and `cited` never matches
+the other schema's row at that key.
+
+**What R-X's new refusal exposed.** Twelve uses of unimplemented keywords
+across three committed schemas, none reached by any existing test:
+`cultnet.database-change-raw.schema.json` uses `allOf` and `if`/`then`/`else`;
+both `cultmesh.verse-catalog-*.schema.json` use `uniqueItems` six times and
+`anyOf` once. **Those three schemas are now formally unvalidatable** until
+either the keywords are implemented or the schemas are rewritten. Nothing
+broke, because nothing ran them through the validator — which is the finding.
+
+**Two gaps Hands named rather than papered over:**
+
+- **S-11 has no dedicated regression test.** `HandleSubscribeV1Async` is
+  private and reachable only through a live LiteNetLib round trip. Fixed by
+  inspection, covered only by the suite passing. Owed.
+- The three unvalidatable schemas above need a decision: implement the
+  keywords, or rewrite them.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
