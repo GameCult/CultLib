@@ -13,8 +13,9 @@ namespace GameCult.Networking
 {
     /// <summary>
     /// Publishes live database changes through any schema-v0 server transport.
-    /// Optional record projection runs after authorization and owns both initial
-    /// snapshot and live-update delivery for a peer.
+    /// Selection match runs after authorization and owns both initial
+    /// snapshot and live-update delivery for a peer. Projection (header vs.
+    /// document) is a value on the request's selection, not a delegate.
     /// </summary>
     public sealed class CultNetDatabaseSubscriptionServer : IDisposable
     {
@@ -24,7 +25,6 @@ namespace GameCult.Networking
         private readonly Func<CultNetDatabaseUnsubscribeMessage, ICultNetSchemaServerPeer, Task> _unsubscribe;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? _authorizeRequest;
         private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? _authorizeRecord;
-        private readonly Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, CultNetRawDocumentRecord, CultNetRawDocumentRecord?>? _projectRecord;
         private readonly ICultNetSchemaServerPeerLifecycle? _peerLifecycle;
         private readonly ConcurrentDictionary<SubscriptionKey, IDisposable> _subscriptions =
             new ConcurrentDictionary<SubscriptionKey, IDisposable>(SubscriptionKeyComparer.Instance);
@@ -40,14 +40,12 @@ namespace GameCult.Networking
             ICultNetSchemaServer server,
             CultNetDatabase database,
             Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, bool>? authorizeRequest = null,
-            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null,
-            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, CultNetRawDocumentRecord, CultNetRawDocumentRecord?>? projectRecord = null)
+            Func<CultNetDatabaseSubscribeMessage, ICultNetSchemaServerPeer, string, string, bool>? authorizeRecord = null)
         {
             _server = server ?? throw new ArgumentNullException(nameof(server));
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _authorizeRequest = authorizeRequest;
             _authorizeRecord = authorizeRecord;
-            _projectRecord = projectRecord;
             _subscribe = HandleSubscribeAsync;
             _unsubscribe = HandleUnsubscribeAsync;
             _server.OnCultNet(_subscribe);
@@ -235,13 +233,10 @@ namespace GameCult.Networking
 
                     var sourceRecordKey = ResolveChangeRecordKey(change);
                     var matched = CreateMatchedRecord(change, request, peer);
-                    var projected = matched;
-                    if (projected != null && _projectRecord != null)
-                        projected = _projectRecord(request, peer, projected);
                     ApplyProjectedChange(
                         projection,
                         sourceRecordKey,
-                        projected,
+                        matched,
                         peer,
                         subscriptionId);
                 }
@@ -305,18 +300,16 @@ namespace GameCult.Networking
                     RecordKeys = request.RecordKeys
                 });
             var bySourceRecordKey = new Dictionary<string, CultNetRawDocumentRecord>(StringComparer.Ordinal);
-            var projectedRecordKeys = new HashSet<string>(StringComparer.Ordinal);
+            var matchedRecordKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var source in snapshot.Documents)
             {
                 var sourceRecordKey = source.RecordKey;
                 if (_authorizeRecord?.Invoke(request, peer, sourceRecordKey, source.SchemaId) == false)
                     continue;
-                var projected = _projectRecord == null ? source : _projectRecord(request, peer, source);
-                if (projected == null) continue;
-                if (!projectedRecordKeys.Add(projected.RecordKey))
+                if (!matchedRecordKeys.Add(source.RecordKey))
                     throw new InvalidOperationException(
-                        $"Database subscription projection produced duplicate record key '{projected.RecordKey}'.");
-                bySourceRecordKey[sourceRecordKey] = projected;
+                        $"Database subscription snapshot produced duplicate record key '{source.RecordKey}'.");
+                bySourceRecordKey[sourceRecordKey] = source;
             }
             return new ProjectedSnapshot(bySourceRecordKey);
         }

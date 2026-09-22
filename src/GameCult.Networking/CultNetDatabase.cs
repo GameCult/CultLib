@@ -638,9 +638,7 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (shard == null) throw new ArgumentNullException(nameof(shard));
 
-            var requestedSchemaIds = filter?.SchemaIds != null
-                ? new HashSet<string>(filter.SchemaIds, StringComparer.Ordinal)
-                : null;
+            var requestedSchemaIds = filter?.SchemaIds;
             var requestedRecordKeys = filter?.RecordKeys != null
                 ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
                 : null;
@@ -652,7 +650,7 @@ namespace GameCult.Networking
                 var key = GetTrackedKey(document, documentType);
                 if (string.IsNullOrWhiteSpace(key.Value) ||
                     !shard.Matches(descriptor.SchemaId, key) ||
-                    (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, requestedSchemaIds)) ||
+                    (requestedSchemaIds != null && !CultNetSchemaAliasMatching.MatchesAny(requestedSchemaIds, descriptor)) ||
                     (requestedRecordKeys != null && !requestedRecordKeys.Contains(key.Value)))
                 {
                     continue;
@@ -1692,7 +1690,7 @@ namespace GameCult.Networking
             {
                 try
                 {
-                    if (MatchesRequestedSchema(_cache.Registry.GetRequiredBySchemaId(shardSchemaId), requestedSchemaIds))
+                    if (CultNetSchemaAliasMatching.MatchesAny(schemaIds, _cache.Registry.GetRequiredBySchemaId(shardSchemaId)))
                         return true;
                 }
                 catch (InvalidOperationException)
@@ -1702,37 +1700,6 @@ namespace GameCult.Networking
             }
 
             return false;
-        }
-
-        private static bool MatchesRequestedSchema(
-            CultDocumentDescriptor descriptor,
-            ISet<string> requestedSchemaIds)
-        {
-            if (requestedSchemaIds.Count == 0)
-                return true;
-
-            if (requestedSchemaIds.Contains(descriptor.SchemaId))
-                return true;
-
-            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requestedSchemaIds.Contains))
-                return true;
-
-            return requestedSchemaIds
-                .Select(InferSchemaName)
-                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
-                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-                return null;
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
 
         internal static CultNetShardDescriptorMessage ToMessage(CultNetShardDescriptor shard)

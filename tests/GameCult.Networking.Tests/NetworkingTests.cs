@@ -1597,12 +1597,7 @@ namespace GameCult.Networking.Tests
                 server,
                 database,
                 authorizeRequest: (request, _) => request.ConsumerRuntimeId == "allowed-runtime",
-                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal),
-                projectRecord: (request, _, record) =>
-                {
-                    record.SourceRuntimeId = "projection:" + request.ConsumerRuntimeId;
-                    return record;
-                });
+                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal));
             using var cancellation = new CancellationTokenSource();
             var serverThread = new Thread(() =>
             {
@@ -1645,7 +1640,6 @@ namespace GameCult.Networking.Tests
             var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
             Assert.That(snapshot.Documents.Select(document => document.RecordKey),
                 Is.EqualTo(new[] { "tests:public:initial" }));
-            Assert.That(snapshot.Documents.Single().SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
 
             await database.PutAsync(new CultRecordKey("tests:private:live"), new NetworkSchemaNote
             {
@@ -1662,19 +1656,19 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
-            Assert.That(update.Document.SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
         }
 
         [Test]
         public async Task DatabaseSubscriptionServer_ReconcilesDeliveredProjectionAndBodyDemandWhenAuthorityChanges()
         {
-            const string sourceRecordKey = "tests:authority:source";
+            const string schemaId = "tests.networking_note";
+            const string recordKeyOne = "tests:authority:one";
+            const string recordKeyTwo = "tests:authority:two";
             const string bodyId = "tests:authority:body";
             var authorized = true;
-            var projectionName = "one";
             var sourceCache = new CultCache();
             var sourceDatabase = new CultNetDatabase(sourceCache);
-            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyOne), new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "initial"
@@ -1688,12 +1682,7 @@ namespace GameCult.Networking.Tests
                 server,
                 sourceDatabase,
                 authorizeRequest: (_, _) => authorized,
-                authorizeRecord: (_, _, _, _) => authorized,
-                projectRecord: (_, _, record) =>
-                {
-                    record.RecordKey = $"tests:authority:projected:{projectionName}";
-                    return record;
-                });
+                authorizeRecord: (_, _, _, _) => authorized);
             using var bodyDemand = new CultMeshBodyDemandTracker(subscriptions);
             using var cancellation = new CancellationTokenSource();
             var serverThread = new Thread(() =>
@@ -1718,33 +1707,42 @@ namespace GameCult.Networking.Tests
             await AwaitWithTimeout(
                 client.SubscribeAsync(
                     "authority",
-                    recordKeys: [sourceRecordKey],
+                    schemaIds: [schemaId],
                     consumerRuntimeId: "authority-client",
                     bodyIds: [bodyId],
                     supportedBodyTransports: [CultMeshBodyTransportKind.SharedMemory.ToString()]),
                 TimeSpan.FromSeconds(2));
-            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:one")), Is.Not.Null);
+            Assert.That(targetCache.Get(new CultRecordKey(recordKeyOne)), Is.Not.Null);
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.True);
 
-            projectionName = "two";
+            // Drive the record's identity change through the selection itself
+            // (a real rename: the old key's row is deleted, a new key's row is
+            // put), not through a projection delegate, then force the full
+            // reconcile diff that D6 gives the subscription server.
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyTwo), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "renamed"
+            });
+            await sourceDatabase.DeleteAsync<NetworkSchemaNote>(new CultRecordKey(recordKeyOne));
             subscriptions.Reconcile();
             await WaitUntilAsync(
-                () => targetCache.Get(new CultRecordKey("tests:authority:projected:one")) == null &&
-                      targetCache.Get(new CultRecordKey("tests:authority:projected:two")) != null,
+                () => targetCache.Get(new CultRecordKey(recordKeyOne)) == null &&
+                      targetCache.Get(new CultRecordKey(recordKeyTwo)) != null,
                 TimeSpan.FromSeconds(2));
             Assert.That(changes.Any(change => change.ChangeKind == "removed" &&
-                change.RecordKey == "tests:authority:projected:one"), Is.True);
+                change.RecordKey == recordKeyOne), Is.True);
             Assert.That(changes.Any(change => change.ChangeKind == "added" &&
-                change.RecordKey == "tests:authority:projected:two"), Is.True);
+                change.RecordKey == recordKeyTwo), Is.True);
 
             authorized = false;
             subscriptions.Reconcile();
             await WaitUntilAsync(
-                () => targetCache.Get(new CultRecordKey("tests:authority:projected:two")) == null,
+                () => targetCache.Get(new CultRecordKey(recordKeyTwo)) == null,
                 TimeSpan.FromSeconds(2));
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.False);
             var changeCountAfterRevocation = changes.Count;
-            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyTwo), new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "must-not-escape"
@@ -1753,7 +1751,7 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
 
             Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
-            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:two")), Is.Null);
+            Assert.That(targetCache.Get(new CultRecordKey(recordKeyTwo)), Is.Null);
         }
 
         [Test]
