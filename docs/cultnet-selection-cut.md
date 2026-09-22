@@ -266,6 +266,18 @@ files, and both Mesh survivors now die. Delta: Mesh −3, Networking +62.
   command was narrowed around it. It is not this cut's code. Its owner is the
   reactive-document path.
 
+**Two pre-merge additions from the Huginn read-side map, 2026-09-22.** They
+join the next selection fix batch, whatever the final Soul pass adds.
+
+- **P-1:** Rust's `Evaluation` gains `matched`. Rust cannot fill the page's
+  `matched` today.
+- **P-2:** derive `Eq` on the selection wire types, because Huginn's request
+  derives it.
+
+**Load-bearing for Huginn:** `Cursor::parse` is public and exposes `as_of`.
+The organ answers a cursor's page at the cursor's own `asOf`. If a finding
+makes `parse` private, expose `cursor_as_of` instead.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
@@ -951,7 +963,11 @@ They die with the last runtime follow-up.
 No dependency in either runtime (`schemars` is **not** added to
 `cultnet-rs`: the schema is hand-written JSON like every CultNet schema, and
 Huginn's derived schema for its own request embeds `Selection` through a
-hand-maintained `JsonSchema` impl in Huginn, not through the substrate —
+`#[schemars(schema_with)]` field attribute in Huginn. The attribute returns a
+`$ref` to this cut's published selection schema `$id`. It does not go through
+the substrate. (Corrected 2026-09-22: a hand-written `impl JsonSchema` for a
+foreign type fails to compile with `E0117`, the orphan rule. The read-side
+Imagination probed it.) —
 see section 12). No new package, binary, transport, or store format.
 **`packages/cultcache-rs` is untouched**: the C# cache change buys the
 evaluator a read surface it does not have, and in Rust the row owner
@@ -1329,8 +1345,10 @@ against a `cultnet-rs` dependency Huginn already has):**
   with their query-builder call sites, their schema fields and the tests
   that pin them, not a deprecation; and `QUERY_LIMIT_MAX`. Huginn's `Query { instance, selection }` carries
   the substrate's type; its published request schema embeds `Selection`
-  through a hand-maintained `JsonSchema` impl for the `cultnet-rs` types
-  inside Huginn (the substrate publishes JSON, not `schemars`), pinned by the
+  through a `#[schemars(schema_with)]` attribute that returns a `$ref` to the
+  published selection schema. A hand-written impl fails with `E0117`
+  (corrected 2026-09-22), and the substrate publishes JSON, not `schemars`. It
+  is pinned by the
   existing byte-for-byte test.
 - Cut 11's lowering to Qdrant and the after-index application of the hop,
   as before.
