@@ -475,6 +475,99 @@ its `RowSet` must expose each schema's name, and it deletes the hash-stripping
 matcher. C# refuses an unresolved `cites.target` at the door. Each vector that
 fails today becomes a vector both runtimes must pass.
 
+**The early Soul pass (commits 0–1, pinned at `17d10e0`) reported late, on
+2026-09-22.** It was interrupted three times by API errors. Much of what it
+found is already covered by R-A to R-M. These findings are **new, and still
+open against the current branch:**
+
+- **F2, high: typed refusals never reach the wire.** `CultNetErrorMessage`
+  (`CultNetSchemaMessages.cs:~498-512`) has no `code` and no `details`. Nothing
+  maps the selection or cursor exceptions to an error. This means
+  `selection_invalid`, `cursor_stale`, `cursor_invalid` and
+  `reference_outside_target` exist only in-process.
+- **F6, high: the cursor can be forged.** The digest is an unkeyed SHA-256
+  that anyone can recompute, so any caller can mint a cursor. A record key
+  containing the U+241F delimiter makes a server's own cursor fail to parse.
+- **F7, high: authorization sees two different ids.** On the snapshot path,
+  the authorizer receives the binding's wire id. On the live path it receives
+  the descriptor id (`CultNetDatabaseSubscriptionServer.cs:~309` against
+  `:~451`). A row delivered by the snapshot can therefore be refused on its
+  first live change, or leak through a denylist. No test pins the live id.
+- **F8, medium: `LastWriteSequence` is not the order a snapshot reflects.**
+  - Replica apply paths (`CultNetDatabase.cs:~1416`, `:~1459`) never set it.
+  - Nothing rebuilds it after a restart.
+  - Sequences are per shard, but `asOf` is a single `ulong`.
+- **F11, medium: v0 lowering changed what v0 answers.** A snapshot with
+  `recordKeys: []` used to answer empty, and now answers every row. v0 rows
+  now come back in schema-and-key order instead of the requested key order.
+- **F12, medium: the committed schemas do not describe the bytes C# writes.**
+  - Headers `$ref` a record schema that requires `payload`.
+  - MessagePack-CSharp writes both `headers` and `documents`, one of them
+    nil, so every C# page fails the `oneOf`.
+  - `fieldPredicate` does not forbid `values` and `number` together.
+- **F14, low, now reachable because v1 is served: field predicates on a
+  Removed change throw.** `TryGetIndexValue(null)`, at
+  `CultNetDatabaseServer.cs:~375`.
+- **F15, low: `cites` skips the out-of-target check** for edges that do not
+  point at the requested key. `EnsureWithinDeclaredTarget` also returns early
+  when `TargetType` is null.
+- **Surviving mutants:**
+  - S1-Loose (reachable becomes all descriptors);
+  - S2-AllOf;
+  - S17-FirstLeaf;
+  - Door-NoValidate, since fixed by R-F;
+  - S5-DigestNoFields;
+  - Auth-LiveSchemaId, which is F7;
+  - QL-OutOfTargetCites, which is F15.
+
+  S4 has no entry. A clone at `C:\ss1` was left behind: the Soul pass could
+  not remove it.
+
+**Self's rulings for fix batch 3, 2026-09-22.** Batch 3 goes to Hands once the
+C# matrix Hands and the Rust alias port have landed, so that no two C# Hands
+edit `src/` at the same time.
+
+- **R-N, F2: refusals are wire messages.** `cultnet.error.v0` gains `code` and
+  `details`. That is an additive field, so the version is unchanged, and v0
+  peers ignore it. Every selection and cursor refusal, and
+  `reference_outside_target`, maps to its code in both servers and in Rust.
+  Tests decode the bytes a peer actually receives.
+- **R-O, F6: cursors are keyed.** The digest becomes an HMAC under a key the
+  answering server holds. The key is random per process, so a cursor does not
+  survive a restart and answers `cursor_invalid`. That is acceptable, because
+  cursors are short-lived and §2 already calls them "minted by the answering
+  server". The cursor body uses length-prefixed fields, not a delimiter. Rust
+  does the same, since Huginn mints cursors.
+- **R-P, F7: one id reaches the authorizer, and it is the wire id**, on the
+  snapshot, live and reconcile paths alike. A test pins the id each path
+  passes.
+- **R-Q, F8:** every path that commits a row, whether local or a replica
+  apply, sets the last-write sequence. It is rebuilt from the mutation log at
+  startup. A multi-shard selection's `asOf` is defined, or refused: a
+  selection that spans shards is answered only when every row comes from one
+  shard's log. Otherwise it is refused with `cursor_stale`/`selection_invalid`
+  as appropriate, and the choice is documented in §2. A single shard is the
+  case today.
+- **R-R, F11: v0 lowering preserves v0's pre-cut answers exactly.** v0 is a
+  frozen contract for the TS, Python and Kotlin peers. **This corrects the
+  earlier ruling in the commit 2 fix batch**, which lowered an empty v0 list
+  to "no filter". Where the pre-cut v0 server answered empty for
+  `recordKeys: []`, it still answers empty. Where pre-cut v0 kept the
+  requested key order, it still does. The pre-cut behaviour comes from the
+  code at `b3d9cf7`, and tests prove it by running the same requests against
+  both.
+- **R-S, F12: the schemas describe the bytes.** Add a header schema, make the
+  page shape match what MessagePack-CSharp writes (nil keys included), and
+  make `fieldPredicate` exclusive. A test decodes real C# bytes against the
+  schemas.
+- **R-T, F14 and F15:** removed changes are evaluated without reading a
+  document. A removal matches through the selection's keys and schemas
+  alone, and field predicates count as unknown. `cites` checks every edge
+  against its declared target.
+- **R-U: every surviving mutant from the early pass becomes an entry, and it
+  must die.** That covers S1-Loose, S2-AllOf, S17-FirstLeaf,
+  S5-DigestNoFields, Auth-LiveSchemaId, QL-OutOfTargetCites and an S4 entry.
+
 **Ledger correction.** Commits 0 and 1 came in at about twice the §14
 estimate:
 
