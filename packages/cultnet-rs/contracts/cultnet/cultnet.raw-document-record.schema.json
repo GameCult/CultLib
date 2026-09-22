@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.raw-document-record.schema.json",
+  "title": "CultNet Raw Document Record",
+  "description": "R-S (docs/cultnet-selection-cut.md, fix batch 3): matches MessagePack-CSharp's map-mode output for CultNetRawDocumentRecord - every declared key is written, nil included, so every property here is `required` (present on the wire) even where its value may be null.",
+  "type": "object",
+  "required": [
+    "schemaId",
+    "schemaName",
+    "schemaVersion",
+    "schemaContentHash",
+    "recordKey",
+    "storedAt",
+    "payloadEncoding",
+    "payload",
+    "sourceRuntimeId",
+    "sourceAgentId",
+    "sourceRole",
+    "tags"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaId": { "type": "string", "minLength": 1 },
+    "schemaName": { "type": ["string", "null"], "minLength": 1 },
+    "schemaVersion": { "type": ["string", "null"], "minLength": 1 },
+    "schemaContentHash": { "type": ["string", "null"], "minLength": 1 },
+    "recordKey": { "type": "string", "minLength": 1 },
+    "storedAt": { "type": "string", "minLength": 1 },
+    "payloadEncoding": { "const": "messagepack" },
+    "payload": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "x-cult-runtime-type": "bytes"
+    },
+    "sourceRuntimeId": { "type": ["string", "null"], "minLength": 1 },
+    "sourceAgentId": { "type": ["string", "null"], "minLength": 1 },
+    "sourceRole": { "type": ["string", "null"], "minLength": 1 },
+    "tags": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
