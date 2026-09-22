@@ -250,6 +250,59 @@ impl CultNetShardDescriptor {
     }
 }
 
+/// Machine-readable `cultnet.error.v0` refusal code (R-N). Mirrors the four strings
+/// `contracts/cultnet/cultnet.error.schema.json` enumerates for `code`; a peer that receives a fifth
+/// string it does not know refuses to decode rather than guess a meaning for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CultNetErrorCode {
+    SelectionInvalid,
+    CursorStale,
+    CursorInvalid,
+    ReferenceOutsideTarget,
+}
+
+impl CultNetErrorCode {
+    fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::SelectionInvalid => "selection_invalid",
+            Self::CursorStale => "cursor_stale",
+            Self::CursorInvalid => "cursor_invalid",
+            Self::ReferenceOutsideTarget => "reference_outside_target",
+        }
+    }
+
+    fn from_wire_str(value: &str) -> Result<Self> {
+        match value {
+            "selection_invalid" => Ok(Self::SelectionInvalid),
+            "cursor_stale" => Ok(Self::CursorStale),
+            "cursor_invalid" => Ok(Self::CursorInvalid),
+            "reference_outside_target" => Ok(Self::ReferenceOutsideTarget),
+            other => Err(anyhow!("ErrorMessage.Code {other:?} is not a recognized cultnet.error.v0 code")),
+        }
+    }
+}
+
+/// Code-specific structured detail carried on `cultnet.error.v0`'s `code`/`details` (R-N). Mirrors
+/// `CultNetErrorDetails`: every field is populated only for the code that defines it and is nil
+/// (present, not omitted) on the wire otherwise, matching the C# reference's always-five-key map.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CultNetErrorDetails {
+    /// The selection field that failed (`selection_invalid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The offending value, when there is one string worth naming (`selection_invalid`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The cursor's own minted asOf (`cursor_stale`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<u64>,
+    /// The answering server's current asOf (`cursor_stale`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schemaVersion")]
 pub enum CultNetMessage {
@@ -291,11 +344,22 @@ pub enum CultNetMessage {
     Verify { nonce: String, session: String },
     #[serde(rename = "cultnet.login_success.v0", rename_all = "camelCase")]
     LoginSuccess { nonce: String, session: String },
-    // R-N (docs/cultnet-selection-cut.md, fix batch 3) is pending: `code`/`details` land here once
-    // the C# reference's exact field names and code strings are known (Self, 2026-09-22 - do not
-    // guess them). `Error` stays its pre-cut shape until then.
+    // R-N (docs/cultnet-selection-cut.md, fix batch 3): `code`/`details` mirror the landed C#
+    // reference (CultNetSchemaMessages.cs) exactly, including its always-five-key map shape
+    // (`schemaVersion`, `error`, `routingHint`, `code`, `details`, every optional key nil rather
+    // than omitted). `Error` is therefore encoded/decoded through the raw
+    // `cultnet.schema.v0` path (parse_raw_cultnet_schema_message/encode_raw_cultnet_schema_message)
+    // like the other messages that need exact wire control, not through this derive - the derive
+    // attributes below exist only so the enum as a whole still compiles and round-trips through the
+    // generic `serde_json::Value` path other tooling may still reach for.
     #[serde(rename = "cultnet.error.v0", rename_all = "camelCase")]
-    Error { error: String },
+    Error {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<CultNetErrorCode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<CultNetErrorDetails>,
+    },
     #[serde(rename = "cultnet.sample.change_name.v0", rename_all = "camelCase")]
     SampleChangeName { name: String },
     #[serde(rename = "cultnet.sample.chat.v0", rename_all = "camelCase")]
@@ -464,7 +528,8 @@ pub fn parse_cultnet_message(
                 Some(
                     "cultnet.document_put_raw.v0"
                     | "cultnet.snapshot_response_raw.v0"
-                    | "cultnet.snapshot_response_raw.v1",
+                    | "cultnet.snapshot_response_raw.v1"
+                    | "cultnet.error.v0",
                 ) => parse_raw_cultnet_schema_message(wire_value)?,
                 _ => {
                     let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
@@ -487,9 +552,8 @@ pub fn encode_cultnet_message_for_wire(
         CultNetWireContract::CultNetSchemaV0 => match message {
             CultNetMessage::DocumentPutRaw { .. }
             | CultNetMessage::SnapshotResponseRaw { .. }
-            | CultNetMessage::SnapshotResponseRawV1 { .. } => {
-                encode_raw_cultnet_schema_message(message)
-            }
+            | CultNetMessage::SnapshotResponseRawV1 { .. }
+            | CultNetMessage::Error { .. } => encode_raw_cultnet_schema_message(message),
             _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
             )?)?),
@@ -576,7 +640,7 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(nonce, "nonce")?;
             require_non_empty(session, "session")?;
         }
-        CultNetMessage::Error { error } => require_non_empty(error, "error")?,
+        CultNetMessage::Error { error, code: _, details: _ } => require_non_empty(error, "error")?,
         CultNetMessage::SampleChangeName { name } => require_non_empty(name, "name")?,
         CultNetMessage::SampleChat { text } => require_non_empty(text, "text")?,
         CultNetMessage::DocumentPut {
@@ -980,10 +1044,71 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                 )?,
             })
         }
+        "cultnet.error.v0" => {
+            let code = get("code")
+                .filter(|value| !value.is_nil())
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| anyhow!("ErrorMessage.Code must be a string"))
+                        .and_then(CultNetErrorCode::from_wire_str)
+                })
+                .transpose()?;
+            let details = require_error_details(get("details"), "ErrorMessage.Details")?;
+            Ok(CultNetMessage::Error {
+                error: require_legacy_string(get("error"), "ErrorMessage.Error")?,
+                code,
+                details,
+            })
+        }
         _ => Err(anyhow!(
             "Unsupported raw cultnet.schema.v0 schemaVersion {schema_version}"
         )),
     }
+}
+
+fn require_error_details(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<CultNetErrorDetails>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(None);
+    }
+    let object = value
+        .as_map()
+        .ok_or_else(|| anyhow!("{field_name} must be an object"))?;
+    let get = |name: &str| -> Option<&rmpv::Value> {
+        object.iter().find_map(|(key, value)| {
+            key.as_str()
+                .filter(|candidate| *candidate == name)
+                .map(|_| value)
+        })
+    };
+    Ok(Some(CultNetErrorDetails {
+        field: require_legacy_optional_string(get("field"), "ErrorMessage.Details.Field")?,
+        value: require_legacy_optional_string(get("value"), "ErrorMessage.Details.Value")?,
+        as_of: require_legacy_optional_u64(get("asOf"), "ErrorMessage.Details.AsOf")?,
+        current: require_legacy_optional_u64(get("current"), "ErrorMessage.Details.Current")?,
+    }))
+}
+
+fn require_legacy_optional_u64(
+    value: Option<&rmpv::Value>,
+    field_name: &str,
+) -> Result<Option<u64>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_nil() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| anyhow!("{field_name} must be a non-negative integer"))
 }
 
 fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::Value> {
@@ -1084,12 +1209,72 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
                     .unwrap_or(rmpv::Value::Nil),
             ),
         ],
+        // R-N: matches the landed C# `CultNetErrorMessage`
+        // (src/GameCult.Networking/CultNetSchemaMessages.cs) key for key and in its declared
+        // order - schemaVersion, error, routingHint, code, details - with every optional key
+        // present as nil rather than omitted. Rust never mints a routingHint today, so that key is
+        // always nil on encode; a peer that sent one is ignored on decode, same as any other v0
+        // peer that does not know a field it did not ask for.
+        CultNetMessage::Error {
+            error,
+            code,
+            details,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultnet.error.v0"),
+            ),
+            (rmpv::Value::from("error"), rmpv::Value::from(error.as_str())),
+            (rmpv::Value::from("routingHint"), rmpv::Value::Nil),
+            (
+                rmpv::Value::from("code"),
+                code.as_ref()
+                    .map(|code| rmpv::Value::from(code.as_wire_str()))
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+            (
+                rmpv::Value::from("details"),
+                details
+                    .as_ref()
+                    .map(encode_error_details)
+                    .unwrap_or(rmpv::Value::Nil),
+            ),
+        ],
         _ => {
             return Err(anyhow!(
                 "Message is not a raw cultnet.schema.v0 binary replication message"
             ));
         }
     }))
+}
+
+fn encode_error_details(details: &CultNetErrorDetails) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("field"),
+            details
+                .field
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("value"),
+            details
+                .value
+                .as_deref()
+                .map(rmpv::Value::from)
+                .unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("asOf"),
+            details.as_of.map(rmpv::Value::from).unwrap_or(rmpv::Value::Nil),
+        ),
+        (
+            rmpv::Value::from("current"),
+            details.current.map(rmpv::Value::from).unwrap_or(rmpv::Value::Nil),
+        ),
+    ])
 }
 
 fn require_raw_document_record(
@@ -1296,6 +1481,11 @@ fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessa
         }),
         4 => Ok(CultNetMessage::Error {
             error: require_legacy_string(payload.first(), "ErrorMessage.Error")?,
+            // gamecult.networking.v0 is the legacy union tag/array contract, unrelated to R-N's
+            // cultnet.error.v0 map shape; it never carried code/details before and does not gain
+            // them now.
+            code: None,
+            details: None,
         }),
         5 => Ok(CultNetMessage::SampleChangeName {
             name: require_legacy_string(payload.first(), "ChangeNameMessage.Name")?,
@@ -1379,7 +1569,7 @@ fn encode_gamecult_networking_message(message: &CultNetMessage) -> Result<rmpv::
                 legacy_bytes(session, "LoginSuccessMessage.Session")?,
             ]),
         ],
-        CultNetMessage::Error { error } => {
+        CultNetMessage::Error { error, .. } => {
             vec![
                 rmpv::Value::from(4),
                 rmpv::Value::Array(vec![error.as_str().into()]),

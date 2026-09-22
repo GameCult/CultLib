@@ -26,6 +26,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::contracts::{CultNetErrorCode, CultNetErrorDetails, CultNetMessage};
 use crate::security::constant_time_eq;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -929,11 +930,62 @@ impl From<SelectionInvalid> for SelectionRefusal {
     }
 }
 
-// R-N (docs/cultnet-selection-cut.md, fix batch 3) is deliberately not implemented here: the C#
-// reference's exact `code` string per refusal and `details` field names are not landed on this
-// branch yet, and Self's instruction (2026-09-22) is not to guess them. When they land, this is
-// where a `SelectionRefusal -> CultNetMessage::Error` mapping belongs, matched byte-for-byte
-// against the reference.
+// R-N (docs/cultnet-selection-cut.md, fix batch 3): the wire shape below is matched byte-for-byte
+// against the landed C# reference (CultNetErrorMessage.ForSelectionInvalid/ForCursor/
+// ForReferenceOutsideTarget in src/GameCult.Networking/CultNetSchemaMessages.cs) - see
+// packages/cultnet-rs/tests/error_message.rs for the comparison against captured C# bytes.
+impl From<&SelectionRefusal> for CultNetMessage {
+    fn from(refusal: &SelectionRefusal) -> Self {
+        match refusal {
+            SelectionRefusal::Invalid(inner) => CultNetMessage::Error {
+                error: format!("selection_invalid: {}", inner.message),
+                code: Some(CultNetErrorCode::SelectionInvalid),
+                details: Some(CultNetErrorDetails {
+                    field: Some(inner.field.clone()),
+                    value: inner.value.clone(),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+            SelectionRefusal::CursorStale { as_of, current } => CultNetMessage::Error {
+                error: format!(
+                    "cursor_stale: The cursor was minted at asOf {as_of}; this server answers as of {current}."
+                ),
+                code: Some(CultNetErrorCode::CursorStale),
+                details: Some(CultNetErrorDetails {
+                    field: None,
+                    value: None,
+                    as_of: Some(*as_of),
+                    current: Some(*current),
+                }),
+            },
+            SelectionRefusal::CursorInvalid { message } => CultNetMessage::Error {
+                error: format!("cursor_invalid: {message}"),
+                code: Some(CultNetErrorCode::CursorInvalid),
+                details: None,
+            },
+            SelectionRefusal::ReferenceOutsideTarget {
+                from_schema_id,
+                from_key,
+                role,
+                to_schema_id,
+                to_key,
+            } => CultNetMessage::Error {
+                error: format!(
+                    "reference_outside_target: {from_schema_id}/{from_key} names {to_schema_id}/{to_key} through role \"{role}\", which is outside the reference's declared target."
+                ),
+                code: Some(CultNetErrorCode::ReferenceOutsideTarget),
+                details: None,
+            },
+        }
+    }
+}
+
+impl From<SelectionRefusal> for CultNetMessage {
+    fn from(refusal: SelectionRefusal) -> Self {
+        CultNetMessage::from(&refusal)
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Row / RowSet (D7): the consumer's declarations and values, reflected over nothing
