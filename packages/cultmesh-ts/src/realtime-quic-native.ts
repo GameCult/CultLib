@@ -297,6 +297,19 @@ export class CultMeshQuicNativeRuntime {
   }
 
   /**
+   * Takes one more reference on this already-open runtime, synchronously —
+   * unlike `open()`, this never awaits a runtime-open call, so a caller
+   * already holding a live instance (a provider handing a reference to a
+   * newly accepted peer) can attach it in the same synchronous turn instead
+   * of crossing a microtask boundary that would leave the event a caller is
+   * mid-dispatching unowned until the next tick.
+   */
+  retain(): CultMeshQuicNativeRuntime {
+    CultMeshQuicNativeRuntime.refCountValue += 1;
+    return this;
+  }
+
+  /**
    * Drops one reference; closes the shared runtime once none remain. Refuses
    * a release when no reference is outstanding. The bridge header (section 4)
    * forbids any host call beginning once `cultmesh_quic_runtime_close` has
