@@ -36,9 +36,11 @@ import {
 
 import {
   CultMeshQuicRealtimeConnector,
+  CultMeshQuicRealtimeProvider,
   CultMeshQuicRealtimeSessionManager,
   parseQuicRealtimeEndpoint,
   type CultMeshQuicRealtimeConnectorOptions,
+  type CultMeshQuicRealtimeProviderOptions,
   type CultMeshQuicRealtimeSessionManagerOptions,
 } from "./realtime-quic";
 
@@ -6293,6 +6295,12 @@ export class CultMesh {
     options: CultMeshQuicRealtimeSessionManagerOptions,
   ): CultMeshQuicRealtimeSessionManager {
     return new CultMeshQuicRealtimeSessionManager(options);
+  }
+
+  public static createQuicRealtimeProvider(
+    options: CultMeshQuicRealtimeProviderOptions,
+  ): Promise<CultMeshQuicRealtimeProvider> {
+    return CultMeshQuicRealtimeProvider.listen(options);
   }
 }
 

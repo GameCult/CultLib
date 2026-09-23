@@ -14,6 +14,7 @@
 // source is a port this module takes, not a transport it owns.
 
 import { createHash } from "node:crypto";
+import { createSecureContext } from "node:tls";
 
 import {
   trimCSharp,
@@ -38,6 +39,7 @@ import {
   CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED,
   CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED,
   CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN,
+  CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION,
   CULTMESH_QUIC_EVENT_STREAM_FRAME,
   CULTMESH_QUIC_EVENT_STREAM_SEND_COMPLETE,
   CULTMESH_QUIC_EVENT_STREAM_SHUTDOWN,
@@ -158,6 +160,52 @@ function compareGeneration(a: LatestGeneration, b: LatestGeneration): number {
   if (a.producerEpoch !== b.producerEpoch) return a.producerEpoch < b.producerEpoch ? -1 : 1;
   if (a.sequence === b.sequence) return 0;
   return a.sequence < b.sequence ? -1 : 1;
+}
+
+/**
+ * Coalescing bookkeeping for a `latest-only` key space: at most one pending
+ * value per key, first-ready-first-out by key. Mirrors the C# reference's
+ * `CultMeshRealtimeInbox` (`:572-618`), split from queue integration so both
+ * directions can drive it their own way: the inbound path below pushes into
+ * it from native events and a waiter pulls a specific key back out at
+ * delivery time; the provider's per-peer outbox (Cut 5) pushes from
+ * `broadcast()` and a pump loop drains ready keys in order. Shared here
+ * instead of reimplemented twice.
+ */
+class CultMeshRealtimeLatestOnlyCoalescer<T> {
+  private readonly pending = new Map<string, T>();
+  private readonly readyKeys: string[] = [];
+
+  /**
+   * Sets `key`'s pending value, overwriting whatever was pending for it.
+   * Returns `true` the first time `key` becomes ready (the caller should
+   * enqueue/wake), `false` when an existing pending value was silently
+   * replaced.
+   */
+  publish(key: string, value: T): boolean {
+    const alreadyPending = this.pending.has(key);
+    this.pending.set(key, value);
+    if (alreadyPending) return false;
+    this.readyKeys.push(key);
+    return true;
+  }
+
+  /** Removes and returns `key`'s pending value. Present exactly when `key` is the token most recently made ready. */
+  take(key: string): T {
+    const value = this.pending.get(key)!;
+    this.pending.delete(key);
+    return value;
+  }
+
+  /** Dequeues the oldest ready key, or `undefined` when none is ready. */
+  nextReadyKey(): string | undefined {
+    return this.readyKeys.shift();
+  }
+
+  clear(): void {
+    this.pending.clear();
+    this.readyKeys.length = 0;
+  }
 }
 
 class SimpleGate {
@@ -348,7 +396,7 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   /** Inbox coalescing (mirrors `CultMeshRealtimeInbox`): the newest not-yet-delivered
    * latest-only frame per `(channel, body)`, so a slow reader accumulates at most one
    * pending frame per key instead of an unbounded backlog. */
-  private readonly latestPending = new Map<string, CultMeshRealtimeFrame>();
+  private readonly latestCoalescer = new CultMeshRealtimeLatestOnlyCoalescer<CultMeshRealtimeFrame>();
   /** FIFO of ready tokens: a direct frame (reliable-ordered/unreliable), or a
    * `(channel, body)` key to look up in `latestPending` at delivery time. */
   private readonly readyTokens: ReadyToken[] = [];
@@ -568,10 +616,7 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
       if (current && compareGeneration(candidate, current) <= 0) return;
       this.latestGenerations.set(key, candidate);
 
-      const alreadyPending = this.latestPending.has(key);
-      this.latestPending.set(key, frame);
-      if (alreadyPending) return;
-      this.enqueueReady({ latestKey: key });
+      if (this.latestCoalescer.publish(key, frame)) this.enqueueReady({ latestKey: key });
       return;
     }
     this.enqueueReady({ frame });
@@ -588,11 +633,373 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
 
   private resolveToken(token: ReadyToken): CultMeshRealtimeFrame {
     if ("frame" in token) return token.frame;
-    const frame = this.latestPending.get(token.latestKey);
-    this.latestPending.delete(token.latestKey);
     // Always present: a key is only ever enqueued alongside setting it, and
-    // removed here on the one dequeue that follows.
-    return frame!;
+    // taken here on the one dequeue that follows.
+    return this.latestCoalescer.take(token.latestKey);
+  }
+}
+
+/**
+ * `TryPublishLatest` plus `SendPublishedFramesAsync` (`:363-367`, `:421-439`),
+ * over a coalescing outbox (`:572-618`). Owns one peer's outbound
+ * `latest-only` traffic: `publish` never blocks (it just replaces whatever is
+ * still pending for the frame's `(channel, body)` key and, if a pump is not
+ * already draining, starts one), and the pump opens a fresh kind-2 stream per
+ * frame through the peer's own `sendFrame` (unchanged from the consumer path
+ * above), sending with `fin` and waiting for `send_complete` before it takes
+ * the next ready key. A stalled peer therefore accumulates at most one
+ * pending frame per key and never blocks a caller's `broadcast`. A send
+ * failure evicts the peer once, the same way a reliable-ordered send failure
+ * does in `CultMeshQuicRealtimeProvider.broadcast`.
+ */
+class CultMeshQuicRealtimeProviderOutbox {
+  private readonly coalescer = new CultMeshRealtimeLatestOnlyCoalescer<CultMeshRealtimeFrame>();
+  private readonly transport: CultMeshQuicRealtimeTransport;
+  private readonly onSendFailure: (error: Error) => void;
+  private pumping = false;
+  private disposed = false;
+
+  constructor(transport: CultMeshQuicRealtimeTransport, onSendFailure: (error: Error) => void) {
+    this.transport = transport;
+    this.onSendFailure = onSendFailure;
+  }
+
+  /** Enqueues `frame`, coalescing on `(channelId, bodyId)`. Never blocks. */
+  publish(frame: CultMeshRealtimeFrame): void {
+    if (this.disposed) return;
+    const key = frame.channelId + "\u001f" + frame.bodyId;
+    const becameReady = this.coalescer.publish(key, frame);
+    if (becameReady && !this.pumping) void this.pump();
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.coalescer.clear();
+  }
+
+  private async pump(): Promise<void> {
+    this.pumping = true;
+    try {
+      for (;;) {
+        if (this.disposed) return;
+        const key = this.coalescer.nextReadyKey();
+        if (key === undefined) return;
+        const frame = this.coalescer.take(key);
+        try {
+          await this.transport.sendFrame(frame);
+        } catch (error) {
+          this.dispose();
+          this.onSendFailure(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+}
+
+/** Stable placeholder target for a provider's accepted peer connections: `isVerifiedFor` is a consumer-side concept the provider never calls. */
+const CULTMESH_PROVIDER_PEER_TARGET: CultMeshRealtimeTarget = { verseId: "", authorityRuntimeId: "" };
+
+/** Configures a `CultMeshQuicRealtimeProvider` listener. */
+export interface CultMeshQuicRealtimeProviderOptions {
+  readonly host: string;
+  readonly port: number;
+  readonly serverCertificate: { readonly pkcs12: Uint8Array; readonly password?: string };
+  readonly handshakeTimeoutMs?: number;
+}
+
+/**
+ * Recovers the leaf certificate's DER bytes from a PKCS12 credential, to
+ * compute the pin a provider advertises. Node has no public PKCS12 decoder;
+ * `tls.createSecureContext` loads the PKCS12 through OpenSSL, and its
+ * internal `context.getCertificate()` is the only way to read back the DER
+ * bytes OpenSSL parsed out of it. Probed against the pinned Node 24 build and
+ * this package's own test fixture pair (`test/fixtures/quic-test.p12` and
+ * `quic-test-cert.der`, generated independently by `openssl pkcs12 -export`):
+ * the returned buffer is byte-identical to the `.der` file and its SHA-256
+ * matches the pin the fixture's tests already assert.
+ */
+function extractLeafCertificateDer(serverCertificate: CultMeshQuicRealtimeProviderOptions["serverCertificate"]): Uint8Array {
+  const context = createSecureContext({
+    pfx: Buffer.from(serverCertificate.pkcs12),
+    passphrase: serverCertificate.password ?? "",
+  }) as unknown as { context: { getCertificate(): Buffer | undefined } };
+  const der = context.context.getCertificate();
+  if (!der || der.length === 0) {
+    throw new Error("CultMesh QUIC provider certificate has no parseable leaf certificate.");
+  }
+  return new Uint8Array(der);
+}
+
+interface PendingAccept {
+  connected: boolean;
+  evicted: boolean;
+  readonly buffered: CultMeshQuicNativeEvent[];
+  transport?: CultMeshQuicRealtimeTransport;
+}
+
+/**
+ * The StreamPixels role: a TypeScript listener that broadcasts with an
+ * explicit delivery mode and cannot be backpressured by a slow consumer.
+ * Rule for rule, this is `CultMeshQuicRealtimeServer` (`CultMeshQuicRealtimeTransport.cs:151-310`):
+ * `listen` opens a listener and computes the advertised endpoint;
+ * `broadcast` mirrors `BroadcastAsync` (`:216-235`); `receive` mirrors
+ * `ReceiveAsync` fanned in from every accepted peer's inbox
+ * (`CultMeshRealtimeInbox.ReceiveAsync`, `:597-609`); peers are evicted on
+ * send failure or shutdown, and there is no reconnect logic here, matching
+ * the C# reference's `AcceptLoopAsync` (`:276-309`).
+ */
+export class CultMeshQuicRealtimeProvider {
+  /** `cultmesh-state+quic://<host>:<boundPort>?cert-sha256=<HEX>`, uppercase — the Unity connector requires the pin. */
+  readonly advertisedEndpoint: string;
+
+  private readonly runtime: CultMeshQuicNativeRuntime;
+  private readonly listenerId: bigint;
+  private readonly handshakeTimeoutMs: number;
+  private readonly peers = new Set<CultMeshQuicRealtimeTransport>();
+  private readonly outboxes = new Map<CultMeshQuicRealtimeTransport, CultMeshQuicRealtimeProviderOutbox>();
+  private readonly readyFrames: CultMeshRealtimeFrame[] = [];
+  private readonly receiveWaiters: PendingReceive[] = [];
+  private disposed = false;
+
+  private constructor(
+    runtime: CultMeshQuicNativeRuntime,
+    listenerId: bigint,
+    advertisedEndpoint: string,
+    handshakeTimeoutMs: number,
+  ) {
+    this.runtime = runtime;
+    this.listenerId = listenerId;
+    this.advertisedEndpoint = advertisedEndpoint;
+    this.handshakeTimeoutMs = handshakeTimeoutMs;
+  }
+
+  /** Number of currently accepted peer connections. */
+  get connectionCount(): number {
+    return this.peers.size;
+  }
+
+  static async listen(options: CultMeshQuicRealtimeProviderOptions): Promise<CultMeshQuicRealtimeProvider> {
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? 10_000;
+    const der = extractLeafCertificateDer(options.serverCertificate);
+    const pinHex = certificateSha256Hex(der).toUpperCase();
+    const host = options.host && options.host.length > 0 ? options.host : "127.0.0.1";
+
+    const runtime = await CultMeshQuicNativeRuntime.open();
+    let listenerId: bigint;
+    let boundPort: number;
+    try {
+      ({ listenerId, boundPort } = runtime.listenerOpen(
+        options.host || null,
+        options.port,
+        options.serverCertificate.pkcs12,
+        options.serverCertificate.password ?? null,
+      ));
+    } catch (error) {
+      await runtime.release();
+      throw error;
+    }
+
+    const advertisedEndpoint = `${CULTMESH_QUIC_REALTIME_SCHEME}://${host}:${boundPort}?cert-sha256=${pinHex}`;
+    const provider = new CultMeshQuicRealtimeProvider(runtime, listenerId, advertisedEndpoint, handshakeTimeoutMs);
+    runtime.onListenerEvent(listenerId, (event) => {
+      if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) provider.acceptConnection(event.connectionId);
+    });
+    return provider;
+  }
+
+  /**
+   * `BroadcastAsync` (`:216-235`). `latest-only` enqueues into each peer's
+   * outbox and returns as soon as every peer has accepted the frame into its
+   * outbox — never once any peer's I/O. `reliable-ordered` awaits every
+   * peer's `send_complete` (or eviction) before resolving, matching
+   * `Task.WhenAll` over `SendToConnectedClientAsync` (`:233-255`).
+   */
+  async broadcast(frame: CultMeshRealtimeFrame): Promise<void> {
+    if (this.disposed) throw new Error("CultMesh QUIC realtime provider is disposed.");
+    if (frame.delivery === "unreliable") {
+      throw new Error(
+        "The native MsQuic connector exposes streams but not QUIC datagrams; unreliable delivery is not supported.",
+      );
+    }
+    if (frame.delivery === "latest-only") {
+      for (const outbox of this.outboxes.values()) outbox.publish(frame);
+      return;
+    }
+    const sends = [...this.peers].map(async (transport) => {
+      try {
+        await transport.sendFrame(frame);
+      } catch {
+        transport.dispose();
+      }
+    });
+    if (sends.length > 0) await Promise.all(sends);
+  }
+
+  /** The next client-originated frame, fanned in from every accepted peer. */
+  async receive(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
+    if (this.readyFrames.length > 0) return this.readyFrames.shift()!;
+    if (this.disposed) throw new Error("CultMesh QUIC realtime provider is disposed.");
+    return await new Promise<CultMeshRealtimeFrame>((resolve, reject) => {
+      const onAbort = (): void => {
+        const index = this.receiveWaiters.indexOf(waiter);
+        if (index >= 0) this.receiveWaiters.splice(index, 1);
+        reject(new Error("CultMesh QUIC realtime provider receive aborted."));
+      };
+      const waiter: PendingReceive = {
+        resolve: (frame) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(frame);
+        },
+        reject: (error) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.receiveWaiters.push(waiter);
+    });
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    try {
+      this.runtime.listenerClose(this.listenerId);
+    } catch {
+      // Best-effort: the listener may already be gone.
+    }
+    for (const transport of [...this.peers]) transport.dispose();
+    const rejection = new Error("CultMesh QUIC realtime provider is disposed.");
+    for (const waiter of this.receiveWaiters.splice(0, this.receiveWaiters.length)) waiter.reject(rejection);
+    void this.runtime.release();
+  }
+
+  private enqueueReceived(frame: CultMeshRealtimeFrame): void {
+    const waiter = this.receiveWaiters.shift();
+    if (waiter) {
+      waiter.resolve(frame);
+      return;
+    }
+    this.readyFrames.push(frame);
+  }
+
+  private async pumpReceivedFrom(transport: CultMeshQuicRealtimeTransport): Promise<void> {
+    for (;;) {
+      let frame: CultMeshRealtimeFrame;
+      try {
+        frame = await transport.receiveFrame();
+      } catch {
+        return; // The transport is disposed/faulted; nothing more to read.
+      }
+      this.enqueueReceived(frame);
+    }
+  }
+
+  /**
+   * Handles `LISTENER_NEW_CONNECTION`. Everything here up to and including
+   * the buffering `onConnectionEvent` registration runs synchronously, in
+   * the same turn the native runtime's pump dispatched this listener event —
+   * before the pump can advance to await its next native event — so nothing
+   * for this connection can be dispatched and lost while `attachPeer` below
+   * awaits a runtime reference.
+   */
+  private acceptConnection(connectionId: bigint): void {
+    if (this.disposed) {
+      this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
+      return;
+    }
+
+    const state: PendingAccept = { connected: false, evicted: false, buffered: [] };
+
+    const evict = (): void => {
+      if (state.evicted) return;
+      state.evicted = true;
+      clearTimeout(timer);
+      if (state.transport) {
+        state.transport.dispose();
+      } else {
+        this.runtime.offConnectionEvent(connectionId);
+        this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      if (!state.connected) evict();
+    }, this.handshakeTimeoutMs);
+
+    this.runtime.onConnectionEvent(
+      connectionId,
+      (event) => {
+        if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) state.connected = true;
+        state.buffered.push(event);
+      },
+      () => evict(),
+    );
+
+    void this.attachPeer(connectionId, state, evict, timer);
+  }
+
+  private async attachPeer(
+    connectionId: bigint,
+    state: PendingAccept,
+    evict: () => void,
+    handshakeTimer: ReturnType<typeof setTimeout>,
+  ): Promise<void> {
+    let peerRuntime: CultMeshQuicNativeRuntime;
+    try {
+      peerRuntime = await CultMeshQuicNativeRuntime.open();
+    } catch {
+      evict();
+      return;
+    }
+    if (state.evicted || this.disposed) {
+      void peerRuntime.release();
+      if (!state.evicted) {
+        this.runtime.offConnectionEvent(connectionId);
+        this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
+      }
+      return;
+    }
+
+    const transport = new CultMeshQuicRealtimeTransport(
+      `quic-peer-${connectionId}`,
+      peerRuntime,
+      connectionId,
+      CULTMESH_PROVIDER_PEER_TARGET,
+      "",
+    );
+    state.transport = transport;
+    transport.onDisposed(() => {
+      state.evicted = true;
+      clearTimeout(handshakeTimer);
+      this.peers.delete(transport);
+      this.outboxes.get(transport)?.dispose();
+      this.outboxes.delete(transport);
+    });
+
+    // Hand the connection to its real dispatcher and replay whatever the
+    // buffering handler above collected while this function awaited.
+    this.runtime.onConnectionEvent(
+      connectionId,
+      (event) => transport.handleConnectionEvent(event),
+      (error) => transport.fault(error),
+    );
+    for (const event of state.buffered) transport.handleConnectionEvent(event);
+
+    // A buffered CONNECTION_SHUTDOWN can dispose `transport` synchronously
+    // during the replay above; do not resurrect an already-dead peer.
+    if (state.evicted) return;
+
+    // Only disarm the handshake timeout once actually connected; if the
+    // handshake is still in flight, the timer (checked against
+    // `state.connected`) is still the thing that will evict it.
+    if (state.connected) clearTimeout(handshakeTimer);
+    this.peers.add(transport);
+    this.outboxes.set(transport, new CultMeshQuicRealtimeProviderOutbox(transport, () => transport.dispose()));
+    void this.pumpReceivedFrom(transport);
   }
 }
 
