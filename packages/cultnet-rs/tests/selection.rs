@@ -64,11 +64,12 @@ struct FixtureSchemaDef {
     hash_alias: String,
 }
 
+// R-AF: no target_schema - the wire a stored reference actually travels on carries a bare record
+// key (GameCult.Caching.MessagePack.CultRecordRefFormatter<T> writes only value.Key.Value), so the
+// fixture stopped pretending otherwise. See the fixture file's "//references" note.
 #[derive(serde::Deserialize)]
 struct FixtureReferenceDef {
     role: String,
-    #[serde(rename = "targetSchema")]
-    target_schema: String,
     #[serde(rename = "targetKey")]
     target_key: String,
 }
@@ -156,6 +157,12 @@ fn leaf_b() -> &'static str {
 fn citer() -> &'static str {
     &fixture_schema("citer").schema_id
 }
+// R-AF: the shared fixture's narrow-target citer - real SHA-256 id, same treatment as
+// leaf_a()/leaf_b()/citer() above, so the shared-key resolution rule is pinned in the actual
+// cross-runtime parity vectors rather than only in this file's own local NARROW_CITER tests.
+fn citer_narrow() -> &'static str {
+    &fixture_schema("citer_narrow").schema_id
+}
 // R-E/shared-fixture ruling: the fixture's map key ("leaf_a", "leaf_b", "citer") *is* each
 // schema's declared name (C#'s CultDocumentDescriptor.SchemaName) - what RowSet::schema_name/
 // Row::schema_name now expose, and what nameAlias's ".v9" suffix resolves against.
@@ -167,6 +174,9 @@ fn leaf_b_name() -> &'static str {
 }
 fn citer_name() -> &'static str {
     "citer"
+}
+fn citer_narrow_name() -> &'static str {
+    "citer_narrow"
 }
 const NARROW_CITER_NAME: &str = "narrow_citer";
 // R-E, Self's ruling 2026-09-22 ("the C# reference's alias rule is the rule"): a hash id with a
@@ -201,32 +211,36 @@ fn build_row(row: &FixtureRowDef) -> FixtureRow {
             )
         }
         "citer" => {
+            // R-AF: the stored edge is a bare target key - the wire carries no schema for it.
             let references = row
                 .references
                 .iter()
-                .map(|reference| {
-                    let target_id = match reference.target_schema.as_str() {
-                        "leaf_a" => leaf_a(),
-                        "leaf_b" => leaf_b(),
-                        other => panic!("selection-vectors.fixture.json: unknown reference target schema '{other}'"),
-                    };
-                    (reference.role.clone(), rr(target_id, leak(reference.target_key.clone())), None)
-                })
+                .map(|reference| (reference.role.clone(), reference.target_key.clone(), None))
                 .collect();
             FixtureRow::citer(leak(row.key.clone()), row.ordinal, references)
+        }
+        "citer_narrow" => {
+            let references = row
+                .references
+                .iter()
+                .map(|reference| (reference.role.clone(), reference.target_key.clone(), None))
+                .collect();
+            FixtureRow::citer_narrow(leak(row.key.clone()), row.ordinal, references)
         }
         other => panic!("selection-vectors.fixture.json: unknown schema '{other}'"),
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct FixtureRow {
     schema_id: &'static str,
     record_key: &'static str,
     ordinal: i64,
     kind: Option<&'static str>,
     mass: Option<&'static str>,
-    references: Vec<(String, RecordRef, Option<Vec<u8>>)>,
+    // R-AF: the stored target is a bare record key, not a RecordRef - see Row::references's doc
+    // comment in src/selection.rs.
+    references: Vec<(String, String, Option<Vec<u8>>)>,
 }
 
 impl FixtureRow {
@@ -241,9 +255,23 @@ impl FixtureRow {
         }
     }
 
-    fn citer(record_key: &'static str, ordinal: i64, references: Vec<(String, RecordRef, Option<Vec<u8>>)>) -> Self {
+    fn citer(record_key: &'static str, ordinal: i64, references: Vec<(String, String, Option<Vec<u8>>)>) -> Self {
         Self {
             schema_id: citer(),
+            record_key,
+            ordinal,
+            kind: None,
+            mass: None,
+            references,
+        }
+    }
+
+    // R-AF: the shared fixture's narrow-target citer (real schema id, from
+    // selection-vectors.fixture.json) - distinct from this file's own local NARROW_CITER, which
+    // stays a Rust-only id never compared across runtimes.
+    fn citer_narrow(record_key: &'static str, ordinal: i64, references: Vec<(String, String, Option<Vec<u8>>)>) -> Self {
+        Self {
+            schema_id: citer_narrow(),
             record_key,
             ordinal,
             kind: None,
@@ -262,6 +290,8 @@ fn schema_name_for(schema_id: &str) -> Option<&'static str> {
         Some(leaf_b_name())
     } else if schema_id == citer() {
         Some(citer_name())
+    } else if schema_id == citer_narrow() {
+        Some(citer_narrow_name())
     } else if schema_id == NARROW_CITER {
         Some(NARROW_CITER_NAME)
     } else {
@@ -295,7 +325,7 @@ impl Row for FixtureRow {
             None
         }
     }
-    fn references(&self) -> Vec<(String, RecordRef, Option<Vec<u8>>)> {
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
         self.references.clone()
     }
 }
@@ -308,6 +338,7 @@ impl RowSet for FixtureRowSet {
             leaf_a().into(),
             leaf_b().into(),
             citer().into(),
+            citer_narrow().into(),
             NARROW_CITER.into(),
         ]
     }
@@ -332,7 +363,7 @@ impl RowSet for FixtureRowSet {
                 // is itself cited by another citer (rather than only ever by a leaf).
                 "peer".into(),
             ]
-        } else if schema_id == NARROW_CITER {
+        } else if schema_id == NARROW_CITER || schema_id == citer_narrow() {
             vec!["narrow_ref".into()]
         } else {
             Vec::new()
@@ -423,6 +454,32 @@ fn orders_by_ordinal_then_identity_and_reverses() {
     );
 }
 
+// R-AJ (Soul's SM-4): `base_rows()`'s one tied ordinal (a-lo/a-eq/b-hi... no - actually every
+// base row has a distinct ordinal) never exercises the schemaId component of `order_rows`'s
+// `(ordinal, schemaId, recordKey)` tiebreak at all. This test builds two rows, one on each
+// schema, sharing one ordinal, with keys chosen *relative to the schema ids discovered at
+// runtime* - the low-sorting schema gets the high-sorting key ("z") and the high-sorting schema
+// gets the low-sorting key ("a") - so a schemaId-first order and a key-first order are the exact
+// reverse of each other no matter which real schema id happens to be smaller (a fixture that
+// merely ties one ordinal across two same-key-ordered rows can pass under either rule by
+// coincidence - see the C# mirror's fix, CultNetSelectionSurvivorTests.cs, for the probe that
+// found this).
+#[test]
+fn row_tiebreak_orders_by_schema_id_before_record_key_when_both_vary_at_a_tied_ordinal() {
+    let (low_schema, high_schema) = if leaf_a() < leaf_b() { (leaf_a(), leaf_b()) } else { (leaf_b(), leaf_a()) };
+    let low_schema_high_key = FixtureRow::leaf(low_schema, "z", 1, "k", "1");
+    let high_schema_low_key = FixtureRow::leaf(high_schema, "a", 1, "k", "1");
+    let rows = vec![low_schema_high_key, high_schema_low_key];
+
+    let evaluation = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
+
+    // schemaId-first (the rule): low_schema < high_schema regardless of key, so the "z"-keyed row
+    // (on low_schema) comes first. record_key-first (the mutant) would instead put the "a"-keyed
+    // row first - the exact reverse.
+    let order: Vec<(&str, &str)> = evaluation.rows.iter().map(|r| (r.schema_id(), r.record_key())).collect();
+    assert_eq!(order, vec![(low_schema, "z"), (high_schema, "a")]);
+}
+
 // S4/S5: a page walk visits every row exactly once, the last page carries no cursor, and a
 // cursor is refused when it does not decode, its digest does not match, or asOf has moved.
 #[test]
@@ -506,8 +563,8 @@ fn cites_role_excludes_a_second_reference_at_the_same_target() {
             "double-citer",
             2,
             vec![
-                ("Design".to_string(), rr(leaf_a(), "a-eq"), None),
-                ("OtherRole".to_string(), rr(leaf_a(), "a-eq"), None),
+                ("Design".to_string(), "a-eq".to_string(), None),
+                ("OtherRole".to_string(), "a-eq".to_string(), None),
             ],
         ),
     ];
@@ -562,19 +619,34 @@ fn cited_exists_is_the_one_negation() {
 // unique per schema, so two schemas can share one record key. Before the fix, `byKey` kept only
 // the last row seen at a key, so which schema's row a `cites` edge resolved to - and whether a
 // `cited` selection counted a row as cited at all - depended on row order.
+//
+// R-AF: uses `narrow_ref` (declared target leaf_a only), not `Design` (both leaves) - a stored
+// edge carries no schema on the wire (`Row::references`'s doc comment), so a *broad*-target role
+// has nothing of its own to break a shared-key tie with and genuinely does depend on row order
+// (Soul's map, SM-1/R-AF: "both row orders give the same answer" is R-V's narrower promise, true
+// only when the declared target excludes all-but-one of the duplicate-key candidates). A
+// narrow-target role still resolves the one candidate inside its target regardless of order,
+// because the other schema's row at the same key is never a valid candidate to begin with - that
+// is the guarantee this test pins.
 #[test]
 fn row_identity_is_schema_and_key_not_key_alone_in_either_row_order() {
     let leaf_a_row = FixtureRow::leaf(leaf_a(), "shared-key", 1, "weapon", "1");
     let leaf_b_row = FixtureRow::leaf(leaf_b(), "shared-key", 2, "shield", "2");
-    let citer_row =
-        FixtureRow::citer("citer-1", 3, vec![("Design".to_string(), rr(leaf_a(), "shared-key"), None)]);
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "citer-1",
+        ordinal: 3,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "shared-key".to_string(), None)],
+    };
 
     let cites_selection = Selection {
-        cites: Some(Citation { target: rr(leaf_a(), "shared-key"), role: Some("Design".into()) }),
+        cites: Some(Citation { target: rr(leaf_a(), "shared-key"), role: Some("narrow_ref".into()) }),
         ..Selection::default()
     };
     let cited_selection = Selection {
-        cited: Some(Incoming { role: "Design".into(), exists: true }),
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
         ..Selection::default()
     };
 
@@ -616,8 +688,8 @@ fn row_identity_is_schema_and_key_not_key_alone_in_either_row_order() {
 #[test]
 fn a_selection_with_both_hops_returns_both_directions_edges() {
     let leaf = FixtureRow::leaf(leaf_a(), "leaf-row", 1, "weapon", "5");
-    let ca = FixtureRow::citer("ca", 2, vec![("Design".to_string(), rr(leaf_a(), "leaf-row"), None)]);
-    let cb = FixtureRow::citer("cb", 3, vec![("peer".to_string(), rr(citer(), "ca"), None)]);
+    let ca = FixtureRow::citer("ca", 2, vec![("Design".to_string(), "leaf-row".to_string(), None)]);
+    let cb = FixtureRow::citer("cb", 3, vec![("peer".to_string(), "ca".to_string(), None)]);
     let rows = vec![leaf, ca, cb];
 
     let selection = Selection {
@@ -641,6 +713,40 @@ fn a_selection_with_both_hops_returns_both_directions_edges() {
         .collect();
     seen.sort_unstable();
     assert_eq!(seen, vec![("ca", "Design", "leaf-row"), ("cb", "peer", "ca")]);
+}
+
+// R-AJ (Soul's SM-4): the test above (and its C# mirror) never actually checks the evaluator's
+// edge *order* - it sorts the observed edges before comparing, so it pins which edges appear, not
+// where. And even a version that did compare order would be blind here: "ca" < "cb" and
+// "Design" < "peer" agree, so a From-key-first rule and a Role-first rule produce the same
+// sequence by coincidence. This test picks a hub citer key and role name that *disagree*: the hub
+// ("z_hub") sorts after the other citer ("a_other") by key, but the hub's own cites-edge role
+// ("Design") sorts before the other's cited-edge role ("peer") - so a From-key-first order and a
+// Role-first order are provably the reverse of each other, and only one of them is the rule (R-B:
+// "page-row order, then (from, role, to)").
+#[test]
+fn edge_order_is_from_key_before_role_when_both_vary_at_the_same_anchor() {
+    let leaf = FixtureRow::leaf(leaf_a(), "target", 1, "weapon", "5");
+    let hub = FixtureRow::citer("z_hub", 2, vec![("Design".to_string(), "target".to_string(), None)]);
+    let other = FixtureRow::citer("a_other", 3, vec![("peer".to_string(), "z_hub".to_string(), None)]);
+    let rows = vec![leaf, hub, other];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "target"), role: Some("Design".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["z_hub"]);
+    assert_eq!(evaluation.edges.len(), 2);
+
+    // From-key-first (the rule): "a_other" < "z_hub", so the cited edge (From=a_other) comes
+    // first. Role-first (the mutant) would instead put the cites edge (Role="Design") first,
+    // since "Design" < "peer" - the exact reverse.
+    let order: Vec<(&str, &str)> =
+        evaluation.edges.iter().map(|edge| (edge.from.record_key(), edge.role.as_str())).collect();
+    assert_eq!(order, vec![("a_other", "peer"), ("z_hub", "Design")]);
 }
 
 // S16: the four comparisons at the boundary, including the row whose value equals the compared
@@ -688,7 +794,7 @@ fn refuses_an_edge_outside_its_declared_target() {
             ordinal: 2,
             kind: None,
             mass: None,
-            references: vec![("narrow_ref".to_string(), rr(leaf_b(), "b"), None)],
+            references: vec![("narrow_ref".to_string(), "b".to_string(), None)],
         },
     ];
     let selection = Selection {
@@ -699,29 +805,104 @@ fn refuses_an_edge_outside_its_declared_target() {
     assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
 }
 
-// R-T/F15: `cites` checks every edge a citer carries against its declared target, not only the
-// one the citation's own role/key filters ask about. Before the fix, a `cites` selection that
-// asked about the citer's legitimate "Design" edge never looked at its "narrow_ref" edge, so a
-// corrupt "narrow_ref" (pointed at a schema outside its declared target) hid behind the filter.
+// R-AF, Soul's SM-1 shape table (docs/cultnet-selection-cut.md): a record key shared by two rows
+// of different schemas, one inside the declared target and one outside it. The in-target row must
+// resolve regardless of which schema's row happens to enumerate first - the edge itself carries no
+// schema to break the tie (`Row::references`'s doc comment), so only the declared leaf set
+// decides. This is the shape neither runtime's parity vectors covered before this cut (zero
+// duplicate record keys across the original fixture's ten rows).
 #[test]
-fn cites_refuses_a_row_carrying_an_unrelated_edge_outside_its_declared_target() {
+fn shared_key_resolves_to_the_row_inside_the_declared_target_in_either_row_order() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "dup-key", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "dup-key", 2, "shield", "2");
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "narrow-citer",
+        ordinal: 3,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "dup-key".to_string(), None)],
+    };
+    let selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    for rows in [
+        vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()],
+        vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()],
+    ] {
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(evaluation.edges.len(), 1);
+        assert_eq!(
+            evaluation.edges[0].to.schema_id(),
+            leaf_a(),
+            "must resolve to leaf_a, the only in-target row, never leaf_b, in either row order"
+        );
+        assert_eq!(evaluation.edges[0].to.record_key(), "dup-key");
+    }
+}
+
+// R-AF, the mirror shape: the only row at the key is outside the declared target - the edge must
+// refuse the selection (S18), not silently produce an empty page. Opposite of
+// `refuses_an_edge_outside_its_declared_target` above only in that this key is one a same-role,
+// in-target row could also have shared (see the test above) - it just doesn't here.
+#[test]
+fn shared_key_refuses_when_the_only_candidate_is_outside_the_declared_target() {
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "narrow-only", 1, "shield", "2");
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "narrow-citer",
+        ordinal: 2,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "narrow-only".to_string(), None)],
+    };
+    let rows = vec![leaf_b_row, citer_row];
+    let selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
+}
+
+// R-T/F15: `cites` checks every edge of the *queried role* a citer carries against its declared
+// target, not only the one edge whose key matches the citation - a many-reference member can carry
+// several edges under the one role/member name, and a corrupt one among them must not hide behind
+// the key filter. Two edges under "Design" here (this crate's `FixtureRow` has no distinct
+// many-reference shape - two tuples sharing one role name is the same thing D11 gives one edge per
+// element of), one in-target and one out, both under the role the citation asks about - mirrors
+// C#'s own R-T(F15) test exactly (Evaluator_CitesRefusesAnOutOfTargetEdgeEvenWhenTheQueriedKey-
+// MatchesNeitherEdge, CultNetSelectionFixBatchTests.cs), which queries the *same* role/member that
+// carries both elements.
+//
+// R-AF (found landing it, matches_citation's own comment): an *unrelated* role's out-of-target edge
+// no longer poisons a citation for a *different*, explicitly-requested role - that was this test's
+// original shape, and it tested a stronger guarantee than the C# reference actually gives
+// (ReferenceMembers(descriptor, citation.Role) filters by role before R-W's per-edge check ever
+// runs, CultNetSelectionEvaluator.cs:451-458).
+#[test]
+fn cites_refuses_an_out_of_target_edge_under_the_same_queried_role() {
     let rows = vec![
         FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
-        FixtureRow::leaf(leaf_b(), "b-hi", 2, "shield", "9"),
-        FixtureRow {
-            schema_id: NARROW_CITER,
-            record_key: "bad-citer",
-            ordinal: 3,
-            kind: None,
-            mass: None,
-            references: vec![
-                ("Design".to_string(), rr(leaf_a(), "a-eq"), None),
-                ("narrow_ref".to_string(), rr(leaf_b(), "b-hi"), None),
+        // Design's declared target is [leaf_a, leaf_b] (FixtureRowSet::target_leaves) - a citer
+        // schema row is outside it, so a "Design" edge pointed here is the out-of-target one.
+        FixtureRow::citer("other-citer", 2, Vec::new()),
+        FixtureRow::citer(
+            "bad-citer",
+            3,
+            vec![
+                ("Design".to_string(), "a-eq".to_string(), None),
+                ("Design".to_string(), "other-citer".to_string(), None),
             ],
-        },
+        ),
     ];
+    // Queries a key neither Design edge carries - the door for the pre-fix bug this pins: skipping
+    // straight to "does any edge's key match" would find nothing and answer an empty page, never
+    // looking at the out-of-target second edge at all.
     let selection = Selection {
-        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        cites: Some(Citation { target: rr(leaf_a(), "does-not-exist"), role: Some("Design".into()) }),
         ..Selection::default()
     };
     let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
@@ -737,8 +918,8 @@ fn dictionary_reference_entries_keep_distinct_payload_bytes() {
         "assembly",
         3,
         vec![
-            ("components".to_string(), rr(leaf_a(), "part-1"), Some(vec![1, 5])),
-            ("components".to_string(), rr(leaf_a(), "part-2"), Some(vec![2, 5])),
+            ("components".to_string(), "part-1".to_string(), Some(vec![1, 5])),
+            ("components".to_string(), "part-2".to_string(), Some(vec![2, 5])),
         ],
     );
     let payloads: std::collections::HashSet<Vec<u8>> =
@@ -760,7 +941,7 @@ fn cited_selections_page_the_citee_and_their_edges_survive_the_page_filter() {
         FixtureRow::citer(
             "assembly",
             2,
-            vec![("components".to_string(), rr(leaf_a(), "part-1"), Some(vec![9]))],
+            vec![("components".to_string(), "part-1".to_string(), Some(vec![9]))],
         ),
     ];
     let selection = Selection {
@@ -782,7 +963,7 @@ fn cited_selections_page_the_citee_and_their_edges_survive_the_page_filter() {
 fn cites_selections_still_page_the_citer_and_key_edges_off_it() {
     let rows = vec![
         FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
-        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), rr(leaf_a(), "a-eq"), None)]),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), None)]),
     ];
     let selection = Selection {
         cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
@@ -979,6 +1160,13 @@ struct Vector {
     // evaluation runs. Absent for an ordinary evaluated vector.
     #[serde(rename = "expectedRefusalField", default, skip_serializing_if = "Option::is_none")]
     expected_refusal_field: Option<String>,
+    // R-AF: a small, separate signal from expected_refusal_field above - that one is the door
+    // (validate, never touches select); this one names an evaluation-time typed refusal select
+    // itself must return (currently only "reference_outside_target", S18). Deliberately narrower
+    // than R-Z/R-AH's page-bytes-and-code parity harness (not this cut's job): it checks which
+    // typed refusal fires, nothing about wire bytes.
+    #[serde(rename = "expectedEvaluationRefusal", default, skip_serializing_if = "Option::is_none")]
+    expected_evaluation_refusal: Option<String>,
     #[serde(rename = "expectedIds", default)]
     expected_ids: Vec<String>,
     #[serde(default)]
@@ -1118,6 +1306,30 @@ fn selection_vectors_written_by_the_reference_decode_and_evaluate_identically_in
             continue;
         }
 
+        if let Some(expected_kind) = &vector.expected_evaluation_refusal {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&vector.selection_message_pack_base64)
+                .expect("vector selection bytes are valid base64");
+            let selection: Selection =
+                rmp_serde::from_slice(&bytes).expect("vector selection bytes decode as MessagePack");
+            let rows = all_fixture_rows();
+            match select(&FixtureRowSet, &rows, &selection, vector.as_of, test_cursor_key()) {
+                Ok(_) => failures.push(format!(
+                    "{}: expected select() to refuse ({expected_kind}) but it accepted the selection",
+                    vector.name
+                )),
+                Err(SelectionRefusal::ReferenceOutsideTarget { .. }) if expected_kind == "reference_outside_target" => {
+                    // expected
+                }
+                Err(other) => failures.push(format!(
+                    "{}: expected select() to refuse with {expected_kind}, got {other:?}",
+                    vector.name
+                )),
+            }
+            continue;
+        }
+
         let evaluated = match evaluate_vector(vector) {
             Ok(evaluated) => evaluated,
             Err(reason) => {
@@ -1252,9 +1464,19 @@ fn write_selection_vectors_for_the_reference() {
         // R-E/Soul "Settled": with real SHA-256 schema ids in the fixture, `cites.target.schemaId`
         // agrees byte for byte across runtimes - the earlier name-as-id fixture masked this. This
         // is the exact-id form.
+        //
+        // R-AF: keys=["citer-1"] (the fixture's one row that actually cites a-eq via Design) scopes
+        // this away from citer_narrow's rows, as hygiene rather than necessity - landing R-AF's
+        // vectors surfaced a real R-T/R-W parity bug this exposed: matches_citation used to resolve
+        // and R-W-check every declared reference a row carries before filtering by the citation's
+        // own role, where C#'s ReferenceMembers(descriptor, citation.Role) filters by role first.
+        // Fixed above (see matches_citation's own comment) so narrow-citer-refused's out-of-target
+        // narrow_ref edge no longer reaches a role="Design" citation in either runtime - this vector
+        // keeps the keys scope anyway so it never depends on that.
         (
             "hop_by_role_cites_exact_id",
             Selection {
+                keys: Some(vec!["citer-1".into()]),
                 cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
                 ..Selection::default()
             },
@@ -1263,9 +1485,11 @@ fn write_selection_vectors_for_the_reference() {
         // resolves ("leaf_a.v9", stripped to "leaf_a" and compared against the schema's declared
         // name) - as of this cut's fix, Row::schema_name/RowSet::schema_name give this crate's own
         // schema_alias the same name to resolve against, so this now agrees with the reference too.
+        // R-AF: keys scoping for the same reason as hop_by_role_cites_exact_id above.
         (
             "hop_by_role_cites_name_alias",
             Selection {
+                keys: Some(vec!["citer-1".into()]),
                 cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
                 ..Selection::default()
             },
@@ -1324,13 +1548,48 @@ fn write_selection_vectors_for_the_reference() {
                 ..Selection::default()
             },
         ),
+        // R-AJ: a tied ordinal across two DIFFERENT schemas (kind=tie-schema is leaf_b/"zz-tie-
+        // schema" and leaf_a/"aa-tie-schema") - the shape the row order's schemaId tiebreak needs
+        // and the astral/BMP pair above never covered (both those rows are leaf_a). The fixture's
+        // keys are anti-correlated with the real schema ids on purpose, so a schemaId-first order
+        // and a recordKey-first order disagree: only the correct composition puts leaf_b's row
+        // ("zz-tie-schema") first.
+        (
+            "row_tiebreak_schema_id_before_record_key_at_tied_ordinal",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "kind".into(),
+                    op: "any_of".into(),
+                    values: Some(vec!["tie-schema".into()]),
+                    number: None,
+                }]),
+                ..Selection::default()
+            },
+        ),
+        // R-AF: "dup-key" carries two rows (leaf_a and leaf_b); citer_narrow's narrow_ref targets
+        // leaf_a only. Keys scopes the citer candidate set to narrow-citer-accepted alone, so this
+        // vector never touches narrow-citer-refused's bad edge (R-W resolves every reference
+        // member unconditionally, so leaving both citer_narrow rows in one candidate set would
+        // always refuse regardless of which edge the query named). One rule, derived from the wire
+        // (docs/cultnet-selection-cut.md, R-AF): resolving "the row this edge names" is by record
+        // key plus the declared leaf set, not an exact (schema, key) pair, so this must accept in
+        // both runtimes and resolve to the leaf_a row even though a leaf_b row shares the same key.
+        (
+            "shared_key_narrow_ref_resolves_leaf_within_target",
+            Selection {
+                keys: Some(vec!["narrow-citer-accepted".into()]),
+                cites: Some(Citation { target: rr(leaf_a(), "dup-key"), role: Some("narrow_ref".into()) }),
+                ..Selection::default()
+            },
+        ),
     ];
 
     let mut vectors = Vec::new();
     for (name, selection) in cases {
         let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
         let rows = all_fixture_rows();
-        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).expect("valid selection");
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key())
+            .unwrap_or_else(|e| panic!("case {name:?} failed: {e:?}"));
         let ids: Vec<String> = evaluation
             .rows
             .iter()
@@ -1354,6 +1613,7 @@ fn write_selection_vectors_for_the_reference() {
             selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
             as_of: 1,
             expected_refusal_field: None,
+            expected_evaluation_refusal: None,
             matched: evaluation.matched,
             has_next: evaluation.next_cursor.is_some(),
             expected_ids: ids,
@@ -1416,6 +1676,40 @@ fn write_selection_vectors_for_the_reference() {
             selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
             as_of: 1,
             expected_refusal_field: Some(expected_field.to_string()),
+            expected_evaluation_refusal: None,
+            matched: 0,
+            has_next: false,
+            expected_ids: Vec::new(),
+            expected_edges: Vec::new(),
+        });
+    }
+
+    // R-AF: evaluation-time refusal vectors. Never handed to validate - the selection decodes and
+    // passes the door; only select itself refuses, and only once the shared-key resolution rule
+    // actually runs. Keys scopes the candidate set to narrow-citer-refused alone (see the comment
+    // on shared_key_narrow_ref_resolves_leaf_within_target above).
+    let evaluation_refusal_cases: Vec<(&str, Selection)> = vec![(
+        "shared_key_narrow_ref_refuses_when_only_candidate_is_outside_target",
+        Selection {
+            keys: Some(vec!["narrow-citer-refused".into()]),
+            cites: Some(Citation { target: rr(leaf_a(), "narrow-only"), role: Some("narrow_ref".into()) }),
+            ..Selection::default()
+        },
+    )];
+    for (name, selection) in evaluation_refusal_cases {
+        let rows = all_fixture_rows();
+        let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+        assert!(
+            matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })),
+            "{name} must be refused by select() before it can be committed as an evaluation-refusal vector, got {result:?}"
+        );
+        let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
+        vectors.push(Vector {
+            name: name.to_string(),
+            selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            as_of: 1,
+            expected_refusal_field: None,
+            expected_evaluation_refusal: Some("reference_outside_target".to_string()),
             matched: 0,
             has_next: false,
             expected_ids: Vec::new(),
@@ -1779,7 +2073,7 @@ fn document_record_for(row: &FixtureRow) -> SelectionDocumentRecord {
 fn select_page_header_projection_carries_no_payload_in_rows_or_edges() {
     let rows = vec![
         FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
-        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), rr(leaf_a(), "a-eq"), Some(vec![7]))]),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), Some(vec![7]))]),
     ];
     let selection = Selection {
         cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
@@ -1802,7 +2096,7 @@ fn select_page_header_projection_carries_no_payload_in_rows_or_edges() {
 fn select_page_document_projection_carries_payload_in_rows_and_edges() {
     let rows = vec![
         FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
-        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), rr(leaf_a(), "a-eq"), Some(vec![7]))]),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), Some(vec![7]))]),
     ];
     let selection = Selection {
         cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
