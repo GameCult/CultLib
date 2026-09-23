@@ -371,6 +371,32 @@ test("reliable-ordered client frames are delivered in order at the provider, nev
   }
 });
 
+test("frames already queued in the provider's receive queue drain before dispose's rejection", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+      await consumer.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: 1n }));
+      await consumer.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: 2n }));
+      await waitUntil(() => provider.receiveQueueSize === 2);
+
+      // Dispose while two frames are still sitting in the queue, unread.
+      provider.dispose();
+
+      const first = await provider.receive();
+      const second = await provider.receive();
+      assert.deepEqual([first.sequence, second.sequence], [1n, 2n], "already-queued frames must drain first");
+      await assert.rejects(() => provider.receive(), /disposed/, "only a call past the drained backlog rejects");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
 test("unreliable broadcast fails closed", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
