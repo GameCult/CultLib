@@ -13,7 +13,10 @@
 // `WaitForFirstConnectionAsync`, since a broadcast to nobody would otherwise
 // silently no-op), then broadcasts `--frames` frames at `--delivery` with
 // `--interval-ms` between them, watching stdin for EOF as its own shutdown
-// signal like the C# peer's `WatchStdinCloseAsync`.
+// signal like the C# peer's `WatchStdinCloseAsync`. `--linger-ms` (default 0)
+// keeps the listener open that long after broadcasting finishes, so the
+// harness can dial a peer late and exercise Cut C's retained-state seed
+// instead of the provider always tearing down the moment it is done sending.
 //
 // Neither mode imports `cultmesh-ts` itself (the harness drives processes,
 // and the dependency direction is `cultmesh-ts` -> `cultnet-ts`, never the
@@ -88,6 +91,7 @@ async function serveAsync(args: Map<string, string>): Promise<void> {
   }
   const delivery = deliveryArg as CultMeshRealtimeDelivery;
   const intervalMs = optionalIntArg(args, "interval-ms", 50);
+  const lingerMs = optionalIntArg(args, "linger-ms", 0);
   const port = optionalIntArg(args, "port", 0);
 
   const provider = await CultMeshQuicRealtimeProvider.listen({
@@ -129,6 +133,7 @@ async function serveAsync(args: Map<string, string>): Promise<void> {
       writeLog("quic-realtime-serve", { sent: sequence, hex: Buffer.from(encodeRealtimeFrame(frame)).toString("hex") });
       if (intervalMs > 0) await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
+    if (lingerMs > 0 && !stopped) await new Promise((resolve) => setTimeout(resolve, lingerMs));
   } finally {
     provider.dispose();
     // Mirrors the C# peer returning from `QuicRealtimeServeAsync`: once

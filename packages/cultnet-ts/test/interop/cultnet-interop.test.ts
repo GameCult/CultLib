@@ -506,6 +506,74 @@ test("CultMesh QUIC realtime: TypeScript provider and C# native connector (the U
   assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
 });
 
+// Cut C headline: a late-joining C# native connector receives the TS
+// provider's retained frame. The TS provider's own trigger peer (a `dial`
+// subprocess, needed only because the provider waits for a first connection
+// before it broadcasts anything) receives every frame and disconnects before
+// the native connector dials, so nothing here is a live retransmission: only
+// Cut C's retained seed can deliver a frame to the late C# connector.
+test("CultMesh QUIC realtime: a late-joining C# native connector receives the retained frame from a TypeScript provider", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("The native connector is Windows-only; this lane runs on Windows.");
+    return;
+  }
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-provider-retention", "build the typescript quic peer");
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-provider-retention", "start the typescript QUIC provider");
+  servers.push(await spawnServeProcess("ts-quic-provider-retention", {
+    command: process.execPath,
+    args: [
+      cultMeshQuicPeerScript,
+      "serve",
+      "--frames", "3",
+      "--delivery", "latest-only",
+      "--interval-ms", "20",
+      "--linger-ms", "60000",
+    ],
+    cwd: cultMeshTsRoot,
+    env: { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" },
+    stdin: "pipe",
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+
+  logInteropPhase("quic-provider-retention", "trigger peer receives every frame, then disconnects");
+  const trigger = await runJsonCommand("ts-quic-dial-trigger", process.execPath, [
+    cultMeshQuicPeerScript,
+    "dial",
+    "--endpoint", ready.endpoint,
+    "--expect", "3",
+  ], cultMeshTsRoot, { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" });
+  assert.equal(trigger.frames.length, 3);
+
+  logInteropPhase("quic-provider-retention", "dotnet test: the native connector dials late, after the trigger peer is gone");
+  const { stdout } = await runDotnetTestFilter(
+    quicNativeTestsProject,
+    "NativeConnectorReceivesTheRetainedFrameWhenJoiningLate",
+    {
+      CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint,
+      CULTMESH_NATIVE_EXTERNAL_EXPECTED_PAYLOAD: "frame-3",
+    },
+  );
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
+  assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env vars should have made the test run, not skip.\n${stdout}`);
+});
+
 test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with golden bytes", async (t) => {
   if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
     t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
