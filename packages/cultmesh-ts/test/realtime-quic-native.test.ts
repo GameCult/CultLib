@@ -26,7 +26,10 @@ import {
   CULTMESH_QUIC_STREAM_RELIABLE,
 } from "../src/realtime-quic-native";
 
-const FIXTURE_P12 = join(__dirname, "fixtures", "quic-test.p12");
+// __dirname at runtime is dist-test/test; fixtures are binary and are never
+// compiled/copied there, so they are read from their source location, two
+// levels up.
+const FIXTURE_P12 = join(__dirname, "..", "..", "test", "fixtures", "quic-test.p12");
 
 function nativeBridgeAvailable(): boolean {
   const dir = process.env.CULTMESH_QUIC_NATIVE_DIR;
@@ -140,11 +143,14 @@ test("negative grep: no koffi callbacks, .async only on nextEvent", () => {
   // __dirname at runtime is dist-test/test; the source lives two levels up,
   // in src/, since only .js output is mirrored under dist-test.
   const source = readFileSync(join(__dirname, "..", "..", "src", "realtime-quic-native.ts"), "utf8");
-  const asyncUses = [...source.matchAll(/\.async\(/g)];
-  assert.ok(asyncUses.length > 0, "expected at least one .async( use for nextEvent");
+  // `.async` is referenced (not necessarily called with a literal "(" at the
+  // reference site: it is handed to `promisify`, which calls it) only for
+  // `nextEvent`, the ABI's single blocking export.
+  const asyncUses = [...source.matchAll(/\.async\b/g)];
+  assert.ok(asyncUses.length > 0, "expected at least one .async use for nextEvent");
   for (const match of asyncUses) {
     const before = source.slice(Math.max(0, match.index! - 40), match.index!);
-    assert.match(before, /nextEvent/, "the only .async( call site must be nextEvent");
+    assert.match(before, /nextEvent/i, "the only .async reference must be nextEvent");
   }
   assert.doesNotMatch(source, /koffi\.register/, "no koffi callbacks");
 });

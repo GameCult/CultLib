@@ -39,8 +39,11 @@ import {
 } from "../src/realtime-quic";
 import { encodeRealtimeFrame, type CultMeshRealtimeFrame } from "../src/realtime-wire";
 
-const FIXTURE_P12 = join(__dirname, "fixtures", "quic-test.p12");
-const FIXTURE_DER = join(__dirname, "fixtures", "quic-test-cert.der");
+// __dirname at runtime is dist-test/test; fixtures are binary and are never
+// compiled/copied there, so they are read from their source location, two
+// levels up.
+const FIXTURE_P12 = join(__dirname, "..", "..", "test", "fixtures", "quic-test.p12");
+const FIXTURE_DER = join(__dirname, "..", "..", "test", "fixtures", "quic-test-cert.der");
 
 function nativeBridgeAvailable(): boolean {
   const dir = process.env.CULTMESH_QUIC_NATIVE_DIR;
@@ -68,9 +71,18 @@ class RawQuicListener {
 
   static async open(): Promise<RawQuicListener> {
     const runtime = await CultMeshQuicNativeRuntime.open();
-    const pkcs12 = readFileSync(FIXTURE_P12);
-    const { listenerId, boundPort } = runtime.listenerOpen("127.0.0.1", 0, pkcs12, "");
-    return new RawQuicListener(runtime, listenerId, boundPort);
+    try {
+      const pkcs12 = readFileSync(FIXTURE_P12);
+      const { listenerId, boundPort } = runtime.listenerOpen("127.0.0.1", 0, pkcs12, "");
+      return new RawQuicListener(runtime, listenerId, boundPort);
+    } catch (error) {
+      // A runtime opened above and never handed to a caller would otherwise
+      // leak: the shared runtime's refcount never reaches zero, its MsQuic
+      // registration and worker threads never tear down, and a process that
+      // hits this on every one of several tests never exits on its own.
+      await runtime.release();
+      throw error;
+    }
   }
 
   /** Waits for one inbound connection and returns its native connection id. */
