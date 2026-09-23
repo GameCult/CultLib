@@ -215,7 +215,14 @@ function loadBindings(): NativeBindings {
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { promisify } = require("node:util") as typeof import("node:util");
-  const nextEventAsync = promisify(nextEvent.async) as NativeBindings["nextEventAsync"];
+  const nextEventAsyncRaw = promisify(nextEvent.async) as (
+    runtime: unknown,
+    timeoutMs: number,
+    outEvent: null,
+    payload: Uint8Array | null,
+    payloadCapacity: number,
+    outRequired: null,
+  ) => Promise<KoffiOutResult<NativeEventStruct>>;
 
   // Every `_Out_` parameter still occupies a call-site slot in this koffi
   // version (an arity check rejects a shorter call); its value is written
@@ -236,7 +243,7 @@ function loadBindings(): NativeBindings {
       streamSendFrame(runtime, streamId, encodedFrame, length, fin),
     streamShutdown: (runtime, streamId, code) => streamShutdown(runtime, streamId, code),
     nextEventAsync: (runtime, timeoutMs, payload, payloadCapacity) =>
-      nextEventAsync(runtime, timeoutMs, null, payload, payloadCapacity, null) as Promise<KoffiOutResult<NativeEventStruct>>,
+      nextEventAsyncRaw(runtime, timeoutMs, null, payload, payloadCapacity, null),
     lastError: (runtime, destination, capacity) => lastError(runtime, destination, capacity),
     lastStatus: (runtime) => lastStatus(runtime),
   };
