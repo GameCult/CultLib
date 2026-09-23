@@ -2969,3 +2969,189 @@ count.** At `-j1`, 150 mutants is a several-hour commitment.
 pass on batch 5 first, and the selection cut cannot merge on a mutation sweep
 of an adjacent file. Recorded as a follow-up with the partial signal attached
 so the next pass starts from it rather than rediscovering it.
+
+## Soul, the merge gate again, 2026-09-23
+
+Opus, against `fc51e9a`. Counts re-measured: C# Networking 274 / 2 skipped,
+Mesh 255. **Rust is 254 tests across 11 targets**, not the 50 reported —
+that figure was `tests/selection.rs` alone, one target of eleven.
+
+**Verdict: Cut 1 may not merge.** Two reasons, either sufficient.
+
+### SM-6, CONFIRMED, high. R-AK deleted a load-bearing guard, and wrote a false premise into the source to justify it.
+
+This one is mine. I ruled the `!member.IsReference` guard was duplicate
+authority and ordered it deleted. Hands verified and got it wrong, then left
+a comment claiming "index aliases are unique per descriptor, so a data
+member's role string can never coincide with a reference member's."
+
+**Source contradicts that.** D10 (`CultCache.cs:1085-1097`) groups only
+members whose `ResolveIndexAlias` is non-null — alias against alias. A plain
+data member with no alias contributes its `MemberName` to the same role
+namespace and is checked against nobody.
+
+Probed: a document with a data member `Owner` and a reference member aliased
+`Owner` **registers fine**, and then every hop path throws
+`ArgumentNullException: Value cannot be null (Parameter 'targetType')`.
+`ReferenceMembers` now yields the data member, `ReferencesOf` matches it to
+the *reference* member's edges by role string, `member.TargetType!` is null,
+and `ResolveTargetLeaves` throws. Before the deletion the guard skipped that
+member and the selection returned one edge.
+
+**Restoring the guard leaves 274/274 green — the suite has no opinion either
+way.** Any schema shaped that way makes every `cites`/`cited` selection over
+it fault, the peer gets no typed refusal, and **the batch's own new dispatch
+backstop swallows it with no log.**
+
+### CONFIRMED, medium. The dispatch backstop is untested and answers nothing.
+
+`catch (Exception) when (false)` — so the backstop never matches — survives
+274/274. `HandleSnapshotRequestV1Async` catches only the three typed selection
+exceptions, unlike its siblings `HandleShardLogRequestAsync` and
+`HandlePutAsync`, which catch `Exception` and answer a `CultNetErrorMessage`.
+**The snapshot path is the one handler where an untyped fault becomes
+silence.** R-AG's invariant was that malformed input reaches the wire typed
+and nothing else escapes; a silently dropped dispatch is not that. It is a
+compensator, and it is already hiding SM-6.
+
+### SM-4, CONFIRMED, medium. R-AJ closed about half of it, and Rust got the thin half.
+
+| mutation | C# | Rust |
+|---|---|---|
+| drop edge-sort `To.SchemaId` | survives | survives |
+| drop `To.Key` | survives | survives |
+| drop `From.SchemaId` | killed | **survives** |
+| drop `Role` | killed | **survives** |
+| drop row-order `recordKey` | killed | **survives** |
+| swap row-order schema/key *(control)* | killed | killed |
+
+**The controls dying means the rewritten tests are not degenerate in the old
+way** — R-AJ's headline fix is real. But the new Rust edge test puts both
+edges on the same `from.schema_id` and never reads `to`, so it pins exactly
+one thing: `from.record_key` before `role`. **Dropping `role` entirely — the
+component it was written for — survives.**
+
+### CONFIRMED, medium. Shared-key resolution is order-dependent and unpinned in both runtimes.
+
+Iterating candidates reversed (C#) and preferring the last in-target candidate
+(Rust) both survive. Nothing pins "the first row in the caller's order wins"
+when **two in-target** rows share a key; R-AF's new vector covers one-in and
+one-out only. Both runtimes agree in source today, and that agreement assumes
+both are handed rows in the same order, which nothing between a C# cache and a
+Rust row owner guarantees.
+
+### PLAUSIBLE. `RowSet::target_leaves(role)` takes no schema
+
+(`selection.rs:1333`), where C# resolves the target set from the declaring
+member's own `TargetType`. Two schemas legitimately declaring one role name
+with different targets **cannot be expressed in Rust at all**. Low-medium.
+
+### PLAUSIBLE, low. A `+` prefix in a cursor length field
+
+parses in Rust (`str::parse::<usize>`) and is refused in C#
+(`NumberStyles.None`). Gated behind the HMAC, so unreachable without forging
+it. Read from source, not probed.
+
+### Promises that held
+
+**R-AF's wire fact is confirmed, and harder than the probe claimed.** It is
+not one serialization — **the type has nowhere to put a schema id.**
+`CultRecordRef<T>` has exactly one field, `ICultRecordRef` exposes only `Key`,
+the formatter writes only the key, and all three declared reference shapes
+yield `CultRecordKey`. A document carrying scalar, many-list and
+many-dictionary references at once encodes with no schema id anywhere. **No
+other formatter, version or nesting can introduce one without changing the
+type.** C#'s rule was right, Rust adopting it is correct, and it is not wrong
+in the other direction.
+
+**Both runtimes now agree at the evaluator on every shape the previous verdict
+split them on** — seven matched probes built independently in each runtime,
+identical answers, including the shared-key matrix in either row order. **The
+role-filter reordering, which no ruling covered and only Hands had checked,
+agrees with C#.**
+
+**R-AG is behaviourally pinned**: moving the cast inside the parens — still
+wrapping, still looking like a fix — kills a test. Dropping the redundant
+`length < 0` survives and is genuinely equivalent.
+
+### R-AH: right scope, under-specified, still unbuilt
+
+**Comparing the payload rather than the envelope is the right call** — the C#
+message carries a non-deterministic `messageId` and three shard fields Rust
+has no concept of, while the shared six are in the same declaration order on
+both sides with camelCase keys already.
+
+**But "the canonical MessagePack bytes" is not a specification.** The same
+page encodes as 285 bytes compact and 402 named, and **the compact form emits
+a 4-element array for a 6-field struct** because `skip_serializing_if` drops
+absent optionals positionally — it is not decodable. The ruling must also fix
+map encoding with camelCase keys, declared field order, and whether an absent
+optional is **omitted** (Rust today) or **nil** (C# today). Those differ right
+now, and the same rule has to reach `Edge`, `RawDocumentHeader` and
+`SelectionDocumentRecord`.
+
+**The structural reason it keeps slipping: C# has no page type at the
+evaluator layer.** `Select` returns rows, and `Projection` appears once in the
+evaluator, inside the cursor digest. Either `Select` gains projection, or the
+harness builds the page outside it and the vectors start testing
+`CultNetDocumentRegistry` too. **Nobody has chosen, and my ruling did not.**
+
+At `fc51e9a`: `pageBytes|payloadBytes|canonicalBytes` is **0 hits** in both
+vector files, `rs-written.json` still carries no projection vector, and door
+refusals still compare a field and never a code.
+
+**Can parity be claimed without it? No — not byte parity.** What exists is
+semantic parity over an agreed field subset. **Even the selection bytes differ
+between the two written files for the same vector** — C# writes nine fields
+with nils, Rust omits absent ones — so there is no byte-level agreement
+anywhere in this cut.
+
+### What Soul could not run
+
+No Stryker run; the 47 survivors stay untriaged, and **two of Soul's own
+confirmed survivors are on lines batch 5 changed**, so that list is not empty
+of real signal. The `--since`/`GitInfoProvider` crash is still not
+root-caused. `contracts.rs` and `schema_discovery.rs` unmeasured. The R-AH
+harness unbuilt, pending the shape decision. Caching's three failures still
+unproven. **One run was lost to CRLF and still exited 0** — fixed in the
+stopgap at Eureka `b12016a`, with a verdict sentinel so a job that never ran
+cannot report success.
+
+## Self's rulings for fix batch 6, 2026-09-23
+
+- **R-AL (SM-6). Restore the guard, and fix the owner.** The guard is not
+  duplicate authority — filtering members by kind is the evaluator's own job,
+  and I was wrong to call it a duplicate. Restore it, delete the false comment,
+  and add the probed shape as a test that fails without it. **Separately, D10
+  is the owner of role-namespace uniqueness and currently admits the
+  collision**: make registration refuse a data member whose name collides with
+  a reference member's alias. Both, with tests. **Standing: a "redundant"
+  deletion must be probed at the shape that would break it, not argued from a
+  property nobody checked.** This is the second time a redundancy ruling of
+  mine was wrong; the first was caught by Hands, this one was not.
+- **R-AM. The snapshot handler answers like its siblings** — catch
+  `Exception`, return a `CultNetErrorMessage`. **The dispatch backstop logs**,
+  always. A backstop that swallows silently is a compensator, and this one hid
+  a high-severity regression for a whole batch.
+- **R-AN. Finish R-AJ in Rust.** Its edge test pins one component of a
+  four-component rule. Every component of both orderings dies under its own
+  mutation, in both runtimes.
+- **R-AO. Pin shared-key resolution order** — two **in-target** rows sharing a
+  key — in both runtimes and in a vector. "The first row in the caller's order
+  wins" is currently a coincidence of source, not a rule.
+- **R-AP (R-AH). Decide the shape, then build it.** The payload, as a
+  **map with camelCase keys**, fields in declared order, and **absent
+  optionals written as nil** rather than omitted — C#'s current behaviour,
+  because a decodable fixed-shape encoding is worth more than brevity, and
+  because omission is what makes the compact form undecodable. The same rule
+  reaches `Edge`, `RawDocumentHeader` and `SelectionDocumentRecord`.
+  **`Select` gains projection**, so the thing the vectors test is the thing
+  that decides; the harness must not assemble a page the evaluator never
+  produces.
+- **R-AQ. Until R-AP lands, this cut claims semantic parity over a named
+  field subset, not byte parity** — and the map says so in those words.
+  Soul is right that byte parity cannot be claimed today, and it is better to
+  name the smaller claim than to let the larger one stand unearned.
+  **Flagged for the operator**: wire parity is this campaign's stated
+  invariant, so if semantic parity is not enough for Cut 1 to merge, R-AP
+  becomes a blocker rather than a follow-up.
