@@ -2,29 +2,44 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.error.schema.json",
   "title": "CultNet Error Message",
+  "description": "R-X (docs/cultnet-selection-cut.md, fix batch 4): CultNetErrorMessage is a MessagePack-CSharp map-mode object, so every declared key is written on the wire, nil included - routingHint, code and details are `required` here the same as cultnet.raw-document-header.schema.json's nullable fields, not optional just because a given refusal leaves them null.",
   "type": "object",
   "required": [
     "schemaVersion",
-    "error"
+    "error",
+    "routingHint",
+    "code",
+    "details"
   ],
   "additionalProperties": false,
   "properties": {
     "schemaVersion": { "const": "cultnet.error.v0" },
     "error": { "type": "string", "minLength": 1 },
+    "routingHint": {
+      "description": "Optional shard routing detail for an authority failure. Null for every selection/cursor refusal code (R-N).",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["shard", "reason"],
+      "properties": {
+        "shard": { "type": ["object", "null"] },
+        "reason": { "type": "string" }
+      }
+    },
     "code": {
       "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it.",
-      "type": "string",
-      "enum": ["selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target"]
+      "type": ["string", "null"],
+      "enum": [null, "selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target"]
     },
     "details": {
-      "description": "Code-specific structured detail (R-N). Every field is populated only for the code that defines it.",
-      "type": "object",
+      "description": "Code-specific structured detail (R-N). Every field is populated only for the code that defines it; the others are null, not omitted.",
+      "type": ["object", "null"],
       "additionalProperties": false,
+      "required": ["field", "value", "asOf", "current"],
       "properties": {
-        "field": { "description": "selection_invalid: the selection field that failed.", "type": "string" },
-        "value": { "description": "selection_invalid: the offending value, when there is one string worth naming.", "type": "string" },
-        "asOf": { "description": "cursor_stale: the cursor's own minted asOf.", "type": "integer", "minimum": 0 },
-        "current": { "description": "cursor_stale: the answering server's current asOf.", "type": "integer", "minimum": 0 }
+        "field": { "description": "selection_invalid: the selection field that failed.", "type": ["string", "null"] },
+        "value": { "description": "selection_invalid: the offending value, when there is one string worth naming.", "type": ["string", "null"] },
+        "asOf": { "description": "cursor_stale: the cursor's own minted asOf.", "type": ["integer", "null"], "minimum": 0 },
+        "current": { "description": "cursor_stale: the answering server's current asOf.", "type": ["integer", "null"], "minimum": 0 }
       }
     }
   }
