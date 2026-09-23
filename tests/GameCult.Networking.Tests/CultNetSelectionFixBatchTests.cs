@@ -626,6 +626,81 @@ namespace GameCult.Networking.Tests
             public CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA> Ref = default;
         }
 
+        // R-AT (Soul's SM-7, merge gate third pass): the edge comparator's `to.schemaId`/
+        // `to.recordKey` components survived dropping entirely, and reversing `to.recordKey`
+        // survived too, because every existing fixture ties `from`+`to` or `from`+`role` but never
+        // ties `from`+`role` while leaving `to` free to vary. Hands had argued no real selection
+        // could do that; Soul falsified the argument by building one: a selection carrying BOTH
+        // `cites` and `cited` mixes their edges into one Vec, and a row that self-references
+        // through the same role it also uses to cite a peer produces a `cites` edge (To = the
+        // queried peer) and a `cited` edge (To = the anchor row itself), tied on From and Role,
+        // differing only on To, in the same page-position bucket. Taken from the rig rather than
+        // rebuilt.
+        [CultDocument("cultnet.selection-tests.soul_self_citer", "cultnet.selection-tests.soul_self_citer.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class SoulSelfCiter
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            [CultReference(typeof(SoulSelfCiter), many: true)]
+            public CultRecordRef<SoulSelfCiter>[] Peers = Array.Empty<CultRecordRef<SoulSelfCiter>>();
+        }
+
+        // Named "zebra"/"alpha", not the rig's "hub"/"other": CultNetSelectionEvaluator.Select runs
+        // the Cited hop before the Cites hop (line ~198 vs ~206), so the self edge is always pushed
+        // to CitedEdges before the peer edge is pushed to CitesEdges. With "hub" self-citing and
+        // "other" as the cites target, "hub" < "other" already matches that push order, so dropping
+        // the comparator's To component reproduces the right answer by coincidence and the mutation
+        // survives. Naming the self-citer "zebra" and the target "alpha" makes push order
+        // [zebra, alpha] disagree with the required sorted order [alpha, zebra], so only the
+        // comparator's own To component - not insertion order - can produce it.
+        [Test]
+        public void Evaluator_EdgeOrderPinsToWhenFromAndRoleAreBothTiedByASelfCitingPeer()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SoulSelfCiter) });
+            var descriptor = registry.GetRequired<SoulSelfCiter>();
+
+            var zebra = new SoulSelfCiter
+            {
+                Name = "zebra",
+                Peers = new[]
+                {
+                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("zebra")),
+                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("alpha"))
+                }
+            };
+            var alpha = new SoulSelfCiter { Name = "alpha" };
+
+            var rows = new[]
+            {
+                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("zebra"), zebra, 1),
+                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("alpha"), alpha, 2)
+            };
+
+            var selection = new CultNetSelection
+            {
+                Cites = new CultNetCitation
+                {
+                    Target = new CultNetRecordRef { SchemaId = descriptor.SchemaId, RecordKey = "alpha" },
+                    Role = "Peers"
+                },
+                Cited = new CultNetIncoming { Role = "Peers", Exists = true }
+            };
+
+            var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+
+            Assert.That(evaluation.Edges.Count, Is.EqualTo(2), "expected two edges in one page-position bucket");
+            Assert.That(evaluation.Edges[0].From.Key.Value, Is.EqualTo(evaluation.Edges[1].From.Key.Value));
+            Assert.That(evaluation.Edges[0].Role, Is.EqualTo(evaluation.Edges[1].Role));
+            Assert.That(evaluation.Edges[0].To.Key.Value, Is.Not.EqualTo(evaluation.Edges[1].To.Key.Value),
+                "To must differ - if it does not, Hands' equivalence claim survives in C# too");
+            Assert.That(evaluation.Edges[0].To.Key.Value, Is.EqualTo("alpha"));
+            Assert.That(evaluation.Edges[1].To.Key.Value, Is.EqualTo("zebra"));
+        }
+
         // R-AM: HandleSnapshotRequestV1Async (CultNetDatabaseServer.cs) now answers an untyped fault
         // like its siblings HandleShardLogRequestAsync/HandlePutAsync - catch (Exception), log, try to
         // answer a CultNetErrorMessage - instead of only catching the three typed selection exceptions
