@@ -93,6 +93,13 @@
     },
     {
       "schema": "leaf_a", "key": "aa-tie-schema", "ordinal": 15, "fields": { "kind": "tie-schema", "mass": "1" }
+    },
+    {
+      "//": "R-AO, 2026-09-23: 'dup-key' already carries two rows (leaf_a ordinal 11, leaf_b ordinal 12) - both are in citer's Design role's declared target ([leaf_a, leaf_b], unlike citer_narrow's narrow_ref above, which only ever had one in-target candidate at a shared key). This citer is the first row in this file (hence in both runtimes' row order) to name 'dup-key' through Design, so resolving it must deterministically pick the leaf_a row - the first in-target candidate in the caller's order - never the leaf_b row, in both runtimes.",
+      "schema": "citer",
+      "key": "citer-both-in-target",
+      "ordinal": 16,
+      "references": [ { "role": "Design", "targetKey": "dup-key" } ]
     }
   ]
 }

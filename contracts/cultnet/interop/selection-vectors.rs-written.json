@@ -16,11 +16,11 @@
       "selectionMessagePackBase64": "g6pwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nw6VsaW1pdAM=",
       "asOf": 1,
       "expectedIds": [
+        "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/aa-tie-schema",
-        "sha256:b1f2407d0227a79dcbffdf7ea317f827eec64be38a3f61b7d4e99e81e3b24b42/zz-tie-schema",
-        "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d/narrow-citer-accepted"
+        "sha256:b1f2407d0227a79dcbffdf7ea317f827eec64be38a3f61b7d4e99e81e3b24b42/zz-tie-schema"
       ],
-      "matched": 17,
+      "matched": 18,
       "hasNext": true,
       "expectedEdges": []
     },
@@ -43,15 +43,22 @@
       "selectionMessagePackBase64": "hKdzY2hlbWFzkdlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmalY2l0ZWSCpHJvbGWmRGVzaWdupmV4aXN0c8OqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8I=",
       "asOf": 1,
       "expectedIds": [
-        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq"
+        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq",
+        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key"
       ],
-      "matched": 1,
+      "matched": 2,
       "hasNext": false,
       "expectedEdges": [
         {
           "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-1",
           "role": "Design",
           "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq",
+          "payloadBase64": null
+        },
+        {
+          "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
+          "role": "Design",
+          "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
           "payloadBase64": null
         }
       ]
@@ -67,10 +74,9 @@
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/tie-mass",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/-row",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/😂-row",
-        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/aa-tie-schema"
       ],
-      "matched": 8,
+      "matched": 7,
       "hasNext": false,
       "expectedEdges": []
     },
@@ -199,6 +205,24 @@
         {
           "fromId": "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d/narrow-citer-accepted",
           "role": "narrow_ref",
+          "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
+          "payloadBase64": null
+        }
+      ]
+    },
+    {
+      "name": "shared_key_design_resolves_the_first_in_target_candidate_in_row_order",
+      "selectionMessagePackBase64": "hKRrZXlzkbRjaXRlci1ib3RoLWluLXRhcmdldKVjaXRlc4KmdGFyZ2V0gqhzY2hlbWFJZNlHc2hhMjU2OmZmMzVmM2Q5ZDZkZTNmMTA2NmI5MzY5ZTczZmU2Yzc2NDhlODgzNjhkMThlZmMyMjc1Yzk5NDczMGNkODRjZmapcmVjb3JkS2V5p2R1cC1rZXmkcm9sZaZEZXNpZ26qcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8I=",
+      "asOf": 1,
+      "expectedIds": [
+        "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": [
+        {
+          "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
+          "role": "Design",
           "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
           "payloadBase64": null
         }

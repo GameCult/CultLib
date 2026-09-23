@@ -20,11 +20,11 @@
       "expectedRefusalField": null,
       "expectedEvaluationRefusal": null,
       "expectedIds": [
+        "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/aa-tie-schema",
-        "sha256:b1f2407d0227a79dcbffdf7ea317f827eec64be38a3f61b7d4e99e81e3b24b42/zz-tie-schema",
-        "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d/narrow-citer-accepted"
+        "sha256:b1f2407d0227a79dcbffdf7ea317f827eec64be38a3f61b7d4e99e81e3b24b42/zz-tie-schema"
       ],
-      "matched": 17,
+      "matched": 18,
       "hasNext": true,
       "expectedEdges": []
     },
@@ -51,15 +51,22 @@
       "expectedRefusalField": null,
       "expectedEvaluationRefusal": null,
       "expectedIds": [
-        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq"
+        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq",
+        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key"
       ],
-      "matched": 1,
+      "matched": 2,
       "hasNext": false,
       "expectedEdges": [
         {
           "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-1",
           "role": "Design",
           "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/a-eq",
+          "payloadBase64": null
+        },
+        {
+          "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
+          "role": "Design",
+          "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
           "payloadBase64": null
         }
       ]
@@ -77,10 +84,9 @@
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/tie-mass",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/-row",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/\uD83D\uDE02-row",
-        "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
         "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/aa-tie-schema"
       ],
-      "matched": 8,
+      "matched": 7,
       "hasNext": false,
       "expectedEdges": []
     },
@@ -114,7 +120,7 @@
     },
     {
       "name": "hop_by_role_cites_exact_id",
-      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlk2UdzaGEyNTY6ZmYzNWYzZDlkNmRlM2YxMDY2YjkzNjllNzNmZTZjNzY0OGU4ODM2OGQxOGVmYzIyNzVjOTk0NzMwY2Q4NGNmZqlyZWNvcmRLZXmkYS1lcaRyb2xlpkRlc2lnbqVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzkadjaXRlci0xpmZpZWxkc8ClY2l0ZXOCpnRhcmdldIKoc2NoZW1hSWTZR3NoYTI1NjpmZjM1ZjNkOWQ2ZGUzZjEwNjZiOTM2OWU3M2ZlNmM3NjQ4ZTg4MzY4ZDE4ZWZjMjI3NWM5OTQ3MzBjZDg0Y2ZmqXJlY29yZEtleaRhLWVxpHJvbGWmRGVzaWdupWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywA==",
       "asOf": 1,
       "expectedRefusalField": null,
       "expectedEvaluationRefusal": null,
@@ -134,7 +140,7 @@
     },
     {
       "name": "cites_target_by_name_alias",
-      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzwKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlkqWxlYWZfYS52OalyZWNvcmRLZXmkYS1lcaRyb2xlpkRlc2lnbqVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzkadjaXRlci0xpmZpZWxkc8ClY2l0ZXOCpnRhcmdldIKoc2NoZW1hSWSpbGVhZl9hLnY5qXJlY29yZEtleaRhLWVxpHJvbGWmRGVzaWdupWNpdGVkwKpwcm9qZWN0aW9upmhlYWRlcqpkZXNjZW5kaW5nwqVsaW1pdMCmY3Vyc29ywA==",
       "asOf": 1,
       "expectedRefusalField": null,
       "expectedEvaluationRefusal": null,
@@ -244,6 +250,26 @@
         {
           "fromId": "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d/narrow-citer-accepted",
           "role": "narrow_ref",
+          "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
+          "payloadBase64": null
+        }
+      ]
+    },
+    {
+      "name": "shared_key_design_resolves_the_first_in_target_candidate_in_row_order",
+      "selectionMessagePackBase64": "iadzY2hlbWFzwKRrZXlzkbRjaXRlci1ib3RoLWluLXRhcmdldKZmaWVsZHPApWNpdGVzgqZ0YXJnZXSCqHNjaGVtYUlk2UdzaGEyNTY6ZmYzNWYzZDlkNmRlM2YxMDY2YjkzNjllNzNmZTZjNzY0OGU4ODM2OGQxOGVmYzIyNzVjOTk0NzMwY2Q4NGNmZqlyZWNvcmRLZXmnZHVwLWtleaRyb2xlpkRlc2lnbqVjaXRlZMCqcHJvamVjdGlvbqZoZWFkZXKqZGVzY2VuZGluZ8KlbGltaXTApmN1cnNvcsA=",
+      "asOf": 1,
+      "expectedRefusalField": null,
+      "expectedEvaluationRefusal": null,
+      "expectedIds": [
+        "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target"
+      ],
+      "matched": 1,
+      "hasNext": false,
+      "expectedEdges": [
+        {
+          "fromId": "sha256:9d0bc9aebc3619b07aabf564f98667afde41444c1b866661d777687d443608dc/citer-both-in-target",
+          "role": "Design",
           "toId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff/dup-key",
           "payloadBase64": null
         }

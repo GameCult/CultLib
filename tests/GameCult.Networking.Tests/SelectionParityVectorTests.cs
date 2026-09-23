@@ -277,6 +277,16 @@ namespace GameCult.Networking.Tests
                 Keys = new[] { "narrow-citer-accepted" },
                 Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "dup-key" }, Role = "narrow_ref" }
             });
+            // R-AO: "dup-key" has two in-target candidates for citer's Design role (unlike
+            // citer_narrow's narrow_ref above, which only ever had one). citer-both-in-target is the
+            // first row in the fixture file (and so in both runtimes' row order) to name it through
+            // Design - resolution must deterministically pick the first in-target candidate in that
+            // order, the leaf_a row (ordinal 11), never the leaf_b row (ordinal 12) sharing the key.
+            yield return ("shared_key_design_resolves_the_first_in_target_candidate_in_row_order", new CultNetSelection
+            {
+                Keys = new[] { "citer-both-in-target" },
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "dup-key" }, Role = "Design" }
+            });
         }
 
         // R-AF: the shared-key shape's other direction - the only row at the declared edge's key is
