@@ -242,10 +242,14 @@ test(
       global.gc();
       const before = process.memoryUsage().rss;
 
-      // Sized so the old per-call `koffi.alloc` code (~64 B event struct +
-      // ~4 B int32, plus allocator bookkeeping, well over 53 B/call) clearly
-      // exceeds the bound below, while the fixed code, which allocates
-      // nothing per call, stays flat.
+      // Even with zero JS-side allocation per call, 200k round trips through
+      // the real native ABI (thread-pool marshaling, promise bookkeeping)
+      // carry their own non-zero RSS noise floor: measured at ~8 MiB for the
+      // fixed code (0 `koffi.alloc` calls in the loop) versus ~30 MiB for the
+      // old per-call `koffi.alloc` code (400k alloc calls, never freed), on
+      // the same build and host. The bound sits well above the fixed
+      // baseline and well below the leaking one, so it stays robust to
+      // ordinary run-to-run noise while still catching the regression.
       const ITERATIONS = 200_000;
       for (let i = 0; i < ITERATIONS; i += 1) {
         await nextEvent(0, null, 0);
@@ -254,7 +258,7 @@ test(
       const after = process.memoryUsage().rss;
 
       const growthBytes = after - before;
-      const BOUND_BYTES = 5 * 1024 * 1024;
+      const BOUND_BYTES = 18 * 1024 * 1024;
       assert.ok(
         growthBytes < BOUND_BYTES,
         `RSS grew by ${growthBytes} bytes (${(growthBytes / 1024 / 1024).toFixed(2)} MiB) over ` +
