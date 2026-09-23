@@ -14,6 +14,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  CultMeshQuicNativeRuntime,
+} from "../src/realtime-quic-native";
+import {
   CultMeshQuicRealtimeConnector,
   CultMeshQuicRealtimeProvider,
   type CultMeshRealtimeCandidate,
@@ -233,6 +236,36 @@ test("a peer is evicted from the provider on connection shutdown", async (t) => 
   }
 });
 
+test("a reliable-ordered send failure evicts the peer without broadcast() throwing to the caller", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    await waitUntil(() => provider.connectionCount === 1);
+    consumer.dispose();
+    // Keep broadcasting reliable-ordered frames into the dying/dead peer's
+    // outbound stream for a short window: somewhere in this window the
+    // send to that peer fails (either the native stream call itself, or
+    // the peer's own CONNECTION_SHUTDOWN cleanup rejecting it), and
+    // CultMeshQuicRealtimeProvider.broadcast()'s per-peer try/catch must
+    // dispose it rather than let the rejection propagate or leave a dead
+    // peer counted forever.
+    const deadline = Date.now() + 2_000;
+    let sequence = 0n;
+    while (Date.now() < deadline && provider.connectionCount > 0) {
+      sequence += 1n;
+      // Must never throw: a removed subtraction of the catch's dispose()
+      // call would not itself make broadcast() throw, but a regression
+      // that let the rejection propagate instead of being caught at all
+      // would, and this loop would then fail loudly instead of hanging.
+      await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence }));
+    }
+    assert.equal(provider.connectionCount, 0, "the dead peer must be evicted, not counted forever");
+  } finally {
+    provider.dispose();
+  }
+});
+
 test("connectionCount reflects accepted peers, and dispose releases the runtime for a fresh listen", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
@@ -251,3 +284,72 @@ test("connectionCount reflects accepted peers, and dispose releases the runtime 
   const again = await startProvider();
   again.dispose();
 });
+
+test("the runtime reference is released when extracting the certificate fails, before any listener opens", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const before = CultMeshQuicNativeRuntime.refCount;
+  await assert.rejects(
+    CultMeshQuicRealtimeProvider.listen({
+      host: "127.0.0.1",
+      port: 0,
+      // Not a PKCS12 credential at all: extractLeafCertificateDer() throws
+      // before CultMeshQuicNativeRuntime.open() is ever called, so there is
+      // no reference to leak on this path; this pins that (trivial but
+      // real) invariant rather than exercising listen()'s own
+      // `catch { await runtime.release(); throw error; }`, which the next
+      // test covers with a listener-level failure instead.
+      serverCertificate: { pkcs12: new Uint8Array([1, 2, 3, 4]), password: "" },
+    }),
+  );
+  assert.equal(CultMeshQuicNativeRuntime.refCount, before, "must not leak a reference that was never opened");
+});
+
+test("the runtime reference is released when the listener itself fails to open", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const holder = await startProvider();
+  try {
+    const boundPort = new URL(holder.advertisedEndpoint).port;
+    const before = CultMeshQuicNativeRuntime.refCount;
+    // A real, valid PKCS12 (so extractLeafCertificateDer succeeds and
+    // CultMeshQuicNativeRuntime.open() actually runs), but the port
+    // `holder` already has bound: listenerOpen() itself must fail, driving
+    // listen()'s `catch { await runtime.release(); throw error; }`.
+    await assert.rejects(
+      CultMeshQuicRealtimeProvider.listen({
+        host: "127.0.0.1",
+        port: Number(boundPort),
+        serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+      }),
+    );
+    assert.equal(
+      CultMeshQuicNativeRuntime.refCount,
+      before,
+      "a listenerOpen() failure must release the reference listen() had already opened",
+    );
+  } finally {
+    holder.dispose();
+  }
+});
+
+test(
+  "the runtime reference is released on dispose with a pending send in flight",
+  { timeout: 10_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+    const before = CultMeshQuicNativeRuntime.refCount;
+    const provider = await startProvider();
+    const consumer = await dialProvider(provider);
+    await waitUntil(() => provider.connectionCount === 1);
+
+    // Start a reliable-ordered broadcast and dispose before it can possibly
+    // have settled; dispose() must tear the peer down (and release its
+    // runtime reference) regardless of the outstanding send. `broadcast()`
+    // must itself never hang: an explicit `{ timeout }` above fails this
+    // test loudly, rather than the whole file, if it ever does.
+    const broadcasting = provider.broadcast(testFrame({ delivery: "reliable-ordered" })).catch(() => {});
+    provider.dispose();
+    await broadcasting;
+    consumer.dispose();
+    await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
+  },
+);

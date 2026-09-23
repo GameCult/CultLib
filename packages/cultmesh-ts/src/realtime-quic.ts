@@ -443,8 +443,22 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
     await this.sendOnStream(streamId, encoded, true);
   }
 
+  /**
+   * A pending send registered after `cleanup()` already ran (a `sendFrame`
+   * queued behind `reliableSendTail` whose microtask lands after `dispose()`
+   * or a fault settles this transport) would otherwise sit in `pendingSends`
+   * forever: `cleanup()`'s own reject sweep already ran once and is guarded
+   * against running again, and `offConnectionEvent` means no later native
+   * event can resolve it either. Checking `this.disposed` here closes that
+   * window: any send that loses the race against disposal rejects
+   * immediately instead of registering an entry nothing will ever settle.
+   */
   private sendOnStream(streamId: bigint, encoded: Uint8Array, fin: boolean): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      if (this.disposed) {
+        reject(this.terminalError ?? new Error("CultMesh QUIC realtime transport is disposed."));
+        return;
+      }
       this.pendingSends.set(streamId, { resolve, reject });
       try {
         this.runtime.streamSendFrame(streamId, encoded, fin);
