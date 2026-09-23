@@ -88,35 +88,26 @@ interface NativeEventStruct {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type KoffiLib = any;
 
+/** `nextEventAsync`'s signature, typed explicitly because `promisify` cannot
+ * infer one from koffi's untyped (`any`) `.async` function. */
+type NextEventAsyncFn = (
+  runtime: CultMeshQuicNativeHandle,
+  timeoutMs: number,
+  outEvent: unknown,
+  payload: Uint8Array | null,
+  payloadCapacity: number,
+  outRequired: unknown,
+) => Promise<number>;
+
 /**
  * The loaded native library: koffi itself, the declared struct, and the
  * twelve raw v2 exports. Untyped (koffi is `any`); the runtime class methods
  * below are the type surface for these calls, so wrapping them a second time
- * in a typed interface would only restate what the methods already say.
+ * in a typed interface would only restate what the methods already say. The
+ * type is inferred from `buildLibrary`'s return value instead of restated.
  */
-interface LoadedNativeLibrary {
-  koffi: KoffiLib;
-  event: KoffiLib;
-  runtimeOpenFn: KoffiLib;
-  runtimeCloseFn: KoffiLib;
-  listenerOpenFn: KoffiLib;
-  listenerCloseFn: KoffiLib;
-  connectionOpenFn: KoffiLib;
-  connectionCertificateCompleteFn: KoffiLib;
-  connectionShutdownFn: KoffiLib;
-  streamOpenFn: KoffiLib;
-  streamSendFrameFn: KoffiLib;
-  streamShutdownFn: KoffiLib;
-  nextEventAsync: (
-    runtime: CultMeshQuicNativeHandle,
-    timeoutMs: number,
-    outEvent: unknown,
-    payload: Uint8Array | null,
-    payloadCapacity: number,
-    outRequired: unknown,
-  ) => Promise<number>;
-  lastErrorFn: KoffiLib;
-}
+// eslint-disable-next-line @typescript-eslint/no-use-before-define
+type LoadedNativeLibrary = ReturnType<typeof buildLibrary>;
 
 let libraryCache: LoadedNativeLibrary | undefined;
 
@@ -140,10 +131,8 @@ function resolveNativeDir(): string {
   return join(__dirname, "..", "native", platformArchDir());
 }
 
-/** Lazily loads koffi, resolves the binary directory, and declares the ABI. */
-function loadBindings(): LoadedNativeLibrary {
-  if (libraryCache) return libraryCache;
-
+/** Loads koffi, resolves the binary directory, and declares the ABI. */
+function buildLibrary() {
   // Untyped on purpose: koffi's own type declarations are ESM-flavored and
   // fight a CommonJS `typeof import(...)` reference under Node16 resolution.
   // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
@@ -222,9 +211,9 @@ function loadBindings(): LoadedNativeLibrary {
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { promisify } = require("node:util") as typeof import("node:util");
-  const nextEventAsync = promisify(nextEventFn.async) as LoadedNativeLibrary["nextEventAsync"];
+  const nextEventAsync = promisify(nextEventFn.async) as NextEventAsyncFn;
 
-  libraryCache = {
+  return {
     koffi,
     event,
     runtimeOpenFn,
@@ -240,6 +229,12 @@ function loadBindings(): LoadedNativeLibrary {
     nextEventAsync,
     lastErrorFn,
   };
+}
+
+/** Lazily builds and caches the loaded native library. */
+function loadBindings(): LoadedNativeLibrary {
+  if (libraryCache) return libraryCache;
+  libraryCache = buildLibrary();
   return libraryCache;
 }
 
