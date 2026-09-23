@@ -34,7 +34,16 @@ import {
   type CultNetWireContract,
 } from "cultnet-ts";
 
+import {
+  CultMeshQuicRealtimeConnector,
+  CultMeshQuicRealtimeSessionManager,
+  parseQuicRealtimeEndpoint,
+  type CultMeshQuicRealtimeConnectorOptions,
+  type CultMeshQuicRealtimeSessionManagerOptions,
+} from "./realtime-quic";
+
 export * from "./realtime-wire";
+export * from "./realtime-quic";
 export * from "./provider-session";
 export * from "./provider-session-wire";
 export * from "./provider-rudp-transport";
@@ -6268,6 +6277,22 @@ export class CultMesh {
       throw new Error(`No authorized RUDP peer for role ${role} in Verse ${verseId}.`);
     }
     return CultMesh.createRudpPeerForPeer(runtimeId, connectionId, peer, options);
+  }
+
+  public static parseQuicRealtimeEndpoint(endpoint: string): ReturnType<typeof parseQuicRealtimeEndpoint> {
+    return parseQuicRealtimeEndpoint(endpoint);
+  }
+
+  public static createQuicRealtimeConnector(
+    options: CultMeshQuicRealtimeConnectorOptions = {},
+  ): CultMeshQuicRealtimeConnector {
+    return new CultMeshQuicRealtimeConnector(options);
+  }
+
+  public static createQuicRealtimeSessionManager(
+    options: CultMeshQuicRealtimeSessionManagerOptions,
+  ): CultMeshQuicRealtimeSessionManager {
+    return new CultMeshQuicRealtimeSessionManager(options);
   }
 }
 
