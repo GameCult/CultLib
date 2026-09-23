@@ -744,6 +744,28 @@ export interface CultMeshQuicRealtimeProviderOptions {
    * a DNS name. Defaults to `host`.
    */
   readonly advertisedHost?: string;
+  /**
+   * When `false` (the default: every existing caller, test, and interop
+   * peer calls `receive()`), the provider fans client-originated streams
+   * into `receive()` as before. When `true`, the provider is publish-only:
+   * any stream a peer opens faults that connection at `STREAM_STARTED`,
+   * before a frame can be decoded or queued, so no inbox, generation-map,
+   * or fan-in entry is ever created for client data; `receive()` itself
+   * rejects. StreamPixels sets this explicitly — it closes the unbounded
+   * per-client memory growth Soul's probe found.
+   */
+  readonly acceptClientFrames?: boolean;
+  /**
+   * Refuses a new connection at accept once the number of connections this
+   * provider is tracking (including mid-handshake ones) has reached this
+   * many: shut down immediately, before any transport, outbox, or
+   * retained-frame seeding is allocated for it. Existing peers are
+   * unaffected. Defaults to 1024 — far more than any single StreamPixels
+   * fan-out needs today, while still bounding per-connection overhead
+   * against a public UDP port whose pin authenticates only the server, so
+   * any internet client can dial in. StreamPixels sets its own value.
+   */
+  readonly maxConnections?: number;
 }
 
 /**
@@ -816,6 +838,8 @@ export class CultMeshQuicRealtimeProvider {
    * sweeps this set instead of only `peers` to close that gap.
    */
   private readonly accepted = new Set<CultMeshQuicRealtimeTransport>();
+  private readonly acceptClientFrames: boolean;
+  private readonly maxConnections: number;
   private disposed = false;
 
   private constructor(
@@ -823,11 +847,15 @@ export class CultMeshQuicRealtimeProvider {
     listenerId: bigint,
     advertisedEndpoint: string,
     handshakeTimeoutMs: number,
+    acceptClientFrames: boolean,
+    maxConnections: number,
   ) {
     this.runtime = runtime;
     this.listenerId = listenerId;
     this.advertisedEndpoint = advertisedEndpoint;
     this.handshakeTimeoutMs = handshakeTimeoutMs;
+    this.acceptClientFrames = acceptClientFrames;
+    this.maxConnections = maxConnections;
   }
 
   /** Number of currently accepted peer connections. */
@@ -863,7 +891,14 @@ export class CultMeshQuicRealtimeProvider {
     }
 
     const advertisedEndpoint = `${CULTMESH_QUIC_REALTIME_SCHEME}://${formatEndpointHost(advertisedHost)}:${boundPort}?cert-sha256=${pinHex}`;
-    const provider = new CultMeshQuicRealtimeProvider(runtime, listenerId, advertisedEndpoint, handshakeTimeoutMs);
+    const provider = new CultMeshQuicRealtimeProvider(
+      runtime,
+      listenerId,
+      advertisedEndpoint,
+      handshakeTimeoutMs,
+      options.acceptClientFrames ?? true,
+      options.maxConnections ?? 1024,
+    );
     runtime.onListenerEvent(listenerId, (event) => {
       if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) provider.acceptConnection(event.connectionId);
     });
@@ -910,6 +945,11 @@ export class CultMeshQuicRealtimeProvider {
 
   /** The next client-originated frame, fanned in from every accepted peer. */
   async receive(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
+    if (!this.acceptClientFrames) {
+      throw new Error(
+        "CultMesh QUIC realtime provider is publish-only (acceptClientFrames: false); it never accepts client frames.",
+      );
+    }
     return this.received.receive(signal);
   }
 
@@ -967,6 +1007,12 @@ export class CultMeshQuicRealtimeProvider {
       this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
       return;
     }
+    if (this.accepted.size >= this.maxConnections) {
+      // Refused before any transport, timer, or outbox exists for it:
+      // existing accepted connections are untouched.
+      this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
+      return;
+    }
 
     const transport = new CultMeshQuicRealtimeTransport(
       `quic-peer-${connectionId}`,
@@ -992,6 +1038,16 @@ export class CultMeshQuicRealtimeProvider {
     this.runtime.onConnectionEvent(
       connectionId,
       (event) => {
+        // Publish-only: a peer-opened stream faults this connection alone,
+        // before `handleConnectionEvent` can record its stream kind or
+        // decode a frame off it. Throwing here drives the dispatch loop's
+        // own fault path (`CultMeshQuicNativeRuntime.dispatch`), which
+        // shuts the connection down and evicts it.
+        if (!this.acceptClientFrames && event.type === CULTMESH_QUIC_EVENT_STREAM_STARTED) {
+          throw new Error(
+            "CultMesh QUIC provider is publish-only (acceptClientFrames: false); it does not accept inbound streams from peers.",
+          );
+        }
         transport.handleConnectionEvent(event);
         if (attached || event.type !== CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) return;
         attached = true;
@@ -1003,7 +1059,7 @@ export class CultMeshQuicRealtimeProvider {
         for (const { frame, encoded } of this.retained.values()) outbox.publish(frame, encoded);
         this.outboxes.set(transport, outbox);
         this.peers.add(transport);
-        void this.pumpReceivedFrom(transport);
+        if (this.acceptClientFrames) void this.pumpReceivedFrom(transport);
       },
       (error) => transport.fault(error),
     );
