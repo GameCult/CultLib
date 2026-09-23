@@ -11,6 +11,7 @@
 // `packages/cultmesh-ts/native/<platform>` tree once a later cut lands it.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -206,67 +207,83 @@ test("negative grep: no koffi callbacks, .async only on nextEvent", () => {
   assert.doesNotMatch(source, /koffi\.register/, "no koffi callbacks");
 });
 
+// The measurement below runs in its own `node --expose-gc` child process
+// instead of in this test's own process: by the time this test would run,
+// ~150 earlier tests in the suite have already grown and partly freed the
+// glibc heap, so a real per-call native leak can land in already-mapped free
+// space and never show up as RSS growth in *this* process (confirmed by hand:
+// the in-process version of this test passed even with `nextEvent` mutated
+// back to allocating fresh koffi buffers every call). A freshly spawned
+// process has no such history, matching the ~8 MiB (fixed) vs ~30 MiB
+// (pre-fix) split measured in isolation.
+const MEMORY_PROBE_SCRIPT = `
+const { CultMeshQuicNativeRuntime } = require(process.argv[1]);
+(async () => {
+  const runtime = await CultMeshQuicNativeRuntime.open();
+  const nextEvent = runtime.nextEvent.bind(runtime);
+  try {
+    for (let i = 0; i < 2000; i += 1) await nextEvent(0, null, 0);
+    global.gc();
+    const before = process.memoryUsage().rss;
+    const ITERATIONS = 200000;
+    for (let i = 0; i < ITERATIONS; i += 1) await nextEvent(0, null, 0);
+    global.gc();
+    const after = process.memoryUsage().rss;
+    process.stdout.write(JSON.stringify({ before, after, growthBytes: after - before, ITERATIONS }));
+  } finally {
+    await runtime.release();
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+`;
+
 test(
   "memory: sustained nextEvent calls do not leak koffi-allocated out-parameter buffers",
   { timeout: 60_000 },
-  async (t) => {
+  (t) => {
     if (!nativeBridgeAvailable()) {
       t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
       return;
     }
-    if (typeof global.gc !== "function") {
-      t.skip("run with --expose-gc to measure RSS growth deterministically.");
-      return;
-    }
 
-    const runtime = await CultMeshQuicNativeRuntime.open();
-    try {
-      // `nextEvent` is private: the pump loop is the only production caller,
-      // and it never has more than one call in flight at a time, which is
-      // exactly the property this test needs to call it directly in a tight
-      // loop instead of waiting on the pump's 250 ms idle poll. A 0 ms
-      // timeout with no listener/connection open returns immediately with
-      // status 0 (no event), so each iteration is a fast round trip through
-      // the real native ABI, not a synthetic stand-in.
-      const nextEvent = (
-        runtime as unknown as {
-          nextEvent(timeoutMs: number, payload: Uint8Array | null, payloadCapacity: number): Promise<unknown>;
-        }
-      ).nextEvent.bind(runtime);
-
-      // Warm up: let koffi's own one-time bookkeeping (module init, JIT,
-      // thread pool spin-up) happen before the baseline measurement.
-      for (let i = 0; i < 2_000; i += 1) {
-        await nextEvent(0, null, 0);
+    // `nextEvent` is private; the compiled module path is resolved the same
+    // way this file's own `import` resolves it, and handed to the child by
+    // argv so the child needs no path logic of its own.
+    const modulePath = require.resolve("../src/realtime-quic-native");
+    const result = spawnSync(process.execPath, ["--expose-gc", "-e", MEMORY_PROBE_SCRIPT, modulePath], {
+      encoding: "utf8",
+      env: process.env,
+    });
+    if (result.status !== 0 || typeof result.stdout !== "string" || result.stdout.trim().length === 0) {
+      if (/--expose-gc/.test(result.stderr ?? "")) {
+        t.skip("this Node build does not support --expose-gc.");
+        return;
       }
-      global.gc();
-      const before = process.memoryUsage().rss;
-
-      // Even with zero JS-side allocation per call, 200k round trips through
-      // the real native ABI (thread-pool marshaling, promise bookkeeping)
-      // carry their own non-zero RSS noise floor: measured at ~8 MiB for the
-      // fixed code (0 `koffi.alloc` calls in the loop) versus ~30 MiB for the
-      // old per-call `koffi.alloc` code (400k alloc calls, never freed), on
-      // the same build and host. The bound sits well above the fixed
-      // baseline and well below the leaking one, so it stays robust to
-      // ordinary run-to-run noise while still catching the regression.
-      const ITERATIONS = 200_000;
-      for (let i = 0; i < ITERATIONS; i += 1) {
-        await nextEvent(0, null, 0);
-      }
-      global.gc();
-      const after = process.memoryUsage().rss;
-
-      const growthBytes = after - before;
-      const BOUND_BYTES = 18 * 1024 * 1024;
-      assert.ok(
-        growthBytes < BOUND_BYTES,
-        `RSS grew by ${growthBytes} bytes (${(growthBytes / 1024 / 1024).toFixed(2)} MiB) over ` +
-          `${ITERATIONS} nextEvent calls; expected it to stay under ${BOUND_BYTES / 1024 / 1024} MiB ` +
-          "once out-parameter buffers are reused instead of allocated per call.",
+      assert.fail(
+        `memory probe child process failed (status ${String(result.status)}):\n${result.stderr ?? "(no stderr)"}`,
       );
-    } finally {
-      await runtime.release();
     }
+
+    const { before, after, growthBytes, ITERATIONS } = JSON.parse(result.stdout.trim()) as {
+      before: number;
+      after: number;
+      growthBytes: number;
+      ITERATIONS: number;
+    };
+    // Measured on Yggdrasil, same build and host, in a dedicated process:
+    // fixed code (0 `koffi.alloc` calls in the loop): ~8.0 MiB RSS growth.
+    // pre-fix code (400k `koffi.alloc` calls, never freed): ~29.9 MiB.
+    // 18 MiB sits well above the fixed baseline and well below the leaking
+    // one, so the bound stays robust to ordinary run-to-run noise while
+    // still catching the regression.
+    const BOUND_BYTES = 18 * 1024 * 1024;
+    assert.ok(
+      growthBytes < BOUND_BYTES,
+      `RSS grew by ${growthBytes} bytes (${(growthBytes / 1024 / 1024).toFixed(2)} MiB, from ${before} to ${after}) ` +
+        `over ${ITERATIONS} nextEvent calls; expected it to stay under ${BOUND_BYTES / 1024 / 1024} MiB once ` +
+        "out-parameter buffers are reused instead of allocated per call.",
+    );
   },
 );
