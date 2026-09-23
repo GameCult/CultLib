@@ -2885,3 +2885,87 @@ corrected against source.
   worked around, not root-caused**, which means the next pass inherits it.
 - **The RUDP dispatch backstop has no dedicated integration test.** It would
   need a fuller server harness. Flagged, not built.
+
+### R-AI landed, 2026-09-23 — `canonical_number` measured and closed
+
+Sonnet, four commits rebased cleanly onto `sel-fix5`, pushed as
+`sel-fix5-rsmut` at `fc51e9a`; 50/50 Rust tests pass against the rebased tree.
+**None of it touches the edge-resolution path** — the whole diff is insertions
+inside `canonical_number`'s own nested `mod tests`, with zero hits for
+`references`, `by_key`, `matches_citation`, `resolve_reference_target` or
+`RecordRef`, so nothing was measured against code batch 5 has since rewritten.
+
+**126 mutants: 89 caught / 29 missed / 7 timeout / 1 unviable → 114 caught /
+4 missed / 6 timeout / 2 unviable.**
+
+`is_canonical` — the Q-J door, where **every branch mutation had been
+surviving** — is closed by direct grammar tests that had never been called
+before; the function was only ever reachable indirectly through a handful of
+`validate_field` spellings. `compare`, `decompose`, `pad_right`,
+`canonicalize_decimal_digits`, `big_mul_small`, `big_to_most_significant_first`,
+`big_from_u64` and `exact_decimal_from_mantissa` each got direct tests, every
+one confirmed red under its own mutation by a real re-run rather than by
+inference.
+
+**Another test that passed by luck.** `render_f32`'s sign-bit mutant survived
+Hands' first negative-value tests because **1.0 and 2.0 happen to have bit 0
+matching their real sign bit**. Adding `-1.0` and `-2.0` killed it. Same shape
+as the degenerate row-tiebreak test in batch 5: a fixture whose values
+coincidentally satisfy the assertion.
+
+**Four survivors, all judged equivalent by hand-tracing rather than assumed:**
+two in `is_canonical` (a leading-zero guard that is a pure early exit, since
+anything it would catch is caught later by the dot check; and an increment
+skipping a digit the caller already validated, which the following loop
+re-consumes either way), and `|` → `^` in both `render_f64` and `render_f32`,
+where the fraction is masked to exactly 52 or 23 bits so the implicit leading
+bit is never set and the two operators are bit-identical.
+
+**Six timeouts are inherent infinite loops under mutation, not test gaps** — a
+`+=` → `*=` on a loop's own increment, two on `big_from_u64`'s loop bound, and
+two exponent-sign corruptions that wrap a negative `i32` into a near-`usize::MAX`
+bound. Any test reaching those lines hangs regardless of what it asserts; the
+timeout is cargo-mutants' signal for "behaviour changed", it simply cannot
+classify a hang as caught.
+
+### **`-j4` is not reliable for verdicts on this image, and that is retroactive**
+
+The identical commit gave **different missed and timeout sets across three
+separate `-j4` runs** — `render_f64`'s L284 alone flipped between missed and
+caught with no code change — while every `-j1` run reproduced the same 4
+missed / 6 timeout. The likely cause is the shared `CARGO_TARGET_DIR` under
+concurrent mutant builds, which is the same class as this pipeline's existing
+shared-target scar.
+
+**This makes every concurrent mutation figure in this campaign provisional**,
+including Stryker runs made with `--concurrency 4` and any cargo-mutants
+result above `-j1`. It does not invalidate them — a killed mutant that was
+genuinely killed stays killed — but a *survivor* list from a concurrent run
+cannot be trusted as complete or as accurate. Where a survivor list drove a
+ruling, the ruling stands on the hand-confirmed evidence beside it, not on the
+count.
+
+### Honest scheduling account
+
+Six real runs launched, **two duplicated and killed** — one caught by Hands,
+one Self had to flag. Effective slot time on real measurement runs was about
+**47 minutes**, spread across **just over five hours of wall-clock**, most of
+it back-and-forth: duplicate cleanup, the `-j4` flakiness detour, and the
+rebase. Hands reported this unprompted and in detail, which is the only reason
+the `-j4` finding exists at all.
+
+### Unmeasured, and named
+
+`contracts.rs` (about 100 mutants) and `schema_discovery.rs` (about 50) were
+**not run against `sel-fix5` at all**. One partial run, killed mid-flight,
+showed several `MISSED` across `contracts.rs`'s `validate_*` family —
+`decode_cultnet_message_from_slice`, `validate_message`,
+`validate_mutation_contract`, `validate_schema_descriptor`,
+`validate_document_record`, `validate_raw_document_record`,
+`validate_shard_descriptor`. **That is real signal on the door family, not a
+count.** At `-j1`, 150 mutants is a several-hour commitment.
+
+**Self's decision: queue it, do not run it now.** The merge gate needs a Soul
+pass on batch 5 first, and the selection cut cannot merge on a mutation sweep
+of an adjacent file. Recorded as a follow-up with the partial signal attached
+so the next pass starts from it rather than rediscovering it.
