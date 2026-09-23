@@ -2812,3 +2812,76 @@ neither python3 nor perl to patch with).
   is the defect even when the duplicate is harmless today.
 - **S-12's remainder:** correct the comment that still calls a fixed defect
   confirmed.
+
+### Fix batch 5 landed, 2026-09-23
+
+Sonnet, five commits on `sel-fix5`. C# Networking **274 passed / 2 skipped**
+(was 269/2), Mesh 255, Rust 50/50 with `cargo-mutants --in-diff` reporting 26
+tested, 21 caught, 5 unviable, **0 missed**.
+
+**R-AF: the wire carries no schema, so C#'s rule was the right one.**
+Established by probe, not by reading either comment: a real `Design` reference
+field serialized through `MessagePackSerializer` dumps as `A4-61-2D-65-71` — a
+bare five-byte msgpack string, `"a-eq"`. The whole document is
+`["citer-1","a-eq"]`. No schema id anywhere. `CultRecordRefFormatter<T>.Serialize`
+confirms it: `writer.Write(value.Key.Value)`, unconditionally, for every
+`CultRecordRef<T>` in the codebase.
+
+**Rust adopted C#'s rule.** `Row::references()` returns a bare
+`target_record_key`; `by_key` is grouped by record key alone; a new
+`resolve_reference_target` mirrors `TryResolveReferenceTarget` exactly —
+search every row sharing the key, return the first inside the declared leaf
+set, refuse deterministically by schema id if none is. `RecordRef` survives
+only where the wire genuinely carries both, which is the `Citation.target`
+query filter.
+
+**The vector that was missing now exists.** The fixture gained a
+`citer_narrow` schema with a real SHA-256 id and rows for **both** shapes from
+Soul's table: a lone out-of-target row, which refuses, and a shared key with
+one in-target and one out-of-target row, which accepts and resolves the
+in-target one **regardless of row order**. Plus a new `expectedEvaluationRefusal`
+vector field — narrower than R-AH's job, just which typed refusal fires.
+
+**A second real defect, found while landing R-AF.** Rust's `matches_citation`
+resolved and target-checked **every** declared reference on a row before
+filtering by the citation's requested role; C# filters by role first. Rust's
+role filter moved ahead of resolution to match. One existing Rust test was
+therefore pinning behaviour C# does not have, and was rewritten to mirror C#'s
+real shape. **This was a live divergence nobody had named** — neither Soul nor
+any ruling.
+
+**R-AG.** C#'s `pos + length` overflowed in unchecked `int`; fixed by
+promoting to `long`. Rust's `pos + len` overflowed in `usize`; fixed with
+`checked_add`. `CultNetRudpSchemaServer.DispatchAsync` gained a backstop catch
+so no untyped exception reaches the poll loop. **Each runtime was fed the
+other's proven overflow**, plus three further hostile shapes, four new tests a
+side, each confirmed to fail without the fix.
+
+**R-AJ, and the finding inside it: the existing row-tiebreak test was
+degenerate.** Hands hand-reverted the tiebreak and swapped it, and the test
+**still passed 100%** — purely by accident of which of `SelLeafA`/`SelLeafB`'s
+real hash ids happened to sort first. It was rewritten to assign keys relative
+to the schema ids discovered at runtime, then re-probed and now fails
+correctly. The same shape was added in Rust, with a shared-fixture vector
+carrying a tied ordinal **across two schemas** — the original fixture only
+ever tied rows of the same schema. `EdgesFor`'s secondary key got the same
+treatment.
+
+**R-AK.** Verified before deleting: `CultCache.ReferencesOf` already searches
+only its own reference members for a role match, and index aliases are unique
+per descriptor, so a data member's role string cannot collide with a reference
+member's. The redundant guard is gone.
+
+**S-12** is closed; the stale "confirmed cross-runtime defect" comment is
+corrected against source.
+
+**Not done, and named rather than buried:**
+
+- **No diff-scoped Stryker run.** `--since` crashed on `GitInfoProvider` in
+  the detached-clone container, so Hands fell back to whole-file globs: 312
+  tested, 262 killed, **47 survived**, 3 timeouts, untriaged between the
+  changed lines and the large pre-existing bulk of both files. Every rule
+  Hands touched was separately confirmed by hand. **The tooling failure was
+  worked around, not root-caused**, which means the next pass inherits it.
+- **The RUDP dispatch backstop has no dedicated integration test.** It would
+  need a fuller server harness. Flagged, not built.
