@@ -193,11 +193,39 @@ test(
       const pkcs12 = readFileSync(FIXTURE_P12);
       const { listenerId, boundPort } = runtime.listenerOpen("127.0.0.1", 0, pkcs12, "");
 
-      // Connection A: both its listener and its onFault handler throw.
-      // Without `faultConnection`'s own try/catch isolating a throwing
-      // `onFault` (P10b's target), that throw would escape the pump's
-      // dispatch loop and take every other connection down with it instead
-      // of staying scoped to connection A.
+      // Connection B: a normal, fully connected loopback pair, established
+      // before A ever faults — so proving B still works afterward exercises
+      // an already-running connection's handler, not a second accept cycle
+      // racing whatever state A's fault left behind.
+      const acceptedB = waitFor<bigint>((resolve) => {
+        runtime.onListenerEvent(listenerId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+        });
+      });
+      const clientB = runtime.connectionOpen("127.0.0.1", boundPort);
+      const clientBConnected = waitFor<void>((resolve) => {
+        runtime.onConnectionEvent(clientB, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED) {
+            runtime.connectionCertificateComplete(clientB, true);
+            return;
+          }
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) resolve();
+        });
+      });
+      const serverBId = await acceptedB;
+      const serverBFrame = waitFor<Uint8Array>((resolve) => {
+        runtime.onConnectionEvent(serverBId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_STREAM_FRAME) resolve(event.payload);
+        });
+      });
+      await clientBConnected;
+
+      // Connection A, opened only after B is fully connected: both its
+      // listener and its onFault handler throw on the first event delivered
+      // to it. Without `faultConnection`'s own try/catch isolating a
+      // throwing `onFault` (P10b's target), that throw would escape the
+      // pump's dispatch loop and take every other connection — including
+      // the already-live B — down with it, instead of staying scoped to A.
       //
       // The server-side connection listener is registered synchronously,
       // inside the LISTENER_NEW_CONNECTION callback itself, rather than
@@ -230,34 +258,20 @@ test(
       });
       await serverAFaulted;
 
-      // Connection B, opened only after A faulted: if the throw above ever
-      // escaped the pump, this connection would never reach CONNECTED at all.
-      let serverBConnected = false;
-      const serverBAccepted = waitFor<void>((resolve) => {
-        runtime.onListenerEvent(listenerId, (event) => {
-          if (event.type !== CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) return;
-          runtime.onConnectionEvent(event.connectionId, (connectionEvent) => {
-            if (connectionEvent.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) serverBConnected = true;
-          });
-          resolve();
-        });
-      });
-      const clientB = runtime.connectionOpen("127.0.0.1", boundPort);
-      const clientBConnected = waitFor<void>((resolve) => {
-        runtime.onConnectionEvent(clientB, (event) => {
-          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED) {
-            runtime.connectionCertificateComplete(clientB, true);
-            return;
-          }
-          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) resolve();
-        });
-      });
-      await serverBAccepted;
-      await clientBConnected;
-      assert.ok(serverBConnected, "connection B's handler must still run after A's onFault threw");
+      // Prove B's handler is still live after A's onFault threw: send a
+      // frame on B and confirm the server side still receives it.
+      const streamId = runtime.streamOpen(clientB, CULTMESH_QUIC_STREAM_RELIABLE);
+      runtime.streamSendFrame(streamId, new Uint8Array([9, 9, 9]), true);
+      const payload = await serverBFrame;
+      assert.deepEqual(
+        Array.from(payload),
+        [9, 9, 9],
+        "connection B must still deliver frames after A's onFault threw",
+      );
 
       runtime.connectionShutdown(clientA, 0n);
       runtime.connectionShutdown(clientB, 0n);
+      runtime.connectionShutdown(serverBId, 0n);
       runtime.listenerClose(listenerId);
     } finally {
       await runtime.release();
