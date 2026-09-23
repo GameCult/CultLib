@@ -139,6 +139,95 @@ public sealed class CultMeshQuicRealtimeTransportTests
     }
 
     [Test]
+    public async Task ASessionAttachingAfterTwoLatestOnlyBroadcastsReceivesExactlyTheNewerFrame()
+    {
+        if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
+        using var certificate = CreateCertificate();
+        await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+        {
+            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
+            ServerCertificate = certificate
+        });
+
+        await server.BroadcastAsync(Frame(1, CultMeshRealtimeDelivery.LatestOnly));
+        await server.BroadcastAsync(Frame(2, CultMeshRealtimeDelivery.LatestOnly));
+
+        // Attach only after both broadcasts above have already completed:
+        // whatever this session receives came from the retained seed on
+        // attach, not from `BroadcastAsync`'s own fan-out.
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
+        using var sessions = CreateSessions(server, out _);
+        var session = await sessions.ConnectRealtimeAsync(target);
+
+        var seeded = await session.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        seeded.Sequence.Should().Be(2, "a late joiner must be seeded with the newest retained generation");
+    }
+
+    [Test]
+    public async Task RetentionKeepsTheNewerGenerationWhenAnOlderOneBroadcastsAfterward()
+    {
+        if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
+        using var certificate = CreateCertificate();
+        await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+        {
+            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
+            ServerCertificate = certificate
+        });
+
+        await server.BroadcastAsync(Frame(5, CultMeshRealtimeDelivery.LatestOnly, producerEpoch: 9));
+        // An older generation broadcast afterward must not overwrite the
+        // retained frame: a plain last-write-wins assignment would regress this.
+        await server.BroadcastAsync(Frame(3, CultMeshRealtimeDelivery.LatestOnly, producerEpoch: 7));
+
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
+        using var sessions = CreateSessions(server, out _);
+        var session = await sessions.ConnectRealtimeAsync(target);
+
+        var seeded = await session.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        seeded.ProducerEpoch.Should().Be(9);
+        seeded.Sequence.Should().Be(5, "an older generation must not replace the retained newer one");
+    }
+
+    [Test]
+    public async Task AReliableOrderedFrameIsNeverRetainedAndIsNotDeliveredToALateJoiner()
+    {
+        if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
+        using var certificate = CreateCertificate();
+        await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+        {
+            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
+            ServerCertificate = certificate
+        });
+        var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
+        var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
+
+        using (var firstSessions = CreateSessions(server, out _))
+        {
+            var firstSession = await firstSessions.ConnectRealtimeAsync(target);
+            await WaitUntilAsync(() => server.ConnectionCount == 1);
+            await server.BroadcastAsync(Frame(9, CultMeshRealtimeDelivery.ReliableOrdered));
+            var atFirst = await firstSession.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            atFirst.Sequence.Should().Be(9);
+        }
+        await WaitUntilAsync(() => server.ConnectionCount == 0);
+
+        // A real latest-only frame follows, so the assertion below proves the
+        // reliable-ordered frame specifically was never retained, rather than
+        // merely proving the server had nothing at all to seed.
+        await server.BroadcastAsync(Frame(1, CultMeshRealtimeDelivery.LatestOnly));
+        using var secondSessions = CreateSessions(server, out _);
+        var secondSession = await secondSessions.ConnectRealtimeAsync(target);
+        var seeded = await secondSession.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        seeded.Delivery.Should().Be(CultMeshRealtimeDelivery.LatestOnly);
+        seeded.Sequence.Should().Be(1, "only the latest-only frame may be seeded, never the reliable-ordered one");
+    }
+
+    [Test]
     public async Task UnreliableDeliveryFailsClosedUntilANativeDatagramConnectorExists()
     {
         if (!QuicListener.IsSupported) Assert.Ignore("MsQuic is unavailable on this test host.");
