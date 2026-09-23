@@ -1053,7 +1053,18 @@ test("P8: a reliable send still queued behind reliableSendTail rejects instead o
       // ran too.
       const send = transport.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: 2n }));
       transport.dispose();
-      await assert.rejects(send, /disposed/i);
+      // Bounded: without the guard, `send` never settles (nothing left to
+      // reject it), so a bare `assert.rejects(send, ...)` would hang this
+      // whole file instead of failing this one test by assertion. Racing
+      // against a timeout that rejects with a different message turns a
+      // regression into a prompt, loud assertion mismatch.
+      const bounded = Promise.race([
+        send,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("P8 guard timed out instead of rejecting")), 3_000),
+        ),
+      ]);
+      await assert.rejects(bounded, /disposed/i);
     } finally {
       transport.dispose();
     }
