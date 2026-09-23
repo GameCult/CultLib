@@ -353,3 +353,54 @@ test(
     await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
   },
 );
+
+test(
+  "dispose() evicts a connection still mid-handshake, not just fully attached peers",
+  { timeout: 10_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+    // A long handshake timeout: without dispose() sweeping still-pending
+    // accepts (fixed alongside this test), a connection whose handshake
+    // never reaches CONNECTED — here, the client rejects the provider's
+    // certificate — would sit on its own handshake timer, and once
+    // attachPeer's own CultMeshQuicNativeRuntime.open() resolves, hold a
+    // runtime reference, for up to this long after dispose() returns. Found
+    // this way: mutating the certificate-pin comparison to be
+    // case-sensitive (M2) made every provider test that dials with an
+    // uppercase-pinned endpoint reject during the handshake, and the whole
+    // file then hung for over two minutes past its last visible test.
+    const before = CultMeshQuicNativeRuntime.refCount;
+    const provider = await CultMeshQuicRealtimeProvider.listen({
+      host: "127.0.0.1",
+      port: 0,
+      serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+      handshakeTimeoutMs: 30_000,
+    });
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      // A pin that can never match this provider's real certificate: the
+      // connector rejects it during CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED,
+      // before the connection ever reaches CONNECTED.
+      endpoint: provider.advertisedEndpoint.replace(/cert-sha256=[0-9A-F]+/, `cert-sha256=${"0".repeat(64)}`),
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    await assert.rejects(connector.connect(candidate, target), /certificate|rejected/i);
+
+    // The provider's own accept flow is asynchronous (attachPeer awaits a
+    // runtime reference before it can even see the rejection); give it a
+    // moment to actually start before disposing, so this test exercises a
+    // real in-flight pending accept rather than one that never began.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const disposedAt = Date.now();
+    provider.dispose();
+    await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
+    assert.ok(
+      Date.now() - disposedAt < 2_000,
+      "dispose() must evict a mid-handshake connection promptly, not wait out its 30s handshake timeout",
+    );
+  },
+);

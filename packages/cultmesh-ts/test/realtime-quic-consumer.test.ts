@@ -134,6 +134,18 @@ async function assertRejectsAndDisposes(
   assert.fail("expected the promise to reject, but it resolved (the resolved value has been disposed)");
 }
 
+/**
+ * `transport.receiveFrame()`, bounded: a fault-path regression that leaves a
+ * malformed frame undelivered-but-not-rejected would otherwise hang this
+ * call (and, through a bare `assert.rejects`, the whole test file) forever,
+ * rather than fail the one assertion it was supposed to fail.
+ */
+function receiveFrameOrTimeout(transport: { receiveFrame(signal?: AbortSignal): Promise<unknown> }, ms = 3_000): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return transport.receiveFrame(controller.signal).finally(() => clearTimeout(timer));
+}
+
 function testFrame(overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshRealtimeFrame {
   return {
     channelId: "aetheria.entities",
@@ -633,12 +645,20 @@ test("fix 1 / M4: a stream-kind/delivery mismatch faults only that connection; t
       { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
       target,
     );
-    const connectionIdA = await acceptedA;
-    listener.sendFrame(connectionIdA, testFrame({ delivery: "latest-only" }), CULTMESH_QUIC_STREAM_RELIABLE);
-    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
-    // Future receives on the faulted transport reject immediately, with the
-    // same error, rather than hanging.
-    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
+    try {
+      const connectionIdA = await acceptedA;
+      listener.sendFrame(connectionIdA, testFrame({ delivery: "latest-only" }), CULTMESH_QUIC_STREAM_RELIABLE);
+      // Bounded: if the mismatch check regresses (never faults), receiveFrame()
+      // waits forever for a frame that will not arrive, and a bare
+      // `assert.rejects` would hang this test, and the whole file, right along
+      // with it (as M4 did before this bound existed).
+      await assert.rejects(receiveFrameOrTimeout(transportA), /incompatible delivery semantics/i);
+      // Future receives on the faulted transport reject immediately, with the
+      // same error, rather than hanging.
+      await assert.rejects(receiveFrameOrTimeout(transportA), /incompatible delivery semantics/i);
+    } finally {
+      transportA.dispose();
+    }
 
     // A second, independent connection through the same process-wide runtime
     // and pump must still work: the fault above did not bring it down.
@@ -676,9 +696,13 @@ test("M4b: a latest-only stream carrying a reliable-ordered frame faults only th
       { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
       target,
     );
-    const connectionIdA = await acceptedA;
-    listener.sendFrame(connectionIdA, testFrame({ delivery: "reliable-ordered" }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
-    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
+    try {
+      const connectionIdA = await acceptedA;
+      listener.sendFrame(connectionIdA, testFrame({ delivery: "reliable-ordered" }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      await assert.rejects(receiveFrameOrTimeout(transportA), /incompatible delivery semantics/i);
+    } finally {
+      transportA.dispose();
+    }
 
     // A second, independent connection still works.
     const connectorB = new CultMeshQuicRealtimeConnector();

@@ -770,6 +770,17 @@ export class CultMeshQuicRealtimeProvider {
   private readonly outboxes = new Map<CultMeshQuicRealtimeTransport, CultMeshQuicRealtimeProviderOutbox>();
   private readonly readyFrames: CultMeshRealtimeFrame[] = [];
   private readonly receiveWaiters: PendingReceive[] = [];
+  /**
+   * One `evict` closure per connection still mid-handshake (accepted, not
+   * yet attached to `peers`). `dispose()` must sweep these too: a peer whose
+   * handshake never reaches CONNECTED (a rejected certificate, a stalled
+   * client) would otherwise sit on its own handshakeTimeoutMs timer — and,
+   * once attachPeer's `CultMeshQuicNativeRuntime.open()` resolves, hold a
+   * runtime reference — for up to that long after the provider itself was
+   * disposed, keeping the process alive over a connection nothing can still
+   * reach.
+   */
+  private readonly pendingAccepts = new Set<() => void>();
   private disposed = false;
 
   private constructor(
@@ -879,6 +890,7 @@ export class CultMeshQuicRealtimeProvider {
     } catch {
       // Best-effort: the listener may already be gone.
     }
+    for (const evict of [...this.pendingAccepts]) evict();
     for (const transport of [...this.peers]) transport.dispose();
     const rejection = new Error("CultMesh QUIC realtime provider is disposed.");
     for (const waiter of this.receiveWaiters.splice(0, this.receiveWaiters.length)) waiter.reject(rejection);
@@ -925,6 +937,7 @@ export class CultMeshQuicRealtimeProvider {
     const evict = (): void => {
       if (state.evicted) return;
       state.evicted = true;
+      this.pendingAccepts.delete(evict);
       clearTimeout(timer);
       if (state.transport) {
         state.transport.dispose();
@@ -933,6 +946,7 @@ export class CultMeshQuicRealtimeProvider {
         this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
       }
     };
+    this.pendingAccepts.add(evict);
 
     const timer = setTimeout(() => {
       if (!state.connected) evict();
@@ -982,6 +996,7 @@ export class CultMeshQuicRealtimeProvider {
     state.transport = transport;
     transport.onDisposed(() => {
       state.evicted = true;
+      this.pendingAccepts.delete(evict);
       clearTimeout(handshakeTimer);
       this.peers.delete(transport);
       this.outboxes.get(transport)?.dispose();
