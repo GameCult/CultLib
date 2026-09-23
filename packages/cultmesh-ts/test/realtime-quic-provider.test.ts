@@ -979,8 +979,20 @@ test("P17: an accept arriving after dispose is refused, not attached as a peer",
     // depending on real listener-close timing to reproduce it.
     connectionId = runtime.connectionOpen("127.0.0.1", 1);
     provider.dispose();
+    // This synthetic connection never reaches CONNECTED either way (it was
+    // never dialed anywhere), so `connectionCount` alone cannot distinguish
+    // "refused" from "attached but still handshaking". `retain()` is
+    // synchronous and only the attach path calls it: a stable `refCount`
+    // across the call proves no transport (and no runtime reference) was
+    // ever allocated for this connection.
+    const beforeRefCount = CultMeshQuicNativeRuntime.refCount;
     assert.doesNotThrow(() =>
       (provider as unknown as { acceptConnection(id: bigint): void }).acceptConnection(connectionId!),
+    );
+    assert.equal(
+      CultMeshQuicNativeRuntime.refCount,
+      beforeRefCount,
+      "a post-dispose accept must never retain a runtime reference for a new transport",
     );
     assert.equal(provider.connectionCount, 0, "a post-dispose accept must never join peers");
   } finally {
