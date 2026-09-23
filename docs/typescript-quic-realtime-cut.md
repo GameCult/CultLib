@@ -1050,6 +1050,76 @@ checking the 2^53 exposure, and judging the subtraction. **Cut 5 started in
 parallel** on `quic-cut5` from `8e32bff`, to save wall-clock time. If Soul
 finds defects, Cut 5 rebases onto their fixes.
 
+### Cut 4 confirmed, fix batch 2, Cut 5 landed, retention (StreamPixels Cut C), 2026-09-23
+
+- **Cut 4 confirming Soul pass (Opus):** the core fixes hold under abuse.
+  - The `release()` use-after-free survives 300 cycles with the thread pool
+    saturated and `MALLOC_PERTURB_`. The old order dumps core.
+  - Malformed frames fault only their own connection.
+  - Racing and coalescing match C#.
+  - koffi returns `bigint` above 2^53, so there is no precision loss.
+  - It found that a throwing `onDisposed` handler killed the process or
+    leaked a ref, and that several fixes had no killing test.
+- **Cut 5 landed** (Sonnet, `8e32bff..fd2a701`): the TS provider. **All four
+  lanes pass on Windows, including TS provider to the C# native connector,
+  the Unity overlay's path.** Linux: 3 lanes pass and 1 skips (Windows-only).
+- **Fix batch 2** (Sonnet, `fd2a701..275010a`):
+  - Handler isolation, a use-after-free regression test (reverted order
+    crashes), 18 mutations killed, two further leaks fixed, and the root
+    lockfile fixed (`npm ci` works; this unblocked the StreamPixels deploy).
+    146/146 on both hosts.
+  - **Scar:** this agent ran to about 800k tokens over 2.6 h because Self
+    packed ten items, subtraction, two hosts and a late addition into one
+    brief. Fix batches are split per file from here on.
+  - Subtraction missed: net +39 against Soul's −130..−150 estimate. The
+    `NativeBindings` collapse moved code rather than deleting it.
+- **Retention** (StreamPixels Cut C, operator OQ1 = A; Sonnet,
+  `275010a..8cf89a7` on `quic-retention`): the provider retains the newest
+  latest-only frame per `(channel, body)` and seeds each new peer before it
+  joins, in TS (+12 lines) and C# (+36, seeding under the same lock as the
+  add). A late-joining C# native connector receives the retained frame on
+  Windows. Both runtimes' mutations are killed.
+
+**Soul gate on Cut 5 plus fix batch 2 (Opus): do not merge toward
+StreamPixels.** Executed probes found:
+1. **Critical: every provider peer is evicted at `handshakeTimeoutMs`.** A
+   handler swap meant CONNECTED was never recorded. No test lived past 10 s.
+2. **Critical: `koffi.alloc` is never freed.** About 53 B per native call,
+   about 36 MB a day idle, and gigabytes a day under load.
+3. **High for StreamPixels:** no chain-validated no-pin connect path exists in
+   the C# native connector or the bridge. The operator therefore ruled a
+   **pinned, long-lived self-signed certificate** (StreamPixels map, section
+   7), so no bridge change is needed.
+4. **High: client frames pile up unboundedly** in the provider's
+   `readyFrames`. C#'s inbox coalesces.
+5. **Medium:** one invalid frame evicts every peer while `broadcast` reports
+   success.
+6. **Medium:** `advertisedEndpoint` cannot describe a public host.
+7. **Low:** `receive(abortedSignal)` never settles.
+8. **Plausible:** the consumer-side native event queue is unbounded when
+   Unity stops polling.
+9. **Hygiene:** under M2 the provider test file hangs for 234 s.
+
+Held: stalled peers never block latest-only `broadcast` (about 2 µs per
+call), per-peer memory is bounded by the key count, 20k churn cycles return to
+baseline apart from the koffi leak, eviction racing with dispose is clean, and
+wire parity at maximum sizes is byte-identical. Lane 2's golden check is not
+tautological.
+
+In the mutation matrix, Hands' 18 are killed. Surviving provider mutants: P3
+(send-failure eviction), P4 and P8 (two claimed fixes with no killing test),
+P10b (`onFault` isolation), and the dispose and resurrection guards.
+
+**Fixes in flight, split per file:**
+- **3a** (`realtime-quic.ts`, on `quic-retention`): synchronous accept via
+  `retain()`, which deletes the async-accept window and its guards and fixes
+  finding 1 structurally; encode once in `broadcast`; an `advertisedHost`
+  option; `receive(aborted)`; tests for P3, P8 and P10b; hygiene.
+- **3c** (`realtime-quic-native.ts`, on `quic-koffi-leak`): allocate once, free
+  on close, and a steady-state RSS test.
+- **3b** follows 3a: one inbox shaped like C#'s `CultMeshRealtimeInbox` across
+  the transport, provider fan-in and outbox, fixing finding 4.
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
