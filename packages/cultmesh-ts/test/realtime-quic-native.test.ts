@@ -25,25 +25,12 @@ import {
   CULTMESH_QUIC_EVENT_STREAM_SEND_COMPLETE,
   CULTMESH_QUIC_STREAM_RELIABLE,
 } from "../src/realtime-quic-native";
+import { nativeBridgeAvailable } from "./support/native-bridge";
 
 // __dirname at runtime is dist-test/test; fixtures are binary and are never
 // compiled/copied there, so they are read from their source location, two
 // levels up.
 const FIXTURE_P12 = join(__dirname, "..", "..", "test", "fixtures", "quic-test.p12");
-
-function nativeBridgeAvailable(): boolean {
-  const dir = process.env.CULTMESH_QUIC_NATIVE_DIR;
-  if (!dir) return false;
-  try {
-    const bridge = process.platform === "win32" ? "gamecult_mesh_quic_native.dll" : "libgamecult_mesh_quic_native.so";
-    const dependency = process.platform === "win32" ? "msquic.dll" : "libmsquic.so.2";
-    readFileSync(join(dir, bridge));
-    readFileSync(join(dir, dependency));
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function waitFor<T>(collect: (resolve: (value: T) => void) => void, timeoutMs = 5_000): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
@@ -137,6 +124,16 @@ test("a full loopback connection delivers one raw frame end to end", async (t) =
   } finally {
     await runtime.release();
   }
+});
+
+test("fix 2: release() refuses a call with no outstanding reference", async (t) => {
+  if (!nativeBridgeAvailable()) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  const runtime = await CultMeshQuicNativeRuntime.open();
+  await runtime.release();
+  await assert.rejects(runtime.release(), /no outstanding reference/i);
 });
 
 test("negative grep: no koffi callbacks, .async only on nextEvent", () => {

@@ -26,6 +26,7 @@ import {
   CultMeshQuicNativeRuntime,
   CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION,
   CULTMESH_QUIC_STREAM_LATEST_ONLY,
+  CULTMESH_QUIC_STREAM_RELIABLE,
 } from "../src/realtime-quic-native";
 import {
   CultMeshQuicRealtimeConnector,
@@ -38,24 +39,13 @@ import {
   type CultMeshRealtimeTransportConnector,
 } from "../src/realtime-quic";
 import { encodeRealtimeFrame, type CultMeshRealtimeFrame } from "../src/realtime-wire";
+import { nativeBridgeAvailable } from "./support/native-bridge";
 
 // __dirname at runtime is dist-test/test; fixtures are binary and are never
 // compiled/copied there, so they are read from their source location, two
 // levels up.
 const FIXTURE_P12 = join(__dirname, "..", "..", "test", "fixtures", "quic-test.p12");
 const FIXTURE_DER = join(__dirname, "..", "..", "test", "fixtures", "quic-test-cert.der");
-
-function nativeBridgeAvailable(): boolean {
-  const dir = process.env.CULTMESH_QUIC_NATIVE_DIR;
-  if (!dir) return false;
-  try {
-    const bridge = process.platform === "win32" ? "gamecult_mesh_quic_native.dll" : "libgamecult_mesh_quic_native.so";
-    readFileSync(join(dir, bridge));
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function fixturePinHex(): string {
   return createHash("sha256").update(readFileSync(FIXTURE_DER)).digest("hex");
@@ -98,6 +88,17 @@ class RawQuicListener {
   sendFrame(connectionId: bigint, frame: CultMeshRealtimeFrame, kind: number): void {
     const streamId = this.runtime.streamOpen(connectionId, kind);
     this.runtime.streamSendFrame(streamId, encodeRealtimeFrame(frame), true);
+  }
+
+  /** Sends arbitrary bytes (not necessarily a valid encoded frame) on a fresh stream of `kind`. */
+  sendRaw(connectionId: bigint, bytes: Uint8Array, kind: number): void {
+    const streamId = this.runtime.streamOpen(connectionId, kind);
+    this.runtime.streamSendFrame(streamId, bytes, true);
+  }
+
+  /** Shuts down one accepted connection from this side, as a peer disconnect. */
+  shutdownConnection(connectionId: bigint, code = 0n): void {
+    this.runtime.connectionShutdown(connectionId, code);
   }
 
   async close(): Promise<void> {
@@ -482,4 +483,265 @@ test("trust negative (e): a transport that fails isVerifiedFor is disposed and r
 
   await assert.rejects(manager.connect(target), /did not prove|No realtime state path/i);
   assert.equal(disposed, true, "the session manager must dispose a transport that fails isVerifiedFor");
+});
+
+test("M3: a real connected transport's isVerifiedFor rejects a generation other than the one it connected with", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "route-generation-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const transport = await connector.connect(candidate, target);
+    try {
+      assert.equal(
+        transport.isVerifiedFor(target.verseId, target.authorityRuntimeId, CULTMESH_REALTIME_STATE_PROTOCOL_ID, "route-generation-1"),
+        true,
+        "the generation it actually connected with must verify",
+      );
+      assert.equal(
+        transport.isVerifiedFor(target.verseId, target.authorityRuntimeId, CULTMESH_REALTIME_STATE_PROTOCOL_ID, "route-generation-2"),
+        false,
+        "a mutated/replayed generation must not verify against a real transport",
+      );
+    } finally {
+      transport.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+test("trust negative (e2): a real transport whose generation no longer matches the freshly verified route is disposed", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const root = generateOdinRoot();
+    const signedRoute = signRoute({
+      verseId: target.verseId,
+      authorityRuntimeId: target.authorityRuntimeId,
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      protocolIds: [CULTMESH_REALTIME_STATE_PROTOCOL_ID],
+      privateKey: root.privateKey,
+      odinKeyId: root.publicKey.keyId,
+      generation: "route-generation-1",
+    });
+    const trust: CultMeshAuthorityTrustPolicy = { mode: "authenticated-remote", odinRoots: [root.publicKey] };
+    const realConnector = new CultMeshQuicRealtimeConnector();
+    let connectedTransport: CultMeshRealtimeTransport | undefined;
+    // A real transport, connected for real against the raw listener, but
+    // stamped with a generation different from the one the session manager
+    // just verified — the way a stale cached transport would look after its
+    // route rotated underneath it.
+    const replayConnector: CultMeshRealtimeTransportConnector = {
+      connectorId: "replay",
+      priority: 0,
+      canConnect: (c) => realConnector.canConnect(c),
+      connect: async (c, t, signal) => {
+        const accepted = listener.acceptOnce();
+        const transport = await realConnector.connect({ ...c, generation: "route-generation-1-stale" }, t, signal);
+        await accepted;
+        connectedTransport = transport;
+        return transport;
+      },
+    };
+    const manager = new CultMeshQuicRealtimeSessionManager({
+      lookupSource: new CultMeshStaticRealtimeLookupSource([verseWithRoute(target.verseId, signedRoute)]),
+      trust,
+      connectors: [replayConnector],
+    });
+
+    await assert.rejects(manager.connect(target), /did not prove|No realtime state path/i);
+    assert.ok(connectedTransport, "a real transport must have connected");
+    // Real cleanup ran: receiveFrame on the disposed transport rejects.
+    await assert.rejects(connectedTransport!.receiveFrame(), /disposed/i);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("the advertised certificate pin is matched case-insensitively (M2)", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex().toUpperCase()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const transport = await connector.connect(candidate, target);
+    transport.dispose();
+  } finally {
+    await listener.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fix batch: pump/dispatch isolation (1), peer-shutdown cleanup (3), the
+// bounded receive backlog and stream-kind pruning (6).
+// ---------------------------------------------------------------------------
+
+test("fix 1 / M4: a stream-kind/delivery mismatch faults only that connection; the pump keeps running", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const endpoint = (): string => `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`;
+
+    // A reliable stream carrying a frame whose own delivery byte says
+    // latest-only: `onStreamFrame` throws, which must fault only this
+    // connection.
+    const connectorA = new CultMeshQuicRealtimeConnector();
+    const acceptedA = listener.acceptOnce();
+    const transportA = await connectorA.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    const connectionIdA = await acceptedA;
+    listener.sendFrame(connectionIdA, testFrame({ delivery: "latest-only" }), CULTMESH_QUIC_STREAM_RELIABLE);
+    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
+    // Future receives on the faulted transport reject immediately, with the
+    // same error, rather than hanging.
+    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
+
+    // A second, independent connection through the same process-wide runtime
+    // and pump must still work: the fault above did not bring it down.
+    const connectorB = new CultMeshQuicRealtimeConnector();
+    const acceptedB = listener.acceptOnce();
+    const transportB = await connectorB.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    try {
+      const connectionIdB = await acceptedB;
+      listener.sendFrame(connectionIdB, testFrame(), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const received = await transportB.receiveFrame();
+      assert.equal(received.bodyId, "body:aetheria:entities");
+    } finally {
+      transportB.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+test("fix 3: a peer-initiated shutdown rejects a pending receive and cleans up exactly once", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const accepted = listener.acceptOnce();
+    const transport = await connector.connect(candidate, target);
+    const connectionId = await accepted;
+
+    const pendingReceive = transport.receiveFrame();
+    listener.shutdownConnection(connectionId);
+    await assert.rejects(pendingReceive, /closed by the remote peer/i);
+
+    // Cleanup already ran: a further explicit dispose is a harmless no-op,
+    // and a fresh receive rejects immediately instead of hanging forever
+    // (the leak fix 3 exists for).
+    transport.dispose();
+    await assert.rejects(transport.receiveFrame(), /closed by the remote peer/i);
+  } finally {
+    await listener.close();
+  }
+});
+
+test("fix 6: a slow latest-only reader accumulates at most one pending frame per key, and an equal generation is dropped", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const accepted = listener.acceptOnce();
+    const transport = await connector.connect(candidate, target);
+    try {
+      const connectionId = await accepted;
+
+      // Three increasing-sequence frames for the same (channel, body),
+      // published while nothing reads: an unbounded queue would deliver all
+      // three in order; the coalescing inbox keeps only the newest.
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 1n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 2n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 3n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      // An equal generation, sent last: it must be dropped outright, not
+      // queued as a fourth pending frame.
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 3n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+
+      // Give the pump time to process all four sends before reading.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const first = await transport.receiveFrame();
+      assert.equal(first.sequence, 3n, "only the newest pending frame for the key is kept");
+
+      const timeout = new AbortController();
+      const timer = setTimeout(() => timeout.abort(), 300);
+      await assert.rejects(transport.receiveFrame(timeout.signal), "nothing else should be pending");
+      clearTimeout(timer);
+    } finally {
+      transport.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+test("fix 6: a stream shutdown prunes its entry so streamKinds does not grow without bound", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const accepted = listener.acceptOnce();
+    const transport = await connector.connect(candidate, target);
+    try {
+      const connectionId = await accepted;
+      listener.sendFrame(connectionId, testFrame(), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const received = await transport.receiveFrame();
+      assert.equal(received.sequence, 1n);
+
+      // The server-side stream the frame arrived on is a fresh latest-only
+      // stream the listener opened and finished with `fin: true`; the native
+      // bridge emits its own shutdown event once MsQuic completes teardown.
+      // Reaching a second, unrelated frame afterwards is proof the consumer
+      // kept working, which is what this fix protects: it does not assert
+      // the internal map directly, since nothing here exposes it.
+      listener.sendFrame(connectionId, testFrame({ sequence: 2n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const second = await transport.receiveFrame();
+      assert.equal(second.sequence, 2n);
+    } finally {
+      transport.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
 });
