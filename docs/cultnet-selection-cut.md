@@ -3155,3 +3155,82 @@ cannot report success.
   **Flagged for the operator**: wire parity is this campaign's stated
   invariant, so if semantic parity is not enough for Cut 1 to merge, R-AP
   becomes a blocker rather than a follow-up.
+
+### Fix batch 6 landed, 2026-09-23, verified locally and not on Yggdrasil
+
+Sonnet, six commits on `sel-fix6` (pushed by Self after review). C# Networking
+**279 passed / 2 skipped** (was 274), Mesh 255, Caching 193 unchanged. Rust
+**259 across 12 targets** (was 254/11). +650 / −47 across 13 files, no new
+targets, packages or dependencies.
+
+**The verification gap comes first, because it is Self's.** The brief said
+"use `ygg-verify.sh`" without its path, where every earlier brief gave the
+full path. Hands searched, could not find it, and **verified the whole batch
+locally on the workstation** — the exact work the load budget forbids there.
+It reported the gap plainly rather than claiming the bar was met, and **left
+the branch unpushed on purpose** so the work would not look merge-ready. Both
+were the right calls. Recorded as a scar at Eureka `301df32`; **this batch
+still owes its Yggdrasil run**, and Soul's pass will provide it.
+
+- **R-AL.** The guard is restored and the false comment deleted. **The real
+  fix went to the owner**: D10b in `CultCache.DiscoverMembers` now groups
+  **every** member by its reference-role namespace (`IndexAlias ?? MemberName`),
+  not only aliased ones, and refuses registration when a data member's bare
+  name collides with a reference member's alias. Registration of the probed
+  shape now throws. Since D10b closes the only production door, the guard
+  itself is pinned by a test that **builds the colliding descriptor through
+  reflection to bypass the registry deliberately** — and removing the guard
+  makes it yield both members and fail.
+- **R-AM.** `HandleSnapshotRequestV1Async` now catches `Exception` and answers
+  a `CultNetErrorMessage`, like its two siblings. The dispatch backstop logs,
+  always. **Writing the test found a second defect**: the backstop logged
+  `DynamicInvoke`'s `TargetInvocationException` wrapper — "Exception has been
+  thrown by the target of an invocation" — rather than the real fault, so it
+  now unwraps. The first run failed on the wrapper text, which is precisely
+  the bug that half of R-AM exists to fix.
+- **R-AN.** Two isolating Rust tests added; the previous one tied `From` and
+  `To` across both edges, so dropping `role` survived. **`To.SchemaId` and
+  `To.Key` were re-checked and the earlier "equivalent" claim holds**, with a
+  structural proof rather than a shrug: within a page-position bucket, `cites`
+  ties every edge's `To` to the query's one declared target and `cited` ties
+  it to the anchor row's own identity, so no construction gives two edges with
+  tied `From` and `Role` and differing `To`. **No artificial test was forced
+  onto dead comparator branches**, which is the right answer.
+- **R-AO.** Shared-key order pinned in both runtimes, both row orders, plus a
+  vector case regenerated into both written files.
+- **R-AP, half built and half stopped, correctly.** The encoding is decided
+  and **C# already did it** — `[MessagePackObject]`/`[Key("name")]` writes a
+  camelCase map with nil for absent optionals by default. The gap was entirely
+  Rust-side: `skip_serializing_if = "Option::is_none"` on four types omitted
+  keys under `to_vec_named`. Removed from all four, `#[serde(default)]` kept
+  for decode. **Byte-identical now, against real C# MessagePack 3.1.7 hex**:
+  `RawDocumentHeader` 86 bytes, `Edge` 99 bytes, each broken once by hand to
+  confirm the assertions are not vacuous.
+
+  **"`Select` gains projection" was not built**, and Hands stopped and said
+  why rather than reporting the ruling closed. Header and document projection
+  is owned by `CultNetDocumentRegistry.SelectPage`/`SelectAll`, a different
+  class from the evaluator, which knows only generic rows and descriptors and
+  has no legitimate route to a schema's wire-binding override. Moving that
+  ownership is buildable — thread a caller-supplied serializer, as
+  `ordinalOf`/`shardIdOf` already are — but changes both signatures, every
+  caller, and the vector harness itself.
+
+**R-AQ, restated honestly.** The claim has moved from "semantic parity, byte
+parity absent" to **"nested wire-type byte parity confirmed and vector-tested;
+whole-message byte parity still blocked on unbuilt page-assembly ownership."**
+No vector yet exercises the real message output byte for byte.
+
+### Self's rulings
+
+- **R-AR. The page-assembly ownership question is its own cut, not a
+  follow-up.** It changes two public signatures, every caller and the harness,
+  which is a cut's worth of work and exactly the kind of thing that has
+  slipped five passes by being carried as a loose end. **Cut 1 does not wait
+  for it.**
+- **R-AS. Cut 1's honest claim is nested wire-type byte parity plus semantic
+  parity over the named field subset.** The map says that in those words, and
+  the target document is reconciled to it. **Flagged for the operator:** if
+  whole-message byte parity is required before this cut merges, R-AR becomes a
+  blocker and Cut 1 stays open; if it can be its own cut, Cut 1 can close on
+  the claim above once Soul clears it.
