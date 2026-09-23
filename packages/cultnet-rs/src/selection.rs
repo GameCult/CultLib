@@ -441,6 +441,220 @@ pub mod canonical_number {
             assert_eq!(super::render_f64(0.0_f64).unwrap(), "0");
             assert_eq!(super::render_f64(-0.0_f64).unwrap(), "0");
         }
+
+        // R-AI/R-D: `is_canonical` is the Q-J door's grammar
+        // (`^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, minus the literal "-0") and was, until this test,
+        // never called directly by any test in this crate - only reachable through
+        // `validate_field`, and only for the handful of spellings
+        // `validation_refuses_non_canonical_number_spellings` (tests/selection.rs) happens to
+        // cover. cargo-mutants found every branch mutation in this function surviving as a result.
+        // This test walks the grammar clause by clause so each comparison, each increment and each
+        // branch has a true case and a false case pinned against the exact byte shape that flips
+        // it.
+        #[test]
+        fn is_canonical_accepts_the_canonical_grammar() {
+            // "0", or "0.<fraction>" - a leading zero is canonical only as the whole integer part.
+            assert!(super::is_canonical("0"));
+            assert!(super::is_canonical("0.5"));
+            assert!(super::is_canonical("0.05"));
+            // "-0" is excluded by name, even though the grammar alone would match it; "-0.5" is a
+            // different literal and stays canonical.
+            assert!(!super::is_canonical("-0"));
+            assert!(super::is_canonical("-0.5"));
+            // A nonzero leading digit, single- and multi-digit.
+            assert!(super::is_canonical("5"));
+            assert!(super::is_canonical("123456789"));
+            assert!(super::is_canonical("-5"));
+            assert!(super::is_canonical("-123"));
+            // A fraction whose last digit is nonzero, one digit and several.
+            assert!(super::is_canonical("5.1"));
+            assert!(super::is_canonical("5.01"));
+            assert!(super::is_canonical("5.100001"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_the_empty_string() {
+            assert!(!super::is_canonical(""));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_lone_minus_sign() {
+            // After consuming '-', i == bytes.len(): the `i >= bytes.len()` half of the guard.
+            assert!(!super::is_canonical("-"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_first_character_that_is_not_a_digit() {
+            // The `!bytes[i].is_ascii_digit()` half of the same guard, unsigned and signed.
+            assert!(!super::is_canonical("."));
+            assert!(!super::is_canonical(".5"));
+            assert!(!super::is_canonical("+5"));
+            assert!(!super::is_canonical("a"));
+            assert!(!super::is_canonical("-a"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_leading_zero_followed_by_another_digit() {
+            assert!(!super::is_canonical("01"));
+            assert!(!super::is_canonical("00"));
+            assert!(!super::is_canonical("-01"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_non_digit_non_dot_after_the_integer_part() {
+            // Exponent notation, stray whitespace, and any other trailing junk right after the
+            // integer digits - the `bytes[i] != b'.'` check.
+            assert!(!super::is_canonical("5e3"));
+            assert!(!super::is_canonical("123e10"));
+            assert!(!super::is_canonical("5 "));
+            assert!(!super::is_canonical("5,0"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_bare_trailing_dot() {
+            // Zero fraction digits: `fraction_len > 0` is false.
+            assert!(!super::is_canonical("5."));
+            assert!(!super::is_canonical("0."));
+        }
+
+        #[test]
+        fn is_canonical_rejects_trailing_bytes_after_the_fraction_digits() {
+            // The `i != bytes.len()` check inside the fraction loop's tail.
+            assert!(!super::is_canonical("5.1x"));
+            assert!(!super::is_canonical("5.12 "));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_trailing_fractional_zero() {
+            // `bytes[i - 1] != b'0'`: the last fraction digit must not be zero.
+            assert!(!super::is_canonical("5.0"));
+            assert!(!super::is_canonical("5.10"));
+            assert!(!super::is_canonical("0.10"));
+        }
+
+        // R-AI: `decompose` and `pad_right` back `compare`'s magnitude comparison and were pinned
+        // only indirectly, through whichever field-comparison tests happened to exercise `compare`
+        // - never with inputs chosen to force unequal-length fraction padding, which is the one
+        // place `pad_right`'s `while owned.len() < width` loop actually runs more than zero times
+        // on both sides. These call the private helpers directly (this test module is nested
+        // inside `canonical_number`, so `super::` reaches them) and pin `compare`'s ordering at the
+        // shapes that exercise sign, integer length, integer digits and padded fraction digits
+        // separately.
+        #[test]
+        fn decompose_splits_sign_integer_and_fraction() {
+            assert_eq!(super::decompose("123.45"), (false, "123", "45"));
+            assert_eq!(super::decompose("-123.45"), (true, "123", "45"));
+            assert_eq!(super::decompose("7"), (false, "7", ""));
+            assert_eq!(super::decompose("-7"), (true, "7", ""));
+        }
+
+        #[test]
+        fn pad_right_pads_to_width_and_leaves_a_wide_enough_value_alone() {
+            assert_eq!(super::pad_right("5", 3), "500");
+            assert_eq!(super::pad_right("", 2), "00");
+            assert_eq!(super::pad_right("50", 2), "50");
+            assert_eq!(super::pad_right("500", 2), "500");
+        }
+
+        #[test]
+        fn compare_orders_by_sign_then_integer_length_then_digits_then_padded_fraction() {
+            use super::Ordering;
+            // Opposite signs: negative is always less, regardless of magnitude.
+            assert_eq!(super::compare("-1", "1"), Ordering::Less);
+            assert_eq!(super::compare("1", "-1"), Ordering::Greater);
+            // Same sign, different integer-part length.
+            assert_eq!(super::compare("9", "10"), Ordering::Less);
+            assert_eq!(super::compare("-9", "-10"), Ordering::Greater);
+            // Same integer length, different digits.
+            assert_eq!(super::compare("19", "21"), Ordering::Less);
+            // Equal integer part, fractions of unequal length: pad_right must align them before
+            // comparing, not compare "5" against "45" lexicographically (which would say "5" >
+            // "45" as strings - the padded comparison must say "1.5" > "1.45").
+            assert_eq!(super::compare("1.5", "1.45"), Ordering::Greater);
+            assert_eq!(super::compare("1.45", "1.5"), Ordering::Less);
+            assert_eq!(super::compare("1.50", "1.5"), Ordering::Equal);
+            // Negative magnitude comparison reverses.
+            assert_eq!(super::compare("-1.5", "-1.45"), Ordering::Less);
+            assert_eq!(super::compare("3", "3"), Ordering::Equal);
+        }
+
+        // R-AI: `canonicalize_decimal_digits` already had one exact-value test; this adds the
+        // negative-collapses-to-zero branch (`negative && !is_zero`) on both its true and false
+        // side, which the existing test never reached (it only fed unsigned and "-0.000").
+        #[test]
+        fn canonicalize_decimal_digits_keeps_a_genuine_negative_value_signed() {
+            assert_eq!(super::canonicalize_decimal_digits("-13.500"), "-13.5");
+            assert_eq!(super::canonicalize_decimal_digits("-007"), "-7");
+        }
+
+        // R-AI: `big_mul_small` and `big_to_most_significant_first` are private helpers behind
+        // `exact_decimal_from_mantissa`, reachable indirectly through render_f32/f64 - but every
+        // render test above happens to pin only the *final* string, so a mutant that corrupts an
+        // intermediate digit or carry and then has the corruption happen to cancel out (or that
+        // only misbehaves on inputs those particular mantissas never exercise) can still leave
+        // every render assertion green. These call both helpers directly with digit sequences
+        // chosen to force a multi-step carry chain (mirroring the "RS-D-BigMulCarry-Loosening"
+        // finding's own reasoning: single-digit-times-single-digit-plus-carry never exceeds one
+        // new leading digit, so a carry chain needs several calls in a row to build multiple
+        // digits deep).
+        #[test]
+        fn big_mul_small_multiplies_in_place_with_carry() {
+            // 9 * 5 = 45: exercises the carry path (`carry > 0`) pushing one new leading digit.
+            let mut digits: Vec<u8> = vec![9]; // "9", little-endian
+            super::big_mul_small(&mut digits, 5);
+            assert_eq!(digits, vec![5, 4]); // "45"
+
+            // Repeated multiplication by 2 on "999" builds a carry chain across every digit:
+            // 999 * 2 = 1998.
+            let mut digits: Vec<u8> = vec![9, 9, 9]; // "999"
+            super::big_mul_small(&mut digits, 2);
+            assert_eq!(digits, vec![8, 9, 9, 1]); // "1998"
+
+            // No carry at all: 10 * 2 = 20, digit count unchanged.
+            let mut digits: Vec<u8> = vec![0, 1]; // "10"
+            super::big_mul_small(&mut digits, 2);
+            assert_eq!(digits, vec![0, 2]); // "20"
+        }
+
+        #[test]
+        fn big_to_most_significant_first_reverses_into_a_decimal_string() {
+            assert_eq!(super::big_to_most_significant_first(&vec![9, 9, 1]), "199");
+            assert_eq!(super::big_to_most_significant_first(&vec![0]), "0");
+            assert_eq!(super::big_to_most_significant_first(&vec![7]), "7");
+        }
+
+        // R-AI: `big_from_u64` (the seed of every bignum expansion) was only reachable indirectly
+        // through render_f32/f64, never pinned on its own digit sequence.
+        #[test]
+        fn big_from_u64_produces_little_endian_digits() {
+            assert_eq!(super::big_from_u64(0), vec![0]);
+            assert_eq!(super::big_from_u64(9), vec![9]);
+            assert_eq!(super::big_from_u64(123), vec![3, 2, 1]);
+        }
+
+        // R-AI: `exact_decimal_from_mantissa` backs both render_f32 and render_f64, but every
+        // existing render test only pins the *final* string for a real IEEE-754 bit pattern -
+        // never the exponent sign branch directly, and never a case where the multiply-by-5
+        // fraction expansion is *shorter* than the number of fraction digits it needs (`rendered.len()
+        // <= k`), which only happens for a small mantissa at a deeply negative exponent and is the
+        // one place the leading-zero padding actually runs.
+        #[test]
+        fn exact_decimal_from_mantissa_takes_the_exponent_sign_branch_it_is_given() {
+            // exponent >= 0: repeated multiply-by-2, no fraction.
+            assert_eq!(super::exact_decimal_from_mantissa(3, 4, false), "48"); // 3 * 2^4
+            // exponent < 0: repeated multiply-by-5, k fraction digits, no padding needed (the
+            // rendered digit count already exceeds k).
+            assert_eq!(super::exact_decimal_from_mantissa(5, -1, false), "2.5"); // 5 / 2^1
+        }
+
+        #[test]
+        fn exact_decimal_from_mantissa_pads_leading_fraction_zeros_when_the_digits_run_short() {
+            // mantissa=1, exponent=-5: 5^5 = 3125 is only 4 digits, but 5 fraction positions are
+            // needed - `rendered.len() (4) <= k (5)` must trigger the leading-zero pad, or the
+            // decimal point lands in the wrong place (and, without the pad, `split` underflows).
+            assert_eq!(super::exact_decimal_from_mantissa(1, -5, false), "0.03125"); // 1 / 2^5
+            assert_eq!(super::exact_decimal_from_mantissa(1, -5, true), "-0.03125");
+        }
     }
 }
 
