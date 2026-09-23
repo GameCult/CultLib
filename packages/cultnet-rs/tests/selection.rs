@@ -480,6 +480,26 @@ fn row_tiebreak_orders_by_schema_id_before_record_key_when_both_vary_at_a_tied_o
     assert_eq!(order, vec![(low_schema, "z"), (high_schema, "a")]);
 }
 
+// R-AT (Soul's SM-7 table, row comparator): `order_rows`'s tiebreak is
+// (ordinal, schema_id, record_key) - the test above pins schema_id ahead of record_key, but every
+// row in it has a distinct record_key too, so record_key never has to be the sole discriminator.
+// This test ties both ordinal and schema_id across two rows on the same schema and varies only
+// record_key, inserted out of order, so dropping record_key from the comparator entirely (SM-7's
+// named Rust row-comparator survivor - killed in C# a pass ago, never pinned in Rust) leaves them
+// in insertion order instead of "a" before "z".
+#[test]
+fn row_tiebreak_orders_by_record_key_when_ordinal_and_schema_id_are_both_tied() {
+    let high_key = FixtureRow::leaf(leaf_a(), "z", 1, "k", "1");
+    let low_key = FixtureRow::leaf(leaf_a(), "a", 1, "k", "1");
+    // Inserted high-key-first, the reverse of the required output.
+    let rows = vec![high_key, low_key];
+
+    let evaluation = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
+
+    let order: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    assert_eq!(order, vec!["a", "z"]);
+}
+
 // S4/S5: a page walk visits every row exactly once, the last page carries no cursor, and a
 // cursor is refused when it does not decode, its digest does not match, or asOf has moved.
 #[test]
@@ -813,6 +833,56 @@ fn edge_order_pins_from_schema_id_when_from_key_and_role_are_both_tied() {
     assert_eq!(evaluation.edges[0].role, "peer");
     assert_eq!(evaluation.edges[1].role, "peer");
     assert_eq!(evaluation.edges[0].from.schema_id(), expected_first_schema);
+}
+
+// R-AT (Soul's SM-7, merge gate third pass): the two tests above tie From+To or From+Role but
+// never both edges' `to` while `from` and `role` are also tied - so dropping `to.schema_id` and
+// `to.record_key` from the edge comparator entirely (or reversing `to.record_key`) still sorted
+// correctly by luck and survived under mutation. Hands' argument that no construction produces
+// this was false: a selection carrying BOTH hops (`cites` and `cited`) mixes their edges into one
+// `Vec`, and a row that self-references through the same role it also uses to cite a peer yields
+// a `cites` edge (`to` = the queried peer) and a `cited` edge (`to` = the anchor row itself) tied
+// on `from` and `role`, differing only on `to`. Soul built this counterexample and it is taken
+// from the rig, not rebuilt - but the rig's own "hub"/"other" naming leaves `to.record_key`
+// dropped-entirely still SURVIVING: `select`'s `cited` phase always pushes the self-edge before
+// the `cites` phase pushes the peer edge, and "hub" < "other" happens to match that push order, so
+// a stable sort with the tiebreak gone reproduces the right answer by coincidence. Naming the
+// self-citing row so its key sorts AFTER the cited target's key ("zebra" self-cites and cites
+// "alpha") makes the push order and the correct sorted order disagree, so only the comparator's
+// own `to` component - not accidental insertion order - can produce the right answer.
+#[test]
+fn edge_order_pins_to_when_from_and_role_are_both_tied_by_a_self_citing_peer() {
+    let zebra = FixtureRow::citer(
+        "zebra",
+        1,
+        vec![
+            ("peer".to_string(), "zebra".to_string(), None),
+            ("peer".to_string(), "alpha".to_string(), None),
+        ],
+    );
+    let alpha = FixtureRow::citer("alpha", 2, Vec::new());
+    let rows = vec![zebra, alpha];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(citer(), "alpha"), role: Some("peer".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.edges.len(), 2, "expected two edges in one page-position bucket");
+    assert_eq!(evaluation.edges[0].from.record_key(), evaluation.edges[1].from.record_key());
+    assert_eq!(evaluation.edges[0].role, evaluation.edges[1].role);
+    assert_ne!(
+        evaluation.edges[0].to.record_key(),
+        evaluation.edges[1].to.record_key(),
+        "To must differ - if it does not, Hands' equivalence claim survives this construction"
+    );
+    // The comparator's to component is what decides the order: "alpha" < "zebra" in code-point
+    // order, opposite of push order (the self edge is always pushed before the cites edge), so
+    // dropping or reversing to.record_key flips this rather than merely agreeing by luck.
+    assert_eq!(evaluation.edges[0].to.record_key(), "alpha");
+    assert_eq!(evaluation.edges[1].to.record_key(), "zebra");
 }
 
 // S16: the four comparisons at the boundary, including the row whose value equals the compared
