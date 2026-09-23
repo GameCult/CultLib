@@ -1425,6 +1425,7 @@ namespace GameCult.Networking.Tests
 
             var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-host-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.host"));
@@ -1470,6 +1471,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             async Task FetchOnce(string messageId)
             {
@@ -1487,7 +1493,12 @@ namespace GameCult.Networking.Tests
             await FetchOnce("first");
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
             await FetchOnce("second");
-            cancellation.Cancel();
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         // A batch is a value: nothing staged in it reaches CultNet observers before the store commits it. A put made
@@ -1549,6 +1560,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-subscription-client");
             var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
@@ -1575,12 +1591,16 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(update.SubscriptionId, Is.EqualTo("note"));
             Assert.That(update.ChangeKind, Is.EqualTo("added"));
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo(recordKey));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1597,12 +1617,7 @@ namespace GameCult.Networking.Tests
                 server,
                 database,
                 authorizeRequest: (request, _) => request.ConsumerRuntimeId == "allowed-runtime",
-                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal),
-                projectRecord: (request, _, record) =>
-                {
-                    record.SourceRuntimeId = "projection:" + request.ConsumerRuntimeId;
-                    return record;
-                });
+                authorizeRecord: (_, _, recordKey, _) => recordKey.StartsWith("tests:public:", StringComparison.Ordinal));
             using var cancellation = new CancellationTokenSource();
             var serverThread = new Thread(() =>
             {
@@ -1613,6 +1628,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             await database.PutAsync(new CultRecordKey("tests:public:initial"), new NetworkSchemaNote
             {
@@ -1645,7 +1665,6 @@ namespace GameCult.Networking.Tests
             var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
             Assert.That(snapshot.Documents.Select(document => document.RecordKey),
                 Is.EqualTo(new[] { "tests:public:initial" }));
-            Assert.That(snapshot.Documents.Single().SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
 
             await database.PutAsync(new CultRecordKey("tests:private:live"), new NetworkSchemaNote
             {
@@ -1658,23 +1677,27 @@ namespace GameCult.Networking.Tests
                 Text = "public-live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(update.Document, Is.Not.Null);
             Assert.That(update.Document!.RecordKey, Is.EqualTo("tests:public:live"));
-            Assert.That(update.Document.SourceRuntimeId, Is.EqualTo("projection:allowed-runtime"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
         public async Task DatabaseSubscriptionServer_ReconcilesDeliveredProjectionAndBodyDemandWhenAuthorityChanges()
         {
-            const string sourceRecordKey = "tests:authority:source";
+            const string schemaId = "tests.networking_note";
+            const string recordKeyOne = "tests:authority:one";
+            const string recordKeyTwo = "tests:authority:two";
             const string bodyId = "tests:authority:body";
             var authorized = true;
-            var projectionName = "one";
             var sourceCache = new CultCache();
             var sourceDatabase = new CultNetDatabase(sourceCache);
-            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyOne), new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "initial"
@@ -1688,12 +1711,7 @@ namespace GameCult.Networking.Tests
                 server,
                 sourceDatabase,
                 authorizeRequest: (_, _) => authorized,
-                authorizeRecord: (_, _, _, _) => authorized,
-                projectRecord: (_, _, record) =>
-                {
-                    record.RecordKey = $"tests:authority:projected:{projectionName}";
-                    return record;
-                });
+                authorizeRecord: (_, _, _, _) => authorized);
             using var bodyDemand = new CultMeshBodyDemandTracker(subscriptions);
             using var cancellation = new CancellationTokenSource();
             var serverThread = new Thread(() =>
@@ -1705,6 +1723,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -1718,42 +1741,427 @@ namespace GameCult.Networking.Tests
             await AwaitWithTimeout(
                 client.SubscribeAsync(
                     "authority",
-                    recordKeys: [sourceRecordKey],
+                    schemaIds: [schemaId],
                     consumerRuntimeId: "authority-client",
                     bodyIds: [bodyId],
                     supportedBodyTransports: [CultMeshBodyTransportKind.SharedMemory.ToString()]),
                 TimeSpan.FromSeconds(2));
-            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:one")), Is.Not.Null);
+            Assert.That(targetCache.Get(new CultRecordKey(recordKeyOne)), Is.Not.Null);
+            // R-K: PublishDemand runs after the snapshot is sent, on the server thread, while
+            // SubscribeAsync's completion is driven by the client's receipt of that same snapshot on a
+            // different thread - asserting immediately races the two. Wait for the deterministic
+            // condition (the demand actually being published) instead of assuming order-of-completion
+            // across a network round trip.
+            await WaitUntilAsync(() => bodyDemand.Plan(bodyId).HasConsumers, TimeSpan.FromSeconds(2));
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.True);
 
-            projectionName = "two";
+            // Drive the record's identity change through the selection itself
+            // (a real rename: the old key's row is deleted, a new key's row is
+            // put), not through a projection delegate, then force the full
+            // reconcile diff that D6 gives the subscription server.
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyTwo), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "renamed"
+            });
+            await sourceDatabase.DeleteAsync<NetworkSchemaNote>(new CultRecordKey(recordKeyOne));
             subscriptions.Reconcile();
             await WaitUntilAsync(
-                () => targetCache.Get(new CultRecordKey("tests:authority:projected:one")) == null &&
-                      targetCache.Get(new CultRecordKey("tests:authority:projected:two")) != null,
+                () => targetCache.Get(new CultRecordKey(recordKeyOne)) == null &&
+                      targetCache.Get(new CultRecordKey(recordKeyTwo)) != null,
                 TimeSpan.FromSeconds(2));
             Assert.That(changes.Any(change => change.ChangeKind == "removed" &&
-                change.RecordKey == "tests:authority:projected:one"), Is.True);
+                change.RecordKey == recordKeyOne), Is.True);
             Assert.That(changes.Any(change => change.ChangeKind == "added" &&
-                change.RecordKey == "tests:authority:projected:two"), Is.True);
+                change.RecordKey == recordKeyTwo), Is.True);
 
             authorized = false;
             subscriptions.Reconcile();
             await WaitUntilAsync(
-                () => targetCache.Get(new CultRecordKey("tests:authority:projected:two")) == null,
+                () => targetCache.Get(new CultRecordKey(recordKeyTwo)) == null,
                 TimeSpan.FromSeconds(2));
+            // R-K: same race as the HasConsumers=true assertion above, the other direction.
+            await WaitUntilAsync(() => !bodyDemand.Plan(bodyId).HasConsumers, TimeSpan.FromSeconds(2));
             Assert.That(bodyDemand.Plan(bodyId).HasConsumers, Is.False);
             var changeCountAfterRevocation = changes.Count;
-            await sourceDatabase.PutAsync(new CultRecordKey(sourceRecordKey), new NetworkSchemaNote
+            await sourceDatabase.PutAsync(new CultRecordKey(recordKeyTwo), new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "must-not-escape"
             });
             await Task.Delay(100);
-            cancellation.Cancel();
-
             Assert.That(changes.Count, Is.EqualTo(changeCountAfterRevocation));
-            Assert.That(targetCache.Get(new CultRecordKey("tests:authority:projected:two")), Is.Null);
+            Assert.That(targetCache.Get(new CultRecordKey(recordKeyTwo)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // Reconcile's remaining responsibility after the S2-2 deletion (docs/cultnet-selection-cut.md,
+        // Self's rulings 2026-09-22): flip authorizeRecord's answer per key while the whole request
+        // stays authorized (so DemandActive never toggles), and prove both halves of the diff -
+        // removing a now-unauthorized key and the add loop picking up a newly-authorized one.
+        [Test]
+        public async Task DatabaseSubscriptionServer_Reconcile_FlipsPerRecordAuthorizationWithoutChangingRequestAuthority()
+        {
+            const string schemaId = "tests.networking_note";
+            const string recordKeyA = "tests:record-authority:a";
+            const string recordKeyB = "tests:record-authority:b";
+            var authorizedKeys = new HashSet<string>(StringComparer.Ordinal) { recordKeyA };
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey(recordKeyA), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "a"
+            });
+            await database.PutAsync(new CultRecordKey(recordKeyB), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "b"
+            });
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-record-authority-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (_, _) => true,
+                authorizeRecord: (_, _, recordKey, _) => authorizedKeys.Contains(recordKey));
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-record-authority-subscription-client");
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+                client.SendCultNet(new CultNetDatabaseSubscribeMessage
+                {
+                    MessageId = "subscribe-record-authority",
+                    SubscriptionId = "record-authority",
+                    ConsumerRuntimeId = "record-authority-client",
+                    SchemaIds = new[] { schemaId },
+                    IncludeSnapshot = true
+                });
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { recordKeyA }));
+
+                authorizedKeys.Clear();
+                authorizedKeys.Add(recordKeyB);
+                subscriptions.Reconcile();
+
+                // SendRemoval carries the removed key on the message's own RecordKey field (no
+                // Document); SendUpsert carries the full record under Document.
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKeyA) &&
+                          changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == recordKeyB),
+                    TimeSpan.FromSeconds(2));
+
+                Assert.That(changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKeyA), Is.True);
+                Assert.That(changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == recordKeyB), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // R-P (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): one id reaches the
+        // authorizer, and it is the wire id, on both the snapshot and the live path. The binding below
+        // overrides NetworkSchemaNote's wire schema id away from its descriptor's own id
+        // ("tests.networking_note"); the authorizer allowlists only the wire id. Before the fix, the
+        // live fast path (CreateMatchedRecord) passed descriptor.SchemaId instead of the wire id, so a
+        // row delivered by the snapshot was refused on its first live change.
+        [Test]
+        public async Task DatabaseSubscriptionServer_AuthorizesSnapshotAndFirstLiveChangeByTheSameWireId()
+        {
+            const string wireSchemaId = "tests.networking_note.wire-alias";
+            const string recordKey = "tests:wire-id:note";
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry, schemaId: wireSchemaId));
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions { DocumentRegistry = registry });
+            await database.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "initial"
+            });
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-wire-id-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(
+                server,
+                database,
+                authorizeRequest: (_, _) => true,
+                authorizeRecord: (_, _, _, schemaId) => schemaId == wireSchemaId);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-wire-id-subscription-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changed = new TaskCompletionSource<CultNetDatabaseChangeRawMessage>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changed.TrySetResult(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+                client.SendCultNet(new CultNetDatabaseSubscribeMessage
+                {
+                    MessageId = "subscribe-wire-id",
+                    SubscriptionId = "wire-id",
+                    RecordKeys = new[] { recordKey },
+                    IncludeSnapshot = true
+                });
+
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { recordKey }));
+
+                await database.PutAsync(new CultRecordKey(recordKey), new NetworkSchemaNote
+                {
+                    Schema = "tests.networking_note.v1",
+                    Text = "updated"
+                });
+                var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(update.Document, Is.Not.Null);
+                Assert.That(update.Document!.RecordKey, Is.EqualTo(recordKey));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // R-T(a) (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3): a removed change is
+        // evaluated without reading a document - it matches on the selection's keys and schemas alone,
+        // and a field predicate counts as unknown rather than excluding the row or throwing
+        // TryGetIndexValue(null). A subscriber holding the row under a selection with a field predicate
+        // must still receive the removal.
+        [Test]
+        public async Task DatabaseSubscriptionServer_DeliversARemovalUnderAFieldPredicateSelectionWithNoException()
+        {
+            const string recordKey = "v1:field-predicate-removal:sword";
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey(recordKey), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "sword",
+                Kind = "weapon",
+                Mass = 3
+            });
+            var schemaId = cache.Registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-field-predicate-removal-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-field-predicate-removal-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawV1Message>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "subscribe-field-predicate-removal",
+                    SubscriptionId = "field-predicate-removal",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Schemas = new[] { schemaId },
+                        Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "weapon" } } }
+                    }
+                });
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                Assert.That(snapshot.Matched, Is.EqualTo(1u));
+
+                // Before R-T(a), evaluating this delete against the field predicate threw
+                // TryGetIndexValue(null) on the server's poll thread instead of delivering a removal.
+                await database.DeleteAsync<CultNetSelectionEvaluatorTests.SelLeafA>(new CultRecordKey(recordKey));
+
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKey),
+                    TimeSpan.FromSeconds(2));
+                Assert.That(changes.Any(change => change.ChangeKind == "removed" && change.RecordKey == recordKey), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // R-A (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch): CultNetDatabaseServer
+        // answers a v1 snapshot request against the selection's own Fields predicate, not a selection
+        // quietly lowered to v0's two allowlists. CultNetDatabaseServer pairs with Server (the
+        // LiteNetLib/TCP-secured production construction site, per section 1), not RudpCultNetSchemaServer
+        // - matching CultNetDatabaseServer_Creates_Filtered_SnapshotResponse above, this drives
+        // CreateSelectionResponse directly rather than a real client/server round trip.
+        [Test]
+        public async Task CultNetDatabaseServer_AnswersV1SnapshotRequestRespectingItsFields()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey("v1:weapon"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "sword",
+                Kind = "weapon",
+                Mass = 3
+            });
+            await database.PutAsync(new CultRecordKey("v1:armor"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "shield",
+                Kind = "armor",
+                Mass = 3
+            });
+
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var response = databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                MessageId = "v1-snapshot",
+                Selection = new CultNetSelection
+                {
+                    Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "weapon" } } },
+                    Projection = CultNetSelectionProjections.Document
+                }
+            });
+
+            Assert.That(response.Matched, Is.EqualTo(1u));
+            Assert.That(response.Documents!.Select(document => document.RecordKey), Is.EqualTo(new[] { "v1:weapon" }));
+        }
+
+        // S9 (docs/cultnet-selection-cut.md section 10) / D6: a hop-bearing subscription reconciles the
+        // whole matched set on every change, not only the changed row. "target" does not itself change
+        // here - a new citer is put that cites it - so only the reconcile path (not the single-row fast
+        // path, which would evaluate the citer's own row against a Selection carrying no hop and answer
+        // null, since the citer's schema is excluded by this selection's Schemas filter) can produce the
+        // add this test waits for.
+        [Test]
+        public async Task DatabaseSubscriptionServer_SubscribesV1AndReconcilesAHopBearingSelectionWhenTheCiterChanges()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            await database.PutAsync(new CultRecordKey("target"), new CultNetSelectionEvaluatorTests.SelLeafA
+            {
+                Name = "target",
+                Kind = "k",
+                Mass = 1
+            });
+            var targetSchemaId = cache.Registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
+
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "database-v1-hop-subscription-server",
+                Socket = BindUdpSocket()
+            });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("database-v1-hop-subscription-client");
+                var subscribed = new TaskCompletionSource<CultNetSnapshotResponseRawV1Message>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(message => subscribed.TrySetResult(message));
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(message => changes.Enqueue(message));
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected, TimeSpan.FromSeconds(2));
+
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "subscribe-v1-hop",
+                    SubscriptionId = "hop",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Schemas = new[] { targetSchemaId },
+                        Cited = new CultNetIncoming { Role = "Design", Exists = true }
+                    }
+                });
+
+                var snapshot = await AwaitWithTimeout(subscribed.Task, TimeSpan.FromSeconds(2));
+                // "target" is not yet cited by anything - the hop-bearing selection matches nothing yet.
+                Assert.That(snapshot.Matched, Is.EqualTo(0u));
+
+                // The citer is a different schema entirely, excluded by this selection's own Schemas
+                // filter - the change that must cause "target" to be reported is not to "target" itself.
+                await database.PutAsync(new CultRecordKey("citer"), new CultNetSelectionEvaluatorTests.SelCiter
+                {
+                    Name = "citer",
+                    Design = new CultRecordRef<CultNetSelectionEvaluatorTests.SelFixtureMiddle>(new CultRecordKey("target"))
+                });
+
+                await WaitUntilAsync(
+                    () => changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == "target"),
+                    TimeSpan.FromSeconds(2));
+                Assert.That(changes.Any(change => change.ChangeKind == "added" && change.Document?.RecordKey == "target"), Is.True);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1785,6 +2193,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-body-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -1815,9 +2228,14 @@ namespace GameCult.Networking.Tests
                 SubscriptionId = "world-body"
             });
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
             Assert.That(removed.ConsumerRuntimeId, Is.EqualTo("eve-unity"));
             Assert.That(removed.Active, Is.False);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         // A load's delivery reaches a subscription observer that needs the lifecycle gate while a subscribe's demand
@@ -1868,6 +2286,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("demand-write-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -1884,7 +2307,14 @@ namespace GameCult.Networking.Tests
             cancellation.Cancel();
             Assert.That(finished, Is.True, "the demand handler's cache write deadlocked with the load's delivery");
             await written.Task;
-            serverThread.Join();
+            }
+            finally
+            {
+                // Cancel/Join before disposing anything the poll thread touches (server), so a failed
+                // assertion above cannot race the thread against a disposed socket (R-K).
+                cancellation.Cancel();
+                serverThread.Join();
+            }
             subscriptions.Dispose();
             server.Dispose();
             database.Dispose();
@@ -1948,6 +2378,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-reactive-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -1963,10 +2398,15 @@ namespace GameCult.Networking.Tests
             });
 
             var observed = await AwaitWithTimeout(active.Task, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
             Assert.That(observed.RecordKeys, Is.EqualTo(new[] { "world:field:fog" }));
             Assert.That(observed.SchemaIds, Is.EqualTo(new[] { "gamecult.fields.splats.v1" }));
             Assert.That(observed.BodyIds, Is.Empty);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -1998,6 +2438,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp("database-disconnect-demand-client");
             client.Connect("127.0.0.1", server.LocalEndPoint.Port);
@@ -2016,10 +2461,14 @@ namespace GameCult.Networking.Tests
             client.Dispose();
             var removed = await AwaitWithTimeout(withdrawn.Task, TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => server.Peers.Count == 0, TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
-
             Assert.That(removed.SubscriptionId, Is.EqualTo("disconnect-world-body"));
             Assert.That(removed.Active, Is.False);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2049,6 +2498,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2072,11 +2526,15 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(update.SubscriptionId, Is.EqualTo("notes"));
             Assert.That(update.Document, Is.TypeOf<NetworkSchemaNote>());
             Assert.That(((NetworkSchemaNote)targetCache.Get(new CultRecordKey(recordKey))!).Text, Is.EqualTo("live"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2106,6 +2564,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2132,10 +2595,14 @@ namespace GameCult.Networking.Tests
                 Text = "live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("live"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2160,6 +2627,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2196,10 +2668,14 @@ namespace GameCult.Networking.Tests
                 Text = "updated"
             });
             update = await AwaitWithTimeout(updated.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(update.Text, Is.EqualTo("updated"));
             Assert.That(value.Current.Text, Is.EqualTo("updated"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2233,6 +2709,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2246,10 +2727,14 @@ namespace GameCult.Networking.Tests
                 client.SubscribeLiveValueAsync<NetworkSchemaNote>("demanded-note", recordKey),
                 TimeSpan.FromSeconds(2));
             await WaitUntilAsync(() => value.HasValue, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(value.Current.Text, Is.EqualTo("materialized-on-demand"));
             Assert.That(targetCache.Get(new CultRecordKey(recordKey)), Is.Null);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2280,6 +2765,11 @@ namespace GameCult.Networking.Tests
                 }
             }) { IsBackground = true };
             serverThread.Start();
+            // R-K: the join moves into finally - a failed assertion below must not leave this poll
+            // thread running past the point where `using` disposes the socket it polls, which turns a
+            // test failure into an unhandled-exception host crash.
+            try
+            {
 
             var targetCache = new CultCache();
             var targetDocuments = new CultNetDocumentRegistry(targetCache.Registry)
@@ -2300,10 +2790,14 @@ namespace GameCult.Networking.Tests
                 Text = "wire-live"
             });
             var update = await AwaitWithTimeout(changed.Task, TimeSpan.FromSeconds(2));
-
-            cancellation.Cancel();
             Assert.That(update.SchemaId, Is.EqualTo(wireSchema));
             Assert.That(((NetworkSchemaNote)update.Document!).Text, Is.EqualTo("wire-live"));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2331,26 +2825,39 @@ namespace GameCult.Networking.Tests
                 new NetworkSchemaNote { Schema = "tests.networking_note.v1", Text = "alias-live" },
                 previousDocument: null);
             var method = typeof(CultNetDatabaseSubscriptionServer).GetMethod(
-                "CreateChange",
+                "CreateMatchedRecord",
                 BindingFlags.Instance | BindingFlags.NonPublic)!;
-
-            var message = (CultNetDatabaseChangeRawMessage?)method.Invoke(subscriptions, new object[]
+            var requestType = typeof(CultNetDatabaseSubscriptionServer).GetNestedType(
+                "SubscriptionRequest", BindingFlags.NonPublic)!;
+            var requestCtor = requestType.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).Single();
+            var request = requestCtor.Invoke(new object?[]
             {
-                change,
-                new CultNetDatabaseSubscribeMessage
+                new CultNetSelection
                 {
-                    SubscriptionId = "alias-notes",
-                    SchemaIds = ["tests.networking_note.v1"],
-                    RecordKeys = ["tests:subscription-client:alias-note"]
+                    Schemas = ["tests.networking_note.v1"],
+                    Keys = ["tests:subscription-client:alias-note"]
                 },
-                "alias-notes"
+                "alias-notes",
+                "alias-notes",
+                true,
+                null,
+                null,
+                null,
+                false
             });
 
-            Assert.That(message, Is.Not.Null);
-            Assert.That(message!.Document!.SchemaId, Is.EqualTo(descriptor.SchemaId));
-            Assert.That(message.Document.SchemaName, Is.EqualTo(descriptor.SchemaName));
-            Assert.That(message.Document.SchemaVersion, Is.EqualTo(descriptor.SchemaVersion));
-            Assert.That(message.Document.SchemaContentHash, Is.EqualTo(descriptor.ContentHash));
+            var record = (CultNetRawDocumentRecord?)method.Invoke(subscriptions, new object?[]
+            {
+                change,
+                request,
+                null
+            });
+
+            Assert.That(record, Is.Not.Null);
+            Assert.That(record!.SchemaId, Is.EqualTo(descriptor.SchemaId));
+            Assert.That(record.SchemaName, Is.EqualTo(descriptor.SchemaName));
+            Assert.That(record.SchemaVersion, Is.EqualTo(descriptor.SchemaVersion));
+            Assert.That(record.SchemaContentHash, Is.EqualTo(descriptor.ContentHash));
         }
 
         [Test]
@@ -2397,6 +2904,8 @@ namespace GameCult.Networking.Tests
                 catch (Exception error) { serverFailure.TrySetResult(error); }
             }) { IsBackground = true };
             serverThread.Start();
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp(
                 runtimeId: "csharp-rudp-large-snapshot-client",
@@ -2419,11 +2928,16 @@ namespace GameCult.Networking.Tests
             await WaitUntilAsync(
                 () => server.Peers.Count == 1 && server.Peers.Single().PendingReliablePacketCount == 0,
                 TimeSpan.FromSeconds(2));
-            cancellation.Cancel();
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].Payload, Has.Length.EqualTo(128 * 1024));
             Assert.That(server.Stats.BytesSent, Is.LessThan(512 * 1024),
                 "A lossless large response must not remain trapped in the reliable resend queue.");
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
         }
 
         [Test]
@@ -2457,6 +2971,8 @@ namespace GameCult.Networking.Tests
                 catch (Exception error) { serverFailure.TrySetResult(error); }
             }) { IsBackground = true };
             serverThread.Start();
+            try
+            {
 
             using var client = CultNetSchemaClients.CreateRudp(
                 runtimeId: "csharp-rudp-concurrent-publish-client",
@@ -2499,7 +3015,12 @@ namespace GameCult.Networking.Tests
             if (completed == serverFailure.Task) throw await serverFailure.Task;
             if (completed != receivedAll.Task)
                 Assert.Fail($"Concurrent publish timed out after receiving {receivedIds.Count} of {expectedMessages} logical messages.");
-            cancellation.Cancel();
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
 
             Assert.That(receivedIds.Count, Is.EqualTo(expectedMessages));
         }
@@ -2918,6 +3439,63 @@ namespace GameCult.Networking.Tests
             Assert.That(SerializePlayerDataPayload(replicated!), Is.EqualTo(expectedPayload));
         }
 
+        // R-R (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): v0 lowering preserves v0's
+        // pre-cut answers exactly. recordKeys: [] answers empty - it does not lower to "no filter".
+        [Test]
+        public async Task CultNetDocumentRegistry_RawSnapshot_ExplicitEmptyRecordKeys_AnswersEmpty()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            await cache.AddAsync(new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@test", PasswordHash = "x", Username = "A" });
+
+            var request = registry.CreateSnapshotRequest("request-empty", recordKeys: Array.Empty<string>());
+            var response = registry.CreateRawSnapshotResponse(cache, "snapshot-empty", request);
+
+            Assert.That(response.Documents, Is.Empty);
+        }
+
+        // R-R: v0's pre-cut CreateRawSnapshotResponse iterated the requested record keys in the order
+        // the caller sent them, not in schema-and-key sort order. This pins that order survives the
+        // move to the shared evaluator.
+        [Test]
+        public async Task CultNetDocumentRegistry_RawSnapshot_KeepsRequestedRecordKeyOrder()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry()
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+
+            var players = new[] { "zeta", "alpha", "mid" }
+                .Select(name => new PlayerData { PlayerId = Guid.NewGuid(), Email = $"{name}@test", PasswordHash = "x", Username = name })
+                .ToArray();
+            var handles = new List<CultRecordHandle<PlayerData>>();
+            foreach (var player in players)
+                handles.Add(await cache.AddAsync(player));
+
+            // Request in an order that matches neither the insertion order nor the ordinal-sorted
+            // record-key order, so a schema-and-key sort would visibly reorder the response.
+            var requestedOrder = new[] { handles[2].Key.Value, handles[0].Key.Value, handles[1].Key.Value };
+            var request = registry.CreateSnapshotRequest("request-order", recordKeys: requestedOrder);
+            var response = registry.CreateRawSnapshotResponse(cache, "snapshot-order", request);
+
+            Assert.That(response.Documents.Select(d => d.RecordKey), Is.EqualTo(requestedOrder));
+        }
+
+        [Test]
+        public void CultNetV0SelectionLowering_Lower_DistinguishesNullFromExplicitEmpty()
+        {
+            Assert.That(CultNetV0SelectionLowering.Lower(null), Is.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(Array.Empty<string>()), Is.Not.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(Array.Empty<string>()), Is.Empty);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "", "  " }), Is.Not.Null);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "", "  " }), Is.Empty);
+            Assert.That(CultNetV0SelectionLowering.Lower(new[] { "b", "a", "b" }), Is.EqualTo(new[] { "b", "a" }));
+        }
+
         [Test]
         public async Task CultNetDatabase_PutGet_AndWatchByIndex_Uses_PrimaryShard()
         {
@@ -3225,6 +3803,100 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Documents, Has.Length.EqualTo(1));
             Assert.That(response.Documents[0].RecordKey, Is.EqualTo(key.Value));
             Assert.That(response.Documents[0].Payload, Is.EqualTo(CultDocumentMessagePackSerialization.SerializeUntyped(note, note.GetType())));
+        }
+
+        // S2-3 (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): the shard snapshot answers
+        // through the same evaluator as the non-shard path, no loop of its own. An unfiltered request
+        // ({schemas:null, keys:null}) must return the same rows from both.
+        [Test]
+        public async Task CultNetDatabase_ShardAndNonShardSnapshot_AgreeOnUnfilteredRequest()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "unfiltered-notes",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "unfiltered-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3080"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            await database.PutAsync(new CultRecordKey("unfiltered-note:one"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "one"
+            });
+            await database.PutAsync(new CultRecordKey("unfiltered-note:two"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "two"
+            });
+            // Outside the shard's key prefix: must reach the non-shard snapshot but never the
+            // shard-scoped one, so an unfiltered request still proves shard membership is enforced.
+            await database.PutAsync(new CultRecordKey("other-note:outside-shard"), new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "outside"
+            });
+
+            var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-unfiltered", filter: null);
+            var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-unfiltered", filter: null);
+
+            Assert.That(
+                shardScoped.Documents.Select(document => document.RecordKey).OrderBy(value => value, StringComparer.Ordinal),
+                Is.EqualTo(new[] { "unfiltered-note:one", "unfiltered-note:two" }));
+            Assert.That(
+                nonShard.Documents.Select(document => document.RecordKey).OrderBy(value => value, StringComparer.Ordinal),
+                Is.EqualTo(new[] { "other-note:outside-shard", "unfiltered-note:one", "unfiltered-note:two" }));
+            Assert.That(shardScoped.Documents, Has.Length.EqualTo(2));
+        }
+
+        // S2-3, second probe: an override of the binding schema id (rather than the descriptor's own)
+        // must match on both the shard and non-shard paths - both run binding-alias expansion.
+        [Test]
+        public async Task CultNetDatabase_ShardAndNonShardSnapshot_AgreeOnBindingSchemaIdOverride()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<NetworkSchemaNote>(cache.Registry));
+            var descriptor = cache.Registry.GetRequired<NetworkSchemaNote>();
+            var shard = new CultNetShardDescriptor(
+                "override-notes",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [descriptor.SchemaId],
+                keyPrefix: "override-note:",
+                primaryEndpoints: ["cultnet://runtime-a:3081"]);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("override-note:one");
+            await database.PutAsync(key, new NetworkSchemaNote
+            {
+                Schema = "tests.networking_note.v1",
+                Text = "override"
+            });
+
+            var request = registry.CreateSnapshotRequest(
+                "snapshot-override-request",
+                schemaIds: ["tests.networking_note.v1"],
+                recordKeys: [key.Value]);
+            var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-override", request);
+            var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-override", request);
+
+            Assert.That(nonShard.Documents, Has.Length.EqualTo(1));
+            Assert.That(shardScoped.Documents, Has.Length.EqualTo(1));
+            Assert.That(shardScoped.Documents[0].RecordKey, Is.EqualTo(nonShard.Documents[0].RecordKey));
         }
 
         [Test]
@@ -3598,6 +4270,7 @@ namespace GameCult.Networking.Tests
 
             var response = await AwaitWithTimeout(responseCompletion.Task, TimeSpan.FromSeconds(2));
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.MessageId, Is.EqualTo("rudp-schema-client-test"));
             Assert.That(response.Schemas.Single().SchemaId, Is.EqualTo("rudp.schema.test"));
@@ -3667,6 +4340,7 @@ namespace GameCult.Networking.Tests
             });
             var response = await client.FetchAsync($"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}");
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.Verses.Single().VerseId, Is.EqualTo("rudp-verse"));
         }
@@ -3736,6 +4410,7 @@ namespace GameCult.Networking.Tests
                 $"rudp://127.0.0.1:{((IPEndPoint)serverSocket.LocalEndPoint!).Port}",
                 new CultMeshPeerExchangeRequestMessage { VerseId = "local" });
             await AwaitWithTimeout(serverDone.Task, TimeSpan.FromSeconds(2));
+            serverThread.Join();
 
             Assert.That(response.Peers.Single().PeerId, Is.EqualTo("rudp-peer"));
         }
@@ -4818,6 +5493,197 @@ namespace GameCult.Networking.Tests
             Assert.That(replicated, Is.Not.Null);
             Assert.That(replicated!.Username, Is.EqualTo("Replica"));
             Assert.That(targetDatabase.GetMutationLog("players-replica"), Has.Count.EqualTo(1));
+            // R-Q (docs/cultnet-selection-cut.md, fix batch 3): a replica apply is a commit path too -
+            // it must set LastWriteSequence exactly like a local commit does (CultNetDatabase.cs, the
+            // ApplyCommittedPutAsync/ApplyCommittedDelete gap), or the selection evaluator's order and
+            // cursor treat a replicated row as never written.
+            Assert.That(targetDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_ReplicaApply_DeleteSetsLastWriteSequence()
+        {
+            var sourceCache = new CultCache();
+            var targetCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var targetRegistry = new CultNetDocumentRegistry(targetCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    targetCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = sourceCache.Registry.GetRequired<PlayerData>().SchemaId;
+            CultNetShardDescriptor Shard(bool isPrimary) => new(
+                "players-replica-delete",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: isPrimary,
+                schemaIds: [schemaId],
+                keyPrefix: "player:");
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                Shards = [Shard(true)]
+            });
+            var targetDatabase = new CultNetDatabase(targetCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = targetRegistry,
+                Shards = [Shard(false)]
+            });
+            using var server = new Server(sourceCache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, sourceDatabase);
+            var key = new CultRecordKey("player:replica-delete");
+            var player = new PlayerData { PlayerId = Guid.NewGuid(), Email = "d@example.test", PasswordHash = "hash", Username = "D" };
+
+            await sourceDatabase.PutAsync(key, player);
+            await sourceDatabase.DeleteAsync<PlayerData>(key);
+            var response = databaseServer.CreateShardLogResponse(new CultNetShardLogRequestMessage
+            {
+                ShardId = "players-replica-delete",
+                ShardEpoch = 1
+            });
+
+            await targetDatabase.ApplyShardLogResponseAsync(response);
+
+            Assert.That(targetCache.Get<PlayerData>(key), Is.Null);
+            Assert.That(targetDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(2));
+        }
+
+        [Test]
+        public async Task CultNetDatabase_RebuildsLastWriteSequence_FromTheDurableLogAfterRestart()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "shard-logs", Guid.NewGuid().ToString("N"));
+            var schemaId = new CultCache().Registry.GetRequired<PlayerData>().SchemaId;
+            var shard = new CultNetShardDescriptor(
+                "players-durable-sequence",
+                "runtime-a",
+                epoch: 1,
+                isPrimary: true,
+                schemaIds: [schemaId],
+                keyPrefix: "player:");
+
+            var sourceCache = new CultCache();
+            var sourceRegistry = new CultNetDocumentRegistry(sourceCache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    sourceCache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var sourceDatabase = new CultNetDatabase(sourceCache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = sourceRegistry,
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+            var key = new CultRecordKey("player:durable-sequence");
+            var player = new PlayerData { PlayerId = Guid.NewGuid(), Email = "r@example.test", PasswordHash = "hash", Username = "R" };
+            await sourceDatabase.PutAsync(key, player);
+            Assert.That(sourceDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+            sourceDatabase.Dispose();
+
+            // R-Q: a restart is a fresh CultNetDatabase instance over the same durable log - the
+            // sequence InitializeLogSequencesFromStore used to rebuild only _nextLogSequences
+            // (what the next local commit gets), never _lastWriteSequence (what a row's own last
+            // write was), so a selection evaluated right after restart would order/page the row as
+            // "never written" until it was written again.
+            var restartedCache = new CultCache();
+            var restartedDatabase = new CultNetDatabase(restartedCache, new CultNetDatabaseOptions
+            {
+                MutationLogStore = new CultNetFileShardMutationLogStore(rootPath),
+                Shards = [shard]
+            });
+
+            Assert.That(restartedDatabase.LastWriteSequence(schemaId, key), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task CultNetDatabaseServer_RefusesASelectionSpanningMoreThanOneShardsLog()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor("shard-a", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "a:"),
+                    new CultNetShardDescriptor("shard-b", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "b:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            await database.PutAsync(
+                new CultRecordKey("a:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "A" });
+            await database.PutAsync(
+                new CultRecordKey("b:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "b@example.test", PasswordHash = "hash", Username = "B" });
+
+            // R-Q: asOf is one shard-log watermark - a selection whose matched rows span shard-a's log
+            // and shard-b's log cannot honestly claim to be exact as of it, so it is refused rather than
+            // answered, reusing the selection_invalid door refusal (R-N) rather than a second shape.
+            var ex = Assert.Throws<CultNetSelectionInvalidException>(() => databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                Selection = new CultNetSelection { Schemas = [schemaId] }
+            }));
+            Assert.That(ex!.Field, Is.EqualTo("asOf"));
+        }
+
+        // S-9 (docs/cultnet-selection-cut.md, fix batch 4): asOf is the watermark of the shard(s) the
+        // selection's matched rows actually come from, not CurrentAsOf()'s database-wide maximum across
+        // every shard - a shard-log sequence is a per-shard counter, so a selection matching only
+        // shard-a's row must not claim exactness as of a sequence shard-b's unrelated writes advanced to.
+        [Test]
+        public async Task CultNetDatabaseServer_SelectionResponseAsOf_IsTheMatchedShardsOwnWatermarkNotTheDatabaseWideMaximum()
+        {
+            var cache = new CultCache();
+            var registry = new CultNetDocumentRegistry(cache.Registry)
+                .Register(CultNetDocumentBinding.ForDocument<PlayerData>(
+                    cache.Registry,
+                    payloadSerializer: SerializePlayerDataPayload,
+                    payloadDeserializer: DeserializePlayerDataPayload));
+            var schemaId = cache.Registry.GetRequired<PlayerData>().SchemaId;
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                DocumentRegistry = registry,
+                Shards =
+                [
+                    new CultNetShardDescriptor("shard-a", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "a:"),
+                    new CultNetShardDescriptor("shard-b", "runtime-a", epoch: 1, isPrimary: true, schemaIds: [schemaId], keyPrefix: "b:")
+                ]
+            });
+            using var server = new Server(cache, DevelopmentServerSecurity);
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            await database.PutAsync(
+                new CultRecordKey("a:one"),
+                new PlayerData { PlayerId = Guid.NewGuid(), Email = "a@example.test", PasswordHash = "hash", Username = "A" });
+            // shard-b takes several more writes than shard-a, so the database-wide maximum runs well
+            // ahead of shard-a's own watermark.
+            for (var i = 0; i < 4; i++)
+            {
+                await database.PutAsync(
+                    new CultRecordKey("b:one"),
+                    new PlayerData { PlayerId = Guid.NewGuid(), Email = $"b{i}@example.test", PasswordHash = "hash", Username = "B" });
+            }
+
+            Assert.That(database.CurrentAsOf(), Is.EqualTo(4UL), "sanity: the database-wide maximum is shard-b's watermark");
+            Assert.That(database.CurrentAsOf("shard-a"), Is.EqualTo(1UL), "sanity: shard-a's own watermark is unaffected by shard-b's writes");
+
+            var response = databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                Selection = new CultNetSelection { Keys = ["a:one"] }
+            });
+
+            Assert.That(response.AsOf, Is.EqualTo(1UL));
         }
 
         [Test]
@@ -5582,11 +6448,11 @@ namespace GameCult.Networking.Tests
             {
                 change,
                 "sub-1",
-                new CultNetDatabaseSubscribeMessage
+                new CultNetSelection
                 {
-                    SubscriptionId = "sub-1",
-                    SchemaIds = [schemaId],
-                    RecordKeys = [key.Value]
+                    Schemas = [schemaId],
+                    Keys = [key.Value],
+                    Projection = CultNetSelectionProjections.Document
                 }
             });
 
@@ -5632,11 +6498,11 @@ namespace GameCult.Networking.Tests
             {
                 change,
                 "sub-alias",
-                new CultNetDatabaseSubscribeMessage
+                new CultNetSelection
                 {
-                    SubscriptionId = "sub-alias",
-                    SchemaIds = ["tests.networking_note.v1"],
-                    RecordKeys = [key.Value]
+                    Schemas = ["tests.networking_note.v1"],
+                    Keys = [key.Value],
+                    Projection = CultNetSelectionProjections.Document
                 }
             });
 

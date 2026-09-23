@@ -18,11 +18,13 @@ namespace GameCult.Networking
         private readonly CultNetDatabase _database;
         private readonly CultNetDatabaseServerOptions _options;
         private readonly Func<CultNetSnapshotRequestMessage, CultNetServerPeer, Task> _snapshotHandler;
+        private readonly Func<CultNetSnapshotRequestV1Message, CultNetServerPeer, Task> _snapshotHandlerV1;
         private readonly Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task> _putHandler;
         private readonly Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task> _deleteHandler;
         private readonly Func<CultNetShardCatalogRequestMessage, CultNetServerPeer, Task> _shardCatalogHandler;
         private readonly Func<CultNetShardLogRequestMessage, CultNetServerPeer, Task> _shardLogHandler;
         private readonly Func<CultNetDatabaseSubscribeMessage, CultNetServerPeer, Task> _subscribeHandler;
+        private readonly Func<CultNetDatabaseSubscribeV1Message, CultNetServerPeer, Task> _subscribeHandlerV1;
         private readonly Func<CultNetDatabaseUnsubscribeMessage, CultNetServerPeer, Task> _unsubscribeHandler;
         private readonly ConcurrentDictionary<string, IDisposable> _subscriptions = new(StringComparer.Ordinal);
         private bool _disposed;
@@ -39,19 +41,23 @@ namespace GameCult.Networking
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _options = options ?? new CultNetDatabaseServerOptions();
             _snapshotHandler = HandleSnapshotRequestAsync;
+            _snapshotHandlerV1 = HandleSnapshotRequestV1Async;
             _putHandler = HandlePutAsync;
             _deleteHandler = HandleDeleteAsync;
             _shardCatalogHandler = HandleShardCatalogRequestAsync;
             _shardLogHandler = HandleShardLogRequestAsync;
             _subscribeHandler = HandleSubscribeAsync;
+            _subscribeHandlerV1 = HandleSubscribeV1Async;
             _unsubscribeHandler = HandleUnsubscribeAsync;
 
             _server.OnCultNet(_snapshotHandler);
+            _server.OnCultNet(_snapshotHandlerV1);
             _server.OnCultNet(_putHandler);
             _server.OnCultNet(_deleteHandler);
             _server.OnCultNet(_shardCatalogHandler);
             _server.OnCultNet(_shardLogHandler);
             _server.OnCultNet(_subscribeHandler);
+            _server.OnCultNet(_subscribeHandlerV1);
             _server.OnCultNet(_unsubscribeHandler);
         }
 
@@ -109,6 +115,30 @@ namespace GameCult.Networking
                 _database.Cache,
                 string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
                 request);
+        }
+
+        /// <summary>
+        /// Answers a typed-selection snapshot request (R-A, docs/cultnet-selection-cut.md): the door,
+        /// then one evaluation over the database's rows in last-write order, through
+        /// <see cref="CultNetDocumentRegistry.CreateSelectionResponse"/>.
+        /// </summary>
+        public CultNetSnapshotResponseRawV1Message CreateSelectionResponse(CultNetSnapshotRequestV1Message request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            return _database.Documents.CreateSelectionResponse(
+                _database.Cache,
+                string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
+                request.Selection,
+                ordinalOf: (schemaId, key) => _database.LastWriteSequence(schemaId, key) ?? 0,
+                asOf: _database.CurrentAsOf(),
+                // R-Q: asOf is one shard-log watermark, so a selection whose matched rows span more than
+                // one shard's log is refused rather than answered against a watermark that is not
+                // exact for all of them.
+                shardIdOf: (schemaId, key) => _database.ResolveShard(schemaId, key).ShardId,
+                cursorKey: _database.CursorKey,
+                // S-9: once the matched rows resolve to one shard, asOf is that shard's own watermark,
+                // not CurrentAsOf()'s database-wide maximum across every shard.
+                asOfForShard: _database.CurrentAsOf);
         }
 
         /// <summary>
@@ -193,11 +223,13 @@ namespace GameCult.Networking
 
             _disposed = true;
             _server.RemoveCultNetMessageListener<CultNetSnapshotRequestMessage>(_snapshotHandler);
+            _server.RemoveCultNetMessageListener<CultNetSnapshotRequestV1Message>(_snapshotHandlerV1);
             _server.RemoveCultNetMessageListener<CultNetDocumentPutRawMessage>(_putHandler);
             _server.RemoveCultNetMessageListener<CultNetDocumentDeleteMessage>(_deleteHandler);
             _server.RemoveCultNetMessageListener<CultNetShardCatalogRequestMessage>(_shardCatalogHandler);
             _server.RemoveCultNetMessageListener<CultNetShardLogRequestMessage>(_shardLogHandler);
             _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeMessage>(_subscribeHandler);
+            _server.RemoveCultNetMessageListener<CultNetDatabaseSubscribeV1Message>(_subscribeHandlerV1);
             _server.RemoveCultNetMessageListener<CultNetDatabaseUnsubscribeMessage>(_unsubscribeHandler);
             foreach (var subscription in _subscriptions.Values)
             {
@@ -210,6 +242,38 @@ namespace GameCult.Networking
         private Task HandleSnapshotRequestAsync(CultNetSnapshotRequestMessage request, CultNetServerPeer peer)
         {
             peer.SendCultNet(CreateSnapshotResponse(request));
+            return Task.CompletedTask;
+        }
+
+        private Task HandleSnapshotRequestV1Async(CultNetSnapshotRequestV1Message request, CultNetServerPeer peer)
+        {
+            try
+            {
+                peer.SendCultNet(CreateSelectionResponse(request));
+            }
+            catch (CultNetSelectionInvalidException ex)
+            {
+                peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+            }
+            catch (CultNetSelectionCursorException ex)
+            {
+                peer.SendCultNet(CultNetErrorMessage.ForCursor(ex));
+            }
+            catch (CultNetSelectionReferenceOutsideTargetException ex)
+            {
+                peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+            }
+            // R-AM: an untyped fault answers like HandleShardLogRequestAsync/HandlePutAsync's own
+            // catch (Exception) - a CultNetErrorMessage on the wire, not silence. Before this, only
+            // the three typed selection exceptions were caught here; anything else propagated up into
+            // the dispatch backstop (CultNetRudpSchemaServer.cs), which swallowed it with no log and
+            // hid SM-6's ArgumentNullException regression for a whole batch.
+            catch (Exception ex)
+            {
+                _server.Logger.LogError($"CultNet snapshot v1 request failed: {ex.Message}");
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+            }
+
             return Task.CompletedTask;
         }
 
@@ -315,6 +379,94 @@ namespace GameCult.Networking
             return Task.CompletedTask;
         }
 
+        private Task HandleSubscribeV1Async(CultNetDatabaseSubscribeV1Message message, CultNetServerPeer peer)
+        {
+            var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
+                ? message.MessageId
+                : message.SubscriptionId;
+            if (string.IsNullOrWhiteSpace(subscriptionId))
+            {
+                peer.SendCultNet(new CultNetErrorMessage { Error = "Database subscription requires a subscriptionId or messageId." });
+                return Task.CompletedTask;
+            }
+
+            // S-11: the door runs first, unconditionally (R-F) - a selection that is invalid for reasons
+            // unrelated to its hop (an empty keys list, an undeclared index, ...) reports that refusal,
+            // not a hop refusal that has nothing to do with why it was actually rejected.
+            try
+            {
+                message.Selection.Validate(_database.Cache.Registry.AllDescriptors.ToArray());
+            }
+            catch (CultNetSelectionInvalidException ex)
+            {
+                peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+                return Task.CompletedTask;
+            }
+
+            // This server delivers live changes through the single-row fast path (CreateChangeMessage /
+            // CultNetSelectionEvaluator.Matches), which is set-independent by construction - the same
+            // ceiling v0 subscriptions on this server already have. A hop-bearing selection is
+            // set-dependent (D6) and needs the subscription server's reconcile loop instead, so it is
+            // refused here, after the door, rather than reaching Matches' own InvalidOperationException
+            // on the first change. The refused field names whichever hop is actually set - cited, not
+            // always cites - so the refusal describes the selection that was actually sent.
+            if (message.Selection.HasHop)
+            {
+                var hopField = message.Selection.Cites != null ? "cites" : "cited";
+                peer.SendCultNet(new CultNetErrorMessage
+                {
+                    Error = $"selection_invalid: selection.{hopField} needs the subscription server's reconcile loop (D6); this server only fast-matches a single row.",
+                    Code = "selection_invalid",
+                    Details = new CultNetErrorDetails { Field = hopField }
+                });
+                return Task.CompletedTask;
+            }
+
+            var key = SubscriptionKey(peer.Peer, subscriptionId);
+            _subscriptions.AddOrUpdate(
+                key,
+                _ => CreateSubscription(message.Selection, subscriptionId, peer),
+                (_, existing) =>
+                {
+                    existing.Dispose();
+                    return CreateSubscription(message.Selection, subscriptionId, peer);
+                });
+
+            if (message.IncludeSnapshot)
+            {
+                try
+                {
+                    peer.SendCultNet(CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+                    {
+                        MessageId = message.MessageId,
+                        Selection = message.Selection
+                    }));
+                }
+                catch (CultNetSelectionInvalidException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForSelectionInvalid(ex));
+                }
+                catch (CultNetSelectionCursorException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForCursor(ex));
+                }
+                catch (CultNetSelectionReferenceOutsideTargetException ex)
+                {
+                    peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
+                }
+            }
+            else
+            {
+                peer.SendCultNet(new CultNetSnapshotResponseRawV1Message
+                {
+                    MessageId = message.MessageId,
+                    AsOf = _database.CurrentAsOf()
+                });
+            }
+
+            return Task.CompletedTask;
+        }
+
         private Task HandleUnsubscribeAsync(CultNetDatabaseUnsubscribeMessage message, CultNetServerPeer peer)
         {
             var subscriptionId = string.IsNullOrWhiteSpace(message.SubscriptionId)
@@ -334,9 +486,25 @@ namespace GameCult.Networking
             string subscriptionId,
             CultNetServerPeer peer)
         {
+            // v0 has no engine of its own (docs/cultnet-selection-cut.md, D3/D4): it lowers into a
+            // Selection and is matched by the one evaluator, same as a v1 subscribe.
+            var selection = new CultNetSelection
+            {
+                Schemas = request.SchemaIds,
+                Keys = request.RecordKeys,
+                Projection = CultNetSelectionProjections.Document
+            };
+            return CreateSubscription(selection, subscriptionId, peer);
+        }
+
+        private IDisposable CreateSubscription(
+            CultNetSelection selection,
+            string subscriptionId,
+            CultNetServerPeer peer)
+        {
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                var outbound = CreateChangeMessage(change, subscriptionId, request);
+                var outbound = CreateChangeMessage(change, subscriptionId, selection);
                 if (outbound != null)
                 {
                     peer.SendCultNet(outbound);
@@ -347,21 +515,28 @@ namespace GameCult.Networking
         internal CultNetDatabaseChangeRawMessage? CreateChangeMessage(
             object change,
             string subscriptionId,
-            CultNetDatabaseSubscribeMessage request)
+            CultNetSelection selection)
         {
             var changeType = change.GetType();
             var key = (CultRecordKey)(changeType.GetProperty("Key")?.GetValue(change) ?? new CultRecordKey(string.Empty));
             var schemaId = (string?)changeType.GetProperty("SchemaId")?.GetValue(change) ?? string.Empty;
             var documentType = changeType.IsGenericType ? changeType.GetGenericArguments()[0] : null;
             var descriptor = documentType == null ? null : _database.Cache.Registry.GetRequired(documentType);
-            var binding = documentType == null ? null : _database.Documents.GetByDocumentType(documentType);
-            if (!Matches(request, schemaId, key, descriptor, binding))
+            var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
+            var document = changeType.GetProperty("Document")?.GetValue(change);
+
+            if (descriptor == null)
             {
                 return null;
             }
 
-            var kind = (CultNetDatabaseChangeKind)(changeType.GetProperty("Kind")?.GetValue(change) ?? CultNetDatabaseChangeKind.Updated);
-            var document = changeType.GetProperty("Document")?.GetValue(change);
+            // R-M: the one binding-alias reconciler (CultNetDocumentRegistry.ExpandSchemaBindingAliases).
+            var effectiveSelection = _database.Documents.ExpandSchemaBindingAliases(selection);
+            if (!CultNetSelectionEvaluator.Matches(descriptor, key, document, effectiveSelection))
+            {
+                return null;
+            }
+
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
             {
                 return new CultNetDatabaseChangeRawMessage
@@ -379,92 +554,8 @@ namespace GameCult.Networking
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
                 ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
-                Document = CreateRawDocumentRecord(key, document)
+                Document = _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"))
             };
-        }
-
-        private CultNetRawDocumentRecord CreateRawDocumentRecord(CultRecordKey key, object document)
-        {
-            var method = typeof(CultNetDocumentRegistry)
-                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-                .Single(candidate => candidate.Name == nameof(CultNetDocumentRegistry.CreateRawDocumentPutMessage) &&
-                                     candidate.IsGenericMethodDefinition);
-            var documentType = document.GetType();
-            var handleType = typeof(CultRecordHandle<>).MakeGenericType(documentType);
-            var handle = Activator.CreateInstance(handleType, new object[] { key });
-            var message = method
-                .MakeGenericMethod(documentType)
-                .Invoke(_database.Documents, new[] { Guid.NewGuid().ToString("N"), handle, document, null });
-            return ((CultNetDocumentPutRawMessage)message!).Document;
-        }
-
-        private static bool Matches(
-            CultNetDatabaseSubscribeMessage request,
-            string schemaId,
-            CultRecordKey key,
-            CultDocumentDescriptor? descriptor,
-            CultNetDocumentBinding? binding)
-        {
-            var schemaMatches = MatchesSchema(request.SchemaIds, schemaId, descriptor, binding);
-            var keyMatches = request.RecordKeys == null ||
-                             request.RecordKeys.Length == 0 ||
-                             request.RecordKeys.Contains(key.Value, StringComparer.Ordinal);
-            return schemaMatches && keyMatches;
-        }
-
-        private static bool MatchesSchema(
-            string[]? requestedSchemaIds,
-            string schemaId,
-            CultDocumentDescriptor? descriptor,
-            CultNetDocumentBinding? binding)
-        {
-            if (requestedSchemaIds == null || requestedSchemaIds.Length == 0)
-            {
-                return true;
-            }
-
-            var requested = requestedSchemaIds.ToHashSet(StringComparer.Ordinal);
-            if (requested.Contains(schemaId))
-            {
-                return true;
-            }
-
-            if (descriptor == null)
-            {
-                return false;
-            }
-
-            if (requested.Contains(descriptor.SchemaId) ||
-                requested.Contains(descriptor.SchemaName) ||
-                requested.Contains(descriptor.SchemaVersion) ||
-                (binding != null && requested.Contains(binding.SchemaId)))
-            {
-                return true;
-            }
-
-            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requested.Contains))
-            {
-                return true;
-            }
-
-            return requested
-                .Select(InferSchemaName)
-                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
-                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-            {
-                return null;
-            }
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
 
         private static string SubscriptionKey(NetPeer peer, string subscriptionId)

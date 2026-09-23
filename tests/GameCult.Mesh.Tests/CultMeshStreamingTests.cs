@@ -2745,6 +2745,87 @@ public sealed class CultMeshStreamingTests
             CultMesh.Verse("starbridge", "unity-pilot"));
 
         (await mixedAliasSchemaHandle.LatestAsync()).Text.Should().Be("compatible-record-key");
+
+        // The recordKey match is exact (ordinal), not case-insensitive. A case-variant key must not
+        // win even when it appears first in the response.
+        var caseVariantKey = key.Value.ToUpperInvariant();
+        var caseVariantKeyHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
+            _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
+            {
+                MessageId = "case-variant-key",
+                Documents = new[]
+                {
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId,
+                        RecordKey = caseVariantKey,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "wrong-case-key",
+                                Revision = 13
+                            },
+                            typeof(MeshNoteDocument))
+                    },
+                    new CultNetRawDocumentRecord
+                    {
+                        SchemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId,
+                        RecordKey = key.Value,
+                        StoredAt = DateTimeOffset.UtcNow.ToString("O"),
+                        PayloadEncoding = "messagepack",
+                        Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                            new MeshNoteDocument
+                            {
+                                Schema = "tests.mesh_note.v1",
+                                Text = "right-case-key",
+                                Revision = 14
+                            },
+                            typeof(MeshNoteDocument))
+                    }
+                }
+            }),
+            key.Value,
+            CultMesh.Verse("starbridge", "unity-pilot"));
+
+        (await caseVariantKeyHandle.LatestAsync()).Text.Should().Be("right-case-key");
+    }
+
+    // R-R (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22) corrects the earlier commit-2
+    // ruling this test used to pin: an explicit empty recordKeys array is a real filter, not "no
+    // filter" that falls back to the type's own schema default. Discrepancy against R-R's prose,
+    // reported rather than silently resolved: at CultMesh's typed convenience layer this selection
+    // never reaches the wire at all. ResolveDefaultSelection now produces Keys=[] instead of Keys=null,
+    // and EnsureV0Compatible - CultMesh's own client-side door, landed under the earlier ruling R-F -
+    // already refuses an empty selection.keys before any request is sent ("Keys=[]/[\"\"] is refused
+    // rather than silently lowered to 'every key'", CultMeshSnapshots.cs:836-841). R-R's "recordKeys:
+    // [] answers empty" therefore only holds for the raw v0 wire protocol server, which any v0 peer
+    // can call directly without CultMesh's typed wrapper - see
+    // CultNetDocumentRegistry_RawSnapshot_ExplicitEmptyRecordKeys_AnswersEmpty in NetworkingTests.cs.
+    [Test]
+    public void FetchDocumentsAsync_WithExplicitEmptyRecordKeys_IsRefusedClientSide()
+    {
+        var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared)
+            .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
+        var requests = new List<CultNetSnapshotRequestMessage>();
+
+        using var session = CultMesh.SnapshotSession(
+            "cultnet://empty-keys-default.test:3075",
+            new CultMeshSnapshotRequestOptions
+            {
+                CreateClient = () => new MeshSnapshotSchemaClient(request =>
+                {
+                    requests.Add(request);
+                    return registry.CreateRawSnapshotResponse(new CultCache(), request.MessageId, request);
+                })
+            },
+            registry);
+
+        Assert.ThrowsAsync<CultNetSelectionInvalidException>(
+            () => session.FetchDocumentsAsync<MeshNoteDocument>(recordKeys: Array.Empty<string>()));
+        requests.Should().BeEmpty();
     }
 
     [Test]
@@ -2936,7 +3017,7 @@ public sealed class CultMeshStreamingTests
         var endpoint = "cultnet://snapshot-helper.test:3075";
         var options = new CultMeshSnapshotRequestOptions
         {
-            RecordKeys = new[] { key.Value },
+            Selection = new CultNetSelection { Keys = new[] { key.Value } },
             ShardId = "primary",
             ShardEpoch = 7,
             MessageIdPrefix = "mesh-test-scoped-snapshot",
@@ -2986,7 +3067,7 @@ public sealed class CultMeshStreamingTests
         var options = new CultMeshSnapshotRequestOptions
         {
             ResponseTimeout = TimeSpan.FromSeconds(30),
-            RecordKeys = new[] { "eve:surface:test" },
+            Selection = new CultNetSelection { Keys = new[] { "eve:surface:test" } },
             CreateClient = () => new FailedBackgroundSchemaClient(
                 new FormatException("malformed fragment"))
         };
@@ -3051,7 +3132,7 @@ public sealed class CultMeshStreamingTests
             "cultnet://foreign-schema.test:3075",
             new CultMeshSnapshotRequestOptions
             {
-                RecordKeys = new[] { key.Value },
+                Selection = new CultNetSelection { Keys = new[] { key.Value } },
                 CreateClient = () => new MeshSnapshotSchemaClient(request =>
                 {
                     snapshot.MessageId = request.MessageId;
@@ -3236,7 +3317,7 @@ public sealed class CultMeshStreamingTests
             endpoint,
             new CultMeshSnapshotRequestOptions
             {
-                RecordKeys = new[] { key.Value },
+                Selection = new CultNetSelection { Keys = new[] { key.Value } },
                 CreateClient = () => new MeshSnapshotSchemaClient(request =>
                     networkRegistry.CreateRawSnapshotResponse(sourceCache, request.MessageId, request))
             },

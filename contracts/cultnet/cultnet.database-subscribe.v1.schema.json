@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.database-subscribe.v1.schema.json",
+  "title": "CultNet Database Subscribe Message v1",
+  "type": "object",
+  "required": ["schemaVersion", "messageId", "subscriptionId", "selection"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "cultnet.database_subscribe.v1" },
+    "messageId": { "type": "string", "minLength": 1 },
+    "subscriptionId": { "type": "string", "minLength": 1 },
+    "selection": { "$ref": "cultnet.selection.schema.json" },
+    "includeSnapshot": { "type": "boolean", "default": true },
+    "consumerRuntimeId": { "type": "string", "minLength": 1 },
+    "bodyIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "supportedBodyTransports": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

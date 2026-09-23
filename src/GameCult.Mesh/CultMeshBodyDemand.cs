@@ -188,31 +188,46 @@ namespace GameCult.Mesh
             SubscriptionId = Require(subscriptionId, nameof(subscriptionId));
             ConsumerRuntimeId = Require(consumerRuntimeId, nameof(consumerRuntimeId));
             BodyId = Require(bodyId, nameof(bodyId));
-            RecordKeys = new[]
-                {
-                    Require(viewRecordKey, nameof(viewRecordKey)),
-                    CultMeshBodyPublicationDocument.CreateLatestRecordKey(bodyId).Value
-                }
-                .Concat(additionalRecordKeys ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            SchemaIds = new[]
-                {
-                    Require(viewSchemaId, nameof(viewSchemaId)),
-                    CultMeshBodyPublicationSchemaVersions.Publication
-                }
-                .Concat(additionalSchemaIds ?? Array.Empty<string>())
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
+            _selection = new CultNetSelection
+            {
+                Keys = new[]
+                    {
+                        Require(viewRecordKey, nameof(viewRecordKey)),
+                        CultMeshBodyPublicationDocument.CreateLatestRecordKey(bodyId).Value
+                    }
+                    .Concat(additionalRecordKeys ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                Schemas = new[]
+                    {
+                        Require(viewSchemaId, nameof(viewSchemaId)),
+                        CultMeshBodyPublicationSchemaVersions.Publication
+                    }
+                    .Concat(additionalSchemaIds ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray()
+            };
         }
 
         public string SubscriptionId { get; }
         public string ConsumerRuntimeId { get; }
         public string BodyId { get; }
-        public IReadOnlyList<string> RecordKeys { get; }
-        public IReadOnlyList<string> SchemaIds { get; }
+
+        private readonly CultNetSelection _selection;
+
+        /// <summary>
+        /// The view record, the body's latest-publication record, and any additional keys/schemas, as
+        /// one selection. Returns a fresh copy on every read: <see cref="CultNetSelection"/>'s arrays
+        /// are wire-mutable by design, and this contract does not let a caller mutate them out from
+        /// under it (docs/cultnet-selection-cut.md, S2-8).
+        /// </summary>
+        public CultNetSelection Selection => new()
+        {
+            Schemas = (string[]?)_selection.Schemas?.Clone(),
+            Keys = (string[]?)_selection.Keys?.Clone()
+        };
 
         private static string Require(string value, string parameterName) =>
             string.IsNullOrWhiteSpace(value)

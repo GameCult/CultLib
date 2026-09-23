@@ -567,7 +567,12 @@ namespace GameCult.Networking
                 or CultNetDocumentDeleteMessage
                 or CultNetDatabaseSubscribeMessage
                 or CultNetDatabaseUnsubscribeMessage
-                or CultNetSnapshotRequestMessage;
+                or CultNetSnapshotRequestMessage
+                // R-A: v1 requests reach the same pre-verification handling as their v0 counterparts -
+                // otherwise a v1 snapshot/subscribe from an unverified peer is silently dropped before
+                // any listener runs, unlike v0 (docs/cultnet-selection-cut.md, Soul's whole-cut pass F1).
+                or CultNetSnapshotRequestV1Message
+                or CultNetDatabaseSubscribeV1Message;
         }
 
         /// <inheritdoc />

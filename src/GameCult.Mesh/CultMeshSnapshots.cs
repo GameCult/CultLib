@@ -13,13 +13,10 @@ namespace GameCult.Mesh
     /// <summary>
     /// Options for one scoped CultNet snapshot request.
     /// </summary>
-    public sealed class CultMeshSnapshotRequestOptions
+    public sealed record CultMeshSnapshotRequestOptions
     {
-        /// <summary>Gets or sets schema ids to request. Empty means no schema filter.</summary>
-        public IReadOnlyList<string>? SchemaIds { get; set; }
-
-        /// <summary>Gets or sets record keys to request. Empty means no record-key filter.</summary>
-        public IReadOnlyList<string>? RecordKeys { get; set; }
+        /// <summary>Gets or sets the selection to request. Absent selects every schema and key.</summary>
+        public CultNetSelection? Selection { get; set; }
 
         /// <summary>Gets or sets the target shard id, when the endpoint is shard-aware.</summary>
         public string? ShardId { get; set; }
@@ -87,7 +84,7 @@ namespace GameCult.Mesh
             _endpoint = string.IsNullOrWhiteSpace(endpoint)
                 ? throw new ArgumentException("Value must be non-empty.", nameof(endpoint))
                 : endpoint;
-            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _defaults = options with { };
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = CultMesh.CreateSnapshotClient(endpoint, _defaults)();
             _client.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
@@ -103,7 +100,7 @@ namespace GameCult.Mesh
         {
             _sharedSession = session ?? throw new ArgumentNullException(nameof(session));
             _endpoint = session.State.Path?.Endpoint ?? session.Target.AuthorityRuntimeId;
-            _defaults = CultMesh.CloneSnapshotRequestOptions(options);
+            _defaults = options with { };
             _registry = registry ?? new CultNetDocumentRegistry();
             _client = session.Channel;
             _responseSubscription = session.OnCultNet<CultNetSnapshotResponseRawMessage>(OnResponse);
@@ -150,9 +147,9 @@ namespace GameCult.Mesh
                         _defaults.ConnectTimeout,
                         (_client as ICultNetSchemaClientHealth)?.BackgroundFailure)
                     .ConfigureAwait(false);
-                var options = CultMesh.CloneSnapshotRequestOptions(_defaults);
-                options.SchemaIds = schemaIds ?? options.SchemaIds;
-                options.RecordKeys = recordKeys ?? options.RecordKeys;
+                var selection = CultMesh.OverlaySelection(_defaults.Selection, schemaIds, recordKeys);
+                CultMesh.EnsureV0Compatible(selection);
+                var options = _defaults with { Selection = selection };
                 var messageId = CultMesh.CreateSnapshotMessageId(options);
                 var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
                     TaskCreationOptions.RunContinuationsAsynchronously);
@@ -164,8 +161,8 @@ namespace GameCult.Mesh
                 _client.SendCultNet(new CultNetSnapshotRequestMessage
                 {
                     MessageId = messageId,
-                    SchemaIds = CultMesh.CleanSnapshotFilter(options.SchemaIds),
-                    RecordKeys = CultMesh.CleanSnapshotFilter(options.RecordKeys),
+                    SchemaIds = selection.Schemas,
+                    RecordKeys = selection.Keys,
                     ShardId = string.IsNullOrWhiteSpace(options.ShardId) ? null : options.ShardId,
                     ShardEpoch = options.ShardEpoch
                 });
@@ -195,8 +192,8 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            var resolvedSchemas = schemaIds ?? (recordKeys is { Count: > 0 } ? null : new[] { descriptor.SchemaId });
-            var snapshot = await FetchSnapshotAsync(resolvedSchemas, recordKeys).ConfigureAwait(false);
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
+            var snapshot = await FetchSnapshotAsync(selection.Schemas, selection.Keys).ConfigureAwait(false);
             return CultMesh.DecodeSnapshotDocuments<TDocument>(snapshot, _registry);
         }
 
@@ -397,7 +394,7 @@ namespace GameCult.Mesh
             var resolvedOptions = options ?? new CultMeshSnapshotEndpointOptions();
             Context = resolvedOptions.Context ?? CultMesh.Verse("remote", "cultmesh-snapshot-client").Context;
             DocumentRegistry = resolvedOptions.DocumentRegistry ?? new CultNetDocumentRegistry();
-            Request = CloneSnapshotRequestOptions(resolvedOptions.Request);
+            Request = resolvedOptions.Request is null ? new CultMeshSnapshotRequestOptions() : resolvedOptions.Request with { };
             RouteHint = resolvedOptions.RouteHint ?? new CultMeshRouteHint(CultMeshLocalityKind.Network, Endpoint);
             SourceId = string.IsNullOrWhiteSpace(resolvedOptions.SourceId) ? Endpoint : resolvedOptions.SourceId!;
             PollInterval = resolvedOptions.PollInterval;
@@ -463,9 +460,10 @@ namespace GameCult.Mesh
             where TDocument : class
         {
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
             return CultMesh.FetchSnapshotDocumentsAsync<TDocument>(
                 Endpoint,
-                CreateRequest(ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor), recordKeys),
+                CreateRequest(selection.Schemas, selection.Keys),
                 DocumentRegistry);
         }
 
@@ -480,10 +478,11 @@ namespace GameCult.Mesh
             if (node == null) throw new ArgumentNullException(nameof(node));
 
             var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
+            var selection = CultMesh.ResolveDefaultSelection(schemaIds, recordKeys, descriptor);
             var result = await SyncSnapshotAsync(
                     node,
-                    ResolveDefaultSchemaFilter(schemaIds, recordKeys, descriptor),
-                    recordKeys,
+                    selection.Schemas,
+                    selection.Keys,
                     flush)
                 .ConfigureAwait(false);
             return CultMesh.DecodeSnapshotDocuments<TDocument>(result.Snapshot, DocumentRegistry);
@@ -612,52 +611,12 @@ namespace GameCult.Mesh
             IReadOnlyList<string>? schemaIds,
             IReadOnlyList<string>? recordKeys)
         {
-            var request = CloneSnapshotRequestOptions(Request);
-            request.SchemaIds = schemaIds ?? request.SchemaIds;
-            request.RecordKeys = recordKeys ?? request.RecordKeys;
+            var request = Request with { Selection = CultMesh.OverlaySelection(Request.Selection, schemaIds, recordKeys) };
             if (string.IsNullOrWhiteSpace(request.RudpRuntimeId))
                 request.RudpRuntimeId = Context.RuntimeId;
             if (string.IsNullOrWhiteSpace(request.MessageIdPrefix))
                 request.MessageIdPrefix = $"cultmesh:{Context.RuntimeId}:snapshot";
             return request;
-        }
-
-        private static IReadOnlyList<string>? ResolveDefaultSchemaFilter(
-            IReadOnlyList<string>? schemaIds,
-            IReadOnlyList<string>? recordKeys,
-            CultDocumentDescriptor descriptor)
-        {
-            if (schemaIds != null)
-                return schemaIds;
-
-            return recordKeys is { Count: > 0 }
-                ? null
-                : new[] { descriptor.SchemaId };
-        }
-
-        private static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(CultMeshSnapshotRequestOptions? source)
-        {
-            if (source == null)
-                return new CultMeshSnapshotRequestOptions();
-
-            return new CultMeshSnapshotRequestOptions
-            {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
-            };
         }
     }
 
@@ -733,7 +692,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
             if (string.IsNullOrWhiteSpace(recordKey)) throw new ArgumentException("Value must be non-empty.", nameof(recordKey));
 
-            var request = CloneSnapshotFacadeRequestOptions(options?.Request);
+            var request = options?.Request is null ? new CultMeshSnapshotRequestOptions() : options.Request with { };
             request.CreateClient = createClient;
             var resolvedOptions = new CultMeshSnapshotEndpointOptions
             {
@@ -745,31 +704,6 @@ namespace GameCult.Mesh
                 PollInterval = options?.PollInterval ?? TimeSpan.FromMilliseconds(250)
             };
             return SnapshotEndpoint(endpoint, resolvedOptions).SyncDocumentAsync<TDocument>(node, recordKey, flush);
-        }
-
-        private static CultMeshSnapshotRequestOptions CloneSnapshotFacadeRequestOptions(CultMeshSnapshotRequestOptions? source)
-        {
-            if (source == null)
-                return new CultMeshSnapshotRequestOptions();
-
-            return new CultMeshSnapshotRequestOptions
-            {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
-            };
         }
 
         /// <summary>
@@ -796,6 +730,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(endpoint)) throw new ArgumentException("Value must be non-empty.", nameof(endpoint));
 
             var resolvedOptions = options ?? new CultMeshSnapshotRequestOptions();
+            EnsureV0Compatible(resolvedOptions.Selection);
             var messageId = CreateSnapshotMessageId(resolvedOptions);
             var completion = new TaskCompletionSource<CultNetSnapshotResponseRawMessage>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -819,8 +754,8 @@ namespace GameCult.Mesh
             client.SendCultNet(new CultNetSnapshotRequestMessage
             {
                 MessageId = messageId,
-                SchemaIds = CleanSnapshotFilter(resolvedOptions.SchemaIds),
-                RecordKeys = CleanSnapshotFilter(resolvedOptions.RecordKeys),
+                SchemaIds = resolvedOptions.Selection?.Schemas,
+                RecordKeys = resolvedOptions.Selection?.Keys,
                 ShardId = string.IsNullOrWhiteSpace(resolvedOptions.ShardId) ? null : resolvedOptions.ShardId,
                 ShardEpoch = resolvedOptions.ShardEpoch
             });
@@ -886,29 +821,84 @@ namespace GameCult.Mesh
             };
         }
 
-        internal static CultMeshSnapshotRequestOptions CloneSnapshotRequestOptions(
-            CultMeshSnapshotRequestOptions? source)
+        /// <summary>
+        /// Refuses, loudly and typed, any selection term the v0 CultNet wire cannot carry. Mesh keeps
+        /// sending v0 in this cut (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22): only
+        /// <c>schemas</c> and <c>keys</c> reach the wire message, so <c>fields</c>, <c>cites</c>,
+        /// <c>cited</c>, <c>limit</c>, <c>cursor</c>, <c>descending</c>, and any non-default
+        /// <c>projection</c> are refused here instead of being silently dropped. A v1-carrying Mesh
+        /// transport is FU-Mesh-v1, not this cut.
+        /// </summary>
+        internal static void EnsureV0Compatible(CultNetSelection? selection)
         {
-            if (source == null) return new CultMeshSnapshotRequestOptions();
-            return new CultMeshSnapshotRequestOptions
+            if (selection == null)
+                return;
+            // The door runs first (docs/cultnet-selection-cut.md, R-F): Mesh has no descriptor list to
+            // check field/role reachability against, but the declaration-independent half of the door -
+            // an empty or blank-only schemas/keys list, an unrecognised projection - applies here just
+            // as it does inside CultNetSelectionEvaluator.Select, so Keys=[]/[""] is refused rather than
+            // silently lowered to "every key".
+            CultNetSelectionValidation.ValidateShape(selection);
+            if (selection.Fields != null)
+                throw new CultNetSelectionInvalidException("fields", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.fields cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cites != null)
+                throw new CultNetSelectionInvalidException("cites", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cites cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cited != null)
+                throw new CultNetSelectionInvalidException("cited", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cited cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Limit != null)
+                throw new CultNetSelectionInvalidException("limit", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.limit cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Cursor != null)
+                throw new CultNetSelectionInvalidException("cursor", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.cursor cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Descending)
+                throw new CultNetSelectionInvalidException("descending", null, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.descending cannot reach the wire (FU-Mesh-v1).");
+            if (selection.Projection != CultNetSelectionProjections.Header)
+                throw new CultNetSelectionInvalidException("projection", selection.Projection, "CultMesh sends cultnet.snapshot_request.v0 in this cut; selection.projection cannot reach the wire (FU-Mesh-v1).");
+        }
+
+        /// <summary>
+        /// Resolves one selection for a typed convenience call: explicit <paramref name="schemaIds"/>
+        /// win; otherwise an explicit <paramref name="recordKeys"/> - including one that lowers to an
+        /// empty array - means no schema filter; otherwise the selection defaults to the document
+        /// type's own schema. R-R (2026-09-22): an empty <paramref name="recordKeys"/> is a real filter
+        /// (answers nothing), not "no filter", so it must not fall through to the schema default
+        /// either. The one owner of that rule (docs/cultnet-selection-cut.md, section 4).
+        /// </summary>
+        internal static CultNetSelection ResolveDefaultSelection(
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys,
+            CultDocumentDescriptor descriptor)
+        {
+            var cleanedKeys = Clean(recordKeys);
+            var schemas = schemaIds != null
+                ? Clean(schemaIds)
+                : (cleanedKeys != null ? null : new[] { descriptor.SchemaId });
+            return new CultNetSelection { Schemas = schemas, Keys = cleanedKeys };
+        }
+
+        /// <summary>
+        /// Overlays explicit schema/record-key overrides onto a default selection: the caller's
+        /// selection replaces the default wholesale rather than merging field by field, so neither
+        /// side decides what a missing override means (docs/cultnet-selection-cut.md, Self's rulings
+        /// 2026-09-22, S2-7). No override at all keeps the default selection untouched.
+        /// </summary>
+        internal static CultNetSelection OverlaySelection(
+            CultNetSelection? defaults,
+            IReadOnlyList<string>? schemaIds,
+            IReadOnlyList<string>? recordKeys)
+        {
+            if (schemaIds == null && recordKeys == null)
+                return defaults ?? new CultNetSelection();
+
+            return new CultNetSelection
             {
-                SchemaIds = source.SchemaIds,
-                RecordKeys = source.RecordKeys,
-                ShardId = source.ShardId,
-                ShardEpoch = source.ShardEpoch,
-                ResponseTimeout = source.ResponseTimeout,
-                ConnectTimeout = source.ConnectTimeout,
-                MessageIdPrefix = source.MessageIdPrefix,
-                Security = source.Security,
-                ConfigureClient = source.ConfigureClient,
-                CreateClient = source.CreateClient,
-                RudpRuntimeId = source.RudpRuntimeId,
-                RudpConnectionId = source.RudpConnectionId,
-                RudpConnectPayload = source.RudpConnectPayload,
-                RudpMaxFragmentBytes = source.RudpMaxFragmentBytes,
-                RudpResendDelayMs = source.RudpResendDelayMs
+                Schemas = Clean(schemaIds),
+                Keys = Clean(recordKeys)
             };
         }
+
+        // The v0-compatibility list cleaning is CultNetV0SelectionLowering's, not a second copy here
+        // (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22).
+        private static string[]? Clean(IReadOnlyList<string>? values) => CultNetV0SelectionLowering.Lower(values);
 
         internal static string CreateSnapshotMessageId(CultMeshSnapshotRequestOptions options)
         {
@@ -963,23 +953,11 @@ namespace GameCult.Mesh
             {
                 throw new TimeoutException(
                     $"Timed out waiting for CultNet snapshot response '{messageId}' from {endpoint} " +
-                    $"for schemas [{string.Join(", ", CleanSnapshotFilter(options.SchemaIds) ?? Array.Empty<string>())}] " +
-                    $"and records [{string.Join(", ", CleanSnapshotFilter(options.RecordKeys) ?? Array.Empty<string>())}].");
+                    $"for schemas [{string.Join(", ", options.Selection?.Schemas ?? Array.Empty<string>())}] " +
+                    $"and records [{string.Join(", ", options.Selection?.Keys ?? Array.Empty<string>())}].");
             }
 
             return await responseTask.ConfigureAwait(false);
-        }
-
-        internal static string[]? CleanSnapshotFilter(IReadOnlyList<string>? values)
-        {
-            if (values is not { Count: > 0 })
-                return null;
-
-            var filtered = values
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-            return filtered.Length == 0 ? null : filtered;
         }
 
         internal static IReadOnlyList<TDocument> DecodeSnapshotDocuments<TDocument>(
@@ -1002,9 +980,9 @@ namespace GameCult.Mesh
                     binding != null &&
                     typeof(TDocument).IsAssignableFrom(binding.DocumentType);
                 var canDeserializeAsSchemaAlias =
-                    string.Equals(record.SchemaId, descriptor.SchemaId, StringComparison.Ordinal) ||
-                    (binding != null && IsSameCultDocumentSchema(binding.DocumentType, descriptor)) ||
-                    RawSnapshotPayloadMatchesSchema(record.Payload, descriptor);
+                    CultNetSchemaAliasMatching.Matches(record.SchemaId, descriptor) ||
+                    (binding != null && CultNetSchemaAliasMatching.Matches(binding.SchemaId, descriptor)) ||
+                    CultNetDocumentRegistry.PayloadMatchesSchema(record.Payload, descriptor);
                 if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
                     continue;
 
@@ -1028,63 +1006,6 @@ namespace GameCult.Mesh
             }
 
             return documents;
-        }
-
-        private static bool RawSnapshotPayloadMatchesSchema(
-            byte[] payload,
-            CultDocumentDescriptor descriptor)
-        {
-            var schemaVersion = TryReadSchemaVersion(payload);
-            if (string.IsNullOrWhiteSpace(schemaVersion))
-                return false;
-
-            if (string.Equals(schemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal))
-                return true;
-
-            var schemaName = InferSchemaName(schemaVersion!);
-            return !string.IsNullOrWhiteSpace(schemaName) &&
-                   string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal);
-        }
-
-        private static string? TryReadSchemaVersion(byte[] payload)
-        {
-            try
-            {
-                var array = MessagePackSerializer.Deserialize<object[]>(payload, CultNetSchemaMessageSerialization.Options);
-                if (array.Length > 0 && array[0] is string schemaVersion)
-                    return schemaVersion;
-            }
-            catch (Exception)
-            {
-                // Fall through to map decoding; different runtimes may encode object-like payloads.
-            }
-
-            try
-            {
-                var map = MessagePackSerializer.Deserialize<IReadOnlyDictionary<string, object?>>(payload, CultNetSchemaMessageSerialization.Options);
-                if (map.TryGetValue("schemaVersion", out var schemaVersion) && schemaVersion is string schemaVersionText)
-                    return schemaVersionText;
-                if (map.TryGetValue("schema_version", out var snakeSchemaVersion) && snakeSchemaVersion is string snakeSchemaVersionText)
-                    return snakeSchemaVersionText;
-            }
-            catch (Exception)
-            {
-                return null;
-            }
-
-            return null;
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-                return null;
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
     }
 }

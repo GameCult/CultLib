@@ -80,6 +80,18 @@ namespace GameCult.Networking
         /// </summary>
         public const string SnapshotResponseRaw = "cultnet.snapshot_response_raw.v0";
         /// <summary>
+        /// typed-selection snapshot request contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string SnapshotRequestV1 = "cultnet.snapshot_request.v1";
+        /// <summary>
+        /// typed-selection database subscription request contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string DatabaseSubscribeV1 = "cultnet.database_subscribe.v1";
+        /// <summary>
+        /// typed-selection snapshot response contract identifier (docs/cultnet-selection-cut.md).
+        /// </summary>
+        public const string SnapshotResponseRawV1 = "cultnet.snapshot_response_raw.v1";
+        /// <summary>
         /// schema catalog request contract identifier.
         /// </summary>
         public const string SchemaCatalogRequest = "cultnet.schema_catalog_request.v0";
@@ -497,6 +509,74 @@ namespace GameCult.Networking
         /// Gets or sets optional shard routing details for authority failures.
         /// </summary>
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
+        /// <summary>
+        /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>. Additive to
+        /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
+        /// </summary>
+        [Key("code")] public string? Code { get; set; }
+        /// <summary>
+        /// Gets or sets the code-specific structured detail (R-N). Additive to <c>cultnet.error.v0</c>.
+        /// </summary>
+        [Key("details")] public CultNetErrorDetails? Details { get; set; }
+
+        /// <summary>
+        /// Builds the wire error for a door refusal (R-N): code <c>selection_invalid</c>, details
+        /// <c>{ field, value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForSelectionInvalid(CultNetSelectionInvalidException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"selection_invalid: {ex.Message}",
+                Code = "selection_invalid",
+                Details = new CultNetErrorDetails { Field = ex.Field, Value = ex.Value }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a cursor refusal (R-N): code <c>cursor_stale</c> with details
+        /// <c>{ asOf, current }</c>, or code <c>cursor_invalid</c> with no details.
+        /// </summary>
+        public static CultNetErrorMessage ForCursor(CultNetSelectionCursorException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"{ex.Code}: {ex.Message}",
+                Code = ex.Code,
+                Details = ex.Code == "cursor_stale"
+                    ? new CultNetErrorDetails { AsOf = ex.AsOf, Current = ex.Current }
+                    : null
+            };
+
+        /// <summary>
+        /// Builds the wire error for an out-of-target reference refusal (R-N): code
+        /// <c>reference_outside_target</c>, no details.
+        /// </summary>
+        public static CultNetErrorMessage ForReferenceOutsideTarget(CultNetSelectionReferenceOutsideTargetException ex) =>
+            new CultNetErrorMessage
+            {
+                // ex.Message already begins "reference_outside_target: " (the exception's own
+                // constructor prefixes it) - this used to prefix it a second time, so a peer received
+                // "reference_outside_target: reference_outside_target: ...". Rust's ForReferenceOutsideTarget
+                // (packages/cultnet-rs) emits the single-prefixed form; this now matches it.
+                Error = ex.Message,
+                Code = "reference_outside_target"
+            };
+    }
+
+    /// <summary>
+    /// Code-specific structured detail carried on <see cref="CultNetErrorMessage"/> (R-N). Fields are
+    /// populated only for the code that defines them; every field is otherwise omitted (nil on the wire).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetErrorDetails
+    {
+        /// <summary>The selection field that failed (<c>selection_invalid</c>).</summary>
+        [Key("field")] public string? Field { get; set; }
+        /// <summary>The offending value, when there is one string worth naming (<c>selection_invalid</c>).</summary>
+        [Key("value")] public string? Value { get; set; }
+        /// <summary>The cursor's own minted asOf (<c>cursor_stale</c>).</summary>
+        [Key("asOf")] public ulong? AsOf { get; set; }
+        /// <summary>The answering server's current asOf (<c>cursor_stale</c>).</summary>
+        [Key("current")] public ulong? Current { get; set; }
     }
 
     /// <summary>
@@ -823,6 +903,78 @@ namespace GameCult.Networking
         /// Gets or sets body transports the consumer can open, ordered by consumer preference.
         /// </summary>
         [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
+    }
+
+    /// <summary>
+    /// CultNet message requesting a document snapshot through a typed selection (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSnapshotRequestV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SnapshotRequestV1;
+        /// <summary>Gets or sets the message id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the selection.</summary>
+        [Key("selection")] public CultNetSelection Selection { get; set; } = new CultNetSelection();
+        /// <summary>Gets or sets the shard id requested for a shard-bounded snapshot.</summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>Gets or sets the expected shard epoch.</summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+    }
+
+    /// <summary>
+    /// Requests a live database subscription through a typed selection (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetDatabaseSubscribeV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.DatabaseSubscribeV1;
+        /// <summary>Gets or sets the request id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the live subscription id.</summary>
+        [Key("subscriptionId")] public string SubscriptionId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the selection.</summary>
+        [Key("selection")] public CultNetSelection Selection { get; set; } = new CultNetSelection();
+        /// <summary>Gets or sets whether the server should send a matching snapshot before live changes.</summary>
+        [Key("includeSnapshot")] public bool IncludeSnapshot { get; set; } = true;
+        /// <summary>Gets or sets the stable consumer runtime identity used for subscription diagnostics and body-plane demand.</summary>
+        [Key("consumerRuntimeId")] public string? ConsumerRuntimeId { get; set; }
+        /// <summary>Gets or sets logical hot-body identities needed by this exact state subscription.</summary>
+        [Key("bodyIds")] public string[]? BodyIds { get; set; }
+        /// <summary>Gets or sets body transports the consumer can open, ordered by consumer preference.</summary>
+        [Key("supportedBodyTransports")] public string[]? SupportedBodyTransports { get; set; }
+    }
+
+    /// <summary>
+    /// CultNet message returning a typed selection's page (docs/cultnet-selection-cut.md).
+    /// </summary>
+    [MessagePackObject]
+    public class CultNetSnapshotResponseRawV1Message : ICultNetSchemaMessage
+    {
+        /// <summary>Gets or sets the schema version.</summary>
+        [Key("schemaVersion")] public string SchemaVersion { get; set; } = CultNetSchemaVersions.SnapshotResponseRawV1;
+        /// <summary>Gets or sets the message id.</summary>
+        [Key("messageId")] public string MessageId { get; set; } = string.Empty;
+        /// <summary>Gets or sets the number of rows on this page.</summary>
+        [Key("matched")] public uint Matched { get; set; }
+        /// <summary>Gets or sets the snapshot this page is exact as of.</summary>
+        [Key("asOf")] public ulong AsOf { get; set; }
+        /// <summary>Gets or sets the cursor for the next page, absent on the last page.</summary>
+        [Key("next")] public string? Next { get; set; }
+        /// <summary>Gets or sets the headers, present under header projection.</summary>
+        [Key("headers")] public CultNetRawDocumentHeader[]? Headers { get; set; }
+        /// <summary>Gets or sets the documents, present under document projection.</summary>
+        [Key("documents")] public CultNetRawDocumentRecord[]? Documents { get; set; }
+        /// <summary>Gets or sets the edges a hop-bearing selection traversed.</summary>
+        [Key("edges")] public CultNetEdge[]? Edges { get; set; }
+        /// <summary>Gets or sets the shard id represented by this snapshot.</summary>
+        [Key("shardId")] public string? ShardId { get; set; }
+        /// <summary>Gets or sets the shard epoch represented by this snapshot.</summary>
+        [Key("shardEpoch")] public long? ShardEpoch { get; set; }
+        /// <summary>Gets or sets the shard-log sequence represented by this snapshot.</summary>
+        [Key("shardLogSequence")] public long? ShardLogSequence { get; set; }
     }
 
     /// <summary>

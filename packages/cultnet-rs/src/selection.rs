@@ -1,0 +1,2507 @@
+//! CultNet typed selection (docs/cultnet-selection-cut.md, sections 2/6/7): the Rust spelling of
+//! the same vocabulary the C# reference (`GameCult.Networking/CultNetSelection.cs`,
+//! `CultNetSelectionEvaluator.cs`) owns, at wire parity, pinned by the S12 parity vectors rather than
+//! by matching shapes 1:1.
+//!
+//! D7: this evaluator carries no `cultcache-rs` knowledge. A row's declared values and edges come
+//! entirely through the [`Row`] and [`RowSet`] traits; the consumer (Huginn, or a test fixture) is the
+//! row owner and supplies them the way `CultCache` supplies the C# evaluator. Nothing here reflects
+//! over a document, and no type here is a serde union that skips its own tag (section 10's
+//! negative grep checks for the literal attribute spelling, which this file deliberately does not
+//! quote even in prose).
+//!
+//! Q-J (section 2 "Numbers"): every comparison number on the wire and every row's declared numeric
+//! value is a canonical decimal string, never a float. [`canonical_number`] is the door's grammar and
+//! the comparator; it is a pure string algorithm with no `f64`/`f32` anywhere on the comparison path.
+
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::Hmac;
+use hmac::Mac;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+use crate::contracts::{CultNetErrorCode, CultNetErrorDetails, CultNetMessage};
+use crate::security::constant_time_eq;
+
+type HmacSha256 = Hmac<Sha256>;
+
+// ---------------------------------------------------------------------------------------------
+// Canonical decimal numbers (Q-J)
+// ---------------------------------------------------------------------------------------------
+
+/// The wire's canonical decimal grammar and comparator (docs/cultnet-selection-cut.md section 2
+/// "Numbers", operator ruling Q-J). A pure string algorithm - no numeric parse, no precision limit,
+/// no `f64`/`f32` on the comparison path. Ported from `CultNetCanonicalNumber`
+/// (`GameCult.Networking/CultNetSelection.cs`); the digit grammar is hand-rolled rather than pulled
+/// in via a `regex` dependency this crate does not otherwise need.
+pub mod canonical_number {
+    use super::Ordering;
+
+    /// `true` for a canonical decimal string: matches `^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$` and is
+    /// not `"-0"` (excluded explicitly; the grammar alone matches it). Forbids leading zeros, a
+    /// trailing fractional zero or bare point, an explicit `+`, exponent notation, and whitespace.
+    pub fn is_canonical(value: &str) -> bool {
+        if value == "-0" {
+            return false;
+        }
+        let bytes = value.as_bytes();
+        if bytes.is_empty() {
+            return false;
+        }
+        let mut i = 0usize;
+        if bytes[0] == b'-' {
+            i += 1;
+        }
+        if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+            return false;
+        }
+        if bytes[i] == b'0' {
+            i += 1;
+            // A leading zero is canonical only as the whole integer part: "0" or "0.x", never "01".
+            if i < bytes.len() && bytes[i].is_ascii_digit() {
+                return false;
+            }
+        } else {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        if i == bytes.len() {
+            return true;
+        }
+        if bytes[i] != b'.' {
+            return false;
+        }
+        i += 1;
+        let fraction_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i != bytes.len() {
+            return false;
+        }
+        let fraction_len = i - fraction_start;
+        // (\.[0-9]*[1-9])?: at least one fraction digit, and the last one is never zero.
+        fraction_len > 0 && bytes[i - 1] != b'0'
+    }
+
+    /// Compares two canonical decimal strings by sign, then the integer part's length, then its
+    /// digits, then the fraction digits padded on the right to equal length. Callers validate both
+    /// operands with [`is_canonical`] first; this does not re-validate. Mirrors
+    /// `CultNetCanonicalNumber.Compare` exactly (docs/cultnet-selection-cut.md section 2 "Numbers").
+    pub fn compare(left: &str, right: &str) -> Ordering {
+        let (negative_left, integer_left, fraction_left) = decompose(left);
+        let (negative_right, integer_right, fraction_right) = decompose(right);
+
+        if negative_left != negative_right {
+            return if negative_left {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+        }
+
+        let magnitude = if integer_left.len() != integer_right.len() {
+            integer_left.len().cmp(&integer_right.len())
+        } else {
+            let integer_cmp = integer_left.cmp(integer_right);
+            if integer_cmp != Ordering::Equal {
+                integer_cmp
+            } else {
+                let width = fraction_left.len().max(fraction_right.len());
+                pad_right(fraction_left, width).cmp(&pad_right(fraction_right, width))
+            }
+        };
+
+        if negative_left {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
+    }
+
+    fn decompose(value: &str) -> (bool, &str, &str) {
+        let negative = value.starts_with('-');
+        let unsigned = if negative { &value[1..] } else { value };
+        match unsigned.find('.') {
+            Some(dot) => (negative, &unsigned[..dot], &unsigned[dot + 1..]),
+            None => (negative, unsigned, ""),
+        }
+    }
+
+    fn pad_right(value: &str, width: usize) -> String {
+        let mut owned = value.to_string();
+        while owned.len() < width {
+            owned.push('0');
+        }
+        owned
+    }
+
+    /// The one canonicalizer every rendered number passes through: strips leading integer zeros and
+    /// trailing fractional zeros, and collapses a negative value that reduces to zero into `"0"`.
+    /// Mirrors `CultCache.cs`'s `CanonicalizeDecimalDigits`. Exposed so a `Row` implementation can
+    /// render its own numeric values into this grammar without re-deriving the algorithm.
+    pub fn canonicalize_decimal_digits(signed_positional: &str) -> String {
+        let negative = signed_positional.starts_with('-');
+        let unsigned = if negative {
+            &signed_positional[1..]
+        } else {
+            signed_positional
+        };
+        let (mut integer_part, fraction_part) = match unsigned.find('.') {
+            Some(dot) => (&unsigned[..dot], &unsigned[dot + 1..]),
+            None => (unsigned, ""),
+        };
+        integer_part = integer_part.trim_start_matches('0');
+        if integer_part.is_empty() {
+            integer_part = "0";
+        }
+        let fraction_part = fraction_part.trim_end_matches('0');
+
+        let is_zero = integer_part == "0" && fraction_part.is_empty();
+        let result = if fraction_part.is_empty() {
+            integer_part.to_string()
+        } else {
+            format!("{integer_part}.{fraction_part}")
+        };
+        if negative && !is_zero {
+            format!("-{result}")
+        } else {
+            result
+        }
+    }
+
+    /// Renders a signed 64-bit integer as its exact canonical decimal - no 2^53 limit, because this
+    /// never passes through a float.
+    pub fn render_i64(value: i64) -> String {
+        canonicalize_decimal_digits(&value.to_string())
+    }
+
+    /// Renders an unsigned 64-bit integer as its exact canonical decimal.
+    pub fn render_u64(value: u64) -> String {
+        canonicalize_decimal_digits(&value.to_string())
+    }
+
+    // R-D (docs/cultnet-selection-cut.md, "Self's rulings for the Cut 1 fix batch"): a float
+    // renders as its exact decimal expansion, computed from mantissa and exponent, not as a
+    // shortest round-trip form (the previous `f64::to_string()` path rounded ties the wrong way
+    // relative to .NET - Soul's parity vectors). Every finite f32/f64 is an exact dyadic rational
+    // `mantissa * 2^exponent`; this is a small fixed-point bignum (decimal digits, little-endian)
+    // that computes that expansion exactly, with no precision loss and no new dependency.
+
+    /// One decimal digit per element, least-significant first.
+    type BigDigits = Vec<u8>;
+
+    fn big_from_u64(mut value: u64) -> BigDigits {
+        if value == 0 {
+            return vec![0];
+        }
+        let mut digits = Vec::new();
+        while value > 0 {
+            digits.push((value % 10) as u8);
+            value /= 10;
+        }
+        digits
+    }
+
+    /// Multiplies `digits` in place by a one-digit factor (2 or 5, here - the two primes 2^k and
+    /// 5^k need to turn a binary mantissa into an exact decimal one).
+    /// Multiplies `digits` in place by a single-digit `factor` (only ever called with 2 or 5, the
+    /// two primes that turn a binary mantissa's magnitude into a decimal one). A single-digit
+    /// factor against a single digit plus a carry that is itself always a single digit
+    /// (inductively: it starts at 0) never produces a carry of 10 or more, so the leftover carry
+    /// needs at most one new leading digit - never a loop (the mutation harness's own
+    /// RS-D-BigMulCarry-Loosening entry proved a `while` here is unreachable generality: nothing
+    /// distinguishes it from a plain `if`).
+    fn big_mul_small(digits: &mut BigDigits, factor: u8) {
+        debug_assert!(factor <= 9, "big_mul_small takes a single decimal digit as its factor");
+        let mut carry: u32 = 0;
+        for digit in digits.iter_mut() {
+            let product = (*digit as u32) * (factor as u32) + carry;
+            *digit = (product % 10) as u8;
+            carry = product / 10;
+        }
+        if carry > 0 {
+            digits.push(carry as u8);
+        }
+    }
+
+    fn big_to_most_significant_first(digits: &BigDigits) -> String {
+        digits.iter().rev().map(|d| (b'0' + d) as char).collect()
+    }
+
+    /// The exact decimal expansion of `(-1)^negative * mantissa * 2^exponent`. `mantissa` carries
+    /// no implicit bit; the caller has already folded it in (or not, for a subnormal).
+    fn exact_decimal_from_mantissa(mantissa: u64, exponent: i32, negative: bool) -> String {
+        // No mantissa == 0 short-circuit: the general path already collapses to "0" for a zero
+        // mantissa (multiplying zero stays zero at every step, and `canonicalize_decimal_digits`
+        // collapses the signed "-0" case too) - a dedicated early return here duplicated that
+        // without changing the answer, and the mutation harness's own RS-D-ZeroMantissa-Revert
+        // entry proved it: removing the guard entirely left the test green.
+        let mut digits = big_from_u64(mantissa);
+        let unsigned = if exponent >= 0 {
+            for _ in 0..exponent {
+                big_mul_small(&mut digits, 2);
+            }
+            big_to_most_significant_first(&digits)
+        } else {
+            // mantissa / 2^k == (mantissa * 5^k) / 10^k: multiplying by 5^k turns the binary
+            // fraction into a decimal one with exactly k fraction digits.
+            let k = (-exponent) as usize;
+            for _ in 0..k {
+                big_mul_small(&mut digits, 5);
+            }
+            let mut rendered = big_to_most_significant_first(&digits);
+            if rendered.len() <= k {
+                rendered = format!("{}{rendered}", "0".repeat(k + 1 - rendered.len()));
+            }
+            let split = rendered.len() - k;
+            format!("{}.{}", &rendered[..split], &rendered[split..])
+        };
+        canonicalize_decimal_digits(&if negative {
+            format!("-{unsigned}")
+        } else {
+            unsigned
+        })
+    }
+
+    /// Renders a `f64` as its canonical decimal, or `None` for NaN/infinity ("a NaN or infinite
+    /// member matches no comparison"). Built from IEEE-754's own mantissa and exponent (R-D) -
+    /// never from `Display`'s shortest round-trip form, which rounds ties differently than .NET's
+    /// `ToString()` (Soul's parity vectors, 394/200k f32 and 48/200k f64 values at ties).
+    pub fn render_f64(value: f64) -> Option<String> {
+        if value.is_nan() || value.is_infinite() {
+            return None;
+        }
+        let bits = value.to_bits();
+        let negative = (bits >> 63) & 1 == 1;
+        let biased_exponent = ((bits >> 52) & 0x7FF) as i32;
+        let fraction = bits & ((1u64 << 52) - 1);
+        let (mantissa, exponent) = if biased_exponent == 0 {
+            (fraction, -1074) // subnormal: 1 - 1023 (bias) - 52 (fraction bits)
+        } else {
+            (fraction | (1u64 << 52), biased_exponent - 1023 - 52)
+        };
+        Some(exact_decimal_from_mantissa(mantissa, exponent, negative))
+    }
+
+    /// Renders a `f32` as its canonical decimal, or `None` for NaN/infinity.
+    pub fn render_f32(value: f32) -> Option<String> {
+        if value.is_nan() || value.is_infinite() {
+            return None;
+        }
+        let bits = value.to_bits();
+        let negative = (bits >> 31) & 1 == 1;
+        let biased_exponent = ((bits >> 23) & 0xFF) as i32;
+        let fraction = (bits & ((1u32 << 23) - 1)) as u64;
+        let (mantissa, exponent) = if biased_exponent == 0 {
+            (fraction, -149) // subnormal: 1 - 127 (bias) - 23 (fraction bits)
+        } else {
+            (fraction | (1u64 << 23), biased_exponent - 127 - 23)
+        };
+        Some(exact_decimal_from_mantissa(mantissa, exponent, negative))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        // R-D no longer renders through `Display` at all (render_f64/render_f32 build the exact
+        // decimal straight from mantissa and exponent), so this probe no longer guards a
+        // production path - it is kept anyway, on the map's instruction, as a standing record of
+        // what Rust's `Display` does for a value this module used to hand it.
+        #[test]
+        fn probe_f64_display_never_uses_exponent_notation() {
+            let huge = 1e21_f64;
+            let tiny = 1e-7_f64;
+            let huge_text = huge.to_string();
+            let tiny_text = tiny.to_string();
+            assert!(
+                !huge_text.contains(['e', 'E']),
+                "expected no exponent notation, got {huge_text}"
+            );
+            assert!(
+                !tiny_text.contains(['e', 'E']),
+                "expected no exponent notation, got {tiny_text}"
+            );
+            assert_eq!(huge_text, "1000000000000000000000");
+            assert_eq!(tiny_text, "0.0000001");
+        }
+
+        // Q-J: an i64 past 2^53 (where f64 loses integer precision) renders exactly - this is the
+        // row-rendering mutant docs/cultnet-selection-cut.md section 2 "Numbers" names: a value
+        // rendered through float64 would silently become "9007199254740992" here.
+        #[test]
+        fn render_i64_past_2_pow_53_is_exact() {
+            assert_eq!(super::render_i64(9_007_199_254_740_993), "9007199254740993");
+            assert_eq!(super::render_i64(-9_007_199_254_740_993), "-9007199254740993");
+            assert_eq!(super::render_i64(0), "0");
+        }
+
+        #[test]
+        fn render_u64_is_exact() {
+            assert_eq!(super::render_u64(18_446_744_073_709_551_615), "18446744073709551615");
+        }
+
+        #[test]
+        fn canonicalize_decimal_digits_strips_leading_and_trailing_zeros() {
+            assert_eq!(super::canonicalize_decimal_digits("13.500"), "13.5");
+            assert_eq!(super::canonicalize_decimal_digits("007"), "7");
+            assert_eq!(super::canonicalize_decimal_digits("0.000"), "0");
+            assert_eq!(super::canonicalize_decimal_digits("-0.000"), "0");
+        }
+
+        #[test]
+        fn render_f64_rewrites_exponent_notation_to_positional_digits() {
+            // 1e21 and 3.5 are both exact dyadic rationals, so their exact expansion is also
+            // their shortest form.
+            assert_eq!(super::render_f64(1e21).unwrap(), "1000000000000000000000");
+            assert_eq!(super::render_f64(3.5).unwrap(), "3.5");
+            // 1e-7 is not exactly representable in binary - R-D renders the value actually
+            // stored, not the shortest decimal that would round-trip back to it (verified
+            // independently outside this crate: 1e-7_f64.to_bits() decomposes to mantissa
+            // 5764607523034235 * 2^-106, whose exact decimal is this 79-digit expansion).
+            assert_eq!(
+                super::render_f64(1e-7).unwrap(),
+                "0.0000000999999999999999954748111825886258685613938723690807819366455078125"
+            );
+        }
+
+        #[test]
+        fn render_f64_and_f32_answer_none_for_nan_and_infinity() {
+            assert_eq!(super::render_f64(f64::NAN), None);
+            assert_eq!(super::render_f64(f64::INFINITY), None);
+            assert_eq!(super::render_f32(f32::NAN), None);
+            assert_eq!(super::render_f32(f32::NEG_INFINITY), None);
+        }
+
+        // R-D: an f32 of 3e20 is not "3e20" or "300000000000000000000", it is the exact IEEE-754
+        // value nearest 3e20. The map's own worked example (and Soul's notes) give this as
+        // "300000002010536247296" - that literal is wrong: 3e20_f32.to_bits() is
+        // 0b01100001100000100001101010110001 (sign 0, exponent 195, fraction 137905), so mantissa
+        // 8526513 * 2^45 - verified independently in Node with BigInt bit-shifting outside this
+        // crate - is 300000006012263202816, which is what this algorithm (and a plain `mantissa
+        // << exponent`) computes. Flagged as a discrepancy in the fix-batch report; this test
+        // pins the value this algorithm can prove, not the map's transcription.
+        #[test]
+        fn render_f32_3e20_is_the_exact_ieee754_value_not_the_shortest_form() {
+            assert_eq!(super::render_f32(3e20_f32).unwrap(), "300000006012263202816");
+        }
+
+        // R-D: 0.1 has no exact binary representation, so its f32/f64 renderings are long and
+        // differ from each other - a shortest-form renderer would print "0.1" for both.
+        #[test]
+        fn render_f32_and_f64_of_0_1_render_the_distinct_exact_binary_values() {
+            let as_f32 = super::render_f32(0.1_f32).unwrap();
+            let as_f64 = super::render_f64(0.1_f64).unwrap();
+            assert_ne!(as_f32, as_f64, "f32 and f64 round 0.1 to different exact values");
+            // Round-trip through Rust's own correctly-rounded parser: the exact decimal expansion
+            // must parse back to the identical bit pattern it was rendered from.
+            assert_eq!(as_f32.parse::<f32>().unwrap().to_bits(), 0.1_f32.to_bits());
+            assert_eq!(as_f64.parse::<f64>().unwrap().to_bits(), 0.1_f64.to_bits());
+            assert_ne!(as_f32, "0.1", "the exact expansion is far longer than the shortest form");
+        }
+
+        // R-D: subnormals (the smallest representable magnitudes, below the normal range) still
+        // render exactly, and round-trip through a correctly-rounded parser.
+        #[test]
+        fn render_f32_and_f64_subnormals_round_trip() {
+            let smallest_f32 = f32::from_bits(1); // smallest positive subnormal f32
+            let smallest_f64 = f64::from_bits(1); // smallest positive subnormal f64
+            let rendered_f32 = super::render_f32(smallest_f32).unwrap();
+            let rendered_f64 = super::render_f64(smallest_f64).unwrap();
+            assert_eq!(rendered_f32.parse::<f32>().unwrap().to_bits(), smallest_f32.to_bits());
+            assert_eq!(rendered_f64.parse::<f64>().unwrap().to_bits(), smallest_f64.to_bits());
+            assert!(!rendered_f32.contains(['e', 'E']));
+            assert!(!rendered_f64.contains(['e', 'E']));
+        }
+
+        // R-D: the largest finite magnitudes round-trip too - these are the widest bignums this
+        // algorithm produces (f64::MAX has 309 integer digits).
+        #[test]
+        fn render_f32_and_f64_max_round_trip() {
+            let rendered_f32 = super::render_f32(f32::MAX).unwrap();
+            let rendered_f64 = super::render_f64(f64::MAX).unwrap();
+            assert_eq!(rendered_f32.parse::<f32>().unwrap().to_bits(), f32::MAX.to_bits());
+            assert_eq!(rendered_f64.parse::<f64>().unwrap().to_bits(), f64::MAX.to_bits());
+            assert!(!rendered_f32.starts_with('-'));
+            assert!(!rendered_f64.starts_with('-'));
+        }
+
+        // R-D: positive and negative zero both render as the canonical "0", never "-0".
+        #[test]
+        fn render_f32_and_f64_positive_and_negative_zero_render_as_canonical_zero() {
+            assert_eq!(super::render_f32(0.0_f32).unwrap(), "0");
+            assert_eq!(super::render_f32(-0.0_f32).unwrap(), "0");
+            assert_eq!(super::render_f64(0.0_f64).unwrap(), "0");
+            assert_eq!(super::render_f64(-0.0_f64).unwrap(), "0");
+        }
+
+        // R-AI: cargo-mutants found `render_f32`'s subnormal-vs-normal branch survivable
+        // (`biased_exponent == 0` flipped to `!=`, and the subnormal exponent's `-149` losing its
+        // sign) even with the round-trip tests above - a round trip through a correctly-rounded
+        // parser can still agree with a wrong bit-extraction if the wrong value happens to parse
+        // back to the same bits it was carelessly derived from, and the MAX/subnormal round-trip
+        // tests above never assert on digit count or magnitude, only on parsing back correctly.
+        // This pins the *shape* of the subnormal case directly: 2^-149 is a fraction with 148
+        // leading zeros after the point, not an astronomical integer (what a stray `+149` would
+        // render) and not a value one exponent off (what taking the normal branch for a
+        // biased_exponent of 0 would render).
+        #[test]
+        fn render_f32_subnormal_uses_the_subnormal_branch_and_its_negative_exponent() {
+            let rendered = super::render_f32(f32::from_bits(1)).unwrap();
+            assert!(rendered.starts_with("0.00000"), "got {rendered:?}");
+            assert_eq!(rendered.len(), 151, "2^-149 is \"0.\" plus 149 fraction digits, got {rendered:?}");
+        }
+
+        // R-AI: the normal-path implicit leading bit (`fraction | (1 << 23)`) is what distinguishes
+        // 1.0 from 0.0 in the mantissa - their fraction bits are identical (all zero); only the
+        // implicit bit the `|` folds in carries the value. Drop it (mutate `|` away, or take the
+        // subnormal branch instead) and both render as "0".
+        #[test]
+        fn render_f32_normal_path_folds_in_the_implicit_leading_bit() {
+            assert_eq!(super::render_f32(1.0_f32).unwrap(), "1");
+            assert_eq!(super::render_f32(2.0_f32).unwrap(), "2");
+        }
+
+        // R-AI: `(bits >> 31) & 1 == 1` reads the sign bit - but 1.0_f32 and 2.0_f32 (bit pattern
+        // 0x3F800000 / 0x40000000) both happen to have their *low* bit (bit 0) equal to 0, same as
+        // their real sign bit (bit 31, also 0 for a positive value) - so a mutant that shifts the
+        // wrong direction (`bits << 31` instead of `bits >> 31`, reading bit 0 instead of bit 31)
+        // computes the same "not negative" answer for both by coincidence, and every render test
+        // above only used positive values. A negative value whose bit 0 differs from its sign bit
+        // (any of them - the mantissa/exponent bits are unrelated to bit 0) exposes it.
+        #[test]
+        fn render_f32_negative_values_carry_the_sign() {
+            assert_eq!(super::render_f32(-1.0_f32).unwrap(), "-1");
+            assert_eq!(super::render_f32(-2.0_f32).unwrap(), "-2");
+        }
+
+        // R-AI: render_f64's sign extraction has the identical shape (`(bits >> 63) & 1 == 1`) and
+        // the identical gap - -1.0_f64 and -2.0_f64's bit 0 is 0, same coincidence as f32's.
+        #[test]
+        fn render_f64_negative_values_carry_the_sign() {
+            assert_eq!(super::render_f64(-1.0_f64).unwrap(), "-1");
+            assert_eq!(super::render_f64(-2.0_f64).unwrap(), "-2");
+        }
+
+        // R-AI/R-D: `is_canonical` is the Q-J door's grammar
+        // (`^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, minus the literal "-0") and was, until this test,
+        // never called directly by any test in this crate - only reachable through
+        // `validate_field`, and only for the handful of spellings
+        // `validation_refuses_non_canonical_number_spellings` (tests/selection.rs) happens to
+        // cover. cargo-mutants found every branch mutation in this function surviving as a result.
+        // This test walks the grammar clause by clause so each comparison, each increment and each
+        // branch has a true case and a false case pinned against the exact byte shape that flips
+        // it.
+        #[test]
+        fn is_canonical_accepts_the_canonical_grammar() {
+            // "0", or "0.<fraction>" - a leading zero is canonical only as the whole integer part.
+            assert!(super::is_canonical("0"));
+            assert!(super::is_canonical("0.5"));
+            assert!(super::is_canonical("0.05"));
+            // "-0" is excluded by name, even though the grammar alone would match it; "-0.5" is a
+            // different literal and stays canonical.
+            assert!(!super::is_canonical("-0"));
+            assert!(super::is_canonical("-0.5"));
+            // A nonzero leading digit, single- and multi-digit.
+            assert!(super::is_canonical("5"));
+            assert!(super::is_canonical("123456789"));
+            assert!(super::is_canonical("-5"));
+            assert!(super::is_canonical("-123"));
+            // A fraction whose last digit is nonzero, one digit and several.
+            assert!(super::is_canonical("5.1"));
+            assert!(super::is_canonical("5.01"));
+            assert!(super::is_canonical("5.100001"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_the_empty_string() {
+            assert!(!super::is_canonical(""));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_lone_minus_sign() {
+            // After consuming '-', i == bytes.len(): the `i >= bytes.len()` half of the guard.
+            assert!(!super::is_canonical("-"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_first_character_that_is_not_a_digit() {
+            // The `!bytes[i].is_ascii_digit()` half of the same guard, unsigned and signed.
+            assert!(!super::is_canonical("."));
+            assert!(!super::is_canonical(".5"));
+            assert!(!super::is_canonical("+5"));
+            assert!(!super::is_canonical("a"));
+            assert!(!super::is_canonical("-a"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_leading_zero_followed_by_another_digit() {
+            assert!(!super::is_canonical("01"));
+            assert!(!super::is_canonical("00"));
+            assert!(!super::is_canonical("-01"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_non_digit_non_dot_after_the_integer_part() {
+            // Exponent notation, stray whitespace, and any other trailing junk right after the
+            // integer digits - the `bytes[i] != b'.'` check.
+            assert!(!super::is_canonical("5e3"));
+            assert!(!super::is_canonical("123e10"));
+            assert!(!super::is_canonical("5 "));
+            assert!(!super::is_canonical("5,0"));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_bare_trailing_dot() {
+            // Zero fraction digits: `fraction_len > 0` is false.
+            assert!(!super::is_canonical("5."));
+            assert!(!super::is_canonical("0."));
+        }
+
+        #[test]
+        fn is_canonical_rejects_trailing_bytes_after_the_fraction_digits() {
+            // The `i != bytes.len()` check inside the fraction loop's tail.
+            assert!(!super::is_canonical("5.1x"));
+            assert!(!super::is_canonical("5.12 "));
+        }
+
+        #[test]
+        fn is_canonical_rejects_a_trailing_fractional_zero() {
+            // `bytes[i - 1] != b'0'`: the last fraction digit must not be zero.
+            assert!(!super::is_canonical("5.0"));
+            assert!(!super::is_canonical("5.10"));
+            assert!(!super::is_canonical("0.10"));
+        }
+
+        // R-AI: `decompose` and `pad_right` back `compare`'s magnitude comparison and were pinned
+        // only indirectly, through whichever field-comparison tests happened to exercise `compare`
+        // - never with inputs chosen to force unequal-length fraction padding, which is the one
+        // place `pad_right`'s `while owned.len() < width` loop actually runs more than zero times
+        // on both sides. These call the private helpers directly (this test module is nested
+        // inside `canonical_number`, so `super::` reaches them) and pin `compare`'s ordering at the
+        // shapes that exercise sign, integer length, integer digits and padded fraction digits
+        // separately.
+        #[test]
+        fn decompose_splits_sign_integer_and_fraction() {
+            assert_eq!(super::decompose("123.45"), (false, "123", "45"));
+            assert_eq!(super::decompose("-123.45"), (true, "123", "45"));
+            assert_eq!(super::decompose("7"), (false, "7", ""));
+            assert_eq!(super::decompose("-7"), (true, "7", ""));
+        }
+
+        #[test]
+        fn pad_right_pads_to_width_and_leaves_a_wide_enough_value_alone() {
+            assert_eq!(super::pad_right("5", 3), "500");
+            assert_eq!(super::pad_right("", 2), "00");
+            assert_eq!(super::pad_right("50", 2), "50");
+            assert_eq!(super::pad_right("500", 2), "500");
+        }
+
+        #[test]
+        fn compare_orders_by_sign_then_integer_length_then_digits_then_padded_fraction() {
+            use super::Ordering;
+            // Opposite signs: negative is always less, regardless of magnitude.
+            assert_eq!(super::compare("-1", "1"), Ordering::Less);
+            assert_eq!(super::compare("1", "-1"), Ordering::Greater);
+            // Same sign, different integer-part length.
+            assert_eq!(super::compare("9", "10"), Ordering::Less);
+            assert_eq!(super::compare("-9", "-10"), Ordering::Greater);
+            // Same integer length, different digits.
+            assert_eq!(super::compare("19", "21"), Ordering::Less);
+            // Equal integer part, fractions of unequal length: pad_right must align them before
+            // comparing, not compare "5" against "45" lexicographically (which would say "5" >
+            // "45" as strings - the padded comparison must say "1.5" > "1.45").
+            assert_eq!(super::compare("1.5", "1.45"), Ordering::Greater);
+            assert_eq!(super::compare("1.45", "1.5"), Ordering::Less);
+            assert_eq!(super::compare("1.50", "1.5"), Ordering::Equal);
+            // Negative magnitude comparison reverses.
+            assert_eq!(super::compare("-1.5", "-1.45"), Ordering::Less);
+            assert_eq!(super::compare("3", "3"), Ordering::Equal);
+        }
+
+        // R-AI: `canonicalize_decimal_digits` already had one exact-value test; this adds the
+        // negative-collapses-to-zero branch (`negative && !is_zero`) on both its true and false
+        // side, which the existing test never reached (it only fed unsigned and "-0.000").
+        #[test]
+        fn canonicalize_decimal_digits_keeps_a_genuine_negative_value_signed() {
+            assert_eq!(super::canonicalize_decimal_digits("-13.500"), "-13.5");
+            assert_eq!(super::canonicalize_decimal_digits("-007"), "-7");
+        }
+
+        // R-AI: `big_mul_small` and `big_to_most_significant_first` are private helpers behind
+        // `exact_decimal_from_mantissa`, reachable indirectly through render_f32/f64 - but every
+        // render test above happens to pin only the *final* string, so a mutant that corrupts an
+        // intermediate digit or carry and then has the corruption happen to cancel out (or that
+        // only misbehaves on inputs those particular mantissas never exercise) can still leave
+        // every render assertion green. These call both helpers directly with digit sequences
+        // chosen to force a multi-step carry chain (mirroring the "RS-D-BigMulCarry-Loosening"
+        // finding's own reasoning: single-digit-times-single-digit-plus-carry never exceeds one
+        // new leading digit, so a carry chain needs several calls in a row to build multiple
+        // digits deep).
+        #[test]
+        fn big_mul_small_multiplies_in_place_with_carry() {
+            // 9 * 5 = 45: exercises the carry path (`carry > 0`) pushing one new leading digit.
+            let mut digits: Vec<u8> = vec![9]; // "9", little-endian
+            super::big_mul_small(&mut digits, 5);
+            assert_eq!(digits, vec![5, 4]); // "45"
+
+            // Repeated multiplication by 2 on "999" builds a carry chain across every digit:
+            // 999 * 2 = 1998.
+            let mut digits: Vec<u8> = vec![9, 9, 9]; // "999"
+            super::big_mul_small(&mut digits, 2);
+            assert_eq!(digits, vec![8, 9, 9, 1]); // "1998"
+
+            // No carry at all: 10 * 2 = 20, digit count unchanged.
+            let mut digits: Vec<u8> = vec![0, 1]; // "10"
+            super::big_mul_small(&mut digits, 2);
+            assert_eq!(digits, vec![0, 2]); // "20"
+        }
+
+        #[test]
+        fn big_to_most_significant_first_reverses_into_a_decimal_string() {
+            assert_eq!(super::big_to_most_significant_first(&vec![9, 9, 1]), "199");
+            assert_eq!(super::big_to_most_significant_first(&vec![0]), "0");
+            assert_eq!(super::big_to_most_significant_first(&vec![7]), "7");
+        }
+
+        // R-AI: `big_from_u64` (the seed of every bignum expansion) was only reachable indirectly
+        // through render_f32/f64, never pinned on its own digit sequence.
+        #[test]
+        fn big_from_u64_produces_little_endian_digits() {
+            assert_eq!(super::big_from_u64(0), vec![0]);
+            assert_eq!(super::big_from_u64(9), vec![9]);
+            assert_eq!(super::big_from_u64(123), vec![3, 2, 1]);
+        }
+
+        // R-AI: `exact_decimal_from_mantissa` backs both render_f32 and render_f64, but every
+        // existing render test only pins the *final* string for a real IEEE-754 bit pattern -
+        // never the exponent sign branch directly, and never a case where the multiply-by-5
+        // fraction expansion is *shorter* than the number of fraction digits it needs (`rendered.len()
+        // <= k`), which only happens for a small mantissa at a deeply negative exponent and is the
+        // one place the leading-zero padding actually runs.
+        #[test]
+        fn exact_decimal_from_mantissa_takes_the_exponent_sign_branch_it_is_given() {
+            // exponent >= 0: repeated multiply-by-2, no fraction.
+            assert_eq!(super::exact_decimal_from_mantissa(3, 4, false), "48"); // 3 * 2^4
+            // exponent < 0: repeated multiply-by-5, k fraction digits, no padding needed (the
+            // rendered digit count already exceeds k).
+            assert_eq!(super::exact_decimal_from_mantissa(5, -1, false), "2.5"); // 5 / 2^1
+        }
+
+        #[test]
+        fn exact_decimal_from_mantissa_pads_leading_fraction_zeros_when_the_digits_run_short() {
+            // mantissa=1, exponent=-5: 5^5 = 3125 is only 4 digits, but 5 fraction positions are
+            // needed - `rendered.len() (4) <= k (5)` must trigger the leading-zero pad, or the
+            // decimal point lands in the wrong place (and, without the pad, `split` underflows).
+            assert_eq!(super::exact_decimal_from_mantissa(1, -5, false), "0.03125"); // 1 / 2^5
+            assert_eq!(super::exact_decimal_from_mantissa(1, -5, true), "-0.03125");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Schema-alias matching (R-E)
+// ---------------------------------------------------------------------------------------------
+
+/// The one schema-identity rule (R-E), ported from the C# reference's
+/// `CultNetSchemaAliasMatching.Matches(string, CultDocumentDescriptor)` / `MatchesAny` -
+/// **Self's ruling, 2026-09-22 ("the C# reference's alias rule is the rule")**: an alias is a
+/// schema *name* with a trailing `.v<digits>` suffix, resolved against the schema's declared name,
+/// never against its hash id. C#'s production call sites (`CultNetSelection.cs:438`,
+/// `CultNetSelectionEvaluator.cs:88,340`) all use the descriptor overload, never the bare
+/// `Matches(string, string)` id-vs-id overload, so that is the behaviour this module ports. D7
+/// still holds: Rust carries no `CultDocumentDescriptor` type, so `RowSet::schema_name`/
+/// `Row::schema_name` stand in for it - the consumer supplies a schema's declared name the same way
+/// it supplies everything else `Row`/`RowSet` expose.
+pub mod schema_alias {
+    /// `true` when `candidate` names `schema_id` exactly, names `schema_name` exactly, or
+    /// `candidate`'s inferred name (the part before a trailing `.v<digits>` marker, or the whole of
+    /// `candidate` when it carries no such marker) equals `schema_name` exactly. Ordinal
+    /// (case-sensitive) comparison throughout, matching C#'s `StringComparison.Ordinal`. Mirrors
+    /// `CultNetSchemaAliasMatching.Matches(string candidate, CultDocumentDescriptor descriptor)`
+    /// (`CultNetDatabase.cs:71-84`) with its `SchemaVersion`/`CompatibleSchemaIds` checks folded
+    /// away: this crate's `Row`/`RowSet` expose no equivalent of either, and no fixture or call site
+    /// needs them (`CultNetSelection.cs:438` and `CultNetSelectionEvaluator.cs:88,340` are this
+    /// port's only production callers, and neither reaches for a schema's version string or its
+    /// compatibility list).
+    pub fn matches(candidate: &str, schema_id: &str, schema_name: &str) -> bool {
+        if candidate == schema_id || candidate == schema_name {
+            return true;
+        }
+        let candidate_name = infer_schema_name(candidate).unwrap_or(candidate);
+        candidate_name == schema_name
+    }
+
+    /// `true` when `candidates` is empty (no filter) or any candidate matches `schema_id`/
+    /// `schema_name`. Mirrors `CultNetSchemaAliasMatching.MatchesAny(IReadOnlyList<string>,
+    /// CultDocumentDescriptor)`.
+    pub fn matches_any(candidates: &[String], schema_id: &str, schema_name: &str) -> bool {
+        candidates.is_empty()
+            || candidates
+                .iter()
+                .any(|candidate| matches(candidate, schema_id, schema_name))
+    }
+
+    /// The part of `schema_id` before a trailing `.v<digits>` marker, or `None` when `schema_id`
+    /// carries no such marker: the marker is absent, sits at position 0 (`".v5"`, C#'s `marker <= 0`
+    /// refusing a zero index too), has nothing after it (`"a.v"`), or what follows `.v` is not every
+    /// byte a digit (`"a.vx"`, `"a.v5x"`). A `schema_id` with more than one `.v<digits>` marker
+    /// resolves at the *last* one (`"a.v5.v2"` -> `Some("a.v5")`), matching C#'s
+    /// `LastIndexOf(".v", Ordinal)`. Byte-for-byte port of ASCII digit classification: C#'s
+    /// `char.IsDigit` is Unicode-aware but every marker byte here is ASCII, so `is_ascii_digit`
+    /// agrees on every input this rule ever sees. Mirrors
+    /// `CultNetSchemaAliasMatching.InferSchemaName` (`CultNetDatabase.cs:86-96`).
+    fn infer_schema_name(schema_id: &str) -> Option<&str> {
+        let marker = schema_id.rfind(".v")?;
+        if marker == 0 {
+            return None;
+        }
+        let version = &schema_id[marker + 2..];
+        if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(&schema_id[..marker])
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn matches_exact_ids() {
+            assert!(matches("sha256:abc", "sha256:abc", "leaf_a"));
+            assert!(!matches("sha256:abc", "sha256:def", "leaf_a"));
+        }
+
+        #[test]
+        fn matches_exact_name() {
+            assert!(matches("leaf_a", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_b", "sha256:abc", "leaf_a"));
+        }
+
+        #[test]
+        fn matches_by_inferred_name_alias_against_the_declared_name() {
+            assert!(matches("leaf_a.v9", "sha256:abc", "leaf_a"));
+            assert!(matches("leaf_a.v0", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_b.v9", "sha256:abc", "leaf_a"));
+        }
+
+        // R-E, the confirmed cross-runtime defect this cut fixes: a hash with a synthetic ".v1"
+        // appended is not a wire form C#'s production rule ever resolves (it strips the ".v1" and
+        // compares the bare hash text against the declared *name*, "leaf_a" - never equal to a
+        // hash). Sections of docs/cultnet-selection-cut.md call this "hashAlias"; it is a negative
+        // check in both runtimes now, not an alias either one resolves.
+        #[test]
+        fn does_not_match_a_hash_shaped_alias() {
+            assert!(!matches("sha256:abc.v1", "sha256:abc", "leaf_a"));
+        }
+
+        #[test]
+        fn does_not_match_a_real_hashed_id_with_no_shared_name() {
+            assert!(!matches("sha256:abc", "sha256:xyz", "leaf_a"));
+        }
+
+        #[test]
+        fn matches_any_empty_candidates_matches_everything() {
+            assert!(matches_any(&[], "sha256:anything", "leaf_a"));
+        }
+
+        // Case sensitivity: C#'s StringComparison.Ordinal is case-sensitive throughout, on the
+        // exact-id check, the exact-name check and the inferred-name comparison alike.
+        #[test]
+        fn every_comparison_is_case_sensitive() {
+            assert!(!matches("SHA256:ABC", "sha256:abc", "leaf_a"));
+            assert!(!matches("LEAF_A", "sha256:abc", "leaf_a"));
+            assert!(!matches("LEAF_A.v9", "sha256:abc", "leaf_a"));
+            assert!(!matches("leaf_a.V9", "sha256:abc", "leaf_a")); // ".V9", not ".v9" - no marker
+        }
+
+        // Edge handling of ".v" with no digits after it: InferSchemaName returns None, so the
+        // candidate falls back to itself, verbatim - it only matches a schema whose *name* equals
+        // that literal string.
+        #[test]
+        fn a_trailing_dot_v_with_no_digits_falls_back_to_the_literal_candidate() {
+            assert!(!matches("leaf_a.v", "sha256:abc", "leaf_a"));
+            assert!(matches("leaf_a.v", "sha256:abc", "leaf_a.v"));
+        }
+
+        // Edge handling of multiple dots: the *last* ".v<digits>" marker wins, matching C#'s
+        // LastIndexOf(".v", Ordinal) - not the first.
+        #[test]
+        fn multiple_dot_v_markers_resolve_at_the_last_one() {
+            assert!(matches("a.v5.v2", "sha256:abc", "a.v5"));
+            assert!(!matches("a.v5.v2", "sha256:abc", "a"));
+        }
+
+        #[test]
+        fn infer_schema_name_refuses_a_leading_marker_and_a_non_numeric_or_empty_version() {
+            assert_eq!(infer_schema_name(".v1"), None);
+            assert_eq!(infer_schema_name("name.vX"), None);
+            assert_eq!(infer_schema_name("name.v"), None);
+            assert_eq!(infer_schema_name("name.v1"), Some("name"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wire types (section 2)
+// ---------------------------------------------------------------------------------------------
+
+/// The four comparison and one any-of operator a field predicate may carry. `FieldPredicate::op` is
+/// the wire's raw string (never a serde-tagged union); this enum exists for evaluator ergonomics
+/// only, mirroring `CultNetSelectionOperator`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionOperator {
+    AnyOf,
+    Lt,
+    Le,
+    Ge,
+    Gt,
+}
+
+impl SelectionOperator {
+    /// Parses a wire operator string; `None` for anything else.
+    pub fn parse(wire: &str) -> Option<Self> {
+        match wire {
+            "any_of" => Some(Self::AnyOf),
+            "lt" => Some(Self::Lt),
+            "le" => Some(Self::Le),
+            "ge" => Some(Self::Ge),
+            "gt" => Some(Self::Gt),
+            _ => None,
+        }
+    }
+
+    /// The wire spelling of this operator.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::AnyOf => "any_of",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Ge => "ge",
+            Self::Gt => "gt",
+        }
+    }
+
+    /// `true` for the four comparison operators (everything but `any_of`).
+    pub fn is_comparison(self) -> bool {
+        !matches!(self, Self::AnyOf)
+    }
+}
+
+/// `"header"` under [`Selection::projection`].
+pub const PROJECTION_HEADER: &str = "header";
+/// `"document"` under [`Selection::projection`].
+pub const PROJECTION_DOCUMENT: &str = "document";
+
+fn default_projection() -> String {
+    PROJECTION_HEADER.to_string()
+}
+
+/// Identifies one row on the wire by schema and record key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordRef {
+    pub schema_id: String,
+    pub record_key: String,
+}
+
+impl RecordRef {
+    pub fn new(schema_id: impl Into<String>, record_key: impl Into<String>) -> Self {
+        Self {
+            schema_id: schema_id.into(),
+            record_key: record_key.into(),
+        }
+    }
+}
+
+/// One predicate over a single declared index alias (section 2).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldPredicate {
+    /// A declared index alias, reachable on some schema the selection can reach.
+    pub index: String,
+    /// `"any_of"`, `"lt"`, `"le"`, `"ge"`, or `"gt"`.
+    pub op: String,
+    /// Present iff `op = any_of`; non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+    /// Present iff `op` is a comparison; a canonical decimal string (Q-J).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
+}
+
+/// Selects rows whose declared reference names a target row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Citation {
+    pub target: RecordRef,
+    /// The reference's declared alias; absent matches any declared reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// Selects rows some other row does or does not name in `role` - the one negation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Incoming {
+    pub role: String,
+    pub exists: bool,
+}
+
+/// One typed selection, carried by `cultnet.snapshot_request.v1` and
+/// `cultnet.database_subscribe.v1` (section 2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Selection {
+    /// Kinds: schema ids. Absent = every schema. (No alias matching in this runtime - D7: Rust's
+    /// row owner has no schema-alias registry; a caller wanting an alias expands it before calling.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<Vec<String>>,
+    /// Record-key allowlist. Absent = every key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    /// Conjunction; each is any-of over one declared index alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<FieldPredicate>>,
+    /// Rows whose declared reference names `target`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cites: Option<Citation>,
+    /// Rows some row does or does not name in `role`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cited: Option<Incoming>,
+    /// `"header"` or `"document"`; default `"header"`.
+    #[serde(default = "default_projection")]
+    pub projection: String,
+    /// Reverses the one order.
+    #[serde(default)]
+    pub descending: bool,
+    /// Clamped 1..=200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Opaque; minted by the answering server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            schemas: None,
+            keys: None,
+            fields: None,
+            cites: None,
+            cited: None,
+            projection: default_projection(),
+            descending: false,
+            limit: None,
+            cursor: None,
+        }
+    }
+}
+
+impl Selection {
+    /// `true` when this selection follows an edge (section 2: "Edges in the answer").
+    pub fn has_hop(&self) -> bool {
+        self.cites.is_some() || self.cited.is_some()
+    }
+}
+
+/// One edge a hop traversed, carried on a selection page.
+///
+/// R-AP: a decodable *fixed-shape* map is worth more than brevity, and `skip_serializing_if`
+/// undermines the compact positional form anyway (a struct's `n`th absent optional turns an
+/// n-element array into a shorter one, undecodable against the declared shape) - every field here
+/// is always present on the wire, `nil` when absent, in this declared order, the same rule
+/// `RawDocumentHeader`/`SelectionDocumentRecord`/`SelectionPage` follow below.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Edge {
+    /// The citing row.
+    pub from: RecordRef,
+    /// The declared reference alias the citer used.
+    pub role: String,
+    /// The cited row, its schema resolved to the leaf actually stored.
+    pub to: RecordRef,
+    /// `"messagepack"` when `payload` is present.
+    #[serde(default)]
+    pub payload_encoding: Option<String>,
+    /// The value attached to the edge (a dictionary reference's value); present under `document`
+    /// projection only.
+    #[serde(default, with = "optional_bytes")]
+    pub payload: Option<Vec<u8>>,
+}
+
+/// `serde_bytes` has no `Option<Vec<u8>>` submodule; this is the same MessagePack `bin`/`nil`
+/// encoding, spelled for the optional case.
+mod optional_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_bytes::{ByteBuf, Bytes};
+
+    pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(bytes) => serializer.serialize_some(Bytes::new(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error> {
+        Ok(Option::<ByteBuf>::deserialize(deserializer)?.map(ByteBuf::into_vec))
+    }
+}
+
+/// A header record: [`SelectionDocumentRecord`] minus its payload and payload encoding.
+///
+/// R-AP: every field always present, `nil` when absent, in this declared order (see `Edge`'s doc
+/// comment above).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawDocumentHeader {
+    pub schema_id: String,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    #[serde(default)]
+    pub schema_content_hash: Option<String>,
+    pub record_key: String,
+    pub stored_at: String,
+    #[serde(default)]
+    pub source_runtime_id: Option<String>,
+    #[serde(default)]
+    pub source_agent_id: Option<String>,
+    #[serde(default)]
+    pub source_role: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// The full record `cultnet.snapshot_response_raw.v1` carries under `document` projection. Distinct
+/// from `contracts::CultNetRawDocumentRecord` (the v0 raw record), which lacks `schemaName`/
+/// `schemaVersion`/`schemaContentHash` - a pre-existing gap in the v0 Rust struct relative to the C#
+/// reference's `CultNetRawDocumentRecord` that this cut does not touch (out of scope: v0's wire is
+/// unchanged). v1 reuses the reference's richer, already-existing C# type, so this Rust type matches
+/// that one, not v0's.
+// R-AP: every optional field always present, `nil` when absent, in this declared order (see
+// `Edge`'s doc comment above).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionDocumentRecord {
+    pub schema_id: String,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    #[serde(default)]
+    pub schema_content_hash: Option<String>,
+    pub record_key: String,
+    pub stored_at: String,
+    #[serde(default = "messagepack_encoding")]
+    pub payload_encoding: String,
+    #[serde(with = "serde_bytes")]
+    pub payload: Vec<u8>,
+    #[serde(default)]
+    pub source_runtime_id: Option<String>,
+    #[serde(default)]
+    pub source_agent_id: Option<String>,
+    #[serde(default)]
+    pub source_role: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+fn messagepack_encoding() -> String {
+    "messagepack".to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Refusals (section 2/3, typed at the door)
+// ---------------------------------------------------------------------------------------------
+
+/// Refused typed at the door: a name, list, or comparison the declared shape cannot support.
+/// Mirrors `CultNetSelectionInvalidException`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionInvalid {
+    /// The selection field that failed (`"schemas"`, `"keys"`, `"fields[i].index"`, ...).
+    pub field: String,
+    /// The offending value, when there is one string worth naming.
+    pub value: Option<String>,
+    pub message: String,
+}
+
+impl SelectionInvalid {
+    fn new(field: impl Into<String>, value: Option<String>, message: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            value,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for SelectionInvalid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "selection_invalid[{}]: {}", self.field, self.message)
+    }
+}
+
+impl std::error::Error for SelectionInvalid {}
+
+/// Every way `select`/`matches` can refuse rather than answer (section 2/3/8).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SelectionRefusal {
+    Invalid(SelectionInvalid),
+    /// The cursor's `asOf` does not match the snapshot being answered.
+    CursorStale { as_of: u64, current: u64 },
+    /// The cursor does not decode, or its digest is not this selection's.
+    CursorInvalid { message: String },
+    /// A stored edge names a row whose schema is outside the reference's declared target (D9/S18).
+    ReferenceOutsideTarget {
+        from_schema_id: String,
+        from_key: String,
+        role: String,
+        to_schema_id: String,
+        to_key: String,
+    },
+}
+
+impl fmt::Display for SelectionRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(inner) => write!(f, "{inner}"),
+            Self::CursorStale { as_of, current } => write!(
+                f,
+                "cursor_stale: the cursor was minted at asOf {as_of}; this server answers as of {current}."
+            ),
+            Self::CursorInvalid { message } => write!(f, "cursor_invalid: {message}"),
+            Self::ReferenceOutsideTarget {
+                from_schema_id,
+                from_key,
+                role,
+                to_schema_id,
+                to_key,
+            } => write!(
+                f,
+                "reference_outside_target: {from_schema_id}/{from_key} names {to_schema_id}/{to_key} through role \"{role}\", which is outside the reference's declared target."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SelectionRefusal {}
+
+impl From<SelectionInvalid> for SelectionRefusal {
+    fn from(value: SelectionInvalid) -> Self {
+        Self::Invalid(value)
+    }
+}
+
+// R-N (docs/cultnet-selection-cut.md, fix batch 3): the wire shape below is matched byte-for-byte
+// against the landed C# reference (CultNetErrorMessage.ForSelectionInvalid/ForCursor/
+// ForReferenceOutsideTarget in src/GameCult.Networking/CultNetSchemaMessages.cs) - see
+// packages/cultnet-rs/tests/error_message.rs for the comparison against captured C# bytes.
+impl From<&SelectionRefusal> for CultNetMessage {
+    fn from(refusal: &SelectionRefusal) -> Self {
+        match refusal {
+            SelectionRefusal::Invalid(inner) => CultNetMessage::Error {
+                error: format!("selection_invalid: {}", inner.message),
+                code: Some(CultNetErrorCode::SelectionInvalid),
+                details: Some(CultNetErrorDetails {
+                    field: Some(inner.field.clone()),
+                    value: inner.value.clone(),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+            SelectionRefusal::CursorStale { as_of, current } => CultNetMessage::Error {
+                error: format!(
+                    "cursor_stale: The cursor was minted at asOf {as_of}; this server answers as of {current}."
+                ),
+                code: Some(CultNetErrorCode::CursorStale),
+                details: Some(CultNetErrorDetails {
+                    field: None,
+                    value: None,
+                    as_of: Some(*as_of),
+                    current: Some(*current),
+                }),
+            },
+            SelectionRefusal::CursorInvalid { message } => CultNetMessage::Error {
+                error: format!("cursor_invalid: {message}"),
+                code: Some(CultNetErrorCode::CursorInvalid),
+                details: None,
+            },
+            SelectionRefusal::ReferenceOutsideTarget {
+                from_schema_id,
+                from_key,
+                role,
+                to_schema_id,
+                to_key,
+            } => CultNetMessage::Error {
+                error: format!(
+                    "reference_outside_target: {from_schema_id}/{from_key} names {to_schema_id}/{to_key} through role \"{role}\", which is outside the reference's declared target."
+                ),
+                code: Some(CultNetErrorCode::ReferenceOutsideTarget),
+                details: None,
+            },
+        }
+    }
+}
+
+impl From<SelectionRefusal> for CultNetMessage {
+    fn from(refusal: SelectionRefusal) -> Self {
+        CultNetMessage::from(&refusal)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Row / RowSet (D7): the consumer's declarations and values, reflected over nothing
+// ---------------------------------------------------------------------------------------------
+
+/// One row available to the evaluator: what the row owner already knows about it. Implemented by
+/// the consumer (Huginn, or a test fixture) - the Rust spelling of what `CultCache`'s public read
+/// surface supplies the C# evaluator.
+pub trait Row {
+    fn schema_id(&self) -> &str;
+    /// This row's declared schema *name* (C#'s `CultDocumentDescriptor.SchemaName`) - the alias
+    /// matcher's name-comparison target (R-E, `schema_alias::matches`). A row whose owner supplies
+    /// no separate name (e.g. a raw wire record with only a hash id) falls back to `schema_id()`,
+    /// which is the same "no name known" behaviour the C# reference has none of: every C# document
+    /// descriptor always carries a real `SchemaName`, so this default exists only for Rust rows
+    /// that genuinely have nothing better, and it costs them nothing they had before (the fallback
+    /// still matches an exact id, just never a name alias).
+    fn schema_name(&self) -> &str {
+        self.schema_id()
+    }
+    fn record_key(&self) -> &str;
+    /// The sequence of the commit that last wrote this row. The row owner supplies it; the
+    /// evaluator never reads a clock.
+    fn ordinal(&self) -> i64;
+    /// Every declared value at `index` on this row (usually zero or one; `any_of` matches
+    /// membership, matching the cache's own string-valued indexes).
+    fn values(&self, index: &str) -> Vec<String>;
+    /// This row's declared numeric value at `index`, as its exact canonical decimal (Q-J) - never
+    /// `f64`. `None` when the row has no value, or the value is NaN/infinite.
+    fn number(&self, index: &str) -> Option<String>;
+    /// Every declared reference edge this row carries: `(role, target_record_key, payload)`. A
+    /// one-reference yields one entry, a many-reference one per element, a dictionary reference one
+    /// per key with its value as the payload (D11).
+    ///
+    /// R-AF: the target is a bare record key, not a `RecordRef` - a stored reference carries no
+    /// schema id on the wire (`GameCult.Caching.MessagePack.CultRecordRefFormatter<T>` serializes a
+    /// `CultRecordRef<T>` as only its key string; probed against real serialized bytes,
+    /// docs/cultnet-selection-cut.md, "R-AF"). `resolve_reference_target` turns this bare key into a
+    /// resolved row, by record key plus the declared leaf set (D9) - never by an exact (schema, key)
+    /// pair, which would assume a schema the edge never actually carries.
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)>;
+}
+
+impl<T: Row + ?Sized> Row for &T {
+    fn schema_id(&self) -> &str {
+        (**self).schema_id()
+    }
+    fn schema_name(&self) -> &str {
+        (**self).schema_name()
+    }
+    fn record_key(&self) -> &str {
+        (**self).record_key()
+    }
+    fn ordinal(&self) -> i64 {
+        (**self).ordinal()
+    }
+    fn values(&self, index: &str) -> Vec<String> {
+        (**self).values(index)
+    }
+    fn number(&self, index: &str) -> Option<String> {
+        (**self).number(index)
+    }
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
+        (**self).references()
+    }
+}
+
+/// The consumer's schema-level declarations: what `select`/`validate` need to know about the shape
+/// of the rows, independent of any one row's values.
+pub trait RowSet {
+    /// Every schema id this row set knows about - the universe `selection.schemas` narrows.
+    fn all_schema_ids(&self) -> Vec<String>;
+    /// `schema_id`'s declared name (C#'s `CultDocumentDescriptor.SchemaName`) - the alias matcher's
+    /// name-comparison target (R-E). `None` when `schema_id` is not one of `all_schema_ids()`.
+    fn schema_name(&self, schema_id: &str) -> Option<String>;
+    /// The declared index aliases a schema carries (inherited or own).
+    fn declared_indexes(&self, schema_id: &str) -> Vec<String>;
+    /// The declared reference roles a schema carries.
+    fn declared_roles(&self, schema_id: &str) -> Vec<String>;
+    /// `true` when `index` is declared numeric on `schema_id`.
+    fn is_numeric(&self, schema_id: &str, index: &str) -> bool;
+    /// The schema ids a reference named `role` may target. An empty result means the role carries
+    /// no restriction the hop must enforce (mirrors C#'s `TargetType == null` skipping the check) -
+    /// a `RowSet` with a real, closed target set returns it non-empty.
+    fn target_leaves(&self, role: &str) -> Vec<String>;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Validation (S1, the door)
+// ---------------------------------------------------------------------------------------------
+
+/// Validates a [`Selection`] against the declared shape of the schemas it can reach - the door
+/// refusals of section 2/3 (S1). Mirrors `CultNetSelectionValidation.Validate`.
+pub fn validate(selection: &Selection, row_set: &impl RowSet) -> Result<(), SelectionInvalid> {
+    if matches!(&selection.schemas, Some(schemas) if schemas.is_empty()) {
+        return Err(SelectionInvalid::new(
+            "schemas",
+            None,
+            "selection.schemas is present and empty; omit it to reach every schema.",
+        ));
+    }
+    if matches!(&selection.keys, Some(keys) if keys.is_empty()) {
+        return Err(SelectionInvalid::new(
+            "keys",
+            None,
+            "selection.keys is present and empty; omit it to reach every key.",
+        ));
+    }
+    // Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): section 2
+    // already said an empty list is refused at the door; the door must refuse a blank entry
+    // inside a present list too, so the evaluator never has to decide what "" or "  " means.
+    // `null` (Rust: `None`) means no filter, everywhere - an empty-or-blank list is never
+    // silently treated as "no filter" by the evaluator (that was CultNetSelectionEvaluator.cs's
+    // pre-fix bug, section 2's S2-3 finding, and this Rust evaluator never had it).
+    // Field name matches the C# reference exactly (568e8e3): plain "schemas"/"keys", not an
+    // indexed "schemas[i]" - CultNetSelectionInvalidException("schemas", schema, ...) names the
+    // list, not the position, and the parity vectors compare this string.
+    if let Some(schemas) = &selection.schemas {
+        for schema in schemas {
+            if schema.trim().is_empty() {
+                return Err(SelectionInvalid::new(
+                    "schemas",
+                    Some(schema.clone()),
+                    "selection.schemas carries an empty or whitespace entry.",
+                ));
+            }
+        }
+    }
+    if let Some(keys) = &selection.keys {
+        for key in keys {
+            if key.trim().is_empty() {
+                return Err(SelectionInvalid::new(
+                    "keys",
+                    Some(key.clone()),
+                    "selection.keys carries an empty or whitespace entry.",
+                ));
+            }
+        }
+    }
+    if selection.projection != PROJECTION_HEADER && selection.projection != PROJECTION_DOCUMENT {
+        return Err(SelectionInvalid::new(
+            "projection",
+            Some(selection.projection.clone()),
+            format!(
+                "selection.projection {:?} is neither \"header\" nor \"document\".",
+                selection.projection
+            ),
+        ));
+    }
+
+    let reachable = reachable_schemas(selection, row_set);
+
+    if let Some(fields) = &selection.fields {
+        for (index, field) in fields.iter().enumerate() {
+            validate_field(field, index, &reachable, row_set)?;
+        }
+    }
+
+    if let Some(cites) = &selection.cites {
+        if cites.target.schema_id.is_empty() || cites.target.record_key.is_empty() {
+            return Err(SelectionInvalid::new(
+                "cites.target",
+                None,
+                "selection.cites.target requires schemaId and recordKey.",
+            ));
+        }
+        // R-E: cites.target.schemaId goes through the one schema-identity rule too. An unmatched
+        // target is refused at the door, never silently answered with an empty page.
+        if !row_set.all_schema_ids().iter().any(|schema_id| {
+            let name = row_set.schema_name(schema_id).unwrap_or_else(|| schema_id.clone());
+            schema_alias::matches(&cites.target.schema_id, schema_id, &name)
+        }) {
+            return Err(SelectionInvalid::new(
+                "cites.target.schemaId",
+                Some(cites.target.schema_id.clone()),
+                format!(
+                    "selection.cites.target.schemaId {:?} matches no known schema.",
+                    cites.target.schema_id
+                ),
+            ));
+        }
+        if let Some(role) = &cites.role
+            && !any_schema_declares_role(row_set, role)
+        {
+            return Err(SelectionInvalid::new(
+                "cites.role",
+                Some(role.clone()),
+                format!("selection.cites.role {role:?} is not declared by any schema."),
+            ));
+        }
+    }
+
+    if let Some(cited) = &selection.cited {
+        if cited.role.is_empty() {
+            return Err(SelectionInvalid::new(
+                "cited.role",
+                None,
+                "selection.cited.role must be non-empty.",
+            ));
+        }
+        if !any_schema_declares_role(row_set, &cited.role) {
+            return Err(SelectionInvalid::new(
+                "cited.role",
+                Some(cited.role.clone()),
+                format!(
+                    "selection.cited.role {:?} is not declared by any schema.",
+                    cited.role
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// The schemas [`Selection::schemas`] reaches - every schema when absent.
+pub fn reachable_schemas(selection: &Selection, row_set: &impl RowSet) -> Vec<String> {
+    let all = row_set.all_schema_ids();
+    match &selection.schemas {
+        None => all,
+        // R-E: reachability goes through the alias matcher, not exact equality.
+        Some(schemas) => all
+            .into_iter()
+            .filter(|id| {
+                let name = row_set.schema_name(id).unwrap_or_else(|| id.clone());
+                schema_alias::matches_any(schemas, id, &name)
+            })
+            .collect(),
+    }
+}
+
+fn any_schema_declares_role(row_set: &impl RowSet, role: &str) -> bool {
+    row_set
+        .all_schema_ids()
+        .iter()
+        .any(|schema_id| row_set.declared_roles(schema_id).iter().any(|r| r == role))
+}
+
+fn validate_field(
+    field: &FieldPredicate,
+    index: usize,
+    reachable: &[String],
+    row_set: &impl RowSet,
+) -> Result<(), SelectionInvalid> {
+    let prefix = format!("fields[{index}]");
+    if field.index.is_empty() {
+        return Err(SelectionInvalid::new(
+            format!("{prefix}.index"),
+            None,
+            format!("{prefix}.index must be non-empty."),
+        ));
+    }
+    let Some(op) = SelectionOperator::parse(&field.op) else {
+        return Err(SelectionInvalid::new(
+            format!("{prefix}.op"),
+            Some(field.op.clone()),
+            format!("{prefix}.op {:?} is not any_of/lt/le/ge/gt.", field.op),
+        ));
+    };
+
+    if op == SelectionOperator::AnyOf {
+        match &field.values {
+            None => {
+                return Err(SelectionInvalid::new(
+                    format!("{prefix}.values"),
+                    None,
+                    format!("{prefix}.values must be non-empty for op any_of."),
+                ));
+            }
+            Some(values) if values.is_empty() => {
+                return Err(SelectionInvalid::new(
+                    format!("{prefix}.values"),
+                    None,
+                    format!("{prefix}.values must be non-empty for op any_of."),
+                ));
+            }
+            _ => {}
+        }
+        if field.number.is_some() {
+            return Err(SelectionInvalid::new(
+                format!("{prefix}.number"),
+                None,
+                format!("{prefix} carries both values and number; any_of takes only values."),
+            ));
+        }
+    } else {
+        match &field.number {
+            None => {
+                return Err(SelectionInvalid::new(
+                    format!("{prefix}.number"),
+                    None,
+                    format!("{prefix}.number is required for op {}.", field.op),
+                ));
+            }
+            Some(number) if !canonical_number::is_canonical(number) => {
+                return Err(SelectionInvalid::new(
+                    format!("{prefix}.number"),
+                    Some(number.clone()),
+                    format!(
+                        "{prefix}.number {number:?} is not a canonical decimal string (Q-J): it must match {} and not be \"-0\".",
+                        r"^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$"
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        if field.values.is_some() {
+            return Err(SelectionInvalid::new(
+                format!("{prefix}.values"),
+                None,
+                format!("{prefix} carries both values and number; a comparison takes only number."),
+            ));
+        }
+    }
+
+    let declaring: Vec<&String> = reachable
+        .iter()
+        .filter(|schema_id| {
+            row_set
+                .declared_indexes(schema_id)
+                .iter()
+                .any(|alias| alias == &field.index)
+        })
+        .collect();
+    if declaring.is_empty() {
+        return Err(SelectionInvalid::new(
+            format!("{prefix}.index"),
+            Some(field.index.clone()),
+            format!(
+                "{prefix}.index {:?} is not declared by any schema this selection can reach.",
+                field.index
+            ),
+        ));
+    }
+    if op.is_comparison() {
+        for schema_id in &declaring {
+            if !row_set.is_numeric(schema_id, &field.index) {
+                return Err(SelectionInvalid::new(
+                    format!("{prefix}.index"),
+                    Some(field.index.clone()),
+                    format!(
+                        "{prefix}.index {:?} is declared non-numeric on a schema this selection can reach; comparisons need a numeric declaration everywhere the alias is reachable.",
+                        field.index
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Evaluation (D6/D7: the single-row fast path and the full Select)
+// ---------------------------------------------------------------------------------------------
+
+/// The lowest and highest limit a page may carry (section 2).
+pub const LIMIT_MIN: u32 = 1;
+pub const LIMIT_MAX: u32 = 200;
+
+/// The single-row fast path (D6): schemas, keys and fields only. A hop-bearing selection
+/// ([`Selection::has_hop`]) is set-dependent and must not use this path - the caller reconciles the
+/// full row set with [`select`] instead.
+///
+/// R-F: this is a real, always-on `assert!`, not a `debug_assert!` - a release build must not
+/// silently ignore `cites`/`cited` by skipping straight to the schema/keys/fields comparison; a
+/// caller that reaches this with a hop-bearing selection has a programming error to fix, not a
+/// page to answer wrong.
+pub fn matches<R: Row>(row: &R, selection: &Selection) -> bool {
+    assert!(
+        !selection.has_hop(),
+        "a hop-bearing selection (cites/cited) is set-dependent and cannot use the single-row \
+         matches fast path; reconcile the full row set with select() instead"
+    );
+    matches_schema_keys_fields(row, selection)
+}
+
+fn matches_schema_keys_fields<R: Row>(row: &R, selection: &Selection) -> bool {
+    // R-E, but deliberately not `schema_alias::matches_any`: that helper's `candidates.is_empty()`
+    // shortcut mirrors the C# reference's own `MatchesAny(schemaId)` on purpose (R-E), but this is
+    // the evaluator's fast path, reached without going through `validate` on the v0 lowering path
+    // (`serve_read_only_raw_snapshot`, which never calls `select`/`validate` by design - v0 has its
+    // own null-collapsing). An empty-but-present `schemas` must never be silently read as "every
+    // schema" here - only `None` means no filter. A plain `.any()` over an empty slice is already
+    // `false` (matches nothing), which is what a present-but-empty list must do until something
+    // upstream (the v1 door, or v0's own lowering) turns it into `None` or refuses it outright.
+    if let Some(schemas) = &selection.schemas
+        && !schemas
+            .iter()
+            .any(|candidate| schema_alias::matches(candidate, row.schema_id(), row.schema_name()))
+    {
+        return false;
+    }
+    if let Some(keys) = &selection.keys
+        && !keys.iter().any(|k| k == row.record_key())
+    {
+        return false;
+    }
+    let Some(fields) = &selection.fields else {
+        return true;
+    };
+
+    for field in fields {
+        let Some(op) = SelectionOperator::parse(&field.op) else {
+            return false;
+        };
+        if op == SelectionOperator::AnyOf {
+            let values = row.values(&field.index);
+            let Some(wanted) = &field.values else {
+                return false;
+            };
+            if !values.iter().any(|v| wanted.iter().any(|w| w == v)) {
+                return false;
+            }
+        } else {
+            let Some(number) = row.number(&field.index) else {
+                return false;
+            };
+            let Some(compared) = &field.number else {
+                return false;
+            };
+            if !compare_number(&number, op, compared) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn compare_number(left: &str, op: SelectionOperator, right: &str) -> bool {
+    let ordering = canonical_number::compare(left, right);
+    match op {
+        SelectionOperator::Lt => ordering == Ordering::Less,
+        SelectionOperator::Le => ordering != Ordering::Greater,
+        SelectionOperator::Ge => ordering != Ordering::Less,
+        SelectionOperator::Gt => ordering == Ordering::Greater,
+        SelectionOperator::AnyOf => unreachable!("any_of never reaches compare_number"),
+    }
+}
+
+/// One edge a hop traversed, resolved against the row set in hand.
+#[derive(Clone, Debug)]
+pub struct EdgeMatch<R: Row + Clone> {
+    pub from: R,
+    pub role: String,
+    pub to: R,
+    pub payload: Option<Vec<u8>>,
+    /// R-W: which end of this edge is the page row that produced it - `cites` anchors on the
+    /// citer (`from`), `cited` anchors on the citee (`to`). A selection carrying both hops mixes
+    /// edges from both sources in one `Vec`, so each edge must carry its own anchor rather than
+    /// the whole batch being filtered by one shared direction.
+    pub anchor: EdgeAnchor,
+}
+
+/// Which end of an [`EdgeMatch`] is the page row it was found through (R-W).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeAnchor {
+    /// Produced by `cites`: the page row is the citer, `from`.
+    Citer,
+    /// Produced by `cited`: the page row is the citee, `to`.
+    Citee,
+}
+
+/// Evaluated, ordered, paged rows plus the edges a hop traversed.
+#[derive(Clone, Debug)]
+pub struct Evaluation<R: Row + Clone> {
+    pub rows: Vec<R>,
+    /// The total number of matches (C5, R-G/P-1) - not the page count. One evaluation answers
+    /// both v0 and shard paging as a single snapshot.
+    pub matched: u32,
+    pub edges: Vec<EdgeMatch<R>>,
+    pub next_cursor: Option<String>,
+}
+
+/// Evaluates a selection over the full row set: schemas/keys/fields, the hop (`cites`/`cited`, with
+/// its edges and the `reference_outside_target` refusal), order, cursor and paging. Mirrors
+/// `CultNetSelectionEvaluator.Select`.
+///
+/// R-F: the door is inside `select` - this validates first and returns the typed refusal; there is
+/// no public entry point that evaluates an unvalidated selection.
+pub fn select<R: Row + Clone>(
+    row_set: &impl RowSet,
+    all_rows: &[R],
+    selection: &Selection,
+    as_of: u64,
+    cursor_key: &CursorKey,
+) -> Result<Evaluation<R>, SelectionRefusal> {
+    validate(selection, row_set)?;
+
+    // R-AF: keyed by record key alone, not `(schemaId, recordKey)` - a stored reference edge
+    // carries no schema id on the wire (see `Row::references`'s doc comment), so resolving "the
+    // row this edge names" must search every row sharing a key, not look one up by a pair the edge
+    // never actually supplies. Two schemas legitimately sharing one record key both live under
+    // that key's entry; `resolve_reference_target` is what picks the one inside the declared
+    // target.
+    let mut by_key: HashMap<&str, Vec<&R>> = HashMap::new();
+    for row in all_rows {
+        by_key.entry(row.record_key()).or_default().push(row);
+    }
+
+    let mut candidates: Vec<&R> = all_rows
+        .iter()
+        .filter(|row| matches_schema_keys_fields(*row, selection))
+        .collect();
+
+    let mut edges: Vec<EdgeMatch<R>> = Vec::new();
+
+    if let Some(cited) = &selection.cited {
+        let incoming = build_incoming_index(row_set, all_rows, &by_key, &cited.role, &mut edges)?;
+        let exists = cited.exists;
+        // R-V: membership is by (schemaId, recordKey) - a row of one schema is not "cited"
+        // merely because some other row cites a different schema sharing its record key.
+        candidates.retain(|row| {
+            incoming.contains(&(row.schema_id().to_string(), row.record_key().to_string())) == exists
+        });
+    }
+
+    if let Some(cites) = &selection.cites {
+        let mut kept = Vec::with_capacity(candidates.len());
+        for row in candidates {
+            if matches_citation(row_set, &by_key, row, cites, &mut edges)? {
+                kept.push(row);
+            }
+        }
+        candidates = kept;
+    }
+
+    let mut matched = candidates;
+    matched.sort_by(|a, b| order_rows(*a, *b, selection.descending));
+    let matched_total = matched.len() as u32;
+
+    let mut start_index = 0usize;
+    if let Some(cursor_text) = selection.cursor.as_deref()
+        && !cursor_text.is_empty()
+    {
+        let cursor = Cursor::parse(cursor_text)?;
+        // R-O: a forged cursor, or one minted under a different process's key, fails this check -
+        // digest equality alone used to be enough to mint one; now the key is required too.
+        if !cursor.verify_digest(selection, cursor_key) {
+            return Err(SelectionRefusal::CursorInvalid {
+                message: "The cursor's selection digest does not match this selection.".into(),
+            });
+        }
+        if cursor.as_of != as_of {
+            return Err(SelectionRefusal::CursorStale {
+                as_of: cursor.as_of,
+                current: as_of,
+            });
+        }
+        start_index = find_cursor_position(&matched, &cursor, selection.descending);
+    }
+
+    let limit = selection
+        .limit
+        .unwrap_or(LIMIT_MAX)
+        .clamp(LIMIT_MIN, LIMIT_MAX) as usize;
+    let page: Vec<R> = matched
+        .iter()
+        .skip(start_index)
+        .take(limit)
+        .map(|row| (*row).clone())
+        .collect();
+    let has_next = start_index + page.len() < matched.len();
+    let next_cursor = if has_next && !page.is_empty() {
+        Some(Cursor::mint(
+            as_of,
+            page.last().expect("checked non-empty"),
+            selection,
+            cursor_key,
+        ))
+    } else {
+        None
+    };
+
+    // R-B/R-W: hop edges follow the hop's own direction, per edge - not one direction for the
+    // whole batch. A selection carrying both `cites` and `cited` puts edges from both functions
+    // into one `Vec`, and each edge already knows which end (R-V: (schemaId, recordKey)) is the
+    // page row that produced it (`EdgeAnchor`): `cites` anchors on the citer (`from`), `cited`
+    // anchors on the citee (`to`). Order is deterministic: page-row order, then (from, role,
+    // to.record_key) in code-point order - never a `HashMap`'s iteration order.
+    //
+    // R-BA (docs/cultnet-selection-cut.md, "Soul, the merge gate, fourth pass"): `to.schema_id`
+    // used to sit last in this tiebreak and has been deleted. `resolve_reference_target` (this
+    // file) resolves purely from `(role, record_key)` against the evaluation's own fixed `by_key`
+    // and `target_leaves(role)` - neither depends on which edge or which `from` is asking - so
+    // within one evaluation the same `(role, record_key)` pair always resolves to the same row,
+    // schema included. That means once `from`, `role` and `to.record_key` already tie, `to.schema_id`
+    // is forced equal; no input can make it decide an order the earlier four keys did not already
+    // decide. Soul verified no construction breaks this (a component that cannot be distinguished
+    // by any input is a line every future reader must reason about for no behavioural gain).
+    let page_edges = if selection.has_hop() {
+        let page_position: HashMap<(&str, &str), usize> = page
+            .iter()
+            .enumerate()
+            .map(|(index, row)| ((row.schema_id(), row.record_key()), index))
+            .collect();
+        fn owner_ref<'a, R: Row + Clone>(edge: &'a EdgeMatch<R>) -> (&'a str, &'a str) {
+            match edge.anchor {
+                EdgeAnchor::Citee => (edge.to.schema_id(), edge.to.record_key()),
+                EdgeAnchor::Citer => (edge.from.schema_id(), edge.from.record_key()),
+            }
+        }
+        let mut kept: Vec<EdgeMatch<R>> = edges
+            .into_iter()
+            .filter(|edge| page_position.contains_key(&owner_ref(edge)))
+            .collect();
+        kept.sort_by(|a, b| {
+            page_position[&owner_ref(a)]
+                .cmp(&page_position[&owner_ref(b)])
+                .then_with(|| a.from.schema_id().cmp(b.from.schema_id()))
+                .then_with(|| a.from.record_key().cmp(b.from.record_key()))
+                .then_with(|| a.role.cmp(&b.role))
+                .then_with(|| a.to.record_key().cmp(b.to.record_key()))
+        });
+        kept
+    } else {
+        Vec::new()
+    };
+
+    Ok(Evaluation {
+        rows: page,
+        matched: matched_total,
+        edges: page_edges,
+        next_cursor,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Page projection (R-I): `cultnet.snapshot_response_raw.v1`'s wire shape
+// ---------------------------------------------------------------------------------------------
+
+/// `cultnet.snapshot_response_raw.v1`'s page (section 2 `SelectionPage`): `matched`, the page
+/// itself under [`Selection::projection`], and the hop's edges. Carried on the wire by the
+/// consumer's own message envelope (`shardId`/`shardEpoch`/`shardLogSequence`, `messageId`, ... -
+/// declared once already in `contracts.rs`'s `CultNetMessage::SnapshotResponseRawV1`); this type
+/// is the page body those fields wrap.
+// R-AP: the payload, not the envelope - matched/asOf/next/headers/documents/edges in this
+// declared order on both runtimes, every optional field always present and `nil` when absent
+// (never omitted - see `Edge`'s doc comment above).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionPage {
+    pub matched: u32,
+    pub as_of: u64,
+    #[serde(default)]
+    pub next: Option<String>,
+    #[serde(default)]
+    pub headers: Option<Vec<RawDocumentHeader>>,
+    #[serde(default)]
+    pub documents: Option<Vec<SelectionDocumentRecord>>,
+    #[serde(default)]
+    pub edges: Option<Vec<Edge>>,
+}
+
+/// Evaluates a selection and projects it into the wire's `SelectionPage` shape (R-I): `select`'s
+/// generic rows become `headers` or `documents` under [`Selection::projection`], never both, and a
+/// header projection carries no payload - in the page's rows and in its edges alike (S20). The
+/// caller supplies `document_record`, the one place a full wire record is built from an `R` (D7:
+/// the evaluator never reflects over a row; the row owner renders it).
+pub fn select_page<R: Row + Clone>(
+    row_set: &impl RowSet,
+    all_rows: &[R],
+    selection: &Selection,
+    as_of: u64,
+    cursor_key: &CursorKey,
+    document_record: impl Fn(&R) -> SelectionDocumentRecord,
+) -> Result<SelectionPage, SelectionRefusal> {
+    let evaluation = select(row_set, all_rows, selection, as_of, cursor_key)?;
+    let want_document = selection.projection == PROJECTION_DOCUMENT;
+
+    let (headers, documents) = if want_document {
+        (None, Some(evaluation.rows.iter().map(&document_record).collect()))
+    } else {
+        (
+            Some(
+                evaluation
+                    .rows
+                    .iter()
+                    .map(|row| header_from_record(&document_record(row)))
+                    .collect(),
+            ),
+            None,
+        )
+    };
+
+    let edges = if selection.has_hop() {
+        Some(
+            evaluation
+                .edges
+                .iter()
+                .map(|edge| Edge {
+                    from: RecordRef::new(edge.from.schema_id(), edge.from.record_key()),
+                    role: edge.role.clone(),
+                    to: RecordRef::new(edge.to.schema_id(), edge.to.record_key()),
+                    // S20: a header projection carries no payload, in edges too.
+                    payload_encoding: if want_document && edge.payload.is_some() {
+                        Some(messagepack_encoding())
+                    } else {
+                        None
+                    },
+                    payload: if want_document { edge.payload.clone() } else { None },
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+
+    Ok(SelectionPage {
+        matched: evaluation.matched,
+        as_of,
+        next: evaluation.next_cursor,
+        headers,
+        documents,
+        edges,
+    })
+}
+
+/// A header carries every field a document record does, minus its payload and payload encoding
+/// (private: R-M deleted the public, zero-caller `RawDocumentHeader::from_document`; this is the
+/// one real caller, folded in rather than resurrecting that associated function under a new name).
+fn header_from_record(document: &SelectionDocumentRecord) -> RawDocumentHeader {
+    RawDocumentHeader {
+        schema_id: document.schema_id.clone(),
+        schema_name: document.schema_name.clone(),
+        schema_version: document.schema_version.clone(),
+        schema_content_hash: document.schema_content_hash.clone(),
+        record_key: document.record_key.clone(),
+        stored_at: document.stored_at.clone(),
+        source_runtime_id: document.source_runtime_id.clone(),
+        source_agent_id: document.source_agent_id.clone(),
+        source_role: document.source_role.clone(),
+        tags: document.tags.clone(),
+    }
+}
+
+fn order_rows<R: Row>(a: &R, b: &R, descending: bool) -> Ordering {
+    let ordering = a
+        .ordinal()
+        .cmp(&b.ordinal())
+        .then_with(|| a.schema_id().cmp(b.schema_id()))
+        .then_with(|| a.record_key().cmp(b.record_key()));
+    if descending { ordering.reverse() } else { ordering }
+}
+
+fn find_cursor_position<R: Row>(ordered: &[R], cursor: &Cursor, descending: bool) -> usize {
+    for (index, row) in ordered.iter().enumerate() {
+        let position = compare_position(row, cursor);
+        let compares_after = if descending {
+            position == Ordering::Less
+        } else {
+            position == Ordering::Greater
+        };
+        if compares_after {
+            return index;
+        }
+    }
+    ordered.len()
+}
+
+fn compare_position<R: Row>(row: &R, cursor: &Cursor) -> Ordering {
+    row.ordinal()
+        .cmp(&cursor.ordinal)
+        .then_with(|| row.schema_id().cmp(cursor.schema_id.as_str()))
+        .then_with(|| row.record_key().cmp(cursor.record_key.as_str()))
+}
+
+// D9/R-AF: a reference's target set is every schema `RowSet::target_leaves` names for that role.
+// A stored edge names only a bare record key (see `Row::references`'s doc comment) - resolving
+// "the row this edge names" means searching every row sharing that key for the one whose schema
+// falls inside the declared set, not an exact (schema, key) lookup that assumes a schema the edge
+// never carries. Two schemas legitimately sharing one record key resolve to two different rows
+// depending on which reference declared which target. Folds D9's leaf-set check into resolution
+// itself (mirroring C#'s `TryResolveReferenceTarget`) rather than a second pass after the fact -
+// there is exactly one row-owner decision here, not two.
+//
+// R-T: every resolvable edge is checked against its declared target, not only the ones a
+// citation's own role/key filter happens to ask about - a corrupt edge must not hide behind an
+// unrelated filter (F15: the pre-fix evaluator skipped this check for every edge that did not
+// point at the requested key). `matches_citation`/`build_incoming_index` call this
+// unconditionally, before any role/key/schema filtering, for exactly that reason.
+fn resolve_reference_target<'a, R: Row>(
+    row_set: &impl RowSet,
+    by_key: &HashMap<&str, Vec<&'a R>>,
+    role: &str,
+    from: &R,
+    record_key: &str,
+) -> Result<Option<&'a R>, SelectionRefusal> {
+    let Some(candidates) = by_key.get(record_key) else {
+        return Ok(None); // a dangling reference - no row at all exists at this key (not an error).
+    };
+    let leaves = row_set.target_leaves(role);
+    for &candidate in candidates {
+        if leaves.iter().any(|leaf| leaf == candidate.schema_id()) {
+            return Ok(Some(candidate));
+        }
+    }
+    // Every row sharing this record key falls outside the reference's declared target: refuse
+    // deterministically (by schema id, code-point order - Rust's byte-wise `str` ordering already
+    // matches `CultNetCodePointComparer` for well-formed UTF-8, R-C) rather than let `by_key`'s
+    // insertion order decide which of them the refusal names (both row orders give the same
+    // answer).
+    let outside = candidates
+        .iter()
+        .min_by(|a, b| a.schema_id().cmp(b.schema_id()))
+        .expect("by_key never stores an empty Vec - entry()/push() always leaves at least one");
+    Err(SelectionRefusal::ReferenceOutsideTarget {
+        from_schema_id: from.schema_id().to_string(),
+        from_key: from.record_key().to_string(),
+        role: role.to_string(),
+        to_schema_id: outside.schema_id().to_string(),
+        to_key: outside.record_key().to_string(),
+    })
+}
+
+fn matches_citation<R: Row + Clone>(
+    row_set: &impl RowSet,
+    by_key: &HashMap<&str, Vec<&R>>,
+    citer: &R,
+    citation: &Citation,
+    edge_sink: &mut Vec<EdgeMatch<R>>,
+) -> Result<bool, SelectionRefusal> {
+    let mut found = false;
+    for (role, target_key, payload) in citer.references() {
+        // R-T/R-W parity fix (found landing R-AF): the citation's own role filter is checked
+        // *before* resolving the edge, mirroring C#'s ReferenceMembers(descriptor, citation.Role) -
+        // which narrows to that role's declared members before any of R-W's per-edge target check
+        // ever runs (CultNetSelectionEvaluator.cs:451-458, MatchesCitation's own foreach). This
+        // module used to resolve every edge unconditionally regardless of the requested role, which
+        // is a stronger and different guarantee than the reference ever gives: C#'s own R-T(F15)
+        // test (Evaluator_CitesRefusesAnOutOfTargetEdgeEvenWhenTheQueriedKeyMatchesNeitherEdge)
+        // queries the *same* role/member that carries the corrupt edge, never an unrelated one - R-W
+        // still checks every edge of the *requested* role unconditionally (untouched below), just
+        // not every edge the row happens to carry under other roles when a role was asked for.
+        if let Some(wanted_role) = &citation.role
+            && *wanted_role != role
+        {
+            continue;
+        }
+        let Some(resolved) = resolve_reference_target(row_set, by_key, &role, citer, &target_key)?
+        else {
+            continue;
+        };
+        if target_key != citation.target.record_key {
+            continue;
+        }
+        // R-E: the target's schema id is matched through the one alias rule, not exact equality.
+        let resolved_name = row_set
+            .schema_name(resolved.schema_id())
+            .unwrap_or_else(|| resolved.schema_id().to_string());
+        if !schema_alias::matches(&citation.target.schema_id, resolved.schema_id(), &resolved_name) {
+            continue;
+        }
+        edge_sink.push(EdgeMatch {
+            from: citer.clone(),
+            role,
+            to: resolved.clone(),
+            payload,
+            anchor: EdgeAnchor::Citer,
+        });
+        found = true;
+    }
+    Ok(found)
+}
+
+// R-B: iterates `all_rows` (the caller's own `Vec` order), never `by_key.values()` - a `HashMap`'s
+// iteration order is not something this function's output may depend on, even transiently, given
+// `select`'s own final sort relies on nothing here having silently picked up map order.
+fn build_incoming_index<R: Row + Clone>(
+    row_set: &impl RowSet,
+    all_rows: &[R],
+    by_key: &HashMap<&str, Vec<&R>>,
+    role: &str,
+    edge_sink: &mut Vec<EdgeMatch<R>>,
+) -> Result<HashSet<(String, String)>, SelectionRefusal> {
+    let mut incoming = HashSet::new();
+    for citer in all_rows {
+        for (edge_role, target_key, payload) in citer.references() {
+            if edge_role != role {
+                continue;
+            }
+            let Some(resolved) = resolve_reference_target(row_set, by_key, &edge_role, citer, &target_key)?
+            else {
+                continue;
+            };
+            incoming.insert((resolved.schema_id().to_string(), resolved.record_key().to_string()));
+            edge_sink.push(EdgeMatch {
+                from: citer.clone(),
+                role: edge_role,
+                to: resolved.clone(),
+                payload,
+                anchor: EdgeAnchor::Citee,
+            });
+        }
+    }
+    Ok(incoming)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cursor (section 2: "Snapshot")
+// ---------------------------------------------------------------------------------------------
+
+/// Random per-process key the answering server holds for minting and verifying its own cursors
+/// (R-O). A cursor minted under one process's key is refused `cursor_invalid` by any other key,
+/// including the same server's own key after a restart - cursors are short-lived and minted only
+/// by the answering server (section 2, "Snapshot"), so not surviving a restart is the accepted
+/// cost, not a bug. Never serialized and never persisted; hold one instance for the process's
+/// lifetime and share it across every `select`/`select_page` call that process answers.
+#[derive(Clone)]
+pub struct CursorKey(Vec<u8>);
+
+impl CursorKey {
+    /// A fresh 32-byte key from the OS RNG.
+    pub fn random() -> Self {
+        let mut bytes = vec![0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl fmt::Debug for CursorKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CursorKey(..)")
+    }
+}
+
+/// The opaque cursor: `asOf`, the last `(ordinal, schemaId, recordKey)`, and an HMAC digest of the
+/// selection with `cursor`/`limit` cleared, keyed under the answering process's [`CursorKey`]
+/// (R-O). Minted only by the answering server. This runtime's own mint/parse/digest algorithm is
+/// internal to it - a cursor is never handed across runtimes (each server answers its own pages),
+/// so it need not (and does not) byte-match the C# reference's; the *rule* it enforces (section 2
+/// "Snapshot") does.
+///
+/// `parse` decodes the cursor's body and exposes `as_of` without the answering server's key -
+/// Huginn depends on reading `as_of` this way, and a cursor's shape does not need the key to
+/// decode, only its digest needs the key to *verify* (done by [`select`], which holds the key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub as_of: u64,
+    pub ordinal: i64,
+    pub schema_id: String,
+    pub record_key: String,
+    digest: String,
+}
+
+impl Cursor {
+    pub fn mint<R: Row>(as_of: u64, last_row: &R, selection: &Selection, key: &CursorKey) -> String {
+        let digest = Self::compute_digest(
+            as_of,
+            last_row.ordinal(),
+            last_row.schema_id(),
+            last_row.record_key(),
+            selection,
+            key,
+        );
+        // R-O: the cursor body uses length-prefixed fields, not a delimiter - a record key
+        // carrying any character, including the pre-fix delimiter itself (F6), round-trips.
+        let mut body = String::new();
+        write_length_prefixed(&mut body, &as_of.to_string());
+        write_length_prefixed(&mut body, &last_row.ordinal().to_string());
+        write_length_prefixed(&mut body, last_row.schema_id());
+        write_length_prefixed(&mut body, last_row.record_key());
+        write_length_prefixed(&mut body, &digest);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
+    }
+
+    pub fn parse(cursor: &str) -> Result<Self, SelectionRefusal> {
+        let invalid = || SelectionRefusal::CursorInvalid {
+            message: "The cursor does not decode.".into(),
+        };
+        let bytes = URL_SAFE_NO_PAD.decode(cursor).map_err(|_| invalid())?;
+        let mut fields = read_length_prefixed_fields(&bytes, 5).ok_or_else(invalid)?;
+        let digest = fields.pop().unwrap();
+        let record_key = fields.pop().unwrap();
+        let schema_id = fields.pop().unwrap();
+        let ordinal: i64 = fields.pop().unwrap().parse().map_err(|_| invalid())?;
+        let as_of: u64 = fields.pop().unwrap().parse().map_err(|_| invalid())?;
+        Ok(Self {
+            as_of,
+            ordinal,
+            schema_id,
+            record_key,
+            digest,
+        })
+    }
+
+    /// Verifies this cursor's digest against `selection` under `key` in constant time (R-O/R-Y): a
+    /// cursor forged without the key, minted by a different process's key, or **rewritten in its
+    /// own position** (`asOf`, `ordinal`, `schemaId` or `recordKey` edited after minting, with the
+    /// original digest reused) is refused - the digest covers the body, not only the selection.
+    fn verify_digest(&self, selection: &Selection, key: &CursorKey) -> bool {
+        let expected = Self::compute_digest(
+            self.as_of,
+            self.ordinal,
+            &self.schema_id,
+            &self.record_key,
+            selection,
+            key,
+        );
+        constant_time_eq(self.digest.as_bytes(), expected.as_bytes())
+    }
+
+    /// An HMAC-SHA256 digest, keyed under `key`, of the cursor's own position (`asOf`, `ordinal`,
+    /// `schemaId`, `recordKey`) as well as the selection with `cursor` and `limit` cleared (R-Y),
+    /// so a cursor is bound both to the selection that minted it, the process that minted it, and
+    /// the exact position it names - a caller cannot hold one valid cursor, rewrite `ordinal` or
+    /// `recordKey` to skip or replay rows, and reuse the original digest.
+    ///
+    /// R-H: every string and list inside the selection is length-prefixed, so no separator
+    /// character can ever make two distinct selections collide (Soul found `["a|b"]` and
+    /// `["a","b"]` digesting the same under a separator-joined scheme). This need not (and does
+    /// not) byte-match the C# reference's own digest - each server answers its own pages (see this
+    /// type's doc comment) - only the collision-freedom and the keying are load-bearing.
+    pub fn compute_digest(
+        as_of: u64,
+        ordinal: i64,
+        schema_id: &str,
+        record_key: &str,
+        selection: &Selection,
+        key: &CursorKey,
+    ) -> String {
+        let mut canonical = String::new();
+        write_length_prefixed(&mut canonical, &as_of.to_string());
+        write_length_prefixed(&mut canonical, &ordinal.to_string());
+        write_length_prefixed(&mut canonical, schema_id);
+        write_length_prefixed(&mut canonical, record_key);
+
+        let mut sorted_schemas = selection.schemas.clone().unwrap_or_default();
+        sorted_schemas.sort();
+        let mut sorted_keys = selection.keys.clone().unwrap_or_default();
+        sorted_keys.sort();
+
+        write_length_prefixed_list(&mut canonical, &sorted_schemas);
+        write_length_prefixed_list(&mut canonical, &sorted_keys);
+
+        let fields = selection.fields.as_deref().unwrap_or_default();
+        canonical.push_str(&fields.len().to_string());
+        canonical.push('{');
+        for field in fields {
+            write_length_prefixed(&mut canonical, &field.index);
+            write_length_prefixed(&mut canonical, &field.op);
+            write_length_prefixed_list(&mut canonical, field.values.as_deref().unwrap_or_default());
+            write_length_prefixed(&mut canonical, field.number.as_deref().unwrap_or_default());
+        }
+        canonical.push('}');
+
+        match &selection.cites {
+            Some(cites) => {
+                canonical.push('1');
+                write_length_prefixed(&mut canonical, &cites.target.schema_id);
+                write_length_prefixed(&mut canonical, &cites.target.record_key);
+                write_length_prefixed(&mut canonical, cites.role.as_deref().unwrap_or_default());
+            }
+            None => canonical.push('0'),
+        }
+
+        match &selection.cited {
+            Some(cited) => {
+                canonical.push('1');
+                write_length_prefixed(&mut canonical, &cited.role);
+                canonical.push(if cited.exists { 'T' } else { 'F' });
+            }
+            None => canonical.push('0'),
+        }
+
+        write_length_prefixed(&mut canonical, &selection.projection);
+        canonical.push(if selection.descending { 'D' } else { 'A' });
+
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key.0)
+            .expect("HMAC-SHA256 accepts a key of any length");
+        mac.update(canonical.as_bytes());
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+/// Writes `value` as `<byte length>:<value>` - unambiguous regardless of what characters `value`
+/// itself carries, including the separator this module would otherwise use.
+fn write_length_prefixed(buffer: &mut String, value: &str) {
+    buffer.push_str(&value.len().to_string());
+    buffer.push(':');
+    buffer.push_str(value);
+}
+
+/// Writes a list as `<count>[<len-prefixed item><len-prefixed item>...]`.
+fn write_length_prefixed_list(buffer: &mut String, values: &[String]) {
+    buffer.push_str(&values.len().to_string());
+    buffer.push('[');
+    for value in values {
+        write_length_prefixed(buffer, value);
+    }
+    buffer.push(']');
+}
+
+/// Reads exactly `count` `<byte length>:<value>` fields written by [`write_length_prefixed`] back
+/// out of `bytes`, in order. `None` on any malformed length, a truncated value, a non-UTF-8 value,
+/// or leftover bytes after the last field - the cursor body has no field this reader may skip.
+fn read_length_prefixed_fields(bytes: &[u8], count: usize) -> Option<Vec<String>> {
+    let mut fields = Vec::with_capacity(count);
+    let mut pos = 0usize;
+    for _ in 0..count {
+        let colon = bytes[pos..].iter().position(|&b| b == b':')?;
+        let len: usize = std::str::from_utf8(&bytes[pos..pos + colon]).ok()?.parse().ok()?;
+        pos += colon + 1;
+        // R-AG: checked arithmetic - an attacker-supplied prefix near usize::MAX makes `pos + len`
+        // overflow. In a release build that wraps silently instead of panicking on the add itself,
+        // but the wrapped (small) sum then passes this guard and `&bytes[pos..pos + len]` below
+        // panics on the out-of-bounds slice anyway; `checked_add` catches both paths the same way
+        // every other malformed shape here already returns `None` instead of unwinding.
+        let end = pos.checked_add(len)?;
+        if end > bytes.len() {
+            return None;
+        }
+        fields.push(std::str::from_utf8(&bytes[pos..end]).ok()?.to_string());
+        pos = end;
+    }
+    if pos != bytes.len() {
+        return None;
+    }
+    Some(fields)
+}
+
+/// R-Y: the cursor's digest covers its own body, not only the selection, so a cursor's position
+/// cannot be rewritten while reusing a genuine digest. Lives here, rather than in the integration
+/// tests, because forging that specific attack - splicing a genuine digest onto a rewritten body -
+/// needs the private `digest` field and the length-prefix wire helpers above.
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn encode(as_of: u64, ordinal: i64, schema_id: &str, record_key: &str, digest: &str) -> String {
+        let mut body = String::new();
+        write_length_prefixed(&mut body, &as_of.to_string());
+        write_length_prefixed(&mut body, &ordinal.to_string());
+        write_length_prefixed(&mut body, schema_id);
+        write_length_prefixed(&mut body, record_key);
+        write_length_prefixed(&mut body, digest);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
+    }
+
+    #[test]
+    fn a_rewritten_ordinal_under_the_original_digest_fails_verification() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+
+        let forged = encode(1, 6, "schema-a", "k1", &genuine_digest);
+        let parsed = Cursor::parse(&forged).expect("well-formed body, forged digest");
+        assert!(
+            !parsed.verify_digest(&selection, &key),
+            "reusing the digest under a rewritten ordinal must fail verification"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_record_key_under_the_original_digest_fails_verification() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+
+        let forged = encode(1, 5, "schema-a", "k2", &genuine_digest);
+        let parsed = Cursor::parse(&forged).expect("well-formed body, forged digest");
+        assert!(
+            !parsed.verify_digest(&selection, &key),
+            "reusing the digest under a rewritten record key must fail verification"
+        );
+    }
+
+    #[test]
+    fn the_genuine_digest_still_verifies() {
+        let key = CursorKey::random();
+        let selection = Selection::default();
+        let genuine_digest = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, &key);
+        let genuine = encode(1, 5, "schema-a", "k1", &genuine_digest);
+        let parsed = Cursor::parse(&genuine).expect("well-formed body");
+        assert!(parsed.verify_digest(&selection, &key));
+    }
+
+    // R-AG: a length-prefixed field with a hostile prefix, first 4 fields well-formed so
+    // `read_length_prefixed_fields` reaches the hostile one mid-loop rather than failing earlier
+    // for an unrelated reason.
+    fn cursor_with_hostile_last_field(hostile_field: &str) -> String {
+        let mut body = String::new();
+        write_length_prefixed(&mut body, "1");
+        write_length_prefixed(&mut body, "5");
+        write_length_prefixed(&mut body, "schema-a");
+        write_length_prefixed(&mut body, "k1");
+        body.push_str(hostile_field);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
+    }
+
+    // R-AG: Rust's own proven overflow (`selection.rs`, before this cut) - a length prefix of
+    // `usize::MAX` makes `pos + len` overflow; `checked_add` must refuse typed, never panic.
+    #[test]
+    fn hostile_length_prefix_near_usize_max_refuses_typed_not_panic() {
+        let cursor = cursor_with_hostile_last_field("18446744073709551615:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: the mirror-image proven overflow, C#'s (`CultNetSelectionEvaluator.cs`,
+    // `ReadLengthPrefixedFields`, before this cut) - a length prefix of `int.MaxValue`
+    // (2147483647) overflowed C#'s `int` guard. Rust's `usize` is wider so this magnitude was
+    // never Rust's own hole, but "each runtime holding exactly the hole the other closed" means
+    // neither side's tests are evidence about the other - fed here too.
+    #[test]
+    fn hostile_length_prefix_near_i32_max_the_csharp_overflow_refuses_typed_here_too() {
+        let cursor = cursor_with_hostile_last_field("2147483647:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: a length prefix with more digits than any integer type holds - `.parse::<usize>()`
+    // itself fails, a different failure path than the checked-add overflow above, and must also
+    // refuse typed rather than panic.
+    #[test]
+    fn hostile_length_prefix_wider_than_any_integer_type_refuses_typed() {
+        let cursor = cursor_with_hostile_last_field("999999999999999999999999999999:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: a negative-looking length prefix - `usize::parse` refuses the leading `-` outright,
+    // a third failure path (neither overflow nor digit-count) that must also refuse typed.
+    #[test]
+    fn hostile_negative_length_prefix_refuses_typed() {
+        let cursor = cursor_with_hostile_last_field("-1:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+}

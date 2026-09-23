@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord};
+use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord, Row, Selection};
 
 /// Read-only backing surface for a CultNet snapshot server.
 ///
@@ -76,15 +76,31 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         return Err(anyhow!("expected cultnet.snapshot_request.v0"));
     };
     require_non_empty(message_id, "message_id")?;
-    reject_duplicates(schema_ids.as_deref(), "requested schema id")?;
-    reject_duplicates(record_keys.as_deref(), "requested record key")?;
+    // R-Q3/R-R (docs/cultnet-selection-cut.md, Self's rulings for fix batch 3, 2026-09-22 -
+    // corrects this comment's own earlier ruling from the commit 2 fix batch, which lowered an
+    // empty v0 list to "no filter"): `None` (the field omitted) still means "no filter", but a
+    // *present* v0 list - even one that empties out after trimming/deduping blanks - must lower to
+    // `Some(possibly-empty)`, never collapse to `None`. `matches_schema_keys_fields` already
+    // treats a present-but-empty selection list as "match nothing" (R-E), which is v0's own
+    // pre-cut behaviour (`recordKeys: []` answers empty, `CultNetDocumentRegistry.
+    // CreateRawSnapshotResponse` tests `filter?.RecordKeys != null`, not a length); collapsing to
+    // `None` here used to turn that into "match everything" instead. Unlike the C# reference, this
+    // function never calls `validate`, so there is no v1 door for a present-but-empty list to hit
+    // (R-R's fixup on the C# side does not apply here).
+    // R-M: `lower_v0_list` already dedups (Soul: it dedups before `reject_duplicates` ever ran,
+    // making that function's own duplicate check dead code - deleted below along with its calls).
+    let schema_ids = lower_v0_list(schema_ids);
+    let record_keys = lower_v0_list(record_keys);
 
-    let requested_schemas = schema_ids
-        .as_ref()
-        .map(|values| values.iter().map(String::as_str).collect::<BTreeSet<_>>());
-    let requested_keys = record_keys
-        .as_ref()
-        .map(|values| values.iter().map(String::as_str).collect::<BTreeSet<_>>());
+    // D3/D4's v0 lowering (docs/cultnet-selection-cut.md section 4): the two allowlists are not a
+    // selector of their own, they are cultnet.snapshot_request.v0 lowered into a Selection with no
+    // fields/cites/cited, matched through the one evaluator (selection::matches) instead of a fifth
+    // hand-rolled copy of "is this schema/key requested".
+    let selection = Selection {
+        schemas: schema_ids.clone(),
+        keys: record_keys.clone(),
+        ..Selection::default()
+    };
     let mut selected = Vec::new();
     let mut seen = BTreeSet::new();
 
@@ -110,25 +126,58 @@ pub fn serve_read_only_raw_snapshot<S: CultNetRawSnapshotSource>(
         if !policy.allows(&document.schema_id, &document.record_key) {
             continue;
         }
-        if requested_schemas
-            .as_ref()
-            .is_some_and(|schemas| !schemas.contains(document.schema_id.as_str()))
-        {
-            continue;
-        }
-        if requested_keys
-            .as_ref()
-            .is_some_and(|keys| !keys.contains(document.record_key.as_str()))
-        {
+        if !crate::matches(&RawSnapshotRow(&document), &selection) {
             continue;
         }
         selected.push(document);
+    }
+
+    // R-R: pre-cut v0 iterated the requested record keys in the caller's own order (a
+    // `HashSet<string>` built from the array, which enumerates in insertion order); the shared
+    // evaluator carries no such tiebreak of its own, so this v0 lowering restores the requested
+    // order here rather than leaking plain snapshot-source order when the caller asked for
+    // particular keys. A stable sort keeps the relative order of documents that share a requested
+    // key (e.g. across schemas) as `raw_snapshot()` produced them.
+    if let Some(keys) = &record_keys {
+        selected.sort_by_key(|document| {
+            keys.iter()
+                .position(|key| key == &document.record_key)
+                .unwrap_or(usize::MAX)
+        });
     }
 
     Ok(CultNetMessage::SnapshotResponseRaw {
         message_id: message_id.clone(),
         documents: selected,
     })
+}
+
+/// A `CultNetRawDocumentRecord` carries only identity (schema id, record key) at this layer - no
+/// declared index values, no ordinal, no reference edges, because it is already-serialized bytes
+/// from a read-only source, not a live document. The v0 lowering above never sets `fields`, `cites`
+/// or `cited`, so `matches_schema_keys_fields` never calls `ordinal`/`values`/`number`/`references`
+/// on this row; the unreachable stubs exist only to satisfy the `Row` trait's shape.
+struct RawSnapshotRow<'a>(&'a CultNetRawDocumentRecord);
+
+impl Row for RawSnapshotRow<'_> {
+    fn schema_id(&self) -> &str {
+        &self.0.schema_id
+    }
+    fn record_key(&self) -> &str {
+        &self.0.record_key
+    }
+    fn ordinal(&self) -> i64 {
+        unreachable!("v0's lowered selection carries no fields/cites/cited; ordinal is not read")
+    }
+    fn values(&self, _index: &str) -> Vec<String> {
+        unreachable!("v0's lowered selection carries no fields; values is not read")
+    }
+    fn number(&self, _index: &str) -> Option<String> {
+        unreachable!("v0's lowered selection carries no fields; number is not read")
+    }
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
+        unreachable!("v0's lowered selection carries no cites/cited; references is not read")
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -317,23 +366,30 @@ fn require_expected_metadata(
     Ok(())
 }
 
-fn reject_duplicates(values: Option<&[String]>, label: &str) -> Result<()> {
-    let Some(values) = values else {
-        return Ok(());
-    };
-    let mut seen = BTreeSet::new();
-    for value in values {
-        require_non_empty(value, label)?;
-        if !seen.insert(value) {
-            return Err(anyhow!("duplicate {label} {value:?}"));
-        }
-    }
-    Ok(())
-}
-
 fn require_non_empty(value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(anyhow!("{field} must be non-empty"));
     }
     Ok(())
+}
+
+/// v0's own cleaning, matching the reference's `CultNetV0SelectionLowering.Lower` exactly
+/// (568e8e3): an absent list, an empty list, or a list made only of blank entries all lower to
+/// `None` (no filter); a mixed list keeps its non-blank entries, deduplicated (order-preserving,
+/// first occurrence wins - `Distinct(StringComparer.Ordinal)`'s behaviour). A v0 compatibility
+/// rule the lowering owns, not a meaning the door or the evaluator carries for v1's own lists
+/// (those refuse `[]` and any blank entry outright, in `selection::validate`).
+fn lower_v0_list(list: &Option<Vec<String>>) -> Option<Vec<String>> {
+    // R-Q3: `None` (the field omitted) still means "no filter"; a present list is always lowered
+    // to `Some`, even when trimming/deduping empties it out (R-R) - see this function's caller for
+    // why collapsing that case to `None` was wrong.
+    let values = list.as_ref()?;
+    let mut seen = std::collections::HashSet::new();
+    let filtered: Vec<String> = values
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| seen.insert(value.as_str()))
+        .cloned()
+        .collect();
+    Some(filtered)
 }

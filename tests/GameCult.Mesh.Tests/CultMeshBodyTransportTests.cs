@@ -463,11 +463,11 @@ public sealed class CultMeshBodyTransportTests
             new[] { "eve:field:gravity" },
             new[] { "gamecult.eve.fields_splats.v1" });
 
-        subscription.RecordKeys.Should().Equal(
+        subscription.Selection.Keys.Should().Equal(
             "eve:view:pilot",
             CultMeshBodyPublicationDocument.CreateLatestRecordKey("eve:body:pilot").Value,
             "eve:field:gravity");
-        subscription.SchemaIds.Should().Equal(
+        subscription.Selection.Schemas.Should().Equal(
             "gamecult.eve.entity_soa_view.v2",
             CultMeshBodyPublicationSchemaVersions.Publication,
             "gamecult.eve.fields_splats.v1");

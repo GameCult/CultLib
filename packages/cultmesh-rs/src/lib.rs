@@ -820,7 +820,7 @@ pub fn request_raw_snapshot_from_rudp_catalog(
                     } if received == &message_id => {
                         snapshot_response = Some(message);
                     }
-                    cultnet_rs::CultNetMessage::Error { error } => {
+                    cultnet_rs::CultNetMessage::Error { error, .. } => {
                         let _ = client.disconnect(b"snapshot-error".to_vec());
                         anyhow::bail!("CultMesh RUDP snapshot failed: {error}");
                     }

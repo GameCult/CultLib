@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
@@ -109,6 +110,46 @@ namespace GameCult.Caching
         public CultSchemaMigrationReport Report { get; }
     }
 
+    // A declared member's addressing shape, read-only: what a caller outside GameCult.Caching
+    // (the CultNet selection evaluator, chiefly) is allowed to know about a member without
+    // reflecting over the document itself. Built from the same declarations CultIndexAttribute
+    // and CultReferenceAttribute already recorded; carries no value.
+    public readonly struct CultDocumentMemberView
+    {
+        internal CultDocumentMemberView(
+            string memberName,
+            int slot,
+            string? indexAlias,
+            bool isName,
+            bool isReference,
+            bool isMany,
+            bool isNumeric,
+            Type? targetType)
+        {
+            MemberName = memberName;
+            Slot = slot;
+            IndexAlias = indexAlias;
+            IsName = isName;
+            IsReference = isReference;
+            IsMany = isMany;
+            IsNumeric = isNumeric;
+            TargetType = targetType;
+        }
+
+        public string MemberName { get; }
+        public int Slot { get; }
+        public string? IndexAlias { get; }
+        public bool IsName { get; }
+        public bool IsReference { get; }
+        public bool IsMany { get; }
+        public bool IsNumeric { get; }
+
+        // The reference's declared target: the type CultReferenceAttribute names, or CultRecordRef<T>'s T.
+        // Null when the member is not a reference. May be abstract (D9): the leaf set is resolved at
+        // evaluation by CultDocumentRegistry.ResolveTargetLeaves, never persisted here or in the catalog.
+        public Type? TargetType { get; }
+    }
+
     public sealed class CultDocumentDescriptor
     {
         internal CultDocumentDescriptor(
@@ -122,7 +163,8 @@ namespace GameCult.Caching
             string? nameMember,
             Func<object, string?>? nameAccessor,
             IReadOnlyDictionary<string, Func<object, string>> indexAccessors,
-            IReadOnlyList<CultDocumentMemberDescriptor> members)
+            IReadOnlyList<CultDocumentMemberDescriptor> members,
+            IReadOnlyList<CultDocumentRegistry.PersistedMember> richMembers)
         {
             DocumentType = documentType;
             SchemaName = schemaName;
@@ -135,6 +177,18 @@ namespace GameCult.Caching
             NameAccessor = nameAccessor;
             IndexAccessors = indexAccessors;
             Members = members;
+            RichMembers = richMembers;
+            DeclaredMembers = richMembers
+                .Select(member => new CultDocumentMemberView(
+                    member.Member.Name,
+                    member.Slot,
+                    member.IndexAlias,
+                    member.IsName,
+                    member.IsReference,
+                    member.IsMany,
+                    member.IsNumeric,
+                    member.TargetType))
+                .ToArray();
         }
 
         public Type DocumentType { get; }
@@ -148,6 +202,80 @@ namespace GameCult.Caching
         internal Func<object, string?>? NameAccessor { get; }
         internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
         internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
+        internal IReadOnlyList<CultDocumentRegistry.PersistedMember> RichMembers { get; }
+
+        // The public read surface (CultNet selection cut 1, section 6): declared addressing, and the
+        // three ways to read a value through it. GameCult.Networking has no InternalsVisibleTo here on
+        // purpose - this is the only door, so nothing outside the cache decides what a member means.
+        public IReadOnlyList<CultDocumentMemberView> DeclaredMembers { get; }
+
+        public bool TryGetIndexValue(object document, string alias, out string? value)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (string.IsNullOrEmpty(alias))
+            {
+                value = null;
+                return false;
+            }
+
+            foreach (var member in RichMembers)
+            {
+                if (string.Equals(member.IndexAlias, alias, StringComparison.Ordinal))
+                {
+                    value = member.GetterNullable(document);
+                    return true;
+                }
+            }
+
+            value = null;
+            return false;
+        }
+
+        public bool TryGetIndexNumber(object document, string alias, out string? value)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (!string.IsNullOrEmpty(alias))
+            {
+                foreach (var member in RichMembers)
+                {
+                    if (string.Equals(member.IndexAlias, alias, StringComparison.Ordinal) && member.IsNumeric)
+                    {
+                        var number = member.NumberOf(document);
+                        if (number != null)
+                        {
+                            value = number;
+                            return true;
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            value = null;
+            return false;
+        }
+
+        // The edges a declared reference member carries: one per CultRecordRef<T>, one per element of
+        // an IEnumerable<CultRecordRef<T>>, one per key of an IDictionary<CultRecordRef<T>, V> with the
+        // value as the payload (D11). role is the member's index alias, or its name when it has none.
+        public IEnumerable<(CultRecordKey Target, object? Payload)> ReferencesOf(object document, string role)
+        {
+            if (document == null) throw new ArgumentNullException(nameof(document));
+            if (string.IsNullOrEmpty(role)) return Array.Empty<(CultRecordKey, object?)>();
+
+            foreach (var member in RichMembers)
+            {
+                if (!member.IsReference) continue;
+                var memberRole = member.IndexAlias ?? member.Member.Name;
+                if (string.Equals(memberRole, role, StringComparison.Ordinal))
+                {
+                    return member.ReferenceEnumerator!(document);
+                }
+            }
+
+            return Array.Empty<(CultRecordKey, object?)>();
+        }
 
         public CultSchemaCatalogEntry ToCatalogEntry()
         {
@@ -253,6 +381,15 @@ namespace GameCult.Caching
 
         public IEnumerable<CultDocumentDescriptor> AllDescriptors =>
             _indexes.ByType.Values.OrderBy(d => d.SchemaName, StringComparer.Ordinal);
+
+        // D9: a reference's target set is every registered leaf assignable to its declared target type,
+        // computed against the registry as it stands right now - never cached, never persisted. A leaf
+        // registered after some other descriptor was built must still show up here.
+        public IReadOnlyList<CultDocumentDescriptor> ResolveTargetLeaves(Type targetType)
+        {
+            if (targetType == null) throw new ArgumentNullException(nameof(targetType));
+            return AllDescriptors.Where(d => targetType.IsAssignableFrom(d.DocumentType)).ToArray();
+        }
 
         public void Refresh()
         {
@@ -495,7 +632,8 @@ namespace GameCult.Caching
                 nameMember?.Member.Name,
                 nameMember?.GetterNullable,
                 indexAccessors,
-                descriptorMembers);
+                descriptorMembers,
+                members);
         }
 
         private static string BuildSemanticFingerprint(
@@ -944,6 +1082,57 @@ namespace GameCult.Caching
                 rejections.Add(HiddenMemberMessage(type.Name, Qualified(pair[0].Member), Qualified(pair[1].Member)));
             }
 
+            // D10: two differently-named members that independently declare the same index alias. A
+            // hiding member sharing one slot is already caught above; this is two distinct members whose
+            // alias map entry (BuildDescriptor's indexAccessors) would otherwise collide silently.
+            foreach (var group in keyed
+                         .Select(entry => (Entry: entry, Alias: ResolveIndexAlias(entry.Member)))
+                         .Where(pair => pair.Alias != null)
+                         .GroupBy(pair => pair.Alias, StringComparer.Ordinal)
+                         .Where(group => group.Select(pair => pair.Entry.Member.Name).Distinct().Count() > 1)
+                         .OrderBy(group => group.Key, StringComparer.Ordinal))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(DuplicateIndexAliasMessage(type.Name, Qualified(pair[0].Entry.Member), Qualified(pair[1].Entry.Member), group.Key!));
+            }
+
+            // D10b: the reference-role namespace is (IndexAlias ?? MemberName) for every member, not
+            // only the aliased ones D10 groups above. A member with no [CultIndex] still contributes
+            // its bare name to that namespace, and a reference member declaring the same string as its
+            // alias collides with it - the collision D10 cannot see because an unaliased member's Alias
+            // is null.
+            foreach (var group in keyed
+                         .Select(entry => (
+                             Entry: entry,
+                             Role: ResolveIndexAlias(entry.Member) ?? entry.Member.Name,
+                             IsReference: PersistedMember.IsReferenceCandidate(entry.Member, entry.MemberType)))
+                         .GroupBy(pair => pair.Role, StringComparer.Ordinal)
+                         .Where(group => group.Select(pair => pair.Entry.Member.Name).Distinct().Count() > 1
+                                         && group.Any(pair => pair.IsReference))
+                         .OrderBy(group => group.Key, StringComparer.Ordinal))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(DuplicateReferenceRoleMessage(type.Name, Qualified(pair[0].Entry.Member), Qualified(pair[1].Entry.Member), group.Key));
+            }
+
+            // D11: a member declared as a reference (by [CultReference] or a bare CultRecordRef<T> type)
+            // whose CLR shape the cache cannot walk. many:false needs CultRecordRef<T> itself; many:true
+            // needs IEnumerable<CultRecordRef<T>> or IDictionary<CultRecordRef<T>, V>. A declaration the
+            // cache cannot read is refused here, not answered as an unreadable no-op reference later.
+            foreach (var candidate in keyed)
+            {
+                var referenceAttribute = candidate.Member.GetCustomAttribute<CultReferenceAttribute>();
+                var isBareRecordRef = IsCultRecordRefType(candidate.MemberType);
+                if (referenceAttribute == null && !isBareRecordRef)
+                    continue;
+                var many = referenceAttribute?.Many ?? false;
+                var supported = many
+                    ? IsEnumerableOfRecordRef(candidate.MemberType) || TryGetDictionaryRefTypes(candidate.MemberType, out _, out _)
+                    : isBareRecordRef;
+                if (!supported)
+                    rejections.Add(UnsupportedReferenceShapeMessage(type.Name, Qualified(candidate.Member)));
+            }
+
             if (rejections.Count > 0)
                 throw new InvalidOperationException(rejections[0]);
 
@@ -991,6 +1180,216 @@ namespace GameCult.Caching
         }
 
         private static string Qualified(MemberInfo member) => member.DeclaringType!.Name.Split('`')[0] + "." + member.Name;
+
+        // Shared by DiscoverMembers' D10/D11 rejections and PersistedMember.FromMember, so registration
+        // refuses exactly the shapes the accessor it builds afterward could not have walked anyway.
+        private static string? ResolveIndexAlias(MemberInfo member)
+        {
+            var indexAttribute = member.GetCustomAttribute<CultIndexAttribute>();
+            if (indexAttribute == null)
+                return null;
+            return string.IsNullOrWhiteSpace(indexAttribute.Alias) ? member.Name : indexAttribute.Alias;
+        }
+
+        private static bool IsCultRecordRefType(Type type) =>
+            type.IsGenericType && type.GetGenericTypeDefinition() == typeof(CultRecordRef<>);
+
+        private static bool IsEnumerableOfRecordRef(Type type)
+        {
+            foreach (var candidate in type.GetInterfaces().Append(type))
+            {
+                if (candidate.IsGenericType
+                    && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>)
+                    && IsCultRecordRefType(candidate.GetGenericArguments()[0]))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetDictionaryRefTypes(Type type, out PropertyInfo keyProperty, out PropertyInfo valueProperty)
+        {
+            foreach (var candidate in type.GetInterfaces().Append(type))
+            {
+                if (!candidate.IsGenericType || candidate.GetGenericTypeDefinition() != typeof(IDictionary<,>))
+                    continue;
+                var arguments = candidate.GetGenericArguments();
+                if (!IsCultRecordRefType(arguments[0]))
+                    continue;
+                var pairType = typeof(KeyValuePair<,>).MakeGenericType(arguments[0], arguments[1]);
+                keyProperty = pairType.GetProperty("Key")!;
+                valueProperty = pairType.GetProperty("Value")!;
+                return true;
+            }
+
+            keyProperty = null!;
+            valueProperty = null!;
+            return false;
+        }
+
+        private static readonly HashSet<Type> NumericClrTypes = new()
+        {
+            typeof(sbyte), typeof(byte), typeof(short), typeof(ushort),
+            typeof(int), typeof(uint), typeof(long), typeof(ulong),
+            typeof(float), typeof(double), typeof(decimal)
+        };
+
+        // D8's closed CLR numeric set: the sole authority for whether a comparison predicate may reach
+        // a member. The TypeName string persisted in the catalog is generated from this set (via
+        // CultSchemaTypeNames.FromType) and must never be hand-checked against separately - S22 pins it.
+        private static bool IsNumericClrType(Type type)
+        {
+            var underlying = Nullable.GetUnderlyingType(type) ?? type;
+            return NumericClrTypes.Contains(underlying);
+        }
+
+        // Q-J (docs/cultnet-selection-cut.md, section 2 "Numbers"): a row's exact canonical decimal,
+        // never a double - a long past 2^53 must not lose precision passing through this path. Boxing a
+        // Nullable<T> with a value produces a boxed T (never a boxed Nullable<T>), so raw is always one
+        // of the closed CLR numeric set's non-nullable types here. NaN and infinity render as null:
+        // "a NaN or infinite member matches no comparison."
+        private static string? RenderCanonicalNumber(object raw) => raw switch
+        {
+            float f => float.IsNaN(f) || float.IsInfinity(f) ? null : RenderExactFloat(f),
+            double d => double.IsNaN(d) || double.IsInfinity(d) ? null : RenderExactDouble(d),
+            decimal m => CanonicalizeDecimalDigits(m.ToString(CultureInfo.InvariantCulture)),
+            _ => CanonicalizeDecimalDigits(Convert.ToString(raw, CultureInfo.InvariantCulture)!)
+        };
+
+        // R-D (docs/cultnet-selection-cut.md): the wire's canonical decimal is the value's exact decimal
+        // expansion, not a shortest round-trip form. .NET's default float/double ToString has used the
+        // shortest round-trip form since .NET Core 3.0, which rounds a tie between two decimals to
+        // whichever is "shorter" - Rust's shortest form breaks the same tie the other way at some
+        // values, so the two runtimes rendered different strings for the same bit pattern (394/200k f32,
+        // 48/200k f64 in the parity vectors). Every finite float and double is an exact dyadic rational
+        // (significand * 2^exponent for an integer significand and exponent), so it has a finite exact
+        // decimal expansion computed with BigInteger: multiply the significand by 5^-exponent when the
+        // exponent is negative (1/2^k == 5^k/10^k) to get the exact digits, and place the decimal point.
+        // No CLR floating-point arithmetic and no string round-tripping is on this path.
+        private static string RenderExactFloat(float value)
+        {
+            var bits = BitConverter.SingleToInt32Bits(value);
+            var negative = bits < 0;
+            var biasedExponent = (bits >> 23) & 0xFF;
+            var mantissaBits = bits & 0x7FFFFF;
+            if (biasedExponent == 0 && mantissaBits == 0)
+                return "0"; // canonical zero: a single "0", never "-0" (Q-J).
+
+            BigInteger significand;
+            int exponent;
+            if (biasedExponent == 0)
+            {
+                significand = mantissaBits;
+                exponent = -126 - 23; // subnormal: no implicit leading 1, minimum exponent.
+            }
+            else
+            {
+                significand = mantissaBits | (1 << 23);
+                exponent = biasedExponent - 127 - 23;
+            }
+
+            return RenderExactDecimal(negative, significand, exponent);
+        }
+
+        private static string RenderExactDouble(double value)
+        {
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            var negative = bits < 0;
+            var biasedExponent = (int)((bits >> 52) & 0x7FF);
+            var mantissaBits = bits & 0xFFFFFFFFFFFFFL;
+            if (biasedExponent == 0 && mantissaBits == 0)
+                return "0"; // canonical zero: a single "0", never "-0" (Q-J).
+
+            BigInteger significand;
+            int exponent;
+            if (biasedExponent == 0)
+            {
+                significand = mantissaBits;
+                exponent = -1022 - 52; // subnormal: no implicit leading 1, minimum exponent.
+            }
+            else
+            {
+                significand = mantissaBits | (1L << 52);
+                exponent = biasedExponent - 1023 - 52;
+            }
+
+            return RenderExactDecimal(negative, significand, exponent);
+        }
+
+        // value = significand * 2^exponent, significand > 0. exponent >= 0 is an exact integer shift;
+        // exponent < 0 rewrites 2^exponent as 5^-exponent / 10^-exponent, so the digits are exact and
+        // the decimal point lands -exponent places from the right - no precision limit, no rounding.
+        private static string RenderExactDecimal(bool negative, BigInteger significand, int exponent)
+        {
+            string digits;
+            int fractionDigits;
+            if (exponent >= 0)
+            {
+                digits = (significand << exponent).ToString(CultureInfo.InvariantCulture);
+                fractionDigits = 0;
+            }
+            else
+            {
+                fractionDigits = -exponent;
+                digits = (significand * BigInteger.Pow(5, fractionDigits)).ToString(CultureInfo.InvariantCulture);
+            }
+
+            string positional;
+            if (fractionDigits == 0)
+            {
+                positional = digits;
+            }
+            else
+            {
+                if (digits.Length <= fractionDigits)
+                    digits = digits.PadLeft(fractionDigits + 1, '0');
+                var splitAt = digits.Length - fractionDigits;
+                positional = digits.Substring(0, splitAt) + "." + digits.Substring(splitAt);
+            }
+
+            return CanonicalizeDecimalDigits(negative ? "-" + positional : positional);
+        }
+
+        // The one canonicalizer every rendered number passes through: strips leading integer zeros and
+        // trailing fractional zeros, and collapses a negative value that reduces to zero into "0" - the
+        // door's regex forbids all three spellings on the way in (Q-J), and this is why the row side
+        // never produces one on the way out.
+        private static string CanonicalizeDecimalDigits(string signedPositional)
+        {
+            var negative = signedPositional.Length > 0 && signedPositional[0] == '-';
+            var unsigned = negative ? signedPositional.Substring(1) : signedPositional;
+            var dot = unsigned.IndexOf('.');
+            var integerPart = dot < 0 ? unsigned : unsigned.Substring(0, dot);
+            var fractionPart = dot < 0 ? string.Empty : unsigned.Substring(dot + 1);
+
+            integerPart = integerPart.TrimStart('0');
+            if (integerPart.Length == 0) integerPart = "0";
+            fractionPart = fractionPart.TrimEnd('0');
+
+            var isZero = integerPart == "0" && fractionPart.Length == 0;
+            var result = fractionPart.Length == 0 ? integerPart : integerPart + "." + fractionPart;
+            return negative && !isZero ? "-" + result : result;
+        }
+
+        private static string DuplicateIndexAliasMessage(string documentTypeName, string first, string second, string alias) =>
+            $"Cult document {documentTypeName} members {first} and {second} both declare index alias \"{alias}\"; an index alias must name one member.";
+
+        // D10b (R-AL): a plain member's bare name colliding with a reference member's index alias.
+        // CultDocumentRegistry.ReferencesOf and CultNetSelectionEvaluator.ReferenceMembers both key
+        // reference lookups off (IndexAlias ?? MemberName); D10 above only groups members that
+        // declare an alias, so an unaliased member's bare name sharing that string with a reference
+        // member's alias registered silently and faulted every hop through it at resolution time.
+        //
+        // Breaking registration change, noted per the fix batch 7 ruling: a shape that used to
+        // register and work - a data member aliased "Owner" beside a reference member named
+        // "Owner" - is now refused. There is no compatibility path; the collision was always a
+        // silent resolution fault waiting to happen, so the fix is a door, not a warning.
+        private static string DuplicateReferenceRoleMessage(string documentTypeName, string first, string second, string role) =>
+            $"Cult document {documentTypeName} members {first} and {second} both resolve to reference role \"{role}\" (index alias, or bare member name when unaliased); a reference role must name one member. " +
+            $"This is a breaking registration change from before D10b existed: a shape where a plain member's bare name collided with a reference member's index alias used to register silently and fault at resolution time instead.";
+
+        private static string UnsupportedReferenceShapeMessage(string documentTypeName, string member) =>
+            $"Cult document {documentTypeName} member {member} declares a reference the cache cannot walk; many:false needs CultRecordRef<T>, many:true needs IEnumerable<CultRecordRef<T>> or IDictionary<CultRecordRef<T>, V>.";
 
         private static string NotMessagePackObjectMessage(string documentTypeName) =>
             $"Cult document {documentTypeName} is not a MessagePack object; add [MessagePackObject] so MessagePack serializes its [Key(n)] members.";
@@ -1047,7 +1446,9 @@ namespace GameCult.Caching
             return "sha256:" + BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
         }
 
-        private sealed class PersistedMember
+        // internal, not private: CultDocumentDescriptor (a separate top-level class) reads RichMembers
+        // through this type to build the public DeclaredMembers view and the three value accessors.
+        internal sealed class PersistedMember
         {
             public MemberInfo Member { get; set; } = default!;
             public Type MemberType { get; set; } = default!;
@@ -1057,8 +1458,26 @@ namespace GameCult.Caching
             public bool IsReference { get; set; }
             public bool IsMany { get; set; }
             public string? TargetSchemaName { get; set; }
+
+            // The reference's declared target Type, held alongside TargetSchemaName (which is null for
+            // an abstract target - D9). CultDocumentRegistry.ResolveTargetLeaves needs the Type, not the
+            // name, to compute the leaf set by assignability.
+            public Type? TargetType { get; set; }
+            public bool IsNumeric { get; set; }
             public Func<object, string> Getter { get; set; } = default!;
             public Func<object, string?> GetterNullable { get; set; } = default!;
+
+            // D8/Q-J (revised 2026-09-22): non-null exactly for the closed CLR numeric set (Nullable<T>
+            // unwrapped), rendered as the member's exact canonical decimal string - never a double, so
+            // no CLR numeric type's range or precision is lost rendering it. docs/cultnet-selection-cut.md
+            // section 2 "Numbers".
+            public Func<object, string?> NumberOf { get; set; } = default!;
+
+            // D11: null for a non-reference member; otherwise yields (target key, payload) per declared
+            // shape - one entry for a bare reference, one per element for a many-enumerable, one per key
+            // with its value as payload for a many-dictionary. Registration already refused every other
+            // shape (DiscoverMembers), so this is never called against something it cannot walk.
+            public Func<object, IEnumerable<(CultRecordKey Target, object? Payload)>>? ReferenceEnumerator { get; set; }
 
             public static PersistedMember FromMember(
                 MemberInfo member,
@@ -1069,6 +1488,8 @@ namespace GameCult.Caching
                 var referenceAttribute = member.GetCustomAttribute<CultReferenceAttribute>();
                 var targetType = ResolveReferenceTarget(memberType, referenceAttribute?.TargetType);
                 var targetSchemaName = targetType?.GetCustomAttribute<CultDocumentAttribute>()?.SchemaName;
+                var isReference = targetType != null || referenceAttribute != null;
+                var many = referenceAttribute?.Many ?? false;
                 return new PersistedMember
                 {
                     Member = member,
@@ -1076,25 +1497,74 @@ namespace GameCult.Caching
                     Slot = slot,
                     IsName = member.GetCustomAttribute<CultNameAttribute>() != null,
                     IndexAlias = ResolveIndexAlias(member),
-                    IsReference = targetType != null || referenceAttribute != null,
-                    IsMany = referenceAttribute?.Many ?? false,
+                    IsReference = isReference,
+                    IsMany = many,
                     TargetSchemaName = targetSchemaName,
+                    TargetType = targetType,
+                    IsNumeric = IsNumericClrType(memberType),
                     Getter = document => getValue(document)?.ToString() ?? string.Empty,
-                    GetterNullable = document => getValue(document)?.ToString()
+                    GetterNullable = document => getValue(document)?.ToString(),
+                    NumberOf = document =>
+                    {
+                        var raw = getValue(document);
+                        return raw == null ? null : RenderCanonicalNumber(raw);
+                    },
+                    ReferenceEnumerator = isReference ? BuildReferenceEnumerator(memberType, many, getValue) : null
                 };
             }
 
-            private static string? ResolveIndexAlias(MemberInfo member)
+            // Registration (DiscoverMembers' D11 check) already refused every shape but the three this
+            // builds an enumerator for; this does not re-refuse, it only classifies which of the three.
+            private static Func<object, IEnumerable<(CultRecordKey Target, object? Payload)>> BuildReferenceEnumerator(
+                Type memberType, bool many, Func<object, object?> getValue)
             {
-                var indexAttribute = member.GetCustomAttribute<CultIndexAttribute>();
-                if (indexAttribute == null)
+                if (!many)
                 {
-                    return null;
+                    return document =>
+                        getValue(document) is ICultRecordRef reference
+                            ? new[] { (reference.Key, (object?)null) }
+                            : Array.Empty<(CultRecordKey, object?)>();
                 }
 
-                return string.IsNullOrWhiteSpace(indexAttribute.Alias)
-                    ? member.Name
-                    : indexAttribute.Alias;
+                if (TryGetDictionaryRefTypes(memberType, out var keyProperty, out var valueProperty))
+                {
+                    return document =>
+                    {
+                        if (getValue(document) is not System.Collections.IEnumerable sequence)
+                            return Array.Empty<(CultRecordKey, object?)>();
+                        var results = new List<(CultRecordKey, object?)>();
+                        foreach (var entry in sequence)
+                        {
+                            if (keyProperty.GetValue(entry) is ICultRecordRef reference)
+                                results.Add((reference.Key, valueProperty.GetValue(entry)));
+                        }
+
+                        return results;
+                    };
+                }
+
+                return document =>
+                {
+                    if (getValue(document) is not System.Collections.IEnumerable sequence)
+                        return Array.Empty<(CultRecordKey, object?)>();
+                    var results = new List<(CultRecordKey, object?)>();
+                    foreach (var entry in sequence)
+                    {
+                        if (entry is ICultRecordRef reference)
+                            results.Add((reference.Key, (object?)null));
+                    }
+
+                    return results;
+                };
+            }
+
+            // Mirrors the isReference computation FromMember uses below, callable from DiscoverMembers
+            // (D10b) before a slot is turned into a full PersistedMember.
+            internal static bool IsReferenceCandidate(MemberInfo member, Type memberType)
+            {
+                var referenceAttribute = member.GetCustomAttribute<CultReferenceAttribute>();
+                var targetType = ResolveReferenceTarget(memberType, referenceAttribute?.TargetType);
+                return targetType != null || referenceAttribute != null;
             }
 
             private static Type? ResolveReferenceTarget(Type memberType, Type? explicitTarget)
@@ -1108,6 +1578,30 @@ namespace GameCult.Caching
                     memberType.GetGenericTypeDefinition() == typeof(CultRecordRef<>))
                 {
                     return memberType.GetGenericArguments()[0];
+                }
+
+                // R-T(b): a many reference's implicit target is its CultRecordRef<T> element's T - the
+                // same narrowing a scalar CultRecordRef<T> gets above - not left null just because the
+                // member's own declared type is List<> or IDictionary<,>, not CultRecordRef<> itself.
+                // Before this, an implicitly-typed many reference reached CultNetSelectionEvaluator's
+                // EnsureWithinDeclaredTarget with a null TargetType and its out-of-target check was
+                // silently skipped for every edge through it (R-T(b)/S18).
+                if (IsEnumerableOfRecordRef(memberType))
+                {
+                    foreach (var candidate in memberType.GetInterfaces().Append(memberType))
+                    {
+                        if (candidate.IsGenericType &&
+                            candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>) &&
+                            IsCultRecordRefType(candidate.GetGenericArguments()[0]))
+                        {
+                            return candidate.GetGenericArguments()[0].GetGenericArguments()[0];
+                        }
+                    }
+                }
+
+                if (TryGetDictionaryRefTypes(memberType, out var keyProperty, out _))
+                {
+                    return keyProperty.PropertyType.GetGenericArguments()[0];
                 }
 
                 return null;

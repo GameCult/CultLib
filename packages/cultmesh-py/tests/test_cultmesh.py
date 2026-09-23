@@ -4317,6 +4317,14 @@ class CultMeshTests(unittest.TestCase):
                 {"schemaVersion": "cultnet.document_delete.v0", "messageId": "bad-delete", "schemaId": "mesh.error_note.v1"},
                 expected_schema_version="cultnet.error.v0",
             )
+            # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): this v0-only Mesh server
+            # refuses a cultnet.selection.v1 carrier message through the same delegating path
+            # (_handle_connection_message -> handle_message) as any other unsupported schema, not a
+            # silent empty response.
+            unsupported_v1 = raw_client.request(
+                {"schemaVersion": "cultnet.snapshot_request.v1", "messageId": "bad-v1-selection"},
+                expected_schema_version="cultnet.error.v0",
+            )
         finally:
             server.stop()
 
@@ -4328,6 +4336,9 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(malformed_put["code"], "malformed_document_put")
         self.assertEqual(malformed_delete["messageId"], "bad-delete")
         self.assertEqual(malformed_delete["code"], "malformed_document_delete")
+        self.assertEqual(unsupported_v1["messageId"], "bad-v1-selection")
+        self.assertEqual(unsupported_v1["code"], "unsupported_schema_version")
+        self.assertEqual(unsupported_v1["details"]["schemaVersion"], "cultnet.snapshot_request.v1")
 
     def test_cultmesh_authority_lease_requires_live_matching_lease(self) -> None:
         peer = CultMeshPeerCard(

@@ -44,7 +44,10 @@ namespace GameCult.Networking
         Reconciled
     }
 
-    internal static class CultNetSchemaAliasMatching
+    /// <summary>
+    /// The one schema-alias matcher for every runtime-side schema match (docs/cultnet-selection-cut.md, D4).
+    /// </summary>
+    public static class CultNetSchemaAliasMatching
     {
         public static bool MatchesAny(IReadOnlyList<string> candidates, string schemaId)
         {
@@ -94,6 +97,10 @@ namespace GameCult.Networking
                 ? schemaId.Substring(0, marker)
                 : null;
         }
+
+        // R-M: WithBindingSchemaAlias (a second binding-alias reconciler, scoped to one descriptor) is
+        // deleted - CultNetDocumentRegistry.ExpandSchemaBindingAliases is the one copy every caller
+        // uses, CultNetDatabaseServer and CultNetDatabaseSubscriptionServer included.
     }
 
     /// <summary>
@@ -298,6 +305,12 @@ namespace GameCult.Networking
         /// Gets or sets the durable store for accepted shard mutation logs.
         /// </summary>
         public ICultNetShardMutationLogStore? MutationLogStore { get; set; }
+        /// <summary>
+        /// Gets or sets the process cursor key (R-O). Omitted in production, where a fresh random key
+        /// per <see cref="CultNetDatabase"/> is exactly the point; a test that must mint a cursor under a
+        /// known key, or reuse the pre-restart key deliberately, sets this explicitly.
+        /// </summary>
+        public CultNetSelectionCursorKey? CursorKey { get; set; }
     }
 
     /// <summary>
@@ -464,6 +477,11 @@ namespace GameCult.Networking
             new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _appliedShardSequences = new(StringComparer.Ordinal);
+        // CultNet typed selection, section 2: "ordinal is the sequence of the commit that last wrote
+        // the row". Kept on every append (AppendMutationLogEntry is the one site), keyed by (schemaId,
+        // recordKey) so the evaluator's order and cursor never read a clock.
+        private readonly Dictionary<(string SchemaId, string RecordKey), long> _lastWriteSequence =
+            new();
         private readonly Subject<object> _changes = new();
         private bool _disposed;
 
@@ -482,9 +500,18 @@ namespace GameCult.Networking
                     : options.Shards)
                 .ToList();
             _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
+            CursorKey = options.CursorKey ?? CultNetSelectionCursorKey.Random();
             InitializeLogSequencesFromStore();
             _cache.OnUpdate += PublishCacheUpdate;
         }
+
+        /// <summary>
+        /// This process's cursor key (R-O): random per instance unless <see cref="CultNetDatabaseOptions.CursorKey"/>
+        /// supplies one, so a page minted by this database cannot be answered by a differently-keyed one,
+        /// and a fresh <see cref="CultNetDatabase"/> - a real process restart, or a simulated one in tests -
+        /// mints under a fresh key that a prior cursor's digest does not verify against.
+        /// </summary>
+        public CultNetSelectionCursorKey CursorKey { get; }
 
         /// <summary>
         /// Gets the local cache backing this database surface.
@@ -589,7 +616,10 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Creates a raw document snapshot bounded to one shard.
+        /// Creates a raw document snapshot bounded to one shard. Answers through the one evaluator
+        /// (<see cref="CultNetSelectionEvaluator"/>, via <see cref="CultNetDocumentRegistry.SelectPage"/>),
+        /// binding-alias expansion included, with the shard membership check as the row filter -
+        /// no loop of its own (docs/cultnet-selection-cut.md, Self's rulings 2026-09-22, S2-3).
         /// </summary>
         public CultNetSnapshotResponseRawMessage CreateShardSnapshotResponse(
             CultNetShardDescriptor shard,
@@ -599,33 +629,40 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (shard == null) throw new ArgumentNullException(nameof(shard));
 
-            var requestedSchemaIds = filter?.SchemaIds != null
-                ? new HashSet<string>(filter.SchemaIds, StringComparer.Ordinal)
-                : null;
-            var requestedRecordKeys = filter?.RecordKeys != null
-                ? new HashSet<string>(filter.RecordKeys, StringComparer.Ordinal)
-                : null;
-            var documents = new List<CultNetRawDocumentRecord>();
-            foreach (var document in _cache.AllEntries)
-            {
-                var documentType = document.GetType();
-                var descriptor = _cache.Registry.GetRequired(documentType);
-                var key = GetTrackedKey(document, documentType);
-                if (string.IsNullOrWhiteSpace(key.Value) ||
-                    !shard.Matches(descriptor.SchemaId, key) ||
-                    (requestedSchemaIds != null && !MatchesRequestedSchema(descriptor, requestedSchemaIds)) ||
-                    (requestedRecordKeys != null && !requestedRecordKeys.Contains(key.Value)))
-                {
-                    continue;
-                }
+            var lowSchemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds);
+            var lowKeys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys);
 
-                documents.Add(CreateRawDocumentRecord(key, document));
+            // R-R: an explicit empty schemas or keys list is v0's own "answer nothing" - it must not
+            // reach the v1 door, which refuses an empty selection.schemas/keys outright.
+            if (lowSchemas is { Length: 0 } || lowKeys is { Length: 0 })
+            {
+                return new CultNetSnapshotResponseRawMessage
+                {
+                    MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
+                    Documents = Array.Empty<CultNetRawDocumentRecord>(),
+                    ShardId = shard.ShardId,
+                    ShardEpoch = shard.Epoch,
+                    ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
+                };
             }
+
+            var selection = new CultNetSelection
+            {
+                Schemas = lowSchemas,
+                Keys = lowKeys,
+                Projection = CultNetSelectionProjections.Document
+            };
+            bool RowFilter(CultDocumentDescriptor descriptor, CultRecordKey key) =>
+                !string.IsNullOrWhiteSpace(key.Value) && shard.Matches(descriptor.SchemaId, key);
+
+            // R-G: one evaluation answers the whole shard snapshot, not a loop that re-filters and
+            // re-sorts the shard's row set once per 200-row page.
+            var page = _documents.SelectAll(_cache, selection, ordinalOf: static (_, _) => 0, asOf: 0, options: null, rowFilter: RowFilter);
 
             return new CultNetSnapshotResponseRawMessage
             {
                 MessageId = string.IsNullOrWhiteSpace(messageId) ? Guid.NewGuid().ToString("N") : messageId,
-                Documents = documents.ToArray(),
+                Documents = page.Documents ?? Array.Empty<CultNetRawDocumentRecord>(),
                 ShardId = shard.ShardId,
                 ShardEpoch = shard.Epoch,
                 ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
@@ -1254,6 +1291,41 @@ namespace GameCult.Networking
                 ? null
                 : wireEntry ?? ToLogEntryMessage(entry);
             RecordMutationLogEntry(entry, storedWireEntry);
+            _lastWriteSequence[(schemaId, key.Value)] = sequence;
+        }
+
+        /// <summary>
+        /// The shard-log sequence of the commit that last wrote this row, or null when the row has
+        /// never been committed through this database. The order the CultNet selection evaluator
+        /// pages by (docs/cultnet-selection-cut.md, section 2).
+        /// </summary>
+        public long? LastWriteSequence(string schemaId, CultRecordKey key) =>
+            _lastWriteSequence.TryGetValue((schemaId, key.Value), out var sequence) ? sequence : null;
+
+        /// <summary>
+        /// The current write-sequence watermark across every shard this database holds, 0 when nothing
+        /// has been committed yet. Only meaningful for an answer that is not scoped to any particular
+        /// shard's log - a selection's own <c>asOf</c> must use <see cref="CurrentAsOf(string)"/> instead
+        /// (S-9): the shard-log sequence is a per-shard counter (<see cref="NextMutationLogSequence"/>),
+        /// so taking the maximum across every shard's rows mixes counters that do not compare to one
+        /// another and can report a page as exact "as of" a sequence another, unrelated shard advanced to
+        /// while the page's own shard sat still.
+        /// </summary>
+        public ulong CurrentAsOf() => _lastWriteSequence.Count == 0 ? 0UL : (ulong)_lastWriteSequence.Values.Max();
+
+        /// <summary>
+        /// The write-sequence watermark of one shard's own log (S-9): the sequence of the last commit
+        /// that shard's log recorded, or 0 when the shard has never taken a write. This is the evaluator's
+        /// <c>asOf</c> for a v1 snapshot or subscription page whose matched rows all come from one shard
+        /// (<see cref="CultNetDocumentRegistry"/>'s single-shard check) - it advances only when that
+        /// shard's own log advances, so a cursor minted against it refuses <c>cursor_stale</c> exactly
+        /// when that shard's log has moved, never because an unrelated shard elsewhere took a write the
+        /// selection never touched.
+        /// </summary>
+        public ulong CurrentAsOf(string shardId)
+        {
+            if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
+            return _nextLogSequences.TryGetValue(shardId, out var next) ? (ulong)(next - 1) : 0UL;
         }
 
         private void RecordMutationLogEntry(
@@ -1297,15 +1369,46 @@ namespace GameCult.Networking
 
             foreach (var shard in _shards)
             {
-                var highest = _mutationLogStore.Read(shard.ShardId)
-                    .Select(entry => entry.Sequence)
-                    .DefaultIfEmpty(0)
-                    .Max();
+                // R-Q: the log is the durable record of every commit, replica-applied ones included, so
+                // the last-write sequence a restart resumes with is rebuilt from it exactly as
+                // AppendMutationLogEntry/the replica apply paths maintain it live - a row's ordinal for
+                // the selection evaluator's order and cursor must not reset to "never written" on restart.
+                var entries = _mutationLogStore.Read(shard.ShardId);
+                var highest = 0L;
+                foreach (var entry in entries)
+                {
+                    if (entry.Sequence > highest)
+                    {
+                        highest = entry.Sequence;
+                    }
+
+                    var (schemaId, recordKey) = KeyOf(entry);
+                    if (schemaId != null && recordKey != null)
+                    {
+                        _lastWriteSequence[(schemaId, recordKey)] = entry.Sequence;
+                    }
+                }
+
                 if (highest > 0)
                 {
                     _nextLogSequences[shard.ShardId] = highest + 1;
                 }
             }
+        }
+
+        private static (string? SchemaId, string? RecordKey) KeyOf(CultNetShardLogEntryMessage entry)
+        {
+            if (entry.Put?.Document != null)
+            {
+                return (entry.Put.Document.SchemaId, entry.Put.Document.RecordKey);
+            }
+
+            if (entry.Delete != null)
+            {
+                return (entry.Delete.SchemaId, entry.Delete.RecordKey);
+            }
+
+            return (null, null);
         }
 
         private async Task ApplyCommittedShardLogEntryAsync(
@@ -1376,6 +1479,11 @@ namespace GameCult.Networking
                 document,
                 previous),
                 entry);
+            // R-Q: a replica apply is a commit path too - the last-write sequence this row now carries
+            // is the entry's own sequence, exactly like AppendMutationLogEntry's local-commit path sets
+            // it, so the selection evaluator's order and cursor agree whether a row's most recent write
+            // landed locally or arrived through replication.
+            _lastWriteSequence[(descriptor.SchemaId, key.Value)] = entry.Sequence;
             PublishUntyped(
                 descriptor.DocumentType,
                 kind,
@@ -1419,6 +1527,8 @@ namespace GameCult.Networking
                 document: null,
                 previousDocument: previous),
                 entry);
+            // R-Q: see ApplyCommittedPutAsync - a replica-applied delete is a commit too.
+            _lastWriteSequence[(descriptor.SchemaId, key.Value)] = entry.Sequence;
             PublishUntyped(
                 descriptor.DocumentType,
                 CultNetDatabaseChangeKind.Removed,
@@ -1644,7 +1754,7 @@ namespace GameCult.Networking
             {
                 try
                 {
-                    if (MatchesRequestedSchema(_cache.Registry.GetRequiredBySchemaId(shardSchemaId), requestedSchemaIds))
+                    if (CultNetSchemaAliasMatching.MatchesAny(schemaIds, _cache.Registry.GetRequiredBySchemaId(shardSchemaId)))
                         return true;
                 }
                 catch (InvalidOperationException)
@@ -1654,37 +1764,6 @@ namespace GameCult.Networking
             }
 
             return false;
-        }
-
-        private static bool MatchesRequestedSchema(
-            CultDocumentDescriptor descriptor,
-            ISet<string> requestedSchemaIds)
-        {
-            if (requestedSchemaIds.Count == 0)
-                return true;
-
-            if (requestedSchemaIds.Contains(descriptor.SchemaId))
-                return true;
-
-            if (descriptor.ToCatalogEntry().CompatibleSchemaIds.Any(requestedSchemaIds.Contains))
-                return true;
-
-            return requestedSchemaIds
-                .Select(InferSchemaName)
-                .Where(schemaName => !string.IsNullOrWhiteSpace(schemaName))
-                .Any(schemaName => string.Equals(schemaName, descriptor.SchemaName, StringComparison.Ordinal));
-        }
-
-        private static string? InferSchemaName(string schemaVersion)
-        {
-            var marker = schemaVersion.LastIndexOf(".v", StringComparison.Ordinal);
-            if (marker <= 0 || marker + 2 >= schemaVersion.Length)
-                return null;
-
-            var version = schemaVersion.Substring(marker + 2);
-            return version.All(char.IsDigit)
-                ? schemaVersion.Substring(0, marker)
-                : null;
         }
 
         internal static CultNetShardDescriptorMessage ToMessage(CultNetShardDescriptor shard)

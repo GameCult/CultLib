@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import json
+import re
 import selectors
 import signal
 import socket
@@ -384,7 +385,36 @@ def handle_server_message(state: PeerState, message: dict[str, Any], subscriptio
         return [state.verse_catalog.create_response(message)]
     if schema_version == PEER_EXCHANGE_REQUEST:
         return [state.peer_catalog.create_response(message)]
+    if is_unsupported_cultnet_version(schema_version):
+        # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): this peer speaks
+        # cultnet.selection.v1's carrier messages (snapshot_request.v1, database_subscribe.v1, and
+        # any later vN) not at all - it is v0-only. A non-v0 message is refused loudly, not answered
+        # with a silent empty list. The prior check only matched ".v1" exactly, so v2+ fell through
+        # to the silent empty return below instead of being refused (R-L).
+        return [unsupported_schema_version_error(message)]
     return []
+
+
+_CULTNET_SCHEMA_VERSION_SUFFIX = re.compile(r"^cultnet\..*\.v(\d+)$")
+
+
+def is_unsupported_cultnet_version(schema_version: Any) -> bool:
+    """True for any cultnet.*.vN with N > 0 - every version this v0-only peer does not speak (R-2/R-L)."""
+    if not isinstance(schema_version, str):
+        return False
+    match = _CULTNET_SCHEMA_VERSION_SUFFIX.match(schema_version)
+    return match is not None and int(match.group(1)) > 0
+
+
+def unsupported_schema_version_error(message: dict[str, Any]) -> dict[str, Any]:
+    schema_version = message.get("schemaVersion")
+    return {
+        "schemaVersion": "cultnet.error.v0",
+        "messageId": str(message.get("messageId") or ""),
+        "error": f"Unsupported CultNet message schema: {schema_version!r}.",
+        "code": "unsupported_schema_version",
+        "details": {"schemaVersion": schema_version},
+    }
 
 
 def handle_database_subscribe(state: PeerState, message: dict[str, Any], subscriptions: dict[str, DatabaseSubscription]) -> list[dict[str, Any]]:

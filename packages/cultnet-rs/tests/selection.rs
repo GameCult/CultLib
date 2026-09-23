@@ -1,0 +1,2406 @@
+//! CultNet typed selection, Cut 1 commit 3 (docs/cultnet-selection-cut.md section 7/10). A toy row
+//! set implementing `Row`/`RowSet` directly - D7: no `cultcache-rs` knowledge, matching S14's brief
+//! ("select_over_a_toy_row_set_matches_orders_hops_pages_and_refuses") rather than reproducing every
+//! one of C#'s S1-S23 fixtures 1:1. Section 10's negative greps and the parity vectors (S12, S13) are
+//! here too.
+
+use std::fs;
+use std::path::Path;
+
+use cultnet_rs::{
+    Citation, Cursor, CursorKey, CultNetMessage, CultNetWireContract, Edge, FieldPredicate, Incoming,
+    RawDocumentHeader, RecordRef, Row, RowSet, Selection, SelectionDocumentRecord, SelectionOperator,
+    SelectionPage, SelectionRefusal, canonical_number, decode_cultnet_message_from_slice,
+    encode_cultnet_message_to_vec, schema_alias, select, select_page, validate,
+};
+
+/// R-O: one process-lifetime key shared by every test in this binary, so a cursor minted in one
+/// `select`/`select_page` call verifies in a later call of the same test.
+fn test_cursor_key() -> &'static CursorKey {
+    static KEY: std::sync::OnceLock<CursorKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(CursorKey::random)
+}
+
+// ------------------------------------------------------------------------------------------
+// The fixture: two leaves under a conceptual abstract middle (mass declared on both,
+// independently - Rust has no inheritance to share it through), a citer with four reference
+// shapes (a single "Design" reference into the abstract middle's leaf set, a "related" many
+// reference, a "components" many-dictionary reference with float payloads, and a "parent"
+// single reference), and a narrow citer whose "narrow_ref" targets only leaf_a - the edge S18
+// needs to reach outside its declared target.
+//
+// Soul's finding (soul-ss4-notes.md, F3): the earlier fixture used the schema *names* ("leaf_a",
+// "leaf_b", ...) as their own schema ids, so every `schemas`/`cites.target` selection matched by
+// plain string equality and never exercised the alias matcher at all - the real gap (C# resolves
+// `["leaf_a"]` against a schema's declared name; Rust's exact-id compare gave 0 rows) was
+// invisible. leaf_a()/leaf_b()/citer() below are real SHA-256-shaped ids
+// (`sha256:<hex>`, no version suffix of their own - see the fixture-loading block's comment) - the
+// same ids `CultCache.cs`'s `Sha256(semanticFingerprint)` produces for the shared fixture's C#
+// document types. NARROW_CITER (just below) is the one id this file still invents locally; it is
+// never compared across runtimes.
+// ------------------------------------------------------------------------------------------
+
+// R-E/shared-fixture ruling (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch,
+// 2026-09-22): leaf_a/leaf_b/citer's real ids come from the one shared fixture,
+// contracts/cultnet/interop/selection-vectors.fixture.json, loaded lazily below - real SHA-256
+// content-hash ids, exactly as GameCult.Caching.CultDocumentRegistry computes them for the
+// fixture's C# document types (tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs). They
+// carry no ".vN" suffix of their own - CultCache.cs's Sha256(semanticFingerprint) folds the version
+// into the hash rather than appending it as text. leaf_a_hash_alias() is the same hash with a
+// synthetic ".v1" appended, the one alias form this crate's own schema_alias module can resolve
+// (see its module doc); leaf_a_name_alias() is the one alias form the C# reference can resolve
+// instead ("leaf_a.v9") - the two runtimes' alias matchers key off different attributes of a
+// descriptor and neither candidate resolves through both. NARROW_CITER stays a local, unshared id:
+// it only ever appears in this file's own S18 test, never in a cross-runtime vector.
+const NARROW_CITER: &str = "sha256:356840f80f14bda0186a33eb7aed41c1e644fd4ffc3b925ad0d7f10fe77b52cb.v1";
+
+#[derive(serde::Deserialize)]
+struct FixtureSchemaDef {
+    #[serde(rename = "schemaId")]
+    schema_id: String,
+    #[serde(rename = "nameAlias")]
+    name_alias: String,
+    #[serde(rename = "hashAlias")]
+    hash_alias: String,
+}
+
+// R-AF: no target_schema - the wire a stored reference actually travels on carries a bare record
+// key (GameCult.Caching.MessagePack.CultRecordRefFormatter<T> writes only value.Key.Value), so the
+// fixture stopped pretending otherwise. See the fixture file's "//references" note.
+#[derive(serde::Deserialize)]
+struct FixtureReferenceDef {
+    role: String,
+    #[serde(rename = "targetKey")]
+    target_key: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureRowDef {
+    schema: String,
+    key: String,
+    ordinal: i64,
+    #[serde(default)]
+    fields: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    references: Vec<FixtureReferenceDef>,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureFile {
+    schemas: std::collections::BTreeMap<String, FixtureSchemaDef>,
+    rows: Vec<FixtureRowDef>,
+}
+
+static FIXTURE: std::sync::OnceLock<FixtureFile> = std::sync::OnceLock::new();
+
+// R-AB: `fixture()` used to read only `contracts_dir()` (the canonical, repo-root
+// `contracts/cultnet/interop/`), which is outside `packages/cultnet-rs` and escapes any tool that
+// copies just this package's directory - the same failure shape `schema_discovery.rs`'s
+// `include_str!`s had. `selection-vectors.fixture.json` is a checked-in input, not a generated
+// artifact (unlike `*-written.json` below, which each runtime produces from the *other* runtime's
+// output and cannot be vendored the same way), so it gets the same vendored-copy treatment: a
+// byte-identical copy lives under `packages/cultnet-rs/contracts/cultnet/interop/`, checked by the
+// drift test right below, and the loader reads the vendored copy unconditionally so it works the
+// same way whether or not the wider repo is checked out beside the package.
+fn vendored_fixture_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("contracts").join("cultnet").join("interop")
+}
+
+fn fixture() -> &'static FixtureFile {
+    FIXTURE.get_or_init(|| {
+        let path = vendored_fixture_dir().join("selection-vectors.fixture.json");
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} is missing or unreadable: {error}", path.display()));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{} is not valid fixture JSON: {error}", path.display()))
+    })
+}
+
+// The drift guard for the vendored fixture, mirroring
+// `schema_discovery_contracts.rs`'s vendored-schema check: skips (not fails) when the canonical
+// repo-root tree is not present beside the package, which is exactly the isolated-copy case the
+// vendored copy exists to survive.
+#[test]
+fn fixture_contract_matches_the_canonical_source() {
+    let canonical = contracts_dir().join("selection-vectors.fixture.json");
+    if !canonical.is_file() {
+        eprintln!(
+            "skipping: {canonical:?} not present beside the package (isolated build, the case \
+             the vendored fixture copy is for)"
+        );
+        return;
+    }
+    let canonical_text = fs::read_to_string(&canonical).expect("reading canonical fixture");
+    let vendored_text = fs::read_to_string(vendored_fixture_dir().join("selection-vectors.fixture.json"))
+        .expect("reading vendored fixture");
+    assert_eq!(
+        canonical_text, vendored_text,
+        "packages/cultnet-rs/contracts/cultnet/interop/selection-vectors.fixture.json has \
+         drifted from the canonical contracts/cultnet/interop/selection-vectors.fixture.json - \
+         re-copy it"
+    );
+}
+
+fn fixture_schema(name: &str) -> &'static FixtureSchemaDef {
+    fixture()
+        .schemas
+        .get(name)
+        .unwrap_or_else(|| panic!("selection-vectors.fixture.json: no schema named '{name}'"))
+}
+
+fn leaf_a() -> &'static str {
+    &fixture_schema("leaf_a").schema_id
+}
+fn leaf_b() -> &'static str {
+    &fixture_schema("leaf_b").schema_id
+}
+fn citer() -> &'static str {
+    &fixture_schema("citer").schema_id
+}
+// R-AF: the shared fixture's narrow-target citer - real SHA-256 id, same treatment as
+// leaf_a()/leaf_b()/citer() above, so the shared-key resolution rule is pinned in the actual
+// cross-runtime parity vectors rather than only in this file's own local NARROW_CITER tests.
+fn citer_narrow() -> &'static str {
+    &fixture_schema("citer_narrow").schema_id
+}
+// R-E/shared-fixture ruling: the fixture's map key ("leaf_a", "leaf_b", "citer") *is* each
+// schema's declared name (C#'s CultDocumentDescriptor.SchemaName) - what RowSet::schema_name/
+// Row::schema_name now expose, and what nameAlias's ".v9" suffix resolves against.
+fn leaf_a_name() -> &'static str {
+    "leaf_a"
+}
+fn leaf_b_name() -> &'static str {
+    "leaf_b"
+}
+fn citer_name() -> &'static str {
+    "citer"
+}
+fn citer_narrow_name() -> &'static str {
+    "citer_narrow"
+}
+const NARROW_CITER_NAME: &str = "narrow_citer";
+// R-E, Self's ruling 2026-09-22 ("the C# reference's alias rule is the rule"): a hash id with a
+// synthetic ".v1" appended is not a wire form either runtime's production rule resolves -
+// CultNetSchemaAliasMatching's descriptor overload strips the ".v1" and compares the bare hash
+// text against the declared *name* ("leaf_a"), never equal. This is now a shared negative check
+// (see does_not_match_a_hash_shaped_alias below and the parity vectors this file writes).
+fn leaf_a_hash_alias() -> &'static str {
+    &fixture_schema("leaf_a").hash_alias
+}
+// The alias form the C# reference's descriptor overload resolves ("leaf_a.v9") - and, as of this
+// cut's fix, the alias form this crate's schema_alias resolves too, through Row::schema_name/
+// RowSet::schema_name now standing in for CultDocumentDescriptor.SchemaName.
+fn leaf_a_name_alias() -> &'static str {
+    &fixture_schema("leaf_a").name_alias
+}
+
+fn leak(value: String) -> &'static str {
+    Box::leak(value.into_boxed_str())
+}
+
+fn build_row(row: &FixtureRowDef) -> FixtureRow {
+    match row.schema.as_str() {
+        "leaf_a" | "leaf_b" => {
+            let schema_id = if row.schema == "leaf_a" { leaf_a() } else { leaf_b() };
+            FixtureRow::leaf(
+                schema_id,
+                leak(row.key.clone()),
+                row.ordinal,
+                leak(row.fields["kind"].clone()),
+                leak(row.fields["mass"].clone()),
+            )
+        }
+        "citer" => {
+            // R-AF: the stored edge is a bare target key - the wire carries no schema for it.
+            let references = row
+                .references
+                .iter()
+                .map(|reference| (reference.role.clone(), reference.target_key.clone(), None))
+                .collect();
+            FixtureRow::citer(leak(row.key.clone()), row.ordinal, references)
+        }
+        "citer_narrow" => {
+            let references = row
+                .references
+                .iter()
+                .map(|reference| (reference.role.clone(), reference.target_key.clone(), None))
+                .collect();
+            FixtureRow::citer_narrow(leak(row.key.clone()), row.ordinal, references)
+        }
+        other => panic!("selection-vectors.fixture.json: unknown schema '{other}'"),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FixtureRow {
+    schema_id: &'static str,
+    record_key: &'static str,
+    ordinal: i64,
+    kind: Option<&'static str>,
+    mass: Option<&'static str>,
+    // R-AF: the stored target is a bare record key, not a RecordRef - see Row::references's doc
+    // comment in src/selection.rs.
+    references: Vec<(String, String, Option<Vec<u8>>)>,
+}
+
+impl FixtureRow {
+    fn leaf(schema_id: &'static str, record_key: &'static str, ordinal: i64, kind: &'static str, mass: &'static str) -> Self {
+        Self {
+            schema_id,
+            record_key,
+            ordinal,
+            kind: Some(kind),
+            mass: Some(mass),
+            references: Vec::new(),
+        }
+    }
+
+    fn citer(record_key: &'static str, ordinal: i64, references: Vec<(String, String, Option<Vec<u8>>)>) -> Self {
+        Self {
+            schema_id: citer(),
+            record_key,
+            ordinal,
+            kind: None,
+            mass: None,
+            references,
+        }
+    }
+
+    // R-AF: the shared fixture's narrow-target citer (real schema id, from
+    // selection-vectors.fixture.json) - distinct from this file's own local NARROW_CITER, which
+    // stays a Rust-only id never compared across runtimes.
+    fn citer_narrow(record_key: &'static str, ordinal: i64, references: Vec<(String, String, Option<Vec<u8>>)>) -> Self {
+        Self {
+            schema_id: citer_narrow(),
+            record_key,
+            ordinal,
+            kind: None,
+            mass: None,
+            references,
+        }
+    }
+}
+
+// Shared by Row::schema_name and RowSet::schema_name below - one place that knows which fixture
+// schema id carries which declared name.
+fn schema_name_for(schema_id: &str) -> Option<&'static str> {
+    if schema_id == leaf_a() {
+        Some(leaf_a_name())
+    } else if schema_id == leaf_b() {
+        Some(leaf_b_name())
+    } else if schema_id == citer() {
+        Some(citer_name())
+    } else if schema_id == citer_narrow() {
+        Some(citer_narrow_name())
+    } else if schema_id == NARROW_CITER {
+        Some(NARROW_CITER_NAME)
+    } else {
+        None
+    }
+}
+
+impl Row for FixtureRow {
+    fn schema_id(&self) -> &str {
+        self.schema_id
+    }
+    fn schema_name(&self) -> &str {
+        schema_name_for(self.schema_id).unwrap_or(self.schema_id)
+    }
+    fn record_key(&self) -> &str {
+        self.record_key
+    }
+    fn ordinal(&self) -> i64 {
+        self.ordinal
+    }
+    fn values(&self, index: &str) -> Vec<String> {
+        match index {
+            "kind" => self.kind.map(|v| vec![v.to_string()]).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+    fn number(&self, index: &str) -> Option<String> {
+        if index == "mass" {
+            self.mass.map(str::to_string)
+        } else {
+            None
+        }
+    }
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
+        self.references.clone()
+    }
+}
+
+struct FixtureRowSet;
+
+impl RowSet for FixtureRowSet {
+    fn all_schema_ids(&self) -> Vec<String> {
+        vec![
+            leaf_a().into(),
+            leaf_b().into(),
+            citer().into(),
+            citer_narrow().into(),
+            NARROW_CITER.into(),
+        ]
+    }
+    fn schema_name(&self, schema_id: &str) -> Option<String> {
+        schema_name_for(schema_id).map(str::to_string)
+    }
+    fn declared_indexes(&self, schema_id: &str) -> Vec<String> {
+        if schema_id == leaf_a() || schema_id == leaf_b() {
+            vec!["kind".into(), "mass".into()]
+        } else {
+            Vec::new()
+        }
+    }
+    fn declared_roles(&self, schema_id: &str) -> Vec<String> {
+        if schema_id == citer() {
+            vec![
+                "parent".into(),
+                "related".into(),
+                "components".into(),
+                "Design".into(),
+                // R-W: a citer-to-citer role, so a both-hops selection can page a citer row that
+                // is itself cited by another citer (rather than only ever by a leaf).
+                "peer".into(),
+            ]
+        } else if schema_id == NARROW_CITER || schema_id == citer_narrow() {
+            vec!["narrow_ref".into()]
+        } else {
+            Vec::new()
+        }
+    }
+    fn is_numeric(&self, schema_id: &str, index: &str) -> bool {
+        (schema_id == leaf_a() || schema_id == leaf_b()) && index == "mass"
+    }
+    fn target_leaves(&self, role: &str) -> Vec<String> {
+        match role {
+            "parent" | "Design" | "related" | "components" => {
+                vec![leaf_a().into(), leaf_b().into()]
+            }
+            "narrow_ref" => vec![leaf_a().into()],
+            "peer" => vec![citer().into()],
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn rr(schema_id: &str, record_key: &str) -> RecordRef {
+    RecordRef::new(schema_id, record_key)
+}
+
+// S2-S23's original 7-row set: the shared fixture's first 7 rows (a-lo..citer-1), unchanged in
+// value or order from before the shared fixture - every test below that enumerates base_rows()'s
+// exact key order or count (S3, S4/S5, matched_is_the_total_count_not_the_page_page, ...) still
+// holds. The parity-vector tests use all_fixture_rows() instead, which adds the fix-batch rows
+// (float tie, astral/BMP keys) the shared fixture also carries.
+fn base_rows() -> Vec<FixtureRow> {
+    fixture().rows.iter().take(7).map(build_row).collect()
+}
+
+fn all_fixture_rows() -> Vec<FixtureRow> {
+    fixture().rows.iter().map(build_row).collect()
+}
+
+// S2: fields conjoin over declared indexes.
+#[test]
+fn conjoins_any_of_and_comparison_predicates() {
+    let rows = base_rows();
+    let selection = Selection {
+        fields: Some(vec![
+            FieldPredicate {
+                index: "kind".into(),
+                op: "any_of".into(),
+                values: Some(vec!["weapon".into()]),
+                number: None,
+            },
+            FieldPredicate {
+                index: "mass".into(),
+                op: "ge".into(),
+                values: None,
+                number: Some("5".into()),
+            },
+        ]),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).expect("selection is valid");
+    let ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    assert_eq!(ids, vec!["a-eq"]);
+}
+
+// S3: order is (ordinal, schemaId, recordKey) ascending, reversed under descending.
+#[test]
+fn orders_by_ordinal_then_identity_and_reverses() {
+    let rows = base_rows();
+    let ascending = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
+    assert_eq!(
+        ascending.rows.iter().map(Row::record_key).collect::<Vec<_>>(),
+        vec!["a-lo", "a-eq", "b-hi", "shared-1", "shared-2", "shared-3", "citer-1"]
+    );
+
+    let descending = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection {
+            descending: true,
+            ..Selection::default()
+        },
+        1,
+        test_cursor_key(),
+    )
+    .unwrap();
+    assert_eq!(
+        descending.rows.iter().map(Row::record_key).collect::<Vec<_>>(),
+        vec!["citer-1", "shared-3", "shared-2", "shared-1", "b-hi", "a-eq", "a-lo"]
+    );
+}
+
+// R-AJ (Soul's SM-4): `base_rows()`'s one tied ordinal (a-lo/a-eq/b-hi... no - actually every
+// base row has a distinct ordinal) never exercises the schemaId component of `order_rows`'s
+// `(ordinal, schemaId, recordKey)` tiebreak at all. This test builds two rows, one on each
+// schema, sharing one ordinal, with keys chosen *relative to the schema ids discovered at
+// runtime* - the low-sorting schema gets the high-sorting key ("z") and the high-sorting schema
+// gets the low-sorting key ("a") - so a schemaId-first order and a key-first order are the exact
+// reverse of each other no matter which real schema id happens to be smaller (a fixture that
+// merely ties one ordinal across two same-key-ordered rows can pass under either rule by
+// coincidence - see the C# mirror's fix, CultNetSelectionSurvivorTests.cs, for the probe that
+// found this).
+#[test]
+fn row_tiebreak_orders_by_schema_id_before_record_key_when_both_vary_at_a_tied_ordinal() {
+    let (low_schema, high_schema) = if leaf_a() < leaf_b() { (leaf_a(), leaf_b()) } else { (leaf_b(), leaf_a()) };
+    let low_schema_high_key = FixtureRow::leaf(low_schema, "z", 1, "k", "1");
+    let high_schema_low_key = FixtureRow::leaf(high_schema, "a", 1, "k", "1");
+    let rows = vec![low_schema_high_key, high_schema_low_key];
+
+    let evaluation = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
+
+    // schemaId-first (the rule): low_schema < high_schema regardless of key, so the "z"-keyed row
+    // (on low_schema) comes first. record_key-first (the mutant) would instead put the "a"-keyed
+    // row first - the exact reverse.
+    let order: Vec<(&str, &str)> = evaluation.rows.iter().map(|r| (r.schema_id(), r.record_key())).collect();
+    assert_eq!(order, vec![(low_schema, "z"), (high_schema, "a")]);
+}
+
+// R-AT (Soul's SM-7 table, row comparator): `order_rows`'s tiebreak is
+// (ordinal, schema_id, record_key) - the test above pins schema_id ahead of record_key, but every
+// row in it has a distinct record_key too, so record_key never has to be the sole discriminator.
+// This test ties both ordinal and schema_id across two rows on the same schema and varies only
+// record_key, inserted out of order, so dropping record_key from the comparator entirely (SM-7's
+// named Rust row-comparator survivor - killed in C# a pass ago, never pinned in Rust) leaves them
+// in insertion order instead of "a" before "z".
+#[test]
+fn row_tiebreak_orders_by_record_key_when_ordinal_and_schema_id_are_both_tied() {
+    let high_key = FixtureRow::leaf(leaf_a(), "z", 1, "k", "1");
+    let low_key = FixtureRow::leaf(leaf_a(), "a", 1, "k", "1");
+    // Inserted high-key-first, the reverse of the required output.
+    let rows = vec![high_key, low_key];
+
+    let evaluation = select(&FixtureRowSet, &rows, &Selection::default(), 1, test_cursor_key()).unwrap();
+
+    let order: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    assert_eq!(order, vec!["a", "z"]);
+}
+
+// S4/S5: a page walk visits every row exactly once, the last page carries no cursor, and a
+// cursor is refused when it does not decode, its digest does not match, or asOf has moved.
+#[test]
+fn pages_exactly_once_and_refuses_a_stale_or_mismatched_cursor() {
+    let rows = base_rows();
+    let mut selection = Selection {
+        limit: Some(2),
+        ..Selection::default()
+    };
+    let mut seen = Vec::new();
+    for _ in 0..10 {
+        let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+        seen.extend(page.rows.iter().map(|r| r.record_key.to_string()));
+        match page.next_cursor {
+            Some(cursor) => selection.cursor = Some(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen,
+        vec!["a-lo", "a-eq", "b-hi", "shared-1", "shared-2", "shared-3", "citer-1"]
+    );
+
+    let first = select(&FixtureRowSet, &rows, &Selection { limit: Some(1), ..Selection::default() }, 1, test_cursor_key()).unwrap();
+    let cursor = first.next_cursor.expect("more than one row");
+
+    let stale = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(cursor.clone()), ..Selection::default() },
+        2,
+        test_cursor_key(),
+    );
+    assert!(matches!(stale, Err(SelectionRefusal::CursorStale { .. })));
+
+    let mismatched = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(cursor), descending: true, ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(mismatched, Err(SelectionRefusal::CursorInvalid { .. })));
+
+    let garbage = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { cursor: Some("not-base64!!".into()), ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(garbage, Err(SelectionRefusal::CursorInvalid { .. })));
+}
+
+// S6: the hop follows one declared reference by role.
+#[test]
+fn hops_one_edge_by_declared_role() {
+    let rows = base_rows();
+    let selection = Selection {
+        cites: Some(Citation {
+            target: rr(leaf_a(), "a-eq"),
+            role: Some("Design".into()),
+        }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
+    assert_eq!(evaluation.edges.len(), 1);
+    assert_eq!(evaluation.edges[0].role, "Design");
+}
+
+// S6, isolated: a citer with two references at the *same* target under different roles - the
+// role filter must exclude the one the caller did not ask for. base_rows()'s citer-1 only ever
+// carries one reference, so a mutant that drops the role filter entirely is invisible there (it
+// has nothing else to wrongly match); this fixture gives it something to wrongly match.
+#[test]
+fn cites_role_excludes_a_second_reference_at_the_same_target() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        FixtureRow::citer(
+            "double-citer",
+            2,
+            vec![
+                ("Design".to_string(), "a-eq".to_string(), None),
+                ("OtherRole".to_string(), "a-eq".to_string(), None),
+            ],
+        ),
+    ];
+    let selection = Selection {
+        cites: Some(Citation {
+            target: rr(leaf_a(), "a-eq"),
+            role: Some("Design".into()),
+        }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.edges.len(), 1, "OtherRole's reference must not also match");
+    assert_eq!(evaluation.edges[0].role, "Design");
+}
+
+// S7: cited { exists } is the one negation, and the two directions answer opposite sets.
+#[test]
+fn cited_exists_is_the_one_negation() {
+    let rows = base_rows();
+    let cited = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection {
+            schemas: Some(vec![leaf_a().into()]),
+            cited: Some(Incoming { role: "Design".into(), exists: true }),
+            ..Selection::default()
+        },
+        1,
+        test_cursor_key(),
+    )
+    .unwrap();
+    assert_eq!(cited.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["a-eq"]);
+
+    let uncited = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection {
+            schemas: Some(vec![leaf_a().into()]),
+            cited: Some(Incoming { role: "Design".into(), exists: false }),
+            ..Selection::default()
+        },
+        1,
+        test_cursor_key(),
+    )
+    .unwrap();
+    let mut ids: Vec<&str> = uncited.rows.iter().map(Row::record_key).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["a-lo", "shared-1", "shared-3"]);
+}
+
+// R-V (S-1): a row's identity is `(schemaId, recordKey)`, never the key alone. CultCache keys are
+// unique per schema, so two schemas can share one record key. Before the fix, `byKey` kept only
+// the last row seen at a key, so which schema's row a `cites` edge resolved to - and whether a
+// `cited` selection counted a row as cited at all - depended on row order.
+//
+// R-AF: uses `narrow_ref` (declared target leaf_a only), not `Design` (both leaves) - a stored
+// edge carries no schema on the wire (`Row::references`'s doc comment), so a *broad*-target role
+// has nothing of its own to break a shared-key tie with and genuinely does depend on row order
+// (Soul's map, SM-1/R-AF: "both row orders give the same answer" is R-V's narrower promise, true
+// only when the declared target excludes all-but-one of the duplicate-key candidates). A
+// narrow-target role still resolves the one candidate inside its target regardless of order,
+// because the other schema's row at the same key is never a valid candidate to begin with - that
+// is the guarantee this test pins.
+#[test]
+fn row_identity_is_schema_and_key_not_key_alone_in_either_row_order() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "shared-key", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "shared-key", 2, "shield", "2");
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "citer-1",
+        ordinal: 3,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "shared-key".to_string(), None)],
+    };
+
+    let cites_selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "shared-key"), role: Some("narrow_ref".into()) }),
+        ..Selection::default()
+    };
+    let cited_selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    for rows in [
+        vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()],
+        vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()],
+    ] {
+        let cites_eval = select(&FixtureRowSet, &rows, &cites_selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(
+            cites_eval.rows.iter().map(Row::record_key).collect::<Vec<_>>(),
+            vec!["citer-1"],
+            "row order must not change whether the citation resolves"
+        );
+        assert_eq!(cites_eval.edges.len(), 1);
+        assert_eq!(
+            cites_eval.edges[0].to.schema_id(),
+            leaf_a(),
+            "the edge must resolve to leaf_a's row, never leaf_b's, regardless of row order"
+        );
+
+        let cited_eval = select(&FixtureRowSet, &rows, &cited_selection, 1, test_cursor_key()).unwrap();
+        let cited_pairs: Vec<(&str, &str)> =
+            cited_eval.rows.iter().map(|r| (r.schema_id(), r.record_key())).collect();
+        assert_eq!(
+            cited_pairs,
+            vec![(leaf_a(), "shared-key")],
+            "cited membership is (schemaId, recordKey) - leaf_b's row at the same key must not \
+             count as cited just because leaf_a's row at that key is"
+        );
+    }
+}
+
+// R-W (S-3), Rust half: a selection carrying both `cites` and `cited` anchors each edge by its
+// own hop, so it returns both sets of edges rather than one flag deciding the direction for the
+// whole batch. Shape from Soul's probe (soul-sel-final-notes.md): a page row "ca" that cites a
+// leaf via "Design" and is itself cited by another citer "cb" via "peer" - the answer must carry
+// both `cb --peer--> ca` (anchored on the citee) and `ca --Design--> leaf` (anchored on the
+// citer).
+#[test]
+fn a_selection_with_both_hops_returns_both_directions_edges() {
+    let leaf = FixtureRow::leaf(leaf_a(), "leaf-row", 1, "weapon", "5");
+    let ca = FixtureRow::citer("ca", 2, vec![("Design".to_string(), "leaf-row".to_string(), None)]);
+    let cb = FixtureRow::citer("cb", 3, vec![("peer".to_string(), "ca".to_string(), None)]);
+    let rows = vec![leaf, ca, cb];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "leaf-row"), role: Some("Design".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["ca"]);
+    assert_eq!(
+        evaluation.edges.len(),
+        2,
+        "both the cites edge (ca->leaf) and the cited edge (cb->ca) must survive - not just one"
+    );
+
+    let mut seen: Vec<(&str, &str, &str)> = evaluation
+        .edges
+        .iter()
+        .map(|edge| (edge.from.record_key(), edge.role.as_str(), edge.to.record_key()))
+        .collect();
+    seen.sort_unstable();
+    assert_eq!(seen, vec![("ca", "Design", "leaf-row"), ("cb", "peer", "ca")]);
+}
+
+// R-AJ (Soul's SM-4): the test above (and its C# mirror) never actually checks the evaluator's
+// edge *order* - it sorts the observed edges before comparing, so it pins which edges appear, not
+// where. And even a version that did compare order would be blind here: "ca" < "cb" and
+// "Design" < "peer" agree, so a From-key-first rule and a Role-first rule produce the same
+// sequence by coincidence. This test picks a hub citer key and role name that *disagree*: the hub
+// ("z_hub") sorts after the other citer ("a_other") by key, but the hub's own cites-edge role
+// ("Design") sorts before the other's cited-edge role ("peer") - so a From-key-first order and a
+// Role-first order are provably the reverse of each other, and only one of them is the rule (R-B:
+// "page-row order, then (from, role, to)").
+#[test]
+fn edge_order_is_from_key_before_role_when_both_vary_at_the_same_anchor() {
+    let leaf = FixtureRow::leaf(leaf_a(), "target", 1, "weapon", "5");
+    let hub = FixtureRow::citer("z_hub", 2, vec![("Design".to_string(), "target".to_string(), None)]);
+    let other = FixtureRow::citer("a_other", 3, vec![("peer".to_string(), "z_hub".to_string(), None)]);
+    let rows = vec![leaf, hub, other];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "target"), role: Some("Design".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["z_hub"]);
+    assert_eq!(evaluation.edges.len(), 2);
+
+    // From-key-first (the rule): "a_other" < "z_hub", so the cited edge (From=a_other) comes
+    // first. Role-first (the mutant) would instead put the cites edge (Role="Design") first,
+    // since "Design" < "peer" - the exact reverse.
+    let order: Vec<(&str, &str)> =
+        evaluation.edges.iter().map(|edge| (edge.from.record_key(), edge.role.as_str())).collect();
+    assert_eq!(order, vec![("a_other", "peer"), ("z_hub", "Design")]);
+}
+
+// R-AN: the test above pins from.record_key before role, but ties From and To across the two
+// edges - dropping role from the comparator entirely still leaves from.record_key as the sole,
+// sufficient discriminator, so that mutation survives (Soul's SM-4). This test ties From (one
+// citer) and To (one target) identically across both edges - only role can differ - by giving the
+// same citer two references through different roles at the same target key. Citation.role: None
+// matches any declared reference (matches_citation), so both edges surface from one `cites` query.
+// Declared out of code-point order ("parent" before "Design") on purpose, so a stable sort with
+// role dropped from the comparator would leave them in that wrong order.
+#[test]
+fn edge_order_pins_role_when_from_and_to_are_both_tied() {
+    let leaf = FixtureRow::leaf(leaf_a(), "target", 1, "weapon", "5");
+    let hub = FixtureRow::citer(
+        "hub",
+        2,
+        vec![
+            ("parent".to_string(), "target".to_string(), None),
+            ("Design".to_string(), "target".to_string(), None),
+        ],
+    );
+    let rows = vec![leaf, hub];
+
+    let selection =
+        Selection { cites: Some(Citation { target: rr(leaf_a(), "target"), role: None }), ..Selection::default() };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.edges.len(), 2);
+    let order: Vec<&str> = evaluation.edges.iter().map(|edge| edge.role.as_str()).collect();
+    // "Design" < "parent" in code-point order (uppercase 'D' 0x44 sorts before lowercase 'p' 0x70).
+    assert_eq!(order, vec!["Design", "parent"]);
+}
+
+// R-AN: ties From.Key and Role across the two edges (both citers share one record key and cite
+// the same target through the same role, "peer" - already declared by the `citer()` schema and
+// resolvable regardless of which schema's row carries it, since target_leaves takes no schema -
+// Soul's separate PLAUSIBLE finding) - only From.SchemaId can differ. Two different-schema citer
+// rows (`citer()` and `citer_narrow()`), same record key, inserted in the opposite of the correct
+// order so a stable sort with from.schema_id dropped from the comparator would leave them wrong.
+#[test]
+fn edge_order_pins_from_schema_id_when_from_key_and_role_are_both_tied() {
+    let target = FixtureRow::citer("hub-target", 1, Vec::new());
+    let from_wide = FixtureRow::citer("same-key", 2, vec![("peer".to_string(), "hub-target".to_string(), None)]);
+    let from_narrow =
+        FixtureRow::citer_narrow("same-key", 3, vec![("peer".to_string(), "hub-target".to_string(), None)]);
+    // Insertion order is whichever schema id sorts *second* first, then the one that sorts first -
+    // deliberately the reverse of the comparator's required output.
+    let (first_inserted, second_inserted) = if citer() < citer_narrow() {
+        (from_narrow, from_wide)
+    } else {
+        (from_wide, from_narrow)
+    };
+    let expected_first_schema = if citer() < citer_narrow() { citer() } else { citer_narrow() };
+    let rows = vec![target, first_inserted, second_inserted];
+
+    let selection =
+        Selection { cited: Some(Incoming { role: "peer".into(), exists: true }), ..Selection::default() };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["hub-target"]);
+    assert_eq!(evaluation.edges.len(), 2);
+    assert_eq!(evaluation.edges[0].from.record_key(), "same-key");
+    assert_eq!(evaluation.edges[1].from.record_key(), "same-key");
+    assert_eq!(evaluation.edges[0].role, "peer");
+    assert_eq!(evaluation.edges[1].role, "peer");
+    assert_eq!(evaluation.edges[0].from.schema_id(), expected_first_schema);
+}
+
+// R-AT (Soul's SM-7, merge gate third pass): the two tests above tie From+To or From+Role but
+// never both edges' `to` while `from` and `role` are also tied - so dropping `to.schema_id` and
+// `to.record_key` from the edge comparator entirely (or reversing `to.record_key`) still sorted
+// correctly by luck and survived under mutation. Hands' argument that no construction produces
+// this was false: a selection carrying BOTH hops (`cites` and `cited`) mixes their edges into one
+// `Vec`, and a row that self-references through the same role it also uses to cite a peer yields
+// a `cites` edge (`to` = the queried peer) and a `cited` edge (`to` = the anchor row itself) tied
+// on `from` and `role`, differing only on `to`. Soul built this counterexample and it is taken
+// from the rig, not rebuilt - but the rig's own "hub"/"other" naming leaves `to.record_key`
+// dropped-entirely still SURVIVING: `select`'s `cited` phase always pushes the self-edge before
+// the `cites` phase pushes the peer edge, and "hub" < "other" happens to match that push order, so
+// a stable sort with the tiebreak gone reproduces the right answer by coincidence. Naming the
+// self-citing row so its key sorts AFTER the cited target's key ("zebra" self-cites and cites
+// "alpha") makes the push order and the correct sorted order disagree, so only the comparator's
+// own `to` component - not accidental insertion order - can produce the right answer.
+#[test]
+fn edge_order_pins_to_when_from_and_role_are_both_tied_by_a_self_citing_peer() {
+    let zebra = FixtureRow::citer(
+        "zebra",
+        1,
+        vec![
+            ("peer".to_string(), "zebra".to_string(), None),
+            ("peer".to_string(), "alpha".to_string(), None),
+        ],
+    );
+    let alpha = FixtureRow::citer("alpha", 2, Vec::new());
+    let rows = vec![zebra, alpha];
+
+    let selection = Selection {
+        cites: Some(Citation { target: rr(citer(), "alpha"), role: Some("peer".into()) }),
+        cited: Some(Incoming { role: "peer".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.edges.len(), 2, "expected two edges in one page-position bucket");
+    assert_eq!(evaluation.edges[0].from.record_key(), evaluation.edges[1].from.record_key());
+    assert_eq!(evaluation.edges[0].role, evaluation.edges[1].role);
+    assert_ne!(
+        evaluation.edges[0].to.record_key(),
+        evaluation.edges[1].to.record_key(),
+        "To must differ - if it does not, Hands' equivalence claim survives this construction"
+    );
+    // The comparator's to component is what decides the order: "alpha" < "zebra" in code-point
+    // order, opposite of push order (the self edge is always pushed before the cites edge), so
+    // dropping or reversing to.record_key flips this rather than merely agreeing by luck.
+    assert_eq!(evaluation.edges[0].to.record_key(), "alpha");
+    assert_eq!(evaluation.edges[1].to.record_key(), "zebra");
+}
+
+// S16: the four comparisons at the boundary, including the row whose value equals the compared
+// number exactly.
+#[test]
+fn compares_numbers_at_the_boundary_for_all_four_operators() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "lo", 1, "k", "4"),
+        FixtureRow::leaf(leaf_a(), "eq", 2, "k", "5"),
+        FixtureRow::leaf(leaf_a(), "hi", 3, "k", "6"),
+    ];
+    let matches_for = |op: &str| {
+        let selection = Selection {
+            fields: Some(vec![FieldPredicate {
+                index: "mass".into(),
+                op: op.into(),
+                values: None,
+                number: Some("5".into()),
+            }]),
+            ..Selection::default()
+        };
+        let mut ids: Vec<String> = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key())
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.record_key.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(matches_for("lt"), vec!["lo"]);
+    assert_eq!(matches_for("le"), vec!["eq", "lo"]);
+    assert_eq!(matches_for("ge"), vec!["eq", "hi"]);
+    assert_eq!(matches_for("gt"), vec!["hi"]);
+}
+
+// S18: an edge naming a row outside the reference's declared target refuses the selection.
+#[test]
+fn refuses_an_edge_outside_its_declared_target() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_b(), "b", 1, "k", "1"),
+        FixtureRow {
+            schema_id: NARROW_CITER,
+            record_key: "bad",
+            ordinal: 2,
+            kind: None,
+            mass: None,
+            references: vec![("narrow_ref".to_string(), "b".to_string(), None)],
+        },
+    ];
+    let selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
+}
+
+// R-AF, Soul's SM-1 shape table (docs/cultnet-selection-cut.md): a record key shared by two rows
+// of different schemas, one inside the declared target and one outside it. The in-target row must
+// resolve regardless of which schema's row happens to enumerate first - the edge itself carries no
+// schema to break the tie (`Row::references`'s doc comment), so only the declared leaf set
+// decides. This is the shape neither runtime's parity vectors covered before this cut (zero
+// duplicate record keys across the original fixture's ten rows).
+#[test]
+fn shared_key_resolves_to_the_row_inside_the_declared_target_in_either_row_order() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "dup-key", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "dup-key", 2, "shield", "2");
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "narrow-citer",
+        ordinal: 3,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "dup-key".to_string(), None)],
+    };
+    let selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+
+    for rows in [
+        vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()],
+        vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()],
+    ] {
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(evaluation.edges.len(), 1);
+        assert_eq!(
+            evaluation.edges[0].to.schema_id(),
+            leaf_a(),
+            "must resolve to leaf_a, the only in-target row, never leaf_b, in either row order"
+        );
+        assert_eq!(evaluation.edges[0].to.record_key(), "dup-key");
+    }
+}
+
+// R-AO: the test above covers one in-target candidate and one out - resolve_reference_target's
+// `for &candidate in candidates { ... return Ok(Some(candidate)) }` picks the first match, but
+// nothing pinned that rule specifically when *two* in-target rows share a key (Soul's SM-4: "the
+// first row in the caller's order wins" was a coincidence of source, not a rule). "Design"'s
+// declared target is [leaf_a, leaf_b] (FixtureRowSet::target_leaves) - both schemas are in-target,
+// so which one resolves depends only on which the caller listed first in `rows`/`by_key`'s
+// insertion order. Both orders are exercised, each expecting whichever row was listed first in
+// *that* run - proving the rule is "first in the caller's order", not merely "leaf_a happens to
+// win" or some other fixed tiebreak.
+#[test]
+fn shared_key_with_two_in_target_candidates_resolves_to_whichever_the_caller_listed_first() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "dup-key-both-in", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "dup-key-both-in", 2, "shield", "2");
+    let citer_row = FixtureRow::citer(
+        "both-in-citer",
+        3,
+        vec![("Design".to_string(), "dup-key-both-in".to_string(), None)],
+    );
+    let selection =
+        Selection { cited: Some(Incoming { role: "Design".into(), exists: true }), ..Selection::default() };
+
+    for (rows, expected_first_schema) in [
+        (vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()], leaf_a()),
+        (vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()], leaf_b()),
+    ] {
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(evaluation.edges.len(), 1);
+        assert_eq!(
+            evaluation.edges[0].to.schema_id(),
+            expected_first_schema,
+            "must resolve to whichever in-target row the caller listed first, not a fixed schema"
+        );
+        assert_eq!(evaluation.edges[0].to.record_key(), "dup-key-both-in");
+    }
+}
+
+// R-AF, the mirror shape: the only row at the key is outside the declared target - the edge must
+// refuse the selection (S18), not silently produce an empty page. Opposite of
+// `refuses_an_edge_outside_its_declared_target` above only in that this key is one a same-role,
+// in-target row could also have shared (see the test above) - it just doesn't here.
+#[test]
+fn shared_key_refuses_when_the_only_candidate_is_outside_the_declared_target() {
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "narrow-only", 1, "shield", "2");
+    let citer_row = FixtureRow {
+        schema_id: NARROW_CITER,
+        record_key: "narrow-citer",
+        ordinal: 2,
+        kind: None,
+        mass: None,
+        references: vec![("narrow_ref".to_string(), "narrow-only".to_string(), None)],
+    };
+    let rows = vec![leaf_b_row, citer_row];
+    let selection = Selection {
+        cited: Some(Incoming { role: "narrow_ref".into(), exists: true }),
+        ..Selection::default()
+    };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
+}
+
+// R-T/F15: `cites` checks every edge of the *queried role* a citer carries against its declared
+// target, not only the one edge whose key matches the citation - a many-reference member can carry
+// several edges under the one role/member name, and a corrupt one among them must not hide behind
+// the key filter. Two edges under "Design" here (this crate's `FixtureRow` has no distinct
+// many-reference shape - two tuples sharing one role name is the same thing D11 gives one edge per
+// element of), one in-target and one out, both under the role the citation asks about - mirrors
+// C#'s own R-T(F15) test exactly (Evaluator_CitesRefusesAnOutOfTargetEdgeEvenWhenTheQueriedKey-
+// MatchesNeitherEdge, CultNetSelectionFixBatchTests.cs), which queries the *same* role/member that
+// carries both elements.
+//
+// R-AF (found landing it, matches_citation's own comment): an *unrelated* role's out-of-target edge
+// no longer poisons a citation for a *different*, explicitly-requested role - that was this test's
+// original shape, and it tested a stronger guarantee than the C# reference actually gives
+// (ReferenceMembers(descriptor, citation.Role) filters by role before R-W's per-edge check ever
+// runs, CultNetSelectionEvaluator.cs:451-458).
+#[test]
+fn cites_refuses_an_out_of_target_edge_under_the_same_queried_role() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        // Design's declared target is [leaf_a, leaf_b] (FixtureRowSet::target_leaves) - a citer
+        // schema row is outside it, so a "Design" edge pointed here is the out-of-target one.
+        FixtureRow::citer("other-citer", 2, Vec::new()),
+        FixtureRow::citer(
+            "bad-citer",
+            3,
+            vec![
+                ("Design".to_string(), "a-eq".to_string(), None),
+                ("Design".to_string(), "other-citer".to_string(), None),
+            ],
+        ),
+    ];
+    // Queries a key neither Design edge carries - the door for the pre-fix bug this pins: skipping
+    // straight to "does any edge's key match" would find nothing and answer an empty page, never
+    // looking at the out-of-target second edge at all.
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "does-not-exist"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })));
+}
+
+// S19-equivalent (D11): a dictionary reference's two entries keep distinct payload bytes.
+// Row::references() is where Rust exposes this - there is no separate cache layer to test it
+// against, unlike C#'s ReferencesOf/Cache_EnumeratesADictionaryReferenceAsEdgesCarryingItsValues.
+#[test]
+fn dictionary_reference_entries_keep_distinct_payload_bytes() {
+    let citer = FixtureRow::citer(
+        "assembly",
+        3,
+        vec![
+            ("components".to_string(), "part-1".to_string(), Some(vec![1, 5])),
+            ("components".to_string(), "part-2".to_string(), Some(vec![2, 5])),
+        ],
+    );
+    let payloads: std::collections::HashSet<Vec<u8>> =
+        citer.references().into_iter().filter_map(|(_, _, payload)| payload).collect();
+    assert_eq!(payloads.len(), 2, "the two dictionary entries must keep distinct payloads");
+}
+
+// R-B: hop edges follow the hop's direction. A `cites` selection's page holds the citer, so its
+// edges (From = citer) survive the page filter, mirroring
+// `EvaluatorHopsOneEdgeByDeclaredReferenceAndRole`. A `cited` selection's page holds the *citee*
+// instead, so - as of R-B - its edges survive when their *To* is on the page, not their *From*:
+// the citer ("assembly") need not itself be on the page at all. (Before R-B, Rust filtered both
+// hop kinds by `edge.From` on the page, so a `cited` selection's edges were silently empty
+// whenever the citer itself did not separately match - Soul's F2 finding.)
+#[test]
+fn cited_selections_page_the_citee_and_their_edges_survive_the_page_filter() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "part-1", 1, "k", "1"),
+        FixtureRow::citer(
+            "assembly",
+            2,
+            vec![("components".to_string(), "part-1".to_string(), Some(vec![9]))],
+        ),
+    ];
+    let selection = Selection {
+        cited: Some(Incoming { role: "components".into(), exists: true }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["part-1"]);
+    assert_eq!(evaluation.edges.len(), 1, "the citee (part-1) is on the page, so its incoming edge survives");
+    assert_eq!(evaluation.edges[0].from.record_key, "assembly");
+    assert_eq!(evaluation.edges[0].to.record_key, "part-1");
+    assert_eq!(evaluation.edges[0].payload, Some(vec![9]));
+}
+
+// R-B: the converse of the test above - a `cites` selection's edges still key off the *citer*
+// being on the page (unchanged by R-B), so an edge whose citee is on the page but whose citer is
+// not filtered out does not leak in under `cites`.
+#[test]
+fn cites_selections_still_page_the_citer_and_key_edges_off_it() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), None)]),
+    ];
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
+    assert_eq!(evaluation.edges.len(), 1);
+    assert_eq!(evaluation.edges[0].from.record_key, "citer-1");
+}
+
+// S23: the evaluator matches every row sharing an index value - not a cache's last-writer-wins
+// unique-index lookup (Rust's toy Row set never had that bug, but the rule is pinned here too:
+// nothing in select() short-circuits after the first match).
+#[test]
+fn matches_every_row_sharing_an_index_value() {
+    let rows = base_rows();
+    let selection = Selection {
+        fields: Some(vec![FieldPredicate {
+            index: "kind".into(),
+            op: "any_of".into(),
+            values: Some(vec!["shared".into()]),
+            number: None,
+        }]),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["shared-1", "shared-2", "shared-3"]);
+}
+
+// S1: the door refuses typed rather than answering an empty page.
+#[test]
+fn validation_refuses_undeclared_index_role_and_empty_lists() {
+    let empty_schemas = Selection {
+        schemas: Some(Vec::new()),
+        ..Selection::default()
+    };
+    assert_eq!(validate(&empty_schemas, &FixtureRowSet).unwrap_err().field, "schemas");
+
+    let empty_keys = Selection {
+        keys: Some(Vec::new()),
+        ..Selection::default()
+    };
+    assert_eq!(validate(&empty_keys, &FixtureRowSet).unwrap_err().field, "keys");
+
+    let undeclared_index = Selection {
+        fields: Some(vec![FieldPredicate {
+            index: "not_declared".into(),
+            op: "any_of".into(),
+            values: Some(vec!["x".into()]),
+            number: None,
+        }]),
+        ..Selection::default()
+    };
+    assert_eq!(
+        validate(&undeclared_index, &FixtureRowSet).unwrap_err().field,
+        "fields[0].index"
+    );
+
+    let undeclared_role = Selection {
+        cited: Some(Incoming { role: "no_such_role".into(), exists: true }),
+        ..Selection::default()
+    };
+    assert_eq!(validate(&undeclared_role, &FixtureRowSet).unwrap_err().field, "cited.role");
+
+    let non_numeric_compare = Selection {
+        fields: Some(vec![FieldPredicate {
+            index: "kind".into(),
+            op: "gt".into(),
+            values: None,
+            number: Some("1".into()),
+        }]),
+        ..Selection::default()
+    };
+    assert_eq!(
+        validate(&non_numeric_compare, &FixtureRowSet).unwrap_err().field,
+        "fields[0].index"
+    );
+}
+
+// Self's ruling, 2026-09-22 (docs/cultnet-selection-cut.md, commit 2 fix batch): the door refuses
+// a blank entry inside a present schemas/keys list, not only an empty list - the evaluator must
+// never have to decide what "" or "  " means.
+#[test]
+fn validation_refuses_a_blank_entry_in_schemas_or_keys() {
+    let blank_schema = Selection {
+        schemas: Some(vec![leaf_a().into(), "  ".into()]),
+        ..Selection::default()
+    };
+    assert_eq!(validate(&blank_schema, &FixtureRowSet).unwrap_err().field, "schemas");
+
+    let blank_key = Selection {
+        keys: Some(vec!["".into()]),
+        ..Selection::default()
+    };
+    assert_eq!(validate(&blank_key, &FixtureRowSet).unwrap_err().field, "keys");
+}
+
+// Q-J: the door refuses every named non-canonical spelling of a comparison number.
+#[test]
+fn validation_refuses_non_canonical_number_spellings() {
+    for spelling in ["+1", "1.0", "01", "1e3", "-0"] {
+        let selection = Selection {
+            fields: Some(vec![FieldPredicate {
+                index: "mass".into(),
+                op: "gt".into(),
+                values: None,
+                number: Some(spelling.into()),
+            }]),
+            ..Selection::default()
+        };
+        let error = validate(&selection, &FixtureRowSet)
+            .expect_err(&format!("{spelling:?} must be refused"));
+        assert_eq!(error.field, "fields[0].number", "spelling {spelling:?}");
+    }
+}
+
+// S13a: nothing on the wire is serde-untagged (docs/cultnet-selection-cut.md section 2).
+#[test]
+fn selection_is_never_untagged() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for entry in fs::read_dir(&src_dir).expect("src directory exists") {
+        let entry = entry.expect("readable directory entry");
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !text.contains("untagged"),
+            "{} must not contain #[serde(untagged)] (section 2's rule)",
+            path.display()
+        );
+    }
+}
+
+// S13b: the selection types round-trip through the named-map MessagePack encoding every runtime
+// on this wire uses (rmp_serde::to_vec_named / from_slice), across every shape this cut adds.
+#[test]
+fn selection_round_trips_through_named_messagepack() {
+    let selection = Selection {
+        schemas: Some(vec![leaf_a().into(), leaf_b().into()]),
+        keys: Some(vec!["k1".into()]),
+        fields: Some(vec![
+            FieldPredicate {
+                index: "kind".into(),
+                op: "any_of".into(),
+                values: Some(vec!["weapon".into()]),
+                number: None,
+            },
+            FieldPredicate {
+                index: "mass".into(),
+                op: "ge".into(),
+                values: None,
+                number: Some("5".into()),
+            },
+        ]),
+        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        cited: Some(Incoming { role: "Design".into(), exists: true }),
+        projection: "document".into(),
+        descending: true,
+        limit: Some(50),
+        cursor: Some("opaque".into()),
+    };
+    let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
+    let decoded: Selection = rmp_serde::from_slice(&bytes).expect("decodes");
+    assert_eq!(decoded, selection);
+}
+
+// ------------------------------------------------------------------------------------------
+// S12: parity vectors. contracts/cultnet/interop/selection-vectors.cs-written.json is written by
+// the C# reference (SelectionParityVectorTests.WriteVectors, gated on CULTNET_WRITE_VECTORS=1)
+// and judged here; selection-vectors.rs-written.json is the mirror this binary writes (gated the
+// same way) for the C# side to judge. A within-runtime round trip pins nothing - both directions
+// run against the fixture's *own* rows, decoding only the Selection bytes across the wire.
+// ------------------------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct VectorFile {
+    vectors: Vec<Vector>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Vector {
+    name: String,
+    #[serde(rename = "selectionMessagePackBase64")]
+    selection_message_pack_base64: String,
+    #[serde(rename = "asOf")]
+    as_of: u64,
+    // Present iff this vector is a door refusal (Self's ruling, 2026-09-22): the selection must
+    // be refused by `validate`/`CultNetSelection.Validate` with exactly this field name, and no
+    // evaluation runs. Absent for an ordinary evaluated vector.
+    #[serde(rename = "expectedRefusalField", default, skip_serializing_if = "Option::is_none")]
+    expected_refusal_field: Option<String>,
+    // R-AF: a small, separate signal from expected_refusal_field above - that one is the door
+    // (validate, never touches select); this one names an evaluation-time typed refusal select
+    // itself must return (currently only "reference_outside_target", S18). Deliberately narrower
+    // than R-Z/R-AH's page-bytes-and-code parity harness (not this cut's job): it checks which
+    // typed refusal fires, nothing about wire bytes.
+    #[serde(rename = "expectedEvaluationRefusal", default, skip_serializing_if = "Option::is_none")]
+    expected_evaluation_refusal: Option<String>,
+    #[serde(rename = "expectedIds", default)]
+    expected_ids: Vec<String>,
+    #[serde(default)]
+    matched: u32,
+    #[serde(rename = "hasNext", default)]
+    has_next: bool,
+    #[serde(rename = "expectedEdges", default)]
+    expected_edges: Vec<VectorEdge>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct VectorEdge {
+    #[serde(rename = "fromId")]
+    from_id: String,
+    role: String,
+    #[serde(rename = "toId")]
+    to_id: String,
+    #[serde(rename = "payloadBase64")]
+    payload_base64: Option<String>,
+}
+
+fn row_id(schema_id: &str, record_key: &str) -> String {
+    format!("{schema_id}/{record_key}")
+}
+
+fn contracts_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("contracts")
+        .join("cultnet")
+        .join("interop")
+}
+
+// Self's ruling, 2026-09-22 (shared-fixture ruling): a real parity defect must be reported, not
+// papered over by aborting the run at the first one. Returns Err(description) instead of
+// panicking when `select` refuses a vector this file did not mark as a refusal vector - R-F wires
+// the door inside `select`, and the C# reference's Validate has no equivalent check for an
+// unresolved `cites.target.schemaId` (CultNetSelection.cs:361-391), so a vector the reference
+// evaluates for real can still be one this crate's door refuses. The caller collects every such
+// mismatch instead of stopping at the first one.
+fn evaluate_vector(vector: &Vector) -> Result<(Vec<String>, u32, bool, Vec<VectorEdge>), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&vector.selection_message_pack_base64)
+        .expect("vector selection bytes are valid base64");
+    let selection: Selection =
+        rmp_serde::from_slice(&bytes).expect("vector selection bytes decode as MessagePack");
+    let rows = all_fixture_rows();
+    let evaluation = select(&FixtureRowSet, &rows, &selection, vector.as_of, test_cursor_key())
+        .map_err(|refusal| format!("select() refused: {refusal:?}"))?;
+    let ids: Vec<String> = evaluation
+        .rows
+        .iter()
+        .map(|row| row_id(row.schema_id(), row.record_key()))
+        .collect();
+    // R-G/P-1: matched is the total match count, not the page count - the two differ whenever a
+    // vector's limit clips the page.
+    let matched = evaluation.matched;
+    let has_next = evaluation.next_cursor.is_some();
+    let edges = evaluation
+        .edges
+        .iter()
+        .map(|edge| VectorEdge {
+            from_id: row_id(edge.from.schema_id(), edge.from.record_key()),
+            role: edge.role.clone(),
+            to_id: row_id(edge.to.schema_id(), edge.to.record_key()),
+            payload_base64: edge
+                .payload
+                .as_ref()
+                .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+        })
+        .collect();
+    Ok((ids, matched, has_next, edges))
+}
+
+// Self's ruling, 2026-09-22: a door-refusal vector decodes its (necessarily malformed, by the
+// v1 rule) selection bytes and asserts `validate` refuses it at exactly the named field, rather
+// than evaluating it - "the evaluator never sees []" means these selections are never run
+// through `select` at all, on either side of the vector.
+fn assert_refusal_vector(vector: &Vector, expected_field: &str) {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&vector.selection_message_pack_base64)
+        .expect("vector selection bytes are valid base64");
+    let selection: Selection =
+        rmp_serde::from_slice(&bytes).expect("vector selection bytes decode as MessagePack");
+    let error = validate(&selection, &FixtureRowSet)
+        .expect_err(&format!("vector {:?} must be refused", vector.name));
+    assert_eq!(error.field, expected_field, "vector {:?}: refusal field", vector.name);
+}
+
+/// Vectors written by the reference (C#) decode and evaluate identically in Rust.
+#[test]
+fn selection_vectors_written_by_the_reference_decode_and_evaluate_identically_in_rust() {
+    if !contracts_dir().is_dir() {
+        // R-AB: cs-written.json is the C# reference's own generated output - there is nothing to
+        // vendor (it is not a checked-in input like the fixture; it exists only once the C# side
+        // has actually run its writer against a real checkout of both runtimes). An isolated
+        // Rust-only copy, such as cargo-mutants' baseline build, can never satisfy this test's
+        // premise no matter what this crate does with its own files, so it skips rather than
+        // failing the whole suite over a cross-runtime artifact the isolated copy cannot produce.
+        eprintln!(
+            "skipping: {:?} not present beside the package (isolated build, no C# checkout to \
+             have written cs-written.json against)",
+            contracts_dir()
+        );
+        return;
+    }
+    let path = contracts_dir().join("selection-vectors.cs-written.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        panic!(
+            "{} is missing - run the C# writer (SelectionParityVectorTests, CULTNET_WRITE_VECTORS=1) first",
+            path.display()
+        );
+    };
+    let file: VectorFile = serde_json::from_str(&text).expect("vector file is valid JSON");
+    assert!(!file.vectors.is_empty(), "the vector file must carry at least one vector");
+
+    // Collect every mismatch instead of stopping at the first one (see evaluate_vector's comment) -
+    // a real parity defect is reported in full, not truncated by whichever vector happened to come
+    // first in the file.
+    let mut failures: Vec<String> = Vec::new();
+    for vector in &file.vectors {
+        if let Some(expected_field) = &vector.expected_refusal_field {
+            let bytes_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_refusal_vector(vector, expected_field)
+            }));
+            if let Err(panic) = bytes_ok {
+                let message = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "<non-string panic>".into());
+                failures.push(format!("{}: {}", vector.name, message));
+            }
+            continue;
+        }
+
+        if let Some(expected_kind) = &vector.expected_evaluation_refusal {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&vector.selection_message_pack_base64)
+                .expect("vector selection bytes are valid base64");
+            let selection: Selection =
+                rmp_serde::from_slice(&bytes).expect("vector selection bytes decode as MessagePack");
+            let rows = all_fixture_rows();
+            match select(&FixtureRowSet, &rows, &selection, vector.as_of, test_cursor_key()) {
+                Ok(_) => failures.push(format!(
+                    "{}: expected select() to refuse ({expected_kind}) but it accepted the selection",
+                    vector.name
+                )),
+                Err(SelectionRefusal::ReferenceOutsideTarget { .. }) if expected_kind == "reference_outside_target" => {
+                    // expected
+                }
+                Err(other) => failures.push(format!(
+                    "{}: expected select() to refuse with {expected_kind}, got {other:?}",
+                    vector.name
+                )),
+            }
+            continue;
+        }
+
+        let evaluated = match evaluate_vector(vector) {
+            Ok(evaluated) => evaluated,
+            Err(reason) => {
+                failures.push(format!(
+                    "{}: expected real evaluation (expectedIds={:?}) but {reason}",
+                    vector.name, vector.expected_ids
+                ));
+                continue;
+            }
+        };
+        let (ids, matched, has_next, edges) = evaluated;
+
+        if ids != vector.expected_ids {
+            failures.push(format!("{}: row ids - expected {:?}, got {:?}", vector.name, vector.expected_ids, ids));
+        }
+        if matched != vector.matched {
+            failures.push(format!("{}: matched - expected {}, got {}", vector.name, vector.matched, matched));
+        }
+        if has_next != vector.has_next {
+            failures.push(format!("{}: hasNext - expected {}, got {}", vector.name, vector.has_next, has_next));
+        }
+        if edges.len() != vector.expected_edges.len() {
+            failures.push(format!(
+                "{}: edge count - expected {}, got {}",
+                vector.name,
+                vector.expected_edges.len(),
+                edges.len()
+            ));
+            continue;
+        }
+        for (i, (actual, expected)) in edges.iter().zip(vector.expected_edges.iter()).enumerate() {
+            if actual.from_id != expected.from_id
+                || actual.role != expected.role
+                || actual.to_id != expected.to_id
+                || actual.payload_base64 != expected.payload_base64
+            {
+                failures.push(format!("{}: edge[{i}] mismatch", vector.name));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} of {} vectors disagreed with the reference:\n{}",
+        failures.len(),
+        file.vectors.len(),
+        failures.join("\n")
+    );
+}
+
+/// The Rust->C# mirror: builds `selection-vectors.rs-written.json` from this binary's own
+/// selections and its own evaluation of the same fixture, for the C# test
+/// `SelectionVectorsWrittenByRustDecodeAndEvaluateIdenticallyInTheReference` to judge. Committed,
+/// not regenerated on every run - rerun with `CULTNET_WRITE_VECTORS=1` after a real change to the
+/// evaluator or the vocabulary.
+#[test]
+fn write_selection_vectors_for_the_reference() {
+    if std::env::var("CULTNET_WRITE_VECTORS").as_deref() != Ok("1") {
+        return;
+    }
+    use base64::Engine;
+
+    let cases: Vec<(&str, Selection)> = vec![
+        (
+            "any_of_plus_ge_conjunction",
+            Selection {
+                fields: Some(vec![
+                    FieldPredicate {
+                        index: "kind".into(),
+                        op: "any_of".into(),
+                        values: Some(vec!["weapon".into()]),
+                        number: None,
+                    },
+                    FieldPredicate {
+                        index: "mass".into(),
+                        op: "ge".into(),
+                        values: None,
+                        number: Some("5".into()),
+                    },
+                ]),
+                ..Selection::default()
+            },
+        ),
+        (
+            "descending_with_limit",
+            Selection {
+                descending: true,
+                limit: Some(3),
+                ..Selection::default()
+            },
+        ),
+        (
+            "gt_numeric_boundary",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "mass".into(),
+                    op: "gt".into(),
+                    values: None,
+                    number: Some("1".into()),
+                }]),
+                ..Selection::default()
+            },
+        ),
+        (
+            "incoming_exists_true",
+            Selection {
+                schemas: Some(vec![leaf_a().into()]),
+                cited: Some(Incoming { role: "Design".into(), exists: true }),
+                ..Selection::default()
+            },
+        ),
+        (
+            "incoming_negation",
+            Selection {
+                schemas: Some(vec![leaf_a().into()]),
+                cited: Some(Incoming { role: "Design".into(), exists: false }),
+                ..Selection::default()
+            },
+        ),
+        (
+            "shared_index_value_three_rows",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "kind".into(),
+                    op: "any_of".into(),
+                    values: Some(vec!["shared".into()]),
+                    number: None,
+                }]),
+                ..Selection::default()
+            },
+        ),
+        // R-E/Soul "Settled": with real SHA-256 schema ids in the fixture, `cites.target.schemaId`
+        // agrees byte for byte across runtimes - the earlier name-as-id fixture masked this. This
+        // is the exact-id form.
+        //
+        // R-AF: keys=["citer-1"] (the fixture's one row that actually cites a-eq via Design) scopes
+        // this away from citer_narrow's rows, as hygiene rather than necessity - landing R-AF's
+        // vectors surfaced a real R-T/R-W parity bug this exposed: matches_citation used to resolve
+        // and R-W-check every declared reference a row carries before filtering by the citation's
+        // own role, where C#'s ReferenceMembers(descriptor, citation.Role) filters by role first.
+        // Fixed above (see matches_citation's own comment) so narrow-citer-refused's out-of-target
+        // narrow_ref edge no longer reaches a role="Design" citation in either runtime - this vector
+        // keeps the keys scope anyway so it never depends on that.
+        (
+            "hop_by_role_cites_exact_id",
+            Selection {
+                keys: Some(vec!["citer-1".into()]),
+                cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+                ..Selection::default()
+            },
+        ),
+        // R-E: the same citation, but the target is named by the alias form C#'s production rule
+        // resolves ("leaf_a.v9", stripped to "leaf_a" and compared against the schema's declared
+        // name) - as of this cut's fix, Row::schema_name/RowSet::schema_name give this crate's own
+        // schema_alias the same name to resolve against, so this now agrees with the reference too.
+        // R-AF: keys scoping for the same reason as hop_by_role_cites_exact_id above.
+        (
+            "hop_by_role_cites_name_alias",
+            Selection {
+                keys: Some(vec!["citer-1".into()]),
+                cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
+                ..Selection::default()
+            },
+        ),
+        // R-E, Self's ruling 2026-09-22 ("the C# reference's alias rule is the rule"): a hash id
+        // with a synthetic ".v1" appended is not a wire form either runtime's production rule
+        // resolves - it strips the ".v1" and compares the bare hash text against the schema's
+        // declared *name* ("leaf_a"), never equal. This is a shared negative check now: both
+        // runtimes give an empty reachable set for `schemas`, hence empty expected_ids here.
+        (
+            "schemas_by_hash_alias",
+            Selection {
+                schemas: Some(vec![leaf_a_hash_alias().into()]),
+                ..Selection::default()
+            },
+        ),
+        // R-E: `schemas` reaches a schema by its name alias - as of this cut's fix, this crate's
+        // schema_alias resolves it the same way CultNetSchemaAliasMatching's descriptor overload
+        // does (the only overload any C# call site uses): strip the trailing ".v9" and compare
+        // "leaf_a" to the schema's declared name. Previously this crate's alias matcher had no
+        // concept of a schema's name at all and gave an empty result here, disagreeing with the
+        // reference - that cross-runtime defect is what this cut fixes.
+        (
+            "schemas_by_name_alias",
+            Selection {
+                schemas: Some(vec![leaf_a_name_alias().into()]),
+                ..Selection::default()
+            },
+        ),
+        // R-D: the row's canonical rendering of 2233759.25f32 is its exact decimal expansion, not a
+        // shortest round-trip form that could round the tie the other way - ge against the exact
+        // value must match. Mirrors SelectionParityVectorTests.Cases's float_tie_exact_ge.
+        (
+            "float_tie_exact_ge",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "mass".into(),
+                    op: "ge".into(),
+                    values: None,
+                    number: Some("2233759.25".into()),
+                }]),
+                ..Selection::default()
+            },
+        ),
+        // R-C: the astral/BMP-private-use key pair sorts by code point, not UTF-16 code unit.
+        // Mirrors SelectionParityVectorTests.Cases's astral_key_code_point_order.
+        (
+            "astral_key_code_point_order",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "kind".into(),
+                    op: "any_of".into(),
+                    values: Some(vec!["unicode".into()]),
+                    number: None,
+                }]),
+                ..Selection::default()
+            },
+        ),
+        // R-AJ: a tied ordinal across two DIFFERENT schemas (kind=tie-schema is leaf_b/"zz-tie-
+        // schema" and leaf_a/"aa-tie-schema") - the shape the row order's schemaId tiebreak needs
+        // and the astral/BMP pair above never covered (both those rows are leaf_a). The fixture's
+        // keys are anti-correlated with the real schema ids on purpose, so a schemaId-first order
+        // and a recordKey-first order disagree: only the correct composition puts leaf_b's row
+        // ("zz-tie-schema") first.
+        (
+            "row_tiebreak_schema_id_before_record_key_at_tied_ordinal",
+            Selection {
+                fields: Some(vec![FieldPredicate {
+                    index: "kind".into(),
+                    op: "any_of".into(),
+                    values: Some(vec!["tie-schema".into()]),
+                    number: None,
+                }]),
+                ..Selection::default()
+            },
+        ),
+        // R-AF: "dup-key" carries two rows (leaf_a and leaf_b); citer_narrow's narrow_ref targets
+        // leaf_a only. Keys scopes the citer candidate set to narrow-citer-accepted alone, so this
+        // vector never touches narrow-citer-refused's bad edge (R-W resolves every reference
+        // member unconditionally, so leaving both citer_narrow rows in one candidate set would
+        // always refuse regardless of which edge the query named). One rule, derived from the wire
+        // (docs/cultnet-selection-cut.md, R-AF): resolving "the row this edge names" is by record
+        // key plus the declared leaf set, not an exact (schema, key) pair, so this must accept in
+        // both runtimes and resolve to the leaf_a row even though a leaf_b row shares the same key.
+        (
+            "shared_key_narrow_ref_resolves_leaf_within_target",
+            Selection {
+                keys: Some(vec!["narrow-citer-accepted".into()]),
+                cites: Some(Citation { target: rr(leaf_a(), "dup-key"), role: Some("narrow_ref".into()) }),
+                ..Selection::default()
+            },
+        ),
+        // R-AO: "dup-key" has two in-target candidates for citer's Design role (unlike
+        // citer_narrow's narrow_ref above, which only ever had one). citer-both-in-target is the
+        // first row in the fixture file (and so in both runtimes' row order) to name it through
+        // Design - resolution must deterministically pick the first in-target candidate in that
+        // order, the leaf_a row (ordinal 11), never the leaf_b row (ordinal 12) that shares the key.
+        (
+            "shared_key_design_resolves_the_first_in_target_candidate_in_row_order",
+            Selection {
+                keys: Some(vec!["citer-both-in-target".into()]),
+                cites: Some(Citation { target: rr(leaf_a(), "dup-key"), role: Some("Design".into()) }),
+                ..Selection::default()
+            },
+        ),
+    ];
+
+    let mut vectors = Vec::new();
+    for (name, selection) in cases {
+        let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
+        let rows = all_fixture_rows();
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key())
+            .unwrap_or_else(|e| panic!("case {name:?} failed: {e:?}"));
+        let ids: Vec<String> = evaluation
+            .rows
+            .iter()
+            .map(|row| row_id(row.schema_id(), row.record_key()))
+            .collect();
+        let edges = evaluation
+            .edges
+            .iter()
+            .map(|edge| VectorEdge {
+                from_id: row_id(edge.from.schema_id(), edge.from.record_key()),
+                role: edge.role.clone(),
+                to_id: row_id(edge.to.schema_id(), edge.to.record_key()),
+                payload_base64: edge
+                    .payload
+                    .as_ref()
+                    .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+            })
+            .collect();
+        vectors.push(Vector {
+            name: name.to_string(),
+            selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            as_of: 1,
+            expected_refusal_field: None,
+            expected_evaluation_refusal: None,
+            matched: evaluation.matched,
+            has_next: evaluation.next_cursor.is_some(),
+            expected_ids: ids,
+            expected_edges: edges,
+        });
+    }
+
+    // Self's ruling, 2026-09-22 (commit 2 fix batch): door-refusal vectors. These selections are
+    // never evaluated on either side - only decoded and handed to validate/Validate, which must
+    // refuse at exactly the named field.
+    let refusal_cases: Vec<(&str, Selection, &str)> = vec![
+        (
+            "refuses_empty_schemas_list",
+            Selection {
+                schemas: Some(Vec::new()),
+                ..Selection::default()
+            },
+            "schemas",
+        ),
+        (
+            "refuses_blank_key_entry",
+            Selection {
+                keys: Some(vec!["a-eq".into(), "   ".into()]),
+                ..Selection::default()
+            },
+            "keys",
+        ),
+        // R-E: an unmatched cites.target.schemaId is refused at the door, never silently answered
+        // with an empty page.
+        (
+            "refuses_unmatched_cites_target_schema",
+            Selection {
+                cites: Some(Citation {
+                    target: rr("sha256:not-a-known-schema", "a-eq"),
+                    role: Some("Design".into()),
+                }),
+                ..Selection::default()
+            },
+            "cites.target.schemaId",
+        ),
+        // R-E, Self's ruling 2026-09-22: a hash-shaped alias resolves to no known schema in either
+        // runtime now (see schemas_by_hash_alias above), so naming one as a cites.target is the
+        // same "unmatched target" refusal as any other unresolvable schema id.
+        (
+            "refuses_cites_target_by_hash_shaped_alias",
+            Selection {
+                cites: Some(Citation {
+                    target: rr(leaf_a_hash_alias(), "a-eq"),
+                    role: Some("Design".into()),
+                }),
+                ..Selection::default()
+            },
+            "cites.target.schemaId",
+        ),
+    ];
+    for (name, selection, expected_field) in refusal_cases {
+        let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
+        vectors.push(Vector {
+            name: name.to_string(),
+            selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            as_of: 1,
+            expected_refusal_field: Some(expected_field.to_string()),
+            expected_evaluation_refusal: None,
+            matched: 0,
+            has_next: false,
+            expected_ids: Vec::new(),
+            expected_edges: Vec::new(),
+        });
+    }
+
+    // R-AF: evaluation-time refusal vectors. Never handed to validate - the selection decodes and
+    // passes the door; only select itself refuses, and only once the shared-key resolution rule
+    // actually runs. Keys scopes the candidate set to narrow-citer-refused alone (see the comment
+    // on shared_key_narrow_ref_resolves_leaf_within_target above).
+    let evaluation_refusal_cases: Vec<(&str, Selection)> = vec![(
+        "shared_key_narrow_ref_refuses_when_only_candidate_is_outside_target",
+        Selection {
+            keys: Some(vec!["narrow-citer-refused".into()]),
+            cites: Some(Citation { target: rr(leaf_a(), "narrow-only"), role: Some("narrow_ref".into()) }),
+            ..Selection::default()
+        },
+    )];
+    for (name, selection) in evaluation_refusal_cases {
+        let rows = all_fixture_rows();
+        let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+        assert!(
+            matches!(result, Err(SelectionRefusal::ReferenceOutsideTarget { .. })),
+            "{name} must be refused by select() before it can be committed as an evaluation-refusal vector, got {result:?}"
+        );
+        let bytes = rmp_serde::to_vec_named(&selection).expect("encodes");
+        vectors.push(Vector {
+            name: name.to_string(),
+            selection_message_pack_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            as_of: 1,
+            expected_refusal_field: None,
+            expected_evaluation_refusal: Some("reference_outside_target".to_string()),
+            matched: 0,
+            has_next: false,
+            expected_ids: Vec::new(),
+            expected_edges: Vec::new(),
+        });
+    }
+
+    let file = VectorFile { vectors };
+    let json = serde_json::to_string_pretty(&file).expect("serializes");
+    let dir = contracts_dir();
+    fs::create_dir_all(&dir).expect("contracts/cultnet/interop exists or is created");
+    fs::write(dir.join("selection-vectors.rs-written.json"), json).expect("writes the vector file");
+}
+
+// A canary that the canonical_number module used above stays reachable from an integration test
+// (it is exercised indirectly through Selection.fields[].number already, but this names the rule
+// directly): a lexicographic compare would put "10" below "9".
+#[test]
+fn canonical_number_compares_by_magnitude() {
+    assert_eq!(
+        canonical_number::compare("10", "9"),
+        std::cmp::Ordering::Greater
+    );
+    assert!(canonical_number::is_canonical("10"));
+    assert!(!canonical_number::is_canonical("+10"));
+}
+
+// Q-J: a negative value orders below a positive one of the same magnitude - a comparator that
+// ignores sign would treat "-1" and "1" as equal (same integer/fraction digits).
+#[test]
+fn canonical_number_compares_by_sign() {
+    assert_eq!(canonical_number::compare("-1", "1"), std::cmp::Ordering::Less);
+    assert_eq!(canonical_number::compare("1", "-1"), std::cmp::Ordering::Greater);
+    assert_eq!(canonical_number::compare("-10", "-2"), std::cmp::Ordering::Less);
+}
+
+#[allow(dead_code)]
+fn unused_operator_reference(op: SelectionOperator) -> &'static str {
+    op.as_wire_str()
+}
+
+// ------------------------------------------------------------------------------------------
+// R-F: the door is inside `select` - it validates first and returns the typed refusal, and the
+// single-row fast path refuses (loudly, not just in debug builds) to answer a hop-bearing
+// selection at all.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn select_refuses_an_invalid_selection_instead_of_evaluating_it() {
+    let rows = base_rows();
+    let selection = Selection { schemas: Some(Vec::new()), ..Selection::default() };
+    let result = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key());
+    assert!(matches!(result, Err(SelectionRefusal::Invalid(ref invalid)) if invalid.field == "schemas"));
+}
+
+// A plain assert (not #[should_panic]) so a mutant that removes the panic reads as an ordinary
+// FAILED test rather than the harness having to special-case should_panic's own output shape.
+#[test]
+fn matches_refuses_a_hop_bearing_selection_even_in_a_release_style_assert() {
+    let row = FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5");
+    let selection = Selection {
+        cited: Some(Incoming { role: "Design".into(), exists: true }),
+        ..Selection::default()
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cultnet_rs::matches(&row, &selection);
+    }));
+    let panicked = outcome.is_err();
+    assert!(panicked, "matches() must panic on a hop-bearing selection, not answer wrong");
+}
+
+// ------------------------------------------------------------------------------------------
+// R-H: the cursor digest is length-prefixed, so no separator character can make two distinct
+// selections collide (Soul: `["a|b"]` and `["a","b"]` used to digest the same).
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn cursor_digest_does_not_collide_on_differently_split_lists() {
+    let one_joined_value = Selection {
+        fields: Some(vec![FieldPredicate {
+            index: "kind".into(),
+            op: "any_of".into(),
+            values: Some(vec!["a|b".into()]),
+            number: None,
+        }]),
+        ..Selection::default()
+    };
+    let two_split_values = Selection {
+        fields: Some(vec![FieldPredicate {
+            index: "kind".into(),
+            op: "any_of".into(),
+            values: Some(vec!["a".into(), "b".into()]),
+            number: None,
+        }]),
+        ..Selection::default()
+    };
+    assert_ne!(
+        Cursor::compute_digest(1, 1, "s", "k", &one_joined_value, test_cursor_key()),
+        Cursor::compute_digest(1, 1, "s", "k", &two_split_values, test_cursor_key()),
+        "a length-prefixed digest must not let list-splitting collide"
+    );
+
+    let one_key = Selection { keys: Some(vec!["a,b".into()]), ..Selection::default() };
+    let two_keys = Selection { keys: Some(vec!["a".into(), "b".into()]), ..Selection::default() };
+    assert_ne!(
+        Cursor::compute_digest(1, 1, "s", "k", &one_key, test_cursor_key()),
+        Cursor::compute_digest(1, 1, "s", "k", &two_keys, test_cursor_key())
+    );
+}
+
+// ------------------------------------------------------------------------------------------
+// R-Y: the digest covers the cursor's own body (`asOf`, `ordinal`, `schemaId`, `recordKey`), not
+// only the selection - a caller holding one valid cursor cannot rewrite its position and reuse
+// the digest.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn cursor_digest_does_not_collide_across_rewritten_positions() {
+    let selection = Selection::default();
+    let key = test_cursor_key();
+    let base = Cursor::compute_digest(1, 5, "schema-a", "k1", &selection, key);
+    let rewritten_ordinal = Cursor::compute_digest(1, 6, "schema-a", "k1", &selection, key);
+    let rewritten_key = Cursor::compute_digest(1, 5, "schema-a", "k2", &selection, key);
+    let rewritten_as_of = Cursor::compute_digest(2, 5, "schema-a", "k1", &selection, key);
+    let rewritten_schema = Cursor::compute_digest(1, 5, "schema-b", "k1", &selection, key);
+    assert_ne!(base, rewritten_ordinal, "a rewritten ordinal must not reuse the digest");
+    assert_ne!(base, rewritten_key, "a rewritten record key must not reuse the digest");
+    assert_ne!(base, rewritten_as_of, "a rewritten asOf must not reuse the digest");
+    assert_ne!(base, rewritten_schema, "a rewritten schemaId must not reuse the digest");
+}
+
+// A cursor whose position was rewritten but whose digest bytes were reused (a forgery only
+// possible with access to the encoded body, not the process key) is covered by the in-module
+// unit test next to `Cursor` itself (`selection.rs`'s `cursor_tests`), where the private `digest`
+// field and the length-prefix helpers used to splice a forged body are directly reachable. This
+// integration test only exercises the public surface: two cursors minted for different positions
+// under the same selection and key never share a digest, which is what makes that forgery
+// impossible without the raw bytes.
+#[test]
+fn cursor_minted_for_a_different_position_never_shares_a_digest() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let genuine = page.next_cursor.expect("more than one row");
+    let parsed = Cursor::parse(&genuine).expect("mints decode");
+
+    let d1 = Cursor::compute_digest(1, parsed.ordinal, &parsed.schema_id, &parsed.record_key, &selection, test_cursor_key());
+    let d2 = Cursor::compute_digest(1, parsed.ordinal + 1, &parsed.schema_id, &parsed.record_key, &selection, test_cursor_key());
+    let d3 = Cursor::compute_digest(1, parsed.ordinal, &parsed.schema_id, "some-other-key", &selection, test_cursor_key());
+    assert_ne!(d1, d2, "a rewritten ordinal must not reuse the digest");
+    assert_ne!(d1, d3, "a rewritten record key must not reuse the digest");
+}
+
+// ------------------------------------------------------------------------------------------
+// R-O: the cursor is keyed. A forged cursor, a cursor minted by another process, and a record
+// key carrying the pre-fix delimiter character are all refused or round-trip correctly under the
+// keyed, length-prefixed cursor.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn cursor_forged_without_the_key_is_refused() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let page = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let genuine = page.next_cursor.expect("more than one row");
+
+    // A forgery attempt: decode the genuine cursor, flip one byte inside its digest (the tail of
+    // the length-prefixed body), and re-encode - the shape (five length-prefixed fields) stays
+    // valid, only the digest content is wrong, exactly what an attacker guessing the selection's
+    // shape without the key would produce.
+    let mut bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &genuine,
+    )
+    .expect("genuine cursor decodes");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    let forged = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes);
+
+    let result = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(forged), ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(result, Err(SelectionRefusal::CursorInvalid { .. })));
+}
+
+#[test]
+fn cursor_minted_by_another_process_is_refused() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(1), ..Selection::default() };
+    let matched = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let last_row = matched.rows.last().expect("more than one row");
+
+    // A different process holds a different random key (R-O) - this cursor is genuine, just not
+    // minted under the key the answering server in this test holds.
+    let other_process_key = CursorKey::random();
+    let cursor = Cursor::mint(1, last_row, &selection, &other_process_key);
+
+    let result = select(
+        &FixtureRowSet,
+        &rows,
+        &Selection { limit: Some(1), cursor: Some(cursor), ..Selection::default() },
+        1,
+        test_cursor_key(),
+    );
+    assert!(matches!(result, Err(SelectionRefusal::CursorInvalid { .. })));
+}
+
+// F6: the pre-fix C# cursor used U+241F as its field delimiter, so a record key carrying that
+// exact character broke the server's own cursor. R-O's length-prefixed body has no delimiter
+// character at all, so this (and any other character a record key might carry) round-trips.
+#[test]
+fn cursor_round_trips_a_record_key_carrying_the_pre_fix_delimiter_character() {
+    let row = FixtureRow::leaf(leaf_a(), "row-\u{241F}-with-the-old-delimiter", 7, "weapon", "5");
+    let selection = Selection::default();
+    let cursor_text = Cursor::mint(9, &row, &selection, test_cursor_key());
+    let cursor = Cursor::parse(&cursor_text).expect("length-prefixed body decodes");
+    assert_eq!(cursor.as_of, 9);
+    assert_eq!(cursor.ordinal, 7);
+    assert_eq!(cursor.schema_id, leaf_a());
+    assert_eq!(cursor.record_key, "row-\u{241F}-with-the-old-delimiter");
+}
+
+// R-N (docs/cultnet-selection-cut.md, fix batch 3) is pending on this branch: the C# reference's
+// exact `code`/`details` shape has not landed, and Self's instruction (2026-09-22) is not to guess
+// it. No test here exercises it yet; add the wire-decode tests alongside the mapping once it lands.
+
+// ------------------------------------------------------------------------------------------
+// R-E: the alias matcher, exercised at the `select`/`validate` level (the module's own unit
+// tests in cultnet_rs::selection::schema_alias::tests cover the string algorithm directly).
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn schemas_reaches_a_schema_by_its_unversioned_name_alias() {
+    let rows = base_rows();
+    let selection = Selection {
+        schemas: Some(vec![leaf_a_name_alias().into()]),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    let mut ids: Vec<&str> = evaluation.rows.iter().map(Row::record_key).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["a-eq", "a-lo", "shared-1", "shared-3"], "every leaf_a row, by name alias");
+}
+
+// R-E, Self's ruling 2026-09-22: a hash-shaped alias ("<hash>.v1") is not a wire form the C#
+// reference's production rule ever resolves - it strips the ".v1" and compares the bare hash text
+// against the schema's declared *name*, never equal. `schemas` never refuses (unlike cites.target
+// below), so an unresolved alias just narrows reachability to nothing.
+#[test]
+fn schemas_does_not_reach_a_schema_by_a_hash_shaped_alias() {
+    let rows = base_rows();
+    let selection = Selection {
+        schemas: Some(vec![leaf_a_hash_alias().into()]),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert!(evaluation.rows.is_empty(), "a hash-shaped alias must not resolve to leaf_a");
+}
+
+// R-E, at the fast path `matches()` uses directly (the v0 snapshot server's own caller,
+// serve_read_only_raw_snapshot, never calls validate/select - v0 has its own lowering instead).
+// An empty-but-present schemas list must match nothing there too, the same as the door's own
+// rule for select() - schema_alias::matches_any's own "empty candidates matches everything"
+// convention (ported faithfully from the C# reference's MatchesAny, for the door/reachability
+// call sites that already refuse or normalise an empty list before this ever runs) must not leak
+// into this call site, which has no such guarantee upstream of it.
+#[test]
+fn matches_treats_an_empty_but_present_schemas_list_as_matching_nothing() {
+    let row = FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5");
+    let selection = Selection { schemas: Some(Vec::new()), ..Selection::default() };
+    assert!(
+        !cultnet_rs::matches(&row, &selection),
+        "an empty-but-present schemas list must never be read as \"no filter\" by the evaluator"
+    );
+}
+
+#[test]
+fn cites_target_resolves_through_the_name_alias_matcher() {
+    let rows = base_rows();
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a_name_alias(), "a-eq"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["citer-1"]);
+}
+
+// R-E, Self's ruling 2026-09-22: a hash-shaped alias resolves to no known schema (see
+// schemas_does_not_reach_a_schema_by_a_hash_shaped_alias above), so a cites.target naming one is
+// refused at the door (R-E's unmatched-target rule), not silently answered with an empty page.
+#[test]
+fn cites_target_by_a_hash_shaped_alias_is_refused_as_unmatched() {
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a_hash_alias(), "a-eq"), role: Some("Design".into()) }),
+        ..Selection::default()
+    };
+    let error = validate(&selection, &FixtureRowSet).expect_err("hash-shaped alias must be refused");
+    assert_eq!(error.field, "cites.target.schemaId");
+}
+
+#[test]
+fn validate_refuses_a_cites_target_schema_that_matches_no_known_schema() {
+    let selection = Selection {
+        cites: Some(Citation {
+            target: rr("sha256:not-a-known-schema", "a-eq"),
+            role: Some("Design".into()),
+        }),
+        ..Selection::default()
+    };
+    let error = validate(&selection, &FixtureRowSet).expect_err("unmatched target must be refused");
+    assert_eq!(error.field, "cites.target.schemaId");
+}
+
+#[test]
+fn schema_alias_module_is_reachable_from_the_crate_root() {
+    assert!(schema_alias::matches(leaf_a_name_alias(), leaf_a(), leaf_a_name()));
+    assert!(!schema_alias::matches(leaf_a_name_alias(), leaf_a(), leaf_b_name()));
+    assert!(!schema_alias::matches(leaf_a_hash_alias(), leaf_a(), leaf_a_name()));
+}
+
+// ------------------------------------------------------------------------------------------
+// R-G/P-1: `matched` is the total match count, not the page count.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn matched_is_the_total_count_not_the_page_count() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(2), ..Selection::default() };
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.len(), 2, "the page is clipped to the limit");
+    assert_eq!(evaluation.matched, 7, "matched counts every row base_rows() carries");
+}
+
+// ------------------------------------------------------------------------------------------
+// R-I: `select_page` projects `select`'s generic rows into the wire's `SelectionPage` - a header
+// projection carries no payload, in the page's rows and in its edges alike (S20).
+// ------------------------------------------------------------------------------------------
+
+fn document_record_for(row: &FixtureRow) -> SelectionDocumentRecord {
+    SelectionDocumentRecord {
+        schema_id: row.schema_id.to_string(),
+        schema_name: None,
+        schema_version: None,
+        schema_content_hash: None,
+        record_key: row.record_key.to_string(),
+        stored_at: "2026-09-22T00:00:00Z".to_string(),
+        payload_encoding: "messagepack".to_string(),
+        payload: vec![0xC0], // a nonempty payload every header-projection assertion must not see
+        source_runtime_id: None,
+        source_agent_id: None,
+        source_role: None,
+        tags: None,
+    }
+}
+
+#[test]
+fn select_page_header_projection_carries_no_payload_in_rows_or_edges() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), Some(vec![7]))]),
+    ];
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        projection: "header".into(),
+        ..Selection::default()
+    };
+    let page: SelectionPage =
+        select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
+    assert!(page.documents.is_none());
+    let headers = page.headers.expect("header projection carries headers");
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].record_key, "citer-1");
+    let edges = page.edges.expect("a hop-bearing selection carries edges");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].payload, None, "S20: a header projection's edges carry no payload");
+    assert_eq!(edges[0].payload_encoding, None);
+}
+
+#[test]
+fn select_page_document_projection_carries_payload_in_rows_and_edges() {
+    let rows = vec![
+        FixtureRow::leaf(leaf_a(), "a-eq", 1, "weapon", "5"),
+        FixtureRow::citer("citer-1", 2, vec![("Design".to_string(), "a-eq".to_string(), Some(vec![7]))]),
+    ];
+    let selection = Selection {
+        cites: Some(Citation { target: rr(leaf_a(), "a-eq"), role: Some("Design".into()) }),
+        projection: "document".into(),
+        ..Selection::default()
+    };
+    let page: SelectionPage =
+        select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
+    assert!(page.headers.is_none());
+    let documents = page.documents.expect("document projection carries documents");
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].payload, vec![0xC0]);
+    let edges = page.edges.expect("a hop-bearing selection carries edges");
+    assert_eq!(edges[0].payload, Some(vec![7]));
+    assert_eq!(edges[0].payload_encoding.as_deref(), Some("messagepack"));
+}
+
+#[test]
+fn select_page_matched_is_the_total_count() {
+    let rows = base_rows();
+    let selection = Selection { limit: Some(2), ..Selection::default() };
+    let page: SelectionPage = select_page(&FixtureRowSet, &rows, &selection, 1, test_cursor_key(), document_record_for).unwrap();
+    assert_eq!(page.matched, 7);
+    assert_eq!(page.headers.unwrap().len(), 2);
+}
+
+// ------------------------------------------------------------------------------------------
+// R-M: `SelectionDocumentRecord`/`RawDocumentHeader`/`Edge`/`RecordRef` used to be encoded and
+// decoded by ~335 lines of hand-written `rmpv::Value` construction (contracts.rs). R-M replaced
+// that with the generic `rmpv::ext::from_value`/`to_value` bridge over their own serde derives.
+// This proves the replacement round-trips through the real message envelope
+// (`cultnet.snapshot_response_raw.v1`, MessagePack, named maps) both ways - headers, documents
+// with a real payload, and edges with and without a payload.
+// ------------------------------------------------------------------------------------------
+
+#[test]
+fn snapshot_response_raw_v1_round_trips_headers_documents_and_edges_through_the_generic_codec() {
+    let message = CultNetMessage::SnapshotResponseRawV1 {
+        message_id: "msg-1".to_string(),
+        matched: 3,
+        as_of: 42,
+        next: Some("cursor-1".to_string()),
+        // A message carries exactly one of headers/documents (validate_message's own invariant,
+        // matching Selection::projection); this vector exercises the document side, the richer of
+        // the two.
+        headers: None,
+        documents: Some(vec![SelectionDocumentRecord {
+            schema_id: leaf_a().to_string(),
+            schema_name: None,
+            schema_version: None,
+            schema_content_hash: None,
+            record_key: "a-eq".to_string(),
+            stored_at: "2026-09-22T00:00:00Z".to_string(),
+            payload_encoding: "messagepack".to_string(),
+            payload: vec![1, 2, 3, 4, 5],
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        }]),
+        edges: Some(vec![
+            Edge {
+                from: rr(citer(), "citer-1"),
+                role: "Design".to_string(),
+                to: rr(leaf_a(), "a-eq"),
+                payload_encoding: Some("messagepack".to_string()),
+                payload: Some(vec![9, 9]),
+            },
+            Edge {
+                from: rr(citer(), "citer-1"),
+                role: "parent".to_string(),
+                to: rr(leaf_b(), "b-hi"),
+                payload_encoding: None,
+                payload: None,
+            },
+        ]),
+        shard_id: Some("shard-1".to_string()),
+        shard_epoch: Some(5),
+        shard_log_sequence: Some(100),
+    };
+
+    let bytes =
+        encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    assert_eq!(decoded, message);
+}
+
+// The header side of the same message shape (S20: no payload field at all, since
+// `RawDocumentHeader` has none to carry).
+#[test]
+fn snapshot_response_raw_v1_round_trips_headers_through_the_generic_codec() {
+    let message = CultNetMessage::SnapshotResponseRawV1 {
+        message_id: "msg-2".to_string(),
+        matched: 1,
+        as_of: 7,
+        next: None,
+        headers: Some(vec![RawDocumentHeader {
+            schema_id: leaf_a().to_string(),
+            schema_name: Some("leaf_a".to_string()),
+            schema_version: Some("v1".to_string()),
+            schema_content_hash: Some("hash".to_string()),
+            record_key: "a-eq".to_string(),
+            stored_at: "2026-09-22T00:00:00Z".to_string(),
+            source_runtime_id: Some("runtime-1".to_string()),
+            source_agent_id: None,
+            source_role: None,
+            tags: Some(vec!["tag-a".to_string()]),
+        }]),
+        documents: None,
+        edges: None,
+        shard_id: None,
+        shard_epoch: None,
+        shard_log_sequence: None,
+    };
+
+    let bytes =
+        encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).expect("encodes");
+    let decoded = decode_cultnet_message_from_slice(&bytes, CultNetWireContract::CultNetSchemaV0)
+        .expect("decodes");
+    assert_eq!(decoded, message);
+}

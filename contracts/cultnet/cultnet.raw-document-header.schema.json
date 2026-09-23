@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/GameCult/CultLib/contracts/cultnet/cultnet.raw-document-header.schema.json",
+  "title": "CultNet Raw Document Header",
+  "description": "R-S (docs/cultnet-selection-cut.md, fix batch 3): CultNetRawDocumentRecord minus payload/payloadEncoding - CultNetRawDocumentHeader has no such members at all, so a header must not $ref the record schema (which requires them). Matches MessagePack-CSharp's map-mode output: every declared key is written, nil included, so every property here is `required` even where its value may be null.",
+  "type": "object",
+  "required": [
+    "schemaId",
+    "schemaName",
+    "schemaVersion",
+    "schemaContentHash",
+    "recordKey",
+    "storedAt",
+    "sourceRuntimeId",
+    "sourceAgentId",
+    "sourceRole",
+    "tags"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaId": { "type": "string", "minLength": 1 },
+    "schemaName": { "type": ["string", "null"], "minLength": 1 },
+    "schemaVersion": { "type": ["string", "null"], "minLength": 1 },
+    "schemaContentHash": { "type": ["string", "null"], "minLength": 1 },
+    "recordKey": { "type": "string", "minLength": 1 },
+    "storedAt": { "type": "string", "minLength": 1 },
+    "sourceRuntimeId": { "type": ["string", "null"], "minLength": 1 },
+    "sourceAgentId": { "type": ["string", "null"], "minLength": 1 },
+    "sourceRole": { "type": ["string", "null"], "minLength": 1 },
+    "tags": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
