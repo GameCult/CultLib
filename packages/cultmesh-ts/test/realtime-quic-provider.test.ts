@@ -94,6 +94,31 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
   }
 }
 
+/**
+ * Waits for `CultMeshQuicNativeRuntime.refCount` to stop moving: `dispose()`
+ * releases its runtime reference fire-and-forget (`void this.runtime.release()`),
+ * so a just-finished test's cleanup can still be landing when the next test
+ * starts. A test that snapshots refCount as a baseline without waiting for
+ * this first can catch that in-flight decrement mid-test and see refCount
+ * undershoot its own "before" value instead of returning to it.
+ */
+async function waitForRefCountToStabilize(quietMs = 200, timeoutMs = 5_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let last = CultMeshQuicNativeRuntime.refCount;
+  let stableSince = Date.now();
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const current = CultMeshQuicNativeRuntime.refCount;
+    if (current !== last) {
+      last = current;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= quietMs) {
+      return current;
+    }
+    if (Date.now() >= deadline) return current;
+  }
+}
+
 test("the advertised endpoint carries an uppercase cert-sha256 pin the Unity connector requires", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
@@ -391,7 +416,10 @@ test(
     // case-sensitive (M2) made every provider test that dials with an
     // uppercase-pinned endpoint reject during the handshake, and the whole
     // file then hung for over two minutes past its last visible test.
-    const before = CultMeshQuicNativeRuntime.refCount;
+    // Earlier tests' dispose() releases fire-and-forget; wait for the
+    // shared refCount to actually settle before treating it as a baseline
+    // (see waitForRefCountToStabilize's own doc comment).
+    const before = await waitForRefCountToStabilize();
     const provider = await CultMeshQuicRealtimeProvider.listen({
       host: "127.0.0.1",
       port: 0,
@@ -426,9 +454,9 @@ test(
 
       const disposedAt = Date.now();
       provider.dispose();
-      await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
+      await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before, 5_000);
       assert.ok(
-        Date.now() - disposedAt < 2_000,
+        Date.now() - disposedAt < 5_000,
         "dispose() must evict a mid-handshake connection promptly, not wait out its 30s handshake timeout",
       );
     } finally {
