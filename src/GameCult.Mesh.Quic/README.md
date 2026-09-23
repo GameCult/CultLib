@@ -66,7 +66,8 @@ var frame = await session.ReceiveAsync(cancellationToken);
 - `ReliableOrdered` uses one ordered QUIC stream.
 - `LatestOnly` uses independent streams and keeps at most one pending frame per
   channel and body. A newer `(producer epoch, sequence)` generation replaces
-  queued state.
+  queued state. The provider also retains the newest `LatestOnly` frame per
+  `(channel, body)` and delivers it to each client as soon as it attaches.
 - `Unreliable` fails closed in this adapter because `System.Net.Quic` does not
   expose QUIC datagrams. Use a native MsQuic connector when datagram semantics
   are required.

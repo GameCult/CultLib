@@ -55,7 +55,11 @@ broadcast enqueues into a keyed, coalescing outbox owned by each physical peer
 and returns without waiting for network delivery. The peer's transport worker
 owns stream writes and eviction after disconnect or send failure. Thus a slow,
 stalled, or departed client cannot backpressure a simulation tick, while a
-healthy peer still converges on the newest generation. Reliable-ordered
+healthy peer still converges on the newest generation. The provider also
+retains the newest latest-only frame per `(channel, body)` and seeds it into
+each newly attached client, bounded by the number of distinct keys, so a peer
+that connects or reconnects after a broadcast still converges on current
+state without a service-side replay loop. Reliable-ordered
 broadcast remains completion-bearing because dropping or replacing it would
 violate its declared delivery contract; caller cancellation can stop that
 operation.
