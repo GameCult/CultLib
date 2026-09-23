@@ -749,6 +749,72 @@ fn edge_order_is_from_key_before_role_when_both_vary_at_the_same_anchor() {
     assert_eq!(order, vec![("a_other", "peer"), ("z_hub", "Design")]);
 }
 
+// R-AN: the test above pins from.record_key before role, but ties From and To across the two
+// edges - dropping role from the comparator entirely still leaves from.record_key as the sole,
+// sufficient discriminator, so that mutation survives (Soul's SM-4). This test ties From (one
+// citer) and To (one target) identically across both edges - only role can differ - by giving the
+// same citer two references through different roles at the same target key. Citation.role: None
+// matches any declared reference (matches_citation), so both edges surface from one `cites` query.
+// Declared out of code-point order ("parent" before "Design") on purpose, so a stable sort with
+// role dropped from the comparator would leave them in that wrong order.
+#[test]
+fn edge_order_pins_role_when_from_and_to_are_both_tied() {
+    let leaf = FixtureRow::leaf(leaf_a(), "target", 1, "weapon", "5");
+    let hub = FixtureRow::citer(
+        "hub",
+        2,
+        vec![
+            ("parent".to_string(), "target".to_string(), None),
+            ("Design".to_string(), "target".to_string(), None),
+        ],
+    );
+    let rows = vec![leaf, hub];
+
+    let selection =
+        Selection { cites: Some(Citation { target: rr(leaf_a(), "target"), role: None }), ..Selection::default() };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.edges.len(), 2);
+    let order: Vec<&str> = evaluation.edges.iter().map(|edge| edge.role.as_str()).collect();
+    // "Design" < "parent" in code-point order (uppercase 'D' 0x44 sorts before lowercase 'p' 0x70).
+    assert_eq!(order, vec!["Design", "parent"]);
+}
+
+// R-AN: ties From.Key and Role across the two edges (both citers share one record key and cite
+// the same target through the same role, "peer" - already declared by the `citer()` schema and
+// resolvable regardless of which schema's row carries it, since target_leaves takes no schema -
+// Soul's separate PLAUSIBLE finding) - only From.SchemaId can differ. Two different-schema citer
+// rows (`citer()` and `citer_narrow()`), same record key, inserted in the opposite of the correct
+// order so a stable sort with from.schema_id dropped from the comparator would leave them wrong.
+#[test]
+fn edge_order_pins_from_schema_id_when_from_key_and_role_are_both_tied() {
+    let target = FixtureRow::citer("hub-target", 1, Vec::new());
+    let from_wide = FixtureRow::citer("same-key", 2, vec![("peer".to_string(), "hub-target".to_string(), None)]);
+    let from_narrow =
+        FixtureRow::citer_narrow("same-key", 3, vec![("peer".to_string(), "hub-target".to_string(), None)]);
+    // Insertion order is whichever schema id sorts *second* first, then the one that sorts first -
+    // deliberately the reverse of the comparator's required output.
+    let (first_inserted, second_inserted) = if citer() < citer_narrow() {
+        (from_narrow, from_wide)
+    } else {
+        (from_wide, from_narrow)
+    };
+    let expected_first_schema = if citer() < citer_narrow() { citer() } else { citer_narrow() };
+    let rows = vec![target, first_inserted, second_inserted];
+
+    let selection =
+        Selection { cited: Some(Incoming { role: "peer".into(), exists: true }), ..Selection::default() };
+
+    let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+    assert_eq!(evaluation.rows.iter().map(Row::record_key).collect::<Vec<_>>(), vec!["hub-target"]);
+    assert_eq!(evaluation.edges.len(), 2);
+    assert_eq!(evaluation.edges[0].from.record_key(), "same-key");
+    assert_eq!(evaluation.edges[1].from.record_key(), "same-key");
+    assert_eq!(evaluation.edges[0].role, "peer");
+    assert_eq!(evaluation.edges[1].role, "peer");
+    assert_eq!(evaluation.edges[0].from.schema_id(), expected_first_schema);
+}
+
 // S16: the four comparisons at the boundary, including the row whose value equals the compared
 // number exactly.
 #[test]
@@ -840,6 +906,42 @@ fn shared_key_resolves_to_the_row_inside_the_declared_target_in_either_row_order
             "must resolve to leaf_a, the only in-target row, never leaf_b, in either row order"
         );
         assert_eq!(evaluation.edges[0].to.record_key(), "dup-key");
+    }
+}
+
+// R-AO: the test above covers one in-target candidate and one out - resolve_reference_target's
+// `for &candidate in candidates { ... return Ok(Some(candidate)) }` picks the first match, but
+// nothing pinned that rule specifically when *two* in-target rows share a key (Soul's SM-4: "the
+// first row in the caller's order wins" was a coincidence of source, not a rule). "Design"'s
+// declared target is [leaf_a, leaf_b] (FixtureRowSet::target_leaves) - both schemas are in-target,
+// so which one resolves depends only on which the caller listed first in `rows`/`by_key`'s
+// insertion order. Both orders are exercised, each expecting whichever row was listed first in
+// *that* run - proving the rule is "first in the caller's order", not merely "leaf_a happens to
+// win" or some other fixed tiebreak.
+#[test]
+fn shared_key_with_two_in_target_candidates_resolves_to_whichever_the_caller_listed_first() {
+    let leaf_a_row = FixtureRow::leaf(leaf_a(), "dup-key-both-in", 1, "weapon", "1");
+    let leaf_b_row = FixtureRow::leaf(leaf_b(), "dup-key-both-in", 2, "shield", "2");
+    let citer_row = FixtureRow::citer(
+        "both-in-citer",
+        3,
+        vec![("Design".to_string(), "dup-key-both-in".to_string(), None)],
+    );
+    let selection =
+        Selection { cited: Some(Incoming { role: "Design".into(), exists: true }), ..Selection::default() };
+
+    for (rows, expected_first_schema) in [
+        (vec![leaf_a_row.clone(), leaf_b_row.clone(), citer_row.clone()], leaf_a()),
+        (vec![leaf_b_row.clone(), leaf_a_row.clone(), citer_row.clone()], leaf_b()),
+    ] {
+        let evaluation = select(&FixtureRowSet, &rows, &selection, 1, test_cursor_key()).unwrap();
+        assert_eq!(evaluation.edges.len(), 1);
+        assert_eq!(
+            evaluation.edges[0].to.schema_id(),
+            expected_first_schema,
+            "must resolve to whichever in-target row the caller listed first, not a fixed schema"
+        );
+        assert_eq!(evaluation.edges[0].to.record_key(), "dup-key-both-in");
     }
 }
 
@@ -1579,6 +1681,19 @@ fn write_selection_vectors_for_the_reference() {
             Selection {
                 keys: Some(vec!["narrow-citer-accepted".into()]),
                 cites: Some(Citation { target: rr(leaf_a(), "dup-key"), role: Some("narrow_ref".into()) }),
+                ..Selection::default()
+            },
+        ),
+        // R-AO: "dup-key" has two in-target candidates for citer's Design role (unlike
+        // citer_narrow's narrow_ref above, which only ever had one). citer-both-in-target is the
+        // first row in the fixture file (and so in both runtimes' row order) to name it through
+        // Design - resolution must deterministically pick the first in-target candidate in that
+        // order, the leaf_a row (ordinal 11), never the leaf_b row (ordinal 12) that shares the key.
+        (
+            "shared_key_design_resolves_the_first_in_target_candidate_in_row_order",
+            Selection {
+                keys: Some(vec!["citer-both-in-target".into()]),
+                cites: Some(Citation { target: rr(leaf_a(), "dup-key"), role: Some("Design".into()) }),
                 ..Selection::default()
             },
         ),
