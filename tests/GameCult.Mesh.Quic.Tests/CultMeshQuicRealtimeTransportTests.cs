@@ -193,7 +193,14 @@ public sealed class CultMeshQuicRealtimeTransportTests
             frame.BodyId.Should().NotBeNullOrWhiteSpace();
             frame.Payload.Should().NotBeEmpty();
 
+            // Which frame this actually is is not pinned to the provider's
+            // first broadcast: latest-only coalesces on both the provider's
+            // outbox and this connector's own receive-side inbox, so a
+            // single ReceiveAsync() can land on whichever sequence was
+            // latest by the time it was called. The harness matches by
+            // sequence rather than assuming the first frame sent.
             var hex = Convert.ToHexString(CultMeshRealtimeWireProtocol.EncodeFrame(frame));
+            TestContext.Out.WriteLine($"CULTMESH_GOLDEN_SEQUENCE={frame.Sequence}");
             TestContext.Out.WriteLine($"CULTMESH_GOLDEN_HEX={hex}");
         }
         finally

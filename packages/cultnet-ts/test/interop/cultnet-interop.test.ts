@@ -548,13 +548,18 @@ test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with
   assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
   assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
 
-  const goldenMatch = /CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
-  assert.ok(goldenMatch, `expected the C# test to print its golden hex line.\n${stdout}`);
-  const csharpHex = goldenMatch![1].toLowerCase();
+  const goldenHexMatch = /CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
+  const goldenSequenceMatch = /CULTMESH_GOLDEN_SEQUENCE=(\d+)/.exec(stdout);
+  assert.ok(goldenHexMatch, `expected the C# test to print its golden hex line.\n${stdout}`);
+  assert.ok(goldenSequenceMatch, `expected the C# test to print which sequence it received.\n${stdout}`);
+  const csharpHex = goldenHexMatch![1].toLowerCase();
+  const csharpSequence = Number(goldenSequenceMatch![1]);
 
-  // The typescript peer logs the hex of its own encoding of frame 1 (the
-  // first, and here the only, frame the managed connector's single
-  // ReceiveAsync call can have gotten) to stderr as it sends it.
+  // Which frame the managed connector's single ReceiveAsync() call actually
+  // got is not pinned to frame 1: latest-only coalesces on both the
+  // provider's outbox and the connector's own receive-side inbox, so a slow
+  // start can land on a later sequence. Match the typescript peer's logged
+  // encoding of that same sequence rather than assuming the first one sent.
   const tsSentLine = server.stderr
     .join("")
     .split("\n")
@@ -567,8 +572,8 @@ test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with
         return undefined;
       }
     })
-    .find((entry) => entry?.event === "quic-realtime-serve" && entry.sent === 1);
-  assert.ok(tsSentLine?.hex, "expected the typescript peer to log frame 1's hex encoding");
+    .find((entry) => entry?.event === "quic-realtime-serve" && entry.sent === csharpSequence);
+  assert.ok(tsSentLine?.hex, `expected the typescript peer to log frame ${csharpSequence}'s hex encoding`);
 
   assert.equal(csharpHex, tsSentLine!.hex, "TypeScript and C# must encode the same frame identically");
 });
