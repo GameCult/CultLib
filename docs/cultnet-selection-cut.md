@@ -3189,13 +3189,19 @@ still owes its Yggdrasil run**, and Soul's pass will provide it.
   now unwraps. The first run failed on the wrapper text, which is precisely
   the bug that half of R-AM exists to fix.
 - **R-AN.** Two isolating Rust tests added; the previous one tied `From` and
-  `To` across both edges, so dropping `role` survived. **`To.SchemaId` and
-  `To.Key` were re-checked and the earlier "equivalent" claim holds**, with a
-  structural proof rather than a shrug: within a page-position bucket, `cites`
-  ties every edge's `To` to the query's one declared target and `cited` ties
-  it to the anchor row's own identity, so no construction gives two edges with
-  tied `From` and `Role` and differing `To`. **No artificial test was forced
-  onto dead comparator branches**, which is the right answer.
+  `To` across both edges, so dropping `role` survived.
+  **The `To.SchemaId`/`To.Key` equivalence argument recorded here was FALSE,
+  and is deleted rather than amended.** It claimed that within a page-position
+  bucket no construction gives two edges with tied `From` and `Role` and
+  differing `To`. Soul built the counterexample and ran it in both runtimes:
+  **a selection carrying both hops mixes their edges into one bucket**, so a
+  row that self-references through the same role it uses to cite a peer yields
+  a `cites` edge (`to` = the queried peer) and a `cited` edge (`to` = itself),
+  tied on `From` and `Role`, differing on `To`. A self-referencing role is a
+  parent or peer link — ordinary, not exotic. **This is the second
+  justification-from-an-unchecked-property in three batches**, and R-AL's
+  standing rule applies to it.
+
 - **R-AO.** Shared-key order pinned in both runtimes, both row orders, plus a
   vector case regenerated into both written files.
 - **R-AP, half built and half stopped, correctly.** The encoding is decided
@@ -3234,3 +3240,163 @@ No vector yet exercises the real message output byte for byte.
   whole-message byte parity is required before this cut merges, R-AR becomes a
   blocker and Cut 1 stays open; if it can be its own cut, Cut 1 can close on
   the claim above once Soul clears it.
+
+## Soul, the merge gate, third pass, 2026-09-23
+
+Opus. **Every run went to Yggdrasil**, supplying the run batch 6 owed.
+Reproduced: C# Networking 279 / 2 skipped, Mesh 255, Rust 259 across 12
+binaries. **Caching is 190 passed / 3 failed** — the three assert a write is
+*refused*, which root in a container cannot produce. **Unproven, not
+passing**, and Soul declined to call them environmental on its own authority.
+
+**Verdict: Cut 1 may not merge.**
+
+### SM-7, CONFIRMED, high. R-AN did not land, and its justification is false.
+
+Three named survivors are still alive:
+
+| mutation | Rust | C# |
+|---|---|---|
+| drop both `to.schemaId` and `to.recordKey` from the edge comparator | **survives** | **survives** |
+| drop `recordKey` from the **row** comparator | **survives** | killed |
+
+The row survivor is the fourth line of SM-4's own table from the previous
+gate, and **batch 6 added no Rust row-order test at all**.
+
+**Soul built the counterexample and ran it in both runtimes.** The false
+argument reasoned about each hop separately; a selection carrying **both**
+hops mixes their edges into one `Vec`. A row that self-references through the
+same role it uses to cite a peer produces a `cites` edge (`to` = the queried
+peer) and a `cited` edge (`to` = itself) in the **same page-position bucket**,
+tied on `From` and `Role`, differing on `To`. Rust's fixture `peer` role and a
+C# `[CultReference(typeof(Self), many: true)]` both express it. Reversing the
+`to.recordKey` comparison is killed **only** by Soul's probe, so the branch is
+live and decides real output. **A self-referencing role is a parent or peer
+link — ordinary.**
+
+Both runtimes agree today only because the comparator text is duplicated —
+the "coincidence of source, not a rule" that SM-4 raised and R-AN was written
+to close.
+
+### SM-8, CONFIRMED, medium. The cut's parity claim has no home.
+
+Section 9 says the claim is written into `docs/runtime-parity-scope.md`, "not
+here alone". **That file contains zero mentions of typed selection**, and
+never did — not even the earlier overstated wording. R-AS said the target
+document "is reconciled to it". It is not.
+
+### SM-9, CONFIRMED, low. The map's byte counts are wrong; the constants are right.
+
+Serialized on Yggdrasil against MessagePack C# 3.1.7: `CultNetRawDocumentHeader`
+is **228 bytes**, `CultNetEdge` is **246 bytes**. The committed hex in
+`selection_wire_parity.rs` matches **exactly**. The landing note recorded 86
+and 99. **The thing Self asked Soul to distrust was sound; the prose beside it
+was not.**
+
+### Promises that held
+
+**R-AL is complete, including inheritance.** Seven shapes built through
+`Reflection.Emit` and pushed at the real registry, all refused: data name
+against reference alias, reference name against reference alias, alias against
+alias, data *alias* against reference *name*, implicit many-reference through
+`List<CultRecordRef<T>>`, and **across inheritance**, where the message names
+both declaring types. The one shape that still registers is two *data* members
+colliding with no reference present — **not a hole**, because the index
+namespace is looked up by exact `IndexAlias` and never by the name fallback;
+only the reference namespace uses `IndexAlias ?? MemberName`.
+`PersistedMember.IsReferenceCandidate` is a character-exact mirror of
+`FromMember`'s `isReference`, so D10b cannot disagree with the descriptor it
+guards. Narrowing D10b dies; weakening the restored guard dies.
+
+**R-AM reaches the wire, not just the log.** Real loopback UDP through
+LiteNetLib with the production transport: the null-`Selection` fault arrives at
+the client and decodes as `CultNetErrorMessage` with the real message.
+Mutating the handler to log but answer nothing dies.
+
+**R-AO's vector genuinely discriminates.** Under last-wins the resolved schema
+stops matching the citation's declared target and the page empties, so the
+vector has real power rather than merely existing.
+
+**R-AP's bytes are right, and more of them than claimed.**
+`SelectionDocumentRecord` is byte-identical at 269 bytes, and — the one that
+matters — **the whole `cultnet.snapshot_response_raw.v1` envelope is
+byte-identical at 376 bytes**, Rust's encoder against C#'s message. Nothing
+broke on decode.
+
+### Observations, not defects
+
+`SelectionPage` has **no C# counterpart to be byte-identical to**; byte parity
+is undefined for it. The new generic catch sends raw .NET exception text to an
+unauthenticated peer — **exactly what R-AM ordered, and what the siblings do**,
+so consistent rather than wrong, but worth its own ruling one day. D10b is
+stricter than the restored guard needs: a data member aliased `Owner` beside a
+reference member named `Owner` used to register and worked, and is now
+refused — defensible, but a breaking registration change with no note.
+
+### Soul on the wording, and Self's correction
+
+Soul agrees **R-AR is its own cut**. It does not agree with how I described
+the residual gap, and it is right on both counts:
+
+- **"Nested wire-type byte parity" overstates it.** The branch proves two
+  types, each at exactly one value with **every optional absent**. Nothing in
+  the batch touches a header with `tags` populated or an edge with a
+  `payload` — precisely where `string[]` versus `Vec<String>` and `byte[]`
+  versus `serde_bytes` could diverge. The correct words are **"byte parity for
+  `RawDocumentHeader` and `Edge` at an all-optionals-absent value"**.
+- **"Blocked on unbuilt page-assembly ownership" is the wrong word, and the
+  expensive one.** It ran two independent things together: the two *encoders*
+  producing identical bytes for the same page value, and the two *evaluators*
+  producing the same page value from the same rows. The second is what the
+  vectors already compare. **The first needs no ownership move at all — Soul
+  wrote it this afternoon and it passes at 376 bytes.** What R-AR buys is a
+  single test driving rows to bytes in one call rather than two halves meeting
+  on paper. **Calling it blocked made the cheapest available evidence look
+  expensive, which is how it slipped six passes while sitting there for the
+  taking.**
+
+### The rig
+
+`C:\Users\Meta\eureka-soul-probes\cultnet-selection-cut1-fix6\`, beside batch
+5's: three C# probe classes, a Rust wire probe, the counterexample patch,
+three mutation drivers, seven precomputed C# mutants, and a README carrying
+the full mutation table and the two `ygg-verify.sh` rakes (now in the
+script's own header, Eureka `db1c84d`).
+
+### What Soul could not run
+
+No Stryker; the C# survivor list stays untriaged. No cargo-mutants sweep —
+thirteen hand-built non-revert mutations instead, all at `-j1`.
+`contracts.rs` and `schema_discovery.rs` unmeasured, with batch 5's partial
+`validate_*` signal still hanging. The `--since`/`GitInfoProvider` crash still
+not root-caused. **Soul proved the `to` comparator branch is reachable; it did
+not prove the two runtimes would disagree on it, only that nothing stops
+them.**
+
+## Self's rulings for fix batch 7, 2026-09-23
+
+- **R-AT (SM-7). Every component of both orderings dies under its own
+  mutation, in both runtimes** — including `to.schemaId` and `to.recordKey`,
+  which now have **a known construction to test against**, and Rust's row
+  comparator `record_key`, which SM-4 named a pass ago and batch 6 never
+  touched. Take Soul's counterexample from the rig rather than rebuilding it.
+- **R-AU. The false equivalence argument is deleted from the map**, done
+  above, not amended. Standing rule reaffirmed: **an argument that a branch is
+  unreachable is a claim to falsify, not a reason to skip a test.**
+- **R-AV (SM-8). `docs/runtime-parity-scope.md` carries the typed-selection
+  row**, in the corrected words. A claim whose named home does not mention it
+  is not recorded.
+- **R-AW (SM-9). Correct the byte counts to 228 and 246.**
+- **R-AX. Land the whole-message parity vector.** Soul already has it green at
+  376 bytes. **This is not blocked and never was** — my wording made it look
+  so. Land it as a vector on both sides, and add a header with `tags` and an
+  edge with a `payload`, since those are the shapes where the collection and
+  byte-array mappings could diverge and the all-absent value proves nothing
+  about them.
+- **R-AY. Cut 1's claim, in these words**: byte parity for the
+  `snapshot_response_raw.v1` envelope and its nested record types, verified at
+  populated and absent optional values, plus semantic parity over the named
+  field subset. **R-AR remains its own cut** and buys a single rows-to-bytes
+  path, not the claim itself.
+- **D10b's strictness gets a note** in the registration error and the map: a
+  shape that used to register and work is now refused.
