@@ -1,0 +1,9 @@
+msquic.version=2.5.9
+msquic.windows.source=https://www.nuget.org/api/v2/package/Microsoft.Native.Quic.MsQuic.OpenSSL/2.5.9 sha256=FEE9A664C0052DEEE66D40CED2E19BFE20BC423DE5AE5234CFC0CEBC22CA3F5E
+msquic.linux.source=https://packages.microsoft.com/debian/13/prod/pool/main/libm/libmsquic/libmsquic_2.5.9_amd64.deb sha256=1baa61ade0b7b4a99f6dcb6b00d9aedb12b5566d00918a325be7425e878e51ba
+bridge.commit=e5bf1c9243acb6b76de72c7864e3b79214177199
+build.workflow_run=https://github.com/GameCult/CultLib/actions/runs/35912386052
+build.release=none (TEMPORARY push-to-quic-cut6 trigger, no tag; see quic-native.yml history for the tagged release path)
+build.win32-x64.host=windows-2025-vs2026, cl.exe (MSVC) 19.51.36256.0
+build.linux-x64.host=ubuntu-24.04, container debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1, g++ (Debian 14.2.0-19) 14.2.0
+date=2026-09-23T19:54:08Z
