@@ -482,6 +482,14 @@ pub mod canonical_number {
             assert_eq!(super::render_f32(-2.0_f32).unwrap(), "-2");
         }
 
+        // R-AI: render_f64's sign extraction has the identical shape (`(bits >> 63) & 1 == 1`) and
+        // the identical gap - -1.0_f64 and -2.0_f64's bit 0 is 0, same coincidence as f32's.
+        #[test]
+        fn render_f64_negative_values_carry_the_sign() {
+            assert_eq!(super::render_f64(-1.0_f64).unwrap(), "-1");
+            assert_eq!(super::render_f64(-2.0_f64).unwrap(), "-2");
+        }
+
         // R-AI/R-D: `is_canonical` is the Q-J door's grammar
         // (`^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, minus the literal "-0") and was, until this test,
         // never called directly by any test in this crate - only reachable through
