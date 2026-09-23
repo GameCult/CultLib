@@ -942,22 +942,53 @@ because nothing better existed. That gap is why the missing DLL copy went
 unnoticed for so long: there was no documented Windows path to run, and so
 nobody ran one.
 
-**Still outstanding for Cut 3:**
+### Cut 3 closed, 2026-09-23
 
-- **Nothing on the release configuration.** Both platforms have now run it
-  without the harness; F1 is closed. This line previously said Windows was
-  owed and was left stale for a few hours after the Windows leg landed above,
-  which is the exact failure the same map records elsewhere.
-- **Whether earlier Windows numbers were measured against the pinned MsQuic**
-  (see the Windows leg above). Until that is settled, they are unconfirmed.
-- **F5's stress under load cannot be run on Windows at all.** It wants five
-  rounds with sixteen CPU burners, and those burners are what froze the
-  operator's workstation on 2026-09-22. `closerace` is Windows-sensitive (it
-  went red under load there in four of five rounds), so the check matters most
-  on the platform where it is now forbidden. **This is an operator fork, not
-  something to route around:** either Windows stress finds a host that is not
-  Starfire, or the check is accepted as unproven on Windows and recorded that
-  way.
+StreamPixels is the priority now, and this is the first cut on its path.
+The operator named it the week's goal: *"We needed to get to the StreamPixels
+cut this week. We need that TO EAT."*
+
+- **Windows release configuration** (Sonnet, `quic-cut3-winrel`, no repo
+  change). This is a plain release build, asserts off, of the four required
+  scenarios, 20 rounds each: all pass, worst overshoot 16 ms against 400 ms.
+  The `msquic.dll` beside the binary is 4,181,856 bytes, SHA-256 `C17C6581…`,
+  which matches `build-quic-native.ps1`'s pin for the OpenSSL 2.5.9 runtime,
+  so the silent wrong-DLL load did not happen again. **F1 is closed on both
+  platforms.** Documentation gap: the README has no Windows test-build
+  CMake line; Hands mirrored the Linux one.
+- **F5, operator fork ruled:** *"Feel free to set Starfire on fire, I'll step
+  away. If I know it's coming, it's not so bad."* Load on Starfire is allowed
+  when the operator is told first and nothing else runs alongside it.
+  - **Linux** (Yggdrasil, 16 burners on a 4-CPU cap, asserts on, `cc71f17`):
+    `closerace` 5 rounds of `20x256`, all pass. Earlier text in this map
+    records `20×512`; these rounds ran the binary's default size.
+  - **Windows, first run** (Starfire, 16 burners on 8 logical CPUs, asserts
+    on): **5 of 5 fail**, every one with *"256 of 256 pollers returned before
+    the close began, so they were never in the race"*. **This was not a
+    bridge defect. The fixture contradicted itself.** Under the debug seam,
+    the settle waited up to 30 s for every poller to be counted inside, while
+    each poller's wait timed out after `kPollTimeoutMs` = 5 s. Under
+    starvation, the early pollers left before the late ones were counted. The
+    bridge neither crashed nor asserted.
+  - **Fixture fix** `44ab376` (Sonnet): the settle budget is named, and
+    `kPollTimeoutMs` is derived as that budget plus 5 s in both
+    configurations. A deadline that expires now reports *"fixture could not
+    settle"* instead of blaming the pollers. The new message was reached only
+    by forcing the branch; under load on either platform, the counted
+    deadline never expired naturally. `HoldCloseOnce`, `LateCallOnce` and
+    `HoldTimeoutOnce` share the settle idiom but not the defect, because their
+    pollers are held at a barrier and cannot time out during it.
+  - **Windows rerun at `44ab376`:** `closerace 20x256: ok` in all 5 rounds
+    under 16 burners. A direct run confirmed exit code 0, because the runner
+    script lost the exit codes (`Start-Process -NoNewWindow` with redirected
+    output). The Linux rerun at the same commit: all ten scenarios pass, and
+    `closerace` passes 5 of 5 under 16 burners. **F5 is closed on both
+    platforms.**
+- **Recorded, not blocking:** whether Windows numbers from before today were
+  measured against the pinned MsQuic stays unconfirmed. Today's were.
+
+Cut 3's work lives on `hands/cultmath-erf` plus `quic-cut3-winrel`, and
+neither is merged to `main`. Cut 4 branches from `cc71f17`.
 
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
