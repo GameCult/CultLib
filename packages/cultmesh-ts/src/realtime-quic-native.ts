@@ -217,22 +217,26 @@ function loadBindings(): NativeBindings {
   const { promisify } = require("node:util") as typeof import("node:util");
   const nextEventAsync = promisify(nextEvent.async) as NativeBindings["nextEventAsync"];
 
+  // Every `_Out_` parameter still occupies a call-site slot in this koffi
+  // version (an arity check rejects a shorter call); its value is written
+  // back through the named field on the returned object regardless of what
+  // was passed here, so `null` is a safe placeholder at each such slot.
   bindingsCache = {
-    runtimeOpen: (appName) => runtimeOpen(appName),
+    runtimeOpen: (appName) => runtimeOpen(appName, null),
     runtimeClose: (runtime) => runtimeClose(runtime),
     listenerOpen: (runtime, host, port, pkcs12, pkcs12Length, password) =>
-      listenerOpen(runtime, host, port, pkcs12, pkcs12Length, password),
+      listenerOpen(runtime, host, port, pkcs12, pkcs12Length, password, null, null),
     listenerClose: (runtime, listenerId) => listenerClose(runtime, listenerId),
-    connectionOpen: (runtime, host, port) => connectionOpen(runtime, host, port),
+    connectionOpen: (runtime, host, port) => connectionOpen(runtime, host, port, null),
     connectionCertificateComplete: (runtime, connectionId, accept) =>
       connectionCertificateComplete(runtime, connectionId, accept),
     connectionShutdown: (runtime, connectionId, code) => connectionShutdown(runtime, connectionId, code),
-    streamOpen: (runtime, connectionId, kind) => streamOpen(runtime, connectionId, kind),
+    streamOpen: (runtime, connectionId, kind) => streamOpen(runtime, connectionId, kind, null),
     streamSendFrame: (runtime, streamId, encodedFrame, length, fin) =>
       streamSendFrame(runtime, streamId, encodedFrame, length, fin),
     streamShutdown: (runtime, streamId, code) => streamShutdown(runtime, streamId, code),
     nextEventAsync: (runtime, timeoutMs, payload, payloadCapacity) =>
-      nextEventAsync(runtime, timeoutMs, payload, payloadCapacity) as Promise<KoffiOutResult<NativeEventStruct>>,
+      nextEventAsync(runtime, timeoutMs, null, payload, payloadCapacity, null) as Promise<KoffiOutResult<NativeEventStruct>>,
     lastError: (runtime, destination, capacity) => lastError(runtime, destination, capacity),
     lastStatus: (runtime) => lastStatus(runtime),
   };

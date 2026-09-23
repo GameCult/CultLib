@@ -137,7 +137,9 @@ test("a full loopback connection delivers one raw frame end to end", async (t) =
 });
 
 test("negative grep: no koffi callbacks, .async only on nextEvent", () => {
-  const source = readFileSync(join(__dirname, "..", "src", "realtime-quic-native.ts"), "utf8");
+  // __dirname at runtime is dist-test/test; the source lives two levels up,
+  // in src/, since only .js output is mirrored under dist-test.
+  const source = readFileSync(join(__dirname, "..", "..", "src", "realtime-quic-native.ts"), "utf8");
   const asyncUses = [...source.matchAll(/\.async\(/g)];
   assert.ok(asyncUses.length > 0, "expected at least one .async( use for nextEvent");
   for (const match of asyncUses) {

@@ -245,13 +245,16 @@ function base64UrlToBase64(value: string): string {
   return base64;
 }
 
+let odinRootSequence = 0;
+
 function generateOdinRoot(): { privateKey: KeyObject; publicKey: CultMeshP256PublicKey } {
   const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const jwk = publicKey.export({ format: "jwk" }) as { x: string; y: string };
+  odinRootSequence += 1;
   return {
     privateKey,
     publicKey: {
-      keyId: "odin-root-1",
+      keyId: `odin-root-${odinRootSequence}`,
       x: base64UrlToBase64(jwk.x),
       y: base64UrlToBase64(jwk.y),
     },
