@@ -142,14 +142,6 @@ interface PendingSend {
   reject(error: Error): void;
 }
 
-interface PendingReceive {
-  resolve(frame: CultMeshRealtimeFrame): void;
-  reject(error: Error): void;
-}
-
-/** A direct frame, or a `latestPending` key to resolve at delivery time. */
-type ReadyToken = { readonly frame: CultMeshRealtimeFrame } | { readonly latestKey: string };
-
 interface LatestGeneration {
   producerEpoch: bigint;
   sequence: bigint;
@@ -161,49 +153,94 @@ function compareGeneration(a: LatestGeneration, b: LatestGeneration): number {
   return a.sequence < b.sequence ? -1 : 1;
 }
 
-/**
- * Coalescing bookkeeping for a `latest-only` key space: at most one pending
- * value per key, first-ready-first-out by key. Mirrors the C# reference's
- * `CultMeshRealtimeInbox` (`:572-618`), split from queue integration so both
- * directions can drive it their own way: the inbound path below pushes into
- * it from native events and a waiter pulls a specific key back out at
- * delivery time; the provider's per-peer outbox (Cut 5) pushes from
- * `broadcast()` and a pump loop drains ready keys in order. Shared here
- * instead of reimplemented twice.
- */
-class CultMeshRealtimeLatestOnlyCoalescer<T> {
-  private readonly pending = new Map<string, T>();
-  private readonly readyKeys: string[] = [];
+/** A direct entry, or a coalesced `key` to resolve against `pending` at delivery time. */
+type InboxToken<T> = { readonly value: T } | { readonly key: string };
 
-  /**
-   * Sets `key`'s pending value, overwriting whatever was pending for it.
-   * Returns `true` the first time `key` becomes ready (the caller should
-   * enqueue/wake), `false` when an existing pending value was silently
-   * replaced.
-   */
-  publish(key: string, value: T): boolean {
+/**
+ * Mirrors the C# reference's `CultMeshRealtimeInbox`
+ * (`CultMeshQuicRealtimeTransport.cs:598-644`): publishing under `key`
+ * coalesces to at most one pending entry per key, keeping that key's
+ * first-arrival queue position while a later publish overwrites its value;
+ * publishing with no `key` always queues, unbounded. `receive` drains
+ * whatever is queued before a `complete(error)` rejects further calls.
+ * Shared by the transport's inbound queue, the provider's fan-in, and (via
+ * a pump reading it instead of `receive` callers) each peer's outbox.
+ */
+class CultMeshRealtimeInbox<T> {
+  private readonly pending = new Map<string, T>();
+  private readonly ready: InboxToken<T>[] = [];
+  private readonly waiters: { resolve(value: T): void; reject(error: Error): void }[] = [];
+  private completed = false;
+  private terminalError: Error | undefined;
+
+  /** Entries queued but not yet delivered: one per ready key, or one per unkeyed entry. Test-visible. */
+  get size(): number {
+    return this.ready.length;
+  }
+
+  /** Publishes `value`, coalescing on `key` when given. Returns `false` once `complete()` has run. */
+  publish(value: T, key?: string): boolean {
+    if (this.completed) return false;
+    if (key === undefined) {
+      this.deliver({ value });
+      return true;
+    }
     const alreadyPending = this.pending.has(key);
     this.pending.set(key, value);
-    if (alreadyPending) return false;
-    this.readyKeys.push(key);
+    if (!alreadyPending) this.deliver({ key });
     return true;
   }
 
-  /** Removes and returns `key`'s pending value. Present exactly when `key` is the token most recently made ready. */
-  take(key: string): T {
-    const value = this.pending.get(key)!;
-    this.pending.delete(key);
+  /** Resolves the oldest ready entry, or waits for one; rejects once `complete(error)` has drained the backlog. */
+  async receive(signal?: AbortSignal): Promise<T> {
+    if (this.ready.length > 0) return this.take(this.ready.shift()!);
+    if (this.completed) throw this.terminalError ?? new Error("CultMesh realtime inbox is completed.");
+    if (signal?.aborted) throw new Error("CultMesh realtime inbox receive aborted.");
+    return await new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new Error("CultMesh realtime inbox receive aborted."));
+      };
+      const waiter = {
+        resolve: (value: T) => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        reject: (error: Error) => {
+          signal?.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
+
+  /** Completes the inbox: entries already queued still drain via `receive`; every call after that rejects with `error`. */
+  complete(error?: Error): void {
+    if (this.completed) return;
+    this.completed = true;
+    this.terminalError = error;
+    for (const waiter of this.waiters.splice(0, this.waiters.length)) {
+      waiter.reject(error ?? new Error("CultMesh realtime inbox is completed."));
+    }
+  }
+
+  private deliver(token: InboxToken<T>): void {
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.resolve(this.take(token));
+      return;
+    }
+    this.ready.push(token);
+  }
+
+  private take(token: InboxToken<T>): T {
+    if ("value" in token) return token.value;
+    const value = this.pending.get(token.key)!;
+    this.pending.delete(token.key);
     return value;
-  }
-
-  /** Dequeues the oldest ready key, or `undefined` when none is ready. */
-  nextReadyKey(): string | undefined {
-    return this.readyKeys.shift();
-  }
-
-  clear(): void {
-    this.pending.clear();
-    this.readyKeys.length = 0;
   }
 }
 
@@ -372,14 +409,8 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   private readonly streamKinds = new Map<bigint, number>();
   /** Generation staleness filter: the newest `(channel, body)` generation delivered so far. */
   private readonly latestGenerations = new Map<string, LatestGeneration>();
-  /** Inbox coalescing (mirrors `CultMeshRealtimeInbox`): the newest not-yet-delivered
-   * latest-only frame per `(channel, body)`, so a slow reader accumulates at most one
-   * pending frame per key instead of an unbounded backlog. */
-  private readonly latestCoalescer = new CultMeshRealtimeLatestOnlyCoalescer<CultMeshRealtimeFrame>();
-  /** FIFO of ready tokens: a direct frame (reliable-ordered/unreliable), or a
-   * `(channel, body)` key to look up in `latestPending` at delivery time. */
-  private readonly readyTokens: ReadyToken[] = [];
-  private readonly receiveWaiters: PendingReceive[] = [];
+  /** Inbound frame queue: bounded to one pending latest-only frame per key. */
+  private readonly inbox = new CultMeshRealtimeInbox<CultMeshRealtimeFrame>();
   private reliableOutboundStreamId: bigint | undefined;
   private disposed = false;
   private terminalError: Error | undefined;
@@ -483,28 +514,7 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   }
 
   async receiveFrame(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
-    if (this.readyTokens.length > 0) return this.resolveToken(this.readyTokens.shift()!);
-    if (this.disposed) throw this.terminalError ?? new Error("CultMesh QUIC realtime transport is disposed.");
-    if (signal?.aborted) throw new Error("CultMesh QUIC receiveFrame aborted.");
-    return await new Promise<CultMeshRealtimeFrame>((resolve, reject) => {
-      const onAbort = (): void => {
-        const index = this.receiveWaiters.indexOf(waiter);
-        if (index >= 0) this.receiveWaiters.splice(index, 1);
-        reject(new Error("CultMesh QUIC receiveFrame aborted."));
-      };
-      const waiter: PendingReceive = {
-        resolve: (frame) => {
-          signal?.removeEventListener("abort", onAbort);
-          resolve(frame);
-        },
-        reject: (error) => {
-          signal?.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.receiveWaiters.push(waiter);
-    });
+    return this.inbox.receive(signal);
   }
 
   /** Registers a handler invoked once, when this transport becomes unusable. */
@@ -557,8 +567,7 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
     const rejection = error ?? new Error("CultMesh QUIC realtime transport is disposed.");
     for (const [, pending] of this.pendingSends) pending.reject(rejection);
     this.pendingSends.clear();
-    const waiters = this.receiveWaiters.splice(0, this.receiveWaiters.length);
-    for (const waiter of waiters) waiter.reject(rejection);
+    this.inbox.complete(rejection);
     void this.runtime.release();
     const handlers = [...this.disposalHandlers];
     this.disposalHandlers.clear();
@@ -623,11 +632,11 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
 
   /**
    * `PublishReceived`'s per-`(channel, body)` generation filter (`:538-560`),
-   * plus the inbox's own coalescing (`CultMeshRealtimeInbox.Publish`,
-   * `:580-595`): a latest-only frame overwrites the still-pending frame for
-   * its key rather than queuing beside it, so an unread backlog holds at most
-   * one frame per `(channel, body)`. Reliable-ordered frames queue directly,
-   * unbounded, exactly as the C# reference's unbounded channel does.
+   * plus the inbox's own coalescing: a latest-only frame overwrites the
+   * still-pending frame for its key rather than queuing beside it, so an
+   * unread backlog holds at most one frame per `(channel, body)`.
+   * Reliable-ordered frames queue directly, unbounded, exactly as the C#
+   * reference's unbounded channel does.
    */
   private publishReceived(frame: CultMeshRealtimeFrame): void {
     if (frame.delivery === "latest-only") {
@@ -636,27 +645,10 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
       const current = this.latestGenerations.get(key);
       if (current && compareGeneration(candidate, current) <= 0) return;
       this.latestGenerations.set(key, candidate);
-
-      if (this.latestCoalescer.publish(key, frame)) this.enqueueReady({ latestKey: key });
+      this.inbox.publish(frame, key);
       return;
     }
-    this.enqueueReady({ frame });
-  }
-
-  private enqueueReady(token: ReadyToken): void {
-    const waiter = this.receiveWaiters.shift();
-    if (waiter) {
-      waiter.resolve(this.resolveToken(token));
-      return;
-    }
-    this.readyTokens.push(token);
-  }
-
-  private resolveToken(token: ReadyToken): CultMeshRealtimeFrame {
-    if ("frame" in token) return token.frame;
-    // Always present: a key is only ever enqueued alongside setting it, and
-    // taken here on the one dequeue that follows.
-    return this.latestCoalescer.take(token.latestKey);
+    this.inbox.publish(frame);
   }
 }
 
@@ -679,7 +671,7 @@ interface OutboxEntry {
 }
 
 class CultMeshQuicRealtimeProviderOutbox {
-  private readonly coalescer = new CultMeshRealtimeLatestOnlyCoalescer<OutboxEntry>();
+  private readonly inbox = new CultMeshRealtimeInbox<OutboxEntry>();
   private readonly transport: CultMeshQuicRealtimeTransport;
   private readonly onSendFailure: (error: Error) => void;
   private pumping = false;
@@ -699,23 +691,27 @@ class CultMeshQuicRealtimeProviderOutbox {
   publish(frame: CultMeshRealtimeFrame, encoded: Uint8Array): void {
     if (this.disposed) return;
     const key = frame.channelId + "\u001f" + frame.bodyId;
-    const becameReady = this.coalescer.publish(key, { frame, encoded });
-    if (becameReady && !this.pumping) void this.pump();
+    this.inbox.publish({ frame, encoded }, key);
+    if (!this.pumping) void this.pump();
   }
 
   dispose(): void {
     this.disposed = true;
-    this.coalescer.clear();
+    this.inbox.complete();
   }
 
+  /** One in flight per peer: the next ready key is taken only after `send_complete`, mirroring `SendPublishedFramesAsync`. */
   private async pump(): Promise<void> {
     this.pumping = true;
     try {
       for (;;) {
         if (this.disposed) return;
-        const key = this.coalescer.nextReadyKey();
-        if (key === undefined) return;
-        const entry = this.coalescer.take(key);
+        let entry: OutboxEntry;
+        try {
+          entry = await this.inbox.receive();
+        } catch {
+          return;
+        }
         try {
           await this.transport.sendEncodedFrame("latest-only", entry.encoded);
         } catch (error) {
@@ -807,8 +803,8 @@ export class CultMeshQuicRealtimeProvider {
    * encoded, seeded into every peer attached after that broadcast. Reliable-ordered frames
    * are events, not state, and are never retained. */
   private readonly retained = new Map<string, { frame: CultMeshRealtimeFrame; encoded: Uint8Array; generation: LatestGeneration }>();
-  private readonly readyFrames: CultMeshRealtimeFrame[] = [];
-  private readonly receiveWaiters: PendingReceive[] = [];
+  /** Client-to-provider fan-in, bounded the same way as the transport's inbound queue. */
+  private readonly received = new CultMeshRealtimeInbox<CultMeshRealtimeFrame>();
   /**
    * Every transport `acceptConnection` has created for a still-live native
    * connection, whether or not its handshake has reached CONNECTED and
@@ -837,6 +833,11 @@ export class CultMeshQuicRealtimeProvider {
   /** Number of currently accepted peer connections. */
   get connectionCount(): number {
     return this.peers.size;
+  }
+
+  /** Frames fanned in from peers but not yet drained by `receive()`. Test-visible: proves the fan-in queue is bounded. */
+  get receiveQueueSize(): number {
+    return this.received.size;
   }
 
   static async listen(options: CultMeshQuicRealtimeProviderOptions): Promise<CultMeshQuicRealtimeProvider> {
@@ -909,28 +910,7 @@ export class CultMeshQuicRealtimeProvider {
 
   /** The next client-originated frame, fanned in from every accepted peer. */
   async receive(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
-    if (this.readyFrames.length > 0) return this.readyFrames.shift()!;
-    if (this.disposed) throw new Error("CultMesh QUIC realtime provider is disposed.");
-    if (signal?.aborted) throw new Error("CultMesh QUIC realtime provider receive aborted.");
-    return await new Promise<CultMeshRealtimeFrame>((resolve, reject) => {
-      const onAbort = (): void => {
-        const index = this.receiveWaiters.indexOf(waiter);
-        if (index >= 0) this.receiveWaiters.splice(index, 1);
-        reject(new Error("CultMesh QUIC realtime provider receive aborted."));
-      };
-      const waiter: PendingReceive = {
-        resolve: (frame) => {
-          signal?.removeEventListener("abort", onAbort);
-          resolve(frame);
-        },
-        reject: (error) => {
-          signal?.removeEventListener("abort", onAbort);
-          reject(error);
-        },
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.receiveWaiters.push(waiter);
-    });
+    return this.received.receive(signal);
   }
 
   dispose(): void {
@@ -946,20 +926,11 @@ export class CultMeshQuicRealtimeProvider {
     // it — whether or not its handshake ever reached CONNECTED and joined
     // `peers`. A still-handshaking connection has no other owner to sweep it.
     for (const transport of [...this.accepted]) transport.dispose();
-    const rejection = new Error("CultMesh QUIC realtime provider is disposed.");
-    for (const waiter of this.receiveWaiters.splice(0, this.receiveWaiters.length)) waiter.reject(rejection);
+    this.received.complete(new Error("CultMesh QUIC realtime provider is disposed."));
     void this.runtime.release();
   }
 
-  private enqueueReceived(frame: CultMeshRealtimeFrame): void {
-    const waiter = this.receiveWaiters.shift();
-    if (waiter) {
-      waiter.resolve(frame);
-      return;
-    }
-    this.readyFrames.push(frame);
-  }
-
+  /** Coalesces client-sent `latest-only` frames by `(channel, body)`, so a publish-only `receive()` caller (StreamPixels) backs up to at most one pending frame per key. */
   private async pumpReceivedFrom(transport: CultMeshQuicRealtimeTransport): Promise<void> {
     for (;;) {
       let frame: CultMeshRealtimeFrame;
@@ -968,7 +939,11 @@ export class CultMeshQuicRealtimeProvider {
       } catch {
         return; // The transport is disposed/faulted; nothing more to read.
       }
-      this.enqueueReceived(frame);
+      if (frame.delivery === "latest-only") {
+        this.received.publish(frame, frame.channelId + "\u001f" + frame.bodyId);
+      } else {
+        this.received.publish(frame);
+      }
     }
   }
 
