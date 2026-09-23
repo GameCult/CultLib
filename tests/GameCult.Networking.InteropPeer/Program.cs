@@ -5,11 +5,15 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
+using GameCult.Mesh;
+using GameCult.Mesh.Quic;
 using GameCult.Networking;
 using MessagePack;
 
@@ -21,7 +25,7 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once | rudp-serve-message-once | rudp-dial-message-once");
+            throw new InvalidOperationException("Expected mode: serve | probe | dial | rudp-serve-once | rudp-dial-once | rudp-serve-message-once | rudp-dial-message-once | quic-realtime-serve");
         }
 
         var mode = args[0];
@@ -48,6 +52,9 @@ static async Task<int> ProgramMainAsync(string[] args)
                 return 0;
             case "rudp-dial-message-once":
                 RudpDialMessageOnce(options);
+                return 0;
+            case "quic-realtime-serve":
+                await QuicRealtimeServeAsync(ParseQuicRealtimeServeConfig(options));
                 return 0;
             default:
                 throw new InvalidOperationException($"Unknown mode {mode}");
@@ -1212,6 +1219,89 @@ static async Task WaitForeverAsync(CancellationToken cancellationToken)
     {
     }
 }
+
+static async Task QuicRealtimeServeAsync(QuicRealtimeServeConfig config)
+{
+    using var certificate = CreateQuicInteropCertificate();
+    await using var server = await CultMeshQuicRealtimeServer.ListenAsync(new CultMeshQuicRealtimeServerOptions
+    {
+        ListenEndPoint = new IPEndPoint(IPAddress.Loopback, config.Port),
+        ServerCertificate = certificate
+    });
+    var pin = Convert.ToHexString(SHA256.HashData(certificate.RawData));
+    var endpoint = $"cultmesh-state+quic://127.0.0.1:{server.LocalEndPoint.Port}?cert-sha256={pin}";
+    WriteJsonLine(new { status = "ready", endpoint });
+
+    var delivery = config.Delivery switch
+    {
+        "reliable-ordered" => CultMeshRealtimeDelivery.ReliableOrdered,
+        "latest-only" => CultMeshRealtimeDelivery.LatestOnly,
+        _ => throw new InvalidOperationException($"Unsupported --delivery '{config.Delivery}'.")
+    };
+
+    var stdinClosed = WatchStdinCloseAsync();
+    for (var sequence = 1; sequence <= config.Frames && !stdinClosed.IsCompleted; sequence++)
+    {
+        var frame = new CultMeshRealtimeFrame
+        {
+            ChannelId = "interop.quic-realtime",
+            SchemaId = "gamecult.interop.quic_realtime_frame.v0",
+            BodyId = "interop:quic-realtime:frame",
+            ProducerEpoch = 1,
+            Sequence = sequence,
+            Delivery = delivery,
+            Payload = Encoding.UTF8.GetBytes($"frame-{sequence}")
+        };
+        await server.BroadcastAsync(frame);
+        WriteLog("quic-realtime-serve", new { sent = sequence });
+        if (config.IntervalMs > 0) await Task.Delay(config.IntervalMs);
+    }
+}
+
+static Task WatchStdinCloseAsync()
+{
+    return Task.Run(async () =>
+    {
+        while (await Console.In.ReadLineAsync() != null)
+        {
+        }
+    });
+}
+
+static QuicRealtimeServeConfig ParseQuicRealtimeServeConfig(Dictionary<string, string> options)
+{
+    return new QuicRealtimeServeConfig(
+        ParseOptionalIntArg(options, "port", 0),
+        ParseOptionalIntArg(options, "frames", 5),
+        options.TryGetValue("delivery", out var delivery) ? delivery : "latest-only",
+        ParseOptionalIntArg(options, "interval-ms", 50));
+}
+
+static X509Certificate2 CreateQuicInteropCertificate()
+{
+    using var key = RSA.Create(2048);
+    var request = new CertificateRequest(
+        "CN=localhost",
+        key,
+        HashAlgorithmName.SHA256,
+        RSASignaturePadding.Pkcs1);
+    request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+    request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+    request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+        new OidCollection { new("1.3.6.1.5.5.7.3.1") },
+        false));
+    var names = new SubjectAlternativeNameBuilder();
+    names.AddDnsName("localhost");
+    names.AddIpAddress(IPAddress.Loopback);
+    request.CertificateExtensions.Add(names.Build());
+    request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+    using var generated = request.CreateSelfSigned(
+        DateTimeOffset.UtcNow.AddMinutes(-1),
+        DateTimeOffset.UtcNow.AddHours(1));
+    return X509CertificateLoader.LoadPkcs12(generated.Export(X509ContentType.Pfx), null);
+}
+
+sealed record QuicRealtimeServeConfig(int Port, int Frames, string Delivery, int IntervalMs);
 
 static Dictionary<string, string> ParseArgs(string[] args)
 {

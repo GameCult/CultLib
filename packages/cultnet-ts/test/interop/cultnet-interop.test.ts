@@ -57,6 +57,8 @@ const csharpDllPath = resolve(
   "net10.0",
   "GameCult.Networking.InteropPeer.dll",
 );
+const cultMeshTsRoot = resolve(cultLibRoot, "packages", "cultmesh-ts");
+const cultMeshQuicPeerScript = resolve(cultMeshTsRoot, "dist-test", "test", "interop", "cultmesh-quic-peer.js");
 const rustBinaryPath = resolve(
   cultnetRsRoot,
   "target",
@@ -72,6 +74,7 @@ const processCleanupTimeoutMs = 5_000;
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
+let cultMeshTsInteropPeerBuild: Promise<void> | undefined;
 
 function resolvePythonCommand(): string {
   const codexPythonCommand = join(homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
@@ -391,6 +394,56 @@ while time.time() < deadline:
 transport.close()
 raise SystemExit("timed out waiting for TypeScript RUDP schema-v0 message")
 `;
+
+test("CultMesh QUIC realtime: C# managed provider and TypeScript consumer", async (t) => {
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-realtime", "build peers");
+  await buildCSharpInteropPeer();
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-realtime", "start csharp QUIC provider");
+  servers.push(await spawnServeProcess("csharp-quic", {
+    command: dotnetCommand,
+    args: [
+      csharpDllPath,
+      "quic-realtime-serve",
+      "--frames", "5",
+      "--delivery", "latest-only",
+      "--interval-ms", "50",
+    ],
+    cwd: cultLibRoot,
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+  assert.match(ready.endpoint, /^cultmesh-state\+quic:\/\/127\.0\.0\.1:\d+\?cert-sha256=[0-9A-Fa-f]{64}$/);
+
+  logInteropPhase("quic-realtime", "typescript dials the csharp QUIC provider");
+  const tsDial = await runJsonCommand("ts-quic-dial", process.execPath, [
+    cultMeshQuicPeerScript,
+    "dial",
+    "--endpoint", ready.endpoint,
+    "--expect", "5",
+  ], cultMeshTsRoot, { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" });
+
+  assert.equal(tsDial.transportId, "msquic-realtime");
+  assert.equal(tsDial.frames.length, 5);
+  for (const [index, frame] of tsDial.frames.entries()) {
+    assert.equal(frame.delivery, "latest-only");
+    assert.equal(frame.bodyId, "interop:quic-realtime:frame");
+    assert.equal(Buffer.from(frame.payloadHex, "hex").toString("utf8"), `frame-${index + 1}`);
+  }
+});
 
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   logInteropPhase("schema-v0", "build peers");
@@ -2432,6 +2485,15 @@ async function buildCSharpInteropPeer(): Promise<void> {
     cwd: cultLibRoot,
   }).then(() => undefined);
   await csharpInteropPeerBuild;
+}
+
+async function buildCultMeshTsQuicPeer(): Promise<void> {
+  cultMeshTsInteropPeerBuild ??= (async () => {
+    const tsc = resolve(cultLibRoot, "node_modules", "typescript", "bin", "tsc");
+    await execFileAsync(process.execPath, [tsc, "-p", "tsconfig.json"], { cwd: cultMeshTsRoot });
+    await execFileAsync(process.execPath, [tsc, "-p", "tsconfig.test.json"], { cwd: cultMeshTsRoot });
+  })();
+  await cultMeshTsInteropPeerBuild;
 }
 
 async function buildKotlinInteropPeer(): Promise<void> {
