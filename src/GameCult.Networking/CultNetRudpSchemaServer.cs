@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
+using GameCult.Logging;
 
 namespace GameCult.Networking
 {
@@ -111,6 +112,17 @@ namespace GameCult.Networking
         private readonly ConcurrentDictionary<Type, Delegate> _handlers = new();
         private readonly ConcurrentDictionary<Delegate, Delegate> _schemaPeerAdapters = new();
         private bool _disposed;
+        private ILogger _logger = new NullLogger();
+
+        /// <summary>
+        /// Gets or sets the logger used by the server. R-AM: the dispatch backstop in DispatchAsync
+        /// logs every untyped fault through this instead of swallowing it silently.
+        /// </summary>
+        public ILogger Logger
+        {
+            get => _logger;
+            set => _logger = value ?? new NullLogger();
+        }
 
         /// <summary>
         /// Creates a schema-v0 RUDP server.
@@ -283,11 +295,13 @@ namespace GameCult.Networking
 
             // R-AG: a handler is expected to catch its own typed refusals (HandleSnapshotRequestV1Async
             // catches the three selection exceptions and answers cursor_invalid/selection_invalid/
-            // reference_outside_target on the wire) - this catch is the backstop for whatever a
+            // reference_outside_target on the wire, R-AM) - this catch is the backstop for whatever a
             // handler does not, so an untyped exception from a malformed/hostile message can never
-            // reach the poll loop and stall the server for every other peer. It answers nothing on the
-            // wire (an exception this generic carries no typed refusal to report) and simply drops the
-            // one malformed dispatch, exactly as an unregistered handler already does just above.
+            // reach the poll loop and stall the server for every other peer. It still answers nothing
+            // on the wire (an exception this generic carries no typed refusal to report) and drops the
+            // one malformed dispatch, exactly as an unregistered handler already does just above -
+            // R-AM: but it always logs. A backstop that swallows silently is a compensator, and an
+            // untested, unlogged one hid the SM-6 ArgumentNullException regression for a whole batch.
             try
             {
                 var result = handler.DynamicInvoke(message, new RudpCultNetSchemaServerPeer(this, delivered.Peer));
@@ -296,8 +310,13 @@ namespace GameCult.Networking
                     await task.ConfigureAwait(false);
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // DynamicInvoke wraps a synchronously-thrown handler fault in TargetInvocationException,
+                // whose own .Message is the generic "Exception has been thrown by the target of an
+                // invocation." - log the real fault, not that wrapper.
+                var reported = ex is System.Reflection.TargetInvocationException { InnerException: { } inner } ? inner : ex;
+                Logger.LogError($"CultNet RUDP schema dispatch failed for {message.GetType().Name}: {reported.Message}");
                 return false;
             }
             return true;

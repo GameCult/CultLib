@@ -263,6 +263,16 @@ namespace GameCult.Networking
             {
                 peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
             }
+            // R-AM: an untyped fault answers like HandleShardLogRequestAsync/HandlePutAsync's own
+            // catch (Exception) - a CultNetErrorMessage on the wire, not silence. Before this, only
+            // the three typed selection exceptions were caught here; anything else propagated up into
+            // the dispatch backstop (CultNetRudpSchemaServer.cs), which swallowed it with no log and
+            // hid SM-6's ArgumentNullException regression for a whole batch.
+            catch (Exception ex)
+            {
+                _server.Logger.LogError($"CultNet snapshot v1 request failed: {ex.Message}");
+                peer.SendCultNet(new CultNetErrorMessage { Error = ex.Message });
+            }
 
             return Task.CompletedTask;
         }
