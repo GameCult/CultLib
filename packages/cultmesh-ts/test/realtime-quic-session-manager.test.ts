@@ -89,10 +89,17 @@ function fakeTransport(endpoint: string, verified = true): FakeTransportHandle {
 function spyConnector(
   connectorId: string,
   priority: number,
-  options: { delayMs?: number; fails?: boolean } = {},
-): { connector: CultMeshRealtimeTransportConnector; calls: CultMeshRealtimeCandidate[]; handles: FakeTransportHandle[] } {
+  options: { delayMs?: number; fails?: boolean; ignoreAbort?: boolean } = {},
+): {
+  connector: CultMeshRealtimeTransportConnector;
+  calls: CultMeshRealtimeCandidate[];
+  handles: FakeTransportHandle[];
+  /** Timestamps at which this connector's abort signal actually fired. */
+  aborts: number[];
+} {
   const calls: CultMeshRealtimeCandidate[] = [];
   const handles: FakeTransportHandle[] = [];
+  const aborts: number[] = [];
   const connector: CultMeshRealtimeTransportConnector = {
     connectorId,
     priority,
@@ -102,10 +109,13 @@ function spyConnector(
       if (options.delayMs) {
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, options.delayMs);
-          signal?.addEventListener("abort", () => {
-            clearTimeout(timer);
-            reject(new Error(`${connectorId} connect aborted`));
-          });
+          if (!options.ignoreAbort) {
+            signal?.addEventListener("abort", () => {
+              clearTimeout(timer);
+              aborts.push(Date.now());
+              reject(new Error(`${connectorId} connect aborted`));
+            });
+          }
         });
       }
       if (options.fails) throw new Error(`${connectorId} refused to connect`);
@@ -114,7 +124,7 @@ function spyConnector(
       return handle.transport;
     },
   };
-  return { connector, calls, handles };
+  return { connector, calls, handles, aborts };
 }
 
 const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
@@ -151,8 +161,11 @@ test("fix 4: concurrent connect() calls for the same target share one dial (sing
   assert.equal(calls.length, 1, "three concurrent callers must share one dial");
 });
 
-test("fix 4: a connect() that completes after dispose() releases its transport instead of caching it", async () => {
-  const { connector, handles } = spyConnector("fake", 0, { delayMs: 50 });
+test("fix 4/low: dispose() aborts a dial in flight instead of letting it land and discarding the result", async () => {
+  // A long delay: if `dispose()` did not cancel the dial, this test would
+  // have to wait it out (or race a timing-dependent assertion) to observe
+  // that the eventually-created transport gets disposed instead of cached.
+  const { connector, handles } = spyConnector("fake", 0, { delayMs: 5_000 });
   const manager = new CultMeshQuicRealtimeSessionManager({
     lookupSource: new CultMeshStaticRealtimeLookupSource([verseWithRoutes(target.verseId, [route()])]),
     trust,
@@ -160,11 +173,42 @@ test("fix 4: a connect() that completes after dispose() releases its transport i
   });
 
   const pending = manager.connect(target);
+  const start = Date.now();
   manager.dispose();
-  await assert.rejects(pending, /disposed/i);
-  assert.equal(handles.length, 1);
-  assert.equal(handles[0]!.disposed(), true, "a transport that lands after dispose() must not be kept alive");
+  await assert.rejects(pending);
+  assert.ok(
+    Date.now() - start < 1_000,
+    "dispose() must cancel the in-flight dial rather than waiting out the connector's own timeout",
+  );
+  assert.equal(handles.length, 0, "an aborted dial must never construct a transport only to immediately discard it");
   await assert.rejects(manager.connect(target), /disposed/i, "a disposed manager refuses further connects");
+});
+
+test("fix 4/low: disconnect() during a dial does not let the dial cache a session once it lands", async () => {
+  const { connector, handles } = spyConnector("fake", 0, { delayMs: 30 });
+  const manager = new CultMeshQuicRealtimeSessionManager({
+    lookupSource: new CultMeshStaticRealtimeLookupSource([verseWithRoutes(target.verseId, [route()])]),
+    trust,
+    connectors: [connector],
+  });
+
+  const pending = manager.connect(target);
+  manager.disconnect(target);
+  await assert.rejects(pending);
+  // Whether or not the aborted dial still managed to construct a transport
+  // (a race against the abort), it must end up disposed, never cached.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  for (const handle of handles) assert.equal(handle.disposed(), true, "a cancelled dial's transport must be disposed");
+
+  // The manager itself is still usable: a fresh connect redials and succeeds.
+  const { connector: connector2 } = spyConnector("fake", 0);
+  const manager2 = new CultMeshQuicRealtimeSessionManager({
+    lookupSource: new CultMeshStaticRealtimeLookupSource([verseWithRoutes(target.verseId, [route()])]),
+    trust,
+    connectors: [connector2],
+  });
+  const fresh = await manager2.connect(target);
+  assert.ok(fresh);
 });
 
 test("fix 5: the race returns the first verified success and aborts the losers", async () => {
@@ -187,6 +231,59 @@ test("fix 5: the race returns the first verified success and aborts the losers",
   const elapsedMs = Date.now() - startedAt;
   assert.ok(elapsedMs < 1_000, `connect() must return on the first success, not wait out the slow route (took ${elapsedMs}ms)`);
   assert.equal(transport.endpoint, "cultmesh-state+quic://127.0.0.1:9001");
+});
+
+test("F5abort: a losing candidate is told to abort promptly, not left to run out its own timeout", async () => {
+  const winner = spyConnector("fast", 0, { delayMs: 10 });
+  const loser = spyConnector("slow", 0, { delayMs: 5_000 });
+  const manager = new CultMeshQuicRealtimeSessionManager({
+    lookupSource: new CultMeshStaticRealtimeLookupSource([
+      verseWithRoutes(target.verseId, [
+        route({ endpoint: "cultmesh-state+quic://127.0.0.1:9001" }),
+        route({ endpoint: "cultmesh-state+quic://127.0.0.1:9002" }),
+      ]),
+    ]),
+    trust,
+    connectors: [winner.connector, loser.connector],
+    maxRacedCandidates: 2,
+  });
+
+  const startedAt = Date.now();
+  await manager.connect(target);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(loser.aborts.length, 1, "the losing candidate's connect() must observe an abort signal");
+  assert.ok(
+    loser.aborts[0]! - startedAt < 1_000,
+    "the abort must arrive promptly after the winner is decided, not after the loser's own 5s timeout",
+  );
+});
+
+test("F5loser: a losing candidate that connects anyway (past the point abort helps) is disposed, not left dangling", async () => {
+  const winner = spyConnector("fast", 0, { delayMs: 10 });
+  // Ignores the abort signal entirely, simulating a candidate already past
+  // the point where cancellation helps: it still produces a real transport.
+  const loser = spyConnector("slow", 0, { delayMs: 80, ignoreAbort: true });
+  const manager = new CultMeshQuicRealtimeSessionManager({
+    lookupSource: new CultMeshStaticRealtimeLookupSource([
+      verseWithRoutes(target.verseId, [
+        route({ endpoint: "cultmesh-state+quic://127.0.0.1:9001" }),
+        route({ endpoint: "cultmesh-state+quic://127.0.0.1:9002" }),
+      ]),
+    ]),
+    trust,
+    connectors: [winner.connector, loser.connector],
+    maxRacedCandidates: 2,
+  });
+
+  const transport = await manager.connect(target);
+  assert.equal(transport.endpoint, "cultmesh-state+quic://127.0.0.1:9001");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(loser.handles.length, 1, "the loser still connects despite racing to lose");
+  assert.equal(
+    loser.handles[0]!.disposed(),
+    true,
+    "a losing candidate that connects after the race is decided must be disposed, never left connected",
+  );
 });
 
 test("M6: maxRacedCandidates caps how many candidates in a tier are attempted", async () => {
