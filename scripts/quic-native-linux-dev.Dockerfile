@@ -49,5 +49,11 @@ RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
  && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+# This minimal Debian image carries no ICU package, and .NET's runtime
+# FailFasts on startup without one. The interop peer already parses every
+# argument through CultureInfo.InvariantCulture, so globalization-invariant
+# mode costs it nothing; installing an ICU package would be the alternative,
+# but Microsoft's own guidance for a minimal container is this flag.
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 
 WORKDIR /src
