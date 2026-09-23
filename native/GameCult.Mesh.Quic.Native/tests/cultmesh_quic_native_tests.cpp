@@ -83,10 +83,29 @@
 
 namespace {
 
-// Long enough that a poller is still parked when the close begins. The close is
-// what ends the wait; this timeout only bounds the scenario if the close never
-// arrives, which is itself the failure.
-constexpr int32_t kPollTimeoutMs = 5000;
+// `CloseRaceOnce`'s own settle budget, named here — ahead of `kPollTimeoutMs`
+// below — so the poll timeout can be derived from it instead of drifting apart
+// as a second freestanding number. Under CPU starvation the settle can spend
+// this whole budget waiting for every poller to be counted inside the library
+// before the close begins; a poll timeout shorter than that lets the first
+// pollers time out for real while the fixture is still waiting on the last
+// ones, which is exactly the failure this scenario exists to catch, not the
+// one it is supposed to be running.
+constexpr int32_t kCloseRaceCountedDeadlineMs = 30000;  // asserts-on: cap on the peak_calls wait
+constexpr int32_t kCloseRaceAssertsSettleMs = 50;       // asserts-on: fixed remainder after counted
+constexpr int32_t kCloseRaceNoSeamSettleMs = 500;       // no-seam #else: fixed settle window
+constexpr int32_t kCloseRaceSettleBudgetMs =
+    (kCloseRaceCountedDeadlineMs + kCloseRaceAssertsSettleMs) > kCloseRaceNoSeamSettleMs
+        ? (kCloseRaceCountedDeadlineMs + kCloseRaceAssertsSettleMs)
+        : kCloseRaceNoSeamSettleMs;
+
+// Long enough that a poller is still parked when the close begins, in every
+// configuration, even when the settle above burns its whole budget. The close
+// is what ends the wait; this timeout only bounds the scenario if the close
+// never arrives, which is itself the failure, so a long poll timeout costs
+// nothing on a passing run. The flat 5 s margin is headroom above the settle
+// budget, not a second guess at it.
+constexpr int32_t kPollTimeoutMs = kCloseRaceSettleBudgetMs + 5000;
 
 // A poller asks for a payload buffer, so the close races a `next_event` that has
 // somewhere to copy into rather than one that can only ever return 0.
@@ -175,11 +194,29 @@ std::string CloseRaceOnce(int pollers) {
     // development seam is compiled in, this reads the bridge's own count
     // instead of guessing at a duration: the settle ends only once every
     // poller is actually counted inside, however long the scheduler took.
-    const auto counted_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto counted_deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(kCloseRaceCountedDeadlineMs);
     while (cultmesh_quic_debug_peak_calls() < pollers &&
            std::chrono::steady_clock::now() < counted_deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    // The fixture's own settle can fail to reach every poller inside the
+    // deadline above, distinct from the race this scenario exists to run.
+    // Proceeding to the close anyway would then produce the pollers' own
+    // failure message — "N of M pollers returned before the close began" —
+    // which blames the pollers for a race the fixture never set up. Report
+    // this plainly instead, and unstick the parked pollers before returning so
+    // this iteration does not just sit out `kPollTimeoutMs`.
+    const int32_t counted = cultmesh_quic_debug_peak_calls();
+    if (counted < pollers) {
+        closing_started.store(true);
+        cultmesh_quic_runtime_close(runtime);
+        for (auto& thread : threads) thread.join();
+        return "fixture could not settle: " + std::to_string(counted) + " of " +
+            std::to_string(pollers) + " pollers counted inside after " +
+            std::to_string(kCloseRaceCountedDeadlineMs) + " ms";
+    }
+
     // `active_calls` — what `peak_calls` reflects — is raised the moment a
     // poller's `CallScope` is constructed, at the top of
     // `cultmesh_quic_next_event`, not when it reaches the condition wait a few
@@ -187,14 +224,14 @@ std::string CloseRaceOnce(int pollers) {
     // starvation (getting the scheduler to run a thread at all); a short fixed
     // settle covers the cheap remainder (a lock acquisition and an empty-queue
     // check) once every poller is already scheduled and running.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(kCloseRaceAssertsSettleMs));
 #else
     // No seam in this configuration (the sanitizer build deliberately ships
     // without one), so the settle falls back to a longer fixed window rather
     // than the 50 ms that starved under 16 contending burners. It is still a
     // window, not a guarantee — the honest limit of a config with no way to
     // ask the bridge what it has actually counted.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(kCloseRaceNoSeamSettleMs));
 #endif
 
     closing_started.store(true);
