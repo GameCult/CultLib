@@ -135,8 +135,11 @@ function resolveNativeDir(): string {
 function loadBindings(): NativeBindings {
   if (bindingsCache) return bindingsCache;
 
+  // Untyped on purpose: koffi's own type declarations are ESM-flavored and
+  // fight a CommonJS `typeof import(...)` reference under Node16 resolution.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const koffi = require("koffi") as typeof import("koffi");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const koffi: any = require("koffi");
   const { bridge, dependency } = platformFileNames();
   const dir = resolveNativeDir();
   const bridgePath = join(dir, bridge);
@@ -210,9 +213,9 @@ function loadBindings(): NativeBindings {
   );
   const lastStatus = bridgeLib.func("int32_t cultmesh_quic_last_status(void *runtime)");
 
-  const nextEventAsync = koffi.promisify
-    ? koffi.promisify(nextEvent.async)
-    : (require("node:util").promisify(nextEvent.async) as NativeBindings["nextEventAsync"]);
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { promisify } = require("node:util") as typeof import("node:util");
+  const nextEventAsync = promisify(nextEvent.async) as NativeBindings["nextEventAsync"];
 
   bindingsCache = {
     runtimeOpen: (appName) => runtimeOpen(appName),
