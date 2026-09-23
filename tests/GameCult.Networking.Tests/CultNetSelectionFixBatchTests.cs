@@ -1,7 +1,15 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using GameCult.Caching;
+using GameCult.Logging;
 using NUnit.Framework;
 
 namespace GameCult.Networking.Tests
@@ -462,6 +470,43 @@ namespace GameCult.Networking.Tests
                 Is.EqualTo(new[] { (registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId, "k") }));
         }
 
+        // R-AO: the test above covers one in-target candidate and one out - TryResolveReferenceTarget's
+        // `foreach (var candidate in candidates) { ... return true; }` (CultNetSelectionEvaluator.cs)
+        // picks the first match, but nothing pinned that rule specifically when *two* in-target rows
+        // share a key (Soul's SM-4: "the first row in the caller's order wins" was a coincidence of
+        // source, not a rule). SelCiter.Design's declared target is the abstract SelFixtureMiddle, so
+        // both SelLeafA and SelLeafB are in-target - which one resolves depends only on which the
+        // caller listed first in `rows` (byKey's insertion order follows `allRows`). Both orders are
+        // exercised, each expecting whichever row was listed first in *that* run - proving the rule is
+        // "first in the caller's order", not a fixed schema preference.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Evaluator_CitedWithTwoInTargetCandidates_ResolvesToWhicheverTheCallerListedFirst(bool reverseRowOrder)
+        {
+            var registry = Registry();
+            var leafA = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a", Kind = "k", Mass = 1 }, "dup", 0);
+            var leafB = Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "b", Kind = "k", Mass = 1 }, "dup", 1);
+            var citer = Row(registry, new CultNetSelectionEvaluatorTests.SelCiter
+            {
+                Name = "citer",
+                Design = new CultRecordRef<CultNetSelectionEvaluatorTests.SelFixtureMiddle>(new CultRecordKey("dup"))
+            }, "citer", 2);
+
+            var rows = reverseRowOrder
+                ? new[] { citer, leafB, leafA }
+                : new[] { citer, leafA, leafB };
+            var expectedFirstSchemaId = reverseRowOrder
+                ? registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafB>().SchemaId
+                : registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
+
+            var selection = new CultNetSelection { Cited = new CultNetIncoming { Role = "Design", Exists = true } };
+            var evaluation = CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1);
+
+            Assert.That(evaluation.Rows.Select(r => (r.Descriptor.SchemaId, r.Key.Value)),
+                Is.EqualTo(new[] { (expectedFirstSchemaId, "dup") }),
+                "must resolve to whichever in-target row the caller listed first, not a fixed schema");
+        }
+
         // R-W (S-2, Soul's P3): EnsureWithinDeclaredTarget's equivalent check must run for every edge a
         // many-reference carries, before the citation's own key filters that edge out - not only for the
         // edge the citation happens to be asking about. SelCiterManyUntyped.ManyRefs is (by inference,
@@ -498,6 +543,188 @@ namespace GameCult.Networking.Tests
                 () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1));
             Assert.That(ex!.ToSchemaId, Is.EqualTo(registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafB>().SchemaId));
             Assert.That(ex.ToKey, Is.EqualTo("b"));
+        }
+
+        // R-AL/SM-6: the evaluator's own `!member.IsReference` guard in ReferenceMembers, pinned
+        // directly. CultCache's D10b (CultCache.cs DiscoverMembers, ~1099) now refuses the colliding
+        // shape at registration, so CultDocumentRegistry.ForTypes can no longer produce a descriptor
+        // this bug reaches - which is D10b's own test's job, not this one's. This test builds the
+        // colliding descriptor by hand, bypassing the registry entirely (reflection over the internal
+        // CultDocumentDescriptor/PersistedMember constructors - the "only door" CultCache.cs:208
+        // describes is a door for production code, not for pinning a caller-side guard in isolation),
+        // so the guard is proven on its own: even a descriptor D10b never had a chance to validate
+        // must not let a data member answer for a reference member's role.
+        [Test]
+        public void ReferenceMembersExcludesADataMemberSharingAReferenceMembersRoleEvenOffARegistryBypassingDescriptor()
+        {
+            var cachingAssembly = typeof(CultDocumentRegistry).Assembly;
+            var persistedMemberType = cachingAssembly.GetType("GameCult.Caching.CultDocumentRegistry+PersistedMember", throwOnError: true)!;
+            var memberDescriptorType = cachingAssembly.GetType("GameCult.Caching.CultDocumentMemberDescriptor", throwOnError: true)!;
+            var descriptorCtor = typeof(CultDocumentDescriptor)
+                .GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance).Single();
+
+            object MakeMember(MemberInfo member, Type memberType, int slot, string? indexAlias, bool isReference, Type? targetType)
+            {
+                var instance = Activator.CreateInstance(persistedMemberType, nonPublic: true)!;
+                void Set(string property, object? value) => persistedMemberType.GetProperty(property)!.SetValue(instance, value);
+                Set("Member", member);
+                Set("MemberType", memberType);
+                Set("Slot", slot);
+                Set("IsName", false);
+                Set("IndexAlias", indexAlias);
+                Set("IsReference", isReference);
+                Set("IsMany", false);
+                Set("TargetSchemaName", null);
+                Set("TargetType", targetType);
+                Set("IsNumeric", false);
+                return instance;
+            }
+
+            // A plain data member "Owner" with no [CultIndex] (its role falls back to its bare name)
+            // and a reference member whose alias is explicitly "Owner" - the exact shape Soul probed.
+            var ownerMember = MakeMember(typeof(GuardProbeShape).GetField(nameof(GuardProbeShape.Owner))!,
+                typeof(string), 0, indexAlias: null, isReference: false, targetType: null);
+            var refMember = MakeMember(typeof(GuardProbeShape).GetField(nameof(GuardProbeShape.Ref))!,
+                typeof(CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA>), 1, indexAlias: "Owner", isReference: true,
+                targetType: typeof(CultNetSelectionEvaluatorTests.SelLeafA));
+
+            var richMembers = Array.CreateInstance(persistedMemberType, 2);
+            richMembers.SetValue(ownerMember, 0);
+            richMembers.SetValue(refMember, 1);
+            var members = Array.CreateInstance(memberDescriptorType, 0);
+
+            var descriptor = (CultDocumentDescriptor)descriptorCtor.Invoke(new object?[]
+            {
+                typeof(GuardProbeShape),
+                "selection.fixture.guard_probe",
+                "selection.fixture.guard_probe.v1",
+                "selection.fixture.guard_probe.v1",
+                "sha256:guard-probe",
+                "{}",
+                false,
+                null,
+                null,
+                new Dictionary<string, Func<object, string>>(),
+                members,
+                richMembers
+            });
+
+            var referenceMembersMethod = typeof(CultNetSelectionEvaluator)
+                .GetMethod("ReferenceMembers", BindingFlags.NonPublic | BindingFlags.Static)!;
+            var yielded = ((IEnumerable<CultDocumentMemberView>)referenceMembersMethod
+                .Invoke(null, new object?[] { descriptor, "Owner" })!).ToArray();
+
+            // Only the reference member answers for role "Owner" - the data member sharing that bare
+            // name must not be yielded, or ReferencesOf would be asked to walk it as a reference and
+            // ResolveTargetLeaves would throw on its null TargetType (the fault Soul probed).
+            Assert.That(yielded.Select(m => m.MemberName), Is.EqualTo(new[] { "Ref" }));
+        }
+
+        private sealed class GuardProbeShape
+        {
+            public string Owner = string.Empty;
+            public CultRecordRef<CultNetSelectionEvaluatorTests.SelLeafA> Ref = default;
+        }
+
+        // R-AM: HandleSnapshotRequestV1Async (CultNetDatabaseServer.cs) now answers an untyped fault
+        // like its siblings HandleShardLogRequestAsync/HandlePutAsync - catch (Exception), log, try to
+        // answer a CultNetErrorMessage - instead of only catching the three typed selection exceptions
+        // and leaving anything else to escape into the RUDP dispatch backstop's silent swallow. The
+        // handler is a private delegate keyed to the concrete sealed CultNetServerPeer (no
+        // ICultNetSchemaServerPeer seam here, unlike CultNetOperationServer's handlers, so a FakePeer
+        // cannot substitute), and CultNetServerPeer's own constructor needs a live LiteNetLib NetPeer
+        // this test does not stand up. Reached the only way available instead: the private delegate
+        // field directly, with Selection: null (a shape CultNetSnapshotRequestV1Message's own type
+        // does not forbid, so a client could still send it) and an uninitialized CultNetServerPeer
+        // (RuntimeHelpers.GetUninitializedObject bypasses its internal constructor). SendCultNet then
+        // NREs on the peer's null Transport - a different, later exception than the
+        // ArgumentNullException CreateSelectionResponse actually threw for a null selection, which is
+        // exactly the proof the catch (Exception) block ran: logged the original fault, then tried and
+        // failed to reply on a peer this test never gave working transport plumbing.
+        [Test]
+        public void CultNetDatabaseServer_SnapshotV1Handler_CatchesAnUntypedFaultAndLogsBeforeAnswering()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache);
+            using var server = new Server(cache, ServerSecurityOptions.Development());
+            var logger = new CapturingLogger();
+            server.Logger = logger;
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var handlerField = typeof(CultNetDatabaseServer)
+                .GetField("_snapshotHandlerV1", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var handler = (Func<CultNetSnapshotRequestV1Message, CultNetServerPeer, Task>)handlerField.GetValue(databaseServer)!;
+            var peer = (CultNetServerPeer)RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
+
+            var thrown = Assert.Catch(() => handler(new CultNetSnapshotRequestV1Message { Selection = null! }, peer));
+
+            Assert.That(thrown, Is.Not.InstanceOf<ArgumentNullException>(),
+                "the null-Selection ArgumentNullException must be caught inside the handler, not escape raw");
+            Assert.That(logger.Errors, Has.Some.Contains("CultNet snapshot v1 request failed"));
+        }
+
+        // R-AM: the RUDP dispatch backstop (CultNetRudpSchemaServer.cs, DispatchAsync) logs every
+        // untyped handler fault it swallows, always - it used to answer nothing and log nothing, which
+        // is exactly what hid SM-6's ArgumentNullException regression for a whole batch. Real
+        // client/server round trip over loopback UDP, the same pattern this file's other RUDP tests
+        // use (CultNetSchemaClients.CreateRudp against a RudpCultNetSchemaServer with an OS-assigned
+        // port), with a handler that deliberately throws an untyped exception to reach the backstop.
+        [Test]
+        public async Task RudpCultNetSchemaServer_DispatchBackstop_LogsEveryUntypedHandlerFault()
+        {
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "dispatch-backstop-logs-server",
+                Socket = socket
+            });
+            var logger = new CapturingLogger();
+            server.Logger = logger;
+            server.OnCultNet<CultNetShardCatalogRequestMessage>((_, _) =>
+                throw new InvalidOperationException("dispatch-backstop-probe"));
+
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            })
+            { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("dispatch-backstop-probe-client");
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                for (var attempt = 0; attempt < 200 && !client.Connected; attempt++)
+                    await Task.Delay(10);
+                Assert.That(client.Connected, Is.True, "client failed to connect to the RUDP server");
+
+                client.SendCultNet(new CultNetShardCatalogRequestMessage { MessageId = "dispatch-backstop-probe" });
+
+                for (var attempt = 0; attempt < 200 && logger.Errors.Count == 0; attempt++)
+                    await Task.Delay(10);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+
+            Assert.That(logger.Errors, Has.Some.Contains("dispatch-backstop-probe"),
+                "the backstop must log the handler's own exception message, not swallow it silently");
+        }
+
+        private sealed class CapturingLogger : ILogger
+        {
+            public List<string> Errors { get; } = new();
+            public void LogInfo(string message) { }
+            public void LogWarning(string message) { }
+            public void LogError(string message) => Errors.Add(message);
+            public void LogDebug(string message) { }
         }
     }
 }

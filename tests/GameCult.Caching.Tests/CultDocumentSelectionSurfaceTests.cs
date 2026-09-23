@@ -236,6 +236,24 @@ namespace GameCult.Caching.Tests
             Assert.That(message, Does.Contain("shared"));
         }
 
+        // R-AL/SM-6: a plain data member's bare name (it declares no [CultIndex], so its role in
+        // ReferencesOf/ReferenceMembers falls back to its own MemberName) colliding with a reference
+        // member's explicit alias. D10 above only groups members that declare an alias and misses
+        // this; before the fix this registered without error and then every hop through the
+        // reference member threw ArgumentNullException at resolution time (probed by Soul).
+        [Test]
+        public void DataMemberNameCollidingWithAReferenceMembersAliasIsRefusedAtRegistration()
+        {
+            var type = Document("OwnerCollision");
+            Field(type, "Owner", typeof(string), Key(0));
+            Field(type, "Ref", typeof(CultRecordRef<FixtureLeafA>), Key(1), IndexAttr("Owner"));
+            var message = Assert.Throws<InvalidOperationException>(() => CultDocumentRegistry.ForTypes(new[] { type.CreateType()! }))!.Message;
+
+            Assert.That(message, Does.Contain("OwnerCollision"));
+            Assert.That(message, Does.Contain("Owner"));
+            Assert.That(message, Does.Contain("Ref"));
+        }
+
         [Test]
         public void ManyReferenceOfAnElementTypeThatIsNotACultRecordRefIsRefused()
         {
