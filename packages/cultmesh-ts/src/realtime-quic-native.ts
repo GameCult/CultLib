@@ -275,9 +275,21 @@ export class CultMeshQuicNativeRuntime {
   private closed = false;
   private pumpLoop: Promise<void>;
 
+  /**
+   * `nextEvent`'s out-parameter buffers, allocated once and reused for every
+   * call instead of per call: the pump is single-threaded with at most one
+   * `nextEvent` in flight (`nextEventAsync` is only ever awaited, never
+   * fired concurrently), so decode-then-reuse is safe. Freed once in
+   * `release()` after the pump loop has exited.
+   */
+  private readonly outEventBuffer: unknown;
+  private readonly outRequiredBuffer: unknown;
+
   private constructor(handle: CultMeshQuicNativeHandle, lib: LoadedNativeLibrary) {
     this.handle = handle;
     this.lib = lib;
+    this.outEventBuffer = lib.koffi.alloc(lib.event, 1);
+    this.outRequiredBuffer = lib.koffi.alloc("int32_t", 1);
     this.pumpLoop = this.pump();
   }
 
@@ -287,9 +299,11 @@ export class CultMeshQuicNativeRuntime {
       const out = lib.koffi.alloc("void *", 1);
       const status = lib.runtimeOpenFn(null, out);
       if (status !== 0) {
+        lib.koffi.free(out);
         throw new Error(`cultmesh_quic_runtime_open failed with status ${status}.`);
       }
       const handle = toBigInt64(lib.koffi.decode(out, "void *"));
+      lib.koffi.free(out);
       CultMeshQuicNativeRuntime.shared = new CultMeshQuicNativeRuntime(handle, lib);
     }
     CultMeshQuicNativeRuntime.refCountValue += 1;
@@ -315,6 +329,8 @@ export class CultMeshQuicNativeRuntime {
     CultMeshQuicNativeRuntime.shared = undefined;
     await this.pumpLoop;
     this.lib.runtimeCloseFn(this.handle);
+    this.lib.koffi.free(this.outEventBuffer);
+    this.lib.koffi.free(this.outRequiredBuffer);
   }
 
   onListenerEvent(listenerId: bigint, listener: NativeEventListener): void {
@@ -349,23 +365,28 @@ export class CultMeshQuicNativeRuntime {
   ): { listenerId: bigint; boundPort: number } {
     const outListenerId = this.lib.koffi.alloc("uint64_t", 1);
     const outBoundPort = this.lib.koffi.alloc("uint16_t", 1);
-    const status = this.lib.listenerOpenFn(
-      this.handle,
-      host,
-      port,
-      pkcs12,
-      pkcs12.length,
-      password,
-      outListenerId,
-      outBoundPort,
-    );
-    if (status !== 0) {
-      throw new Error(`cultmesh_quic_listener_open failed: ${readLastError(this.lib, this.handle)}`);
+    try {
+      const status = this.lib.listenerOpenFn(
+        this.handle,
+        host,
+        port,
+        pkcs12,
+        pkcs12.length,
+        password,
+        outListenerId,
+        outBoundPort,
+      );
+      if (status !== 0) {
+        throw new Error(`cultmesh_quic_listener_open failed: ${readLastError(this.lib, this.handle)}`);
+      }
+      return {
+        listenerId: toBigInt64(this.lib.koffi.decode(outListenerId, "uint64_t")),
+        boundPort: this.lib.koffi.decode(outBoundPort, "uint16_t") as number,
+      };
+    } finally {
+      this.lib.koffi.free(outListenerId);
+      this.lib.koffi.free(outBoundPort);
     }
-    return {
-      listenerId: toBigInt64(this.lib.koffi.decode(outListenerId, "uint64_t")),
-      boundPort: this.lib.koffi.decode(outBoundPort, "uint16_t") as number,
-    };
   }
 
   listenerClose(listenerId: bigint): void {
@@ -375,11 +396,15 @@ export class CultMeshQuicNativeRuntime {
 
   connectionOpen(host: string, port: number): bigint {
     const out = this.lib.koffi.alloc("uint64_t", 1);
-    const status = this.lib.connectionOpenFn(this.handle, host, port, out);
-    if (status !== 0) {
-      throw new Error(`cultmesh_quic_connection_open failed: ${readLastError(this.lib, this.handle)}`);
+    try {
+      const status = this.lib.connectionOpenFn(this.handle, host, port, out);
+      if (status !== 0) {
+        throw new Error(`cultmesh_quic_connection_open failed: ${readLastError(this.lib, this.handle)}`);
+      }
+      return toBigInt64(this.lib.koffi.decode(out, "uint64_t"));
+    } finally {
+      this.lib.koffi.free(out);
     }
-    return toBigInt64(this.lib.koffi.decode(out, "uint64_t"));
   }
 
   connectionCertificateComplete(connectionId: bigint, accept: boolean): void {
@@ -397,11 +422,15 @@ export class CultMeshQuicNativeRuntime {
 
   streamOpen(connectionId: bigint, kind: number): bigint {
     const out = this.lib.koffi.alloc("uint64_t", 1);
-    const status = this.lib.streamOpenFn(this.handle, connectionId, kind, out);
-    if (status !== 0) {
-      throw new Error(`cultmesh_quic_stream_open failed: ${readLastError(this.lib, this.handle)}`);
+    try {
+      const status = this.lib.streamOpenFn(this.handle, connectionId, kind, out);
+      if (status !== 0) {
+        throw new Error(`cultmesh_quic_stream_open failed: ${readLastError(this.lib, this.handle)}`);
+      }
+      return toBigInt64(this.lib.koffi.decode(out, "uint64_t"));
+    } finally {
+      this.lib.koffi.free(out);
     }
-    return toBigInt64(this.lib.koffi.decode(out, "uint64_t"));
   }
 
   streamSendFrame(streamId: bigint, encodedFrame: Uint8Array, fin: boolean): void {
@@ -484,10 +513,21 @@ export class CultMeshQuicNativeRuntime {
     payload: Uint8Array | null,
     payloadCapacity: number,
   ): Promise<{ status: number; event: NativeEventStruct | null; required: number }> {
-    const outEvent = this.lib.koffi.alloc(this.lib.event, 1);
-    const outRequired = this.lib.koffi.alloc("int32_t", 1);
-    const status = await this.lib.nextEventAsync(this.handle, timeoutMs, outEvent, payload, payloadCapacity, outRequired);
-    const decoded = status === 1 ? (this.lib.koffi.decode(outEvent, this.lib.event) as NativeEventStruct) : null;
+    // Reuses the buffers allocated once in the constructor instead of
+    // allocating fresh ones per call: the pump awaits each `nextEventAsync`
+    // before issuing the next one, so at most one call is ever in flight
+    // against them, and both are fully decoded here before the buffers can
+    // be reused by the pump's next call.
+    const status = await this.lib.nextEventAsync(
+      this.handle,
+      timeoutMs,
+      this.outEventBuffer,
+      payload,
+      payloadCapacity,
+      this.outRequiredBuffer,
+    );
+    const decoded =
+      status === 1 ? (this.lib.koffi.decode(this.outEventBuffer, this.lib.event) as NativeEventStruct) : null;
     return {
       status,
       event: decoded && {
@@ -497,7 +537,7 @@ export class CultMeshQuicNativeRuntime {
         stream_id: toBigInt64(decoded.stream_id),
         code: toBigInt64(decoded.code),
       },
-      required: this.lib.koffi.decode(outRequired, "int32_t") as number,
+      required: this.lib.koffi.decode(this.outRequiredBuffer, "int32_t") as number,
     };
   }
 
