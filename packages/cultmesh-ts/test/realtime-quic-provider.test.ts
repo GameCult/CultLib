@@ -398,31 +398,41 @@ test(
       serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
       handshakeTimeoutMs: 30_000,
     });
-    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
-    const candidate: CultMeshRealtimeCandidate = {
-      // A pin that can never match this provider's real certificate: the
-      // connector rejects it during CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED,
-      // before the connection ever reaches CONNECTED.
-      endpoint: provider.advertisedEndpoint.replace(/cert-sha256=[0-9A-F]+/, `cert-sha256=${"0".repeat(64)}`),
-      authorityRuntimeId: target.authorityRuntimeId,
-      priority: 0,
-      generation: "gen-1",
-    };
-    const connector = new CultMeshQuicRealtimeConnector();
-    await assertRejectsAndDisposes(connector.connect(candidate, target), /certificate|rejected/i);
+    try {
+      const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+      const candidate: CultMeshRealtimeCandidate = {
+        // A pin that can never match this provider's real certificate: the
+        // connector rejects it during CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED,
+        // before the connection ever reaches CONNECTED.
+        endpoint: provider.advertisedEndpoint.replace(/cert-sha256=[0-9A-F]+/, `cert-sha256=${"0".repeat(64)}`),
+        authorityRuntimeId: target.authorityRuntimeId,
+        priority: 0,
+        generation: "gen-1",
+      };
+      const connector = new CultMeshQuicRealtimeConnector();
+      // If the certificate check ever regresses into accepting everything
+      // (M1), this resolves into a fully attached peer instead of rejecting;
+      // assertRejectsAndDisposes() disposes the client-side transport either
+      // way, but only the outer `finally` below disposes the provider itself
+      // (and the peer it would then hold), which is what actually closes
+      // the file-hanging gap M1 found here.
+      await assertRejectsAndDisposes(connector.connect(candidate, target), /certificate|rejected/i);
 
-    // The provider's own accept flow is asynchronous (attachPeer awaits a
-    // runtime reference before it can even see the rejection); give it a
-    // moment to actually start before disposing, so this test exercises a
-    // real in-flight pending accept rather than one that never began.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+      // The provider's own accept flow is asynchronous (attachPeer awaits a
+      // runtime reference before it can even see the rejection); give it a
+      // moment to actually start before disposing, so this test exercises a
+      // real in-flight pending accept rather than one that never began.
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-    const disposedAt = Date.now();
-    provider.dispose();
-    await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
-    assert.ok(
-      Date.now() - disposedAt < 2_000,
-      "dispose() must evict a mid-handshake connection promptly, not wait out its 30s handshake timeout",
-    );
+      const disposedAt = Date.now();
+      provider.dispose();
+      await waitUntil(() => CultMeshQuicNativeRuntime.refCount === before);
+      assert.ok(
+        Date.now() - disposedAt < 2_000,
+        "dispose() must evict a mid-handshake connection promptly, not wait out its 30s handshake timeout",
+      );
+    } finally {
+      provider.dispose();
+    }
   },
 );
