@@ -198,9 +198,28 @@ test(
       // `onFault` (P10b's target), that throw would escape the pump's
       // dispatch loop and take every other connection down with it instead
       // of staying scoped to connection A.
-      const acceptedA = waitFor<bigint>((resolve) => {
+      //
+      // The server-side connection listener is registered synchronously,
+      // inside the LISTENER_NEW_CONNECTION callback itself, rather than
+      // after an `await`: the native bridge can dispatch a connection's next
+      // event (CERTIFICATE_RECEIVED, or CONNECTED) before a later `await`'s
+      // continuation ever runs, and an event with no listener registered for
+      // its connection id is silently dropped (`dispatch`'s own
+      // `if (!entry) return`) — the same async-registration gap fix 1 closed
+      // for the provider's own accept path.
+      const serverAFaulted = waitFor<void>((resolve) => {
         runtime.onListenerEvent(listenerId, (event) => {
-          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+          if (event.type !== CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) return;
+          runtime.onConnectionEvent(
+            event.connectionId,
+            () => {
+              throw new Error("P10b: connection A's listener always throws.");
+            },
+            () => {
+              resolve();
+              throw new Error("P10b: connection A's onFault also throws.");
+            },
+          );
         });
       });
       const clientA = runtime.connectionOpen("127.0.0.1", boundPort);
@@ -209,24 +228,18 @@ test(
           runtime.connectionCertificateComplete(clientA, true);
         }
       });
-      const serverAId = await acceptedA;
-      runtime.onConnectionEvent(
-        serverAId,
-        () => {
-          throw new Error("P10b: connection A's listener always throws.");
-        },
-        () => {
-          throw new Error("P10b: connection A's onFault also throws.");
-        },
-      );
-      // Give A's handshake a moment to reach the throwing listener and fault.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await serverAFaulted;
 
       // Connection B, opened only after A faulted: if the throw above ever
       // escaped the pump, this connection would never reach CONNECTED at all.
-      const acceptedB = waitFor<bigint>((resolve) => {
+      let serverBConnected = false;
+      const serverBAccepted = waitFor<void>((resolve) => {
         runtime.onListenerEvent(listenerId, (event) => {
-          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+          if (event.type !== CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) return;
+          runtime.onConnectionEvent(event.connectionId, (connectionEvent) => {
+            if (connectionEvent.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) serverBConnected = true;
+          });
+          resolve();
         });
       });
       const clientB = runtime.connectionOpen("127.0.0.1", boundPort);
@@ -239,17 +252,12 @@ test(
           if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) resolve();
         });
       });
-      const serverBId = await acceptedB;
-      let serverBConnected = false;
-      runtime.onConnectionEvent(serverBId, (event) => {
-        if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) serverBConnected = true;
-      });
+      await serverBAccepted;
       await clientBConnected;
       assert.ok(serverBConnected, "connection B's handler must still run after A's onFault threw");
 
       runtime.connectionShutdown(clientA, 0n);
       runtime.connectionShutdown(clientB, 0n);
-      runtime.connectionShutdown(serverBId, 0n);
       runtime.listenerClose(listenerId);
     } finally {
       await runtime.release();

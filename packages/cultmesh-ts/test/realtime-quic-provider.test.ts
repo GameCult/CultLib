@@ -661,8 +661,12 @@ test("fix 3: an IPv6 bind advertises a bracketed literal that round-trips throug
       provider.advertisedEndpoint,
       /^cultmesh-state\+quic:\/\/\[::1\]:\d+\?cert-sha256=[0-9A-F]{64}$/,
     );
+    // `URL`'s own `hostname` keeps the brackets for an IPv6 literal (unlike
+    // the unbracketed form `formatEndpointHost` accepted as input); the
+    // round trip's job is proving the endpoint parses at all, not stripping
+    // brackets the WHATWG URL parser itself never strips.
     const parsed = parseQuicRealtimeEndpoint(provider.advertisedEndpoint);
-    assert.equal(parsed.host, "::1");
+    assert.equal(parsed.host, "[::1]");
   } finally {
     provider.dispose();
   }

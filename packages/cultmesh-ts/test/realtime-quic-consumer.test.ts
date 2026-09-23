@@ -1034,17 +1034,29 @@ test("P8: a reliable send still queued behind reliableSendTail rejects instead o
     };
     const connector = new CultMeshQuicRealtimeConnector();
     const transport = await connector.connect(candidate, target);
-    // `sendFrame` chains onto `reliableSendTail`, which resolves as a
-    // microtask; calling `dispose()` synchronously right after, in the same
-    // turn, guarantees `cleanup()` has already set `disposed = true` by the
-    // time that microtask runs `sendOnStream`. Without the `this.disposed`
-    // guard `sendOnStream` registers (P8's target), this send would sit in
-    // `pendingSends` forever: `cleanup()`'s reject sweep already ran once
-    // before this send was ever registered, and no later native event can
-    // reach it either, since `offConnectionEvent` already ran too.
-    const send = transport.sendFrame(testFrame({ delivery: "reliable-ordered" }));
-    transport.dispose();
-    await assert.rejects(send, /disposed/i);
+    try {
+      // Prime the reliable outbound stream and let it fully settle, so its
+      // id is already cached: a second reliable send then chains straight
+      // onto `sendOnStream` with no `streamOpen` call of its own in between
+      // (a `streamOpen` against an already-shut-down connection fails with
+      // its own native error, which would mask the guard this test targets).
+      await transport.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: 1n }));
+
+      // `sendFrame` chains onto `reliableSendTail`, which resolves as a
+      // microtask; calling `dispose()` synchronously right after, in the
+      // same turn, guarantees `cleanup()` has already set `disposed = true`
+      // by the time that microtask runs `sendOnStream`. Without the
+      // `this.disposed` guard `sendOnStream` registers (P8's target), this
+      // send would sit in `pendingSends` forever: `cleanup()`'s reject sweep
+      // already ran once before this send was ever registered, and no later
+      // native event can reach it either, since `offConnectionEvent` already
+      // ran too.
+      const send = transport.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: 2n }));
+      transport.dispose();
+      await assert.rejects(send, /disposed/i);
+    } finally {
+      transport.dispose();
+    }
   } finally {
     await listener.close();
   }
