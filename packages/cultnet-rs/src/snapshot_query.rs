@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord, RecordRef, Row, Selection};
+use crate::{CultNetDocumentRegistry, CultNetMessage, CultNetRawDocumentRecord, Row, Selection};
 
 /// Read-only backing surface for a CultNet snapshot server.
 ///
@@ -175,7 +175,7 @@ impl Row for RawSnapshotRow<'_> {
     fn number(&self, _index: &str) -> Option<String> {
         unreachable!("v0's lowered selection carries no fields; number is not read")
     }
-    fn references(&self) -> Vec<(String, RecordRef, Option<Vec<u8>>)> {
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
         unreachable!("v0's lowered selection carries no cites/cited; references is not read")
     }
 }

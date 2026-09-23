@@ -1016,10 +1016,17 @@ pub trait Row {
     /// This row's declared numeric value at `index`, as its exact canonical decimal (Q-J) - never
     /// `f64`. `None` when the row has no value, or the value is NaN/infinite.
     fn number(&self, index: &str) -> Option<String>;
-    /// Every declared reference edge this row carries: `(role, target, payload)`. A one-reference
-    /// yields one entry, a many-reference one per element, a dictionary reference one per key with
-    /// its value as the payload (D11).
-    fn references(&self) -> Vec<(String, RecordRef, Option<Vec<u8>>)>;
+    /// Every declared reference edge this row carries: `(role, target_record_key, payload)`. A
+    /// one-reference yields one entry, a many-reference one per element, a dictionary reference one
+    /// per key with its value as the payload (D11).
+    ///
+    /// R-AF: the target is a bare record key, not a `RecordRef` - a stored reference carries no
+    /// schema id on the wire (`GameCult.Caching.MessagePack.CultRecordRefFormatter<T>` serializes a
+    /// `CultRecordRef<T>` as only its key string; probed against real serialized bytes,
+    /// docs/cultnet-selection-cut.md, "R-AF"). `resolve_reference_target` turns this bare key into a
+    /// resolved row, by record key plus the declared leaf set (D9) - never by an exact (schema, key)
+    /// pair, which would assume a schema the edge never actually carries.
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)>;
 }
 
 impl<T: Row + ?Sized> Row for &T {
@@ -1041,7 +1048,7 @@ impl<T: Row + ?Sized> Row for &T {
     fn number(&self, index: &str) -> Option<String> {
         (**self).number(index)
     }
-    fn references(&self) -> Vec<(String, RecordRef, Option<Vec<u8>>)> {
+    fn references(&self) -> Vec<(String, String, Option<Vec<u8>>)> {
         (**self).references()
     }
 }
@@ -1468,12 +1475,16 @@ pub fn select<R: Row + Clone>(
 ) -> Result<Evaluation<R>, SelectionRefusal> {
     validate(selection, row_set)?;
 
-    // R-V: a row's identity is `(schemaId, recordKey)`, never the key alone - CultCache keys are
-    // unique per schema, so two schemas can share one record key and must not collide here.
-    let by_key: HashMap<(&str, &str), &R> = all_rows
-        .iter()
-        .map(|row| ((row.schema_id(), row.record_key()), row))
-        .collect();
+    // R-AF: keyed by record key alone, not `(schemaId, recordKey)` - a stored reference edge
+    // carries no schema id on the wire (see `Row::references`'s doc comment), so resolving "the
+    // row this edge names" must search every row sharing a key, not look one up by a pair the edge
+    // never actually supplies. Two schemas legitimately sharing one record key both live under
+    // that key's entry; `resolve_reference_target` is what picks the one inside the declared
+    // target.
+    let mut by_key: HashMap<&str, Vec<&R>> = HashMap::new();
+    for row in all_rows {
+        by_key.entry(row.record_key()).or_default().push(row);
+    }
 
     let mut candidates: Vec<&R> = all_rows
         .iter()
@@ -1730,53 +1741,83 @@ fn compare_position<R: Row>(row: &R, cursor: &Cursor) -> Ordering {
         .then_with(|| row.record_key().cmp(cursor.record_key.as_str()))
 }
 
-// D9: a reference's target set is every schema `RowSet::target_leaves` names for that role. A
-// stored edge naming a row whose schema is outside that set refuses the selection (S18).
-fn ensure_within_declared_target<R: Row>(
+// D9/R-AF: a reference's target set is every schema `RowSet::target_leaves` names for that role.
+// A stored edge names only a bare record key (see `Row::references`'s doc comment) - resolving
+// "the row this edge names" means searching every row sharing that key for the one whose schema
+// falls inside the declared set, not an exact (schema, key) lookup that assumes a schema the edge
+// never carries. Two schemas legitimately sharing one record key resolve to two different rows
+// depending on which reference declared which target. Folds D9's leaf-set check into resolution
+// itself (mirroring C#'s `TryResolveReferenceTarget`) rather than a second pass after the fact -
+// there is exactly one row-owner decision here, not two.
+//
+// R-T: every resolvable edge is checked against its declared target, not only the ones a
+// citation's own role/key filter happens to ask about - a corrupt edge must not hide behind an
+// unrelated filter (F15: the pre-fix evaluator skipped this check for every edge that did not
+// point at the requested key). `matches_citation`/`build_incoming_index` call this
+// unconditionally, before any role/key/schema filtering, for exactly that reason.
+fn resolve_reference_target<'a, R: Row>(
     row_set: &impl RowSet,
+    by_key: &HashMap<&str, Vec<&'a R>>,
     role: &str,
     from: &R,
-    to: &R,
-) -> Result<(), SelectionRefusal> {
+    record_key: &str,
+) -> Result<Option<&'a R>, SelectionRefusal> {
+    let Some(candidates) = by_key.get(record_key) else {
+        return Ok(None); // a dangling reference - no row at all exists at this key (not an error).
+    };
     let leaves = row_set.target_leaves(role);
-    if leaves.is_empty() || leaves.iter().any(|leaf| leaf == to.schema_id()) {
-        return Ok(());
+    for &candidate in candidates {
+        if leaves.iter().any(|leaf| leaf == candidate.schema_id()) {
+            return Ok(Some(candidate));
+        }
     }
+    // Every row sharing this record key falls outside the reference's declared target: refuse
+    // deterministically (by schema id, code-point order - Rust's byte-wise `str` ordering already
+    // matches `CultNetCodePointComparer` for well-formed UTF-8, R-C) rather than let `by_key`'s
+    // insertion order decide which of them the refusal names (both row orders give the same
+    // answer).
+    let outside = candidates
+        .iter()
+        .min_by(|a, b| a.schema_id().cmp(b.schema_id()))
+        .expect("by_key never stores an empty Vec - entry()/push() always leaves at least one");
     Err(SelectionRefusal::ReferenceOutsideTarget {
         from_schema_id: from.schema_id().to_string(),
         from_key: from.record_key().to_string(),
         role: role.to_string(),
-        to_schema_id: to.schema_id().to_string(),
-        to_key: to.record_key().to_string(),
+        to_schema_id: outside.schema_id().to_string(),
+        to_key: outside.record_key().to_string(),
     })
 }
 
 fn matches_citation<R: Row + Clone>(
     row_set: &impl RowSet,
-    by_key: &HashMap<(&str, &str), &R>,
+    by_key: &HashMap<&str, Vec<&R>>,
     citer: &R,
     citation: &Citation,
     edge_sink: &mut Vec<EdgeMatch<R>>,
 ) -> Result<bool, SelectionRefusal> {
     let mut found = false;
-    for (role, target, payload) in citer.references() {
-        // R-V: the edge's own declared target is resolved by (schemaId, recordKey), not the key
-        // alone, so a row of the wrong schema sharing this record key can never stand in for it.
-        let Some(resolved) = by_key.get(&(target.schema_id.as_str(), target.record_key.as_str()))
-        else {
-            continue;
-        };
-        // R-T: every resolvable edge is checked against its declared target, not only the ones
-        // the citation's own role/key filters happen to ask about - a corrupt edge must not hide
-        // behind an unrelated filter (F15: the pre-fix evaluator skipped this check for every
-        // edge that did not point at the requested key).
-        ensure_within_declared_target(row_set, &role, citer, *resolved)?;
+    for (role, target_key, payload) in citer.references() {
+        // R-T/R-W parity fix (found landing R-AF): the citation's own role filter is checked
+        // *before* resolving the edge, mirroring C#'s ReferenceMembers(descriptor, citation.Role) -
+        // which narrows to that role's declared members before any of R-W's per-edge target check
+        // ever runs (CultNetSelectionEvaluator.cs:451-458, MatchesCitation's own foreach). This
+        // module used to resolve every edge unconditionally regardless of the requested role, which
+        // is a stronger and different guarantee than the reference ever gives: C#'s own R-T(F15)
+        // test (Evaluator_CitesRefusesAnOutOfTargetEdgeEvenWhenTheQueriedKeyMatchesNeitherEdge)
+        // queries the *same* role/member that carries the corrupt edge, never an unrelated one - R-W
+        // still checks every edge of the *requested* role unconditionally (untouched below), just
+        // not every edge the row happens to carry under other roles when a role was asked for.
         if let Some(wanted_role) = &citation.role
             && *wanted_role != role
         {
             continue;
         }
-        if target.record_key != citation.target.record_key {
+        let Some(resolved) = resolve_reference_target(row_set, by_key, &role, citer, &target_key)?
+        else {
+            continue;
+        };
+        if target_key != citation.target.record_key {
             continue;
         }
         // R-E: the target's schema id is matched through the one alias rule, not exact equality.
@@ -1789,7 +1830,7 @@ fn matches_citation<R: Row + Clone>(
         edge_sink.push(EdgeMatch {
             from: citer.clone(),
             role,
-            to: (*resolved).clone(),
+            to: resolved.clone(),
             payload,
             anchor: EdgeAnchor::Citer,
         });
@@ -1804,28 +1845,25 @@ fn matches_citation<R: Row + Clone>(
 fn build_incoming_index<R: Row + Clone>(
     row_set: &impl RowSet,
     all_rows: &[R],
-    by_key: &HashMap<(&str, &str), &R>,
+    by_key: &HashMap<&str, Vec<&R>>,
     role: &str,
     edge_sink: &mut Vec<EdgeMatch<R>>,
 ) -> Result<HashSet<(String, String)>, SelectionRefusal> {
     let mut incoming = HashSet::new();
     for citer in all_rows {
-        for (edge_role, target, payload) in citer.references() {
+        for (edge_role, target_key, payload) in citer.references() {
             if edge_role != role {
                 continue;
             }
-            // R-V: resolved by (schemaId, recordKey) - see the matching comment in
-            // `matches_citation`.
-            let Some(resolved) = by_key.get(&(target.schema_id.as_str(), target.record_key.as_str()))
+            let Some(resolved) = resolve_reference_target(row_set, by_key, &edge_role, citer, &target_key)?
             else {
                 continue;
             };
-            ensure_within_declared_target(row_set, &edge_role, citer, *resolved)?;
             incoming.insert((resolved.schema_id().to_string(), resolved.record_key().to_string()));
             edge_sink.push(EdgeMatch {
                 from: citer.clone(),
                 role: edge_role,
-                to: (*resolved).clone(),
+                to: resolved.clone(),
                 payload,
                 anchor: EdgeAnchor::Citee,
             });
@@ -2043,11 +2081,17 @@ fn read_length_prefixed_fields(bytes: &[u8], count: usize) -> Option<Vec<String>
         let colon = bytes[pos..].iter().position(|&b| b == b':')?;
         let len: usize = std::str::from_utf8(&bytes[pos..pos + colon]).ok()?.parse().ok()?;
         pos += colon + 1;
-        if pos + len > bytes.len() {
+        // R-AG: checked arithmetic - an attacker-supplied prefix near usize::MAX makes `pos + len`
+        // overflow. In a release build that wraps silently instead of panicking on the add itself,
+        // but the wrapped (small) sum then passes this guard and `&bytes[pos..pos + len]` below
+        // panics on the out-of-bounds slice anyway; `checked_add` catches both paths the same way
+        // every other malformed shape here already returns `None` instead of unwinding.
+        let end = pos.checked_add(len)?;
+        if end > bytes.len() {
             return None;
         }
-        fields.push(std::str::from_utf8(&bytes[pos..pos + len]).ok()?.to_string());
-        pos += len;
+        fields.push(std::str::from_utf8(&bytes[pos..end]).ok()?.to_string());
+        pos = end;
     }
     if pos != bytes.len() {
         return None;
@@ -2109,5 +2153,70 @@ mod cursor_tests {
         let genuine = encode(1, 5, "schema-a", "k1", &genuine_digest);
         let parsed = Cursor::parse(&genuine).expect("well-formed body");
         assert!(parsed.verify_digest(&selection, &key));
+    }
+
+    // R-AG: a length-prefixed field with a hostile prefix, first 4 fields well-formed so
+    // `read_length_prefixed_fields` reaches the hostile one mid-loop rather than failing earlier
+    // for an unrelated reason.
+    fn cursor_with_hostile_last_field(hostile_field: &str) -> String {
+        let mut body = String::new();
+        write_length_prefixed(&mut body, "1");
+        write_length_prefixed(&mut body, "5");
+        write_length_prefixed(&mut body, "schema-a");
+        write_length_prefixed(&mut body, "k1");
+        body.push_str(hostile_field);
+        URL_SAFE_NO_PAD.encode(body.as_bytes())
+    }
+
+    // R-AG: Rust's own proven overflow (`selection.rs`, before this cut) - a length prefix of
+    // `usize::MAX` makes `pos + len` overflow; `checked_add` must refuse typed, never panic.
+    #[test]
+    fn hostile_length_prefix_near_usize_max_refuses_typed_not_panic() {
+        let cursor = cursor_with_hostile_last_field("18446744073709551615:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: the mirror-image proven overflow, C#'s (`CultNetSelectionEvaluator.cs`,
+    // `ReadLengthPrefixedFields`, before this cut) - a length prefix of `int.MaxValue`
+    // (2147483647) overflowed C#'s `int` guard. Rust's `usize` is wider so this magnitude was
+    // never Rust's own hole, but "each runtime holding exactly the hole the other closed" means
+    // neither side's tests are evidence about the other - fed here too.
+    #[test]
+    fn hostile_length_prefix_near_i32_max_the_csharp_overflow_refuses_typed_here_too() {
+        let cursor = cursor_with_hostile_last_field("2147483647:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: a length prefix with more digits than any integer type holds - `.parse::<usize>()`
+    // itself fails, a different failure path than the checked-add overflow above, and must also
+    // refuse typed rather than panic.
+    #[test]
+    fn hostile_length_prefix_wider_than_any_integer_type_refuses_typed() {
+        let cursor = cursor_with_hostile_last_field("999999999999999999999999999999:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
+    }
+
+    // R-AG: a negative-looking length prefix - `usize::parse` refuses the leading `-` outright,
+    // a third failure path (neither overflow nor digit-count) that must also refuse typed.
+    #[test]
+    fn hostile_negative_length_prefix_refuses_typed() {
+        let cursor = cursor_with_hostile_last_field("-1:x");
+        let result = std::panic::catch_unwind(|| Cursor::parse(&cursor));
+        match result {
+            Ok(Err(SelectionRefusal::CursorInvalid { .. })) => {}
+            other => panic!("expected a typed CursorInvalid refusal, not a panic or acceptance: {other:?}"),
+        }
     }
 }
