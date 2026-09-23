@@ -748,14 +748,20 @@ test("fix 1: a throwing onDisposed handler cannot crash the pump when a malforme
       secondHandlerRan = true;
     });
 
-    const connectionIdA = await acceptedA;
-    // Random bytes on a reliable stream: not a valid encoded frame, so
-    // decodeRealtimeFrame throws inside onStreamFrame, which native's
-    // dispatch loop (fix 1's native half) catches and faults only this
-    // connection.
-    listener.sendRaw(connectionIdA, new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]), CULTMESH_QUIC_STREAM_RELIABLE);
-    await assert.rejects(transportA.receiveFrame());
-    assert.equal(secondHandlerRan, true, "a throwing handler must not stop the next onDisposed handler from running");
+    try {
+      const connectionIdA = await acceptedA;
+      // Random bytes on a reliable stream: not a valid encoded frame, so
+      // decodeRealtimeFrame throws inside onStreamFrame, which native's
+      // dispatch loop (fix 1's native half) catches and faults only this
+      // connection. Bounded: if the fault path regresses and never faults
+      // this connection, receiveFrame() would otherwise wait forever for a
+      // frame that will not arrive.
+      listener.sendRaw(connectionIdA, new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]), CULTMESH_QUIC_STREAM_RELIABLE);
+      await assert.rejects(receiveFrameOrTimeout(transportA));
+      assert.equal(secondHandlerRan, true, "a throwing handler must not stop the next onDisposed handler from running");
+    } finally {
+      transportA.dispose();
+    }
 
     // The process (and this test file's pump) survives, and a second,
     // independent connection through the same runtime still works.
@@ -792,27 +798,33 @@ test("fix 1: a throwing onDisposed handler on a peer shutdown still releases the
     const connector = new CultMeshQuicRealtimeConnector();
     const accepted = listener.acceptOnce();
     const transport = await connector.connect(candidate, target);
-    const connectionId = await accepted;
+    try {
+      const connectionId = await accepted;
 
-    let secondHandlerRan = false;
-    transport.onDisposed?.(() => {
-      throw new Error("first onDisposed handler throws on purpose");
-    });
-    transport.onDisposed?.(() => {
-      secondHandlerRan = true;
-    });
+      let secondHandlerRan = false;
+      transport.onDisposed?.(() => {
+        throw new Error("first onDisposed handler throws on purpose");
+      });
+      transport.onDisposed?.(() => {
+        secondHandlerRan = true;
+      });
 
-    const before = CultMeshQuicNativeRuntime.refCount;
-    listener.shutdownConnection(connectionId);
-    // Wait for cleanup() to run (driven by the pump's CONNECTION_SHUTDOWN
-    // dispatch), rather than asserting immediately.
-    await assert.rejects(transport.receiveFrame());
-    assert.equal(
-      CultMeshQuicNativeRuntime.refCount,
-      before - 1,
-      "the runtime reference must be released even though a handler threw",
-    );
-    assert.equal(secondHandlerRan, true, "every onDisposed handler must still run despite an earlier one throwing");
+      const before = CultMeshQuicNativeRuntime.refCount;
+      listener.shutdownConnection(connectionId);
+      // Wait for cleanup() to run (driven by the pump's CONNECTION_SHUTDOWN
+      // dispatch), rather than asserting immediately. Bounded: if the
+      // shutdown-cleanup path regresses (F3) and never rejects, this would
+      // otherwise hang instead of failing the assertion below it.
+      await assert.rejects(receiveFrameOrTimeout(transport));
+      assert.equal(
+        CultMeshQuicNativeRuntime.refCount,
+        before - 1,
+        "the runtime reference must be released even though a handler threw",
+      );
+      assert.equal(secondHandlerRan, true, "every onDisposed handler must still run despite an earlier one throwing");
+    } finally {
+      transport.dispose();
+    }
   } finally {
     await listener.close();
   }
@@ -896,17 +908,24 @@ test("fix 3: a peer-initiated shutdown rejects a pending receive and cleans up e
     const connector = new CultMeshQuicRealtimeConnector();
     const accepted = listener.acceptOnce();
     const transport = await connector.connect(candidate, target);
-    const connectionId = await accepted;
+    try {
+      const connectionId = await accepted;
 
-    const pendingReceive = transport.receiveFrame();
-    listener.shutdownConnection(connectionId);
-    await assert.rejects(pendingReceive, /closed by the remote peer/i);
+      // Bounded: this is F3's own mutant target (removing the
+      // CONNECTION_SHUTDOWN cleanup call), and a broken cleanup path means
+      // this receive never settles.
+      const pendingReceive = receiveFrameOrTimeout(transport);
+      listener.shutdownConnection(connectionId);
+      await assert.rejects(pendingReceive, /closed by the remote peer/i);
 
-    // Cleanup already ran: a further explicit dispose is a harmless no-op,
-    // and a fresh receive rejects immediately instead of hanging forever
-    // (the leak fix 3 exists for).
-    transport.dispose();
-    await assert.rejects(transport.receiveFrame(), /closed by the remote peer/i);
+      // Cleanup already ran: a further explicit dispose is a harmless no-op,
+      // and a fresh receive rejects immediately instead of hanging forever
+      // (the leak fix 3 exists for).
+      transport.dispose();
+      await assert.rejects(receiveFrameOrTimeout(transport), /closed by the remote peer/i);
+    } finally {
+      transport.dispose();
+    }
   } finally {
     await listener.close();
   }
