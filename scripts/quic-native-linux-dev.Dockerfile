@@ -28,11 +28,26 @@ FROM debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9
 # ca-certificates and dpkg fetch and unpack the pinned libmsquic deb;
 # util-linux carries setarch, needed to re-execute the TSan scenarios under
 # ADDR_NO_RANDOMIZE. The four libraries are MsQuic's own runtime dependencies,
-# which the bridge does not vendor.
+# which the bridge does not vendor. gnupg is needed only to fetch the NodeSource
+# key below.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates cmake curl dpkg g++ ninja-build util-linux \
+      bash ca-certificates cmake curl dpkg g++ ninja-build util-linux gnupg \
       libssl3t64 libnuma1 libxdp1 libnl-route-3-200 \
  && rm -rf /var/lib/apt/lists/*
+
+# Node 24 and the .NET 10 SDK: the Cut 4 QUIC realtime plane's own npm tests
+# and the C#-to-TS interop lane run in this image too, so it needs to build the
+# bridge and then exercise it from both runtimes without a second image.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+ && bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /usr/share/dotnet \
+ && rm /tmp/dotnet-install.sh \
+ && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+ENV DOTNET_ROOT=/usr/share/dotnet
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 
 WORKDIR /src
