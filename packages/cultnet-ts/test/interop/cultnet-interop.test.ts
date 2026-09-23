@@ -7,7 +7,7 @@ import { existsSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer } from "node:net";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -407,6 +407,10 @@ test("CultMesh QUIC realtime: C# managed provider and TypeScript consumer", asyn
   const servers: RunningServeProcess[] = [];
   t.after(async () => {
     for (const server of servers) {
+      // The C# quic-realtime-serve peer watches stdin for EOF as its own
+      // shutdown signal; end it explicitly before killing so a lingering pipe
+      // never masks whether the process exited on its own.
+      server.child.stdin?.end();
       server.child.kill();
     }
     await delay(processCleanupTimeoutMs);
@@ -423,6 +427,7 @@ test("CultMesh QUIC realtime: C# managed provider and TypeScript consumer", asyn
       "--interval-ms", "50",
     ],
     cwd: cultLibRoot,
+    stdin: "pipe",
   }));
   const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
   assert.equal(ready.status, "ready");
@@ -2541,11 +2546,21 @@ interface ServeCommand {
   args: string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Defaults to "ignore" (every existing serve mode's stdin is unused, so it
+   * is closed at spawn). "pipe" keeps stdin open until the caller ends it: the
+   * C# `quic-realtime-serve` mode watches stdin for EOF as its own shutdown
+   * signal (`WatchStdinCloseAsync`, `Program.cs:1261-1269`), so spawning it
+   * with "ignore" hands it an already-closed stdin and it tears down before
+   * sending anything. Only that mode should ask for "pipe"; changing the
+   * default would affect every other serve process spawned here.
+   */
+  stdin?: "ignore" | "pipe";
 }
 
 interface RunningServeProcess {
   name: string;
-  child: ChildProcessByStdio<null, Readable, Readable>;
+  child: ChildProcessByStdio<Writable | null, Readable, Readable>;
   ready: Promise<unknown>;
   stderr: string[];
 }
@@ -2554,7 +2569,7 @@ async function spawnServeProcess(name: string, command: ServeCommand): Promise<R
   const child = spawn(command.command, command.args, {
     cwd: command.cwd,
     env: { ...process.env, ...command.env },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [command.stdin ?? "ignore", "pipe", "pipe"],
   });
   const stderr: string[] = [];
   let stdoutBuffer = "";
