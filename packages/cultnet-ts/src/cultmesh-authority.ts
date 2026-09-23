@@ -6,7 +6,7 @@
 // through the same functions; the C# reference is
 // `src/GameCult.Mesh/CultMeshAuthorityProof.cs`.
 
-import type { CultMeshSessionOpenMessage } from "./contracts";
+import type { CultMeshRouteCertificateMessage, CultMeshSessionOpenMessage } from "./contracts";
 
 export interface CultMeshAuthorityIdentity {
   verseId: string;
@@ -34,6 +34,30 @@ export interface CultMeshAuthorityRouteCertificate {
   issuedAtUnixMilliseconds: number;
   expiresAtUnixMilliseconds: number;
   signature: string;
+}
+
+/**
+ * Maps an advertised route's wire-shaped certificate to the view
+ * `verifyAuthorityRoute` and the transports consume. Shared by the QUIC
+ * realtime session manager (`cultmesh-ts`) and the browser WebSocket client
+ * (`cultmesh-browser`), which advertise the same `CultMeshAuthorityRouteMessage`
+ * certificate shape and were computing this mapping independently.
+ */
+export function routeCertificateView(
+  certificate: CultMeshRouteCertificateMessage | undefined,
+): CultMeshAuthorityRouteCertificate | undefined {
+  if (!certificate) return undefined;
+  return {
+    providerKey: {
+      keyId: certificate.providerKeyId,
+      x: certificate.providerPublicKeyX,
+      y: certificate.providerPublicKeyY,
+    },
+    odinKeyId: certificate.odinKeyId,
+    issuedAtUnixMilliseconds: certificate.issuedAtUnixMilliseconds,
+    expiresAtUnixMilliseconds: certificate.expiresAtUnixMilliseconds,
+    signature: certificate.signature,
+  };
 }
 
 export type CultMeshAuthorityTrustMode = "authenticated-remote" | "local-development";
