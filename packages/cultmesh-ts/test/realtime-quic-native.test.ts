@@ -20,6 +20,7 @@ import {
   CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION,
   CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED,
   CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED,
+  CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN,
   CULTMESH_QUIC_EVENT_STREAM_STARTED,
   CULTMESH_QUIC_EVENT_STREAM_FRAME,
   CULTMESH_QUIC_EVENT_STREAM_SEND_COMPLETE,
@@ -120,6 +121,59 @@ test("a full loopback connection delivers one raw frame end to end", async (t) =
 
     runtime.connectionShutdown(clientConnectionId, 0n);
     runtime.connectionShutdown(serverConnectionId, 0n);
+    runtime.listenerClose(listenerId);
+  } finally {
+    await runtime.release();
+  }
+});
+
+test("F7: a 64-bit event code round-trips exactly through the struct decode", async (t) => {
+  if (!nativeBridgeAvailable()) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  const runtime = await CultMeshQuicNativeRuntime.open();
+  try {
+    const pkcs12 = readFileSync(FIXTURE_P12);
+    const { listenerId, boundPort } = runtime.listenerOpen("127.0.0.1", 0, pkcs12, "");
+
+    // `code` (a `uint64_t`, the same field `CULTMESH_QUIC_SEND_CANCELED` is
+    // compared against on the stream-send path) is exercised here through
+    // CONNECTION_SHUTDOWN instead, whose code is an application-chosen value
+    // this test fully controls: two values above 2^53 (where koffi's decode
+    // stops being a plain safe-integer `number`) prove the whole
+    // encode-native-decode-coerce path is exact, deterministically, with no
+    // dependency on MsQuic's own send-completion timing.
+    for (const code of [(1n << 53n) + 1n, (1n << 62n) - 1n]) {
+      const accepted = waitFor<bigint>((resolve) => {
+        runtime.onListenerEvent(listenerId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+        });
+      });
+      const clientConnectionId = runtime.connectionOpen("127.0.0.1", boundPort);
+      const clientConnected = waitFor<void>((resolve) => {
+        runtime.onConnectionEvent(clientConnectionId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED) {
+            runtime.connectionCertificateComplete(clientConnectionId, true);
+            return;
+          }
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) resolve();
+        });
+      });
+      const serverConnectionId = await accepted;
+      await clientConnected;
+
+      const seenOnClient = waitFor<bigint>((resolve) => {
+        runtime.onConnectionEvent(clientConnectionId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN) resolve(event.code);
+        });
+      });
+      runtime.connectionShutdown(serverConnectionId, code);
+      const seen = await seenOnClient;
+      assert.equal(typeof seen, "bigint", "a decoded event code must always be bigint, never number");
+      assert.equal(seen, code, `shutdown code ${code} must round-trip exactly through the struct decode`);
+    }
+
     runtime.listenerClose(listenerId);
   } finally {
     await runtime.release();

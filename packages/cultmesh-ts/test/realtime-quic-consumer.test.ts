@@ -33,6 +33,7 @@ import {
   CultMeshQuicRealtimeSessionManager,
   CultMeshStaticRealtimeLookupSource,
   CULTMESH_REALTIME_STATE_PROTOCOL_ID,
+  type CultMeshQuicRealtimeTransport,
   type CultMeshRealtimeCandidate,
   type CultMeshRealtimeTarget,
   type CultMeshRealtimeTransport,
@@ -634,6 +635,109 @@ test("fix 1 / M4: a stream-kind/delivery mismatch faults only that connection; t
   }
 });
 
+test("M4b: a latest-only stream carrying a reliable-ordered frame faults only that connection", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const endpoint = (): string => `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`;
+
+    // The mirror image of the M4 test above: a latest-only stream carrying
+    // a frame whose own delivery byte says reliable-ordered.
+    const connectorA = new CultMeshQuicRealtimeConnector();
+    const acceptedA = listener.acceptOnce();
+    const transportA = await connectorA.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    const connectionIdA = await acceptedA;
+    listener.sendFrame(connectionIdA, testFrame({ delivery: "reliable-ordered" }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+    await assert.rejects(transportA.receiveFrame(), /incompatible delivery semantics/i);
+
+    // A second, independent connection still works.
+    const connectorB = new CultMeshQuicRealtimeConnector();
+    const acceptedB = listener.acceptOnce();
+    const transportB = await connectorB.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    try {
+      const connectionIdB = await acceptedB;
+      listener.sendFrame(connectionIdB, testFrame(), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const received = await transportB.receiveFrame();
+      assert.equal(received.bodyId, "body:aetheria:entities");
+    } finally {
+      transportB.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+test("M10: an equal generation delivered after the first was already consumed is dropped, not redelivered", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const accepted = listener.acceptOnce();
+    const transport = await connector.connect(candidate, target);
+    try {
+      const connectionId = await accepted;
+
+      // Send one frame and consume it, so the coalescer no longer holds
+      // anything pending for this key: the generation filter's own record
+      // (`latestGenerations`) is the only thing left that could still know
+      // this generation was already seen. Sending a frame back-to-back with
+      // an unconsumed duplicate would mask a broken filter behind the
+      // coalescer overwriting the pending value with an identical one; this
+      // sequencing is what M10 needs to be observable at all (Soul's note).
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 3n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const first = await transport.receiveFrame();
+      assert.equal(first.sequence, 3n);
+
+      // The exact same generation, sent again after consumption: the
+      // filter must drop it outright rather than deliver it as new.
+      listener.sendFrame(connectionId, testFrame({ producerEpoch: 1n, sequence: 3n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const timeout = new AbortController();
+      const timer = setTimeout(() => timeout.abort(), 300);
+      await assert.rejects(
+        transport.receiveFrame(timeout.signal),
+        "an equal generation already consumed must not be redelivered",
+      );
+      clearTimeout(timer);
+    } finally {
+      transport.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+// F7 ("a canceled send must not resolve as success") is covered in
+// realtime-quic-native.test.ts, at the native binding layer, not here.
+// A consumer-level scenario was attempted first: prime the reliable stream,
+// start a second send, and shut the connection down from the peer mid-flight.
+// It proved unreliable on this host regardless of payload size or added
+// delay before the shutdown call — MsQuic here appears to accept and locally
+// complete a `StreamSend` (marking it as a plain, non-canceled
+// SEND_COMPLETE) faster than any JS-observable window can reliably land a
+// shutdown ahead of it, and a delay long enough to guarantee the shutdown
+// wins just lets the send finish first instead. This is recorded as not yet
+// reached at the consumer layer, not as unreachable: the native-layer test
+// asserts the exact field (`code`, decoded through the same struct decode
+// F7 mutates) that this scenario would also exercise, so the fix itself is
+// defended; only the end-to-end SEND_CANCELED proof through the consumer's
+// own `sendFrame()` promise is the open gap.
+
 test("fix 3: a peer-initiated shutdown rejects a pending receive and cleans up exactly once", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const listener = await RawQuicListener.open();
@@ -732,9 +836,17 @@ test("fix 6: a stream shutdown prunes its entry so streamKinds does not grow wit
       // The server-side stream the frame arrived on is a fresh latest-only
       // stream the listener opened and finished with `fin: true`; the native
       // bridge emits its own shutdown event once MsQuic completes teardown.
-      // Reaching a second, unrelated frame afterwards is proof the consumer
-      // kept working, which is what this fix protects: it does not assert
-      // the internal map directly, since nothing here exposes it.
+      // Wait for that STREAM_SHUTDOWN to actually land, then assert the
+      // internal map was pruned, not just that a second frame still works
+      // (F6kinds's removed prune line has no behavioural symptom until a
+      // stream id is reused, which QUIC never does within one connection).
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(
+        (transport as CultMeshQuicRealtimeTransport).trackedStreamCount,
+        0,
+        "streamKinds must be pruned once the stream shuts down, not accumulate one entry per stream",
+      );
+
       listener.sendFrame(connectionId, testFrame({ sequence: 2n }), CULTMESH_QUIC_STREAM_LATEST_ONLY);
       const second = await transport.receiveFrame();
       assert.equal(second.sequence, 2n);
