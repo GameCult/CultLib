@@ -442,6 +442,33 @@ pub mod canonical_number {
             assert_eq!(super::render_f64(-0.0_f64).unwrap(), "0");
         }
 
+        // R-AI: cargo-mutants found `render_f32`'s subnormal-vs-normal branch survivable
+        // (`biased_exponent == 0` flipped to `!=`, and the subnormal exponent's `-149` losing its
+        // sign) even with the round-trip tests above - a round trip through a correctly-rounded
+        // parser can still agree with a wrong bit-extraction if the wrong value happens to parse
+        // back to the same bits it was carelessly derived from, and the MAX/subnormal round-trip
+        // tests above never assert on digit count or magnitude, only on parsing back correctly.
+        // This pins the *shape* of the subnormal case directly: 2^-149 is a fraction with 148
+        // leading zeros after the point, not an astronomical integer (what a stray `+149` would
+        // render) and not a value one exponent off (what taking the normal branch for a
+        // biased_exponent of 0 would render).
+        #[test]
+        fn render_f32_subnormal_uses_the_subnormal_branch_and_its_negative_exponent() {
+            let rendered = super::render_f32(f32::from_bits(1)).unwrap();
+            assert!(rendered.starts_with("0.00000"), "got {rendered:?}");
+            assert_eq!(rendered.len(), 151, "2^-149 is \"0.\" plus 149 fraction digits, got {rendered:?}");
+        }
+
+        // R-AI: the normal-path implicit leading bit (`fraction | (1 << 23)`) is what distinguishes
+        // 1.0 from 0.0 in the mantissa - their fraction bits are identical (all zero); only the
+        // implicit bit the `|` folds in carries the value. Drop it (mutate `|` away, or take the
+        // subnormal branch instead) and both render as "0".
+        #[test]
+        fn render_f32_normal_path_folds_in_the_implicit_leading_bit() {
+            assert_eq!(super::render_f32(1.0_f32).unwrap(), "1");
+            assert_eq!(super::render_f32(2.0_f32).unwrap(), "2");
+        }
+
         // R-AI/R-D: `is_canonical` is the Q-J door's grammar
         // (`^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, minus the literal "-0") and was, until this test,
         // never called directly by any test in this crate - only reachable through
