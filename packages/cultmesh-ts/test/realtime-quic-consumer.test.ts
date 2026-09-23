@@ -674,6 +674,100 @@ test("M4b: a latest-only stream carrying a reliable-ordered frame faults only th
   }
 });
 
+test("fix 1: a throwing onDisposed handler cannot crash the pump when a malformed frame faults a connection", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const endpoint = (): string => `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`;
+
+    const connectorA = new CultMeshQuicRealtimeConnector();
+    const acceptedA = listener.acceptOnce();
+    const transportA = await connectorA.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    // A throwing onDisposed handler, registered before the fault: fix 1
+    // must run it inside its own try/catch so it cannot escape cleanup(),
+    // and must have already released the runtime reference regardless.
+    let secondHandlerRan = false;
+    transportA.onDisposed?.(() => {
+      throw new Error("first onDisposed handler throws on purpose");
+    });
+    transportA.onDisposed?.(() => {
+      secondHandlerRan = true;
+    });
+
+    const connectionIdA = await acceptedA;
+    // Random bytes on a reliable stream: not a valid encoded frame, so
+    // decodeRealtimeFrame throws inside onStreamFrame, which native's
+    // dispatch loop (fix 1's native half) catches and faults only this
+    // connection.
+    listener.sendRaw(connectionIdA, new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]), CULTMESH_QUIC_STREAM_RELIABLE);
+    await assert.rejects(transportA.receiveFrame());
+    assert.equal(secondHandlerRan, true, "a throwing handler must not stop the next onDisposed handler from running");
+
+    // The process (and this test file's pump) survives, and a second,
+    // independent connection through the same runtime still works.
+    const connectorB = new CultMeshQuicRealtimeConnector();
+    const acceptedB = listener.acceptOnce();
+    const transportB = await connectorB.connect(
+      { endpoint: endpoint(), authorityRuntimeId: target.authorityRuntimeId, priority: 0, generation: "gen-1" },
+      target,
+    );
+    try {
+      const connectionIdB = await acceptedB;
+      listener.sendFrame(connectionIdB, testFrame(), CULTMESH_QUIC_STREAM_LATEST_ONLY);
+      const received = await transportB.receiveFrame();
+      assert.equal(received.bodyId, "body:aetheria:entities");
+    } finally {
+      transportB.dispose();
+    }
+  } finally {
+    await listener.close();
+  }
+});
+
+test("fix 1: a throwing onDisposed handler on a peer shutdown still releases the runtime and runs every handler", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const accepted = listener.acceptOnce();
+    const transport = await connector.connect(candidate, target);
+    const connectionId = await accepted;
+
+    let secondHandlerRan = false;
+    transport.onDisposed?.(() => {
+      throw new Error("first onDisposed handler throws on purpose");
+    });
+    transport.onDisposed?.(() => {
+      secondHandlerRan = true;
+    });
+
+    const before = CultMeshQuicNativeRuntime.refCount;
+    listener.shutdownConnection(connectionId);
+    // Wait for cleanup() to run (driven by the pump's CONNECTION_SHUTDOWN
+    // dispatch), rather than asserting immediately.
+    await assert.rejects(transport.receiveFrame());
+    assert.equal(
+      CultMeshQuicNativeRuntime.refCount,
+      before - 1,
+      "the runtime reference must be released even though a handler threw",
+    );
+    assert.equal(secondHandlerRan, true, "every onDisposed handler must still run despite an earlier one throwing");
+  } finally {
+    await listener.close();
+  }
+});
+
 test("M10: an equal generation delivered after the first was already consumed is dropped, not redelivered", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const listener = await RawQuicListener.open();
