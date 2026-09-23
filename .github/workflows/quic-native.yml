@@ -1,0 +1,198 @@
+name: CultMesh QUIC native
+
+# Builds and, on a tag, releases the CultMesh QUIC native binaries that
+# packages/cultmesh-ts/native/{win32-x64,linux-x64} commits (cut 6,
+# docs/typescript-quic-realtime-cut.md:2108-2159). Under Q8 Option 1 the
+# operator downloads a tagged run's Release assets, verifies every digest
+# against this workflow's own logs and SHA256SUMS, and commits the bytes;
+# nothing here writes to the tree. Under Q6 A, the Linux artifact comes only
+# from the pinned debian:13 container below, never from a local or Yggdrasil
+# build.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "cultmesh-quic-native-v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Push to main and pull_request run this job only: it proves the tree's
+  # committed bytes still match the manifest they shipped with. A tag push
+  # also runs it, alongside the two builds and the release.
+  verify-committed:
+    name: Verify committed binaries match SHA256SUMS
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: sha256sum -c SHA256SUMS
+        run: |
+          set -euo pipefail
+          if [ ! -f packages/cultmesh-ts/native/SHA256SUMS ]; then
+            echo "packages/cultmesh-ts/native/SHA256SUMS is missing" >&2
+            exit 1
+          fi
+          cd packages/cultmesh-ts/native
+          sha256sum -c SHA256SUMS
+
+  # workflow_dispatch and a cultmesh-quic-native-v* tag run the two builds.
+  # A dry (workflow_dispatch) run uploads artifacts and creates no release.
+  build-win32-x64:
+    name: Build win32-x64
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Build the native QUIC bridge
+        shell: pwsh
+        run: .\scripts\build-quic-native.ps1 -OutputDirectory artifacts\quic-native\win32-x64
+
+      - name: Print toolchain version and digests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $compilerCmake = Get-ChildItem -Recurse -LiteralPath "artifacts\quic-native-build\x64\Release" -Filter "CMakeCXXCompiler.cmake" |
+            Select-Object -First 1
+          if ($compilerCmake) {
+            Select-String -LiteralPath $compilerCmake.FullName -Pattern "CMAKE_CXX_COMPILER_VERSION" |
+              ForEach-Object { Write-Host $_.Line.Trim() }
+          }
+          Get-FileHash -Algorithm SHA256 artifacts\quic-native\win32-x64\gamecult_mesh_quic_native.dll
+          Get-FileHash -Algorithm SHA256 artifacts\quic-native\win32-x64\msquic.dll
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-native-win32-x64
+          path: artifacts/quic-native/win32-x64
+          if-no-files-found: error
+
+  build-linux-x64:
+    name: Build linux-x64
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+    runs-on: ubuntu-latest
+    # Q6 A: this pinned Debian 13 container is the only permitted Linux
+    # release builder. The digest is the pin; the `debian:13` tag is only a
+    # label. The artifact links against this image's glibc (2.41); a bare
+    # ubuntu-latest runner carries glibc 2.39, which is not the deploy host's
+    # OS (docs/typescript-quic-realtime-cut.md:2192-2197).
+    container:
+      image: debian:13@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1
+    timeout-minutes: 20
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build g++ curl ca-certificates dpkg
+
+      - name: Build the native QUIC bridge
+        run: ./scripts/build-quic-native.sh artifacts/quic-native/linux-x64
+
+      - name: Print toolchain version and digests
+        run: |
+          g++ --version
+          sha256sum artifacts/quic-native/linux-x64/libgamecult_mesh_quic_native.so
+          sha256sum artifacts/quic-native/linux-x64/libmsquic.so.2
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-native-linux-x64
+          path: artifacts/quic-native/linux-x64
+          if-no-files-found: error
+
+  # Only this job has write permission, and only a tag push runs it. It
+  # attaches a draft MANIFEST.txt: the fields both build jobs cannot know
+  # (host names, MSVC version, the pinned dependency sources) are left for
+  # the operator to fill in from this run's own logs before committing the
+  # binaries, per 11.5's manifest paragraph.
+  release:
+    name: Release native binaries
+    needs: [build-win32-x64, build-linux-x64]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out CultLib
+        uses: actions/checkout@v4
+
+      - name: Download win32-x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: quic-native-win32-x64
+          path: release/win32-x64
+
+      - name: Download linux-x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: quic-native-linux-x64
+          path: release/linux-x64
+
+      - name: Write SHA256SUMS and a draft MANIFEST.txt
+        run: |
+          set -euo pipefail
+          cd release
+          # Relative paths matching packages/cultmesh-ts/native/ exactly, so
+          # this file is the one the operator commits verbatim (11.5, 11.7).
+          sha256sum \
+            win32-x64/gamecult_mesh_quic_native.dll \
+            win32-x64/msquic.dll \
+            linux-x64/libgamecult_mesh_quic_native.so \
+            linux-x64/libmsquic.so.2 \
+            > SHA256SUMS
+          cat > MANIFEST.txt <<EOF
+          # Draft written by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.
+          # The operator fills the remaining fields from this run's job logs
+          # (build-win32-x64 and build-linux-x64 each print their toolchain
+          # version) before committing packages/cultmesh-ts/native/MANIFEST.txt.
+          msquic.version=2.5.9
+          msquic.windows.source=
+          msquic.linux.source=
+          bridge.commit=${GITHUB_SHA}
+          build.workflow_run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          build.release=${GITHUB_REF_NAME}
+          build.win32-x64.host=
+          build.linux-x64.host=
+          date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          tar -C win32-x64 -czf cultmesh-quic-native-win32-x64.tar.gz .
+          tar -C linux-x64 -czf cultmesh-quic-native-linux-x64.tar.gz .
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd release
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file MANIFEST.txt \
+            cultmesh-quic-native-win32-x64.tar.gz \
+            cultmesh-quic-native-linux-x64.tar.gz \
+            SHA256SUMS \
+            MANIFEST.txt
