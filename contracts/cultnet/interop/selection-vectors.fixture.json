@@ -1,6 +1,7 @@
 {
-  "//": "CultNet typed selection, Cut 1 fix batch (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch, R-E and the shared-fixture ruling, 2026-09-22). The one row set both the C# reference and cultnet-rs build their parity vectors from. schemaId is each schema's real SHA-256 content-hash id, exactly as GameCult.Caching.CultDocumentRegistry computes it for the fixture's C# document types (leaf_a=ParityLeafA, leaf_b=ParityLeafB, citer=ParityCiter, tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs) - CultCache.cs's Sha256(semanticFingerprint), which carries no '.vN' suffix of its own; the version is folded into the hash, never appended as text. Both writers read this file instead of building their own fixture rows.",
+  "//": "CultNet typed selection, Cut 1 fix batch (docs/cultnet-selection-cut.md, Self's rulings for the Cut 1 fix batch, R-E and the shared-fixture ruling, 2026-09-22). The one row set both the C# reference and cultnet-rs build their parity vectors from. schemaId is each schema's real SHA-256 content-hash id, exactly as GameCult.Caching.CultDocumentRegistry computes it for the fixture's C# document types (leaf_a=ParityLeafA, leaf_b=ParityLeafB, citer=ParityCiter, citer_narrow=ParityCiterNarrow, tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs) - CultCache.cs's Sha256(semanticFingerprint), which carries no '.vN' suffix of its own; the version is folded into the hash, never appended as text. Both writers read this file instead of building their own fixture rows.",
   "//aliases": "Two DIFFERENT alias forms, now deliberate rather than a cross-runtime defect (S-12, 2026-09-22: the Rust alias port made this so - see docs/cultnet-selection-cut.md, 'Self's ruling, 2026-09-22: the C# reference's alias rule is the rule'). Both runtimes resolve a schema alias the same one way: strip a trailing .vN and compare the remainder against the descriptor's declared SchemaName (CultNetSchemaAliasMatching.Matches(candidate, CultDocumentDescriptor), src/GameCult.Networking/CultNetDatabase.cs:74-87; cultnet_rs::selection::schema_alias::matches ports it name-for-name and deletes the hash-stripping overload it used to carry). nameAlias is <SchemaName>.v9 and resolves through both runtimes under that one rule. hashAlias is <schemaId>.v1 and is refused as unmatched by both - it is not a wire form either runtime's production call sites ever produce or accept, and it is kept in the fixture specifically to pin that neither runtime resolves it.",
+  "//references": "R-AF, 2026-09-23: a reference's `references[].targetKey` is the only thing a stored edge actually carries on the wire - GameCult.Caching.MessagePack.CultRecordRefFormatter<T> serializes a CultRecordRef<T> as a bare key string (probed: MessagePackSerializer.Serialize on a real Design field produced the single msgpack string 'a-eq', nothing else). This fixture used to also carry a `targetSchema` per reference; it was never anything but documentation - SelectionParityVectorTests.BuildDocument and cultnet-rs's build_row both read only targetKey to construct the edge - and it is removed rather than kept as a field the wire does not have. Resolving which row an edge names is by targetKey alone, filtered to the declared role's target leaves (D9); see citer_narrow below for the shared-key shape that rule is pinned against.",
   "schemas": {
     "leaf_a": {
       "schemaId": "sha256:ff35f3d9d6de3f1066b9369e73fe6c7648e88368d18efc2275c994730cd84cff",
@@ -27,6 +28,15 @@
       "roles": [
         { "name": "Design", "targets": ["leaf_a", "leaf_b"] }
       ]
+    },
+    "citer_narrow": {
+      "//": "R-AF: a citer whose declared reference target is one leaf only (leaf_a), so a record key shared by a leaf_a row and a leaf_b row has exactly one candidate inside the declared target and exactly one outside it - the shape neither runtime's parity vectors covered before this cut (zero duplicate record keys across the original ten rows).",
+      "schemaId": "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d",
+      "nameAlias": "citer_narrow.v9",
+      "hashAlias": "sha256:ee192f6526a8f8cdec7044551aa2c8e28c612426766bb270605023bc94e2614d.v1",
+      "roles": [
+        { "name": "narrow_ref", "targets": ["leaf_a"] }
+      ]
     }
   },
   "rows": [
@@ -40,7 +50,7 @@
       "schema": "citer",
       "key": "citer-1",
       "ordinal": 7,
-      "references": [ { "role": "Design", "targetSchema": "leaf_a", "targetKey": "a-eq" } ]
+      "references": [ { "role": "Design", "targetKey": "a-eq" } ]
     },
     {
       "//": "R-D: 2233759.25 is exactly representable as an f32 and sits on a round-to-even tie between two shortest-form spellings; its exact canonical decimal is 2233759.25 either way. kind=tie so no weapon/armor/shared case can sweep it up.",
@@ -48,11 +58,41 @@
     },
     {
       "//": "R-C: BMP private-use key (U+E000), same ordinal as the astral row below so the tiebreak - not the ordinal - decides order. kind=unicode, mass=0 so no unfiltered or mass>1 case reaches these.",
-      "schema": "leaf_a", "key": "-row", "ordinal": 9, "fields": { "kind": "unicode", "mass": "0" }
+      "schema": "leaf_a", "key": "-row", "ordinal": 9, "fields": { "kind": "unicode", "mass": "0" }
     },
     {
       "//": "R-C: astral key (U+1F602, encoded as a surrogate pair whose high half 0xD83D is less than 0xE000 - a UTF-16 code-unit compare sorts this first; code-point order sorts it after the BMP row above).",
       "schema": "leaf_a", "key": "😂-row", "ordinal": 9, "fields": { "kind": "unicode", "mass": "0" }
+    },
+    {
+      "//": "R-AF shape 1: the only row at this key is outside citer_narrow's declared target (leaf_a only) - resolving the edge below must refuse reference_outside_target in both runtimes, not silently accept an empty page. kind=narrow-fixture (not \"shared\") so this row never sweeps into shared_index_value_three_rows, which pins an exact count of 3.",
+      "schema": "leaf_b", "key": "narrow-only", "ordinal": 10, "fields": { "kind": "narrow-fixture", "mass": "1" }
+    },
+    {
+      "//": "R-AF shape 2: two rows share this key, one inside citer_narrow's declared target and one outside it - resolving the edge below must accept, deterministically picking the leaf_a row, in both runtimes.",
+      "schema": "leaf_a", "key": "dup-key", "ordinal": 11, "fields": { "kind": "narrow-fixture", "mass": "1" }
+    },
+    {
+      "schema": "leaf_b", "key": "dup-key", "ordinal": 12, "fields": { "kind": "narrow-fixture", "mass": "1" }
+    },
+    {
+      "schema": "citer_narrow",
+      "key": "narrow-citer-refused",
+      "ordinal": 13,
+      "references": [ { "role": "narrow_ref", "targetKey": "narrow-only" } ]
+    },
+    {
+      "schema": "citer_narrow",
+      "key": "narrow-citer-accepted",
+      "ordinal": 14,
+      "references": [ { "role": "narrow_ref", "targetKey": "dup-key" } ]
+    },
+    {
+      "//": "R-AJ: a tied ordinal across two DIFFERENT schemas (leaf_a and leaf_b), not two rows of the same leaf like the astral/BMP pair above - the shape the row order's schemaId tiebreak needs and the original ten rows never had. Keys are anti-correlated with the real schema ids on purpose: leaf_b's real id sorts before leaf_a's (sha256:b1f2... < sha256:ff35...), so leaf_b gets the alphabetically-*later* key (\"zz-tie-schema\") and leaf_a gets the *earlier* one (\"aa-tie-schema\") - a schemaId-first order and a recordKey-first order disagree here on purpose, so only the correct composition produces leaf_b's row first.",
+      "schema": "leaf_b", "key": "zz-tie-schema", "ordinal": 15, "fields": { "kind": "tie-schema", "mass": "1" }
+    },
+    {
+      "schema": "leaf_a", "key": "aa-tie-schema", "ordinal": 15, "fields": { "kind": "tie-schema", "mass": "1" }
     }
   ]
 }
