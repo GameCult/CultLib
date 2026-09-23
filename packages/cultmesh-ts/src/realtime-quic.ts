@@ -768,6 +768,10 @@ export class CultMeshQuicRealtimeProvider {
   private readonly handshakeTimeoutMs: number;
   private readonly peers = new Set<CultMeshQuicRealtimeTransport>();
   private readonly outboxes = new Map<CultMeshQuicRealtimeTransport, CultMeshQuicRealtimeProviderOutbox>();
+  /** The newest `latest-only` frame broadcast so far per `(channel, body)` key, seeded into
+   * every peer attached after that broadcast. Reliable-ordered frames are events, not state,
+   * and are never retained. */
+  private readonly retained = new Map<string, CultMeshRealtimeFrame>();
   private readonly readyFrames: CultMeshRealtimeFrame[] = [];
   private readonly receiveWaiters: PendingReceive[] = [];
   /**
@@ -844,6 +848,10 @@ export class CultMeshQuicRealtimeProvider {
       );
     }
     if (frame.delivery === "latest-only") {
+      const key = frame.channelId + "\u001f" + frame.bodyId;
+      const current = this.retained.get(key);
+      const candidate: LatestGeneration = { producerEpoch: frame.producerEpoch, sequence: frame.sequence };
+      if (!current || compareGeneration(candidate, current) > 0) this.retained.set(key, frame);
       for (const outbox of this.outboxes.values()) outbox.publish(frame);
       return;
     }
@@ -1020,8 +1028,10 @@ export class CultMeshQuicRealtimeProvider {
     // handshake is still in flight, the timer (checked against
     // `state.connected`) is still the thing that will evict it.
     if (state.connected) clearTimeout(handshakeTimer);
+    const outbox = new CultMeshQuicRealtimeProviderOutbox(transport, () => transport.dispose());
+    for (const retainedFrame of this.retained.values()) outbox.publish(retainedFrame);
+    this.outboxes.set(transport, outbox);
     this.peers.add(transport);
-    this.outboxes.set(transport, new CultMeshQuicRealtimeProviderOutbox(transport, () => transport.dispose()));
     void this.pumpReceivedFrom(transport);
   }
 }

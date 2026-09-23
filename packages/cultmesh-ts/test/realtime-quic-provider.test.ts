@@ -464,3 +464,80 @@ test(
     }
   },
 );
+
+test("a peer attaching after two latest-only broadcasts for one key receives exactly the newer frame", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    await provider.broadcast(testFrame({ sequence: 1n, payload: new Uint8Array([1]) }));
+    await provider.broadcast(testFrame({ sequence: 2n, payload: new Uint8Array([2]) }));
+
+    // Attach after both broadcasts have already resolved: nothing in this
+    // peer's outbox came from `broadcast()`'s own fan-out, only from the
+    // retained seed on attach.
+    const consumer = await dialProvider(provider);
+    try {
+      const seeded = await consumer.receiveFrame();
+      assert.equal(seeded.sequence, 2n, "a late joiner must be seeded with the newest retained generation");
+      assert.deepEqual(seeded.payload, new Uint8Array([2]));
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("retention keeps the newer generation when an older one broadcasts afterward", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    await provider.broadcast(testFrame({ sequence: 5n, payload: new Uint8Array([5]) }));
+    // An older generation broadcast after a newer one must not overwrite the
+    // retained frame: mutating the retention comparison to a plain
+    // last-write-wins assignment would regress this.
+    await provider.broadcast(testFrame({ sequence: 3n, payload: new Uint8Array([3]) }));
+
+    const consumer = await dialProvider(provider);
+    try {
+      const seeded = await consumer.receiveFrame();
+      assert.equal(seeded.sequence, 5n, "an older generation must not replace the retained newer one");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("a reliable-ordered frame is never retained and is not delivered to a late joiner", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const firstConsumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+      await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence: 9n }));
+      assert.deepEqual((await firstConsumer.receiveFrame()).sequence, 9n);
+    } finally {
+      firstConsumer.dispose();
+    }
+    await waitUntil(() => provider.connectionCount === 0);
+
+    // A second peer attaches after the reliable-ordered frame above and
+    // after a real latest-only frame, so the assertion below proves the
+    // reliable-ordered frame specifically was never retained, rather than
+    // merely proving the provider had nothing at all to seed.
+    await provider.broadcast(testFrame({ delivery: "latest-only", sequence: 1n, payload: new Uint8Array([1]) }));
+    const secondConsumer = await dialProvider(provider);
+    try {
+      const seeded = await secondConsumer.receiveFrame();
+      assert.equal(seeded.delivery, "latest-only");
+      assert.equal(seeded.sequence, 1n, "only the latest-only frame may be seeded, never the reliable-ordered one");
+    } finally {
+      secondConsumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
