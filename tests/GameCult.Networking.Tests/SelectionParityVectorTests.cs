@@ -28,7 +28,7 @@ namespace GameCult.Networking.Tests
     {
         private static CultDocumentRegistry Registry() => CultDocumentRegistry.ForTypes(new[]
         {
-            typeof(ParityLeafA), typeof(ParityLeafB), typeof(ParityCiter)
+            typeof(ParityLeafA), typeof(ParityLeafB), typeof(ParityCiter), typeof(ParityCiterNarrow)
         });
 
         private static CultNetSelectionEvaluator.Row Row(CultDocumentRegistry registry, object document, string key, long ordinal) =>
@@ -49,7 +49,11 @@ namespace GameCult.Networking.Tests
         // can resolve; HashAlias is what cultnet_rs::selection::schema_alias can resolve.
         private sealed record FixtureSchema(string SchemaId, string NameAlias, string HashAlias);
 
-        private sealed record FixtureReference(string Role, string TargetSchema, string TargetKey);
+        // R-AF: no TargetSchema - the wire a stored reference actually travels on carries a bare
+        // record key (GameCult.Caching.MessagePack.CultRecordRefFormatter<T> writes only
+        // value.Key.Value), so the fixture stopped pretending otherwise. See the fixture file's
+        // "//references" note.
+        private sealed record FixtureReference(string Role, string TargetKey);
 
         private sealed record FixtureRow(
             string Schema, string Key, long Ordinal,
@@ -90,7 +94,6 @@ namespace GameCult.Networking.Tests
                     {
                         references.Add(new FixtureReference(
                             reference.GetProperty("role").GetString()!,
-                            reference.GetProperty("targetSchema").GetString()!,
                             reference.GetProperty("targetKey").GetString()!));
                     }
                 }
@@ -130,6 +133,15 @@ namespace GameCult.Networking.Tests
                 Design = new CultRecordRef<ParityMiddle>(new CultRecordKey(
                     row.References.Single(reference => reference.Role == "Design").TargetKey))
             },
+            // R-AF: citer_narrow's reference is declared to ParityLeafA only (one leaf, not
+            // ParityMiddle) - the shared-key shape needs a role whose declared target excludes at
+            // least one of the schemas that can share a record key.
+            "citer_narrow" => new ParityCiterNarrow
+            {
+                Name = row.Key,
+                NarrowRef = new CultRecordRef<ParityLeafA>(new CultRecordKey(
+                    row.References.Single(reference => reference.Role == "narrow_ref").TargetKey))
+            },
             _ => throw new InvalidOperationException($"selection-vectors.fixture.json: unknown schema '{row.Schema}'")
         };
 
@@ -144,6 +156,7 @@ namespace GameCult.Networking.Tests
             AssertSchemaIdMatches(registry, typeof(ParityLeafA), schemas["leaf_a"].SchemaId);
             AssertSchemaIdMatches(registry, typeof(ParityLeafB), schemas["leaf_b"].SchemaId);
             AssertSchemaIdMatches(registry, typeof(ParityCiter), schemas["citer"].SchemaId);
+            AssertSchemaIdMatches(registry, typeof(ParityCiterNarrow), schemas["citer_narrow"].SchemaId);
 
             var rows = fixtureRows.Select(row => Row(registry, BuildDocument(row), row.Key, row.Ordinal)).ToArray();
             return (registry, rows, schemas);
@@ -188,23 +201,38 @@ namespace GameCult.Networking.Tests
                 Fields = new[] { new CultNetFieldPredicate { Index = "mass", Op = "ge", Number = "2233759.25" } }
             });
             // R-E: the exact real schema id, mirroring cultnet-rs's hop_by_role_cites_exact_id.
+            // R-AF: Keys=["citer-1"] (the fixture's one row that actually cites a-eq via Design)
+            // scopes this away from citer_narrow's rows, as hygiene rather than necessity -
+            // landing R-AF's vectors surfaced a real R-T/R-W parity bug this exposed: Rust's
+            // matches_citation used to resolve and R-W-check every declared reference a row
+            // carries before filtering by the citation's own role, where C#'s
+            // ReferenceMembers(descriptor, citation.Role) filters by role first
+            // (CultNetSelectionEvaluator.cs:451-458). Fixed in cultnet_rs::selection::matches_citation
+            // to filter first too, so narrow-citer-refused's out-of-target narrow_ref edge no longer
+            // reaches a Role="Design" citation in either runtime - this vector keeps the Keys scope
+            // anyway so it never depends on that.
             yield return ("hop_by_role_cites_exact_id", new CultNetSelection
             {
-                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "a-eq" } }
+                Keys = new[] { "citer-1" },
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "a-eq" }, Role = "Design" }
             });
             // R-E: the same citation, but the target is named by its C#-resolvable alias
             // ("leaf_a.v9") rather than the exact id. CultNetSchemaAliasMatching's descriptor overload
             // (CultNetDatabase.cs:74-87, the only overload any `schemas`/`cites.target.schemaId` call
             // site in src/ uses) strips the trailing ".v9" and compares "leaf_a" to
-            // ParityLeafA's descriptor.SchemaName - a real match here, in the reference. Rust's
-            // schema_alias has no concept of a schema's human name at all - it only ever sees the raw
-            // hash id (Row::schema_id()) - so this vector's expectedIds are real and non-empty here,
-            // but when cultnet-rs's reader judges this same vector it cannot resolve "leaf_a.v9" to
-            // anything (packages/cultnet-rs/src/selection.rs:452-459) and gets zero rows instead.
-            // Confirmed cross-runtime defect; see the report.
+            // ParityLeafA's descriptor.SchemaName - a real match here, in the reference. S-12
+            // (2026-09-22) is not a leftover defect: cultnet_rs::selection::schema_alias now resolves
+            // the same way, through Row::schema_name/RowSet::schema_name standing in for
+            // CultDocumentDescriptor.SchemaName (packages/cultnet-rs/src/selection.rs:452-475), so
+            // this vector's expectedIds are real and non-empty in both runtimes - the alias port made
+            // the two DIFFERENT alias forms deliberate (see the fixture file's "//aliases" note)
+            // rather than leaving this one unresolved on the Rust side.
+            // R-AF: Role="Design" plus Keys=["citer-1"] for the same reason as
+            // hop_by_role_cites_exact_id above.
             yield return ("cites_target_by_name_alias", new CultNetSelection
             {
-                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].NameAlias, RecordKey = "a-eq" } }
+                Keys = new[] { "citer-1" },
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].NameAlias, RecordKey = "a-eq" }, Role = "Design" }
             });
             // R-E: `schemas` reached by the same name alias. Same one-sided-match caveat as above.
             yield return ("schemas_by_name_alias", new CultNetSelection { Schemas = new[] { schemas["leaf_a"].NameAlias } });
@@ -224,6 +252,45 @@ namespace GameCult.Networking.Tests
             {
                 Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "unicode" } } },
                 Projection = CultNetSelectionProjections.Document
+            });
+            // R-AJ: a tied ordinal across two DIFFERENT schemas (kind=tie-schema is leaf_b/"zz-tie-
+            // schema" and leaf_a/"aa-tie-schema") - the shape the row order's schemaId tiebreak
+            // needs and the astral/BMP pair above never covered (both those rows are leaf_a). The
+            // fixture's keys are anti-correlated with the real schema ids on purpose, so a
+            // schemaId-first order and a recordKey-first order disagree: only the correct
+            // composition puts leaf_b's row ("zz-tie-schema") first.
+            yield return ("row_tiebreak_schema_id_before_record_key_at_tied_ordinal", new CultNetSelection
+            {
+                Fields = new[] { new CultNetFieldPredicate { Index = "kind", Op = "any_of", Values = new[] { "tie-schema" } } }
+            });
+            // R-AF: "dup-key" carries two rows (leaf_a and leaf_b); citer_narrow's narrow_ref
+            // targets leaf_a only. Keys scopes the citer candidate set to narrow-citer-accepted
+            // alone, so this vector never touches narrow-citer-refused's bad edge (R-W resolves
+            // every reference member unconditionally, so leaving both citer_narrow rows in one
+            // candidate set would always refuse regardless of which edge the query named). One
+            // rule, derived from the wire (docs/cultnet-selection-cut.md, R-AF): resolving "the
+            // row this edge names" is by record key plus the declared leaf set, not an exact
+            // (schema, key) pair, so this must accept in both runtimes and resolve to the leaf_a
+            // row even though a leaf_b row shares the same key.
+            yield return ("shared_key_narrow_ref_resolves_leaf_within_target", new CultNetSelection
+            {
+                Keys = new[] { "narrow-citer-accepted" },
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "dup-key" }, Role = "narrow_ref" }
+            });
+        }
+
+        // R-AF: the shared-key shape's other direction - the only row at the declared edge's key is
+        // outside the reference's declared target, so evaluating the selection itself must refuse
+        // (CultNetSelectionReferenceOutsideTargetException/SelectionRefusal::ReferenceOutsideTarget),
+        // not merely return an empty page. Keys scopes the candidate set to narrow-citer-refused
+        // alone (see the comment on shared_key_narrow_ref_resolves_leaf_within_target above).
+        private static IEnumerable<(string Name, CultNetSelection Selection)> EvaluationRefusalCases(
+            IReadOnlyDictionary<string, FixtureSchema> schemas)
+        {
+            yield return ("shared_key_narrow_ref_refuses_when_only_candidate_is_outside_target", new CultNetSelection
+            {
+                Keys = new[] { "narrow-citer-refused" },
+                Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = schemas["leaf_a"].SchemaId, RecordKey = "narrow-only" }, Role = "narrow_ref" }
             });
         }
 
@@ -294,6 +361,30 @@ namespace GameCult.Networking.Tests
                     {
                         if (error.Field != refusalField.GetString())
                             failures.Add($"{name}: refusal field - expected '{refusalField.GetString()}', got '{error.Field}'");
+                    }
+                    continue;
+                }
+
+                // R-AF: a small, separate signal from expectedRefusalField above - that one is the
+                // door (Validate, never touches Select); this one names an evaluation-time typed
+                // refusal Select itself must throw (currently only reference_outside_target, S18).
+                // Deliberately narrower than R-Z/R-AH's page-bytes-and-code parity harness (not
+                // this cut's job): it checks which typed refusal fires, nothing about wire bytes.
+                if (vector.TryGetProperty("expectedEvaluationRefusal", out var evalRefusal) && evalRefusal.ValueKind != JsonValueKind.Null)
+                {
+                    var expectedKind = evalRefusal.GetString();
+                    try
+                    {
+                        CultNetSelectionEvaluator.Select(registry, rows, selection, asOf);
+                        failures.Add($"{name}: expected Select to refuse ({expectedKind}) but it accepted the selection");
+                    }
+                    catch (CultNetSelectionReferenceOutsideTargetException) when (expectedKind == "reference_outside_target")
+                    {
+                        // expected
+                    }
+                    catch (Exception error)
+                    {
+                        failures.Add($"{name}: expected Select to refuse with {expectedKind}, got {error.GetType().Name}: {error.Message}");
                     }
                     continue;
                 }
@@ -375,6 +466,7 @@ namespace GameCult.Networking.Tests
                     selectionMessagePackBase64 = Convert.ToBase64String(selectionBytes),
                     asOf = 1UL,
                     expectedRefusalField = (string?)null,
+                    expectedEvaluationRefusal = (string?)null,
                     expectedIds = evaluation.Rows.Select(RowId).ToArray(),
                     matched = (uint)evaluation.TotalMatched,
                     hasNext = evaluation.NextCursor != null,
@@ -410,6 +502,32 @@ namespace GameCult.Networking.Tests
                     selectionMessagePackBase64 = Convert.ToBase64String(selectionBytes),
                     asOf = 1UL,
                     expectedRefusalField = (string?)expectedField,
+                    expectedEvaluationRefusal = (string?)null,
+                    expectedIds = Array.Empty<string>(),
+                    matched = 0U,
+                    hasNext = false,
+                    expectedEdges = Array.Empty<object>()
+                });
+            }
+
+            // R-AF: evaluation-time refusal vectors. Never handed to Validate - the selection
+            // decodes and passes the door; only Select itself refuses, and only once the shared-key
+            // resolution rule actually runs. Asserted here before being committed, mirroring how
+            // RefusalCases above asserts Validate refuses before its vectors are written.
+            foreach (var (name, selection) in EvaluationRefusalCases(schemas))
+            {
+                Assert.Throws<CultNetSelectionReferenceOutsideTargetException>(
+                    () => CultNetSelectionEvaluator.Select(registry, rows, selection, asOf: 1),
+                    $"{name} must be refused by Select before it can be committed as an evaluation-refusal vector");
+
+                var selectionBytes = MessagePackSerializer.Serialize(selection, CultNetSchemaMessageSerialization.Options);
+                vectors.Add(new
+                {
+                    name,
+                    selectionMessagePackBase64 = Convert.ToBase64String(selectionBytes),
+                    asOf = 1UL,
+                    expectedRefusalField = (string?)null,
+                    expectedEvaluationRefusal = (string?)"reference_outside_target",
                     expectedIds = Array.Empty<string>(),
                     matched = 0U,
                     hasNext = false,
@@ -489,6 +607,23 @@ namespace GameCult.Networking.Tests
             [Key(1)]
             [CultReference(typeof(ParityMiddle))]
             public CultRecordRef<ParityMiddle> Design;
+        }
+
+        // R-AF: a citer whose declared reference target is one leaf only, so a record key shared
+        // by a ParityLeafA row and a ParityLeafB row has exactly one row inside the declared
+        // target and exactly one outside it - see the fixture file's "citer_narrow" schema.
+        [CultDocument("citer_narrow", "cultnet.selection-parity.citer_narrow.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class ParityCiterNarrow
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            [CultIndex("narrow_ref")]
+            [CultReference(typeof(ParityLeafA))]
+            public CultRecordRef<ParityLeafA> NarrowRef;
         }
     }
 }

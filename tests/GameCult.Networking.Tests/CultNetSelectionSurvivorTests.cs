@@ -185,6 +185,16 @@ namespace GameCult.Networking.Tests
         // prior test used distinct ordinals, so the schemaId/recordKey tiebreak comparators were never
         // actually invoked by the sort (LINQ's composed comparer short-circuits once a key differs).
         // Three rows share one ordinal so the sort must fall through to schemaId, then recordKey.
+        //
+        // R-AJ (Soul's SM-4): this test's earlier fixture (two SelLeafA rows "a"/"b", one SelLeafB row
+        // "a") passed 269/269 even under a SchemaId<->Key swap mutant - not because the test is wrong
+        // in principle, but because whether it discriminates the swap depends on which of SelLeafA's/
+        // SelLeafB's real SHA-256 schema ids happens to sort first, and on this repo's actual ids it
+        // didn't (probed: reverting the fix and applying the swap by hand, this test still passed).
+        // A loosening that cannot fail is a finding about the fixture, not license to keep it. The fix
+        // below assigns keys *relative to the schema ids discovered at runtime* - the low-sorting
+        // schema gets the high-sorting key and vice versa - so schema-first and key-first orderings
+        // are forced to disagree regardless of which real schema id happens to be smaller.
         // ---------------------------------------------------------------------------------------------
         [Test]
         public void Evaluator_BreaksAnOrdinalTieBySchemaIdThenRecordKeyInBothDirections()
@@ -195,30 +205,46 @@ namespace GameCult.Networking.Tests
             });
             var schemaA = registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafA>().SchemaId;
             var schemaB = registry.GetRequired<CultNetSelectionEvaluatorTests.SelLeafB>().SchemaId;
+            // sanity: schemaA/schemaB really are distinct, or this test would not exercise the tiebreak.
+            Assert.That(schemaA, Is.Not.EqualTo(schemaB));
 
-            // All three rows share ordinal 1: two SelLeafA rows (keys "a"/"b") and one SelLeafB row
-            // (key "a"). Expected order is derived from the same comparer the evaluator uses, so this
-            // test does not depend on which of schemaA/schemaB happens to sort first.
-            var rows = new[]
-            {
-                Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a-b", Kind = "k", Mass = 1 }, "b", 1),
-                Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "a-a", Kind = "k", Mass = 1 }, "a", 1),
-                Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "b-a", Kind = "k", Mass = 1 }, "a", 1)
-            };
+            var schemaALowersFirst = CultNetCodePointComparer.Instance.Compare(schemaA, schemaB) < 0;
+            var lowSchema = schemaALowersFirst ? typeof(CultNetSelectionEvaluatorTests.SelLeafA) : typeof(CultNetSelectionEvaluatorTests.SelLeafB);
+
+            // The low-sorting schema's row gets the *high*-sorting key ("z"), and the high-sorting
+            // schema's row gets the *low*-sorting key ("a") - anti-correlated on purpose, so
+            // schema-first order ([low-schema, high-schema], independent of key) and key-first order
+            // ([low-key, high-key] = [high-schema, low-schema]) are the exact reverse of each other no
+            // matter which real id sorts lower. Two rows, two different schemas, two different keys:
+            // the simplest shape that cannot degenerate into agreement between the two candidate rules.
+            var rows = lowSchema == typeof(CultNetSelectionEvaluatorTests.SelLeafA)
+                ? new[]
+                {
+                    Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "low-schema-high-key", Kind = "k", Mass = 1 }, "z", 1),
+                    Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "high-schema-low-key", Kind = "k", Mass = 1 }, "a", 1)
+                }
+                : new[]
+                {
+                    Row(registry, new CultNetSelectionEvaluatorTests.SelLeafB { Name = "low-schema-high-key", Kind = "k", Mass = 1 }, "z", 1),
+                    Row(registry, new CultNetSelectionEvaluatorTests.SelLeafA { Name = "high-schema-low-key", Kind = "k", Mass = 1 }, "a", 1)
+                };
 
             var expectedAscending = rows
                 .OrderBy(r => r.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
                 .ThenBy(r => r.Key.Value, CultNetCodePointComparer.Instance)
                 .Select(r => (r.Descriptor.SchemaId, r.Key.Value))
                 .ToArray();
+            // The anti-correlated construction above means the schema-first answer must put the
+            // high-key row first (its schema sorts low) - if a key-first mutant instead put the
+            // low-key row first, this sanity check catches the fixture degenerating, not just the
+            // main assertions below.
+            Assert.That(expectedAscending[0].Value, Is.EqualTo("z"), "fixture sanity: schema-first must not agree with key-first here");
 
             var ascending = CultNetSelectionEvaluator.Select(registry, rows, new CultNetSelection(), asOf: 1);
             Assert.That(ascending.Rows.Select(r => (r.Descriptor.SchemaId, r.Key.Value)), Is.EqualTo(expectedAscending));
 
             var descending = CultNetSelectionEvaluator.Select(registry, rows, new CultNetSelection { Descending = true }, asOf: 1);
             Assert.That(descending.Rows.Select(r => (r.Descriptor.SchemaId, r.Key.Value)), Is.EqualTo(expectedAscending.Reverse()));
-            // sanity: schemaA/schemaB really are distinct, or this test would not exercise the tiebreak.
-            Assert.That(schemaA, Is.Not.EqualTo(schemaB));
         }
 
         // ---------------------------------------------------------------------------------------------
@@ -337,6 +363,37 @@ namespace GameCult.Networking.Tests
             Assert.That(evaluation.Rows.Select(r => r.Key.Value), Is.EqualTo(new[] { "z-target", "a-target" }));
             // Edges must follow that same page order, not "citer-a" < "citer-z".
             Assert.That(evaluation.Edges.Select(e => e.From.Key.Value), Is.EqualTo(new[] { "citer-z", "citer-a" }));
+        }
+
+        // R-AJ (Soul's SM-4): the two tests above each isolate one component of the (From.SchemaId,
+        // From.Key, Role, To.SchemaId, To.Key) tiebreak by tying every other one - so neither can
+        // distinguish the *composition* "From.Key before Role" from "Role before From.Key", which is
+        // exactly the mutant that survived (permuting Role ahead of From.Key, keeping every
+        // component). This calls EdgesFor directly with two hand-built edges sharing one anchor, so
+        // both From.Key and Role vary at once and the two orderings disagree: "aaa" < "zzz" as a key,
+        // but the row keyed "zzz" carries the role "aaa" - a Role-first mutant would put that edge
+        // first; the rule (R-B: "page-row order, then (from, role, to)") puts it second.
+        [Test]
+        public void EdgesFor_OrdersByFromKeyBeforeRoleWhenBothVaryAtTheSameAnchor()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SurvivorAliasTarget) });
+            var anchor = Row(registry, new SurvivorAliasTarget { Name = "anchor" }, "anchor-key", 1);
+            var to = Row(registry, new SurvivorAliasTarget { Name = "to" }, "to-key", 2);
+            var fromZ = Row(registry, new SurvivorAliasTarget { Name = "z" }, "zzz", 3);
+            var fromA = Row(registry, new SurvivorAliasTarget { Name = "a" }, "aaa", 4);
+
+            var edgeFromZRoleA = new CultNetSelectionEvaluator.EdgeMatch(fromZ, "aaa", to, null);
+            var edgeFromARoleZ = new CultNetSelectionEvaluator.EdgeMatch(fromA, "zzz", to, null);
+            var full = new CultNetSelectionEvaluator.FullEvaluation
+            {
+                Edges = new[] { (edgeFromZRoleA, anchor), (edgeFromARoleZ, anchor) }
+            };
+
+            var edges = CultNetSelectionEvaluator.EdgesFor(new[] { anchor }, full);
+
+            Assert.That(edges.Select(e => e.From.Key.Value), Is.EqualTo(new[] { "aaa", "zzz" }),
+                "From.Key must decide before Role - a Role-first composition would put the \"zzz\"-keyed edge first, since its role \"aaa\" sorts first");
+            Assert.That(edges.Select(e => e.Role), Is.EqualTo(new[] { "zzz", "aaa" }));
         }
 
         [CultDocument("cultnet.selection-tests.survivor_page_order_citer", "cultnet.selection-tests.survivor_page_order_citer.v1")]
