@@ -205,3 +205,64 @@ test("negative grep: no koffi callbacks, .async only on nextEvent", () => {
   }
   assert.doesNotMatch(source, /koffi\.register/, "no koffi callbacks");
 });
+
+test(
+  "memory: sustained nextEvent calls do not leak koffi-allocated out-parameter buffers",
+  { timeout: 60_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) {
+      t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+      return;
+    }
+    if (typeof global.gc !== "function") {
+      t.skip("run with --expose-gc to measure RSS growth deterministically.");
+      return;
+    }
+
+    const runtime = await CultMeshQuicNativeRuntime.open();
+    try {
+      // `nextEvent` is private: the pump loop is the only production caller,
+      // and it never has more than one call in flight at a time, which is
+      // exactly the property this test needs to call it directly in a tight
+      // loop instead of waiting on the pump's 250 ms idle poll. A 0 ms
+      // timeout with no listener/connection open returns immediately with
+      // status 0 (no event), so each iteration is a fast round trip through
+      // the real native ABI, not a synthetic stand-in.
+      const nextEvent = (
+        runtime as unknown as {
+          nextEvent(timeoutMs: number, payload: Uint8Array | null, payloadCapacity: number): Promise<unknown>;
+        }
+      ).nextEvent.bind(runtime);
+
+      // Warm up: let koffi's own one-time bookkeeping (module init, JIT,
+      // thread pool spin-up) happen before the baseline measurement.
+      for (let i = 0; i < 2_000; i += 1) {
+        await nextEvent(0, null, 0);
+      }
+      global.gc();
+      const before = process.memoryUsage().rss;
+
+      // Sized so the old per-call `koffi.alloc` code (~64 B event struct +
+      // ~4 B int32, plus allocator bookkeeping, well over 53 B/call) clearly
+      // exceeds the bound below, while the fixed code, which allocates
+      // nothing per call, stays flat.
+      const ITERATIONS = 200_000;
+      for (let i = 0; i < ITERATIONS; i += 1) {
+        await nextEvent(0, null, 0);
+      }
+      global.gc();
+      const after = process.memoryUsage().rss;
+
+      const growthBytes = after - before;
+      const BOUND_BYTES = 5 * 1024 * 1024;
+      assert.ok(
+        growthBytes < BOUND_BYTES,
+        `RSS grew by ${growthBytes} bytes (${(growthBytes / 1024 / 1024).toFixed(2)} MiB) over ` +
+          `${ITERATIONS} nextEvent calls; expected it to stay under ${BOUND_BYTES / 1024 / 1024} MiB ` +
+          "once out-parameter buffers are reused instead of allocated per call.",
+      );
+    } finally {
+      await runtime.release();
+    }
+  },
+);
