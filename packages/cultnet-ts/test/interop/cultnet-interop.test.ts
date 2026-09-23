@@ -498,7 +498,11 @@ test("CultMesh QUIC realtime: TypeScript provider and C# native connector (the U
     "NativeConnectorReceivesFromExternalProvider",
     { CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint },
   );
-  assert.match(stdout, /Passed!/);
+  // Real output observed from a live run (NUnit3TestExecutor via VSTest, not
+  // Microsoft.Testing.Platform's newer console format): "Test Run
+  // Successful." plus "Passed: N", never the literal word "Passed!".
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
   assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
 });
 
@@ -537,7 +541,11 @@ test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with
     "ManagedConnectorReceivesFromExternalProvider",
     { CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint },
   );
-  assert.match(stdout, /Passed!/);
+  // Real output observed from a live run (NUnit3TestExecutor via VSTest, not
+  // Microsoft.Testing.Platform's newer console format): "Test Run
+  // Successful." plus "Passed: N", never the literal word "Passed!".
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
   assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
 
   const goldenMatch = /CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
