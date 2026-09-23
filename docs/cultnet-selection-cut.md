@@ -3539,3 +3539,36 @@ unrooted; Caching's three, which **need a non-root container to prove and must
 not be "fixed"**.
 
 Rig: `C:\Users\Meta\eureka-soul-probes\cultnet-selection-cut1-fix7\`.
+
+### Fix batch 8 landed, 2026-09-23 — the pre-merge batch
+
+Sonnet, two commits on `sel-fix8` (`cda28fa`, `492dd0e`), verified on
+Yggdrasil at `-j1`. C# Networking **284 passed / 2 skipped** (283 baseline
+plus the one new test), Rust **264 across 12 binaries**, unchanged — the
+deletion is behaviour-neutral.
+
+- **R-AZ.** The 246-byte all-absent `Edge` vector is mirrored into
+  `SelectionWireParityTests.cs`, so both runtimes now assert all four cells.
+  **Proven non-vacuous**: flipping byte 0 of the constant fails exactly that
+  test and nothing else, on a throwaway commit that was never pushed.
+- **R-BA. Deleted, not constructed — and the argument is stronger than the one
+  the ruling carried.** Hands traced both resolvers: each resolves a reference
+  purely from `(citer's schema, role, recordKey)` against the evaluation's own
+  fixed candidate index, with no edge- or caller-specific input steering which
+  candidate wins — Rust's `target_leaves(role)` does not even take a schema.
+  So once `From`, `Role` and `To.RecordKey` tie in the comparator, **the
+  resolved row including its schema is forced identical by construction**.
+
+  That does not depend on schema-authoring discipline the way my D10b argument
+  did; it depends only on the resolution function being a pure function of
+  already-tied inputs. **It is a structural proof rather than a semantic
+  claim**, which is the distinction that has bitten this cut twice. Hands
+  checked it against the live counterexample too — the self-citing row breaks
+  `to.record_key`, not `to.schema_id`.
+
+  The tiebreak is gone from both comparators, with its stale documentation in
+  a third file. No test relied on it.
+
+**All four of Soul's pre-merge items are closed**, three by this batch and
+R-BC by Self, which struck the false equivalence argument at both original
+sites rather than annotating it.
