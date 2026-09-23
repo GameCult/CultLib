@@ -1020,3 +1020,32 @@ test("fix 6: a stream shutdown prunes its entry so streamKinds does not grow wit
     await listener.close();
   }
 });
+
+test("P8: a reliable send still queued behind reliableSendTail rejects instead of hanging when disposal wins the race", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const listener = await RawQuicListener.open();
+  try {
+    const target: CultMeshRealtimeTarget = { verseId: "aetheria", authorityRuntimeId: "service:aetheria.daemon" };
+    const candidate: CultMeshRealtimeCandidate = {
+      endpoint: `cultmesh-state+quic://127.0.0.1:${listener.boundPort}?cert-sha256=${fixturePinHex()}`,
+      authorityRuntimeId: target.authorityRuntimeId,
+      priority: 0,
+      generation: "gen-1",
+    };
+    const connector = new CultMeshQuicRealtimeConnector();
+    const transport = await connector.connect(candidate, target);
+    // `sendFrame` chains onto `reliableSendTail`, which resolves as a
+    // microtask; calling `dispose()` synchronously right after, in the same
+    // turn, guarantees `cleanup()` has already set `disposed = true` by the
+    // time that microtask runs `sendOnStream`. Without the `this.disposed`
+    // guard `sendOnStream` registers (P8's target), this send would sit in
+    // `pendingSends` forever: `cleanup()`'s reject sweep already ran once
+    // before this send was ever registered, and no later native event can
+    // reach it either, since `offConnectionEvent` already ran too.
+    const send = transport.sendFrame(testFrame({ delivery: "reliable-ordered" }));
+    transport.dispose();
+    await assert.rejects(send, /disposed/i);
+  } finally {
+    await listener.close();
+  }
+});

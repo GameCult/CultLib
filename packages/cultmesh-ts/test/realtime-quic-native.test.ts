@@ -180,6 +180,83 @@ test("F7: a 64-bit event code round-trips exactly through the struct decode", as
   }
 });
 
+test(
+  "P10b: a throwing onFault handler is isolated — the pump survives and other connections' handlers still run",
+  { timeout: 10_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) {
+      t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+      return;
+    }
+    const runtime = await CultMeshQuicNativeRuntime.open();
+    try {
+      const pkcs12 = readFileSync(FIXTURE_P12);
+      const { listenerId, boundPort } = runtime.listenerOpen("127.0.0.1", 0, pkcs12, "");
+
+      // Connection A: both its listener and its onFault handler throw.
+      // Without `faultConnection`'s own try/catch isolating a throwing
+      // `onFault` (P10b's target), that throw would escape the pump's
+      // dispatch loop and take every other connection down with it instead
+      // of staying scoped to connection A.
+      const acceptedA = waitFor<bigint>((resolve) => {
+        runtime.onListenerEvent(listenerId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+        });
+      });
+      const clientA = runtime.connectionOpen("127.0.0.1", boundPort);
+      runtime.onConnectionEvent(clientA, (event) => {
+        if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED) {
+          runtime.connectionCertificateComplete(clientA, true);
+        }
+      });
+      const serverAId = await acceptedA;
+      runtime.onConnectionEvent(
+        serverAId,
+        () => {
+          throw new Error("P10b: connection A's listener always throws.");
+        },
+        () => {
+          throw new Error("P10b: connection A's onFault also throws.");
+        },
+      );
+      // Give A's handshake a moment to reach the throwing listener and fault.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Connection B, opened only after A faulted: if the throw above ever
+      // escaped the pump, this connection would never reach CONNECTED at all.
+      const acceptedB = waitFor<bigint>((resolve) => {
+        runtime.onListenerEvent(listenerId, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) resolve(event.connectionId);
+        });
+      });
+      const clientB = runtime.connectionOpen("127.0.0.1", boundPort);
+      const clientBConnected = waitFor<void>((resolve) => {
+        runtime.onConnectionEvent(clientB, (event) => {
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CERTIFICATE_RECEIVED) {
+            runtime.connectionCertificateComplete(clientB, true);
+            return;
+          }
+          if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) resolve();
+        });
+      });
+      const serverBId = await acceptedB;
+      let serverBConnected = false;
+      runtime.onConnectionEvent(serverBId, (event) => {
+        if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) serverBConnected = true;
+      });
+      await clientBConnected;
+      assert.ok(serverBConnected, "connection B's handler must still run after A's onFault threw");
+
+      runtime.connectionShutdown(clientA, 0n);
+      runtime.connectionShutdown(clientB, 0n);
+      runtime.connectionShutdown(serverBId, 0n);
+      runtime.listenerClose(listenerId);
+    } finally {
+      await runtime.release();
+    }
+  },
+);
+
 test("fix 2: release() refuses a call with no outstanding reference", async (t) => {
   if (!nativeBridgeAvailable()) {
     t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");

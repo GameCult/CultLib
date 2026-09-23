@@ -19,6 +19,7 @@ import {
 import {
   CultMeshQuicRealtimeConnector,
   CultMeshQuicRealtimeProvider,
+  parseQuicRealtimeEndpoint,
   type CultMeshRealtimeCandidate,
   type CultMeshRealtimeTarget,
   type CultMeshRealtimeTransport,
@@ -537,6 +538,166 @@ test("a reliable-ordered frame is never retained and is not delivered to a late 
     } finally {
       secondConsumer.dispose();
     }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test(
+  "fix 1: a peer stays connected and keeps receiving well past handshakeTimeoutMs",
+  { timeout: 10_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+    // Must fail on the pre-fix code: the buffering-handler/attachPeer swap
+    // there loses `state.connected` to whichever handler happens to be
+    // registered when CONNECTED actually arrives, and the handshake timer
+    // evicts a fully healthy peer at this deadline regardless.
+    const handshakeTimeoutMs = 500;
+    const provider = await CultMeshQuicRealtimeProvider.listen({
+      host: "127.0.0.1",
+      port: 0,
+      serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+      handshakeTimeoutMs,
+    });
+    try {
+      const consumer = await dialProvider(provider);
+      try {
+        await waitUntil(() => provider.connectionCount === 1);
+        await new Promise((resolve) => setTimeout(resolve, handshakeTimeoutMs * 3));
+        assert.equal(provider.connectionCount, 1, "a connected peer must not be evicted by the handshake timer");
+
+        await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence: 1n }));
+        const received = await consumer.receiveFrame();
+        assert.equal(received.sequence, 1n, "a peer past the handshake deadline must still receive frames");
+      } finally {
+        consumer.dispose();
+      }
+    } finally {
+      provider.dispose();
+    }
+  },
+);
+
+test("fix 2: an invalid frame throws from broadcast, and connectionCount is unchanged", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+      // A 70,000-byte channelId exceeds the wire's 0xffff identity limit:
+      // `encodeRealtimeFrame` throws. Before fix 2, encoding happened once
+      // per peer inside `sendFrame`, so the same failure evicted every peer
+      // while `broadcast()` itself reported success.
+      await assert.rejects(
+        provider.broadcast(testFrame({ delivery: "reliable-ordered", channelId: "x".repeat(70_000) })),
+        /exceeds the QUIC wire limit/i,
+      );
+      assert.equal(provider.connectionCount, 1, "an invalid frame must not evict any peer");
+
+      // The peer must still be usable afterward: prove the connection itself
+      // survived, not merely that the count field wasn't decremented.
+      await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence: 42n }));
+      assert.equal((await consumer.receiveFrame()).sequence, 42n);
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("fix 2: a latest-only invalid frame also throws from broadcast without evicting any peer", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+      await assert.rejects(
+        provider.broadcast(testFrame({ delivery: "latest-only", channelId: "x".repeat(70_000) })),
+        /exceeds the QUIC wire limit/i,
+      );
+      assert.equal(provider.connectionCount, 1, "an invalid latest-only frame must not evict any peer");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("fix 3: advertisedHost is used in place of the bind address, and round-trips through the module's parser", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await CultMeshQuicRealtimeProvider.listen({
+    host: "0.0.0.0",
+    port: 0,
+    serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+    advertisedHost: "streampixels.gamecult.org",
+  });
+  try {
+    assert.match(
+      provider.advertisedEndpoint,
+      /^cultmesh-state\+quic:\/\/streampixels\.gamecult\.org:\d+\?cert-sha256=[0-9A-F]{64}$/,
+    );
+    const parsed = parseQuicRealtimeEndpoint(provider.advertisedEndpoint);
+    assert.equal(parsed.host, "streampixels.gamecult.org");
+    assert.equal(parsed.port, Number(new URL(provider.advertisedEndpoint).port));
+    assert.ok(parsed.certificateSha256);
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("fix 3: an IPv6 bind advertises a bracketed literal that round-trips through the module's parser", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await CultMeshQuicRealtimeProvider.listen({
+    host: "::1",
+    port: 0,
+    serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+  });
+  try {
+    assert.match(
+      provider.advertisedEndpoint,
+      /^cultmesh-state\+quic:\/\/\[::1\]:\d+\?cert-sha256=[0-9A-F]{64}$/,
+    );
+    const parsed = parseQuicRealtimeEndpoint(provider.advertisedEndpoint);
+    assert.equal(parsed.host, "::1");
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("fix 4: receive() with an already-aborted signal rejects immediately instead of hanging", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(provider.receive(controller.signal), /aborted/i);
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("P3: a latest-only send failure evicts the peer without broadcast() throwing to the caller", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    await waitUntil(() => provider.connectionCount === 1);
+    consumer.dispose();
+    // Mirrors the existing reliable-ordered eviction test, but for the
+    // outbox's own send failure path (`CultMeshQuicRealtimeProviderOutbox.pump`'s
+    // catch, which disposes the peer and reports failure through
+    // `onSendFailure`) rather than `broadcast()`'s direct per-peer catch.
+    const deadline = Date.now() + 2_000;
+    let sequence = 0n;
+    while (Date.now() < deadline && provider.connectionCount > 0) {
+      sequence += 1n;
+      await provider.broadcast(testFrame({ delivery: "latest-only", sequence, bodyId: `body:${sequence}` }));
+    }
+    assert.equal(provider.connectionCount, 0, "the dead peer must be evicted, not counted forever");
   } finally {
     provider.dispose();
   }
