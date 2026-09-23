@@ -1015,6 +1015,12 @@ impl Selection {
 }
 
 /// One edge a hop traversed, carried on a selection page.
+///
+/// R-AP: a decodable *fixed-shape* map is worth more than brevity, and `skip_serializing_if`
+/// undermines the compact positional form anyway (a struct's `n`th absent optional turns an
+/// n-element array into a shorter one, undecodable against the declared shape) - every field here
+/// is always present on the wire, `nil` when absent, in this declared order, the same rule
+/// `RawDocumentHeader`/`SelectionDocumentRecord`/`SelectionPage` follow below.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Edge {
@@ -1025,11 +1031,11 @@ pub struct Edge {
     /// The cited row, its schema resolved to the leaf actually stored.
     pub to: RecordRef,
     /// `"messagepack"` when `payload` is present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub payload_encoding: Option<String>,
     /// The value attached to the edge (a dictionary reference's value); present under `document`
     /// projection only.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "optional_bytes")]
+    #[serde(default, with = "optional_bytes")]
     pub payload: Option<Vec<u8>>,
 }
 
@@ -1052,25 +1058,28 @@ mod optional_bytes {
 }
 
 /// A header record: [`SelectionDocumentRecord`] minus its payload and payload encoding.
+///
+/// R-AP: every field always present, `nil` when absent, in this declared order (see `Edge`'s doc
+/// comment above).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawDocumentHeader {
     pub schema_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_content_hash: Option<String>,
     pub record_key: String,
     pub stored_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tags: Option<Vec<String>>,
 }
 
@@ -1080,15 +1089,17 @@ pub struct RawDocumentHeader {
 /// reference's `CultNetRawDocumentRecord` that this cut does not touch (out of scope: v0's wire is
 /// unchanged). v1 reuses the reference's richer, already-existing C# type, so this Rust type matches
 /// that one, not v0's.
+// R-AP: every optional field always present, `nil` when absent, in this declared order (see
+// `Edge`'s doc comment above).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionDocumentRecord {
     pub schema_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub schema_content_hash: Option<String>,
     pub record_key: String,
     pub stored_at: String,
@@ -1096,13 +1107,13 @@ pub struct SelectionDocumentRecord {
     pub payload_encoding: String,
     #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub source_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tags: Option<Vec<String>>,
 }
 
@@ -1875,18 +1886,21 @@ pub fn select<R: Row + Clone>(
 /// consumer's own message envelope (`shardId`/`shardEpoch`/`shardLogSequence`, `messageId`, ... -
 /// declared once already in `contracts.rs`'s `CultNetMessage::SnapshotResponseRawV1`); this type
 /// is the page body those fields wrap.
+// R-AP: the payload, not the envelope - matched/asOf/next/headers/documents/edges in this
+// declared order on both runtimes, every optional field always present and `nil` when absent
+// (never omitted - see `Edge`'s doc comment above).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionPage {
     pub matched: u32,
     pub as_of: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub next: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub headers: Option<Vec<RawDocumentHeader>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub documents: Option<Vec<SelectionDocumentRecord>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub edges: Option<Vec<Edge>>,
 }
 
