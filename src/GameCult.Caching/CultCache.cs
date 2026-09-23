@@ -1379,8 +1379,14 @@ namespace GameCult.Caching
         // reference lookups off (IndexAlias ?? MemberName); D10 above only groups members that
         // declare an alias, so an unaliased member's bare name sharing that string with a reference
         // member's alias registered silently and faulted every hop through it at resolution time.
+        //
+        // Breaking registration change, noted per the fix batch 7 ruling: a shape that used to
+        // register and work - a data member aliased "Owner" beside a reference member named
+        // "Owner" - is now refused. There is no compatibility path; the collision was always a
+        // silent resolution fault waiting to happen, so the fix is a door, not a warning.
         private static string DuplicateReferenceRoleMessage(string documentTypeName, string first, string second, string role) =>
-            $"Cult document {documentTypeName} members {first} and {second} both resolve to reference role \"{role}\" (index alias, or bare member name when unaliased); a reference role must name one member.";
+            $"Cult document {documentTypeName} members {first} and {second} both resolve to reference role \"{role}\" (index alias, or bare member name when unaliased); a reference role must name one member. " +
+            $"This is a breaking registration change from before D10b existed: a shape where a plain member's bare name collided with a reference member's index alias used to register silently and fault at resolution time instead.";
 
         private static string UnsupportedReferenceShapeMessage(string documentTypeName, string member) =>
             $"Cult document {documentTypeName} member {member} declares a reference the cache cannot walk; many:false needs CultRecordRef<T>, many:true needs IEnumerable<CultRecordRef<T>> or IDictionary<CultRecordRef<T>, V>.";
