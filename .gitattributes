@@ -22,3 +22,10 @@
 packages/cultmesh-ts/native/**/*.dll binary
 packages/cultmesh-ts/native/**/*.so binary
 packages/cultmesh-ts/native/**/*.so.* binary
+
+# The digest list and manifest beside them keep LF on every checkout. Left to
+# `text=auto`, a Windows clone writes them with carriage returns, and the
+# documented `sha256sum -c SHA256SUMS` then fails on every line (each filename
+# ends in `\r`) while CI, checking out on Linux, stays green.
+packages/cultmesh-ts/native/SHA256SUMS text eol=lf
+packages/cultmesh-ts/native/MANIFEST.txt text eol=lf
