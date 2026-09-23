@@ -7,7 +7,7 @@ import { existsSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer } from "node:net";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -57,6 +57,10 @@ const csharpDllPath = resolve(
   "net10.0",
   "GameCult.Networking.InteropPeer.dll",
 );
+const cultMeshTsRoot = resolve(cultLibRoot, "packages", "cultmesh-ts");
+const cultMeshQuicPeerScript = resolve(cultMeshTsRoot, "dist-test", "test", "interop", "cultmesh-quic-peer.js");
+const quicNativeTestsProject = resolve(cultLibRoot, "tests", "GameCult.Mesh.Quic.Native.Tests", "GameCult.Mesh.Quic.Native.Tests.csproj");
+const quicManagedTestsProject = resolve(cultLibRoot, "tests", "GameCult.Mesh.Quic.Tests", "GameCult.Mesh.Quic.Tests.csproj");
 const rustBinaryPath = resolve(
   cultnetRsRoot,
   "target",
@@ -72,6 +76,7 @@ const processCleanupTimeoutMs = 5_000;
 let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
+let cultMeshTsInteropPeerBuild: Promise<void> | undefined;
 
 function resolvePythonCommand(): string {
   const codexPythonCommand = join(homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
@@ -391,6 +396,320 @@ while time.time() < deadline:
 transport.close()
 raise SystemExit("timed out waiting for TypeScript RUDP schema-v0 message")
 `;
+
+test("CultMesh QUIC realtime: C# managed provider and TypeScript consumer", async (t) => {
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-realtime", "build peers");
+  await buildCSharpInteropPeer();
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      // The C# quic-realtime-serve peer watches stdin for EOF as its own
+      // shutdown signal; end it explicitly before killing so a lingering pipe
+      // never masks whether the process exited on its own.
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-realtime", "start csharp QUIC provider");
+  servers.push(await spawnServeProcess("csharp-quic", {
+    command: dotnetCommand,
+    args: [
+      csharpDllPath,
+      "quic-realtime-serve",
+      "--frames", "5",
+      "--delivery", "latest-only",
+      "--interval-ms", "50",
+    ],
+    cwd: cultLibRoot,
+    stdin: "pipe",
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+  assert.match(ready.endpoint, /^cultmesh-state\+quic:\/\/127\.0\.0\.1:\d+\?cert-sha256=[0-9A-Fa-f]{64}$/);
+
+  logInteropPhase("quic-realtime", "typescript dials the csharp QUIC provider");
+  const tsDial = await runJsonCommand("ts-quic-dial", process.execPath, [
+    cultMeshQuicPeerScript,
+    "dial",
+    "--endpoint", ready.endpoint,
+    "--expect", "5",
+  ], cultMeshTsRoot, { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" });
+
+  assert.equal(tsDial.transportId, "msquic-realtime");
+  assert.equal(tsDial.frames.length, 5);
+  for (const [index, frame] of tsDial.frames.entries()) {
+    assert.equal(frame.delivery, "latest-only");
+    assert.equal(frame.bodyId, "interop:quic-realtime:frame");
+    assert.equal(Buffer.from(frame.payloadHex, "hex").toString("utf8"), `frame-${index + 1}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cut 5: the TypeScript QUIC realtime provider (the StreamPixels role). Four
+// lanes, spec section 10. Lane 1 is the headline: it proves the Unity
+// overlay's transport, and is gated to Windows because the native connector
+// under test (`CultMeshNativeQuicRealtimeTransportConnector`) is.
+// ---------------------------------------------------------------------------
+
+test("CultMesh QUIC realtime: TypeScript provider and C# native connector (the Unity path)", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("The native connector is Windows-only; this lane runs on Windows.");
+    return;
+  }
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-provider-native", "build the typescript quic peer");
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-provider-native", "start the typescript QUIC provider");
+  servers.push(await spawnServeProcess("ts-quic-provider", {
+    command: process.execPath,
+    args: [cultMeshQuicPeerScript, "serve", "--frames", "5", "--delivery", "latest-only"],
+    cwd: cultMeshTsRoot,
+    env: { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" },
+    stdin: "pipe",
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+  assert.match(ready.endpoint, /^cultmesh-state\+quic:\/\/127\.0\.0\.1:\d+\?cert-sha256=[0-9A-F]{64}$/);
+
+  logInteropPhase("quic-provider-native", "dotnet test: the native connector dials the typescript provider");
+  const { stdout } = await runDotnetTestFilter(
+    quicNativeTestsProject,
+    "NativeConnectorReceivesFromExternalProvider",
+    { CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint },
+  );
+  // Real output observed from a live run (NUnit3TestExecutor via VSTest, not
+  // Microsoft.Testing.Platform's newer console format): "Test Run
+  // Successful." plus "Passed: N", never the literal word "Passed!".
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
+  assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
+});
+
+// Cut C headline: a late-joining C# native connector receives the TS
+// provider's retained frame. The TS provider's own trigger peer (a `dial`
+// subprocess, needed only because the provider waits for a first connection
+// before it broadcasts anything) receives every frame and disconnects before
+// the native connector dials, so nothing here is a live retransmission: only
+// Cut C's retained seed can deliver a frame to the late C# connector.
+test("CultMesh QUIC realtime: a late-joining C# native connector receives the retained frame from a TypeScript provider", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("The native connector is Windows-only; this lane runs on Windows.");
+    return;
+  }
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-provider-retention", "build the typescript quic peer");
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-provider-retention", "start the typescript QUIC provider");
+  servers.push(await spawnServeProcess("ts-quic-provider-retention", {
+    command: process.execPath,
+    args: [
+      cultMeshQuicPeerScript,
+      "serve",
+      "--frames", "3",
+      "--delivery", "latest-only",
+      "--interval-ms", "20",
+      "--linger-ms", "60000",
+    ],
+    cwd: cultMeshTsRoot,
+    env: { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" },
+    stdin: "pipe",
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+
+  logInteropPhase("quic-provider-retention", "trigger peer receives every frame, then disconnects");
+  const trigger = await runJsonCommand("ts-quic-dial-trigger", process.execPath, [
+    cultMeshQuicPeerScript,
+    "dial",
+    "--endpoint", ready.endpoint,
+    "--expect", "3",
+  ], cultMeshTsRoot, { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" });
+  assert.equal(trigger.frames.length, 3);
+
+  logInteropPhase("quic-provider-retention", "dotnet test: the native connector dials late, after the trigger peer is gone");
+  const { stdout } = await runDotnetTestFilter(
+    quicNativeTestsProject,
+    "NativeConnectorReceivesTheRetainedFrameWhenJoiningLate",
+    {
+      CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint,
+      CULTMESH_NATIVE_EXTERNAL_EXPECTED_PAYLOAD: "frame-3",
+    },
+  );
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
+  assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env vars should have made the test run, not skip.\n${stdout}`);
+});
+
+test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with golden bytes", async (t) => {
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-provider-managed", "build the typescript quic peer");
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-provider-managed", "start the typescript QUIC provider");
+  servers.push(await spawnServeProcess("ts-quic-provider-managed", {
+    command: process.execPath,
+    args: [cultMeshQuicPeerScript, "serve", "--frames", "5", "--delivery", "latest-only"],
+    cwd: cultMeshTsRoot,
+    env: { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" },
+    stdin: "pipe",
+  }));
+  const server = servers[servers.length - 1];
+  const ready = (await server.ready) as { status: string; endpoint: string };
+  assert.equal(ready.status, "ready");
+
+  logInteropPhase("quic-provider-managed", "dotnet test: the managed connector dials the typescript provider");
+  const { stdout } = await runDotnetTestFilter(
+    quicManagedTestsProject,
+    "ManagedConnectorReceivesFromExternalProvider",
+    { CULTMESH_NATIVE_EXTERNAL_ENDPOINT: ready.endpoint },
+  );
+  // Real output observed from a live run (NUnit3TestExecutor via VSTest, not
+  // Microsoft.Testing.Platform's newer console format): "Test Run
+  // Successful." plus "Passed: N", never the literal word "Passed!".
+  assert.match(stdout, /Test Run Successful\./);
+  assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
+  assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
+
+  // `dotnet test --logger "console;verbosity=detailed"` prints a passed
+  // test's TestContext.Out lines twice (once live-streamed, once again under
+  // "Standard Output Messages:"), so matching SEQUENCE and HEX independently
+  // risks pairing a sequence from one copy with a hex from the other. The C#
+  // test writes them as one WriteLine call each, back to back; requiring them
+  // adjacent guarantees whichever pair matches first is self-consistent.
+  const goldenMatch = /CULTMESH_GOLDEN_SEQUENCE=(\d+)\s*\r?\n\s*CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
+  assert.ok(goldenMatch, `expected the C# test to print its golden sequence and hex lines together.\n${stdout}`);
+  const csharpSequence = Number(goldenMatch![1]);
+  const csharpHex = goldenMatch![2].toLowerCase();
+
+  // Which frame the managed connector's single ReceiveAsync() call actually
+  // got is not pinned to frame 1: latest-only coalesces on both the
+  // provider's outbox and the connector's own receive-side inbox, so a slow
+  // start can land on a later sequence. Match the typescript peer's logged
+  // encoding of that same sequence rather than assuming the first one sent.
+  const tsSentLine = server.stderr
+    .join("")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line) as { event?: string; sent?: number; hex?: string };
+      } catch {
+        return undefined;
+      }
+    })
+    .find((entry) => entry?.event === "quic-realtime-serve" && entry.sent === csharpSequence);
+  assert.ok(tsSentLine?.hex, `expected the typescript peer to log frame ${csharpSequence}'s hex encoding`);
+
+  assert.equal(csharpHex, tsSentLine!.hex, "TypeScript and C# must encode the same frame identically");
+});
+
+test("CultMesh QUIC realtime: latest-only under a stalled consumer converges without blocking the provider", async (t) => {
+  if (!process.env.CULTMESH_QUIC_NATIVE_DIR) {
+    t.skip("CULTMESH_QUIC_NATIVE_DIR is not set to a built native bridge.");
+    return;
+  }
+  logInteropPhase("quic-provider-stalled", "build the typescript quic peer");
+  await buildCultMeshTsQuicPeer();
+
+  const servers: RunningServeProcess[] = [];
+  t.after(async () => {
+    for (const server of servers) {
+      server.child.stdin?.end();
+      server.child.kill();
+    }
+    await delay(processCleanupTimeoutMs);
+  });
+
+  logInteropPhase("quic-provider-stalled", "start the typescript QUIC provider");
+  const started = Date.now();
+  servers.push(await spawnServeProcess("ts-quic-provider-stalled", {
+    command: process.execPath,
+    args: [cultMeshQuicPeerScript, "serve", "--frames", "200", "--delivery", "latest-only", "--interval-ms", "1"],
+    cwd: cultMeshTsRoot,
+    env: { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" },
+    stdin: "pipe",
+  }));
+  const ready = (await servers[servers.length - 1].ready) as { status: string; endpoint: string };
+
+  logInteropPhase("quic-provider-stalled", "dial twice: one healthy, one paused mid-stream");
+  const env = { CULTMESH_QUIC_NATIVE_DIR: process.env.CULTMESH_QUIC_NATIVE_DIR ?? "" };
+  const [healthy, paused] = await Promise.all([
+    runJsonCommand("ts-quic-dial-healthy", process.execPath, [
+      cultMeshQuicPeerScript,
+      "dial",
+      "--endpoint", ready.endpoint,
+      "--expect-sequence", "200",
+      "--timeout-ms", "20000",
+    ], cultMeshTsRoot, env),
+    runJsonCommand("ts-quic-dial-paused", process.execPath, [
+      cultMeshQuicPeerScript,
+      "dial",
+      "--endpoint", ready.endpoint,
+      "--expect-sequence", "200",
+      "--pause-after", "5",
+      "--pause-ms", "500",
+      "--timeout-ms", "20000",
+    ], cultMeshTsRoot, env),
+  ]);
+
+  // The provider's 200 broadcasts (bounded per-frame by --interval-ms 1, so
+  // ~200ms of pacing) plus the 500ms pause plus process/network overhead
+  // must still land well inside the bound below regardless of the pause: the
+  // provider itself was never blocked by the paused consumer.
+  assert.ok(Date.now() - started < 15_000, "the provider's broadcasts must not be blocked by a stalled peer");
+
+  assert.equal(healthy.frames.at(-1).sequence, "200");
+  assert.equal(paused.frames.at(-1).sequence, "200");
+  // Coalescing means the paused consumer saw far fewer than 200 frames.
+  assert.ok(paused.frames.length < 200, `expected coalescing under the pause, got ${paused.frames.length} frames`);
+});
 
 test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state over the shared schema-v0 lane", async (t) => {
   logInteropPhase("schema-v0", "build peers");
@@ -2434,6 +2753,49 @@ async function buildCSharpInteropPeer(): Promise<void> {
   await csharpInteropPeerBuild;
 }
 
+async function buildCultMeshTsQuicPeer(): Promise<void> {
+  cultMeshTsInteropPeerBuild ??= (async () => {
+    const tsc = resolve(cultLibRoot, "node_modules", "typescript", "bin", "tsc");
+    await execFileAsync(process.execPath, [tsc, "-p", "tsconfig.json"], { cwd: cultMeshTsRoot });
+    await execFileAsync(process.execPath, [tsc, "-p", "tsconfig.test.json"], { cwd: cultMeshTsRoot });
+  })();
+  await cultMeshTsInteropPeerBuild;
+}
+
+/**
+ * Runs `dotnet test` against one project, filtered to a single test by name,
+ * with extra environment (normally `CULTMESH_NATIVE_EXTERNAL_ENDPOINT`).
+ * `verbosity=detailed` is what makes VSTest's console logger print a passed
+ * test's own `TestContext.Out` lines (the golden-bytes hex line, section
+ * 10's lane 4) instead of only failures.
+ */
+async function runDotnetTestFilter(
+  projectPath: string,
+  testName: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await execFileAsync(
+      dotnetCommand,
+      [
+        "test",
+        projectPath,
+        "--filter",
+        `FullyQualifiedName~${testName}`,
+        "--logger",
+        "console;verbosity=detailed",
+        "-nologo",
+      ],
+      { cwd: cultLibRoot, env: { ...process.env, ...env }, timeout: jsonCommandTimeoutMs },
+    );
+  } catch (error) {
+    const execError = error as { stdout?: string; stderr?: string; message: string };
+    throw new Error(
+      `dotnet test ${testName} failed.\nstdout:\n${execError.stdout ?? ""}\nstderr:\n${execError.stderr ?? execError.message}`,
+    );
+  }
+}
+
 async function buildKotlinInteropPeer(): Promise<void> {
   kotlinInteropPeerBuild ??= execFileAsync(
     "powershell",
@@ -2479,21 +2841,35 @@ interface ServeCommand {
   args: string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Defaults to "ignore" (every existing serve mode's stdin is unused, so it
+   * is closed at spawn). "pipe" keeps stdin open until the caller ends it: the
+   * C# `quic-realtime-serve` mode watches stdin for EOF as its own shutdown
+   * signal (`WatchStdinCloseAsync`, `Program.cs:1261-1269`), so spawning it
+   * with "ignore" hands it an already-closed stdin and it tears down before
+   * sending anything. Only that mode should ask for "pipe"; changing the
+   * default would affect every other serve process spawned here.
+   */
+  stdin?: "ignore" | "pipe";
 }
 
 interface RunningServeProcess {
   name: string;
-  child: ChildProcessByStdio<null, Readable, Readable>;
+  child: ChildProcessByStdio<Writable | null, Readable, Readable>;
   ready: Promise<unknown>;
   stderr: string[];
 }
 
 async function spawnServeProcess(name: string, command: ServeCommand): Promise<RunningServeProcess> {
+  // A non-literal first stdio element (it varies per caller) loses `spawn`'s
+  // typed-tuple overload entirely, including for the two fixed "pipe"
+  // elements, so this is asserted rather than inferred: stdout/stderr are
+  // always piped here, and only stdin's presence varies.
   const child = spawn(command.command, command.args, {
     cwd: command.cwd,
     env: { ...process.env, ...command.env },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+    stdio: [command.stdin ?? "ignore", "pipe", "pipe"],
+  }) as ChildProcessByStdio<Writable | null, Readable, Readable>;
   const stderr: string[] = [];
   let stdoutBuffer = "";
 

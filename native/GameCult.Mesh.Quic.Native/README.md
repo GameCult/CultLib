@@ -114,8 +114,8 @@ and a container that cannot ask for that cannot run them:
       scripts/build-quic-native.sh
       cmake -S native/GameCult.Mesh.Quic.Native -B artifacts/quic-native-tests/linux-x64 -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCULTMESH_QUIC_BUILD_TESTS=ON -DCULTMESH_QUIC_DEBUG_ASSERTS=ON \
-        -DMSQUIC_INCLUDE_DIR=artifacts/dependencies/msquic-linux-2.5.9/include \
-        -DMSQUIC_LIB_DIR=artifacts/dependencies/msquic-linux-2.5.9/package/usr/lib/x86_64-linux-gnu
+        -DMSQUIC_INCLUDE_DIR=\$(pwd)/artifacts/dependencies/msquic-linux-2.5.9/include \
+        -DMSQUIC_LIB_DIR=\$(pwd)/artifacts/dependencies/msquic-linux-2.5.9/package/usr/lib/x86_64-linux-gnu
       cmake --build artifacts/quic-native-tests/linux-x64
       for scenario in closerace holdclose holdtimeout polltimeout pollbusy pollhammer zerotimeout payloadfit latecall waitseam; do
         setarch -R artifacts/quic-native-tests/linux-x64/bin/cultmesh_quic_native_tests \"\${scenario}\" || exit 1
@@ -123,7 +123,16 @@ and a container that cannot ask for that cannot run them:
     "
 
 Both lines are run from the repository root, and the mount is that root wherever
-it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. `CULTMESH_QUIC_BUILD_TESTS`
+it is: `${PWD}` in PowerShell, `$(pwd)` in a POSIX shell. `MSQUIC_INCLUDE_DIR`
+and `MSQUIC_LIB_DIR` need `$(pwd)` too, even though the `cmake` invocation
+itself already runs from `/src`: CMake resolves a relative path passed as a
+cache variable against the CMakeLists.txt that consumes it
+(`native/GameCult.Mesh.Quic.Native`), not against the directory `cmake` was
+invoked from, so a bare `artifacts/...` here looks for the dependency one level
+too deep and fails the compile before it reaches the loader. The test target's
+own build now copies `libmsquic.so.2` from `MSQUIC_LIB_DIR` beside the built
+binaries, so nothing else here needs the packaged output directory `scripts/build-quic-native.sh`
+produces. `CULTMESH_QUIC_BUILD_TESTS`
 is off in the shipped configuration (see the CMakeLists.txt option comment); it
 turns on the scenario runner `tests/cultmesh_quic_native_tests.cpp` compiles into,
 and `CULTMESH_QUIC_DEBUG_ASSERTS` turns on both the bridge's internal invariant

@@ -158,6 +158,16 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<CultMeshQuicRealtimeTransport, byte> _clients = new();
     private readonly CultMeshRealtimeInbox _received = new();
+    /// <summary>Guards <see cref="_retained"/> together with client registration, so a newly
+    /// accepted client's seed and a concurrent broadcast's retained update are totally ordered:
+    /// a client only ever becomes visible to <see cref="BroadcastAsync"/> already carrying the
+    /// newest retained generation, and can never be seeded with a frame older than one it already
+    /// received via broadcast.</summary>
+    private readonly object _retainedGate = new();
+    /// <summary>The newest `latest-only` frame broadcast so far per `(channel, body)` key, seeded
+    /// into every client accepted after that broadcast. Reliable-ordered frames are events, not
+    /// state, and are never retained.</summary>
+    private readonly Dictionary<string, CultMeshRealtimeFrame> _retained = new(StringComparer.Ordinal);
     private readonly TaskCompletionSource<Exception> _backgroundFailure = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _acceptLoop;
@@ -222,10 +232,22 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
 
         if (frame.Delivery == CultMeshRealtimeDelivery.LatestOnly)
         {
-            foreach (var client in _clients.Keys)
+            var key = frame.ChannelId + "\u001f" + frame.BodyId;
+            var candidate = new CultMeshQuicRealtimeTransport.CultMeshGeneration(frame.ProducerEpoch, frame.Sequence);
+            lock (_retainedGate)
             {
-                if (client.TryPublishLatest(frame)) continue;
-                if (_clients.TryRemove(client, out _)) client.Dispose();
+                if (!_retained.TryGetValue(key, out var current) ||
+                    candidate.CompareTo(new CultMeshQuicRealtimeTransport.CultMeshGeneration(
+                        current.ProducerEpoch, current.Sequence)) > 0)
+                {
+                    _retained[key] = frame;
+                }
+
+                foreach (var client in _clients.Keys)
+                {
+                    if (client.TryPublishLatest(frame)) continue;
+                    if (_clients.TryRemove(client, out _)) client.Dispose();
+                }
             }
             return;
         }
@@ -284,7 +306,11 @@ public sealed class CultMeshQuicRealtimeServer : IAsyncDisposable
                     connection.RemoteEndPoint?.ToString() ?? "quic-peer",
                     connection,
                     frame => _received.Publish(frame));
-                _clients.TryAdd(transport, 0);
+                lock (_retainedGate)
+                {
+                    _clients.TryAdd(transport, 0);
+                    foreach (var retainedFrame in _retained.Values) transport.TryPublishLatest(retainedFrame);
+                }
                 _ = transport.Completion.ContinueWith(
                     completed =>
                     {
@@ -559,7 +585,7 @@ internal sealed class CultMeshQuicRealtimeTransport : ICultMeshRealtimeTransport
         _received.Publish(frame);
     }
 
-    private readonly record struct CultMeshGeneration(long ProducerEpoch, long Sequence) : IComparable<CultMeshGeneration>
+    internal readonly record struct CultMeshGeneration(long ProducerEpoch, long Sequence) : IComparable<CultMeshGeneration>
     {
         public int CompareTo(CultMeshGeneration other)
         {

@@ -20,6 +20,7 @@ import {
   bytesToBase64,
   isLoopbackEndpoint,
   isUnsignedCertificate,
+  routeCertificateView,
   verifyAuthorityRoute,
   verifyProviderSessionProof,
   type CultMeshAuthorityIdentity,
@@ -870,17 +871,7 @@ async function selectOdinRoute(
       protocolIds: route.protocolIds,
       priority: route.priority,
       generation: route.generation,
-      ...(route.certificate ? { certificate: {
-        providerKey: {
-          keyId: route.certificate.providerKeyId,
-          x: route.certificate.providerPublicKeyX,
-          y: route.certificate.providerPublicKeyY,
-        },
-        odinKeyId: route.certificate.odinKeyId,
-        issuedAtUnixMilliseconds: route.certificate.issuedAtUnixMilliseconds,
-        expiresAtUnixMilliseconds: route.certificate.expiresAtUnixMilliseconds,
-        signature: route.certificate.signature,
-      } } : {}),
+      ...(route.certificate ? { certificate: routeCertificateView(route.certificate) } : {}),
     };
     try {
       await verifyAuthorityRoute(candidate, trust);

@@ -12,13 +12,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "native"
   ],
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "prepack": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
     "typecheck": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json --pretty false",
-    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js"
+    "test": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json && node ../../node_modules/typescript/bin/tsc -p tsconfig.test.json && node --expose-gc --test dist-test/test/*.test.js"
   },
   "keywords": [
     "cultmesh",
@@ -44,7 +45,8 @@
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
     "@gamecult/cultcache-ts": "^0.14.0",
-    "cultnet-ts": "^0.2.0"
+    "cultnet-ts": "^0.2.0",
+    "koffi": "3.3.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

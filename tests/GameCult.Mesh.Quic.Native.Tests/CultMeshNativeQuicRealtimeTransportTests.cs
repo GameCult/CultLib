@@ -13,11 +13,14 @@ namespace GameCult.Mesh.Quic.Native.Tests;
 public sealed class CultMeshNativeQuicRealtimeTransportTests
 {
     [Test]
-    public async Task NativeConnectorReceivesFromExternalManagedProvider()
+    public async Task NativeConnectorReceivesFromExternalProvider()
     {
+        // The provider on the other end is no longer necessarily the C#
+        // managed one (Cut 5 adds a TypeScript provider on this same lane);
+        // the env var name stays, since it names the endpoint, not the peer.
         var endpoint = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_ENDPOINT");
         if (string.IsNullOrWhiteSpace(endpoint))
-            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process native/managed parity.");
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process native/external-provider parity.");
 
         var connector = new CultMeshNativeQuicRealtimeTransportConnector();
         using var client = await connector.ConnectAsync(
@@ -30,6 +33,36 @@ public sealed class CultMeshNativeQuicRealtimeTransportTests
         frame.SchemaId.Should().NotBeNullOrWhiteSpace();
         frame.BodyId.Should().NotBeNullOrWhiteSpace();
         frame.Payload.Should().NotBeEmpty();
+    }
+
+    /// <summary>
+    /// Cut C's headline cross-process proof: the harness lets the external
+    /// TypeScript provider finish broadcasting and disconnect its trigger peer
+    /// <i>before</i> this test dials, so nothing is retransmitted live. If a
+    /// frame arrives at all here, it can only be the provider's retained seed;
+    /// this test also checks the retained frame's own payload, so a
+    /// regression that seeds a stale generation (not just no seed) is caught
+    /// too.
+    /// </summary>
+    [Test]
+    public async Task NativeConnectorReceivesTheRetainedFrameWhenJoiningLate()
+    {
+        var endpoint = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_ENDPOINT");
+        if (string.IsNullOrWhiteSpace(endpoint))
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise the late-join retention lane.");
+        var expectedPayload = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_EXPECTED_PAYLOAD");
+        if (string.IsNullOrWhiteSpace(expectedPayload))
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_EXPECTED_PAYLOAD to the retained frame's expected payload text.");
+
+        var connector = new CultMeshNativeQuicRealtimeTransportConnector();
+        using var client = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint!),
+            new CultMeshSessionTarget("aetheria", "aetheria.local"));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var frame = await client.ReceiveAsync(timeout.Token);
+
+        frame.Delivery.Should().Be(CultMeshRealtimeDelivery.LatestOnly);
+        System.Text.Encoding.UTF8.GetString(frame.Payload.ToArray()).Should().Be(expectedPayload);
     }
 
     [Test]

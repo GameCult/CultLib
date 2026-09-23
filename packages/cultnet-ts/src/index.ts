@@ -73,6 +73,7 @@ export {
   isNullOrWhiteSpaceCSharp,
   isProtectedEndpoint,
   isUnsignedCertificate,
+  routeCertificateView,
   trimCSharp,
   verifyAuthorityRoute,
   verifyP256,

@@ -13,3 +13,19 @@
 # repair is in native/GameCult.Mesh.Quic.Native/README.md, beside the container
 # path it unblocks.
 *.sh text eol=lf
+
+# The committed CultMesh QUIC native binaries (cut 6, packaging) ride the
+# deploy `git archive` as raw bytes. `* text=auto` already autodetects them as
+# binary by content, but that autodetection is a heuristic; say so explicitly
+# so no future text-processing rule (a diff driver, an export filter) can
+# apply text conversion and poison the committed digests in SHA256SUMS.
+packages/cultmesh-ts/native/**/*.dll binary
+packages/cultmesh-ts/native/**/*.so binary
+packages/cultmesh-ts/native/**/*.so.* binary
+
+# The digest list and manifest beside them keep LF on every checkout. Left to
+# `text=auto`, a Windows clone writes them with carriage returns, and the
+# documented `sha256sum -c SHA256SUMS` then fails on every line (each filename
+# ends in `\r`) while CI, checking out on Linux, stays green.
+packages/cultmesh-ts/native/SHA256SUMS text eol=lf
+packages/cultmesh-ts/native/MANIFEST.txt text eol=lf
