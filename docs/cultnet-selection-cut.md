@@ -3451,3 +3451,84 @@ Everything else is tests and docs.
 
 **Every condition Soul set for merging is now met.** A final gate pass
 follows.
+
+## Soul, the merge gate, fourth pass, 2026-09-23
+
+Opus. Four sequential Yggdrasil jobs, one slot, Rust at `-j1`. Merge to
+`origin/main` is conflict-free; main's 42 divergent commits touch no file this
+cut touches.
+
+### **Verdict: Cut 1 may merge.**
+
+**Baselines, with one correction.** Rust 264 across 12 binaries, Mesh 255,
+Caching 190 / 3 — all as reported. **C# Networking is 283 passed / 2 skipped,
+not the 280 reported.** Under-reported this time rather than over; the count
+still went into the record wrong.
+
+### The five conditions
+
+1. **Met for everything that decides output, not met on the letter.** Killed
+   in both runtimes: dropping both `to` components, dropping `to.record_key`
+   alone, reversing it, dropping `record_key` from the row comparator, plus
+   `from.record_key` and `role` in Rust. **The batch's new fixtures are the
+   killers and they are not coincidental** — Soul attacked them with
+   single-component variants and they held.
+
+   **But `to.schemaId` survives both dropping and reversing, in both
+   runtimes.** Hands never claimed it dies alone; **R-AT did, and R-AT was
+   mine.** Soul could not construct a selection where it decides anything —
+   under D10b a role resolves to one declared target type and reference
+   resolution yields at most one row per (role, key) — but says plainly that
+   is a claim, not a proof, **and the same shape of argument that has been
+   wrong twice here.** Hence the follow-up is "construct a killer **or delete
+   the component**", not "record it as equivalent".
+2. **Partially met, and the miss is mine.** The false argument is gone where
+   batch 6 restated it and **still stands, unstruck, at its original site** —
+   the `EdgesFor` paragraph and ruling **R-AC** ("Recorded, not to be chased").
+   Those read as live instructions. I deleted the copy and left the original,
+   which is the same sweep failure this map has recorded before.
+3. **Met.** `runtime-parity-scope.md` carries the row in R-AY's words, naming
+   four files that all exist.
+4. **Met**, and the constants were right all along.
+5. **Met, and genuinely two-sided.** The three constants are byte-identical
+   strings in both files; each runtime serializes and asserts independently,
+   so **neither reads the other's answer**. All three C# tests pass and **all
+   three fail when Soul flipped one hex digit** of the expected constant. 239,
+   261 and 376 are real MessagePack C# 3.1.7 output.
+
+### SM-10, CONFIRMED. The 246-byte all-absent `Edge` vector is Rust-only.
+
+The 228-byte all-absent header is nested inside the 376-byte envelope, so C#
+regenerates it. **The edge has no such cover.** A C# edge encoder that resumed
+omitting a null `payload`/`payloadEncoding` would still pass the 261-byte
+populated vector, and **nothing on the C# side would fail** — which is exactly
+what R-AP existed to kill. It leaves `runtime-parity-scope.md`'s "verified at
+populated and absent optional values" true for three cells of four.
+
+**Five lines of C# closes it.**
+
+### Self's decision: close four items, then merge
+
+Soul named this the follow-up it "would put a name on". A known hole that a
+five-line test closes is not a follow-up — merging over it would be shipping
+the exact asymmetry the cut exists to prevent, with a note promising to come
+back. **Batch 8 closes items 1 to 4, then the cut merges.**
+
+- **R-AZ (SM-10).** Mirror the 246-byte all-absent `Edge` constant into
+  `SelectionWireParityTests.cs`, so both runtimes assert all four cells.
+- **R-BA.** Settle `to.schemaId`: **construct a killer, or delete the
+  component from both comparators.** A component no input can distinguish is
+  not free — it is a line the next reader must reason about, and the reasoning
+  has been wrong twice.
+- **R-BB.** Correct the landing note to 283 passed / 2 skipped.
+- **R-BC.** Strike R-AC and the `EdgesFor` equivalence paragraph **at their
+  original site**, not with a note beside them.
+
+**Not blocking, recorded as genuine follow-ups**, none a known defect in the
+cut's behaviour and all outside the selection surface: the C# Stryker survivor
+list untriaged; `contracts.rs` and `schema_discovery.rs` unmeasured with batch
+5's partial `validate_*` signal hanging; the `--since`/`GitInfoProvider` crash
+unrooted; Caching's three, which **need a non-root container to prove and must
+not be "fixed"**.
+
+Rig: `C:\Users\Meta\eureka-soul-probes\cultnet-selection-cut1-fix7\`.
