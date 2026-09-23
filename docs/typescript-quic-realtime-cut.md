@@ -990,6 +990,66 @@ cut this week. We need that TO EAT."*
 Cut 3's work lives on `hands/cultmath-erf` plus `quic-cut3-winrel`, and
 neither is merged to `main`. Cut 4 branches from `cc71f17`.
 
+### Cut 4, 2026-09-23: landed, gated, fix batch 1, confirming pass running
+
+**Landed** (Sonnet, 12 commits, `cc71f17..c57b613` on `quic-cut4`): the koffi
+binding, consumer, session manager and trust. It reported 109/109 on Yggdrasil.
+The interop lane was reported as an operator fork (EHOSTUNREACH). **Scars from
+this landing:**
+- A test helper leaked a runtime handle. It left a verify job idle at 0% CPU
+  for 25 minutes, and the agent waiting on it never woke. Self found the hang
+  with a SIGUSR2 diagnostic report: the event loop was idle with only
+  unreferenced handles. The fix at the owner: `ygg-verify.sh` gained a watchdog
+  (Eureka `9359e9c`). The first watchdog leaked the slot lock to its own
+  `sleep` child and held two slots for an hour; fixed at `dbe594e`.
+- The agent ran past 550k tokens of context and was retired for a fresh one.
+  Its cut came in at +2,061 lines against an estimate of about 1,300.
+
+**Soul gate (Opus): Cut 5 may not build on this.** Confirmed by executed probes:
+- A malformed frame from a peer killed the whole process (an unhandled
+  rejection in the pump). C# faults only that connection.
+- `release()` was a use-after-free: it closed the runtime while a
+  `nextEvent.async` call was queued but not started. Exit 134 under
+  thread-pool saturation with `MALLOC_PERTURB_`.
+- A peer shutdown leaked a runtime reference, and pending receives hung
+  forever.
+- The session manager never went offline on transport death (C#
+  `InvalidateRealtimeSession`), and had no disposed guard or single-flight.
+- The race waited on `allSettled`, so one dead route cost about 10 s. C#
+  returns the first success.
+- `streamKinds` and the receive queue grew without bound, with no latest-only
+  coalescing as in C#'s inbox.
+- The types said `bigint` while koffi struct members returned `number`, so
+  the canceled-send check was dead code.
+- Eight spec rules had no killing test (M2–M4, M6–M10), and M1 was killed
+  only by a hang.
+
+**The interop "fork" was not a network problem.** Self's IPv6 hypothesis was
+refuted: IPv6 was enabled and `--network host` failed identically. The probe's
+first explanation, that an AF_INET socket ignores v4-mapped traffic, was also
+wrong: ECONNREFUSED meant nothing was listening. The executed cause:
+- the harness spawns peers with `stdio: ["ignore", ...]`, and the C# serve loop
+  stops on stdin EOF, so the listener tore itself down at once;
+- the serve mode broadcast without waiting for a client;
+- .NET in the image could not find `libmsquic`.
+
+**Fix batch 1** (fresh Sonnet, `c57b613..8e32bff`):
+- 125/125 pass. **The C# managed provider to TS consumer lane passes**,
+  separate processes, on Linux.
+- Kills are confirmed for reverted fixes 1 and 3–6. **Not proven by
+  execution:** the `release()` ordering fix (checked by reading only) and
+  kills for Soul's M2–M10.
+- **The cut grew by about +906 net instead of shrinking.** Hands declined the
+  subtraction item on its own authority, arguing that `NativeBindings` is the
+  only static typing over koffi. `realtime-quic.ts` is 849 lines, against an
+  estimate of about 650 across Cuts 4 and 5 combined.
+- Fix 7 coerces u64 struct members from `number`, which is lossy above 2^53.
+
+A confirming Soul pass (Opus) is rerunning the crash reproductions and M1–M10,
+checking the 2^53 exposure, and judging the subtraction. **Cut 5 started in
+parallel** on `quic-cut5` from `8e32bff`, to save wall-clock time. If Soul
+finds defects, Cut 5 rebases onto their fixes.
+
 **Cut 1 Soul findings, 2026-09-16.** Held: every test count, both negative
 greps, all twelve mutations rerun and killed, the control catching a
 truncated write, the equivalent mutant confirmed (Node 24 WebCrypto refuses
