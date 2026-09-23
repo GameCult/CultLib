@@ -19,6 +19,7 @@ import {
 import {
   CultMeshQuicRealtimeConnector,
   CultMeshQuicRealtimeProvider,
+  CultMeshQuicRealtimeTransport as CultMeshQuicRealtimeTransportClass,
   parseQuicRealtimeEndpoint,
   type CultMeshRealtimeCandidate,
   type CultMeshRealtimeTarget,
@@ -837,13 +838,233 @@ test("P3: a latest-only send failure evicts the peer without broadcast() throwin
     // outbox's own send failure path (`CultMeshQuicRealtimeProviderOutbox.pump`'s
     // catch, which disposes the peer and reports failure through
     // `onSendFailure`) rather than `broadcast()`'s direct per-peer catch.
-    const deadline = Date.now() + 2_000;
-    let sequence = 0n;
-    while (Date.now() < deadline && provider.connectionCount > 0) {
-      sequence += 1n;
+    //
+    // What made this flaky: unlike the reliable-ordered version,
+    // `broadcast()` never awaits a latest-only peer's actual send — it only
+    // hands the frame to that peer's outbox and returns (see
+    // `CultMeshQuicRealtimeProvider.broadcast`). A `while (Date.now() <
+    // deadline)` loop therefore does no real I/O per iteration; it just
+    // spins encoding and enqueueing frames as fast as the CPU allows,
+    // starving the event-loop turns the native pump needs to actually
+    // observe the dead connection and fire `send_complete`/
+    // `CONNECTION_SHUTDOWN`. Under any extra load in the test process
+    // (exactly what running under mutation testing adds, regardless of
+    // which line was mutated) that starvation can burn the whole wall-clock
+    // bound without ever landing an attempt past the point the connection
+    // is actually dead — a failure with nothing to do with the mutant under
+    // test. Raising the bound only buys more spinning, not more real
+    // attempts. Fixed by decoupling "how many attempts to seed" (a small,
+    // fixed count, each with a real yield) from "how long to wait for the
+    // result" (a single `waitUntil` afterward, which is what actually
+    // bounds this test).
+    for (let sequence = 0n; sequence < 20n && provider.connectionCount > 0; sequence += 1n) {
       await provider.broadcast(testFrame({ delivery: "latest-only", sequence, bodyId: `body:${sequence}` }));
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    await waitUntil(() => provider.connectionCount === 0);
     assert.equal(provider.connectionCount, 0, "the dead peer must be evicted, not counted forever");
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("I1: an inbox key keeps its first-arrival position when a newer frame overwrites it", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+
+      // Key A arrives first, then key B, then A is republished with a new
+      // value while still unread: `CultMeshRealtimeInbox.publish`'s
+      // coalescing must overwrite A's *value* in place, not move it to the
+      // back of the queue behind B. `received` is exactly that inbox,
+      // reached through the provider's client fan-in.
+      await consumer.sendFrame(testFrame({ delivery: "latest-only", bodyId: "body:A", sequence: 1n }));
+      await waitUntil(() => provider.receiveQueueSize === 1);
+      await consumer.sendFrame(testFrame({ delivery: "latest-only", bodyId: "body:B", sequence: 1n }));
+      await waitUntil(() => provider.receiveQueueSize === 2);
+      await consumer.sendFrame(testFrame({ delivery: "latest-only", bodyId: "body:A", sequence: 2n }));
+      // Still 2: the second A publish must coalesce onto the already-queued
+      // A entry, not add a third.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(provider.receiveQueueSize, 2, "a republish of a still-pending key must not grow the queue");
+
+      const first = await provider.receive();
+      const second = await provider.receive();
+      assert.equal(first.bodyId, "body:A", "A must still drain first: its position must survive the overwrite");
+      assert.equal(first.sequence, 2n, "A's value must be the newer, overwritten one");
+      assert.equal(second.bodyId, "body:B");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("L1: the outbox keeps one send in flight per peer; the next frame dequeues only after send_complete", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+
+      // Prototype-patched for the life of this test, restored in `finally`:
+      // the provider builds its peer transport internally, so this is the
+      // only vantage point outside the module from which to observe
+      // concurrency of `sendEncodedFrame` calls, which is what
+      // `CultMeshQuicRealtimeProviderOutbox.pump` serializes one-at-a-time
+      // against `send_complete`.
+      const original = CultMeshQuicRealtimeTransportClass.prototype.sendEncodedFrame;
+      let active = 0;
+      let maxActive = 0;
+      CultMeshQuicRealtimeTransportClass.prototype.sendEncodedFrame = function (
+        this: InstanceType<typeof CultMeshQuicRealtimeTransportClass>,
+        delivery: "reliable-ordered" | "latest-only",
+        encoded: Uint8Array,
+      ) {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        return original.call(this, delivery, encoded).finally(() => {
+          active -= 1;
+        });
+      };
+      try {
+        const total = 20;
+        const sends: Promise<void>[] = [];
+        for (let key = 0; key < total; key += 1) {
+          sends.push(provider.broadcast(testFrame({ bodyId: `body:${key}`, sequence: 1n })));
+        }
+        await Promise.all(sends);
+
+        const seen = new Set<string>();
+        while (seen.size < total) {
+          const frame = await consumer.receiveFrame();
+          seen.add(frame.bodyId);
+        }
+      } finally {
+        CultMeshQuicRealtimeTransportClass.prototype.sendEncodedFrame = original;
+      }
+      assert.equal(maxActive, 1, "the outbox pump must never have two sends in flight for one peer at once");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("P15: broadcast() after dispose rejects instead of touching a torn-down provider", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  provider.dispose();
+  await assert.rejects(provider.broadcast(testFrame()), /disposed/i);
+});
+
+test("P17: an accept arriving after dispose is refused, not attached as a peer", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  const runtime = await CultMeshQuicNativeRuntime.open();
+  let connectionId: bigint | undefined;
+  try {
+    // A real native connection handle this test owns outright (never dialed
+    // anywhere reachable, so shutting it down is safe): stands in for the
+    // handle a genuine NEW_CONNECTION event would have carried, without
+    // fabricating a bogus native pointer. `acceptConnection` is private;
+    // reaching it directly is what lets this test drive the exact race
+    // (an accept event landing after `dispose()` has already run) without
+    // depending on real listener-close timing to reproduce it.
+    connectionId = runtime.connectionOpen("127.0.0.1", 1);
+    provider.dispose();
+    assert.doesNotThrow(() =>
+      (provider as unknown as { acceptConnection(id: bigint): void }).acceptConnection(connectionId!),
+    );
+    assert.equal(provider.connectionCount, 0, "a post-dispose accept must never join peers");
+  } finally {
+    if (connectionId !== undefined) {
+      try {
+        runtime.connectionShutdown(connectionId, 0n);
+      } catch {
+        // Best-effort: acceptConnection's own disposed-path may already have shut it down.
+      }
+    }
+    await runtime.release();
+  }
+});
+
+test("fix 1: a publish-only provider faults a client that sends to it, and its memory stays empty", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await CultMeshQuicRealtimeProvider.listen({
+    host: "127.0.0.1",
+    port: 0,
+    serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+    acceptClientFrames: false,
+  });
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+
+      // receive() itself rejects clearly rather than hanging forever.
+      await assert.rejects(provider.receive(), /publish-only/i);
+
+      // Any inbound stream from the client faults that connection. The
+      // client's own `sendFrame` promise settles on its *local* stream
+      // send completing (MsQuic hands the bytes off and reports
+      // send_complete without waiting for the peer to process them), so it
+      // may well resolve even though the server already faulted its side —
+      // the proof this test owns is the server's state, not the client's
+      // send outcome, so the client send is fired and ignored either way.
+      void consumer.sendFrame(testFrame({ delivery: "latest-only" })).catch(() => {});
+      await waitUntil(() => provider.connectionCount === 0);
+      assert.equal(provider.receiveQueueSize, 0, "no frame from a faulted publish-only client may be queued");
+
+      // The provider itself is otherwise healthy: broadcasting still works
+      // for a freshly attached peer.
+      const second = await dialProvider(provider);
+      try {
+        await waitUntil(() => provider.connectionCount === 1);
+        await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence: 1n }));
+        assert.equal((await second.receiveFrame()).sequence, 1n);
+      } finally {
+        second.dispose();
+      }
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
+test("fix 2: a connection beyond maxConnections is refused and existing peers are unaffected", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await CultMeshQuicRealtimeProvider.listen({
+    host: "127.0.0.1",
+    port: 0,
+    serverCertificate: { pkcs12: readFileSync(FIXTURE_P12), password: "" },
+    maxConnections: 1,
+  });
+  try {
+    const first = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+
+      // Refused at accept: never reaches CONNECTED, never becomes a peer.
+      await assertRejectsAndDisposes(dialProvider(provider), /certificate|rejected|closed|shut|timed out/i);
+      // Give the refusal a moment to be visible either way, then prove the
+      // existing peer was never touched.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(provider.connectionCount, 1, "the existing peer must be unaffected by a refused connection");
+
+      await provider.broadcast(testFrame({ delivery: "reliable-ordered", sequence: 7n }));
+      assert.equal((await first.receiveFrame()).sequence, 7n, "the existing peer must still be fully usable");
+    } finally {
+      first.dispose();
+    }
   } finally {
     provider.dispose();
   }
