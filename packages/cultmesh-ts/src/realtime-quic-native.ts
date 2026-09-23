@@ -89,7 +89,7 @@ interface NativeEventStruct {
 type KoffiLib = any;
 
 /** `nextEventAsync`'s signature, typed explicitly because `promisify` cannot
- * infer one from koffi's untyped (`any`) `.async` function. */
+ * infer one from koffi's untyped (`any`) async export. */
 type NextEventAsyncFn = (
   runtime: CultMeshQuicNativeHandle,
   timeoutMs: number,
