@@ -12,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "native"
   ],
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc -p tsconfig.json",
