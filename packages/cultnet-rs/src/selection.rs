@@ -469,6 +469,19 @@ pub mod canonical_number {
             assert_eq!(super::render_f32(2.0_f32).unwrap(), "2");
         }
 
+        // R-AI: `(bits >> 31) & 1 == 1` reads the sign bit - but 1.0_f32 and 2.0_f32 (bit pattern
+        // 0x3F800000 / 0x40000000) both happen to have their *low* bit (bit 0) equal to 0, same as
+        // their real sign bit (bit 31, also 0 for a positive value) - so a mutant that shifts the
+        // wrong direction (`bits << 31` instead of `bits >> 31`, reading bit 0 instead of bit 31)
+        // computes the same "not negative" answer for both by coincidence, and every render test
+        // above only used positive values. A negative value whose bit 0 differs from its sign bit
+        // (any of them - the mantissa/exponent bits are unrelated to bit 0) exposes it.
+        #[test]
+        fn render_f32_negative_values_carry_the_sign() {
+            assert_eq!(super::render_f32(-1.0_f32).unwrap(), "-1");
+            assert_eq!(super::render_f32(-2.0_f32).unwrap(), "-2");
+        }
+
         // R-AI/R-D: `is_canonical` is the Q-J door's grammar
         // (`^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`, minus the literal "-0") and was, until this test,
         // never called directly by any test in this crate - only reachable through
