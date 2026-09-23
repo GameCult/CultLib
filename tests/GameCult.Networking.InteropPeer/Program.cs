@@ -1301,8 +1301,6 @@ static X509Certificate2 CreateQuicInteropCertificate()
     return X509CertificateLoader.LoadPkcs12(generated.Export(X509ContentType.Pfx), null);
 }
 
-sealed record QuicRealtimeServeConfig(int Port, int Frames, string Delivery, int IntervalMs);
-
 static Dictionary<string, string> ParseArgs(string[] args)
 {
     var parsed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1536,6 +1534,8 @@ sealed record DialConfig(
     int? TargetPort,
     int? TargetRudpPort,
     string SchemaPath);
+
+sealed record QuicRealtimeServeConfig(int Port, int Frames, string Delivery, int IntervalMs);
 
 static class InteropPeerShared
 {
