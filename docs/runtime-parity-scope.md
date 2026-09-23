@@ -62,6 +62,17 @@ to speak CultNet or participate in CultMesh.
   shared transport port and expand RUDP adoption beyond the core proof.
 - `packages/cultmesh-kotlin/README.md` records Kotlin's runtime role and
   ergonomic surface, including the explicit non-claim around C# SoA storage.
+- CultNet typed selection (`cultnet.snapshot_response_raw.v1`, C#/Rust only;
+  docs/cultnet-selection-cut.md, R-AY): byte parity for the
+  `snapshot_response_raw.v1` envelope and its nested record types, verified at
+  populated and absent optional values, plus semantic parity over the named
+  field subset. `packages/cultnet-rs/tests/selection_wire_parity.rs` and
+  `tests/GameCult.Networking.Tests/SelectionWireParityTests.cs` carry the byte
+  vectors; `packages/cultnet-rs/tests/selection.rs`'s
+  `write_selection_vectors_for_the_reference` and
+  `tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs` carry the
+  semantic ones. A single rows-to-bytes path driving both halves in one call
+  remains its own cut (R-AR) and is not part of this claim.
 
 ## Expansion Work Outside The Current Parity Claim
 
