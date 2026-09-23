@@ -49,6 +49,22 @@ RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
  && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 ENV DOTNET_ROOT=/usr/share/dotnet
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# .NET's own System.Net.Quic P/Invokes into "libmsquic" and resolves it
+# through the loader's normal search path, not through this repo's
+# CULTMESH_QUIC_NATIVE_DIR (that is the Node bridge's own binary directory,
+# never the system loader path). Without this, the interop lane's C# peer
+# fails QuicListener.IsSupported with PlatformNotSupportedException. `dpkg -i`
+# (rather than the build script's `dpkg-deb -x` into a build-local directory)
+# installs the same pinned package into /usr/lib/x86_64-linux-gnu and runs
+# ldconfig, so it is resolvable process-wide. Same version, same digest as
+# scripts/build-quic-native.sh.
+RUN curl -fsSL -o /tmp/libmsquic.deb \
+      https://packages.microsoft.com/debian/13/prod/pool/main/libm/libmsquic/libmsquic_2.5.9_amd64.deb \
+ && echo "1baa61ade0b7b4a99f6dcb6b00d9aedb12b5566d00918a325be7425e878e51ba /tmp/libmsquic.deb" | sha256sum -c - \
+ && dpkg -i /tmp/libmsquic.deb \
+ && rm /tmp/libmsquic.deb \
+ && ldconfig
 # This minimal Debian image carries no ICU package, and .NET's runtime
 # FailFasts on startup without one. The interop peer already parses every
 # argument through CultureInfo.InvariantCulture, so globalization-invariant
