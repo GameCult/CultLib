@@ -13,6 +13,11 @@ on:
   push:
     branches:
       - main
+      # TEMPORARY (cut 6 landing): workflow_dispatch cannot be exercised until
+      # this file is registered from the default branch, so a push to this
+      # branch stands in to prove the build/verify jobs before the binaries
+      # are committed. Remove this line before merging to main.
+      - quic-cut6
     tags:
       - "cultmesh-quic-native-v*"
   pull_request:
@@ -27,10 +32,14 @@ jobs:
   # also runs it, alongside the two builds and the release.
   verify-committed:
     name: Verify committed binaries match SHA256SUMS
+    # TEMPORARY: the `refs/heads/quic-cut6` arm below goes with the branch
+    # trigger above. Remove both in the same commit, before merge.
     if: >-
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' &&
-        (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
+        (github.ref == 'refs/heads/main' ||
+          github.ref == 'refs/heads/quic-cut6' ||
+          startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -51,9 +60,12 @@ jobs:
   # A dry (workflow_dispatch) run uploads artifacts and creates no release.
   build-win32-x64:
     name: Build win32-x64
+    # TEMPORARY: the push-to-quic-cut6 arm below goes with the branch trigger
+    # above. Remove both in the same commit, before merge.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/quic-cut6' || startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -86,9 +98,12 @@ jobs:
 
   build-linux-x64:
     name: Build linux-x64
+    # TEMPORARY: the push-to-quic-cut6 arm below goes with the branch trigger
+    # above. Remove both in the same commit, before merge.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v'))
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/quic-cut6' || startsWith(github.ref, 'refs/tags/cultmesh-quic-native-v')))
     runs-on: ubuntu-latest
     # Q6 A: this pinned Debian 13 container is the only permitted Linux
     # release builder. The digest is the pin; the `debian:13` tag is only a
