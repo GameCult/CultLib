@@ -650,42 +650,48 @@ namespace GameCult.Networking.Tests
             public CultRecordRef<SoulSelfCiter>[] Peers = Array.Empty<CultRecordRef<SoulSelfCiter>>();
         }
 
-        // Named "zebra"/"alpha", not the rig's "hub"/"other": CultNetSelectionEvaluator.Select runs
-        // the Cited hop before the Cites hop (line ~198 vs ~206), so the self edge is always pushed
-        // to CitedEdges before the peer edge is pushed to CitesEdges. With "hub" self-citing and
-        // "other" as the cites target, "hub" < "other" already matches that push order, so dropping
-        // the comparator's To component reproduces the right answer by coincidence and the mutation
-        // survives. Naming the self-citer "zebra" and the target "alpha" makes push order
-        // [zebra, alpha] disagree with the required sorted order [alpha, zebra], so only the
-        // comparator's own To component - not insertion order - can produce it.
+        // Named "alpha" (self-citer) / "zebra" (cites target) - the OPPOSITE pairing from the Rust
+        // mirror of this test. CultNetSelectionEvaluator.EvaluateAll builds `edges` as
+        // `citesEdges` THEN `citedEdges` (line ~215-216), unlike cultnet_rs::select's single Vec
+        // pushed cited-then-cites - so in C# the cites edge (anchored on From) is pushed before the
+        // self/cited edge (anchored on To). With the rig's "hub" self-citing and "other" as the
+        // cites target, push order is [other, hub] and "hub" < "other" is the wrong order anyway
+        // (masked by the assertion using different values) - the actual coincidence this runtime
+        // needs broken is push order agreeing with sort order when the *target* name sorts before
+        // the *self* name. Naming the self-citer "alpha" and the target "zebra" makes C#'s push
+        // order [zebra, alpha] disagree with the required sorted order [alpha, zebra], so only the
+        // comparator's own To component - not insertion order - can produce it. (The Rust test uses
+        // the reverse pairing because cultnet_rs's push order is cited-then-cites, the opposite of
+        // this runtime's citesEdges-then-citedEdges - each runtime needs its own naming to defeat
+        // its own coincidence.)
         [Test]
         public void Evaluator_EdgeOrderPinsToWhenFromAndRoleAreBothTiedByASelfCitingPeer()
         {
             var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SoulSelfCiter) });
             var descriptor = registry.GetRequired<SoulSelfCiter>();
 
-            var zebra = new SoulSelfCiter
+            var alpha = new SoulSelfCiter
             {
-                Name = "zebra",
+                Name = "alpha",
                 Peers = new[]
                 {
-                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("zebra")),
-                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("alpha"))
+                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("alpha")),
+                    new CultRecordRef<SoulSelfCiter>(new CultRecordKey("zebra"))
                 }
             };
-            var alpha = new SoulSelfCiter { Name = "alpha" };
+            var zebra = new SoulSelfCiter { Name = "zebra" };
 
             var rows = new[]
             {
-                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("zebra"), zebra, 1),
-                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("alpha"), alpha, 2)
+                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("alpha"), alpha, 1),
+                new CultNetSelectionEvaluator.Row(descriptor, new CultRecordKey("zebra"), zebra, 2)
             };
 
             var selection = new CultNetSelection
             {
                 Cites = new CultNetCitation
                 {
-                    Target = new CultNetRecordRef { SchemaId = descriptor.SchemaId, RecordKey = "alpha" },
+                    Target = new CultNetRecordRef { SchemaId = descriptor.SchemaId, RecordKey = "zebra" },
                     Role = "Peers"
                 },
                 Cited = new CultNetIncoming { Role = "Peers", Exists = true }
