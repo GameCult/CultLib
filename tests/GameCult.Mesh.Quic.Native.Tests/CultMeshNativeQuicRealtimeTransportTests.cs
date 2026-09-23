@@ -13,11 +13,14 @@ namespace GameCult.Mesh.Quic.Native.Tests;
 public sealed class CultMeshNativeQuicRealtimeTransportTests
 {
     [Test]
-    public async Task NativeConnectorReceivesFromExternalManagedProvider()
+    public async Task NativeConnectorReceivesFromExternalProvider()
     {
+        // The provider on the other end is no longer necessarily the C#
+        // managed one (Cut 5 adds a TypeScript provider on this same lane);
+        // the env var name stays, since it names the endpoint, not the peer.
         var endpoint = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_ENDPOINT");
         if (string.IsNullOrWhiteSpace(endpoint))
-            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process native/managed parity.");
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process native/external-provider parity.");
 
         var connector = new CultMeshNativeQuicRealtimeTransportConnector();
         using var client = await connector.ConnectAsync(

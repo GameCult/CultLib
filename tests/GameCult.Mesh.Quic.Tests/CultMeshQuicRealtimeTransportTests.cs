@@ -159,6 +159,49 @@ public sealed class CultMeshQuicRealtimeTransportTests
         session.State.Status.Should().Be(CultMeshSessionStatus.Offline);
     }
 
+    /// <summary>
+    /// Cut 5's cross-process lane: an external provider (normally the
+    /// TypeScript `cultmesh-quic-peer.ts serve` peer started by
+    /// `cultnet-interop.test.ts`) is dialed by the plain managed connector,
+    /// using only the endpoint's own `cert-sha256` pin — no
+    /// <see cref="CultMeshQuicRealtimeConnectorOptions.ValidateProviderCertificate"/> —
+    /// exactly as an ordinary consumer would. Prints the received frame's
+    /// re-encoding as hex so the harness can compare it against the same
+    /// frame's TypeScript-side <c>encodeRealtimeFrame</c> output (golden
+    /// bytes across processes, closing "TypeScript encodings decode in C#"
+    /// by process, not by shared file).
+    /// </summary>
+    [Test]
+    public async Task ManagedConnectorReceivesFromExternalProvider()
+    {
+        var endpoint = Environment.GetEnvironmentVariable("CULTMESH_NATIVE_EXTERNAL_ENDPOINT");
+        if (string.IsNullOrWhiteSpace(endpoint))
+            Assert.Ignore("Set CULTMESH_NATIVE_EXTERNAL_ENDPOINT to exercise cross-process managed/external-provider parity.");
+
+        var connector = new CultMeshQuicRealtimeTransportConnector();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var transport = await connector.ConnectAsync(
+            new CultMeshTransportCandidate(endpoint!),
+            new CultMeshSessionTarget("interop", "interop.ts-provider"),
+            timeout.Token);
+        try
+        {
+            var frame = await transport.ReceiveAsync(timeout.Token);
+
+            transport.TransportId.Should().Be("msquic-realtime");
+            frame.SchemaId.Should().NotBeNullOrWhiteSpace();
+            frame.BodyId.Should().NotBeNullOrWhiteSpace();
+            frame.Payload.Should().NotBeEmpty();
+
+            var hex = Convert.ToHexString(CultMeshRealtimeWireProtocol.EncodeFrame(frame));
+            TestContext.Out.WriteLine($"CULTMESH_GOLDEN_HEX={hex}");
+        }
+        finally
+        {
+            transport.Dispose();
+        }
+    }
+
     private static CultMeshSessionManager CreateSessions(
         CultMeshQuicRealtimeServer server,
         out IdentityObservation validatedIdentity)
