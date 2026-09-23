@@ -108,6 +108,32 @@ class RawQuicListener {
   }
 }
 
+/**
+ * `assert.rejects`, but safe against a mutant or a real regression that
+ * makes the promise resolve instead: a transport that unexpectedly connects
+ * is disposed before the assertion fails, rather than left live with an open
+ * native connection and an outstanding runtime reference. A bare
+ * `assert.rejects(connector.connect(...))` hung the whole file exactly this
+ * way under M1 (the certificate-accept mutation): three tests failed their
+ * assertion correctly, but each left a connected, undisposed transport
+ * behind, and Node's test runner refuses to exit while any promise or
+ * native handle is still outstanding.
+ */
+async function assertRejectsAndDisposes(
+  promise: Promise<{ dispose(): void }>,
+  match?: RegExp,
+): Promise<void> {
+  let resolved: { dispose(): void } | undefined;
+  try {
+    resolved = await promise;
+  } catch (error) {
+    if (match) assert.match(error instanceof Error ? error.message : String(error), match);
+    return;
+  }
+  resolved.dispose();
+  assert.fail("expected the promise to reject, but it resolved (the resolved value has been disposed)");
+}
+
 function testFrame(overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshRealtimeFrame {
   return {
     channelId: "aetheria.entities",
@@ -162,7 +188,7 @@ test("connect refuses a wrong advertised pin", async (t) => {
       generation: "gen-1",
     };
     const connector = new CultMeshQuicRealtimeConnector();
-    await assert.rejects(connector.connect(candidate, target), /certificate|rejected/i);
+    await assertRejectsAndDisposes(connector.connect(candidate, target), /certificate|rejected/i);
   } finally {
     await listener.close();
   }
@@ -180,7 +206,7 @@ test("connect refuses a missing certificate pin when no validator is supplied", 
       generation: "gen-1",
     };
     const connector = new CultMeshQuicRealtimeConnector();
-    await assert.rejects(connector.connect(candidate, target), /certificate|rejected/i);
+    await assertRejectsAndDisposes(connector.connect(candidate, target), /certificate|rejected/i);
   } finally {
     await listener.close();
   }
@@ -373,7 +399,7 @@ test("trust negative (a): an expired certificate is refused", async () => {
     trust,
     connectors: [unreachableConnector],
   });
-  await assert.rejects(manager.connect(target), /valid|expired/i);
+  await assertRejectsAndDisposes(manager.connect(target), /valid|expired/i);
 });
 
 test("trust negative (b): an unsigned remote route is refused", async () => {
@@ -391,7 +417,7 @@ test("trust negative (b): an unsigned remote route is refused", async () => {
     trust,
     connectors: [unreachableConnector],
   });
-  await assert.rejects(manager.connect(target), /Odin-signed/i);
+  await assertRejectsAndDisposes(manager.connect(target), /Odin-signed/i);
 });
 
 test("trust negative (c): a route signed by an untrusted Odin root is refused", async () => {
@@ -412,7 +438,7 @@ test("trust negative (c): a route signed by an untrusted Odin root is refused", 
     trust,
     connectors: [unreachableConnector],
   });
-  await assert.rejects(manager.connect(target), /not trusted/i);
+  await assertRejectsAndDisposes(manager.connect(target), /not trusted/i);
 });
 
 test("trust negative (d): a route that verifies but pins the wrong certificate is refused at the transport", async (t) => {
@@ -435,7 +461,7 @@ test("trust negative (d): a route that verifies but pins the wrong certificate i
       trust,
       connectors: [new CultMeshQuicRealtimeConnector()],
     });
-    await assert.rejects(manager.connect(target), /certificate|rejected/i);
+    await assertRejectsAndDisposes(manager.connect(target), /certificate|rejected/i);
   } finally {
     await listener.close();
   }
@@ -482,7 +508,7 @@ test("trust negative (e): a transport that fails isVerifiedFor is disposed and r
     connectors: [staleConnector],
   });
 
-  await assert.rejects(manager.connect(target), /did not prove|No realtime state path/i);
+  await assertRejectsAndDisposes(manager.connect(target), /did not prove|No realtime state path/i);
   assert.equal(disposed, true, "the session manager must dispose a transport that fails isVerifiedFor");
 });
 
@@ -558,7 +584,7 @@ test("trust negative (e2): a real transport whose generation no longer matches t
       connectors: [replayConnector],
     });
 
-    await assert.rejects(manager.connect(target), /did not prove|No realtime state path/i);
+    await assertRejectsAndDisposes(manager.connect(target), /did not prove|No realtime state path/i);
     assert.ok(connectedTransport, "a real transport must have connected");
     // Real cleanup ran: receiveFrame on the disposed transport rejects.
     await assert.rejects(connectedTransport!.receiveFrame(), /disposed/i);
