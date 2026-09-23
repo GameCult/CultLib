@@ -2555,3 +2555,48 @@ are test gaps; two look like real defects:
   one to check first: it is reachable from an attacker-supplied cursor.
 - **R-AE. A second golden digest with both hops absent**, closing the three
   residual mutants rather than leaving them as folklore.
+
+**Fix batch 4, Rust half, landed** (Sonnet), `cultnet/selection-cut1` now at
+`d7f73af`, rebased onto the C# side's `99e366a`. Six commits: `c91e937`
+(R-V and Rust's half of R-W), `97627dd` (R-Y), `4bfd989` and `94c32ac`
+(R-AB), `8005586` (S-12, prose), `d7f73af` (a vendored-schema resync).
+
+**217 Rust tests green** on Yggdrasil, and re-confirmed locally with
+`contracts/` entirely hidden, which simulates cargo-mutants' isolated copy.
+**Mutants scoped to the diff: 23 tested, 23 caught, 0 missed.** Nothing to
+triage.
+
+**S-2 is C#-only** — Rust already checked the declared target before filtering
+by key, so the divergence was one-sided and the C# commits close it. No Rust
+change was needed and none was made. S-1 and S-3 are closed by R-V and R-W.
+
+**R-AB worked, and it took two fixes rather than one.** The named escape was
+`schema_discovery.rs`'s `include_str!("../../../contracts/…")`. Vendoring
+byte-identical copies under `packages/cultnet-rs/contracts/` fixed that and
+left the crate still unmutable: `tests/selection.rs`'s fixture loader read the
+same canonical tree three levels up, and 37 of 45 tests panicked under the
+isolated copy. The first full-crate run failed its unmutated baseline for
+exactly that reason. Vendoring the fixture too, plus a skip-when-absent guard
+on the test that reads C#'s own `cs-written.json` output — which cannot be
+vendored, being the other runtime's product rather than a checked-in input —
+made the crate mutable for the first time.
+
+**The vendoring is duplicate authority, and it drifted within hours.** The
+rebase onto the C# side's landed R-X changed `cultnet.error.schema.json`, and
+the vendored copy did not see it. **Hands' own drift test caught it** and the
+copy was re-synced at `d7f73af`.
+
+That is worth stating plainly rather than filing as a win. Twenty-two schemas
+now exist twice, and the guard against the copies diverging is a test rather
+than a structure. The cleaner shape — a build script staging the canonical
+contracts into `OUT_DIR` — **fails for the same reason the `include_str!`
+did**: cargo-mutants copies the package tree, so a `build.rs` reaching three
+levels up is just as unreachable. Publishing the contracts as their own crate
+would fix it properly and is out of this cut's scope. **So the duplicate is
+accepted for now, on the record, with the drift test as its named guard.** It
+goes in the follow-ups, not the win column.
+
+**Hands burned an unscoped full-crate mutants run** — 2,329 mutants and a
+timeout cascade across files the cut never touched — before rescoping to the
+diff. It reported that unprompted and discarded the output. The ruling did say
+"the cut's diff"; the run cost most of a night on a shared host.
