@@ -29,7 +29,7 @@ import {
   CultMeshQuicRealtimeProvider,
   type CultMeshRealtimeTarget,
 } from "../../src/realtime-quic";
-import type { CultMeshRealtimeDelivery, CultMeshRealtimeFrame } from "../../src/realtime-wire";
+import { encodeRealtimeFrame, type CultMeshRealtimeDelivery, type CultMeshRealtimeFrame } from "../../src/realtime-wire";
 
 // `__dirname` at runtime is `dist-test/test/interop`; fixtures are binary and
 // are never compiled/copied there, so they are read from their source
@@ -123,7 +123,10 @@ async function serveAsync(args: Map<string, string>): Promise<void> {
         payload: Buffer.from(`frame-${sequence}`, "utf8"),
       };
       await provider.broadcast(frame);
-      writeLog("quic-realtime-serve", { sent: sequence });
+      // Printed so the harness can compare this exact frame's TypeScript
+      // encoding against the same frame's C#-side re-encoding (golden bytes
+      // across processes), without the harness importing the codec itself.
+      writeLog("quic-realtime-serve", { sent: sequence, hex: Buffer.from(encodeRealtimeFrame(frame)).toString("hex") });
       if (intervalMs > 0) await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   } finally {
@@ -147,7 +150,22 @@ async function main(): Promise<void> {
   const args = parseArgs(rest);
   const endpoint = requireArg(args, "endpoint");
   const expect = optionalIntArg(args, "expect", 1);
+  // Alternative stop condition to --expect: keep receiving (through whatever
+  // the consumer's own coalescing inbox delivers) until a frame with this
+  // sequence arrives, then stop. Lets a caller prove convergence under
+  // latest-only coalescing, where the frame *count* a stalled reader sees is
+  // not the interesting number, but the final value it converges on is.
+  const expectSequenceRaw = args.get("expect-sequence");
+  const expectSequence = expectSequenceRaw !== undefined ? BigInt(expectSequenceRaw) : undefined;
   const timeoutMs = optionalIntArg(args, "timeout-ms", 15_000);
+  // Simulates "a test hook on the runtime that stops calling next_event"
+  // (spec section 10, LatestOnly-under-a-stalled-consumer lane) at the level
+  // this subprocess can reach: after receiving --pause-after frames, stop
+  // calling receiveFrame for --pause-ms. The shared native pump keeps
+  // dispatching and coalescing into this transport's own inbox regardless
+  // (Cut 4), so not reading is externally equivalent to not polling.
+  const pauseAfter = optionalIntArg(args, "pause-after", -1);
+  const pauseMs = optionalIntArg(args, "pause-ms", 0);
 
   const target: CultMeshRealtimeTarget = { verseId: "interop", authorityRuntimeId: "interop.csharp-provider" };
   const connector = new CultMeshQuicRealtimeConnector();
@@ -168,13 +186,23 @@ async function main(): Promise<void> {
   }> = [];
   try {
     const deadline = Date.now() + timeoutMs;
-    while (frames.length < expect) {
+    let lastSequence: bigint | undefined;
+    while (
+      (expectSequence === undefined && frames.length < expect) ||
+      (expectSequence !== undefined && lastSequence !== expectSequence)
+    ) {
+      if (pauseAfter >= 0 && frames.length === pauseAfter) {
+        writeLog("pausing", { afterFrames: frames.length, pauseMs });
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+        writeLog("resumed", { afterFrames: frames.length });
+      }
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error(`Timed out after receiving ${frames.length} of ${expect} frames.`);
+      if (remaining <= 0) throw new Error(`Timed out after receiving ${frames.length} frames (last sequence ${lastSequence}).`);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), remaining);
       try {
         const frame = await transport.receiveFrame(controller.signal);
+        lastSequence = frame.sequence;
         frames.push({
           channelId: frame.channelId,
           schemaId: frame.schemaId,
