@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Logging;
+using MessagePack;
 using NUnit.Framework;
 
 namespace GameCult.Networking.Tests
