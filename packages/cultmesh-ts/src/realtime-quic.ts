@@ -133,6 +133,10 @@ function certificateSha256Hex(der: Uint8Array): string {
   return createHash("sha256").update(der).digest("hex");
 }
 
+/** Shared by `CultMeshQuicRealtimeTransport.sendFrame` and `CultMeshQuicRealtimeProvider.broadcast`: one message, not two copies that can drift. */
+const CULTMESH_QUIC_UNRELIABLE_UNSUPPORTED_MESSAGE =
+  "The native MsQuic connector exposes streams but not QUIC datagrams; unreliable delivery is not supported.";
+
 interface PendingSend {
   resolve(): void;
   reject(error: Error): void;
@@ -417,12 +421,21 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   async sendFrame(frame: CultMeshRealtimeFrame): Promise<void> {
     if (this.disposed) throw new Error("CultMesh QUIC realtime transport is disposed.");
     if (frame.delivery === "unreliable") {
-      throw new Error(
-        "The native MsQuic connector exposes streams but not QUIC datagrams; unreliable delivery is not supported.",
-      );
+      throw new Error(CULTMESH_QUIC_UNRELIABLE_UNSUPPORTED_MESSAGE);
     }
-    const encoded = encodeRealtimeFrame(frame);
-    if (frame.delivery === "reliable-ordered") {
+    return this.sendEncodedFrame(frame.delivery, encodeRealtimeFrame(frame));
+  }
+
+  /**
+   * @internal The primitive `sendFrame` itself calls, after encoding. Exposed
+   * so a caller that already holds the encoded bytes for many peers at once
+   * — `CultMeshQuicRealtimeProvider.broadcast` fanning a frame out to every
+   * peer, and each peer's `CultMeshQuicRealtimeProviderOutbox` pump — sends
+   * them without re-encoding (and re-validating) per peer.
+   */
+  async sendEncodedFrame(delivery: "reliable-ordered" | "latest-only", encoded: Uint8Array): Promise<void> {
+    if (this.disposed) throw new Error("CultMesh QUIC realtime transport is disposed.");
+    if (delivery === "reliable-ordered") {
       const send = this.reliableSendTail.then(async () => {
         if (this.reliableOutboundStreamId === undefined) {
           this.reliableOutboundStreamId = this.runtime.streamOpen(
@@ -660,8 +673,13 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
  * failure evicts the peer once, the same way a reliable-ordered send failure
  * does in `CultMeshQuicRealtimeProvider.broadcast`.
  */
+interface OutboxEntry {
+  readonly frame: CultMeshRealtimeFrame;
+  readonly encoded: Uint8Array;
+}
+
 class CultMeshQuicRealtimeProviderOutbox {
-  private readonly coalescer = new CultMeshRealtimeLatestOnlyCoalescer<CultMeshRealtimeFrame>();
+  private readonly coalescer = new CultMeshRealtimeLatestOnlyCoalescer<OutboxEntry>();
   private readonly transport: CultMeshQuicRealtimeTransport;
   private readonly onSendFailure: (error: Error) => void;
   private pumping = false;
@@ -672,11 +690,16 @@ class CultMeshQuicRealtimeProviderOutbox {
     this.onSendFailure = onSendFailure;
   }
 
-  /** Enqueues `frame`, coalescing on `(channelId, bodyId)`. Never blocks. */
-  publish(frame: CultMeshRealtimeFrame): void {
+  /**
+   * Enqueues an already-encoded `frame`, coalescing on `(channelId,
+   * bodyId)`. Never blocks. Takes the encoded bytes rather than encoding its
+   * own copy so every peer's outbox reuses the one encode `broadcast` (or a
+   * retained-frame seed) already did for this frame.
+   */
+  publish(frame: CultMeshRealtimeFrame, encoded: Uint8Array): void {
     if (this.disposed) return;
     const key = frame.channelId + "\u001f" + frame.bodyId;
-    const becameReady = this.coalescer.publish(key, frame);
+    const becameReady = this.coalescer.publish(key, { frame, encoded });
     if (becameReady && !this.pumping) void this.pump();
   }
 
@@ -692,9 +715,9 @@ class CultMeshQuicRealtimeProviderOutbox {
         if (this.disposed) return;
         const key = this.coalescer.nextReadyKey();
         if (key === undefined) return;
-        const frame = this.coalescer.take(key);
+        const entry = this.coalescer.take(key);
         try {
-          await this.transport.sendFrame(frame);
+          await this.transport.sendEncodedFrame("latest-only", entry.encoded);
         } catch (error) {
           this.dispose();
           this.onSendFailure(error instanceof Error ? error : new Error(String(error)));
@@ -716,6 +739,25 @@ export interface CultMeshQuicRealtimeProviderOptions {
   readonly port: number;
   readonly serverCertificate: { readonly pkcs12: Uint8Array; readonly password?: string };
   readonly handshakeTimeoutMs?: number;
+  /**
+   * The host advertised in `advertisedEndpoint`, when it differs from the
+   * bind address `host` — the usual case for a public service: `host` is
+   * typically `0.0.0.0`, an empty string, or an IPv6 wildcard (`::`), none of
+   * which describe a route a client can dial, and the native listener (which
+   * `host` also configures) only accepts IP addresses in the first place, not
+   * a DNS name. Defaults to `host`.
+   */
+  readonly advertisedHost?: string;
+}
+
+/**
+ * Brackets an IPv6 literal for use in a URL authority (`[::1]:443`), the way
+ * `URL` itself renders one; a hostname or IPv4 literal passes through
+ * unchanged, and an already-bracketed literal is left alone.
+ */
+function formatEndpointHost(host: string): string {
+  if (host.startsWith("[")) return host;
+  return host.includes(":") ? `[${host}]` : host;
 }
 
 /**
@@ -741,13 +783,6 @@ function extractLeafCertificateDer(serverCertificate: CultMeshQuicRealtimeProvid
   return new Uint8Array(der);
 }
 
-interface PendingAccept {
-  connected: boolean;
-  evicted: boolean;
-  readonly buffered: CultMeshQuicNativeEvent[];
-  transport?: CultMeshQuicRealtimeTransport;
-}
-
 /**
  * The StreamPixels role: a TypeScript listener that broadcasts with an
  * explicit delivery mode and cannot be backpressured by a slow consumer.
@@ -768,23 +803,23 @@ export class CultMeshQuicRealtimeProvider {
   private readonly handshakeTimeoutMs: number;
   private readonly peers = new Set<CultMeshQuicRealtimeTransport>();
   private readonly outboxes = new Map<CultMeshQuicRealtimeTransport, CultMeshQuicRealtimeProviderOutbox>();
-  /** The newest `latest-only` frame broadcast so far per `(channel, body)` key, seeded into
-   * every peer attached after that broadcast. Reliable-ordered frames are events, not state,
-   * and are never retained. */
-  private readonly retained = new Map<string, CultMeshRealtimeFrame>();
+  /** The newest `latest-only` frame broadcast so far per `(channel, body)` key, already
+   * encoded, seeded into every peer attached after that broadcast. Reliable-ordered frames
+   * are events, not state, and are never retained. */
+  private readonly retained = new Map<string, { frame: CultMeshRealtimeFrame; encoded: Uint8Array; generation: LatestGeneration }>();
   private readonly readyFrames: CultMeshRealtimeFrame[] = [];
   private readonly receiveWaiters: PendingReceive[] = [];
   /**
-   * One `evict` closure per connection still mid-handshake (accepted, not
-   * yet attached to `peers`). `dispose()` must sweep these too: a peer whose
-   * handshake never reaches CONNECTED (a rejected certificate, a stalled
-   * client) would otherwise sit on its own handshakeTimeoutMs timer — and,
-   * once attachPeer's `CultMeshQuicNativeRuntime.open()` resolves, hold a
-   * runtime reference — for up to that long after the provider itself was
-   * disposed, keeping the process alive over a connection nothing can still
-   * reach.
+   * Every transport `acceptConnection` has created for a still-live native
+   * connection, whether or not its handshake has reached CONNECTED and
+   * joined `peers` yet. A connection whose handshake never reaches CONNECTED
+   * (a rejected certificate, a stalled client) would otherwise sit on its
+   * own handshake timer — and hold a runtime reference — for up to
+   * `handshakeTimeoutMs` after the provider itself was disposed, keeping the
+   * process alive over a connection nothing can still reach; `dispose()`
+   * sweeps this set instead of only `peers` to close that gap.
    */
-  private readonly pendingAccepts = new Set<() => void>();
+  private readonly accepted = new Set<CultMeshQuicRealtimeTransport>();
   private disposed = false;
 
   private constructor(
@@ -808,7 +843,8 @@ export class CultMeshQuicRealtimeProvider {
     const handshakeTimeoutMs = options.handshakeTimeoutMs ?? 10_000;
     const der = extractLeafCertificateDer(options.serverCertificate);
     const pinHex = certificateSha256Hex(der).toUpperCase();
-    const host = options.host && options.host.length > 0 ? options.host : "127.0.0.1";
+    const bindHost = options.host && options.host.length > 0 ? options.host : "127.0.0.1";
+    const advertisedHost = options.advertisedHost && options.advertisedHost.length > 0 ? options.advertisedHost : bindHost;
 
     const runtime = await CultMeshQuicNativeRuntime.open();
     let listenerId: bigint;
@@ -825,7 +861,7 @@ export class CultMeshQuicRealtimeProvider {
       throw error;
     }
 
-    const advertisedEndpoint = `${CULTMESH_QUIC_REALTIME_SCHEME}://${host}:${boundPort}?cert-sha256=${pinHex}`;
+    const advertisedEndpoint = `${CULTMESH_QUIC_REALTIME_SCHEME}://${formatEndpointHost(advertisedHost)}:${boundPort}?cert-sha256=${pinHex}`;
     const provider = new CultMeshQuicRealtimeProvider(runtime, listenerId, advertisedEndpoint, handshakeTimeoutMs);
     runtime.onListenerEvent(listenerId, (event) => {
       if (event.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION) provider.acceptConnection(event.connectionId);
@@ -843,21 +879,27 @@ export class CultMeshQuicRealtimeProvider {
   async broadcast(frame: CultMeshRealtimeFrame): Promise<void> {
     if (this.disposed) throw new Error("CultMesh QUIC realtime provider is disposed.");
     if (frame.delivery === "unreliable") {
-      throw new Error(
-        "The native MsQuic connector exposes streams but not QUIC datagrams; unreliable delivery is not supported.",
-      );
+      throw new Error(CULTMESH_QUIC_UNRELIABLE_UNSUPPORTED_MESSAGE);
     }
+    // Encode (and validate) exactly once, up front: an invalid frame throws
+    // here, to the caller, before touching any peer. The old per-peer encode
+    // inside `sendFrame` meant an invalid frame failed identically for every
+    // peer in turn, evicting all of them while `broadcast` itself still
+    // reported success.
+    const encoded = encodeRealtimeFrame(frame);
     if (frame.delivery === "latest-only") {
       const key = frame.channelId + "\u001f" + frame.bodyId;
       const current = this.retained.get(key);
       const candidate: LatestGeneration = { producerEpoch: frame.producerEpoch, sequence: frame.sequence };
-      if (!current || compareGeneration(candidate, current) > 0) this.retained.set(key, frame);
-      for (const outbox of this.outboxes.values()) outbox.publish(frame);
+      if (!current || compareGeneration(candidate, current.generation) > 0) {
+        this.retained.set(key, { frame, encoded, generation: candidate });
+      }
+      for (const outbox of this.outboxes.values()) outbox.publish(frame, encoded);
       return;
     }
     const sends = [...this.peers].map(async (transport) => {
       try {
-        await transport.sendFrame(frame);
+        await transport.sendEncodedFrame("reliable-ordered", encoded);
       } catch {
         transport.dispose();
       }
@@ -869,6 +911,7 @@ export class CultMeshQuicRealtimeProvider {
   async receive(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
     if (this.readyFrames.length > 0) return this.readyFrames.shift()!;
     if (this.disposed) throw new Error("CultMesh QUIC realtime provider is disposed.");
+    if (signal?.aborted) throw new Error("CultMesh QUIC realtime provider receive aborted.");
     return await new Promise<CultMeshRealtimeFrame>((resolve, reject) => {
       const onAbort = (): void => {
         const index = this.receiveWaiters.indexOf(waiter);
@@ -898,8 +941,11 @@ export class CultMeshQuicRealtimeProvider {
     } catch {
       // Best-effort: the listener may already be gone.
     }
-    for (const evict of [...this.pendingAccepts]) evict();
-    for (const transport of [...this.peers]) transport.dispose();
+    // `accepted` is every transport this provider ever created for a native
+    // connection, from the moment `acceptConnection` synchronously builds
+    // it — whether or not its handshake ever reached CONNECTED and joined
+    // `peers`. A still-handshaking connection has no other owner to sweep it.
+    for (const transport of [...this.accepted]) transport.dispose();
     const rejection = new Error("CultMesh QUIC realtime provider is disposed.");
     for (const waiter of this.receiveWaiters.splice(0, this.receiveWaiters.length)) waiter.reject(rejection);
     void this.runtime.release();
@@ -927,12 +973,19 @@ export class CultMeshQuicRealtimeProvider {
   }
 
   /**
-   * Handles `LISTENER_NEW_CONNECTION`. Everything here up to and including
-   * the buffering `onConnectionEvent` registration runs synchronously, in
-   * the same turn the native runtime's pump dispatched this listener event —
-   * before the pump can advance to await its next native event — so nothing
-   * for this connection can be dispatched and lost while `attachPeer` below
-   * awaits a runtime reference.
+   * Handles `LISTENER_NEW_CONNECTION`, fully synchronously: one handler owns
+   * this connection from this point on, so there is no async window in which
+   * a NEW_CONNECTION-then-CONNECTED pair (the bridge's own event order,
+   * `native/GameCult.Mesh.Quic.Native/cultmesh_quic_native.cpp:731-757,627`)
+   * can be split across a temporary buffering handler and a later real one.
+   * `this.runtime.retain()` takes a reference on the provider's own
+   * already-open runtime instead of `await`ing a fresh
+   * `CultMeshQuicNativeRuntime.open()`, which is what used to force that
+   * split: the previous async gap left `CONNECTION_CONNECTED` dispatched
+   * straight to `transport.handleConnectionEvent` (which has no case for
+   * it) with nothing to clear the handshake timer, so a healthy peer was
+   * evicted at `handshakeTimeoutMs` regardless of how well-behaved the
+   * client was.
    */
   private acceptConnection(connectionId: bigint): void {
     if (this.disposed) {
@@ -940,99 +993,45 @@ export class CultMeshQuicRealtimeProvider {
       return;
     }
 
-    const state: PendingAccept = { connected: false, evicted: false, buffered: [] };
-
-    const evict = (): void => {
-      if (state.evicted) return;
-      state.evicted = true;
-      this.pendingAccepts.delete(evict);
-      clearTimeout(timer);
-      if (state.transport) {
-        state.transport.dispose();
-      } else {
-        this.runtime.offConnectionEvent(connectionId);
-        this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
-      }
-    };
-    this.pendingAccepts.add(evict);
-
-    const timer = setTimeout(() => {
-      if (!state.connected) evict();
-    }, this.handshakeTimeoutMs);
-
-    this.runtime.onConnectionEvent(
-      connectionId,
-      (event) => {
-        if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) state.connected = true;
-        state.buffered.push(event);
-      },
-      () => evict(),
-    );
-
-    void this.attachPeer(connectionId, state, evict, timer);
-  }
-
-  private async attachPeer(
-    connectionId: bigint,
-    state: PendingAccept,
-    evict: () => void,
-    handshakeTimer: ReturnType<typeof setTimeout>,
-  ): Promise<void> {
-    let peerRuntime: CultMeshQuicNativeRuntime;
-    try {
-      peerRuntime = await CultMeshQuicNativeRuntime.open();
-    } catch {
-      evict();
-      return;
-    }
-    if (state.evicted || this.disposed) {
-      void peerRuntime.release();
-      if (!state.evicted) {
-        this.runtime.offConnectionEvent(connectionId);
-        this.runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
-      }
-      return;
-    }
-
     const transport = new CultMeshQuicRealtimeTransport(
       `quic-peer-${connectionId}`,
-      peerRuntime,
+      this.runtime.retain(),
       connectionId,
       CULTMESH_PROVIDER_PEER_TARGET,
       "",
     );
-    state.transport = transport;
+    this.accepted.add(transport);
+
+    const handshakeTimer = setTimeout(() => transport.dispose(), this.handshakeTimeoutMs);
     transport.onDisposed(() => {
-      state.evicted = true;
-      this.pendingAccepts.delete(evict);
       clearTimeout(handshakeTimer);
+      this.accepted.delete(transport);
       this.peers.delete(transport);
       this.outboxes.get(transport)?.dispose();
       this.outboxes.delete(transport);
     });
 
-    // Hand the connection to its real dispatcher and replay whatever the
-    // buffering handler above collected while this function awaited.
+    // CONNECTED fires at most once per connection; `attached` guards against
+    // ever running the join-`peers` bookkeeping twice.
+    let attached = false;
     this.runtime.onConnectionEvent(
       connectionId,
-      (event) => transport.handleConnectionEvent(event),
+      (event) => {
+        transport.handleConnectionEvent(event);
+        if (attached || event.type !== CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) return;
+        attached = true;
+        clearTimeout(handshakeTimer);
+        // Cut C's retained-frame seeding happens atomically here, before the
+        // peer joins `peers`: nothing can observe this transport as an
+        // attached peer with a not-yet-seeded outbox.
+        const outbox = new CultMeshQuicRealtimeProviderOutbox(transport, () => transport.dispose());
+        for (const { frame, encoded } of this.retained.values()) outbox.publish(frame, encoded);
+        this.outboxes.set(transport, outbox);
+        this.peers.add(transport);
+        void this.pumpReceivedFrom(transport);
+      },
       (error) => transport.fault(error),
     );
-    for (const event of state.buffered) transport.handleConnectionEvent(event);
-
-    // A buffered CONNECTION_SHUTDOWN can dispose `transport` synchronously
-    // during the replay above; do not resurrect an already-dead peer.
-    if (state.evicted) return;
-
-    // Only disarm the handshake timeout once actually connected; if the
-    // handshake is still in flight, the timer (checked against
-    // `state.connected`) is still the thing that will evict it.
-    if (state.connected) clearTimeout(handshakeTimer);
-    const outbox = new CultMeshQuicRealtimeProviderOutbox(transport, () => transport.dispose());
-    for (const retainedFrame of this.retained.values()) outbox.publish(retainedFrame);
-    this.outboxes.set(transport, outbox);
-    this.peers.add(transport);
-    void this.pumpReceivedFrom(transport);
   }
 }
 
