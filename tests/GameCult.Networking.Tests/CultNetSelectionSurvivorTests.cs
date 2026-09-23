@@ -248,16 +248,21 @@ namespace GameCult.Networking.Tests
         }
 
         // ---------------------------------------------------------------------------------------------
-        // Survivor 5: CultNetSelectionEvaluator.EdgesFor - the five ordering keys after page-row
-        // position (From.SchemaId, From.Key, Role, To.SchemaId, To.Key) each mutated ThenBy<->
-        // ThenByDescending. Rule (R-B): "page-row order, then (from, role, to) in code-point order."
-        // Two behavioural angles: the From.SchemaId tiebreak (two differently-schema'd citers, same
-        // key, citing one target under the same role), and the Role tiebreak (one citer with two
-        // reference members that both resolve to the same target, so From and To tie and only Role
-        // differs). To.SchemaId/To.Key could not be isolated: within one hop direction, an edge's
-        // (From, Role) already determines its To deterministically (one declared value per member), so
-        // two edges sharing an anchor, From and Role always share To too - see the equivalence note at
-        // the bottom of this file.
+        // Survivor 5: CultNetSelectionEvaluator.EdgesFor - the ordering keys after page-row position
+        // (From.SchemaId, From.Key, Role, To.Key) each mutated ThenBy<->ThenByDescending. Rule (R-B):
+        // "page-row order, then (from, role, to.recordKey) in code-point order." Two behavioural
+        // angles: the From.SchemaId tiebreak (two differently-schema'd citers, same key, citing one
+        // target under the same role), and the Role tiebreak (one citer with two reference members
+        // that both resolve to the same target, so From and To tie and only Role differs).
+        //
+        // A fifth component, To.SchemaId, used to sit last in this chain. R-BA (docs/cultnet-selection
+        // -cut.md, "Soul, the merge gate, fourth pass") deleted it from both runtimes'
+        // comparators: TryResolveReferenceTarget/resolve_reference_target resolve purely from
+        // (the citer's schema, role, recordKey) against the evaluation's own fixed candidate index, so
+        // once From and Role already tie (pinning the citer's schema and the target type/leaves) and
+        // To.RecordKey also ties, To.SchemaId is forced equal - no input can make it decide an order
+        // the earlier keys did not already decide, so a Stryker mutant on it cannot be killed and the
+        // component bought nothing.
         // ---------------------------------------------------------------------------------------------
         [Test]
         public void EdgesFor_BreaksATiedAnchorByFromSchemaIdWhenFromKeysAreEqual()

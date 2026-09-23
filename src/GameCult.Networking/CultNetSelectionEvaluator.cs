@@ -286,11 +286,22 @@ namespace GameCult.Networking
             return new Evaluation { Rows = page, Edges = pageEdges, NextCursor = nextCursor, TotalMatched = ordered.Count };
         }
 
-        // R-B: the order is deterministic - the page-row order, then (from, role, to) in code-point
-        // order. Grouping by the row an edge is anchored to (LINQ's OrderBy is stable, so the given
-        // rows' own order survives as the primary key) and breaking ties by the edge's own identity
-        // gives both without a second pass. Public because a v0/shard full walk (R-G, one evaluation
-        // answering every page) reports edges against its whole matched set, not one 200-row page.
+        // R-B: the order is deterministic - the page-row order, then (from, role, to.recordKey) in
+        // code-point order. Grouping by the row an edge is anchored to (LINQ's OrderBy is stable, so
+        // the given rows' own order survives as the primary key) and breaking ties by the edge's own
+        // identity gives both without a second pass. Public because a v0/shard full walk (R-G, one
+        // evaluation answering every page) reports edges against its whole matched set, not one
+        // 200-row page.
+        //
+        // R-BA (docs/cultnet-selection-cut.md, "Soul, the merge gate, fourth pass"): a
+        // `To.Descriptor.SchemaId` tiebreak used to sit last here and has been deleted.
+        // TryResolveReferenceTarget (this file) resolves purely from a fixed target type - itself
+        // determined only by the citer's schema and the role, both already pinned once `From` and
+        // `Role` tie - plus the record key, against the evaluation's own fixed `byKey`; no edge or
+        // caller-specific input steers it. So within one evaluation the same (citer schema, role,
+        // recordKey) always resolves to the same row, schema included: once `From`, `Role` and
+        // `To.RecordKey` already tie, `To.SchemaId` is forced equal and cannot decide an order the
+        // earlier four keys did not already decide. Soul verified no construction breaks this.
         public static EdgeMatch[] EdgesFor(IReadOnlyList<Row> rows, FullEvaluation full)
         {
             // R-V: the anchor lookup is keyed by (schemaId, recordKey), not the bare key - two schemas'
@@ -307,7 +318,6 @@ namespace GameCult.Networking
                 .ThenBy(pair => pair.Edge.From.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
                 .ThenBy(pair => pair.Edge.From.Key.Value, CultNetCodePointComparer.Instance)
                 .ThenBy(pair => pair.Edge.Role, CultNetCodePointComparer.Instance)
-                .ThenBy(pair => pair.Edge.To.Descriptor.SchemaId, CultNetCodePointComparer.Instance)
                 .ThenBy(pair => pair.Edge.To.Key.Value, CultNetCodePointComparer.Instance)
                 .Select(pair => pair.Edge)
                 .ToArray();

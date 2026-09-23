@@ -1837,8 +1837,18 @@ pub fn select<R: Row + Clone>(
     // whole batch. A selection carrying both `cites` and `cited` puts edges from both functions
     // into one `Vec`, and each edge already knows which end (R-V: (schemaId, recordKey)) is the
     // page row that produced it (`EdgeAnchor`): `cites` anchors on the citer (`from`), `cited`
-    // anchors on the citee (`to`). Order is deterministic: page-row order, then (from, role, to)
-    // in code-point order - never a `HashMap`'s iteration order.
+    // anchors on the citee (`to`). Order is deterministic: page-row order, then (from, role,
+    // to.record_key) in code-point order - never a `HashMap`'s iteration order.
+    //
+    // R-BA (docs/cultnet-selection-cut.md, "Soul, the merge gate, fourth pass"): `to.schema_id`
+    // used to sit last in this tiebreak and has been deleted. `resolve_reference_target` (this
+    // file) resolves purely from `(role, record_key)` against the evaluation's own fixed `by_key`
+    // and `target_leaves(role)` - neither depends on which edge or which `from` is asking - so
+    // within one evaluation the same `(role, record_key)` pair always resolves to the same row,
+    // schema included. That means once `from`, `role` and `to.record_key` already tie, `to.schema_id`
+    // is forced equal; no input can make it decide an order the earlier four keys did not already
+    // decide. Soul verified no construction breaks this (a component that cannot be distinguished
+    // by any input is a line every future reader must reason about for no behavioural gain).
     let page_edges = if selection.has_hop() {
         let page_position: HashMap<(&str, &str), usize> = page
             .iter()
@@ -1861,7 +1871,6 @@ pub fn select<R: Row + Clone>(
                 .then_with(|| a.from.schema_id().cmp(b.from.schema_id()))
                 .then_with(|| a.from.record_key().cmp(b.from.record_key()))
                 .then_with(|| a.role.cmp(&b.role))
-                .then_with(|| a.to.schema_id().cmp(b.to.schema_id()))
                 .then_with(|| a.to.record_key().cmp(b.to.record_key()))
         });
         kept
