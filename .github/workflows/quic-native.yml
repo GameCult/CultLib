@@ -180,8 +180,12 @@ jobs:
           build.linux-x64.host=
           date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
-          tar -C win32-x64 -czf cultmesh-quic-native-win32-x64.tar.gz .
-          tar -C linux-x64 -czf cultmesh-quic-native-linux-x64.tar.gz .
+          # Named after the upload-artifact names above, not after the parked
+          # scoped per-platform npm package names from the registry-publication
+          # seam (11.9): these are release archives, not npm packages, and
+          # 11.7's negative grep for that parked naming must stay clean.
+          tar -C win32-x64 -czf quic-native-win32-x64.tar.gz .
+          tar -C linux-x64 -czf quic-native-linux-x64.tar.gz .
 
       - name: Create release
         env:
@@ -192,7 +196,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --notes-file MANIFEST.txt \
-            cultmesh-quic-native-win32-x64.tar.gz \
-            cultmesh-quic-native-linux-x64.tar.gz \
+            quic-native-win32-x64.tar.gz \
+            quic-native-linux-x64.tar.gz \
             SHA256SUMS \
             MANIFEST.txt
