@@ -2505,13 +2505,16 @@ green on Yggdrasil, 271 passed / 2 skipped.
 Every one of the nine named survivor groups is killed, with two corrections to
 the triage that matter more than the score.
 
-- **`EdgesFor`: three of five killed, and two are genuinely equivalent.**
-  Within one hop direction, `(From, Role)` already determines a unique
-  declared edge value, so no legal selection can make two edges share anchor,
-  From and Role while `To` differs. Hands could not construct one, and
-  Stryker agreed across two independent runs. **Soul's triage misclassified
-  `To.SchemaId` and `To.Key` as live.** They are recorded here as equivalent
-  so nobody pays for them a third time.
+- **`EdgesFor`: three of five killed. STRUCK 2026-09-23 — what stood here was
+  wrong.** It claimed that within one hop direction `(From, Role)` determines
+  a unique declared edge value, so no legal selection could make two edges
+  share anchor, From and Role while `To` differs, and recorded `To.SchemaId`
+  and `To.Key` as equivalent "so nobody pays for them a third time". **A
+  selection carrying both hops mixes their edges into one bucket**, and Soul
+  built the counterexample: a row self-referencing through the role it uses to
+  cite a peer. `To.Key` is now killed in both runtimes; `To.SchemaId` is
+  settled under R-BA. The text is struck rather than edited because it was
+  read as a live instruction for two passes.
 - **A sixth mutant in the same method that nobody had named**:
   `OrderBy(pageRowIndex)`, which is R-B's *primary* key, ahead of
   `(from, role, to)`. It survived the first pass and is now killed by a test
@@ -2546,9 +2549,13 @@ are test gaps; two look like real defects:
 
 **Self's rulings, 2026-09-22:**
 
-- **R-AC. The two `EdgesFor` `To` mutants are equivalent.** Recorded, not to
-  be chased. A survivor correctly identified beats a test written to move a
-  number.
+- **R-AC. STRUCK 2026-09-23. It said the two `EdgesFor` `To` mutants were
+  equivalent and "recorded, not to be chased".** That instruction was false
+  and was obeyed for two passes. Soul's counterexample kills `To.Key` in both
+  runtimes; `To.SchemaId` is settled under R-BA. **The sentence it closed with
+  — a survivor correctly identified beats a test written to move a number —
+  is still true, and is exactly why a survivor must be identified by a
+  construction attempt rather than by an argument.**
 - **R-AD. The three suspected defects above get behaviour tests first**, since
   a test that fails today is the only thing that proves they are defects
   rather than readings. The out-of-bounds read in `FindCursorPosition` is the
