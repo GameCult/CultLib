@@ -16,6 +16,17 @@
 // (the committed tree a later cut lands; `__dirname` is `dist/` at runtime, so
 // this path holds in the repo, an `npm pack` tarball and a pnpm `file:` copy
 // alike). No `node_modules` lookup, no platform package, no registry.
+//
+// koffi's out-parameter marker (`_Out_`) does not auto-allocate storage or
+// reshape the return value the way its name suggests: probed on the pinned
+// 3.3.0 build (`node -e`, loading the real bridge), a function declared with
+// `_Out_ void **out_runtime` still demands a real buffer at that call-site
+// position (a bare `null` is read by the bridge as a null out parameter and
+// refused with -1) and its return value is the plain scalar `int32_t`, not an
+// object. Every out parameter here is therefore `koffi.alloc(type, 1)`,
+// decoded with `koffi.decode(buffer, type)` after the call. A `void *` value
+// — the runtime handle, and every listener/connection/stream id, since ids
+// share the 64-bit width — decodes as a JavaScript `bigint`.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -53,16 +64,8 @@ export const CULTMESH_QUIC_RESULT_BAD_ARGUMENT = -2;
 
 type NativeEventListener = (event: CultMeshQuicNativeEvent) => void;
 
-interface KoffiOutResult<T> {
-  readonly result: number;
-  readonly out_runtime?: unknown;
-  readonly out_listener_id?: bigint;
-  readonly out_bound_port?: number;
-  readonly out_connection_id?: bigint;
-  readonly out_stream_id?: bigint;
-  readonly out_event?: T;
-  readonly out_required?: number;
-}
+/** The opaque native runtime handle: a `void *`, decoded by koffi as a `bigint`. */
+export type CultMeshQuicNativeHandle = bigint;
 
 interface NativeEventStruct {
   type: number;
@@ -76,37 +79,45 @@ interface NativeEventStruct {
 }
 
 interface NativeBindings {
-  runtimeOpen(appName: string | null): KoffiOutResult<never>;
-  runtimeClose(runtime: unknown): void;
+  runtimeOpen(appName: string | null): { status: number; runtime: CultMeshQuicNativeHandle | null };
+  runtimeClose(runtime: CultMeshQuicNativeHandle): void;
   listenerOpen(
-    runtime: unknown,
+    runtime: CultMeshQuicNativeHandle,
     host: string | null,
     port: number,
     pkcs12: Uint8Array,
     pkcs12Length: number,
     password: string | null,
-  ): KoffiOutResult<never>;
-  listenerClose(runtime: unknown, listenerId: bigint): void;
-  connectionOpen(runtime: unknown, host: string, port: number): KoffiOutResult<never>;
-  connectionCertificateComplete(runtime: unknown, connectionId: bigint, accept: number): number;
-  connectionShutdown(runtime: unknown, connectionId: bigint, code: bigint): void;
-  streamOpen(runtime: unknown, connectionId: bigint, kind: number): KoffiOutResult<never>;
+  ): { status: number; listenerId: bigint; boundPort: number };
+  listenerClose(runtime: CultMeshQuicNativeHandle, listenerId: bigint): void;
+  connectionOpen(
+    runtime: CultMeshQuicNativeHandle,
+    host: string,
+    port: number,
+  ): { status: number; connectionId: bigint };
+  connectionCertificateComplete(runtime: CultMeshQuicNativeHandle, connectionId: bigint, accept: number): number;
+  connectionShutdown(runtime: CultMeshQuicNativeHandle, connectionId: bigint, code: bigint): void;
+  streamOpen(
+    runtime: CultMeshQuicNativeHandle,
+    connectionId: bigint,
+    kind: number,
+  ): { status: number; streamId: bigint };
   streamSendFrame(
-    runtime: unknown,
+    runtime: CultMeshQuicNativeHandle,
     streamId: bigint,
     encodedFrame: Uint8Array,
     length: number,
     fin: number,
   ): number;
-  streamShutdown(runtime: unknown, streamId: bigint, code: bigint): void;
+  streamShutdown(runtime: CultMeshQuicNativeHandle, streamId: bigint, code: bigint): void;
   nextEventAsync(
-    runtime: unknown,
+    runtime: CultMeshQuicNativeHandle,
     timeoutMs: number,
     payload: Uint8Array | null,
     payloadCapacity: number,
-  ): Promise<KoffiOutResult<NativeEventStruct>>;
-  lastError(runtime: unknown, destination: Uint8Array, capacity: number): number;
-  lastStatus(runtime: unknown): number;
+  ): Promise<{ status: number; event: NativeEventStruct | null; required: number }>;
+  lastError(runtime: CultMeshQuicNativeHandle, destination: Uint8Array, capacity: number): number;
+  lastStatus(runtime: CultMeshQuicNativeHandle): number;
 }
 
 let bindingsCache: NativeBindings | undefined;
@@ -170,87 +181,111 @@ function loadBindings(): NativeBindings {
     reserved: koffi.array("uint8_t", 16),
   });
 
-  const runtimeOpen = bridgeLib.func(
-    "int32_t cultmesh_quic_runtime_open(str app_name, _Out_ void **out_runtime)",
+  const runtimeOpenFn = bridgeLib.func(
+    "int32_t cultmesh_quic_runtime_open(str app_name, void **out_runtime)",
   );
-  const runtimeClose = bridgeLib.func("void cultmesh_quic_runtime_close(void *runtime)");
-  const listenerOpen = bridgeLib.func(
+  const runtimeCloseFn = bridgeLib.func("void cultmesh_quic_runtime_close(void *runtime)");
+  const listenerOpenFn = bridgeLib.func(
     "int32_t cultmesh_quic_listener_open(void *runtime, str host, uint16_t port, " +
       "uint8_t *pkcs12, int32_t pkcs12_length, str password, " +
-      "_Out_ uint64_t *out_listener_id, _Out_ uint16_t *out_bound_port)",
+      "uint64_t *out_listener_id, uint16_t *out_bound_port)",
   );
-  const listenerClose = bridgeLib.func(
+  const listenerCloseFn = bridgeLib.func(
     "void cultmesh_quic_listener_close(void *runtime, uint64_t listener_id)",
   );
-  const connectionOpen = bridgeLib.func(
+  const connectionOpenFn = bridgeLib.func(
     "int32_t cultmesh_quic_connection_open(void *runtime, str host, uint16_t port, " +
-      "_Out_ uint64_t *out_connection_id)",
+      "uint64_t *out_connection_id)",
   );
-  const connectionCertificateComplete = bridgeLib.func(
+  const connectionCertificateCompleteFn = bridgeLib.func(
     "int32_t cultmesh_quic_connection_certificate_complete(void *runtime, uint64_t connection_id, int32_t accept)",
   );
-  const connectionShutdown = bridgeLib.func(
+  const connectionShutdownFn = bridgeLib.func(
     "void cultmesh_quic_connection_shutdown(void *runtime, uint64_t connection_id, uint64_t code)",
   );
-  const streamOpen = bridgeLib.func(
+  const streamOpenFn = bridgeLib.func(
     "int32_t cultmesh_quic_stream_open(void *runtime, uint64_t connection_id, uint8_t kind, " +
-      "_Out_ uint64_t *out_stream_id)",
+      "uint64_t *out_stream_id)",
   );
-  const streamSendFrame = bridgeLib.func(
+  const streamSendFrameFn = bridgeLib.func(
     "int32_t cultmesh_quic_stream_send_frame(void *runtime, uint64_t stream_id, " +
       "uint8_t *encoded_frame, int32_t length, int32_t fin)",
   );
-  const streamShutdown = bridgeLib.func(
+  const streamShutdownFn = bridgeLib.func(
     "void cultmesh_quic_stream_shutdown(void *runtime, uint64_t stream_id, uint64_t code)",
   );
-  const nextEvent = bridgeLib.func(
+  const nextEventFn = bridgeLib.func(
     "int32_t cultmesh_quic_next_event(void *runtime, int32_t timeout_ms, " +
-      `_Out_ ${CultMeshQuicEvent.name} *out_event, uint8_t *payload, int32_t payload_capacity, ` +
-      "_Out_ int32_t *out_required)",
+      `${CultMeshQuicEvent.name} *out_event, uint8_t *payload, int32_t payload_capacity, ` +
+      "int32_t *out_required)",
   );
-  const lastError = bridgeLib.func(
+  const lastErrorFn = bridgeLib.func(
     "int32_t cultmesh_quic_last_error(void *runtime, uint8_t *destination, int32_t capacity)",
   );
-  const lastStatus = bridgeLib.func("int32_t cultmesh_quic_last_status(void *runtime)");
+  const lastStatusFn = bridgeLib.func("int32_t cultmesh_quic_last_status(void *runtime)");
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { promisify } = require("node:util") as typeof import("node:util");
-  const nextEventAsyncRaw = promisify(nextEvent.async) as (
-    runtime: unknown,
+  const nextEventAsyncRaw = promisify(nextEventFn.async) as (
+    runtime: CultMeshQuicNativeHandle,
     timeoutMs: number,
-    outEvent: null,
+    outEvent: unknown,
     payload: Uint8Array | null,
     payloadCapacity: number,
-    outRequired: null,
-  ) => Promise<KoffiOutResult<NativeEventStruct>>;
+    outRequired: unknown,
+  ) => Promise<number>;
 
-  // Every `_Out_` parameter still occupies a call-site slot in this koffi
-  // version (an arity check rejects a shorter call); its value is written
-  // back through the named field on the returned object regardless of what
-  // was passed here, so `null` is a safe placeholder at each such slot.
   bindingsCache = {
-    runtimeOpen: (appName) => runtimeOpen(appName, null),
-    runtimeClose: (runtime) => runtimeClose(runtime),
-    listenerOpen: (runtime, host, port, pkcs12, pkcs12Length, password) =>
-      listenerOpen(runtime, host, port, pkcs12, pkcs12Length, password, null, null),
-    listenerClose: (runtime, listenerId) => listenerClose(runtime, listenerId),
-    connectionOpen: (runtime, host, port) => connectionOpen(runtime, host, port, null),
+    runtimeOpen: (appName) => {
+      const out = koffi.alloc("void *", 1);
+      const status = runtimeOpenFn(appName, out);
+      return { status, runtime: status === 0 ? (koffi.decode(out, "void *") as CultMeshQuicNativeHandle) : null };
+    },
+    runtimeClose: (runtime) => runtimeCloseFn(runtime),
+    listenerOpen: (runtime, host, port, pkcs12, pkcs12Length, password) => {
+      const outListenerId = koffi.alloc("uint64_t", 1);
+      const outBoundPort = koffi.alloc("uint16_t", 1);
+      const status = listenerOpenFn(runtime, host, port, pkcs12, pkcs12Length, password, outListenerId, outBoundPort);
+      return {
+        status,
+        listenerId: status === 0 ? (koffi.decode(outListenerId, "uint64_t") as bigint) : 0n,
+        boundPort: status === 0 ? (koffi.decode(outBoundPort, "uint16_t") as number) : 0,
+      };
+    },
+    listenerClose: (runtime, listenerId) => listenerCloseFn(runtime, listenerId),
+    connectionOpen: (runtime, host, port) => {
+      const out = koffi.alloc("uint64_t", 1);
+      const status = connectionOpenFn(runtime, host, port, out);
+      return { status, connectionId: status === 0 ? (koffi.decode(out, "uint64_t") as bigint) : 0n };
+    },
     connectionCertificateComplete: (runtime, connectionId, accept) =>
-      connectionCertificateComplete(runtime, connectionId, accept),
-    connectionShutdown: (runtime, connectionId, code) => connectionShutdown(runtime, connectionId, code),
-    streamOpen: (runtime, connectionId, kind) => streamOpen(runtime, connectionId, kind, null),
+      connectionCertificateCompleteFn(runtime, connectionId, accept),
+    connectionShutdown: (runtime, connectionId, code) => connectionShutdownFn(runtime, connectionId, code),
+    streamOpen: (runtime, connectionId, kind) => {
+      const out = koffi.alloc("uint64_t", 1);
+      const status = streamOpenFn(runtime, connectionId, kind, out);
+      return { status, streamId: status === 0 ? (koffi.decode(out, "uint64_t") as bigint) : 0n };
+    },
     streamSendFrame: (runtime, streamId, encodedFrame, length, fin) =>
-      streamSendFrame(runtime, streamId, encodedFrame, length, fin),
-    streamShutdown: (runtime, streamId, code) => streamShutdown(runtime, streamId, code),
-    nextEventAsync: (runtime, timeoutMs, payload, payloadCapacity) =>
-      nextEventAsyncRaw(runtime, timeoutMs, null, payload, payloadCapacity, null),
-    lastError: (runtime, destination, capacity) => lastError(runtime, destination, capacity),
-    lastStatus: (runtime) => lastStatus(runtime),
+      streamSendFrameFn(runtime, streamId, encodedFrame, length, fin),
+    streamShutdown: (runtime, streamId, code) => streamShutdownFn(runtime, streamId, code),
+    nextEventAsync: async (runtime, timeoutMs, payload, payloadCapacity) => {
+      const outEvent = koffi.alloc(CultMeshQuicEvent, 1);
+      const outRequired = koffi.alloc("int32_t", 1);
+      const status = await nextEventAsyncRaw(runtime, timeoutMs, outEvent, payload, payloadCapacity, outRequired);
+      return {
+        status,
+        event: status === 1 ? (koffi.decode(outEvent, CultMeshQuicEvent) as NativeEventStruct) : null,
+        required: koffi.decode(outRequired, "int32_t") as number,
+      };
+    },
+    lastError: (runtime, destination, capacity) => lastErrorFn(runtime, destination, capacity),
+    lastStatus: (runtime) => lastStatusFn(runtime),
   };
   return bindingsCache;
 }
 
-function readLastError(bindings: NativeBindings, runtime: unknown): string {
+function readLastError(bindings: NativeBindings, runtime: CultMeshQuicNativeHandle): string {
   const buffer = Buffer.alloc(1024);
   const written = bindings.lastError(runtime, buffer, buffer.length);
   return written > 0 ? buffer.subarray(0, written).toString("utf8") : "CultMesh native QUIC call failed.";
@@ -267,14 +302,14 @@ export class CultMeshQuicNativeRuntime {
   private static shared: CultMeshQuicNativeRuntime | undefined;
   private static refCount = 0;
 
-  private readonly handle: unknown;
+  private readonly handle: CultMeshQuicNativeHandle;
   private readonly bindings: NativeBindings;
   private readonly listenerListeners = new Map<bigint, NativeEventListener>();
   private readonly connectionListeners = new Map<bigint, NativeEventListener>();
   private closed = false;
   private pumpLoop: Promise<void>;
 
-  private constructor(handle: unknown, bindings: NativeBindings) {
+  private constructor(handle: CultMeshQuicNativeHandle, bindings: NativeBindings) {
     this.handle = handle;
     this.bindings = bindings;
     this.pumpLoop = this.pump();
@@ -284,10 +319,10 @@ export class CultMeshQuicNativeRuntime {
     if (!CultMeshQuicNativeRuntime.shared) {
       const bindings = loadBindings();
       const opened = bindings.runtimeOpen(null);
-      if (opened.result !== 0 || !opened.out_runtime) {
-        throw new Error(`cultmesh_quic_runtime_open failed with status ${opened.result}.`);
+      if (opened.status !== 0 || opened.runtime === null) {
+        throw new Error(`cultmesh_quic_runtime_open failed with status ${opened.status}.`);
       }
-      CultMeshQuicNativeRuntime.shared = new CultMeshQuicNativeRuntime(opened.out_runtime, bindings);
+      CultMeshQuicNativeRuntime.shared = new CultMeshQuicNativeRuntime(opened.runtime, bindings);
     }
     CultMeshQuicNativeRuntime.refCount += 1;
     return CultMeshQuicNativeRuntime.shared;
@@ -326,10 +361,10 @@ export class CultMeshQuicNativeRuntime {
     password: string | null,
   ): { listenerId: bigint; boundPort: number } {
     const opened = this.bindings.listenerOpen(this.handle, host, port, pkcs12, pkcs12.length, password);
-    if (opened.result !== 0 || opened.out_listener_id === undefined) {
+    if (opened.status !== 0) {
       throw new Error(`cultmesh_quic_listener_open failed: ${readLastError(this.bindings, this.handle)}`);
     }
-    return { listenerId: opened.out_listener_id, boundPort: opened.out_bound_port ?? 0 };
+    return { listenerId: opened.listenerId, boundPort: opened.boundPort };
   }
 
   listenerClose(listenerId: bigint): void {
@@ -339,15 +374,15 @@ export class CultMeshQuicNativeRuntime {
 
   connectionOpen(host: string, port: number): bigint {
     const opened = this.bindings.connectionOpen(this.handle, host, port);
-    if (opened.result !== 0 || opened.out_connection_id === undefined) {
+    if (opened.status !== 0) {
       throw new Error(`cultmesh_quic_connection_open failed: ${readLastError(this.bindings, this.handle)}`);
     }
-    return opened.out_connection_id;
+    return opened.connectionId;
   }
 
   connectionCertificateComplete(connectionId: bigint, accept: boolean): void {
-    const result = this.bindings.connectionCertificateComplete(this.handle, connectionId, accept ? 1 : 0);
-    if (result !== 0) {
+    const status = this.bindings.connectionCertificateComplete(this.handle, connectionId, accept ? 1 : 0);
+    if (status !== 0) {
       throw new Error(
         `cultmesh_quic_connection_certificate_complete failed: ${readLastError(this.bindings, this.handle)}`,
       );
@@ -360,15 +395,15 @@ export class CultMeshQuicNativeRuntime {
 
   streamOpen(connectionId: bigint, kind: number): bigint {
     const opened = this.bindings.streamOpen(this.handle, connectionId, kind);
-    if (opened.result !== 0 || opened.out_stream_id === undefined) {
+    if (opened.status !== 0) {
       throw new Error(`cultmesh_quic_stream_open failed: ${readLastError(this.bindings, this.handle)}`);
     }
-    return opened.out_stream_id;
+    return opened.streamId;
   }
 
   streamSendFrame(streamId: bigint, encodedFrame: Uint8Array, fin: boolean): void {
-    const result = this.bindings.streamSendFrame(this.handle, streamId, encodedFrame, encodedFrame.length, fin ? 1 : 0);
-    if (result !== 0) {
+    const status = this.bindings.streamSendFrame(this.handle, streamId, encodedFrame, encodedFrame.length, fin ? 1 : 0);
+    if (status !== 0) {
       throw new Error(`cultmesh_quic_stream_send_frame failed: ${readLastError(this.bindings, this.handle)}`);
     }
   }
@@ -397,7 +432,7 @@ export class CultMeshQuicNativeRuntime {
 
   private async pump(): Promise<void> {
     while (!this.closed) {
-      let first: KoffiOutResult<NativeEventStruct>;
+      let first: Awaited<ReturnType<NativeBindings["nextEventAsync"]>>;
       try {
         first = await this.bindings.nextEventAsync(this.handle, 250, null, 0);
       } catch {
@@ -405,22 +440,22 @@ export class CultMeshQuicNativeRuntime {
         continue;
       }
       if (this.closed) return;
-      if (first.result === 0 || first.result === CULTMESH_QUIC_RESULT_BAD_CALL) continue;
-      if (first.result === 1 && first.out_event) {
-        this.dispatch(first.out_event, new Uint8Array(0));
+      if (first.status === 0 || first.status === CULTMESH_QUIC_RESULT_BAD_CALL) continue;
+      if (first.status === 1 && first.event) {
+        this.dispatch(first.event, new Uint8Array(0));
         continue;
       }
-      if (first.result === 2 && first.out_required) {
-        const buffer = Buffer.alloc(first.out_required);
-        let second: KoffiOutResult<NativeEventStruct>;
+      if (first.status === 2 && first.required > 0) {
+        const buffer = Buffer.alloc(first.required);
+        let second: Awaited<ReturnType<NativeBindings["nextEventAsync"]>>;
         try {
           second = await this.bindings.nextEventAsync(this.handle, 0, buffer, buffer.length);
         } catch {
           if (this.closed) return;
           continue;
         }
-        if (second.result === 1 && second.out_event) {
-          this.dispatch(second.out_event, buffer.subarray(0, second.out_event.payload_length));
+        if (second.status === 1 && second.event) {
+          this.dispatch(second.event, buffer.subarray(0, second.event.payload_length));
         }
         continue;
       }
