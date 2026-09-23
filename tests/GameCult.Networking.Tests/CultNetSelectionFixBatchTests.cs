@@ -333,6 +333,68 @@ namespace GameCult.Networking.Tests
             Assert.That(second.NextCursor, Is.Null);
         }
 
+        /// <summary>
+        /// Builds a cursor body whose 5th (final) field carries a raw, hostile length-prefix
+        /// spelling instead of a well-formed `AppendString` field - R-AG. The first 4 fields are
+        /// well-formed so <c>ReadLengthPrefixedFields</c> reaches the hostile one mid-loop rather
+        /// than failing earlier for an unrelated reason.
+        /// </summary>
+        private static string CursorWithHostileLastField(string hostileField)
+        {
+            var body = new System.Text.StringBuilder();
+            void AppendString(string value) =>
+                body.Append(System.Text.Encoding.UTF8.GetByteCount(value)).Append(':').Append(value);
+            AppendString("1");
+            AppendString("5");
+            AppendString("schema-a");
+            AppendString("k1");
+            body.Append(hostileField);
+            var bytes = System.Text.Encoding.UTF8.GetBytes(body.ToString());
+            return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
+
+        // R-AG: C#'s own proven overflow (CultNetSelectionEvaluator.cs, ReadLengthPrefixedFields,
+        // before this cut) - a length prefix of int.MaxValue (2147483647) made `pos + length`
+        // overflow int math and slip past the guard, so Encoding.UTF8.GetString threw
+        // ArgumentOutOfRangeException instead of Parse returning the typed cursor_invalid refusal.
+        [Test]
+        public void HostileCursor_LengthPrefixNearInt32Max_RefusesTypedNotUntyped()
+        {
+            var cursor = CursorWithHostileLastField("2147483647:x");
+            Assert.Throws<CultNetSelectionCursorException>(() => CultNetSelectionCursor.Parse(cursor));
+        }
+
+        // R-AG: the mirror-image proven overflow, Rust's (packages/cultnet-rs/src/selection.rs,
+        // read_length_prefixed_fields, before this cut) - a length prefix of usize::MAX
+        // (18446744073709551615) overflowed Rust's usize guard and panicked. "Each runtime holding
+        // exactly the hole the other closed" means neither side's tests are evidence about the
+        // other - fed here too. int.TryParse refuses a value this wide outright (a different
+        // failure path than C#'s own overflow above), which must also refuse typed.
+        [Test]
+        public void HostileCursor_LengthPrefixNearUSizeMax_RefusesTypedNotUntyped()
+        {
+            var cursor = CursorWithHostileLastField("18446744073709551615:x");
+            Assert.Throws<CultNetSelectionCursorException>(() => CultNetSelectionCursor.Parse(cursor));
+        }
+
+        // R-AG: a length prefix with more digits than any integer type holds.
+        [Test]
+        public void HostileCursor_LengthPrefixWiderThanAnyIntegerType_RefusesTypedNotUntyped()
+        {
+            var cursor = CursorWithHostileLastField("999999999999999999999999999999:x");
+            Assert.Throws<CultNetSelectionCursorException>(() => CultNetSelectionCursor.Parse(cursor));
+        }
+
+        // R-AG: a negative-looking length prefix - int.TryParse(NumberStyles.None, ...) refuses the
+        // leading '-' outright (NumberStyles.None permits no sign), a third failure path (neither
+        // overflow nor digit-count) that must also refuse typed.
+        [Test]
+        public void HostileCursor_NegativeLengthPrefix_RefusesTypedNotUntyped()
+        {
+            var cursor = CursorWithHostileLastField("-1:x");
+            Assert.Throws<CultNetSelectionCursorException>(() => CultNetSelectionCursor.Parse(cursor));
+        }
+
         // R-J: any_of on a numeric alias compares TryGetIndexNumber's canonical rendering, not the
         // string getter's culture-dependent ToString() - a float large enough that .NET's default
         // ToString() renders exponent notation ("1E+21") must still match its canonical decimal form.

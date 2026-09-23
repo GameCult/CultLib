@@ -281,10 +281,24 @@ namespace GameCult.Networking
                 return false;
             }
 
-            var result = handler.DynamicInvoke(message, new RudpCultNetSchemaServerPeer(this, delivered.Peer));
-            if (result is Task task)
+            // R-AG: a handler is expected to catch its own typed refusals (HandleSnapshotRequestV1Async
+            // catches the three selection exceptions and answers cursor_invalid/selection_invalid/
+            // reference_outside_target on the wire) - this catch is the backstop for whatever a
+            // handler does not, so an untyped exception from a malformed/hostile message can never
+            // reach the poll loop and stall the server for every other peer. It answers nothing on the
+            // wire (an exception this generic carries no typed refusal to report) and simply drops the
+            // one malformed dispatch, exactly as an unregistered handler already does just above.
+            try
             {
-                await task.ConfigureAwait(false);
+                var result = handler.DynamicInvoke(message, new RudpCultNetSchemaServerPeer(this, delivered.Peer));
+                if (result is Task task)
+                {
+                    await task.ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                return false;
             }
             return true;
         }

@@ -448,11 +448,16 @@ namespace GameCult.Networking
             return incoming;
         }
 
+        // R-AK: no `!member.IsReference` guard here - CultCache.ReferencesOf (CultCache.cs:262-278)
+        // already searches only its own RichMembers' reference members for a role match and
+        // returns empty for anything else, including a data member's own alias (index aliases are
+        // unique per descriptor, so a data member's role string can never coincide with a
+        // reference member's). A second copy of the same exclusion here was duplicate authority,
+        // not a second decision - CultCache owns "is this member a reference" once.
         private static IEnumerable<CultDocumentMemberView> ReferenceMembers(CultDocumentDescriptor descriptor, string? role)
         {
             foreach (var member in descriptor.DeclaredMembers)
             {
-                if (!member.IsReference) continue;
                 if (role != null && (member.IndexAlias ?? member.MemberName) != role) continue;
                 yield return member;
             }
@@ -747,7 +752,13 @@ namespace GameCult.Networking
                 if (!int.TryParse(lengthText, NumberStyles.None, CultureInfo.InvariantCulture, out var length))
                     return null;
                 pos = colon + 1;
-                if (length < 0 || pos + length > bytes.Length) return null;
+                // R-AG: checked arithmetic - an attacker-supplied prefix near int.MaxValue makes
+                // `pos + length` overflow in unchecked int math (C#'s default), wrapping negative and
+                // slipping past this guard; GetString then throws ArgumentOutOfRangeException instead
+                // of this method returning null the way every other malformed shape does. `(long)`
+                // promotes before the add so the sum can never wrap - both operands are bounded well
+                // under long's range, so this can never itself overflow.
+                if (length < 0 || (long)pos + length > bytes.Length) return null;
                 fields.Add(Encoding.UTF8.GetString(bytes, pos, length));
                 pos += length;
             }
