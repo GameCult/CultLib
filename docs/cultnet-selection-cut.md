@@ -2600,3 +2600,215 @@ goes in the follow-ups, not the win column.
 timeout cascade across files the cut never touched — before rescoping to the
 diff. It reported that unprompted and discarded the output. The ruling did say
 "the cut's diff"; the run cost most of a night on a shared host.
+
+## Soul, the merge gate, 2026-09-23
+
+Opus, against `d7f73af`. Counts re-run by Soul itself: Networking 269 passed /
+2 skipped, Mesh 255, cultnet-rs **224** across 12 targets. (R-AA reported
+"271 passed" — that is 269 + 2 skipped. The Rust half reported 217; the
+measured figure is 224. Both green, one overstated.)
+
+**Verdict: Cut 1 may not merge.** Three reasons, any one sufficient.
+
+### SM-1, high. S-1 is not closed. One ruling became two different rules.
+
+`CultNetSelectionEvaluator.cs:358-386` resolves a reference's target by
+**record key plus the declared leaf set** — its own comment says "a
+reference's stored target is a bare record key, the wire carries no schema for
+it". `packages/cultnet-rs/src/selection.rs:1765` and `:1817` resolve it by an
+exact `by_key.get(&(target.schema_id, target.record_key))` on the
+`RecordRef`'s own schema id. R-V said both runtimes index rows **and incoming
+edges** by the pair. C# indexes rows by the pair and edges by the key; Rust
+indexes both by the pair.
+
+Probed at the evaluator in both runtimes, same logical rows:
+
+| Shape | C# | Rust |
+|---|---|---|
+| Only row at key `k` is out-of-target; narrow ref declared to leaf_a points at `k` | **REFUSED** `reference_outside_target` | **ACCEPTED**, empty page |
+| Two rows at key `k`; ref declared to leaf_a, stored target names leaf_b | **ACCEPTED**, resolves the leaf_a row, emits an edge | **REFUSED** `reference_outside_target` |
+
+**They give opposite answers on the exact shared-key shape R-V was written
+for.** A consumer paging the same data through the two runtimes gets a
+refusal from one and rows from the other. Parity is this cut's invariant.
+
+**No vector covers it:** the shared fixture has zero duplicate record keys
+across its ten rows, exactly one reference, and that reference's role targets
+both leaves — so `reference_outside_target` is never reached cross-runtime at
+all. R-V's narrower promise does hold: within each runtime, both row orders
+agree.
+
+### SM-2, high. Both runtimes take a hostile cursor into an unhandled fault, on mirror-image cases.
+
+- **C#.** `ReadLengthPrefixedFields` (`CultNetSelectionEvaluator.cs:750-751`)
+  tests `pos + length > bytes.Length` in `int`. A prefix of `2147483647`
+  overflows, the guard passes, and `Encoding.UTF8.GetString` throws
+  `ArgumentOutOfRangeException`. `HandleSnapshotRequestV1Async` catches only
+  the three typed selection exceptions and `CultNetRudpSchemaServer.DispatchAsync`
+  has no catch at all, so **an untyped exception reaches the server's poll
+  loop**. The peer gets no answer.
+- **Rust.** `read_length_prefixed_fields` (`selection.rs:2044-2046`) parses the
+  prefix as `usize` and computes `pos + len`; `18446744073709551615`
+  overflows. Probed: **panic.**
+
+Rust refuses the `int::MAX` case typed; C# refuses the `usize::MAX` case
+typed. **Each runtime has exactly the hole the other closed** — which is what
+happens when a rule is hardened twice independently and neither run fed it
+garbage. R-N's whole point was that every cursor refusal reaches the wire as
+`cursor_invalid`.
+
+### SM-3, high. R-Z did not land, and nobody said so — including me.
+
+R-Z required the vectors to compare **page bytes**, plus `asOf`, `next` and a
+refusal's **code**, with projection vectors on both sides.
+`git diff --stat 52082ec..d7f73af` touches neither
+`SelectionParityVectorTests.cs` nor either vector file's vectors. The reader
+still compares row ids, `matched`, `hasNext` and edge fields, and
+`expectedRefusalField` — **never the code**. There is no page-bytes field in
+either JSON. `rs-written.json` still carries no projection vector, which is
+S-7's original wording verbatim. The C#-side projection vectors run through
+`Select`, which ignores `Projection`, so the comment claiming "page bytes
+under each projection" describes something the test does not do.
+
+**R-Z is absent from the batch's work and from its open list.** Self recorded
+the batch as closing its rulings without checking that one, which is the
+tracking failure that let it pass silently.
+
+### SM-4, medium. Two ordering rules are pinned by their mutants, not their behaviour.
+
+Twelve non-revert mutations, each changing a rule a different way from the
+Stryker mutant its R-AA test was written against. Nine died. Three survived:
+
+- **`EdgesFor`'s secondary key.** Permuting `Role` ahead of `From.Key`
+  (`:307-311`), keeping every component, passes 269/269. R-AA's test kills the
+  *primary* key's deletion; the **composition** of the rest is unpinned, and
+  the fixture's single reference pins nothing either.
+- **The row tiebreak.** Swapping `SchemaId` and `Key.Value` in the ascending
+  tiebreak (`:214`) passes 269/269. The fixture does have one tied ordinal,
+  but both rows are leaf_a, so **the schemaId component of
+  `(ordinal, schemaId, recordKey)` is exercised by nothing** — not in unit
+  tests, not in vectors. Rust's `order_rows` uses the same three components,
+  so a silent permutation on either side goes unnoticed.
+- **`!member.IsReference`** (`:456`) is a redundant second copy of the guard
+  in `CultCache.ResolveReferences`/`ReferencesOf`, which already returns empty
+  for a data member. **Equivalent mutant, and duplicate authority** — not a
+  defect, but not innocent either.
+
+### SM-5, medium. The Rust half of the vocabulary has 59 live mutants and nobody has looked.
+
+The diff-scoped run ("23 tested, 23 caught, 0 missed") measures only the lines
+batch 4 changed. Soul ran cargo-mutants over the whole of `selection.rs`:
+**351 mutants, 274 caught, 59 missed, 14 unviable, 4 timeouts, 36 minutes.**
+
+- **`canonical_number`: about 35 missed plus all four timeouts.** `is_canonical`
+  — the Q-J door — has **every branch mutation surviving**. `decompose`,
+  `pad_right`, `canonicalize_decimal_digits`, `big_mul_small` and
+  `big_to_most_significant_first` can each be replaced with `String::new()` or
+  `"xyzzy"` and the suite stays green. **This is R-D, a byte-for-byte wire
+  parity rule.**
+- `validate`: 4 missed, including a deleted `!` and `||` → `&&` — the door R-F
+  put inside `select`.
+- `matches_schema_keys_fields`: 3 missed, including two deleted `!` and an
+  `==` → `!=` — which rows match.
+- `schema_alias::matches`: `==` → `!=` — R-E's one identity rule.
+
+**S-5 blocked this cut at 66% on the C# side and produced R-AA. The Rust side
+of the same rules has never been measured. The asymmetry is the finding.**
+
+### Settled, not defects
+
+- **`FindCursorPosition`'s loop bound is not a defect.** It bounds at
+  `i < ordered.Count`. Probed in both runtimes: paging to the exact end and
+  replaying the last cursor gives an empty page, `next = null`, no exception,
+  no panic. The Stryker survivor was a coverage gap. **R-AD's headline
+  suspicion was wrong**, and settling it was worth the pass.
+- **`length <= 0` does not exist** in either runtime, and a zero-length field
+  parses fine in both. The real bug in that function is SM-2's overflow.
+- **S-2 held, and Hands' "C#-only" claim is true** — Soul checked rather than
+  accepted it. Both Rust call sites run `ensure_within_declared_target` before
+  any role or key filtering, with a test pinning it.
+- **S-3 held.** A both-hops selection returns all its `cites` edges in both
+  runtimes, each anchored by its own hop, identically.
+- **S-12 is half done.** The fixture's prose was fixed;
+  `SelectionParityVectorTests.cs:200-208` still calls the name-alias case a
+  "Confirmed cross-runtime defect" that the alias port already fixed. Low, but
+  it is a falsehood in a file a future reader will trust.
+
+### Promises that held
+
+S-4 (real `CultNetErrorMessage` bytes validated against the schema for all
+four codes), S-6 (a spliced digest and a reused cursor under a changed
+selection both refused), S-9, S-10, S-11 (the hop refusal is gone and the hop
+is served; still no dedicated regression test). **R-AB's guard is real**: all
+23 vendored files are byte-identical right now, the hand list matches every
+`include_str!` 22/22, and flipping one byte makes the drift test fail by name.
+**R-AA's tests are mostly behavioural**: nine of twelve hand mutations died,
+including the digest under a double-append rather than a deletion, the
+comparator forced back to UTF-16 units, both role-naming sites under inverted
+precedence, and cursor positioning made inclusive.
+
+**Caching's three failures remain unproven, not passing** — the stopgap's
+container runs as root and the tests need a write to a read-only directory to
+fail. Soul declined to call them environmental on its own authority.
+
+### What Soul could not run
+
+- **No page-byte parity comparison exists to run.** C#'s page is a
+  `CultNetSnapshotResponseRawV1Message` envelope; Rust's is a bare
+  `SelectionPage`. **There is no common wire type**, so R-Z as written needs a
+  shape decision before it can be implemented at all.
+- No fresh Stryker run on the C# side; twelve hand mutations instead, which is
+  what the brief asked for. The Rust figure is Soul's own measurement.
+- Only `selection.rs` was mutated in Rust; `contracts.rs`, `schema_discovery.rs`
+  and the rest of the crate are unmeasured.
+
+### The rig, handed over
+
+`C:\Users\Meta\eureka-soul-probes\cultnet-selection-cut1\` — deliberately
+outside the repo and outside the session scratchpad, **so it does not
+evaporate the way the Idunn rig did**. `README.md` says where each file drops
+in and what it proves: `SoulProbeTests.cs`, `soul_probe.rs`,
+`soul-mutants.sh` and twelve precomputed mutated files (the dotnet image has
+neither python3 nor perl to patch with).
+
+## Self's rulings for fix batch 5, 2026-09-23
+
+- **R-AF (SM-1). One rule, and the wire decides which.** Hands establishes
+  empirically what a stored reference actually carries — a bare record key, or
+  a key and a schema id. **If the wire carries no schema, C#'s rule is right
+  and Rust adopts it. If it carries both, Rust's is right and C# adopts it.**
+  I am not choosing by taste between two implementations when the Body already
+  knows the answer; what I am ruling is that the answer is one rule, derived
+  from the wire, in both runtimes. **A parity vector must cover the shared-key
+  shape in both directions** — its absence is why this survived four passes.
+- **R-AG (SM-2). Every malformed cursor becomes `cursor_invalid` on the
+  wire, in both runtimes, and nothing else escapes.** Use checked arithmetic
+  on both sides. C#'s dispatch path gains a catch so an untyped exception
+  cannot reach the poll loop. **Feed each runtime the other's proven
+  overflow**, plus a small set of deliberately hostile cursors, and pin them.
+  The shape of this bug — each runtime holding exactly the hole the other
+  closed — means neither side's tests are evidence about the other.
+- **R-AH (SM-3). R-Z needs its shape settled before it can be built.** The
+  envelope types differ, so **the vectors compare the canonical MessagePack
+  bytes of the page payload** — rows, edges, `asOf`, `next` — which both
+  runtimes can produce, rather than the transport envelope, which only one
+  has. Refusals compare the **code**. Projection vectors exist on both sides,
+  and `Select` must actually honour `Projection` or the vector is a lie.
+  **Flag for operator review**: this is my ruling on a wire-shape question,
+  and if the payload's canonical form is meant to be something else, it should
+  be corrected before the vectors harden around it.
+- **R-AI (SM-5). Measure the Rust vocabulary and triage it.** Run
+  cargo-mutants across `selection.rs` and the rest of the crate's selection
+  path, and close survivors by behaviour. **`canonical_number` first**: R-D is
+  a byte-for-byte parity rule whose door currently survives every branch
+  mutation, which means the canonical decimal form is pinned by nothing in
+  Rust. Equivalents get a one-line reason.
+- **R-AJ (SM-4). Pin the ordering compositions, in both runtimes and in the
+  vectors**: `EdgesFor`'s secondary key ordering, and the schemaId component
+  of the row tiebreak, which needs a fixture with a tied ordinal across two
+  schemas — the current fixture's tie is within one leaf.
+- **R-AK. Delete the evaluator's redundant `!member.IsReference` guard.**
+  `CultCache` owns that decision and already enforces it. Duplicate authority
+  is the defect even when the duplicate is harmless today.
+- **S-12's remainder:** correct the comment that still calls a fixed defect
+  confirmed.
