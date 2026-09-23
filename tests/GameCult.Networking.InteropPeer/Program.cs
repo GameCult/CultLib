@@ -1232,6 +1232,12 @@ static async Task QuicRealtimeServeAsync(QuicRealtimeServeConfig config)
     var endpoint = $"cultmesh-state+quic://127.0.0.1:{server.LocalEndPoint.Port}?cert-sha256={pin}";
     WriteJsonLine(new { status = "ready", endpoint });
 
+    // The harness dials only after reading the line above, so broadcasting
+    // immediately would send to nobody: MsQuic's own send path silently no-ops
+    // over an empty peer set. Wait for at least one connection first, bounded,
+    // so a peer that never shows up still exits instead of hanging forever.
+    await WaitForFirstConnectionAsync(server, TimeSpan.FromSeconds(30));
+
     var delivery = config.Delivery switch
     {
         "reliable-ordered" => CultMeshRealtimeDelivery.ReliableOrdered,
@@ -1255,6 +1261,17 @@ static async Task QuicRealtimeServeAsync(QuicRealtimeServeConfig config)
         await server.BroadcastAsync(frame);
         WriteLog("quic-realtime-serve", new { sent = sequence });
         if (config.IntervalMs > 0) await Task.Delay(config.IntervalMs);
+    }
+}
+
+static async Task WaitForFirstConnectionAsync(CultMeshQuicRealtimeServer server, TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow + timeout;
+    while (server.ConnectionCount == 0)
+    {
+        if (DateTime.UtcNow >= deadline)
+            throw new TimeoutException($"quic-realtime-serve: no client connected within {timeout}.");
+        await Task.Delay(20);
     }
 }
 
