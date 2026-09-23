@@ -548,12 +548,16 @@ test("CultMesh QUIC realtime: TypeScript provider and C# managed connector, with
   assert.match(stdout, /Passed:\s*1/, `expected exactly one passed test.\n${stdout}`);
   assert.doesNotMatch(stdout, /Skipped:\s*1/, `the env var should have made the test run, not skip.\n${stdout}`);
 
-  const goldenHexMatch = /CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
-  const goldenSequenceMatch = /CULTMESH_GOLDEN_SEQUENCE=(\d+)/.exec(stdout);
-  assert.ok(goldenHexMatch, `expected the C# test to print its golden hex line.\n${stdout}`);
-  assert.ok(goldenSequenceMatch, `expected the C# test to print which sequence it received.\n${stdout}`);
-  const csharpHex = goldenHexMatch![1].toLowerCase();
-  const csharpSequence = Number(goldenSequenceMatch![1]);
+  // `dotnet test --logger "console;verbosity=detailed"` prints a passed
+  // test's TestContext.Out lines twice (once live-streamed, once again under
+  // "Standard Output Messages:"), so matching SEQUENCE and HEX independently
+  // risks pairing a sequence from one copy with a hex from the other. The C#
+  // test writes them as one WriteLine call each, back to back; requiring them
+  // adjacent guarantees whichever pair matches first is self-consistent.
+  const goldenMatch = /CULTMESH_GOLDEN_SEQUENCE=(\d+)\s*\r?\n\s*CULTMESH_GOLDEN_HEX=([0-9A-Fa-f]+)/.exec(stdout);
+  assert.ok(goldenMatch, `expected the C# test to print its golden sequence and hex lines together.\n${stdout}`);
+  const csharpSequence = Number(goldenMatch![1]);
+  const csharpHex = goldenMatch![2].toLowerCase();
 
   // Which frame the managed connector's single ReceiveAsync() call actually
   // got is not pinned to frame 1: latest-only coalesces on both the
