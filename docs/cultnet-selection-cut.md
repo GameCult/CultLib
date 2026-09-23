@@ -3210,8 +3210,11 @@ still owes its Yggdrasil run**, and Soul's pass will provide it.
   Rust-side: `skip_serializing_if = "Option::is_none"` on four types omitted
   keys under `to_vec_named`. Removed from all four, `#[serde(default)]` kept
   for decode. **Byte-identical now, against real C# MessagePack 3.1.7 hex**:
-  `RawDocumentHeader` 86 bytes, `Edge` 99 bytes, each broken once by hand to
-  confirm the assertions are not vacuous.
+  `RawDocumentHeader` and `Edge`, each broken once by hand to confirm the
+  assertions are not vacuous. **The byte counts recorded here were wrong** —
+  86 and 99 — and are corrected to **228 and 246**, measured on Yggdrasil
+  against MessagePack C# 3.1.7. The committed hex constants matched the real
+  bytes exactly all along; only this prose was wrong.
 
   **"`Select` gains projection" was not built**, and Hands stopped and said
   why rather than reporting the ruling closed. Header and document projection
@@ -3400,3 +3403,51 @@ them.**
   path, not the claim itself.
 - **D10b's strictness gets a note** in the registration error and the map: a
   shape that used to register and work is now refused.
+
+### Fix batch 7 landed, 2026-09-23
+
+Sonnet, seven commits on `sel-fix7`, **all verified on Yggdrasil**, one slot
+at a time across thirteen sequential jobs with no concurrent verdicts. C#
+Networking **280 passed** (was 279 / 2 skipped), Mesh 255 unchanged, Rust
+**264 across 12 binaries** (was 259). Caching stays 190 / 3, the three still
+unprovable under a root container and deliberately not "fixed".
+
+**No production logic changed** except one error message and its comment.
+Everything else is tests and docs.
+
+- **R-AT.** All three surviving comparator components now die, in both
+  runtimes, at `-j1`: dropping both `to` components, reversing
+  `to.record_key`, and dropping `record_key` from Rust's row comparator.
+
+  **And Hands found that Soul's own construction did not actually kill the
+  "drop both" mutant.** Taken verbatim from the rig, it survives in *both*
+  runtimes — not because the branch is unreachable, but because `select`'s
+  push order happens to match alphabetical sort for that naming, and **the two
+  runtimes push in opposite orders** (Rust emits `cited` before `cites`, C# the
+  reverse). Rust needed the self-citer's key to sort *after* the target's,
+  C# needed the reverse. **A third fixture passing by coincidence**, found
+  while executing rather than by a later pass. Each runtime now carries its
+  own naming with the reasoning written into the test.
+- **R-AV.** `docs/runtime-parity-scope.md` gains the typed-selection row in
+  R-AY's words, naming the four files that carry the byte and semantic
+  vectors and calling out R-AR as separate and still open. **The claim now has
+  the home the map said it had.**
+- **R-AW.** Verified, not assumed: the committed hex constants are **228 and
+  246 bytes**, matching a real MessagePack C# 3.1.7 run. The map's prose is
+  corrected above; the constants were right all along.
+- **R-AX. The whole-message vector landed, byte-identical at 376 bytes**, and
+  the thin evidence is no longer thin:
+  - `RawDocumentHeader` with `tags = ["alpha","beta"]`: **239 bytes**,
+    identical — `string[]` and `Vec<String>` agree.
+  - `Edge` with `payload = [1,2,3]` and `payload_encoding = "messagepack"`:
+    **261 bytes**, identical — `byte[]` and `serde_bytes` agree.
+
+  **No divergence.** That was a real risk named in the ruling and it did not
+  materialise.
+- **D10b's breaking change is noted** in the error message and its owning
+  comment: a data member aliased `Owner` beside a reference member named
+  `Owner` used to register silently and fault at resolution; it is now refused
+  at the door with no compatibility path.
+
+**Every condition Soul set for merging is now met.** A final gate pass
+follows.
