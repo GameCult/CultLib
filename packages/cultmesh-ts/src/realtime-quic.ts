@@ -17,16 +17,12 @@ import { createHash } from "node:crypto";
 import { createSecureContext } from "node:tls";
 
 import {
+  routeCertificateView,
   trimCSharp,
   verifyAuthorityRoute,
-  type CultMeshAuthorityRouteCertificate,
   type CultMeshAuthorityTrustPolicy,
-  type CultMeshP256PublicKey,
 } from "cultnet-ts";
-import type {
-  CultMeshAuthorityRouteMessage,
-  CultMeshVerseDescriptorMessage,
-} from "cultnet-ts/contracts";
+import type { CultMeshVerseDescriptorMessage } from "cultnet-ts/contracts";
 
 import {
   decodeRealtimeFrame,
@@ -68,7 +64,6 @@ export interface CultMeshRealtimeCandidate {
   readonly authorityRuntimeId: string;
   readonly priority: number;
   readonly generation: string;
-  readonly authorityRoute?: CultMeshAuthorityRouteMessage;
 }
 
 /** Transport-neutral realtime plane; the TS analogue of `ICultMeshRealtimeTransport`. */
@@ -208,22 +203,6 @@ class CultMeshRealtimeLatestOnlyCoalescer<T> {
   }
 }
 
-class SimpleGate {
-  private tail: Promise<void> = Promise.resolve();
-
-  async run<T>(work: () => Promise<T>): Promise<T> {
-    const previous = this.tail;
-    let release!: () => void;
-    this.tail = new Promise((resolve) => (release = resolve));
-    await previous;
-    try {
-      return await work();
-    } finally {
-      release();
-    }
-  }
-}
-
 /** Configures certificate acceptance for an outbound QUIC realtime connection. */
 export interface CultMeshQuicRealtimeConnectorOptions {
   readonly handshakeTimeoutMs?: number;
@@ -277,47 +256,42 @@ export class CultMeshQuicRealtimeConnector implements CultMeshRealtimeTransportC
     return await new Promise<CultMeshRealtimeTransport>((resolve, reject) => {
       let settled = false;
 
-      // Honour a signal already aborted by the time we reach here (it fired
-      // before `addEventListener` could observe it, so it never would).
-      if (signal?.aborted) {
-        runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
-        void runtime.release();
-        reject(new Error("CultMesh QUIC connect aborted."));
-        return;
-      }
-
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        runtime.offConnectionEvent(connectionId);
-        runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
-        void runtime.release();
-        reject(new TimeoutError(`CultMesh QUIC handshake with '${candidate.endpoint}' timed out.`));
-      }, handshakeTimeoutMs);
-      const onAbort = (): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        runtime.offConnectionEvent(connectionId);
-        runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
-        void runtime.release();
-        reject(new Error("CultMesh QUIC connect aborted."));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      const finish = (transport?: CultMeshRealtimeTransport, error?: Error): void => {
+      // Every failure path below — an already-aborted signal, the handshake
+      // timeout, a later abort, and any handshake-time error — settles here
+      // exactly once: shut the native connection down, drop the runtime
+      // reference, and reject.
+      const fail = (error: Error): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        if (error) {
-          runtime.offConnectionEvent(connectionId);
-          void runtime.release();
-          reject(error);
-          return;
-        }
-        resolve(transport!);
+        runtime.offConnectionEvent(connectionId);
+        runtime.connectionShutdown(connectionId, CULTMESH_REALTIME_CONNECTION_CLOSE_CODE);
+        void runtime.release();
+        reject(error);
       };
+
+      const succeed = (transport: CultMeshRealtimeTransport): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(transport);
+      };
+
+      // Honour a signal already aborted by the time we reach here (it fired
+      // before `addEventListener` could observe it, so it never would).
+      if (signal?.aborted) {
+        fail(new Error("CultMesh QUIC connect aborted."));
+        return;
+      }
+
+      const timer = setTimeout(
+        () => fail(new Error(`CultMesh QUIC handshake with '${candidate.endpoint}' timed out.`)),
+        handshakeTimeoutMs,
+      );
+      const onAbort = (): void => fail(new Error("CultMesh QUIC connect aborted."));
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       // Told by the runtime when this connection faults mid-dispatch (a
       // throwing validator during the handshake, or a malformed frame /
@@ -325,7 +299,7 @@ export class CultMeshQuicRealtimeConnector implements CultMeshRealtimeTransportC
       // or hand the fault to the connected transport.
       const onFault = (error: Error): void => {
         if (!settled) {
-          finish(undefined, error);
+          fail(error);
           return;
         }
         transport.fault(error);
@@ -351,21 +325,22 @@ export class CultMeshQuicRealtimeConnector implements CultMeshRealtimeTransportC
             try {
               runtime.connectionCertificateComplete(connectionId, accepted);
             } catch (error) {
-              finish(undefined, error instanceof Error ? error : new Error(String(error)));
+              fail(error instanceof Error ? error : new Error(String(error)));
+              return;
             }
             if (!accepted) {
-              finish(undefined, new Error(`CultMesh QUIC provider certificate for '${candidate.endpoint}' was rejected.`));
+              fail(new Error(`CultMesh QUIC provider certificate for '${candidate.endpoint}' was rejected.`));
             }
             return;
           }
           if (event.type === CULTMESH_QUIC_EVENT_CONNECTION_SHUTDOWN && !settled) {
             const reason = Buffer.from(event.payload).toString("utf8");
-            finish(undefined, new Error(`CultMesh QUIC connection closed during handshake: ${reason || event.code}`));
+            fail(new Error(`CultMesh QUIC connection closed during handshake: ${reason || event.code}`));
             return;
           }
           transport.handleConnectionEvent(event);
           if (!settled && event.type === CULTMESH_QUIC_EVENT_CONNECTION_CONNECTED) {
-            finish(transport);
+            succeed(transport);
           }
         },
         onFault,
@@ -373,8 +348,6 @@ export class CultMeshQuicRealtimeConnector implements CultMeshRealtimeTransportC
     });
   }
 }
-
-class TimeoutError extends Error {}
 
 /**
  * `CultMeshQuicRealtimeTransport`, over the native v2 bridge. `TransportId`
@@ -388,8 +361,10 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   private readonly connectionId: bigint;
   private readonly target: CultMeshRealtimeTarget;
   private readonly routeGeneration: string;
-  private readonly reliableGate = new SimpleGate();
+  /** Serializes writes to the reliable-ordered outbound stream: each send chains onto this tail. */
+  private reliableSendTail: Promise<void> = Promise.resolve();
   private readonly pendingSends = new Map<bigint, PendingSend>();
+  /** Peer-opened stream id to its declared kind, pruned on `STREAM_SHUTDOWN`; see `trackedStreamCount`. */
   private readonly streamKinds = new Map<bigint, number>();
   /** Generation staleness filter: the newest `(channel, body)` generation delivered so far. */
   private readonly latestGenerations = new Map<string, LatestGeneration>();
@@ -434,6 +409,11 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
     );
   }
 
+  /** Number of peer-opened streams still tracked for their kind. Test-visible: proves `STREAM_SHUTDOWN` prunes `streamKinds` instead of leaking one entry per stream for the life of the connection. */
+  get trackedStreamCount(): number {
+    return this.streamKinds.size;
+  }
+
   async sendFrame(frame: CultMeshRealtimeFrame): Promise<void> {
     if (this.disposed) throw new Error("CultMesh QUIC realtime transport is disposed.");
     if (frame.delivery === "unreliable") {
@@ -443,21 +423,23 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
     }
     const encoded = encodeRealtimeFrame(frame);
     if (frame.delivery === "reliable-ordered") {
-      await this.reliableGate.run(async () => {
+      const send = this.reliableSendTail.then(async () => {
         if (this.reliableOutboundStreamId === undefined) {
           this.reliableOutboundStreamId = this.runtime.streamOpen(
             this.connectionId,
             CULTMESH_QUIC_STREAM_RELIABLE,
           );
-          this.streamKinds.set(this.reliableOutboundStreamId, CULTMESH_QUIC_STREAM_RELIABLE);
         }
         await this.sendOnStream(this.reliableOutboundStreamId, encoded, false);
       });
-      return;
+      // The tail must advance even if this send rejects, so the next queued
+      // send is not blocked forever on a settled promise; the caller still
+      // observes the rejection through `send` itself.
+      this.reliableSendTail = send.catch(() => {});
+      return send;
     }
     // latest-only: a fresh stream per send, mirroring the C# reference.
     const streamId = this.runtime.streamOpen(this.connectionId, CULTMESH_QUIC_STREAM_LATEST_ONLY);
-    this.streamKinds.set(streamId, CULTMESH_QUIC_STREAM_LATEST_ONLY);
     await this.sendOnStream(streamId, encoded, true);
   }
 
@@ -476,6 +458,7 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   async receiveFrame(signal?: AbortSignal): Promise<CultMeshRealtimeFrame> {
     if (this.readyTokens.length > 0) return this.resolveToken(this.readyTokens.shift()!);
     if (this.disposed) throw this.terminalError ?? new Error("CultMesh QUIC realtime transport is disposed.");
+    if (signal?.aborted) throw new Error("CultMesh QUIC receiveFrame aborted.");
     return await new Promise<CultMeshRealtimeFrame>((resolve, reject) => {
       const onAbort = (): void => {
         const index = this.receiveWaiters.indexOf(waiter);
@@ -532,9 +515,12 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
   /**
    * Runs exactly once, however the transport becomes unusable: explicit
    * `dispose()`, a peer-initiated `CONNECTION_SHUTDOWN`, or `fault()`.
-   * Releases the runtime reference and rejects every pending and future
-   * receive/send, so none of those paths can leak the reference or hang a
-   * waiter forever.
+   * Releases the runtime reference before running any `onDisposed` handler,
+   * so a handler that throws (or blocks) can never delay or skip the
+   * release; every handler runs in its own try/catch, so one throwing
+   * handler cannot stop the rest from running. Also rejects every pending
+   * and future receive/send, so none of those paths can leak the reference
+   * or hang a waiter forever.
    */
   private cleanup(error?: Error): void {
     if (this.disposed) return;
@@ -546,9 +532,17 @@ export class CultMeshQuicRealtimeTransport implements CultMeshRealtimeTransport 
     this.pendingSends.clear();
     const waiters = this.receiveWaiters.splice(0, this.receiveWaiters.length);
     for (const waiter of waiters) waiter.reject(rejection);
-    for (const handler of this.disposalHandlers) handler();
-    this.disposalHandlers.clear();
     void this.runtime.release();
+    const handlers = [...this.disposalHandlers];
+    this.disposalHandlers.clear();
+    for (const handler of handlers) {
+      try {
+        handler();
+      } catch (handlerError) {
+        // eslint-disable-next-line no-console
+        console.error("CultMesh QUIC realtime transport onDisposed handler threw:", handlerError);
+      }
+    }
   }
 
   /** @internal Routed here by the connector's connection-event registration. */
@@ -1016,24 +1010,6 @@ export class CultMeshStaticRealtimeLookupSource implements ICultMeshRealtimeLook
   }
 }
 
-function routeCertificateView(
-  certificate: CultMeshAuthorityRouteMessage["certificate"],
-): CultMeshAuthorityRouteCertificate | undefined {
-  if (!certificate) return undefined;
-  const providerKey: CultMeshP256PublicKey = {
-    keyId: certificate.providerKeyId,
-    x: certificate.providerPublicKeyX,
-    y: certificate.providerPublicKeyY,
-  };
-  return {
-    providerKey,
-    odinKeyId: certificate.odinKeyId,
-    issuedAtUnixMilliseconds: certificate.issuedAtUnixMilliseconds,
-    expiresAtUnixMilliseconds: certificate.expiresAtUnixMilliseconds,
-    signature: certificate.signature,
-  };
-}
-
 /** Options for `CultMeshQuicRealtimeSessionManager`. */
 export interface CultMeshQuicRealtimeSessionManagerOptions {
   readonly lookupSource: ICultMeshRealtimeLookupSource;
@@ -1052,6 +1028,8 @@ export class CultMeshQuicRealtimeSessionManager {
   private readonly sessions = new Map<string, CultMeshRealtimeTransport>();
   /** Single-flight: concurrent `connect()` calls for the same key share one dial. */
   private readonly connecting = new Map<string, Promise<CultMeshRealtimeTransport>>();
+  /** One controller per in-flight dial, so `dispose()` and `disconnect()` can cancel it. */
+  private readonly dialAborts = new Map<string, AbortController>();
   private disposed = false;
 
   constructor(options: CultMeshQuicRealtimeSessionManagerOptions) {
@@ -1085,18 +1063,29 @@ export class CultMeshQuicRealtimeSessionManager {
     const inFlight = this.connecting.get(key);
     if (inFlight) return inFlight;
 
-    const attempt = this.connectOwnedAsync(key, target).finally(() => {
+    const controller = new AbortController();
+    this.dialAborts.set(key, controller);
+    const attempt = this.connectOwnedAsync(key, target, controller.signal).finally(() => {
       this.connecting.delete(key);
+      if (this.dialAborts.get(key) === controller) this.dialAborts.delete(key);
     });
     this.connecting.set(key, attempt);
     return attempt;
   }
 
-  private async connectOwnedAsync(key: string, target: CultMeshRealtimeTarget): Promise<CultMeshRealtimeTransport> {
-    const transport = await this.dialAsync(key, target);
-    if (this.disposed) {
+  private async connectOwnedAsync(
+    key: string,
+    target: CultMeshRealtimeTarget,
+    signal: AbortSignal,
+  ): Promise<CultMeshRealtimeTransport> {
+    const transport = await this.dialAsync(key, target, signal);
+    if (this.disposed || signal.aborted) {
       transport.dispose();
-      throw new Error("CultMeshQuicRealtimeSessionManager was disposed while connecting.");
+      throw new Error(
+        this.disposed
+          ? "CultMeshQuicRealtimeSessionManager was disposed while connecting."
+          : `Dial for '${key}' was cancelled while connecting.`,
+      );
     }
     this.sessions.set(key, transport);
     transport.onDisposed?.(() => {
@@ -1105,7 +1094,11 @@ export class CultMeshQuicRealtimeSessionManager {
     return transport;
   }
 
-  private async dialAsync(key: string, target: CultMeshRealtimeTarget): Promise<CultMeshRealtimeTransport> {
+  private async dialAsync(
+    key: string,
+    target: CultMeshRealtimeTarget,
+    signal: AbortSignal,
+  ): Promise<CultMeshRealtimeTransport> {
     const verses = await this.options.lookupSource.resolve(target);
     const routes = verses
       .flatMap((verse) => verse.authorityRoutes ?? [])
@@ -1123,7 +1116,6 @@ export class CultMeshQuicRealtimeSessionManager {
         authorityRuntimeId: route.authorityRuntimeId,
         priority: route.priority,
         generation: trimCSharp(route.generation),
-        authorityRoute: route,
       };
       try {
         await verifyAuthorityRoute(
@@ -1166,10 +1158,11 @@ export class CultMeshQuicRealtimeSessionManager {
     const maxRaced = this.options.maxRacedCandidates ?? 2;
     const failures: Error[] = [];
     for (const tier of [...tiers.keys()].sort((a, b) => a - b)) {
+      if (signal.aborted) break;
       const entries = [...(tiers.get(tier) ?? [])]
         .sort((a, b) => a.candidate.priority - b.candidate.priority)
         .slice(0, maxRaced);
-      const winner = await this.raceFirstSuccessAsync(key, target, entries, failures);
+      const winner = await this.raceFirstSuccessAsync(key, target, entries, failures, signal);
       if (winner) return winner;
     }
     throw new Error(
@@ -1191,8 +1184,11 @@ export class CultMeshQuicRealtimeSessionManager {
     target: CultMeshRealtimeTarget,
     entries: ReadonlyArray<{ candidate: CultMeshRealtimeCandidate; connector: CultMeshRealtimeTransportConnector }>,
     failures: Error[],
+    outerSignal: AbortSignal,
   ): Promise<CultMeshRealtimeTransport | undefined> {
     const controller = new AbortController();
+    if (outerSignal.aborted) controller.abort();
+    else outerSignal.addEventListener("abort", () => controller.abort(), { once: true });
     const pending = new Set(
       entries.map((entry) => this.connectCandidateAsync(key, target, entry, controller.signal)),
     );
@@ -1239,17 +1235,25 @@ export class CultMeshQuicRealtimeSessionManager {
     return transport;
   }
 
-  /** Marks the session for `target` offline, disposing its transport. */
+  /**
+   * Marks the session for `target` offline, disposing its transport. Also
+   * cancels a dial still in flight for `target`, so a connect racing this
+   * call cannot cache a transport this call meant to discard.
+   */
   disconnect(target: CultMeshRealtimeTarget): void {
     const key = this.sessionKey(target);
     const transport = this.sessions.get(key);
-    if (!transport) return;
-    this.sessions.delete(key);
-    transport.dispose();
+    if (transport) {
+      this.sessions.delete(key);
+      transport.dispose();
+    }
+    this.dialAborts.get(key)?.abort();
   }
 
   dispose(): void {
     this.disposed = true;
+    for (const controller of this.dialAborts.values()) controller.abort();
+    this.dialAborts.clear();
     for (const transport of this.sessions.values()) transport.dispose();
     this.sessions.clear();
   }
