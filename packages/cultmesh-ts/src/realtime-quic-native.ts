@@ -24,9 +24,13 @@
 // position (a bare `null` is read by the bridge as a null out parameter and
 // refused with -1) and its return value is the plain scalar `int32_t`, not an
 // object. Every out parameter here is therefore `koffi.alloc(type, 1)`,
-// decoded with `koffi.decode(buffer, type)` after the call. A `void *` value
-// — the runtime handle, and every listener/connection/stream id, since ids
-// share the 64-bit width — decodes as a JavaScript `bigint`.
+// decoded with `koffi.decode(buffer, type)` after the call. A decoded 64-bit
+// value (`void *`, `uint64_t`) comes back from koffi as a plain JavaScript
+// `number` when it fits the safe-integer range, not a `bigint` (probed
+// against the pinned 3.3.0 build: a decoded `uint64_t` field reads
+// `typeof === "number"`). Every such decode is coerced through `toBigInt64`
+// below, once, at this boundary, so every exported type in this module keeps
+// its honest `bigint` declaration.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -63,6 +67,16 @@ export const CULTMESH_QUIC_RESULT_BAD_CALL = -1;
 export const CULTMESH_QUIC_RESULT_BAD_ARGUMENT = -2;
 
 type NativeEventListener = (event: CultMeshQuicNativeEvent) => void;
+/** Invoked once when a connection is faulted: a throwing listener, a malformed
+ * frame, or any other error raised while dispatching an event for it. */
+type NativeFaultHandler = (error: Error) => void;
+
+/** koffi decodes a 64-bit value as `number` when it fits a safe integer and as
+ * `bigint` otherwise (probed on the pinned 3.3.0 build); this is the single
+ * place that coerces either into the `bigint` every exported type promises. */
+function toBigInt64(value: number | bigint): bigint {
+  return typeof value === "bigint" ? value : BigInt(value);
+}
 
 /** The opaque native runtime handle: a `void *`, decoded by koffi as a `bigint`. */
 export type CultMeshQuicNativeHandle = bigint;
@@ -117,7 +131,6 @@ interface NativeBindings {
     payloadCapacity: number,
   ): Promise<{ status: number; event: NativeEventStruct | null; required: number }>;
   lastError(runtime: CultMeshQuicNativeHandle, destination: Uint8Array, capacity: number): number;
-  lastStatus(runtime: CultMeshQuicNativeHandle): number;
 }
 
 let bindingsCache: NativeBindings | undefined;
@@ -148,8 +161,7 @@ function loadBindings(): NativeBindings {
 
   // Untyped on purpose: koffi's own type declarations are ESM-flavored and
   // fight a CommonJS `typeof import(...)` reference under Node16 resolution.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
   const koffi: any = require("koffi");
   const { bridge, dependency } = platformFileNames();
   const dir = resolveNativeDir();
@@ -222,7 +234,6 @@ function loadBindings(): NativeBindings {
   const lastErrorFn = bridgeLib.func(
     "int32_t cultmesh_quic_last_error(void *runtime, uint8_t *destination, int32_t capacity)",
   );
-  const lastStatusFn = bridgeLib.func("int32_t cultmesh_quic_last_status(void *runtime)");
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { promisify } = require("node:util") as typeof import("node:util");
@@ -239,7 +250,7 @@ function loadBindings(): NativeBindings {
     runtimeOpen: (appName) => {
       const out = koffi.alloc("void *", 1);
       const status = runtimeOpenFn(appName, out);
-      return { status, runtime: status === 0 ? (koffi.decode(out, "void *") as CultMeshQuicNativeHandle) : null };
+      return { status, runtime: status === 0 ? toBigInt64(koffi.decode(out, "void *")) : null };
     },
     runtimeClose: (runtime) => runtimeCloseFn(runtime),
     listenerOpen: (runtime, host, port, pkcs12, pkcs12Length, password) => {
@@ -248,7 +259,7 @@ function loadBindings(): NativeBindings {
       const status = listenerOpenFn(runtime, host, port, pkcs12, pkcs12Length, password, outListenerId, outBoundPort);
       return {
         status,
-        listenerId: status === 0 ? (koffi.decode(outListenerId, "uint64_t") as bigint) : 0n,
+        listenerId: status === 0 ? toBigInt64(koffi.decode(outListenerId, "uint64_t")) : 0n,
         boundPort: status === 0 ? (koffi.decode(outBoundPort, "uint16_t") as number) : 0,
       };
     },
@@ -256,7 +267,7 @@ function loadBindings(): NativeBindings {
     connectionOpen: (runtime, host, port) => {
       const out = koffi.alloc("uint64_t", 1);
       const status = connectionOpenFn(runtime, host, port, out);
-      return { status, connectionId: status === 0 ? (koffi.decode(out, "uint64_t") as bigint) : 0n };
+      return { status, connectionId: status === 0 ? toBigInt64(koffi.decode(out, "uint64_t")) : 0n };
     },
     connectionCertificateComplete: (runtime, connectionId, accept) =>
       connectionCertificateCompleteFn(runtime, connectionId, accept),
@@ -264,7 +275,7 @@ function loadBindings(): NativeBindings {
     streamOpen: (runtime, connectionId, kind) => {
       const out = koffi.alloc("uint64_t", 1);
       const status = streamOpenFn(runtime, connectionId, kind, out);
-      return { status, streamId: status === 0 ? (koffi.decode(out, "uint64_t") as bigint) : 0n };
+      return { status, streamId: status === 0 ? toBigInt64(koffi.decode(out, "uint64_t")) : 0n };
     },
     streamSendFrame: (runtime, streamId, encodedFrame, length, fin) =>
       streamSendFrameFn(runtime, streamId, encodedFrame, length, fin),
@@ -273,14 +284,20 @@ function loadBindings(): NativeBindings {
       const outEvent = koffi.alloc(CultMeshQuicEvent, 1);
       const outRequired = koffi.alloc("int32_t", 1);
       const status = await nextEventAsyncRaw(runtime, timeoutMs, outEvent, payload, payloadCapacity, outRequired);
+      const decoded = status === 1 ? (koffi.decode(outEvent, CultMeshQuicEvent) as NativeEventStruct) : null;
       return {
         status,
-        event: status === 1 ? (koffi.decode(outEvent, CultMeshQuicEvent) as NativeEventStruct) : null,
+        event: decoded && {
+          ...decoded,
+          listener_id: toBigInt64(decoded.listener_id),
+          connection_id: toBigInt64(decoded.connection_id),
+          stream_id: toBigInt64(decoded.stream_id),
+          code: toBigInt64(decoded.code),
+        },
         required: koffi.decode(outRequired, "int32_t") as number,
       };
     },
     lastError: (runtime, destination, capacity) => lastErrorFn(runtime, destination, capacity),
-    lastStatus: (runtime) => lastStatusFn(runtime),
   };
   return bindingsCache;
 }
@@ -305,7 +322,10 @@ export class CultMeshQuicNativeRuntime {
   private readonly handle: CultMeshQuicNativeHandle;
   private readonly bindings: NativeBindings;
   private readonly listenerListeners = new Map<bigint, NativeEventListener>();
-  private readonly connectionListeners = new Map<bigint, NativeEventListener>();
+  private readonly connectionListeners = new Map<
+    bigint,
+    { listener: NativeEventListener; onFault?: NativeFaultHandler }
+  >();
   private closed = false;
   private pumpLoop: Promise<void>;
 
@@ -328,14 +348,26 @@ export class CultMeshQuicNativeRuntime {
     return CultMeshQuicNativeRuntime.shared;
   }
 
-  /** Drops one reference; closes the shared runtime once none remain. */
+  /**
+   * Drops one reference; closes the shared runtime once none remain. Refuses
+   * a release when no reference is outstanding. The bridge header (section 4)
+   * forbids any host call beginning once `cultmesh_quic_runtime_close` has
+   * started, so this marks the runtime closed and waits for the pump to exit
+   * — it wakes within its 250 ms `nextEvent` timeout — before making that
+   * call. Closing first and awaiting the pump after (the previous order) let
+   * a queued, not-yet-started `nextEvent` call begin after close and run
+   * against freed memory.
+   */
   async release(): Promise<void> {
-    CultMeshQuicNativeRuntime.refCount = Math.max(0, CultMeshQuicNativeRuntime.refCount - 1);
+    if (CultMeshQuicNativeRuntime.refCount === 0) {
+      throw new Error("CultMeshQuicNativeRuntime.release called with no outstanding reference.");
+    }
+    CultMeshQuicNativeRuntime.refCount -= 1;
     if (CultMeshQuicNativeRuntime.refCount > 0) return;
     this.closed = true;
-    this.bindings.runtimeClose(this.handle);
     CultMeshQuicNativeRuntime.shared = undefined;
     await this.pumpLoop;
+    this.bindings.runtimeClose(this.handle);
   }
 
   onListenerEvent(listenerId: bigint, listener: NativeEventListener): void {
@@ -346,8 +378,16 @@ export class CultMeshQuicNativeRuntime {
     this.listenerListeners.delete(listenerId);
   }
 
-  onConnectionEvent(connectionId: bigint, listener: NativeEventListener): void {
-    this.connectionListeners.set(connectionId, listener);
+  /**
+   * Registers the event listener for one connection. `onFault`, if given, is
+   * invoked exactly once if `listener` (or anything it calls synchronously,
+   * such as a caller-supplied certificate validator) throws while dispatching
+   * an event for this connection: the pump isolates the fault to this
+   * connection, shuts it down at the native level, removes the listener, and
+   * keeps running for every other connection.
+   */
+  onConnectionEvent(connectionId: bigint, listener: NativeEventListener, onFault?: NativeFaultHandler): void {
+    this.connectionListeners.set(connectionId, { listener, onFault });
   }
 
   offConnectionEvent(connectionId: bigint): void {
@@ -412,6 +452,15 @@ export class CultMeshQuicNativeRuntime {
     this.bindings.streamShutdown(this.handle, streamId, code);
   }
 
+  /**
+   * Isolates the faulting connection so one bad event never brings down the
+   * pump: a malformed frame, a stream-kind/delivery mismatch, or a throwing
+   * caller-supplied listener (certificate validator, waiter) faults only its
+   * own connection. The listener is removed, the connection is shut down at
+   * the native level, and `onFault` (if registered) is told, so pending and
+   * future work on that connection can reject with the error. Every other
+   * connection, and the pump itself, keep running.
+   */
   private dispatch(event: NativeEventStruct, payload: Uint8Array): void {
     const decoded: CultMeshQuicNativeEvent = {
       type: event.type,
@@ -424,10 +473,41 @@ export class CultMeshQuicNativeRuntime {
       payload,
     };
     if (decoded.type === CULTMESH_QUIC_EVENT_LISTENER_NEW_CONNECTION || decoded.type === CULTMESH_QUIC_EVENT_LISTENER_STOPPED) {
-      this.listenerListeners.get(decoded.listenerId)?.(decoded);
+      try {
+        this.listenerListeners.get(decoded.listenerId)?.(decoded);
+      } catch (error) {
+        // No fault contract for listener-level events today; do not let a
+        // throwing handler crash the pump.
+        this.reportUnhandledDispatchError(error);
+      }
       return;
     }
-    this.connectionListeners.get(decoded.connectionId)?.(decoded);
+    const entry = this.connectionListeners.get(decoded.connectionId);
+    if (!entry) return;
+    try {
+      entry.listener(decoded);
+    } catch (error) {
+      this.faultConnection(decoded.connectionId, error instanceof Error ? error : new Error(String(error)), entry.onFault);
+    }
+  }
+
+  private faultConnection(connectionId: bigint, error: Error, onFault: NativeFaultHandler | undefined): void {
+    this.connectionListeners.delete(connectionId);
+    try {
+      this.bindings.connectionShutdown(this.handle, connectionId, 0n);
+    } catch {
+      // Best-effort: the connection may already be gone.
+    }
+    if (onFault) {
+      onFault(error);
+    } else {
+      this.reportUnhandledDispatchError(error);
+    }
+  }
+
+  private reportUnhandledDispatchError(error: unknown): void {
+    // eslint-disable-next-line no-console
+    console.error("CultMesh QUIC native event dispatch failed with no fault handler registered:", error);
   }
 
   private async pump(): Promise<void> {
