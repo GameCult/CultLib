@@ -448,16 +448,20 @@ namespace GameCult.Networking
             return incoming;
         }
 
-        // R-AK: no `!member.IsReference` guard here - CultCache.ReferencesOf (CultCache.cs:262-278)
-        // already searches only its own RichMembers' reference members for a role match and
-        // returns empty for anything else, including a data member's own alias (index aliases are
-        // unique per descriptor, so a data member's role string can never coincide with a
-        // reference member's). A second copy of the same exclusion here was duplicate authority,
-        // not a second decision - CultCache owns "is this member a reference" once.
+        // R-AL: the `!member.IsReference` guard is restored. R-AK's removal argued a data member's
+        // role string could never coincide with a reference member's because index aliases are
+        // unique per descriptor - false. CultCache's D10 only rejects a collision between two
+        // *aliased* members (CultCache.cs:1085-1097); a plain data member with no [CultIndex]
+        // contributes its bare MemberName to the same role namespace unchecked (fixed for new
+        // registrations by D10b, CultCache.cs ~1099, but this guard is the caller-side backstop for
+        // whatever is already registered). Without it, a data member sharing a reference member's
+        // role is yielded here, ReferencesOf then matches it to the *reference* member's edges by
+        // role string, and `member.TargetType!` is null - ArgumentNullException on every hop.
         private static IEnumerable<CultDocumentMemberView> ReferenceMembers(CultDocumentDescriptor descriptor, string? role)
         {
             foreach (var member in descriptor.DeclaredMembers)
             {
+                if (!member.IsReference) continue;
                 if (role != null && (member.IndexAlias ?? member.MemberName) != role) continue;
                 yield return member;
             }

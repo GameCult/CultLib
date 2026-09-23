@@ -1096,6 +1096,25 @@ namespace GameCult.Caching
                 rejections.Add(DuplicateIndexAliasMessage(type.Name, Qualified(pair[0].Entry.Member), Qualified(pair[1].Entry.Member), group.Key!));
             }
 
+            // D10b: the reference-role namespace is (IndexAlias ?? MemberName) for every member, not
+            // only the aliased ones D10 groups above. A member with no [CultIndex] still contributes
+            // its bare name to that namespace, and a reference member declaring the same string as its
+            // alias collides with it - the collision D10 cannot see because an unaliased member's Alias
+            // is null.
+            foreach (var group in keyed
+                         .Select(entry => (
+                             Entry: entry,
+                             Role: ResolveIndexAlias(entry.Member) ?? entry.Member.Name,
+                             IsReference: PersistedMember.IsReferenceCandidate(entry.Member, entry.MemberType)))
+                         .GroupBy(pair => pair.Role, StringComparer.Ordinal)
+                         .Where(group => group.Select(pair => pair.Entry.Member.Name).Distinct().Count() > 1
+                                         && group.Any(pair => pair.IsReference))
+                         .OrderBy(group => group.Key, StringComparer.Ordinal))
+            {
+                var pair = group.Take(2).ToArray();
+                rejections.Add(DuplicateReferenceRoleMessage(type.Name, Qualified(pair[0].Entry.Member), Qualified(pair[1].Entry.Member), group.Key));
+            }
+
             // D11: a member declared as a reference (by [CultReference] or a bare CultRecordRef<T> type)
             // whose CLR shape the cache cannot walk. many:false needs CultRecordRef<T> itself; many:true
             // needs IEnumerable<CultRecordRef<T>> or IDictionary<CultRecordRef<T>, V>. A declaration the
@@ -1355,6 +1374,14 @@ namespace GameCult.Caching
         private static string DuplicateIndexAliasMessage(string documentTypeName, string first, string second, string alias) =>
             $"Cult document {documentTypeName} members {first} and {second} both declare index alias \"{alias}\"; an index alias must name one member.";
 
+        // D10b (R-AL): a plain member's bare name colliding with a reference member's index alias.
+        // CultDocumentRegistry.ReferencesOf and CultNetSelectionEvaluator.ReferenceMembers both key
+        // reference lookups off (IndexAlias ?? MemberName); D10 above only groups members that
+        // declare an alias, so an unaliased member's bare name sharing that string with a reference
+        // member's alias registered silently and faulted every hop through it at resolution time.
+        private static string DuplicateReferenceRoleMessage(string documentTypeName, string first, string second, string role) =>
+            $"Cult document {documentTypeName} members {first} and {second} both resolve to reference role \"{role}\" (index alias, or bare member name when unaliased); a reference role must name one member.";
+
         private static string UnsupportedReferenceShapeMessage(string documentTypeName, string member) =>
             $"Cult document {documentTypeName} member {member} declares a reference the cache cannot walk; many:false needs CultRecordRef<T>, many:true needs IEnumerable<CultRecordRef<T>> or IDictionary<CultRecordRef<T>, V>.";
 
@@ -1523,6 +1550,15 @@ namespace GameCult.Caching
 
                     return results;
                 };
+            }
+
+            // Mirrors the isReference computation FromMember uses below, callable from DiscoverMembers
+            // (D10b) before a slot is turned into a full PersistedMember.
+            internal static bool IsReferenceCandidate(MemberInfo member, Type memberType)
+            {
+                var referenceAttribute = member.GetCustomAttribute<CultReferenceAttribute>();
+                var targetType = ResolveReferenceTarget(memberType, referenceAttribute?.TargetType);
+                return targetType != null || referenceAttribute != null;
             }
 
             private static Type? ResolveReferenceTarget(Type memberType, Type? explicitTarget)
