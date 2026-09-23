@@ -31,6 +31,28 @@ import { nativeBridgeAvailable } from "./support/native-bridge";
 // levels up.
 const FIXTURE_P12 = join(__dirname, "..", "..", "test", "fixtures", "quic-test.p12");
 
+/**
+ * `assert.rejects`, but safe against a mutant or a real regression that
+ * makes the promise resolve instead: a transport that unexpectedly connects
+ * is disposed before the assertion fails, so a broken certificate check
+ * cannot hang this file the way M1 did before realtime-quic-consumer.test.ts
+ * gained this same helper.
+ */
+async function assertRejectsAndDisposes(
+  promise: Promise<{ dispose(): void }>,
+  match?: RegExp,
+): Promise<void> {
+  let resolved: { dispose(): void } | undefined;
+  try {
+    resolved = await promise;
+  } catch (error) {
+    if (match) assert.match(error instanceof Error ? error.message : String(error), match);
+    return;
+  }
+  resolved.dispose();
+  assert.fail("expected the promise to reject, but it resolved (the resolved value has been disposed)");
+}
+
 function testFrame(overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshRealtimeFrame {
   return {
     channelId: "aetheria.entities",
@@ -387,7 +409,7 @@ test(
       generation: "gen-1",
     };
     const connector = new CultMeshQuicRealtimeConnector();
-    await assert.rejects(connector.connect(candidate, target), /certificate|rejected/i);
+    await assertRejectsAndDisposes(connector.connect(candidate, target), /certificate|rejected/i);
 
     // The provider's own accept flow is asynchronous (attachPeer awaits a
     // runtime reference before it can even see the rejection); give it a
