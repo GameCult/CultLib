@@ -255,6 +255,122 @@ test("a stalled peer's outbox holds at most one pending frame per key across man
   }
 });
 
+test(
+  "20,000 client latest-only frames on one key leave at most 1 pending in the provider's receive queue",
+  { timeout: 120_000 },
+  async (t) => {
+    if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+    const provider = await startProvider();
+    try {
+      const consumer = await dialProvider(provider);
+      try {
+        await waitUntil(() => provider.connectionCount === 1);
+
+        // The exact scenario Soul's probe reproduced against the unbounded
+        // `readyFrames` array this replaced: a publish-only StreamPixels-style
+        // consumer of `receive()` never drains the provider's fan-in queue,
+        // so a client hammering one key must not be able to grow it past one
+        // entry no matter how many frames it sends.
+        const total = 20_000;
+        const sends: Promise<void>[] = [];
+        for (let sequence = 1; sequence <= total; sequence += 1) {
+          sends.push(consumer.sendFrame(testFrame({ delivery: "latest-only", sequence: BigInt(sequence) })));
+        }
+        await Promise.all(sends);
+        await waitUntil(() => provider.receiveQueueSize > 0, 30_000);
+        // Let any trailing send_complete events land before asserting the
+        // queue has settled, so this isn't racing the last few deliveries.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        assert.equal(
+          provider.receiveQueueSize,
+          1,
+          `one client key must coalesce to at most one pending frame, got ${provider.receiveQueueSize}`,
+        );
+        const frame = await provider.receive();
+        assert.equal(frame.sequence, BigInt(total), "the one pending frame must be the newest generation sent");
+        assert.equal(provider.receiveQueueSize, 0);
+      } finally {
+        consumer.dispose();
+      }
+    } finally {
+      provider.dispose();
+    }
+  },
+);
+
+test(
+  "many distinct client latest-only keys stay bounded by the key count, not the frame count",
+  async (t) => {
+    if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+    const provider = await startProvider();
+    try {
+      const consumer = await dialProvider(provider);
+      try {
+        await waitUntil(() => provider.connectionCount === 1);
+
+        const keyCount = 50;
+        const sendsPerKey = 20;
+        const sends: Promise<void>[] = [];
+        for (let key = 0; key < keyCount; key += 1) {
+          for (let sequence = 1; sequence <= sendsPerKey; sequence += 1) {
+            sends.push(
+              consumer.sendFrame(
+                testFrame({
+                  delivery: "latest-only",
+                  bodyId: `body:${key}`,
+                  sequence: BigInt(sequence),
+                }),
+              ),
+            );
+          }
+        }
+        await Promise.all(sends);
+        await waitUntil(() => provider.receiveQueueSize > 0, 10_000);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        assert.equal(
+          provider.receiveQueueSize,
+          keyCount,
+          `the queue must hold exactly one pending frame per distinct key, got ${provider.receiveQueueSize}`,
+        );
+      } finally {
+        consumer.dispose();
+      }
+    } finally {
+      provider.dispose();
+    }
+  },
+);
+
+test("reliable-ordered client frames are delivered in order at the provider, never coalesced", async (t) => {
+  if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
+  const provider = await startProvider();
+  try {
+    const consumer = await dialProvider(provider);
+    try {
+      await waitUntil(() => provider.connectionCount === 1);
+
+      const total = 500;
+      for (let sequence = 1; sequence <= total; sequence += 1) {
+        await consumer.sendFrame(testFrame({ delivery: "reliable-ordered", sequence: BigInt(sequence) }));
+      }
+      await waitUntil(() => provider.receiveQueueSize === total, 10_000);
+
+      const received: bigint[] = [];
+      for (let i = 0; i < total; i += 1) {
+        received.push((await provider.receive()).sequence);
+      }
+      const expected = Array.from({ length: total }, (_, i) => BigInt(i + 1));
+      assert.deepEqual(received, expected, "reliable-ordered frames must never be coalesced or reordered");
+    } finally {
+      consumer.dispose();
+    }
+  } finally {
+    provider.dispose();
+  }
+});
+
 test("unreliable broadcast fails closed", async (t) => {
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
