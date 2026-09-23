@@ -39,6 +39,25 @@ try {
     const files = packed[0].files.map(file => file.path);
     assert.ok(files.includes("dist/index.js"), `${packageName} tarball is missing dist/index.js`);
     assert.ok(files.includes("dist/index.d.ts"), `${packageName} tarball is missing dist/index.d.ts`);
+    if (packageName === "cultmesh-ts") {
+      // The committed native binaries only reach a consumer if `files` (and
+      // therefore the packed tarball) actually carries them; a fresh clone,
+      // an `npm pack` tarball and the deploy `git archive` all depend on it.
+      // Assert on every host: the tarball carries both platforms, and the
+      // host only decides which one loads.
+      const requiredNativeFiles = [
+        "native/win32-x64/gamecult_mesh_quic_native.dll",
+        "native/win32-x64/msquic.dll",
+        "native/linux-x64/libgamecult_mesh_quic_native.so",
+        "native/linux-x64/libmsquic.so.2",
+        "native/SHA256SUMS",
+        "native/MANIFEST.txt",
+        "native/MSQUIC-LICENSE.txt",
+      ];
+      for (const requiredNativeFile of requiredNativeFiles) {
+        assert.ok(files.includes(requiredNativeFile), `cultmesh-ts tarball is missing ${requiredNativeFile}`);
+      }
+    }
     tarballs.push(join(tarballRoot, packed[0].filename));
   }
 
