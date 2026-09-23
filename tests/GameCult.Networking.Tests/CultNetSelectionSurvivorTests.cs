@@ -371,7 +371,7 @@ namespace GameCult.Networking.Tests
         }
 
         // R-AJ (Soul's SM-4): the two tests above each isolate one component of the (From.SchemaId,
-        // From.Key, Role, To.SchemaId, To.Key) tiebreak by tying every other one - so neither can
+        // From.Key, Role, To.Key) tiebreak by tying every other one - so neither can
         // distinguish the *composition* "From.Key before Role" from "Role before From.Key", which is
         // exactly the mutant that survived (permuting Role ahead of From.Key, keeping every
         // component). This calls EdgesFor directly with two hand-built edges sharing one anchor, so
