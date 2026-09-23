@@ -205,19 +205,18 @@ public sealed class CultMeshQuicRealtimeTransportTests
         var runtimeId = CultMeshRuntimeId.Parse("service:aetheria.daemon");
         var target = new CultMeshSessionTarget("aetheria", runtimeId.Value);
 
-        using (var firstSessions = CreateSessions(server, out _))
-        {
-            var firstSession = await firstSessions.ConnectRealtimeAsync(target);
-            await WaitUntilAsync(() => server.ConnectionCount == 1);
-            await server.BroadcastAsync(Frame(9, CultMeshRealtimeDelivery.ReliableOrdered));
-            var atFirst = await firstSession.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            atFirst.Sequence.Should().Be(9);
-        }
-        await WaitUntilAsync(() => server.ConnectionCount == 0);
+        using var firstSessions = CreateSessions(server, out _);
+        var firstSession = await firstSessions.ConnectRealtimeAsync(target);
+        await WaitUntilAsync(() => server.ConnectionCount == 1);
+        await server.BroadcastAsync(Frame(9, CultMeshRealtimeDelivery.ReliableOrdered));
+        var atFirst = await firstSession.ReceiveAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        atFirst.Sequence.Should().Be(9);
 
         // A real latest-only frame follows, so the assertion below proves the
         // reliable-ordered frame specifically was never retained, rather than
-        // merely proving the server had nothing at all to seed.
+        // merely proving the server had nothing at all to seed. The first
+        // session stays connected throughout: only the second session's own
+        // seed is under test here.
         await server.BroadcastAsync(Frame(1, CultMeshRealtimeDelivery.LatestOnly));
         using var secondSessions = CreateSessions(server, out _);
         var secondSession = await secondSessions.ConnectRealtimeAsync(target);
