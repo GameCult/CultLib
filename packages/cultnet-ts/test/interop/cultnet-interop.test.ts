@@ -2566,11 +2566,15 @@ interface RunningServeProcess {
 }
 
 async function spawnServeProcess(name: string, command: ServeCommand): Promise<RunningServeProcess> {
+  // A non-literal first stdio element (it varies per caller) loses `spawn`'s
+  // typed-tuple overload entirely, including for the two fixed "pipe"
+  // elements, so this is asserted rather than inferred: stdout/stderr are
+  // always piped here, and only stdin's presence varies.
   const child = spawn(command.command, command.args, {
     cwd: command.cwd,
     env: { ...process.env, ...command.env },
     stdio: [command.stdin ?? "ignore", "pipe", "pipe"],
-  });
+  }) as ChildProcessByStdio<Writable | null, Readable, Readable>;
   const stderr: string[] = [];
   let stdoutBuffer = "";
 
