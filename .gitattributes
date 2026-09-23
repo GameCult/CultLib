@@ -13,3 +13,12 @@
 # repair is in native/GameCult.Mesh.Quic.Native/README.md, beside the container
 # path it unblocks.
 *.sh text eol=lf
+
+# The committed CultMesh QUIC native binaries (cut 6, packaging) ride the
+# deploy `git archive` as raw bytes. `* text=auto` already autodetects them as
+# binary by content, but that autodetection is a heuristic; say so explicitly
+# so no future text-processing rule (a diff driver, an export filter) can
+# apply text conversion and poison the committed digests in SHA256SUMS.
+packages/cultmesh-ts/native/**/*.dll binary
+packages/cultmesh-ts/native/**/*.so binary
+packages/cultmesh-ts/native/**/*.so.* binary
