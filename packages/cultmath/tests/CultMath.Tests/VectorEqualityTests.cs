@@ -119,6 +119,17 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float, float2, bool2>(
             scalar, left, new double[] { scalar, scalar }, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float2 scalar-vector");
+
+        // A value compared against an exact copy of itself: every component ties. This is the
+        // complementary fixture to the no-tie one above. A tie is where < and <= (or > and >=)
+        // actually disagree, so it catches a strict/non-strict boundary swap (e.g. < mutated to
+        // <=) that a fixture with no equal components cannot: unlike a threshold compared against
+        // an arbitrary float, an exact self-tie is neither rare nor equivalent here, since these
+        // are general-purpose comparison operators (bounds/containment checks compare against
+        // literal endpoints routinely, as CultMath's own touching-edges rect test does).
+        AssertElementwiseComparisonOperators<float2, float2, bool2>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float2 tied vector-vector");
     }
 
     // ---- float3 -----------------------------------------------------------------------------
@@ -166,6 +177,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float, float3, bool3>(
             scalar, left, new double[] { scalar, scalar, scalar }, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float3 scalar-vector");
+
+        // Tied against itself (see the float2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<float3, float3, bool3>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float3 tied vector-vector");
     }
 
     // ---- float4 -----------------------------------------------------------------------------
@@ -214,6 +230,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float, float4, bool4>(
             scalar, left, new double[] { scalar, scalar, scalar, scalar }, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float4 scalar-vector");
+
+        // Tied against itself (see the float2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<float4, float4, bool4>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float4 tied vector-vector");
     }
 
     // ---- double2 ----------------------------------------------------------------------------
@@ -244,6 +265,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<double2, double2, bool2>(
             left, right, leftVals, rightVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "double2 vector-vector");
+
+        // Tied against itself (see the float2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<double2, double2, bool2>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "double2 tied vector-vector");
     }
 
     // ---- double3 ----------------------------------------------------------------------------
@@ -276,6 +302,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<double3, double3, bool3>(
             left, right, leftVals, rightVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "double3 vector-vector");
+
+        // Tied against itself (see the float2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<double3, double3, bool3>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "double3 tied vector-vector");
     }
 
     // ---- int2 -------------------------------------------------------------------------------
@@ -306,6 +337,12 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<int2, int2, bool2>(
             left, right, leftVals, rightVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int2 vector-vector");
+
+        // Tied against itself (see the float2 tied-fixture comment above); integers make an
+        // exact tie the routine case, not the rare one.
+        AssertElementwiseComparisonOperators<int2, int2, bool2>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int2 tied vector-vector");
     }
 
     // ---- int3 -------------------------------------------------------------------------------
@@ -338,6 +375,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<int3, int3, bool3>(
             left, right, leftVals, rightVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int3 vector-vector");
+
+        // Tied against itself (see the int2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<int3, int3, bool3>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int3 tied vector-vector");
     }
 
     // ---- int4 -------------------------------------------------------------------------------
@@ -371,6 +413,11 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<int4, int4, bool4>(
             left, right, leftVals, rightVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int4 vector-vector");
+
+        // Tied against itself (see the int2 tied-fixture comment above).
+        AssertElementwiseComparisonOperators<int4, int4, bool4>(
+            left, left, leftVals, leftVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "int4 tied vector-vector");
     }
 
     // ---- bool2/3/4 (no ordering operators) ---------------------------------------------------
