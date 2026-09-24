@@ -300,6 +300,56 @@ public sealed class BatchMathTests
     }
 
     [Fact]
+    public void Float2RadialFalloffAccumulatesOntoExistingAcceleration()
+    {
+        // Guards against a mutation that assigns instead of accumulating (BatchMath.cs:115):
+        // seed a nonzero, per-element-distinct acceleration and confirm the falloff
+        // contribution is added to it, not overwritten. An out-of-range particle must be left
+        // exactly at its seed value, not reset to zero.
+        var count = 5;
+        var positions = new float2[count];
+        var seedAcceleration = new float2[count];
+        for (var i = 0; i < count; i++)
+        {
+            positions[i] = new float2(i * 1.1f - 2.0f, i * -0.8f + 1.0f);
+            seedAcceleration[i] = new float2(i * 2.3f + 4.0f, i * -1.7f - 6.0f);
+        }
+
+        var center = new float2(1.5f, -0.5f);
+        const float strength = 3.0f;
+        const float radius = 3.0f;
+        var acceleration = (float2[])seedAcceleration.Clone();
+
+        BatchMath.AddRadialFalloffAcceleration2D(positions, center, strength, radius, acceleration);
+
+        var insideCount = 0;
+        var outsideCount = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var delta = center - positions[i];
+            var distanceSquared = Math.Max(delta.x * delta.x + delta.y * delta.y, 1.0e-8f);
+            var distance = MathF.Sqrt(distanceSquared);
+
+            if (distance > radius)
+            {
+                outsideCount++;
+                Assert.Equal(seedAcceleration[i].x, acceleration[i].x, Tolerance);
+                Assert.Equal(seedAcceleration[i].y, acceleration[i].y, Tolerance);
+                continue;
+            }
+
+            insideCount++;
+            var falloff = Math.Max(0.0f, 1.0f - distance / radius);
+            var contribution = delta / distance * (strength * falloff);
+            Assert.Equal(seedAcceleration[i].x + contribution.x, acceleration[i].x, Tolerance);
+            Assert.Equal(seedAcceleration[i].y + contribution.y, acceleration[i].y, Tolerance);
+        }
+
+        Assert.True(insideCount > 0, "fixture must include particles inside the radius");
+        Assert.True(outsideCount > 0, "fixture must include particles outside the radius");
+    }
+
+    [Fact]
     public void Float2EulerIntegrationMatchesScalarReferenceWithNonzeroYAndMask()
     {
         const float deltaTime = 0.2f;
