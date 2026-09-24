@@ -43,6 +43,13 @@ public sealed class BatchMathTests
         // both the ConditionalSelect(inRange, ...) vector path and the scalar "continue".
         const float radius = 6.0f;
 
+        // The scalar remainder is exactly one particle (index count-1). The generator above puts
+        // it far outside the radius, which would leave any y-axis mutation in the scalar tail's
+        // "in range" arithmetic unobserved (the only remainder particle never reaches it). Pin it
+        // inside the radius with a nonzero, non-degenerate y offset instead.
+        px[count - 1] = centerX + 2.0f;
+        py[count - 1] = centerY + 1.5f;
+
         BatchMath.AddRadialFalloffAcceleration2D(px, py, centerX, centerY, strength, radius, ax, ay);
 
         var insideCount = 0;
@@ -179,6 +186,12 @@ public sealed class BatchMathTests
             ax[i] = i * 0.5f - 2.5f;
             ay[i] = i * -0.9f + 1.5f;
         }
+
+        // The scalar remainder is exactly one particle (index count-1). The mask pattern above
+        // would leave it frozen for lane counts divisible by 3, which masks every y-axis (and
+        // x-axis) mutation in the scalar tail's arithmetic to zero regardless of the mutation.
+        // Force it dynamic so the remainder actually exercises the scalar tail's math.
+        dynamicMask[count - 1] = 1.0f;
 
         // Independent copies for the scalar reference; the arrays under test are mutated in place.
         var expectedPx = (float[])px.Clone();
@@ -333,5 +346,20 @@ public sealed class BatchMathTests
 
         Assert.Throws<ArgumentException>(() =>
             BatchMath.AddRadialFalloffAcceleration2D(positions, float2.zero, 1.0f, 1.0f, acceleration));
+    }
+
+    [Fact]
+    public void Float2RadialFalloffIsNoOpWhenRadiusIsNonPositiveOrStrengthIsZero()
+    {
+        var positions = new[] { new float2(1.0f, 3.0f), new float2(2.0f, -4.0f) };
+        var acceleration = new[] { new float2(5.0f, 7.0f), new float2(6.0f, 8.0f) };
+
+        BatchMath.AddRadialFalloffAcceleration2D(positions, float2.zero, 9.0f, 0.0f, acceleration);
+        Assert.Equal(new float2(5.0f, 7.0f), acceleration[0]);
+        Assert.Equal(new float2(6.0f, 8.0f), acceleration[1]);
+
+        BatchMath.AddRadialFalloffAcceleration2D(positions, float2.zero, 0.0f, 10.0f, acceleration);
+        Assert.Equal(new float2(5.0f, 7.0f), acceleration[0]);
+        Assert.Equal(new float2(6.0f, 8.0f), acceleration[1]);
     }
 }

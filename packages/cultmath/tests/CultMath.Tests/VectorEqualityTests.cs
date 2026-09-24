@@ -148,9 +148,11 @@ public sealed class VectorEqualityTests
     [Fact]
     public void Float3ComparisonOperatorsDifferPerComponent()
     {
-        var left = new float3(1.0f, 5.0f, 4.0f);
+        // No component is tied: a tie makes strict < and strict > agree (both false), which
+        // would hide a direction-flip mutation (< swapped for >) at that component.
+        var left = new float3(1.0f, 5.0f, 7.0f);
         var right = new float3(2.0f, 3.0f, 4.0f);
-        var leftVals = new double[] { 1.0, 5.0, 4.0 };
+        var leftVals = new double[] { 1.0, 5.0, 7.0 };
         var rightVals = new double[] { 2.0, 3.0, 4.0 };
 
         AssertElementwiseComparisonOperators<float3, float3, bool3>(
@@ -194,10 +196,12 @@ public sealed class VectorEqualityTests
     [Fact]
     public void Float4ComparisonOperatorsDifferPerComponent()
     {
-        var left = new float4(1.0f, 5.0f, 4.0f, 8.0f);
-        var right = new float4(2.0f, 3.0f, 4.0f, 6.0f);
-        var leftVals = new double[] { 1.0, 5.0, 4.0, 8.0 };
-        var rightVals = new double[] { 2.0, 3.0, 4.0, 6.0 };
+        // No component is tied (see the float3 comment above for why a tie hides a
+        // direction-flip mutation at that component).
+        var left = new float4(1.0f, 5.0f, 7.0f, 2.0f);
+        var right = new float4(2.0f, 3.0f, 4.0f, 9.0f);
+        var leftVals = new double[] { 1.0, 5.0, 7.0, 2.0 };
+        var rightVals = new double[] { 2.0, 3.0, 4.0, 9.0 };
 
         AssertElementwiseComparisonOperators<float4, float4, bool4>(
             left, right, leftVals, rightVals,
@@ -263,9 +267,10 @@ public sealed class VectorEqualityTests
     [Fact]
     public void Double3ComparisonOperatorsDifferPerComponent()
     {
-        var left = new double3(1.0, 5.0, 4.0);
+        // No component is tied (see the float3 comment above).
+        var left = new double3(1.0, 5.0, 7.0);
         var right = new double3(2.0, 3.0, 4.0);
-        var leftVals = new double[] { 1.0, 5.0, 4.0 };
+        var leftVals = new double[] { 1.0, 5.0, 7.0 };
         var rightVals = new double[] { 2.0, 3.0, 4.0 };
 
         AssertElementwiseComparisonOperators<double3, double3, bool3>(
@@ -324,9 +329,10 @@ public sealed class VectorEqualityTests
     [Fact]
     public void Int3ComparisonOperatorsDifferPerComponent()
     {
-        var left = new int3(1, 5, 4);
+        // No component is tied (see the float3 comment above).
+        var left = new int3(1, 5, 7);
         var right = new int3(2, 3, 4);
-        var leftVals = new double[] { 1, 5, 4 };
+        var leftVals = new double[] { 1, 5, 7 };
         var rightVals = new double[] { 2, 3, 4 };
 
         AssertElementwiseComparisonOperators<int3, int3, bool3>(
@@ -356,10 +362,11 @@ public sealed class VectorEqualityTests
     [Fact]
     public void Int4ComparisonOperatorsDifferPerComponent()
     {
-        var left = new int4(1, 5, 4, 8);
-        var right = new int4(2, 3, 4, 6);
-        var leftVals = new double[] { 1, 5, 4, 8 };
-        var rightVals = new double[] { 2, 3, 4, 6 };
+        // No component is tied (see the float3 comment above).
+        var left = new int4(1, 5, 7, 2);
+        var right = new int4(2, 3, 4, 9);
+        var leftVals = new double[] { 1, 5, 7, 2 };
+        var rightVals = new double[] { 2, 3, 4, 9 };
 
         AssertElementwiseComparisonOperators<int4, int4, bool4>(
             left, right, leftVals, rightVals,
@@ -414,6 +421,20 @@ public sealed class VectorEqualityTests
         AssertEqualsAndHashCodeContract(a, b, false, $"bool4 differing at {index}");
         AssertElementwiseEqualityOperators<bool4, bool4, bool4>(
             a, b, 4, i => i != index, (x, y) => x == y, (x, y) => x != y, (v, i) => v[i], "bool4 ==");
+    }
+
+    [Fact]
+    public void BoolVectorFalseAndTrueConstantsHaveEveryComponentSet()
+    {
+        // bool2.@false/@true and bool4.@false/bool3.@true have no other consumer in this suite
+        // (bool3.@false and bool4.@true are read by HlslSemanticsTests), so a wrong component in
+        // their field initializers would otherwise go unnoticed.
+        Assert.Equal(new bool2(false, false), bool2.@false);
+        Assert.Equal(new bool2(true, true), bool2.@true);
+        Assert.Equal(new bool3(false, false, false), bool3.@false);
+        Assert.Equal(new bool3(true, true, true), bool3.@true);
+        Assert.Equal(new bool4(false, false, false, false), bool4.@false);
+        Assert.Equal(new bool4(true, true, true, true), bool4.@true);
     }
 
     // ---- quaternion (== and != return a plain bool, not a component vector) -----------------

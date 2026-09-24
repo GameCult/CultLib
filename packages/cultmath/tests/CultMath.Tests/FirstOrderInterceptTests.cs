@@ -77,14 +77,44 @@ public sealed class FirstOrderInterceptTests
     [Fact]
     public void NegativeDeterminantReturnsZeroWhenTargetOutrunsTheProjectile()
     {
-        // Target crossing perpendicular to the line of sight fast enough, with a slow shot,
-        // that no real root of the intercept quadratic exists.
+        // Target moving fast and mostly sideways, with a slow shot, so no real root of the
+        // intercept quadratic exists. b = 2*dot(vel, pos) is deliberately nonzero (-40): if it
+        // were 0, a mutant that drops the "determinant < 0" branch entirely and falls through to
+        // `max(-b / (2a), 0)` would coincidentally also compute 0 and this test would not
+        // distinguish the two.
         var time = math.first_order_intercept_time(
             shotSpeed: 1.0f,
             targetRelativePosition: new float3(10.0f, 0.0f, 0.0f),
-            targetRelativeVelocity: new float3(0.0f, 20.0f, 0.0f));
+            targetRelativeVelocity: new float3(-2.0f, 30.0f, 0.0f));
 
         Assert.Equal(0.0f, time);
+    }
+
+    [Fact]
+    public void BothQuadraticRootsPositiveReturnsTheEarlierOne()
+    {
+        // velocitySquared > shotSpeed*shotSpeed (a > 0): the target is relatively faster than
+        // the shot, but closing almost head-on, so both quadratic roots are real and positive
+        // (lengthsq(pos) >= 0 forces same-signed roots whenever a > 0). This is the only shape
+        // that reaches the `t1 > 0` branch's `t2 > 0 ? min(t1, t2) : t1` line at all; every other
+        // fixture in this file keeps t1 <= 0.
+        var shooterPosition = new float3(4.0f, -2.0f, 1.0f);
+        var shooterVelocity = new float3(0.5f, -0.5f, 0.0f);
+        var shotSpeed = 5.0f;
+        var targetRelativePosition = new float3(10.0f, 0.0f, 0.0f);
+        var targetRelativeVelocity = new float3(-20.0f, 0.0f, 0.0f);
+
+        var time = math.first_order_intercept_time(shotSpeed, targetRelativePosition, targetRelativeVelocity);
+
+        // a = 400 - 25 = 375, b = -400, c = 100, determinant = 10000, root = 100:
+        // t1 = (400 + 100) / 750 = 0.6667, t2 = (400 - 100) / 750 = 0.4. Both positive; the
+        // earlier one (0.4) is the physically correct intercept time.
+        Assert.Equal(0.4f, time, Precision);
+
+        var targetPosition = shooterPosition + targetRelativePosition;
+        var targetVelocity = shooterVelocity + targetRelativeVelocity;
+        var aimPoint = math.first_order_intercept(shooterPosition, shooterVelocity, shotSpeed, targetPosition, targetVelocity);
+        AssertShotAndTargetCoincideAtTime(shooterPosition, shooterVelocity, shotSpeed, aimPoint, targetPosition, targetVelocity, time);
     }
 
     [Fact]
