@@ -339,6 +339,18 @@ public sealed class BatchMathTests
     }
 
     [Fact]
+    public void Float2EulerIntegrationValidatesEqualSpanLengths()
+    {
+        var dynamicMask = new float[3];
+        var position = new float2[3];
+        var velocity = new float2[2];
+        var acceleration = new float2[3];
+
+        Assert.Throws<ArgumentException>(() =>
+            BatchMath.IntegrateSemiImplicitEuler2D(0.5f, dynamicMask, position, velocity, acceleration));
+    }
+
+    [Fact]
     public void Float2RadialFalloffValidatesEqualSpanLengths()
     {
         var positions = new float2[3];

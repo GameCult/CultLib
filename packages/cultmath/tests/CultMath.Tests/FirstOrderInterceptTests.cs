@@ -24,7 +24,7 @@ namespace CultMath.Tests;
 // determinant > 0 with both roots <= 0 => 0 (via max(t2, 0)).
 public sealed class FirstOrderInterceptTests
 {
-    private const float Precision = 4;
+    private const int Precision = 4;
 
     [Fact]
     public void ZeroRelativeVelocityReturnsZeroTime()
