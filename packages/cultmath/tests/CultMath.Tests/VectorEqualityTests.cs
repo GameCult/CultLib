@@ -130,6 +130,18 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float2, float2, bool2>(
             left, left, leftVals, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float2 tied vector-vector");
+
+        // The scalar overloads need their own tie: a uniform vector against a scalar equal to
+        // every component, so every component of the vector-scalar and scalar-vector overloads
+        // ties too (the vector-vector tie above does not cover them).
+        var uniform = new float2(4.0f, 4.0f);
+        var uniformVals = new double[] { 4.0, 4.0 };
+        AssertElementwiseComparisonOperators<float2, float, bool2>(
+            uniform, 4.0f, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float2 tied vector-scalar");
+        AssertElementwiseComparisonOperators<float, float2, bool2>(
+            4.0f, uniform, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float2 tied scalar-vector");
     }
 
     // ---- float3 -----------------------------------------------------------------------------
@@ -182,6 +194,16 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float3, float3, bool3>(
             left, left, leftVals, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float3 tied vector-vector");
+
+        // The scalar overloads need their own tie (see the float2 uniform-vector comment above).
+        var uniform = new float3(4.0f, 4.0f, 4.0f);
+        var uniformVals = new double[] { 4.0, 4.0, 4.0 };
+        AssertElementwiseComparisonOperators<float3, float, bool3>(
+            uniform, 4.0f, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float3 tied vector-scalar");
+        AssertElementwiseComparisonOperators<float, float3, bool3>(
+            4.0f, uniform, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float3 tied scalar-vector");
     }
 
     // ---- float4 -----------------------------------------------------------------------------
@@ -235,6 +257,16 @@ public sealed class VectorEqualityTests
         AssertElementwiseComparisonOperators<float4, float4, bool4>(
             left, left, leftVals, leftVals,
             (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float4 tied vector-vector");
+
+        // The scalar overloads need their own tie (see the float2 uniform-vector comment above).
+        var uniform = new float4(4.0f, 4.0f, 4.0f, 4.0f);
+        var uniformVals = new double[] { 4.0, 4.0, 4.0, 4.0 };
+        AssertElementwiseComparisonOperators<float4, float, bool4>(
+            uniform, 4.0f, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float4 tied vector-scalar");
+        AssertElementwiseComparisonOperators<float, float4, bool4>(
+            4.0f, uniform, uniformVals, uniformVals,
+            (x, y) => x < y, (x, y) => x > y, (x, y) => x <= y, (x, y) => x >= y, (v, i) => v[i], "float4 tied scalar-vector");
     }
 
     // ---- double2 ----------------------------------------------------------------------------
