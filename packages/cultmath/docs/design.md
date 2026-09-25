@@ -126,9 +126,11 @@ which only `HlslSemanticsTests` pins.
 The comparison also allows exactly one struct return shape: a mirror function
 whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
 fields is compared to its C# counterpart field by field, recursing into each
-field's own components, down to bit-for-bit scalars. `CultCellular` (`math.cs`,
-`cellular`) is the first and, for now, only consumer. A struct return with a
-mismatched field does not get a second comparison path or a shape of its own;
+field's own components, down to bit-for-bit scalars, matching each leaf's
+declaration path (field names, not just position) and declared type as well
+as its value. `CultCellular` (`math.cs`, `cellular`) is the first and, for
+now, only consumer. A struct return with a mismatched, reordered-by-name, or
+retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
 ## Invariant 8: Value-and-Gradient Primitives
@@ -138,7 +140,7 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
 (a value-only form would be a second path with no consumer). `smin_grad` and
 `cellular` are the first primitives in this family:
 
-- `smin_grad(float4 a, float4 b, float k)` is Inigo Quilez's cubic-polynomial
+- `smin_grad(float4 a, float4 b, float k)` is Inigo Quilez's quadratic-polynomial
   smooth minimum ("smooth minimum",
   <https://iquilezles.org/articles/smin/>), carried to value-and-gradient
   form. Its blend factor `h` is affine in `b.w - a.w`, so differentiating the
@@ -148,23 +150,55 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   across the `|a.w - b.w| = k` seam where `h` saturates to 0 or 1.
 - `cellular(float3 p)` is Worley's cellular texture basis function ("A
   Cellular Texture Basis Function", SIGGRAPH 1996), searched over the
-  jittered 3×3×3 neighbourhood of feature points selected by `pcg3d` (never
-  the sin-based `hash`). It returns `CultCellular { nearest, edge, id }`:
-  `nearest` is `(∇F1, F1)`, `edge` is `(∇F2 - ∇F1, F2 - F1)`, and `id` is the
-  nearest cell's `pcg3d` hash mapped to `[0, 1)`. `∇F1` is undefined exactly
-  at its own feature point (`F1 = 0`); `cellular` follows the repo's existing
-  degenerate-normal convention
+  jittered 5×5×5 neighbourhood of feature points selected by `pcg3d` (never
+  the sin-based `hash`), with cells whose position-only lower bound already
+  exceeds the running F2 skipped before their hash is even computed. It
+  returns `CultCellular { nearest, edge, id }`: `nearest` is `(∇F1, F1)`,
+  `edge` is `(∇F2 - ∇F1, F2 - F1)`, and `id` is the nearest cell's `pcg4d`
+  hash (over the cell coordinate alone, never the `pcg3d` hash that produced
+  its jitter) mapped to `[0, 1)`. `∇F1` and `∇F2` are each undefined exactly
+  at their own feature point (`F1 = 0` or `F2 = 0`); `cellular` follows the
+  repo's existing degenerate-normal convention
   (`GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle`, which
   guards a zero-length normal and returns the zero vector instead of the NaN
-  a bare `normalize` gives there) and returns the zero vector rather than NaN.
-  `∇F2` carries no such guard: `F2 = 0` would need two distinct cells'
-  pcg3d-jittered feature points to land on the exact same float32 value in
-  every component, which the jitter's float precision makes unreachable for
-  any `p` this function is actually called with, so there is no reachable
-  case to defend. The identity of the nearest and second-nearest feature
-  point changes discontinuously across the `F1 = F2` set (a genuine kink, not
-  a numerical artifact), so `∇F1` and `∇F2` are only continuous away from
-  that set.
+  a bare `normalize` gives there) and returns the zero vector rather than NaN
+  for either. `F1 = 0` is ordinary (`p` sits on a feature point); `F2 = 0`
+  needs two distinct cells' `pcg3d`-jittered feature points to land on the
+  same float32 value in every component, which is unreachable at ordinary
+  magnitudes but confirmed reachable (see "Precision domain" below). The
+  identity of the nearest and second-nearest feature point changes
+  discontinuously across the `F1 = F2` set (a genuine kink, not a numerical
+  artifact), so `∇F1` and `∇F2` are only continuous away from that set.
+
+  The 5×5×5 radius is exact, not merely safer than the classic 3×3×3 radius:
+  for a query at position `u` inside its own cell (`u` in `[0, 1)^3` per
+  component) and a candidate feature at integer cell offset `d` with jitter
+  `j` in `[0, 1)^3`, the per-axis displacement `(u_i - j_i) - d_i` is always
+  strictly greater in magnitude than `max(0, |d_i| - 1)`, because
+  `u_i - j_i` is always strictly inside `(-1, 1)`. So any cell with `|d_i| >=
+  3` on some axis is strictly farther than 2 from the query. Two real,
+  always-present candidates — the query's own cell, and whichever
+  single-axis-offset neighbour sits on the near side of the query's position
+  in that axis — each have distance strictly less than `sqrt(3)`; F2 is at
+  most the larger of these two (any two real candidates upper-bound the
+  2nd-smallest value over the full infinite candidate set), so `F1 < sqrt(3)`
+  and `F2 < sqrt(3)` always, comfortably under the radius-2 exclusion
+  distance of 2. 3×3×3's matching argument only reaches radius 1, whose
+  excluded cells start at distance 1, short of the `sqrt(3)` ceiling — the
+  gap its measured failures (9 of 400,000 points in `[-50, 50]^3`, worst
+  error 0.088) live in. `CellularAndSminGradTests` pins both the prune's
+  bit-identical equivalence to an unpruned 5×5×5 reference and the search's
+  exact agreement with an independent 7×7×7 brute-force oracle.
+
+  Precision domain: `cellular`'s exactness above is a statement about the
+  search radius, not about float32. Past `|p|` of roughly `2^23`, adjacent
+  integer cells stop being distinguishable from their neighbours at float32
+  precision in some directions, and distinct cells' jittered features can
+  round onto the same value, making `F1 = F2` ties (and, per-component,
+  `F2 = 0`) increasingly common from about `1e6` and confirmed at `2^24`
+  (measured: 4096 of 4096 sampled integer points at `2^24` hit this before
+  the guard above). `cellular` stays finite there; it does not stay accurate
+  in the sense of matching the idealized real-valued Worley field.
 
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
