@@ -1,0 +1,11 @@
+{
+  "stryker-config": {
+    "project": "GameCult.Geometry.csproj",
+    "mutate": [
+      "**/src/GameCult.Geometry/**/*.cs"
+    ],
+    "mutation-level": "Standard",
+    "reporters": [ "progress", "html", "json" ],
+    "thresholds": { "high": 80, "low": 60, "break": 0 }
+  }
+}

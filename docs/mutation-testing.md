@@ -77,10 +77,22 @@ as a missing test without that check.
 
 ## Follow-ups
 
-CultMath.Tests is the only project currently scoped. `GameCult.Caching`,
-`GameCult.Geometry`, `GameCult.Mesh` (+ `.Quic`, `.Quic.Native`),
+CultMath.Tests and GameCult.Geometry.Tests are the only projects currently
+scoped. GameCult.Geometry's `stryker-config.json` has no `test-runner`
+entry: the project is NUnit 4 with `NUnit3TestAdapter` and
+`Microsoft.NET.Test.Sdk`, so Stryker's default `vstest` runner applies
+directly (no `mtp` workaround needed, unlike CultMath.Tests's xunit.v3
+suite).
+
+GameCult.Geometry has only ever been run `--since:`-scoped to the cut that
+added surface nets; a full-project baseline (running mutation against all of
+`CultGeometryIsoSurface`, `CultGeometryDocuments`, and
+`CultGeometryPrimitives`, not just the diff) is a recorded follow-up, not
+something either cut did.
+
+`GameCult.Caching`, `GameCult.Mesh` (+ `.Quic`, `.Quic.Native`),
 `GameCult.Networking` (+ `.WebSockets`), and the non-.NET runtimes
-(`cultcache-rs/py/ts`, `cultmesh-*`, `cultnet-*`) each need their own
+(`cultcache-rs/py/ts`, `cultmesh-*`, `cultnet-*`) each still need their own
 `stryker-config.json` (or ecosystem-equivalent tool: `cargo-mutants` for
 Rust, `StrykerJS` for TypeScript, `mutmut` for Python) and a baseline pass.
 None of that is wired into CI yet.
