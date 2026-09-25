@@ -313,7 +313,7 @@ int4 cultmath_pcg4d(int4 value)
 
 int4 cultmath_pcg4d(float4 value) { return cultmath_pcg4d(int4((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z), (int)asuint(value.w))); }
 
-// Inigo Quilez, "smooth minimum": cubic-polynomial smin carried to value-and-gradient form. See
+// Inigo Quilez, "smooth minimum": quadratic-polynomial smin carried to value-and-gradient form. See
 // math.smin_grad's comment (math.cs) for why the gradient blend is exact, not an approximation.
 float4 cultmath_smin_grad(float4 a, float4 b, float k)
 {
@@ -333,7 +333,8 @@ struct CultCellular
 };
 
 // Worley, "A Cellular Texture Basis Function" (SIGGRAPH 1996). See math.cellular's comment
-// (math.cs) for the hashing, gradient and degenerate-point conventions this mirrors.
+// (math.cs) for the hashing, gradient, search-radius exactness proof, id source and
+// degenerate-point conventions this mirrors exactly, including the 5x5x5 lower-bound prune.
 CultCellular cultmath_cellular(float3 p)
 {
     float3 cell = floor(p);
@@ -341,27 +342,34 @@ CultCellular cultmath_cellular(float3 p)
     float f2 = 1.0e30;
     float3 c1 = float3(0.0, 0.0, 0.0);
     float3 c2 = float3(0.0, 0.0, 0.0);
-    int hash1 = 0;
+    float3 cellId = float3(0.0, 0.0, 0.0);
 
-    for (int dz = -1; dz <= 1; dz++)
+    for (int dz = -2; dz <= 2; dz++)
     {
-        for (int dy = -1; dy <= 1; dy++)
+        float lz = max(0.0, abs((float)dz) - 1.0);
+        for (int dy = -2; dy <= 2; dy++)
         {
-            for (int dx = -1; dx <= 1; dx++)
+            float ly = max(0.0, abs((float)dy) - 1.0);
+            for (int dx = -2; dx <= 2; dx++)
             {
+                float lx = max(0.0, abs((float)dx) - 1.0);
+                float lowerBound = sqrt(lx * lx + ly * ly + lz * lz);
+                if (lowerBound >= f2)
+                    continue;
+
                 float3 neighbor = cell + float3(dx, dy, dz);
                 int3 hash = cultmath_pcg3d(neighbor);
                 float3 jitter = float3(
-                    (uint)hash.x * (1.0 / 4294967296.0),
-                    (uint)hash.y * (1.0 / 4294967296.0),
-                    (uint)hash.z * (1.0 / 4294967296.0));
+                    ((uint)hash.x >> 8) * (1.0 / 16777216.0),
+                    ((uint)hash.y >> 8) * (1.0 / 16777216.0),
+                    ((uint)hash.z >> 8) * (1.0 / 16777216.0));
                 float3 feature = neighbor + jitter;
                 float d = cultmath_distance(p, feature);
 
                 if (d < f1)
                 {
                     f2 = f1; c2 = c1;
-                    f1 = d; c1 = feature; hash1 = hash.x;
+                    f1 = d; c1 = feature; cellId = neighbor;
                 }
                 else if (d < f2)
                 {
@@ -371,15 +379,19 @@ CultCellular cultmath_cellular(float3 p)
         }
     }
 
-    // Only F1's degenerate point is guarded; see math.cellular's comment (math.cs) for why F2 = 0
-    // has no reachable case to defend.
+    // F1 = 0 and F2 = 0 share the same degenerate-gradient guard; see math.cellular's comment
+    // (math.cs) for why F2 = 0 is reachable past roughly |p| = 2^23.
     float3 grad1 = f1 > 0.0 ? (p - c1) / f1 : float3(0.0, 0.0, 0.0);
-    float3 grad2 = (p - c2) / f2;
+    float3 grad2 = f2 > 0.0 ? (p - c2) / f2 : float3(0.0, 0.0, 0.0);
+
+    // id comes from pcg4d over the winning cell alone, never from the pcg3d hash that produced its
+    // jitter (F4).
+    int4 idHash = cultmath_pcg4d(float4(cellId, 0.0));
 
     CultCellular result;
     result.nearest = float4(grad1, f1);
     result.edge = float4(grad2 - grad1, f2 - f1);
-    result.id = (uint)hash1 * (1.0 / 4294967296.0);
+    result.id = ((uint)idHash.w >> 8) * (1.0 / 16777216.0);
     return result;
 }
 

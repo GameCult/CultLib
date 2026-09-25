@@ -13,7 +13,8 @@ public struct CultCellular
     /// <summary>(&#8711;F2 - &#8711;F1, F2 - F1): for lineae along cell borders.</summary>
     public float4 edge;
 
-    /// <summary>The nearest cell's pcg3d hash, mapped to [0, 1).</summary>
+    /// <summary>The nearest cell's pcg4d hash, mapped to [0, 1); independent of the pcg3d hash that
+    /// produced that cell's jitter.</summary>
     public float id;
 
     public CultCellular(float4 nearest, float4 edge, float id)

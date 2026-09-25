@@ -86,7 +86,7 @@ public sealed class HlslSourceCompatibilityTests
                 var actual = Values(mirror.Invoke(shader, args)!);
                 if (!BitwiseEqual(expected, actual))
                 {
-                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
+                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a).Select(v => v.Value))))}): C# {string.Join(" ", expected.Select(v => v.Value))}, mirror {string.Join(" ", actual.Select(v => v.Value))}");
                 }
             }
         }
@@ -118,6 +118,61 @@ public sealed class HlslSourceCompatibilityTests
         Assert.False(BitwiseEqual(Values(expected), Values(mismatchedNestedComponent)));
     }
 
+    /// <summary>
+    /// Struct shapes standing in for CultCellular's own field order (<c>nearest; edge; id</c>), used
+    /// to falsify two named mutants (F2): H2 declares the mirror struct with its first two fields
+    /// swapped (<c>edge; nearest; id</c>) and swaps the assignments to match, so every leaf VALUE
+    /// still lands in the same POSITION as the correct struct; only the field NAME at each position
+    /// differs. H3 renames and retypes every field (id becomes an int carrying the same bits) while
+    /// keeping the original position order, so only NAME and TYPE differ, never position.
+    /// </summary>
+    private struct NearestEdgeIdExpected { public float4 nearest; public float4 edge; public float id; }
+    private struct EdgeNearestIdSwappedNames { public float4 edge; public float4 nearest; public float id; }
+    private struct RenamedAndRetypedFields { public float4 a; public float4 b; public int c; }
+
+    [Fact]
+    public void StructReturnComparisonRejectsFieldsSwappedByNameEvenWhenValuesAlign()
+    {
+        // H2: the mutant struct's field ORDER is (edge, nearest, id), and its assignments are
+        // swapped to match, so declaration-position values are identical to the correct struct's.
+        // Only checking names (not just position) can tell these apart.
+        var expected = new NearestEdgeIdExpected
+        {
+            nearest = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            edge = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            id = 9.0f,
+        };
+        var swapped = new EdgeNearestIdSwappedNames
+        {
+            edge = new float4(1.0f, 2.0f, 3.0f, 4.0f), // holds what should be "nearest"'s value.
+            nearest = new float4(5.0f, 6.0f, 7.0f, 8.0f), // holds what should be "edge"'s value.
+            id = 9.0f,
+        };
+
+        Assert.False(BitwiseEqual(Values(expected), Values(swapped)));
+    }
+
+    [Fact]
+    public void StructReturnComparisonRejectsRenamedAndRetypedFields()
+    {
+        // H3: field order matches the correct struct exactly, but every field is renamed, and id is
+        // retyped from float to int carrying the same bit pattern the correct id would round to.
+        var expected = new NearestEdgeIdExpected
+        {
+            nearest = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            edge = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            id = 9.0f,
+        };
+        var renamed = new RenamedAndRetypedFields
+        {
+            a = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            b = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            c = BitConverter.SingleToInt32Bits(9.0f),
+        };
+
+        Assert.False(BitwiseEqual(Values(expected), Values(renamed)));
+    }
+
     // Integer arguments take the bit pattern of the float input, so specials become 0, 0x80000000, NaN bits, ...
     private static readonly Type[] Scalars = { typeof(float), typeof(int), typeof(uint) };
 
@@ -129,18 +184,36 @@ public sealed class HlslSourceCompatibilityTests
     private static FieldInfo[] Components(Type t) => t.GetFields().Where(f => !f.IsStatic && Scalars.Contains(f.FieldType)).ToArray();
 
     /// <summary>
+    /// One flattened scalar leaf of a (possibly nested) return value: its declaration path (field
+    /// names joined by '.'), its declared type, and its value. Carrying path and type, not just the
+    /// value, is what lets the struct-return comparison reject a field that was renamed or retyped
+    /// but landed in the same position (F2): a positional-only comparison cannot tell "edge" holding
+    /// nearest's value apart from "nearest" holding it.
+    /// </summary>
+    private readonly record struct Leaf(string Path, Type Type, object Value);
+
+    /// <summary>
     /// Flattens a return value to its scalar leaves, recursing through struct fields of any type
     /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>'s float4/float4/float
     /// fields) so a struct return is compared field by field, down to bit-for-bit scalars, exactly
-    /// like a bare vector return already is.
+    /// like a bare vector return already is. Each leaf keeps the field name (and its ancestors') and
+    /// declared type it was read from.
     /// </summary>
-    private static object[] Values(object value) => Scalars.Contains(value.GetType()) ? new[] { value }
-        : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Values(f.GetValue(value)!)).ToArray();
+    private static Leaf[] Values(object value, string path = "") => Scalars.Contains(value.GetType())
+        ? new[] { new Leaf(path, value.GetType(), value) }
+        : value.GetType().GetFields().Where(f => !f.IsStatic)
+            .SelectMany(f => Values(f.GetValue(value)!, path.Length == 0 ? f.Name : path + "." + f.Name))
+            .ToArray();
 
-    private static bool BitwiseEqual(object[] expected, object[] actual) =>
-        expected.Length == actual.Length && expected.Zip(actual).All(p => p.First is float a && p.Second is float b
-            ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
-            : p.First.Equals(p.Second));
+    // Compares leaves by NAME and TYPE as well as value, in declaration order, so a mirror struct
+    // whose fields are reordered, renamed, or retyped relative to its C# counterpart fails here even
+    // when the flattened values happen to line up positionally (F2's H2/H3 mutants).
+    private static bool BitwiseEqual(Leaf[] expected, Leaf[] actual) =>
+        expected.Length == actual.Length && expected.Zip(actual).All(p =>
+            p.First.Path == p.Second.Path && p.First.Type == p.Second.Type &&
+            (p.First.Value is float a && p.Second.Value is float b
+                ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
+                : p.First.Value.Equals(p.Second.Value)));
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
