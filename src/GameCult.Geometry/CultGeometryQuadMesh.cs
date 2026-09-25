@@ -56,12 +56,13 @@ namespace GameCult.Geometry
         /// <inheritdoc />
         public override string ToString() => $"({X}, {Y}, {Z})+e{Axis}";
 
+        // The relational operators (<, >, <=, >=) had no caller and no test anywhere in the repo:
+        // ordering goes through CompareTo (see
+        // Extraction_is_deterministic_and_quad_edges_are_strictly_ascending), so they were deleted
+        // rather than carried as untested surface. != is kept only because C# requires it whenever
+        // == is defined (CS0216); it is exercised directly by a test.
         public static bool operator ==(CultGeometryGridEdge left, CultGeometryGridEdge right) => left.Equals(right);
         public static bool operator !=(CultGeometryGridEdge left, CultGeometryGridEdge right) => !left.Equals(right);
-        public static bool operator <(CultGeometryGridEdge left, CultGeometryGridEdge right) => left.CompareTo(right) < 0;
-        public static bool operator >(CultGeometryGridEdge left, CultGeometryGridEdge right) => left.CompareTo(right) > 0;
-        public static bool operator <=(CultGeometryGridEdge left, CultGeometryGridEdge right) => left.CompareTo(right) <= 0;
-        public static bool operator >=(CultGeometryGridEdge left, CultGeometryGridEdge right) => left.CompareTo(right) >= 0;
     }
 
     /// <summary>

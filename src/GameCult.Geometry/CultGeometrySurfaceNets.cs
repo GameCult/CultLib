@@ -9,22 +9,21 @@ namespace GameCult.Geometry
     /// </summary>
     public static class CultGeometrySurfaceNets
     {
-        // Start-corner offsets for each axis's four parallel edges of a unit cell. The edge itself
-        // runs from the listed corner to that corner plus one step along Axis.
-        private static readonly (int Dx, int Dy, int Dz)[] AxisXEdgeStarts =
-        {
-            (0, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 1),
-        };
+        // For axis A, the two perpendicular axes in (u, v) order. Axis 0 (X) pairs (Y, Z) and axis
+        // 2 (Z) pairs (X, Y): both right-handed, u x v == +A_hat. Axis 1 (Y) pairs (X, Z), which is
+        // left-handed (X x Z == -Y). OrientationSign below records that mirroring explicitly so
+        // quad winding can be derived from it instead of a per-quad geometric test.
+        private static readonly (int U, int V)[] PerpAxes = { (1, 2), (0, 2), (0, 1) };
 
-        private static readonly (int Dx, int Dy, int Dz)[] AxisYEdgeStarts =
-        {
-            (0, 0, 0), (1, 0, 0), (0, 0, 1), (1, 0, 1),
-        };
+        // +1 when (PerpAxes[axis].U, .V) is right-handed, -1 when it is mirrored (axis 1 only).
+        private static readonly int[] OrientationSign = { 1, -1, 1 };
 
-        private static readonly (int Dx, int Dy, int Dz)[] AxisZEdgeStarts =
-        {
-            (0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0),
-        };
+        // The perimeter loop around a crossing edge, in perpendicular (u, v) space: a proper square
+        // loop (0,0) -> (1,0) -> (1,1) -> (0,1), not a diagonal cross. Added to a cell's own
+        // coordinate it gives the axis's four parallel edges inside that cell (for vertex
+        // placement); shifted by -1 it gives the four cells that share a crossing edge (for quad
+        // assembly). One table, two uses, instead of three axis-specific copies of each.
+        private static readonly (int U, int V)[] PerimeterLoop = { (0, 0), (1, 0), (1, 1), (0, 1) };
 
         /// <summary>
         /// Extracts the <paramref name="isoValue"/> surface with surface nets.
@@ -42,6 +41,14 @@ namespace GameCult.Geometry
                 throw new ArgumentException("A surface nets field requires at least two samples on every axis.", nameof(samples));
             }
 
+            foreach (var sample in samples)
+            {
+                if (!float.IsFinite(sample))
+                {
+                    throw new ArgumentException("A surface nets field requires every sample to be finite.", nameof(samples));
+                }
+            }
+
             if (!(cellSize > 0f) || float.IsInfinity(cellSize))
             {
                 throw new ArgumentOutOfRangeException(nameof(cellSize), "Cell size must be finite and positive.");
@@ -50,23 +57,23 @@ namespace GameCult.Geometry
             var sizeX = samples.GetLength(0);
             var sizeY = samples.GetLength(1);
             var sizeZ = samples.GetLength(2);
-            var cellsX = sizeX - 1;
-            var cellsY = sizeY - 1;
-            var cellsZ = sizeZ - 1;
+            var sizes = new[] { sizeX, sizeY, sizeZ };
+            var cellCounts = new[] { sizeX - 1, sizeY - 1, sizeZ - 1 };
             var originValue = new float3(origin.X, origin.Y, origin.Z);
 
             var vertexIndex = new Dictionary<(int, int, int), uint>();
             var positions = new List<float>();
 
-            for (var cx = 0; cx < cellsX; cx++)
-            for (var cy = 0; cy < cellsY; cy++)
-            for (var cz = 0; cz < cellsZ; cz++)
+            for (var cx = 0; cx < cellCounts[0]; cx++)
+            for (var cy = 0; cy < cellCounts[1]; cy++)
+            for (var cz = 0; cz < cellCounts[2]; cz++)
             {
-                var vertex = CellVertex(samples, cx, cy, cz, isoValue, originValue, cellSize);
-                if (vertex is not { } position) continue;
+                var cellCoord = new[] { cx, cy, cz };
+                var vertex = CellVertex(samples, cellCoord, isoValue, originValue, cellSize);
+                if (vertex == null) continue;
 
                 vertexIndex[(cx, cy, cz)] = (uint)(positions.Count / 3);
-                Append(position, positions);
+                Append(vertex.Value, positions);
             }
 
             var quads = new List<uint>();
@@ -76,52 +83,42 @@ namespace GameCult.Geometry
             for (var y = 0; y < sizeY; y++)
             for (var z = 0; z < sizeZ; z++)
             {
+                var coord = new[] { x, y, z };
+
                 for (byte axis = 0; axis < 3; axis++)
                 {
-                    if (!TryGetOtherEndpoint(sizeX, sizeY, sizeZ, x, y, z, axis, out var ox, out var oy, out var oz))
+                    if (!TryGetOtherEndpoint(sizes, coord, axis, out var other))
                     {
                         continue;
                     }
 
-                    var inside = samples[x, y, z] <= isoValue;
-                    var otherInside = samples[ox, oy, oz] <= isoValue;
+                    var inside = IsInside(samples[x, y, z], isoValue);
+                    var otherInside = IsInside(samples[other[0], other[1], other[2]], isoValue);
                     if (inside == otherInside) continue;
 
-                    if (!TryGetQuadCells(cellsX, cellsY, cellsZ, x, y, z, axis, out var c0, out var c1, out var c2, out var c3))
+                    if (!TryGetQuadCells(cellCounts, coord, axis, out var cells))
                     {
                         continue;
                     }
 
-                    if (!vertexIndex.TryGetValue(c0, out var v0) ||
-                        !vertexIndex.TryGetValue(c1, out var v1) ||
-                        !vertexIndex.TryGetValue(c2, out var v2) ||
-                        !vertexIndex.TryGetValue(c3, out var v3))
+                    // The four cells around a crossing edge each contain that same crossing edge
+                    // among their own twelve, so each of them is mixed and has a vertex: this
+                    // indexer cannot miss without the extraction invariant already being broken.
+                    var v = new uint[4];
+                    for (var i = 0; i < 4; i++) v[i] = vertexIndex[cells[i]];
+
+                    // Orientation comes only from which endpoint is inside and the axis's fixed
+                    // handedness (OrientationSign) - never from the quad's own geometry, so
+                    // degenerate (zero-area) quads still orient consistently with their neighbours.
+                    if (inside == (OrientationSign[axis] < 0))
                     {
-                        // The four cells around a crossing edge each contain that same crossing edge
-                        // among their own twelve, so each of them is mixed and has a vertex. This is an
-                        // invariant guard, not a reachable branch.
-                        throw new InvalidOperationException("A surface-nets crossing edge bordered a cell with no vertex.");
+                        (v[1], v[3]) = (v[3], v[1]);
                     }
 
-                    var p0 = Position(positions, v0);
-                    var p1 = Position(positions, v1);
-                    var p2 = Position(positions, v2);
-                    var p3 = Position(positions, v3);
-                    var diagonalCross = math.cross(p2 - p0, p3 - p1);
-
-                    var insideCoord = inside ? new float3(x, y, z) : new float3(ox, oy, oz);
-                    var outsideCoord = inside ? new float3(ox, oy, oz) : new float3(x, y, z);
-                    var outward = outsideCoord - insideCoord;
-
-                    if (math.dot(diagonalCross, outward) < 0f)
-                    {
-                        (v1, v3) = (v3, v1);
-                    }
-
-                    quads.Add(v0);
-                    quads.Add(v1);
-                    quads.Add(v2);
-                    quads.Add(v3);
+                    quads.Add(v[0]);
+                    quads.Add(v[1]);
+                    quads.Add(v[2]);
+                    quads.Add(v[3]);
                     quadEdges.Add(new CultGeometryGridEdge(x, y, z, axis));
                 }
             }
@@ -134,11 +131,11 @@ namespace GameCult.Geometry
             };
         }
 
+        private static bool IsInside(float sample, float isoValue) => sample <= isoValue;
+
         private static float3? CellVertex(
             float[,,] samples,
-            int cx,
-            int cy,
-            int cz,
+            int[] cellCoord,
             float isoValue,
             float3 origin,
             float cellSize)
@@ -146,41 +143,41 @@ namespace GameCult.Geometry
             var sum = float3.zero;
             var count = 0;
 
-            AccumulateAxisEdges(samples, cx, cy, cz, 0, AxisXEdgeStarts, isoValue, origin, cellSize, ref sum, ref count);
-            AccumulateAxisEdges(samples, cx, cy, cz, 1, AxisYEdgeStarts, isoValue, origin, cellSize, ref sum, ref count);
-            AccumulateAxisEdges(samples, cx, cy, cz, 2, AxisZEdgeStarts, isoValue, origin, cellSize, ref sum, ref count);
+            for (byte axis = 0; axis < 3; axis++)
+            {
+                AccumulateAxisEdges(samples, cellCoord, axis, isoValue, origin, cellSize, ref sum, ref count);
+            }
 
             return count == 0 ? null : sum / count;
         }
 
         private static void AccumulateAxisEdges(
             float[,,] samples,
-            int cx,
-            int cy,
-            int cz,
-            int axis,
-            (int Dx, int Dy, int Dz)[] starts,
+            int[] cellCoord,
+            byte axis,
             float isoValue,
             float3 origin,
             float cellSize,
             ref float3 sum,
             ref int count)
         {
-            foreach (var start in starts)
+            var (u, v) = PerpAxes[axis];
+
+            for (var i = 0; i < 4; i++)
             {
-                var startX = cx + start.Dx;
-                var startY = cy + start.Dy;
-                var startZ = cz + start.Dz;
-                var endX = startX + (axis == 0 ? 1 : 0);
-                var endY = startY + (axis == 1 ? 1 : 0);
-                var endZ = startZ + (axis == 2 ? 1 : 0);
+                var start = (int[])cellCoord.Clone();
+                start[u] += PerimeterLoop[i].U;
+                start[v] += PerimeterLoop[i].V;
 
-                var startValue = samples[startX, startY, startZ];
-                var endValue = samples[endX, endY, endZ];
-                if ((startValue <= isoValue) == (endValue <= isoValue)) continue;
+                var end = (int[])start.Clone();
+                end[axis] += 1;
 
-                var startPosition = origin + new float3(startX, startY, startZ) * cellSize;
-                var endPosition = origin + new float3(endX, endY, endZ) * cellSize;
+                var startValue = samples[start[0], start[1], start[2]];
+                var endValue = samples[end[0], end[1], end[2]];
+                if (IsInside(startValue, isoValue) == IsInside(endValue, isoValue)) continue;
+
+                var startPosition = origin + new float3(start[0], start[1], start[2]) * cellSize;
+                var endPosition = origin + new float3(end[0], end[1], end[2]) * cellSize;
                 sum += Interpolate(startPosition, startValue, endPosition, endValue, isoValue);
                 count++;
             }
@@ -188,107 +185,52 @@ namespace GameCult.Geometry
 
         private static float3 Interpolate(float3 first, float firstValue, float3 second, float secondValue, float isoValue)
         {
-            var delta = secondValue - firstValue;
-            var amount = math.abs(delta) <= 1e-20f ? 0.5f : (isoValue - firstValue) / delta;
+            // A straddling edge has exactly one endpoint <= isoValue and the other > isoValue, so
+            // delta is always non-zero (.NET preserves subnormals; there is no value of delta for
+            // which a fallback produces a better answer than the exact interpolation).
+            var amount = (isoValue - firstValue) / (secondValue - firstValue);
             return math.lerp(first, second, amount);
         }
 
-        private static bool TryGetOtherEndpoint(
-            int sizeX,
-            int sizeY,
-            int sizeZ,
-            int x,
-            int y,
-            int z,
-            byte axis,
-            out int ox,
-            out int oy,
-            out int oz)
+        private static bool TryGetOtherEndpoint(int[] sizes, int[] coord, byte axis, out int[] other)
         {
-            ox = x;
-            oy = y;
-            oz = z;
+            other = (int[])coord.Clone();
+            if (coord[axis] + 1 >= sizes[axis]) return false;
 
-            switch (axis)
-            {
-                case 0:
-                    if (x + 1 >= sizeX) return false;
-                    ox = x + 1;
-                    return true;
-                case 1:
-                    if (y + 1 >= sizeY) return false;
-                    oy = y + 1;
-                    return true;
-                default:
-                    if (z + 1 >= sizeZ) return false;
-                    oz = z + 1;
-                    return true;
-            }
+            other[axis] += 1;
+            return true;
         }
 
         // The four cells that share the grid edge from (x, y, z) to (x, y, z) + e_axis, listed as a
         // perimeter loop around the edge (not crossed diagonally) so the caller can build a quad
-        // directly from them.
-        private static bool TryGetQuadCells(
-            int cellsX,
-            int cellsY,
-            int cellsZ,
-            int x,
-            int y,
-            int z,
-            byte axis,
-            out (int, int, int) c0,
-            out (int, int, int) c1,
-            out (int, int, int) c2,
-            out (int, int, int) c3)
+        // directly from them. The edge's own coordinate is unchanged for all four cells: it is
+        // guaranteed to already index a valid cell there because TryGetOtherEndpoint verified
+        // coord[axis] + 1 < sizes[axis], i.e. coord[axis] < cellCounts[axis].
+        private static bool TryGetQuadCells(int[] cellCounts, int[] coord, byte axis, out (int, int, int)[] cells)
         {
-            c0 = c1 = c2 = c3 = default;
+            cells = Array.Empty<(int, int, int)>();
+            var (u, v) = PerpAxes[axis];
 
-            switch (axis)
+            if (!InRange(coord[u] - 1, cellCounts[u]) || !InRange(coord[u], cellCounts[u]) ||
+                !InRange(coord[v] - 1, cellCounts[v]) || !InRange(coord[v], cellCounts[v]))
             {
-                case 0:
-                    if (!InRange(y - 1, cellsY) || !InRange(y, cellsY) || !InRange(z - 1, cellsZ) || !InRange(z, cellsZ))
-                    {
-                        return false;
-                    }
-
-                    c0 = (x, y - 1, z - 1);
-                    c1 = (x, y, z - 1);
-                    c2 = (x, y, z);
-                    c3 = (x, y - 1, z);
-                    return InRange(x, cellsX);
-                case 1:
-                    if (!InRange(x - 1, cellsX) || !InRange(x, cellsX) || !InRange(z - 1, cellsZ) || !InRange(z, cellsZ))
-                    {
-                        return false;
-                    }
-
-                    c0 = (x - 1, y, z - 1);
-                    c1 = (x, y, z - 1);
-                    c2 = (x, y, z);
-                    c3 = (x - 1, y, z);
-                    return InRange(y, cellsY);
-                default:
-                    if (!InRange(x - 1, cellsX) || !InRange(x, cellsX) || !InRange(y - 1, cellsY) || !InRange(y, cellsY))
-                    {
-                        return false;
-                    }
-
-                    c0 = (x - 1, y - 1, z);
-                    c1 = (x, y - 1, z);
-                    c2 = (x, y, z);
-                    c3 = (x - 1, y, z);
-                    return InRange(z, cellsZ);
+                return false;
             }
+
+            var result = new (int, int, int)[4];
+            for (var i = 0; i < 4; i++)
+            {
+                var cell = (int[])coord.Clone();
+                cell[u] += PerimeterLoop[i].U - 1;
+                cell[v] += PerimeterLoop[i].V - 1;
+                result[i] = (cell[0], cell[1], cell[2]);
+            }
+
+            cells = result;
+            return true;
         }
 
         private static bool InRange(int value, int count) => value >= 0 && value < count;
-
-        private static float3 Position(List<float> positions, uint index)
-        {
-            var offset = (int)index * 3;
-            return new float3(positions[offset], positions[offset + 1], positions[offset + 2]);
-        }
 
         private static void Append(float3 value, List<float> destination)
         {
