@@ -64,6 +64,41 @@ public sealed class HlslSourceCompatibilityTests
         for (var k = 0; k < 64; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i]); }
         for (var k = 0; k < 16; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i & ~1]); }
 
+        // Points aimed squarely at cellular's HLSL mirror (F6/F3 Soul findings): the generic random
+        // and special-value cases above pass ~92 inputs through cultmath_cellular and never happen to
+        // hit a point where a radius-2 cell wins (about 3.5e-5 of points, Soul measured) or an
+        // integer point at or past 2^23, so an HLSL mutant of the search radius, the prune, or the
+        // removed F2=0 guard can survive this test even though it changes cellular's real output.
+        void AddPointCase(float3 point)
+        {
+            var values = new[] { point.x, point.y, point.z };
+            cases.Add(i => i < values.Length ? values[i] : 0.0f);
+        }
+
+        // The six constructed points from CellularAndSminGradTests.SearchReachesEveryAxisAlignedRadiusTwoSlice:
+        // each one realizes a different axis-aligned radius-2 offset as F1 or F2, which is exactly
+        // the case an `if (lowerBound >= f2)` prune written as `>= f1`, or a search radius narrowed on
+        // one axis (`dz < 2`, `dx` starting at -1), changes.
+        foreach (var offset in CellularAndSminGradTests.AxisAlignedRadiusTwoOffsets)
+            AddPointCase(CellularAndSminGradTests.FindPointRealizingOffset(offset));
+
+        // Integer points at 2^24, several, both signs: past |p| ~= 2^23 distinct cells' jittered
+        // features can round onto the same float32 value (design.md, "Precision domain"), making
+        // F2 = 0 reachable and exercising the grad2 = f2 > 0 ? ... : zero guard this test would
+        // otherwise never touch.
+        const float twoTo24 = 16777216.0f;
+        AddPointCase(new float3(twoTo24, twoTo24, twoTo24));
+        AddPointCase(new float3(-twoTo24, -twoTo24, -twoTo24));
+        AddPointCase(new float3(twoTo24 + 3.0f, -twoTo24 + 5.0f, twoTo24 - 7.0f));
+        AddPointCase(new float3(-twoTo24 + 11.0f, twoTo24 - 13.0f, -twoTo24 + 17.0f));
+
+        // One exact F1 = F2 tie point: the midpoint of two adjacent cells' feature points is
+        // bit-exact-equidistant from both by construction (negating a vector does not change its
+        // length, and p - a = -(p - b) here by symmetry), without needing to search for one.
+        var tieMidpoint = (CellularAndSminGradTests.FeaturePoint(new float3(0.0f, 0.0f, 0.0f))
+            + CellularAndSminGradTests.FeaturePoint(new float3(1.0f, 0.0f, 0.0f))) * 0.5f;
+        AddPointCase(tieMidpoint);
+
         var mismatches = new List<string>();
         var compared = new HashSet<string>();
         foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_")))
