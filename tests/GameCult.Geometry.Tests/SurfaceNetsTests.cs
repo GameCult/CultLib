@@ -139,22 +139,23 @@ namespace GameCult.Geometry.Tests
         [Test]
         public void Vertex_placement_applies_origin_and_cell_size()
         {
+            // The inside corner is (1,1,1), not (0,0,0): every crossing edge's start sample has at
+            // least one non-zero coordinate, so a cellSize applied by division instead of
+            // multiplication (or dropped altogether) changes the result instead of coincidentally
+            // matching it (a zero component erases that distinction either way).
             var samples = new float[2, 2, 2];
-            samples[0, 0, 0] = -1f;
-            samples[1, 0, 0] = 1f;
-            samples[0, 1, 0] = 1f;
-            samples[0, 0, 1] = 1f;
-            samples[1, 1, 0] = 5f;
-            samples[1, 0, 1] = 5f;
-            samples[0, 1, 1] = 5f;
-            samples[1, 1, 1] = 5f;
+            for (var x = 0; x < 2; x++)
+            for (var y = 0; y < 2; y++)
+            for (var z = 0; z < 2; z++) samples[x, y, z] = 9f;
+
+            samples[1, 1, 1] = -1f;
 
             var mesh = CultGeometrySurfaceNets.Extract(samples, origin: new CultVec3(10f, 20f, 30f), cellSize: 2f);
 
             mesh.VertexCount.Should().Be(1);
-            mesh.Positions[0].Should().BeApproximately(10f + (1f / 6f * 2f), 1e-5f);
-            mesh.Positions[1].Should().BeApproximately(20f + (1f / 6f * 2f), 1e-5f);
-            mesh.Positions[2].Should().BeApproximately(30f + (1f / 6f * 2f), 1e-5f);
+            mesh.Positions[0].Should().BeApproximately(10f + (2.9f / 3f * 2f), 1e-5f);
+            mesh.Positions[1].Should().BeApproximately(20f + (2.9f / 3f * 2f), 1e-5f);
+            mesh.Positions[2].Should().BeApproximately(30f + (2.9f / 3f * 2f), 1e-5f);
         }
 
         [TestCase(6)]
@@ -217,6 +218,67 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
+        public void An_open_plane_along_y_emits_quads_only_where_all_four_surrounding_cells_exist()
+        {
+            var samples = new float[4, 4, 4];
+            for (var x = 0; x < 4; x++)
+            for (var y = 0; y < 4; y++)
+            for (var z = 0; z < 4; z++)
+            {
+                samples[x, y, z] = y - 1.5f;
+            }
+
+            var mesh = CultGeometrySurfaceNets.Extract(samples);
+
+            mesh.QuadCount.Should().Be(4);
+            mesh.QuadEdges.Should().OnlyContain(edge =>
+                edge.Y == 1 && edge.Axis == 1 &&
+                (edge.X == 1 || edge.X == 2) &&
+                (edge.Z == 1 || edge.Z == 2));
+        }
+
+        [Test]
+        public void An_open_plane_along_z_emits_quads_only_where_all_four_surrounding_cells_exist()
+        {
+            var samples = new float[4, 4, 4];
+            for (var x = 0; x < 4; x++)
+            for (var y = 0; y < 4; y++)
+            for (var z = 0; z < 4; z++)
+            {
+                samples[x, y, z] = z - 1.5f;
+            }
+
+            var mesh = CultGeometrySurfaceNets.Extract(samples);
+
+            mesh.QuadCount.Should().Be(4);
+            mesh.QuadEdges.Should().OnlyContain(edge =>
+                edge.Z == 1 && edge.Axis == 2 &&
+                (edge.X == 1 || edge.X == 2) &&
+                (edge.Y == 1 || edge.Y == 2));
+        }
+
+        [Test]
+        public void An_extremely_small_edge_delta_falls_back_to_the_edge_midpoint()
+        {
+            // Every crossing edge from the inside corner has a delta of ~3e-21, under the 1e-20
+            // threshold that falls back to the 0.5 midpoint; computed directly, (0 - -1e-30) / 3e-21
+            // would land near the inside endpoint instead (amt ~ 3.3e-10), not the midpoint.
+            var samples = new float[2, 2, 2];
+            for (var x = 0; x < 2; x++)
+            for (var y = 0; y < 2; y++)
+            for (var z = 0; z < 2; z++) samples[x, y, z] = 3e-21f;
+
+            samples[0, 0, 0] = -1e-30f;
+
+            var mesh = CultGeometrySurfaceNets.Extract(samples);
+
+            mesh.VertexCount.Should().Be(1);
+            mesh.Positions[0].Should().BeApproximately(1f / 6f, 1e-4f);
+            mesh.Positions[1].Should().BeApproximately(1f / 6f, 1e-4f);
+            mesh.Positions[2].Should().BeApproximately(1f / 6f, 1e-4f);
+        }
+
+        [Test]
         public void Extraction_is_deterministic_and_quad_edges_are_strictly_ascending()
         {
             var samples = Sphere(8);
@@ -232,6 +294,26 @@ namespace GameCult.Geometry.Tests
             {
                 first.QuadEdges[index].CompareTo(first.QuadEdges[index - 1]).Should().BePositive();
             }
+        }
+
+        [Test]
+        public void Grid_edge_equality_requires_every_component_to_match()
+        {
+            var edge = new CultGeometryGridEdge(1, 2, 3, 0);
+
+            (edge == new CultGeometryGridEdge(1, 2, 3, 0)).Should().BeTrue();
+            (edge == new CultGeometryGridEdge(9, 2, 3, 0)).Should().BeFalse();
+            (edge == new CultGeometryGridEdge(1, 9, 3, 0)).Should().BeFalse();
+            (edge == new CultGeometryGridEdge(1, 2, 9, 0)).Should().BeFalse();
+            (edge == new CultGeometryGridEdge(1, 2, 3, 1)).Should().BeFalse();
+        }
+
+        [Test]
+        public void Grid_edge_to_string_names_its_coordinates_and_axis()
+        {
+            var edge = new CultGeometryGridEdge(1, 2, 3, 2);
+
+            edge.ToString().Should().Be("(1, 2, 3)+e2");
         }
 
         [Test]

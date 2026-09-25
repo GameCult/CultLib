@@ -11,20 +11,22 @@ namespace GameCult.Geometry.Tests
         public void A_sliver_sharing_a_vertex_does_not_move_the_large_quads_normal()
         {
             // A 10x10 quad in the XY plane (facing +Z) sharing vertex 0 with a near-degenerate
-            // sliver tilted into the XZ plane. The sliver's area is ~1e6 times smaller.
+            // sliver tilted into the XZ plane. The sliver's area is ~1e6 times smaller. Offset away
+            // from the origin so a diagonal computed as (p2 + p0) instead of (p2 - p0) is not
+            // coincidentally the same value (p0 = 0 would erase that distinction).
             var mesh = new CultGeometryQuadMesh
             {
                 Positions = new[]
                 {
                     // Large quad: 0,1,2,3
-                    0f, 0f, 0f,
-                    10f, 0f, 0f,
-                    10f, 10f, 0f,
-                    0f, 10f, 0f,
+                    5f, 7f, 9f,
+                    15f, 7f, 9f,
+                    15f, 17f, 9f,
+                    5f, 17f, 9f,
                     // Sliver quad: 0 (shared), 4, 5, 6
-                    0.001f, 0f, 0f,
-                    0.001f, 0f, 0.001f,
-                    0f, 0f, 0.001f,
+                    5.001f, 7f, 9f,
+                    5.001f, 7f, 9.001f,
+                    5f, 7f, 9.001f,
                 },
                 Quads = new[]
                 {
@@ -46,22 +48,33 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
-        public void A_closed_cube_gets_unit_length_normals()
+        public void A_closed_cube_gets_unit_length_normals_pointing_away_from_center()
         {
             var mesh = Cube();
 
             var normals = CultGeometryQuadNormals.FaceWeighted(mesh);
 
+            // Each vertex's normal must point away from the cube's center (0.5,0.5,0.5) along every
+            // axis, i.e. its sign must match the vertex's own offset from the center. Checking the
+            // exact direction (not just the length) catches a mutant that flips the sign of one of a
+            // vertex's three contributing faces: three orthogonal +-2-length vectors summed have the
+            // same length no matter which one is negated, so a length-only check cannot tell them apart.
+            var oneOverRoot3 = 1f / MathF.Sqrt(3f);
             for (var vertex = 0; vertex < mesh.VertexCount; vertex++)
             {
-                var x = normals[vertex * 3];
-                var y = normals[(vertex * 3) + 1];
-                var z = normals[(vertex * 3) + 2];
-                var length = MathF.Sqrt((x * x) + (y * y) + (z * z));
-                length.Should().BeApproximately(1f, 1e-5f);
-                float.IsFinite(x).Should().BeTrue();
-                float.IsFinite(y).Should().BeTrue();
-                float.IsFinite(z).Should().BeTrue();
+                var px = mesh.Positions[vertex * 3];
+                var py = mesh.Positions[(vertex * 3) + 1];
+                var pz = mesh.Positions[(vertex * 3) + 2];
+                var expected = new[]
+                {
+                    px > 0.5f ? oneOverRoot3 : -oneOverRoot3,
+                    py > 0.5f ? oneOverRoot3 : -oneOverRoot3,
+                    pz > 0.5f ? oneOverRoot3 : -oneOverRoot3,
+                };
+
+                normals[vertex * 3].Should().BeApproximately(expected[0], 1e-5f);
+                normals[(vertex * 3) + 1].Should().BeApproximately(expected[1], 1e-5f);
+                normals[(vertex * 3) + 2].Should().BeApproximately(expected[2], 1e-5f);
             }
         }
 
