@@ -88,9 +88,9 @@ public sealed class CellularAndSminGradTests
                 (Smin(p + new float3(0.0f, eps, 0.0f)) - Smin(p - new float3(0.0f, eps, 0.0f))) / (2.0f * eps),
                 (Smin(p + new float3(0.0f, 0.0f, eps)) - Smin(p - new float3(0.0f, 0.0f, eps))) / (2.0f * eps));
 
-            Assert.Equal(numeric.x, analytic.x, precision: 2);
-            Assert.Equal(numeric.y, analytic.y, precision: 2);
-            Assert.Equal(numeric.z, analytic.z, precision: 2);
+            AssertWithinTolerance(numeric.x, analytic.x, 0.02f);
+            AssertWithinTolerance(numeric.y, analytic.y, 0.02f);
+            AssertWithinTolerance(numeric.z, analytic.z, 0.02f);
         }
     }
 
@@ -196,7 +196,6 @@ public sealed class CellularAndSminGradTests
             var result = math.cellular(p);
             const float eps = 0.0005f;
             float F1At(float3 q) => FindF1F2(q).f1;
-            float F2At(float3 q) => FindF1F2(q).f2;
 
             AssertGradientMatchesCentralDifference(F1At, p, eps, result.nearest);
             var edgeValueFn = new Func<float3, float>(q => { var (a, b) = FindF1F2(q); return b - a; });
@@ -302,10 +301,18 @@ public sealed class CellularAndSminGradTests
             (scalarField(p + new float3(0.0f, eps, 0.0f)) - scalarField(p - new float3(0.0f, eps, 0.0f))) / (2.0f * eps),
             (scalarField(p + new float3(0.0f, 0.0f, eps)) - scalarField(p - new float3(0.0f, 0.0f, eps))) / (2.0f * eps));
 
-        Assert.Equal(numeric.x, valueAndGradient.x, precision: 2);
-        Assert.Equal(numeric.y, valueAndGradient.y, precision: 2);
-        Assert.Equal(numeric.z, valueAndGradient.z, precision: 2);
+        AssertWithinTolerance(numeric.x, valueAndGradient.x, 0.02f);
+        AssertWithinTolerance(numeric.y, valueAndGradient.y, 0.02f);
+        AssertWithinTolerance(numeric.z, valueAndGradient.z, 0.02f);
     }
+
+    // A fixed decimal-place Assert.Equal snaps two numbers that agree to within a few times 1e-5 to
+    // different rounded digits whenever their true difference straddles a rounding boundary (seen:
+    // 0.824987829 vs 0.825006127, agreeing to 2e-5, rounding to 0.82 and 0.83). An absolute-tolerance
+    // check states the actual claim (central differences agree with the analytic gradient within the
+    // finite-difference step's own truncation error) without that artifact.
+    private static void AssertWithinTolerance(float expected, float actual, float tolerance) =>
+        Assert.True(MathF.Abs(expected - actual) <= tolerance, $"expected {expected}, actual {actual}, tolerance {tolerance}");
 
     private static float3 RandomUnit(System.Random random) =>
         new(random.NextSingle() * 2.0f - 1.0f, random.NextSingle() * 2.0f - 1.0f, random.NextSingle() * 2.0f - 1.0f);
