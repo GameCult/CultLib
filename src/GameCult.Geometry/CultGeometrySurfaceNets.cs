@@ -57,7 +57,6 @@ namespace GameCult.Geometry
             var sizeX = samples.GetLength(0);
             var sizeY = samples.GetLength(1);
             var sizeZ = samples.GetLength(2);
-            var sizes = new[] { sizeX, sizeY, sizeZ };
             var cellCounts = new[] { sizeX - 1, sizeY - 1, sizeZ - 1 };
             var originValue = new float3(origin.X, origin.Y, origin.Z);
 
@@ -87,39 +86,42 @@ namespace GameCult.Geometry
 
                 for (byte axis = 0; axis < 3; axis++)
                 {
-                    if (!TryGetOtherEndpoint(sizes, coord, axis, out var other))
+                    // Only an edge whose far endpoint is still inside the grid can cross into a
+                    // quad. Bounding the loop with this one condition, instead of a helper that
+                    // returned a bool for the caller to branch on, leaves one path through the
+                    // rest of the body instead of two that happened to produce the same result.
+                    if (coord[axis] < cellCounts[axis])
                     {
-                        continue;
+                        var other = (int[])coord.Clone();
+                        other[axis] += 1;
+
+                        var inside = IsInside(samples[x, y, z], isoValue);
+                        var otherInside = IsInside(samples[other[0], other[1], other[2]], isoValue);
+                        if (inside != otherInside && TryGetQuadCells(cellCounts, coord, axis, out var cells))
+                        {
+                            // The four cells around a crossing edge each contain that same crossing
+                            // edge among their own twelve, so each of them is mixed and has a
+                            // vertex: this indexer cannot miss without the extraction invariant
+                            // already being broken.
+                            var v = new uint[4];
+                            for (var i = 0; i < 4; i++) v[i] = vertexIndex[cells[i]];
+
+                            // Orientation comes only from which endpoint is inside and the axis's
+                            // fixed handedness (OrientationSign) - never from the quad's own
+                            // geometry, so degenerate (zero-area) quads still orient consistently
+                            // with their neighbours.
+                            if (inside == (OrientationSign[axis] < 0))
+                            {
+                                (v[1], v[3]) = (v[3], v[1]);
+                            }
+
+                            quads.Add(v[0]);
+                            quads.Add(v[1]);
+                            quads.Add(v[2]);
+                            quads.Add(v[3]);
+                            quadEdges.Add(new CultGeometryGridEdge(x, y, z, axis));
+                        }
                     }
-
-                    var inside = IsInside(samples[x, y, z], isoValue);
-                    var otherInside = IsInside(samples[other[0], other[1], other[2]], isoValue);
-                    if (inside == otherInside) continue;
-
-                    if (!TryGetQuadCells(cellCounts, coord, axis, out var cells))
-                    {
-                        continue;
-                    }
-
-                    // The four cells around a crossing edge each contain that same crossing edge
-                    // among their own twelve, so each of them is mixed and has a vertex: this
-                    // indexer cannot miss without the extraction invariant already being broken.
-                    var v = new uint[4];
-                    for (var i = 0; i < 4; i++) v[i] = vertexIndex[cells[i]];
-
-                    // Orientation comes only from which endpoint is inside and the axis's fixed
-                    // handedness (OrientationSign) - never from the quad's own geometry, so
-                    // degenerate (zero-area) quads still orient consistently with their neighbours.
-                    if (inside == (OrientationSign[axis] < 0))
-                    {
-                        (v[1], v[3]) = (v[3], v[1]);
-                    }
-
-                    quads.Add(v[0]);
-                    quads.Add(v[1]);
-                    quads.Add(v[2]);
-                    quads.Add(v[3]);
-                    quadEdges.Add(new CultGeometryGridEdge(x, y, z, axis));
                 }
             }
 
@@ -192,20 +194,11 @@ namespace GameCult.Geometry
             return math.lerp(first, second, amount);
         }
 
-        private static bool TryGetOtherEndpoint(int[] sizes, int[] coord, byte axis, out int[] other)
-        {
-            other = (int[])coord.Clone();
-            if (coord[axis] + 1 >= sizes[axis]) return false;
-
-            other[axis] += 1;
-            return true;
-        }
-
         // The four cells that share the grid edge from (x, y, z) to (x, y, z) + e_axis, listed as a
         // perimeter loop around the edge (not crossed diagonally) so the caller can build a quad
         // directly from them. The edge's own coordinate is unchanged for all four cells: it is
-        // guaranteed to already index a valid cell there because TryGetOtherEndpoint verified
-        // coord[axis] + 1 < sizes[axis], i.e. coord[axis] < cellCounts[axis].
+        // guaranteed to already index a valid cell there because the caller's own loop bound
+        // already verified coord[axis] < cellCounts[axis].
         private static bool TryGetQuadCells(int[] cellCounts, int[] coord, byte axis, out (int, int, int)[] cells)
         {
             cells = Array.Empty<(int, int, int)>();
