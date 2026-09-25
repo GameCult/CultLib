@@ -37,6 +37,10 @@ Deliberate behavior:
   rule never looks at its geometry;
 - non-finite `isoValue` or `origin` components are rejected, matching the
   existing rejection of non-finite samples and cell size;
+- an extreme but finite input (a `cellSize` near float's magnitude limit, or
+  finite samples whose interpolated position overflows to infinity) is a
+  float-domain overflow, not a validated input error, and is deliberately not
+  range-checked;
 - vertices are welded: one vertex per active cell, shared by every quad
   touching that cell;
 - face-weighted normals sum each quad's diagonal cross product (unnormalized,

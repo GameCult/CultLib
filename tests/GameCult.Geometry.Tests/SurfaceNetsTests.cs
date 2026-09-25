@@ -629,6 +629,36 @@ namespace GameCult.Geometry.Tests
         [TestCase(float.NegativeInfinity)]
         [TestCase(float.PositiveInfinity)]
         [TestCase(float.NaN)]
+        public void A_non_finite_isoValue_is_rejected(float nonFiniteValue)
+        {
+            var samples = new float[2, 2, 2];
+
+            Action act = () => CultGeometrySurfaceNets.Extract(samples, isoValue: nonFiniteValue);
+
+            act.Should().Throw<ArgumentException>();
+        }
+
+        [TestCase(float.NegativeInfinity, 0f, 0f)]
+        [TestCase(float.PositiveInfinity, 0f, 0f)]
+        [TestCase(float.NaN, 0f, 0f)]
+        [TestCase(0f, float.NegativeInfinity, 0f)]
+        [TestCase(0f, float.PositiveInfinity, 0f)]
+        [TestCase(0f, float.NaN, 0f)]
+        [TestCase(0f, 0f, float.NegativeInfinity)]
+        [TestCase(0f, 0f, float.PositiveInfinity)]
+        [TestCase(0f, 0f, float.NaN)]
+        public void A_non_finite_origin_component_is_rejected(float x, float y, float z)
+        {
+            var samples = new float[2, 2, 2];
+
+            Action act = () => CultGeometrySurfaceNets.Extract(samples, origin: new CultVec3(x, y, z));
+
+            act.Should().Throw<ArgumentException>();
+        }
+
+        [TestCase(float.NegativeInfinity)]
+        [TestCase(float.PositiveInfinity)]
+        [TestCase(float.NaN)]
         public void A_non_finite_sample_is_rejected(float nonFiniteValue)
         {
             var samples = new float[2, 2, 2];

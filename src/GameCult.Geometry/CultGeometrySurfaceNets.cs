@@ -29,6 +29,18 @@ namespace GameCult.Geometry
         /// Extracts the <paramref name="isoValue"/> surface with surface nets.
         /// Values less than or equal to the isovalue are treated as inside.
         /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="samples"/> is null.</exception>
+        /// <exception cref="ArgumentException">
+        /// <paramref name="samples"/> is too small or has a non-finite sample, or
+        /// <paramref name="isoValue"/> or a component of <paramref name="origin"/> is non-finite.
+        /// </exception>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="cellSize"/> is non-positive or infinite.</exception>
+        /// <remarks>
+        /// Non-finite results from otherwise-finite inputs (for example an extreme
+        /// <paramref name="cellSize"/> or samples near float's magnitude limit producing an
+        /// infinite vertex position) are a float-domain overflow, not a validated input error;
+        /// this method does not range-check magnitudes for that case.
+        /// </remarks>
         public static CultGeometryQuadMesh Extract(
             float[,,] samples,
             float isoValue = 0f,
@@ -47,6 +59,16 @@ namespace GameCult.Geometry
                 {
                     throw new ArgumentException("A surface nets field requires every sample to be finite.", nameof(samples));
                 }
+            }
+
+            if (!float.IsFinite(isoValue))
+            {
+                throw new ArgumentException("The isovalue must be finite.", nameof(isoValue));
+            }
+
+            if (!float.IsFinite(origin.X) || !float.IsFinite(origin.Y) || !float.IsFinite(origin.Z))
+            {
+                throw new ArgumentException("The origin must be finite.", nameof(origin));
             }
 
             if (!(cellSize > 0f) || float.IsInfinity(cellSize))
