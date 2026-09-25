@@ -747,8 +747,12 @@ public static partial class math
             }
         }
 
+        // Only F1's degenerate point is guarded, matching the spec: F2 = 0 needs two distinct
+        // integer cells' pcg3d-jittered feature points to land on the exact same float32 value in
+        // every component, which the jitter's ~24-bit float precision makes unreachable for any p
+        // this function is actually called with, so there is no reachable case for a guard to defend.
         var grad1 = f1 > 0.0f ? (p - c1) / f1 : new float3(0.0f, 0.0f, 0.0f);
-        var grad2 = f2 > 0.0f ? (p - c2) / f2 : new float3(0.0f, 0.0f, 0.0f);
+        var grad2 = (p - c2) / f2;
 
         return new CultCellular(
             new float4(grad1, f1),

@@ -151,15 +151,20 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   jittered 3×3×3 neighbourhood of feature points selected by `pcg3d` (never
   the sin-based `hash`). It returns `CultCellular { nearest, edge, id }`:
   `nearest` is `(∇F1, F1)`, `edge` is `(∇F2 - ∇F1, F2 - F1)`, and `id` is the
-  nearest cell's `pcg3d` hash mapped to `[0, 1)`. `∇F1`/`∇F2` are undefined
-  exactly at their own feature point (`F1 = 0` or `F2 = 0`); `cellular`
-  follows the repo's existing degenerate-normal convention
+  nearest cell's `pcg3d` hash mapped to `[0, 1)`. `∇F1` is undefined exactly
+  at its own feature point (`F1 = 0`); `cellular` follows the repo's existing
+  degenerate-normal convention
   (`GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle`, which
   guards a zero-length normal and returns the zero vector instead of the NaN
   a bare `normalize` gives there) and returns the zero vector rather than NaN.
-  The identity of the nearest and second-nearest feature point changes
-  discontinuously across the `F1 = F2` set (a genuine kink, not a numerical
-  artifact), so `∇F1` and `∇F2` are only continuous away from that set.
+  `∇F2` carries no such guard: `F2 = 0` would need two distinct cells'
+  pcg3d-jittered feature points to land on the exact same float32 value in
+  every component, which the jitter's float precision makes unreachable for
+  any `p` this function is actually called with, so there is no reachable
+  case to defend. The identity of the nearest and second-nearest feature
+  point changes discontinuously across the `F1 = F2` set (a genuine kink, not
+  a numerical artifact), so `∇F1` and `∇F2` are only continuous away from
+  that set.
 
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32

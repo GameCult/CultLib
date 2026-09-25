@@ -371,8 +371,10 @@ CultCellular cultmath_cellular(float3 p)
         }
     }
 
+    // Only F1's degenerate point is guarded; see math.cellular's comment (math.cs) for why F2 = 0
+    // has no reachable case to defend.
     float3 grad1 = f1 > 0.0 ? (p - c1) / f1 : float3(0.0, 0.0, 0.0);
-    float3 grad2 = f2 > 0.0 ? (p - c2) / f2 : float3(0.0, 0.0, 0.0);
+    float3 grad2 = (p - c2) / f2;
 
     CultCellular result;
     result.nearest = float4(grad1, f1);
