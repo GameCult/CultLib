@@ -718,8 +718,8 @@ public static partial class math
         var cell = floor(p);
         var f1 = 1.0e30f;
         var f2 = 1.0e30f;
-        var c1 = float3.zero;
-        var c2 = float3.zero;
+        var c1 = new float3(0.0f, 0.0f, 0.0f);
+        var c2 = new float3(0.0f, 0.0f, 0.0f);
         var hash1 = 0;
 
         for (var dz = -1; dz <= 1; dz++)
@@ -747,8 +747,8 @@ public static partial class math
             }
         }
 
-        var grad1 = f1 > 0.0f ? (p - c1) / f1 : float3.zero;
-        var grad2 = f2 > 0.0f ? (p - c2) / f2 : float3.zero;
+        var grad1 = f1 > 0.0f ? (p - c1) / f1 : new float3(0.0f, 0.0f, 0.0f);
+        var grad2 = f2 > 0.0f ? (p - c2) / f2 : new float3(0.0f, 0.0f, 0.0f);
 
         return new CultCellular(
             new float4(grad1, f1),
