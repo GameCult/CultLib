@@ -104,11 +104,20 @@ compares a sample against itself, the inside/outside flags always match,
 and the crossing is skipped exactly as it would have been had the method
 correctly returned `false`. No test can distinguish the two branches because
 there is nothing to distinguish - it is a legitimate equivalent mutant, not
-evidence of a `vstest` false survivor. There is no confirmed `vstest`
-coverage-false-survivor case in this project's history; if one shows up, it
-still needs the same hand-mutation-plus-direct-`dotnet-test` confirmation the
-`mtp`/`static readonly` caveat above requires before being triaged as a tool
-bug.
+evidence of a `vstest` false survivor.
+
+There is now a confirmed `vstest` coverage-false-survivor case, from the same
+cut that fixed the orientation bug above. `CultGeometrySurfaceNets.Extract`'s
+`if (inside == (OrientationSign[axis] < 0))` (the sole authority for quad
+winding after the geometric cross-product fallback was deleted) was reported
+`Survived` for an `Equality mutation` (`==` -> `!=`). Hand-mutating it to
+`!=` and running `dotnet test tests/GameCult.Geometry.Tests --filter
+FullyQualifiedName~SurfaceNetsTests` directly failed 4 of 38 tests (the three
+per-axis corner-order tests plus the outward-winding test), so the mutant is
+genuinely killed and Stryker's `vstest` coverage-based test selection
+mis-attributed (or dropped) the covering tests. Treat any survivor on that
+line, or one that looks like it must obviously be covered, as unproven until
+confirmed the same way.
 
 ## Follow-ups
 
