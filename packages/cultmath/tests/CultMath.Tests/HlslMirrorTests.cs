@@ -49,6 +49,8 @@ public sealed class HlslMirrorTests
             "cultmath_value_noise_bicubic",
             "cultmath_value_noise_texture",
             "cultmath_value_noise_texture_bicubic",
+            "cultmath_smin_grad",
+            "cultmath_cellular",
         };
 
         foreach (var symbol in requiredSymbols)

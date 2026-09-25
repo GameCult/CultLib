@@ -25,6 +25,8 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise", typeof(float2)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_value_noise_bicubic", typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_smin_grad", typeof(float4), typeof(float4), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_cellular", typeof(float3)));
     }
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
@@ -82,9 +84,7 @@ public sealed class HlslSourceCompatibilityTests
                     : Activator.CreateInstance(t, Components(t).Select(f => Scalar(f.FieldType, input(slot++))).ToArray())!).ToArray();
                 var expected = Values(counterpart.Invoke(null, args)!);
                 var actual = Values(mirror.Invoke(shader, args)!);
-                if (expected.Length != actual.Length || expected.Zip(actual).Any(p => p.First is float a && p.Second is float b
-                    ? !(float.IsNaN(a) && float.IsNaN(b)) && BitConverter.SingleToInt32Bits(a) != BitConverter.SingleToInt32Bits(b)
-                    : !p.First.Equals(p.Second)))
+                if (!BitwiseEqual(expected, actual))
                 {
                     mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
                 }
@@ -92,7 +92,30 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(28, compared.Count);
+        Assert.Equal(30, compared.Count);
+    }
+
+    /// <summary>
+    /// A hand-built pair of structs standing in for a mirror struct return and its C# counterpart
+    /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>): same field shape,
+    /// different concrete type, exactly like the real mirror comparison. Proves the field-by-field,
+    /// bit-for-bit walk actually rejects a struct whose field differs; without this, the walk could
+    /// have been comparing lengths only, or skipping the nested vector's own components.
+    /// </summary>
+    private struct StructMirrorProbeExpected { public float4 first; public float second; }
+    private struct StructMirrorProbeActual { public float4 first; public float second; }
+
+    [Fact]
+    public void StructReturnComparisonRejectsAMismatchedField()
+    {
+        var expected = new StructMirrorProbeExpected { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.0f };
+        var matching = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.0f };
+        var mismatchedLeaf = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.5f };
+        var mismatchedNestedComponent = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, -3.0f, 4.0f), second = 5.0f };
+
+        Assert.True(BitwiseEqual(Values(expected), Values(matching)));
+        Assert.False(BitwiseEqual(Values(expected), Values(mismatchedLeaf)));
+        Assert.False(BitwiseEqual(Values(expected), Values(mismatchedNestedComponent)));
     }
 
     // Integer arguments take the bit pattern of the float input, so specials become 0, 0x80000000, NaN bits, ...
@@ -101,10 +124,23 @@ public sealed class HlslSourceCompatibilityTests
     private static object Scalar(Type t, float f) => t == typeof(float) ? f
         : t == typeof(int) ? BitConverter.SingleToInt32Bits(f) : (object)(uint)BitConverter.SingleToInt32Bits(f);
 
+    // Scoped to scalar-typed fields: this only ever builds function ARGUMENTS (float2/3/4, int2/3/4, ...),
+    // never a struct-of-struct return, so it must not recurse.
     private static FieldInfo[] Components(Type t) => t.GetFields().Where(f => !f.IsStatic && Scalars.Contains(f.FieldType)).ToArray();
 
+    /// <summary>
+    /// Flattens a return value to its scalar leaves, recursing through struct fields of any type
+    /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>'s float4/float4/float
+    /// fields) so a struct return is compared field by field, down to bit-for-bit scalars, exactly
+    /// like a bare vector return already is.
+    /// </summary>
     private static object[] Values(object value) => Scalars.Contains(value.GetType()) ? new[] { value }
-        : Components(value.GetType()).Select(field => field.GetValue(value)!).ToArray();
+        : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Values(f.GetValue(value)!)).ToArray();
+
+    private static bool BitwiseEqual(object[] expected, object[] actual) =>
+        expected.Length == actual.Length && expected.Zip(actual).All(p => p.First is float a && p.Second is float b
+            ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
+            : p.First.Equals(p.Second));
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
@@ -122,7 +158,13 @@ public sealed class HlslSourceCompatibilityTests
         // 4. Floating literals gain the `f` suffix; an unsuffixed C# literal is a double.
         source = Regex.Replace(source, @"(?<![\w.])(\d+\.\d*(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)(?![\w.])", "$1f");
 
-        // 5. The file body is wrapped in a class; C# has no free functions.
+        // 5. Struct fields gain `public`; HLSL has no field access-modifier concept, and a C# struct's
+        //    fields default to private, which would hide them from the mirror test's reflection-based
+        //    field comparison (invariant 8's one struct return shape, e.g. CultCellular).
+        source = Regex.Replace(source, @"(?ms)(struct\s+\w+\s*\{)(.*?)(\};)", m =>
+            m.Groups[1].Value + Regex.Replace(m.Groups[2].Value, @"(?m)^(\s*)(\w+\s+\w+;)", "$1public $2") + m.Groups[3].Value);
+
+        // 6. The file body is wrapped in a class; C# has no free functions.
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + source + "\n}\n";
     }
 
