@@ -11,7 +11,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void SminValueNeverExceedsTheOrdinaryMinimum()
     {
-        var random = new Random(0xACE1);
+        var random = new System.Random(0xACE1);
         for (var i = 0; i < 256; i++)
         {
             var a = new float4(RandomUnit(random), RandomScalar(random));
@@ -27,7 +27,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void SminMatchesTheHardMinimumAndItsGradientOutsideTheBand()
     {
-        var random = new Random(0xACE2);
+        var random = new System.Random(0xACE2);
         for (var i = 0; i < 64; i++)
         {
             var gradA = RandomUnit(random);
@@ -58,7 +58,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void SminGradientMatchesCentralDifferencesOfItsOwnValue()
     {
-        var random = new Random(0xACE3);
+        var random = new System.Random(0xACE3);
         var tested = 0;
         while (tested < 200)
         {
@@ -117,7 +117,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void F1NeverExceedsF2()
     {
-        var random = new Random(0xCE11);
+        var random = new System.Random(0xCE11);
         for (var i = 0; i < 256; i++)
         {
             var p = new float3(random.NextSingle() * 20.0f - 10.0f, random.NextSingle() * 20.0f - 10.0f, random.NextSingle() * 20.0f - 10.0f);
@@ -137,7 +137,7 @@ public sealed class CellularAndSminGradTests
         // it. Rather than hand-picking a hash value, search random points for one whose true nearest
         // feature (by independent brute force) happens to live in exactly that last-visited cell, at
         // a comfortable margin from the F1 = F2 seam, then check math.cellular agrees.
-        var random = new Random(0xCE14);
+        var random = new System.Random(0xCE14);
         var lastOffset = new float3(1.0f, 1.0f, 1.0f);
         for (var attempt = 0; attempt < 5000; attempt++)
         {
@@ -177,7 +177,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void GradientMatchesCentralDifferencesAwayFromTheF1EqualsF2Seam()
     {
-        var random = new Random(0xCE12);
+        var random = new System.Random(0xCE12);
         var tested = 0;
         var attempts = 0;
         while (tested < 120 && attempts < 20000)
@@ -209,7 +209,7 @@ public sealed class CellularAndSminGradTests
     [Fact]
     public void IdIsConstantAcrossAFeaturesWholeRegionAndVariesBetweenCells()
     {
-        var random = new Random(0xCE13);
+        var random = new System.Random(0xCE13);
         var baseCell = new float3(2.0f, 2.0f, 2.0f);
         var feature = FeaturePoint(baseCell);
         var idAtFeature = math.cellular(feature).id;
@@ -307,8 +307,8 @@ public sealed class CellularAndSminGradTests
         Assert.Equal(numeric.z, valueAndGradient.z, precision: 2);
     }
 
-    private static float3 RandomUnit(Random random) =>
+    private static float3 RandomUnit(System.Random random) =>
         new(random.NextSingle() * 2.0f - 1.0f, random.NextSingle() * 2.0f - 1.0f, random.NextSingle() * 2.0f - 1.0f);
 
-    private static float RandomScalar(Random random) => random.NextSingle() * 20.0f - 10.0f;
+    private static float RandomScalar(System.Random random) => random.NextSingle() * 20.0f - 10.0f;
 }
