@@ -87,7 +87,7 @@ namespace GameCult.Geometry.Tests
 
             normals.Should().HaveCount(15);
             normals.Should().OnlyContain(value => value == 0f);
-            normals.Should().OnlyContain(float.IsFinite);
+            normals.Should().OnlyContain(value => float.IsFinite(value));
         }
 
         [Test]

@@ -207,7 +207,9 @@ namespace GameCult.Geometry.Tests
             // interior y,z in {1,2} have all four surrounding cells, so only 4 quads are emitted.
             mesh.QuadCount.Should().Be(4);
             mesh.QuadEdges.Should().OnlyContain(edge =>
-                edge.X == 1 && edge.Axis == 0 && edge.Y is 1 or 2 && edge.Z is 1 or 2);
+                edge.X == 1 && edge.Axis == 0 &&
+                (edge.Y == 1 || edge.Y == 2) &&
+                (edge.Z == 1 || edge.Z == 2));
         }
 
         [Test]
