@@ -313,6 +313,74 @@ int4 cultmath_pcg4d(int4 value)
 
 int4 cultmath_pcg4d(float4 value) { return cultmath_pcg4d(int4((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z), (int)asuint(value.w))); }
 
+// Inigo Quilez, "smooth minimum": cubic-polynomial smin carried to value-and-gradient form. See
+// math.smin_grad's comment (math.cs) for why the gradient blend is exact, not an approximation.
+float4 cultmath_smin_grad(float4 a, float4 b, float k)
+{
+    float h = saturate(0.5 + 0.5 * (b.w - a.w) / k);
+    float value = lerp(b.w, a.w, h) - k * h * (1.0 - h);
+    float3 gradient = lerp(b.xyz, a.xyz, h);
+    return float4(gradient, value);
+}
+
+// Invariant 8's one struct return shape (design.md, "HLSL Target: Source Transformations"):
+// compared field by field and bit for bit against CultMath.CultCellular, same field order.
+struct CultCellular
+{
+    float4 nearest;
+    float4 edge;
+    float id;
+};
+
+// Worley, "A Cellular Texture Basis Function" (SIGGRAPH 1996). See math.cellular's comment
+// (math.cs) for the hashing, gradient and degenerate-point conventions this mirrors.
+CultCellular cultmath_cellular(float3 p)
+{
+    float3 cell = floor(p);
+    float f1 = 1.0e30;
+    float f2 = 1.0e30;
+    float3 c1 = float3(0.0, 0.0, 0.0);
+    float3 c2 = float3(0.0, 0.0, 0.0);
+    int hash1 = 0;
+
+    for (int dz = -1; dz <= 1; dz++)
+    {
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                float3 neighbor = cell + float3(dx, dy, dz);
+                int3 hash = cultmath_pcg3d(neighbor);
+                float3 jitter = float3(
+                    (uint)hash.x * (1.0 / 4294967296.0),
+                    (uint)hash.y * (1.0 / 4294967296.0),
+                    (uint)hash.z * (1.0 / 4294967296.0));
+                float3 feature = neighbor + jitter;
+                float d = cultmath_distance(p, feature);
+
+                if (d < f1)
+                {
+                    f2 = f1; c2 = c1;
+                    f1 = d; c1 = feature; hash1 = hash.x;
+                }
+                else if (d < f2)
+                {
+                    f2 = d; c2 = feature;
+                }
+            }
+        }
+    }
+
+    float3 grad1 = f1 > 0.0 ? (p - c1) / f1 : float3(0.0, 0.0, 0.0);
+    float3 grad2 = f2 > 0.0 ? (p - c2) / f2 : float3(0.0, 0.0, 0.0);
+
+    CultCellular result;
+    result.nearest = float4(grad1, f1);
+    result.edge = float4(grad2 - grad1, f2 - f1);
+    result.id = (uint)hash1 * (1.0 / 4294967296.0);
+    return result;
+}
+
 float cultmath_value_noise(float2 position)
 {
     float2 cell = floor(position);
