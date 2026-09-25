@@ -106,18 +106,25 @@ correctly returned `false`. No test can distinguish the two branches because
 there is nothing to distinguish - it is a legitimate equivalent mutant, not
 evidence of a `vstest` false survivor.
 
-There is now a confirmed `vstest` coverage-false-survivor case, from the same
-cut that fixed the orientation bug above. `CultGeometrySurfaceNets.Extract`'s
-`if (inside == (OrientationSign[axis] < 0))` (the sole authority for quad
-winding after the geometric cross-product fallback was deleted) was reported
-`Survived` for an `Equality mutation` (`==` -> `!=`). Hand-mutating it to
-`!=` and running `dotnet test tests/GameCult.Geometry.Tests --filter
-FullyQualifiedName~SurfaceNetsTests` directly failed 4 of 38 tests (the three
-per-axis corner-order tests plus the outward-winding test), so the mutant is
-genuinely killed and Stryker's `vstest` coverage-based test selection
-mis-attributed (or dropped) the covering tests. Treat any survivor on that
-line, or one that looks like it must obviously be covered, as unproven until
-confirmed the same way.
+`CultGeometrySurfaceNets.Extract`'s `if (inside == (OrientationSign[axis] <
+0))` (the sole authority for quad winding after the geometric cross-product
+fallback was deleted) has three mutants on that line: `==` -> `!=`, and `< 0`
+negated to `> 0` or widened to `<= 0`. The first two, `inside != (OrientationSign[axis]
+< 0)` and `OrientationSign[axis] > 0`, are both reported `Killed`. The third,
+`OrientationSign[axis] <= 0`, survives, but it is an equivalent mutant, not a
+coverage gap: `OrientationSign` is the fixed table `{ 1, -1, 1 }` and never
+holds `0`, so `< 0` and `<= 0` agree on every value the table can actually
+produce. There is nothing for a test to distinguish, the same shape as the
+`TryGetOtherEndpoint` equivalent mutant above.
+
+No `vstest` coverage-based false survivor has actually been confirmed for
+GameCult.Geometry. Every survivor triaged here so far has turned out to be a
+genuine equivalent mutant once hand-mutated and checked directly against
+`dotnet test`; treat any survivor that looks like it must obviously be
+covered as unproven until confirmed the same way, but do not cite this
+project as precedent for the `vstest` caveat itself - that caveat is
+`mtp`-runner-specific and documented above for `static readonly` field
+initializers, and GameCult.Geometry has never actually hit it.
 
 ## Follow-ups
 
