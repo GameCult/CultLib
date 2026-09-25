@@ -552,6 +552,33 @@ namespace GameCult.Geometry.Tests
         }
 
         [Test]
+        public void Grid_edge_object_equals_distinguishes_every_component_and_rejects_null_and_other_types()
+        {
+            var edge = new CultGeometryGridEdge(1, 2, 3, 0);
+            object same = new CultGeometryGridEdge(1, 2, 3, 0);
+            object diffX = new CultGeometryGridEdge(9, 2, 3, 0);
+            object diffY = new CultGeometryGridEdge(1, 9, 3, 0);
+            object diffZ = new CultGeometryGridEdge(1, 2, 9, 0);
+            object diffAxis = new CultGeometryGridEdge(1, 2, 3, 1);
+
+            edge.Equals(same).Should().BeTrue();
+            edge.Equals(diffX).Should().BeFalse();
+            edge.Equals(diffY).Should().BeFalse();
+            edge.Equals(diffZ).Should().BeFalse();
+            edge.Equals(diffAxis).Should().BeFalse();
+            edge.Equals(null).Should().BeFalse();
+            edge.Equals("not an edge").Should().BeFalse();
+            edge.Equals((object)42).Should().BeFalse();
+
+            // object.Equals must agree with the typed Equals(CultGeometryGridEdge) it delegates to,
+            // and with GetHashCode wherever the two report equal, so the type is safe as a
+            // dictionary/set key (Extract uses it as one via vertexIndex's cell-coordinate tuples'
+            // sibling role, and tests key EdgeUsage dictionaries by it directly).
+            edge.Equals(same).Should().Be(edge.Equals((CultGeometryGridEdge)same));
+            edge.GetHashCode().Should().Be(((CultGeometryGridEdge)same).GetHashCode());
+        }
+
+        [Test]
         public void Grid_edge_inequality_is_the_negation_of_equality()
         {
             // != has no caller of its own; it exists only because C# requires it whenever == is
