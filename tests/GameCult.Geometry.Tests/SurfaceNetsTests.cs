@@ -175,12 +175,16 @@ namespace GameCult.Geometry.Tests
         [Test]
         public void An_ambiguous_checkerboard_field_has_even_but_not_necessarily_manifold_edge_usage()
         {
-            var samples = new float[4, 4, 4];
-            for (var x = 0; x < 4; x++)
-            for (var y = 0; y < 4; y++)
-            for (var z = 0; z < 4; z++)
+            // A checkerboard pattern with a one-sample uniform-outside margin, so every crossing
+            // edge this exercises has all four surrounding cells in range: any odd usage would be
+            // a real non-manifold artifact of the ambiguity, not an open-boundary side effect.
+            var samples = new float[5, 5, 5];
+            for (var x = 0; x < 5; x++)
+            for (var y = 0; y < 5; y++)
+            for (var z = 0; z < 5; z++)
             {
-                samples[x, y, z] = ((x + y + z) % 2 == 0) ? -1f : 1f;
+                var interior = x is >= 1 and <= 3 && y is >= 1 and <= 3 && z is >= 1 and <= 3;
+                samples[x, y, z] = interior ? (((x + y + z) % 2 == 0) ? -1f : 1f) : 5f;
             }
 
             var mesh = CultGeometrySurfaceNets.Extract(samples);
