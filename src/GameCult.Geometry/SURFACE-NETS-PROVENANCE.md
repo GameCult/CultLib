@@ -25,9 +25,18 @@ Deliberate behavior:
 - one quad is emitted per crossing interior grid edge, from the (up to) four
   cells that share it; an edge whose four surrounding cells do not all exist
   emits no quad, leaving the mesh open at the field boundary;
-- quad winding is oriented outward: the diagonal cross product of each quad
-  must have a positive dot product with the direction from the edge's inside
-  endpoint to its outside endpoint;
+- quad winding is decided by which of the crossing edge's two endpoints is
+  inside, times the per-axis handedness table (`OrientationSign`: `+1, -1,
+  +1`), never by a per-quad geometric test: axis 1's perpendicular pair (X,
+  Z) is left-handed, so its sign is mirrored relative to axes 0 and 2. On a
+  non-degenerate (non-zero-area) quad this decision has the outward-facing
+  property as a corollary: the diagonal cross product of the quad has a
+  positive dot product with the direction from the edge's inside endpoint to
+  its outside endpoint. A degenerate quad carries no such geometric property
+  to check, but still orients consistently with its neighbors because the
+  rule never looks at its geometry;
+- non-finite `isoValue` or `origin` components are rejected, matching the
+  existing rejection of non-finite samples and cell size;
 - vertices are welded: one vertex per active cell, shared by every quad
   touching that cell;
 - face-weighted normals sum each quad's diagonal cross product (unnormalized,
