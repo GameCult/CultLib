@@ -688,6 +688,79 @@ public static partial class math
     private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
     private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
 
+    // Inigo Quilez, "smooth minimum" (https://iquilezles.org/articles/smin/): the cubic-polynomial
+    // smin, carried to value-and-gradient form (invariant 8). h is affine in (b.w - a.w) inside the
+    // smoothing band, so differentiating value = lerp(b.w, a.w, h) - k*h*(1-h) with respect to
+    // position, the terms carrying dh/dp cancel exactly (dh/dp * [(a.w-b.w) - k + 2*k*h] and the
+    // bracket is identically zero given how h is built from a.w-b.w). What is left is exactly
+    // lerp(∇b, ∇a, h): the gradient blend is not an approximation, it is the analytic gradient.
+    // Outside the band (|a.w - b.w| >= k), h saturates to 0 or 1 and this is exactly min(a, b) with
+    // that input's own gradient, continuously (h and the correction term both reach the boundary at
+    // the same value from the smooth side, so there is no kink to exclude here the way cellular's
+    // F1 = F2 seam needs one).
+    public static float4 smin_grad(float4 a, float4 b, float k)
+    {
+        var h = saturate(0.5f + 0.5f * (b.w - a.w) / k);
+        var value = lerp(b.w, a.w, h) - k * h * (1.0f - h);
+        var gradient = lerp(new float3(b.x, b.y, b.z), new float3(a.x, a.y, a.z), h);
+        return new float4(gradient, value);
+    }
+
+    // Worley, "A Cellular Texture Basis Function" (SIGGRAPH 1996): F1/F2 and their analytic
+    // gradients, searched over the jittered 3x3x3 neighbourhood of feature points. Feature points
+    // are selected with pcg3d (design.md, "Integer hashing"), never the sin-based hash. The gradient
+    // of a distance field, del|p - c|, is the unit vector (p - c)/|p - c|; that is undefined exactly
+    // at a feature point (F1 = 0), so cellular follows the repo's existing degenerate-normal
+    // convention (GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle: guard the zero-length
+    // case and return the zero vector instead of the NaN a bare normalize would produce there).
+    public static CultCellular cellular(float3 p)
+    {
+        var cell = floor(p);
+        var f1 = 1.0e30f;
+        var f2 = 1.0e30f;
+        var c1 = float3.zero;
+        var c2 = float3.zero;
+        var hash1 = 0;
+
+        for (var dz = -1; dz <= 1; dz++)
+        {
+            for (var dy = -1; dy <= 1; dy++)
+            {
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    var neighbor = cell + new float3(dx, dy, dz);
+                    var hash = pcg3d(neighbor);
+                    var jitter = new float3(cellular_unit(hash.x), cellular_unit(hash.y), cellular_unit(hash.z));
+                    var feature = neighbor + jitter;
+                    var d = distance(p, feature);
+
+                    if (d < f1)
+                    {
+                        f2 = f1; c2 = c1;
+                        f1 = d; c1 = feature; hash1 = hash.x;
+                    }
+                    else if (d < f2)
+                    {
+                        f2 = d; c2 = feature;
+                    }
+                }
+            }
+        }
+
+        var grad1 = f1 > 0.0f ? (p - c1) / f1 : float3.zero;
+        var grad2 = f2 > 0.0f ? (p - c2) / f2 : float3.zero;
+
+        return new CultCellular(
+            new float4(grad1, f1),
+            new float4(grad2 - grad1, f2 - f1),
+            cellular_unit(hash1));
+    }
+
+    // Maps a pcg3d output component's uint bit pattern to [0, 1) by the standard uint-to-float
+    // divide-by-2^32; the division is by an exact power of two, and the uint-to-float conversion is
+    // the same IEEE-754 round-to-nearest both dxc and C# use, so this is bit-exact on both sides.
+    private static float cellular_unit(int bits) => (uint)bits * (1.0f / 4294967296.0f);
+
     public static float value_noise(float2 position)
     {
         var cell = floor(position);

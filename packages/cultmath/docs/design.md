@@ -100,7 +100,10 @@ needs anything else, the test fails:
    no CultMath analog.
 3. File-scope `static const` becomes `const`.
 4. Floating literals gain `f` (`0.5` becomes `0.5f`).
-5. The file body is wrapped in a class, since C# has no free functions; HLSL
+5. Struct fields gain `public`. HLSL struct members have no access-modifier
+   concept; a C# struct's fields default to `private`, which would hide them
+   from the mirror test's reflection-based field comparison.
+6. The file body is wrapped in a class, since C# has no free functions; HLSL
    functions become private instance methods.
 
 HLSL constructs that stay outside the target and must not appear in the mirror:
@@ -119,6 +122,44 @@ C# `math` on the CPU, not that a GPU agrees: driver `sin` precision alone makes
 compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
+
+The comparison also allows exactly one struct return shape: a mirror function
+whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
+fields is compared to its C# counterpart field by field, recursing into each
+field's own components, down to bit-for-bit scalars. `CultCellular` (`math.cs`,
+`cellular`) is the first and, for now, only consumer. A struct return with a
+mismatched field does not get a second comparison path or a shape of its own;
+it fails the same walk that already handles a bare vector return.
+
+## Invariant 8: Value-and-Gradient Primitives
+
+A primitive tagged invariant 8 returns its value and analytic gradient
+together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
+(a value-only form would be a second path with no consumer). `smin_grad` and
+`cellular` are the first primitives in this family:
+
+- `smin_grad(float4 a, float4 b, float k)` is Inigo Quilez's cubic-polynomial
+  smooth minimum ("smooth minimum",
+  <https://iquilezles.org/articles/smin/>), carried to value-and-gradient
+  form. Its blend factor `h` is affine in `b.w - a.w`, so differentiating the
+  value with respect to position, the terms carrying `dh/dp` cancel exactly;
+  the surviving gradient is `lerp(∇b, ∇a, h)`, the same `h` the value uses.
+  This is the analytic gradient, not an approximation, and it is continuous
+  across the `|a.w - b.w| = k` seam where `h` saturates to 0 or 1.
+- `cellular(float3 p)` is Worley's cellular texture basis function ("A
+  Cellular Texture Basis Function", SIGGRAPH 1996), searched over the
+  jittered 3×3×3 neighbourhood of feature points selected by `pcg3d` (never
+  the sin-based `hash`). It returns `CultCellular { nearest, edge, id }`:
+  `nearest` is `(∇F1, F1)`, `edge` is `(∇F2 - ∇F1, F2 - F1)`, and `id` is the
+  nearest cell's `pcg3d` hash mapped to `[0, 1)`. `∇F1`/`∇F2` are undefined
+  exactly at their own feature point (`F1 = 0` or `F2 = 0`); `cellular`
+  follows the repo's existing degenerate-normal convention
+  (`GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle`, which
+  guards a zero-length normal and returns the zero vector instead of the NaN
+  a bare `normalize` gives there) and returns the zero vector rather than NaN.
+  The identity of the nearest and second-nearest feature point changes
+  discontinuously across the `F1 = F2` set (a genuine kink, not a numerical
+  artifact), so `∇F1` and `∇F2` are only continuous away from that set.
 
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
