@@ -75,6 +75,18 @@ inside a `static readonly` field initializer as unproven until confirmed
 with a direct `dotnet test` run against the same mutation; do not triage it
 as a missing test without that check.
 
+The default `vstest` runner has its own analog. GameCult.Geometry.Tests's
+first `--since` pass reported three `Boolean mutation -> true` survivors in
+`CultGeometrySurfaceNets.TryGetOtherEndpoint` (the per-axis `if (x + 1 >=
+sizeX) return false;` guards, mutated to `if (true) return false;`), despite
+X/Y/Z-axis open-boundary tests that exercise exactly those guards. Hand-
+mutating all three and running `dotnet test tests/GameCult.Geometry.Tests
+--filter FullyQualifiedName~SurfaceNetsTests` directly failed 11 of 24 tests,
+confirming the mutants are well-covered and Stryker's coverage-based test
+selection mis-attributed (or dropped) their covering tests. Treat a survivor
+that looks like it must be covered as unproven until confirmed the same way,
+regardless of which runner is in play.
+
 ## Follow-ups
 
 CultMath.Tests and GameCult.Geometry.Tests are the only projects currently
@@ -89,6 +101,16 @@ added surface nets; a full-project baseline (running mutation against all of
 `CultGeometryIsoSurface`, `CultGeometryDocuments`, and
 `CultGeometryPrimitives`, not just the diff) is a recorded follow-up, not
 something either cut did.
+
+That first `--since` pass did not actually stay diff-scoped: adding
+`stryker-config.json` itself in the same cut that first used it made Stryker
+log "391 mutants will be tested because: Non-CSharp files in test project
+were changed" and mutate the whole `mutate` glob (all four existing
+GameCult.Geometry source files), not just the new surface-nets files. A cut
+that changes a non-C# file inside the test project (a fixture, this config
+file, anything under `Fixtures/`) loses `--since` line-level scoping for that
+run; a future cut whose diff is C#-only, against a base commit that already
+has `stryker-config.json`, should scope correctly.
 
 `GameCult.Caching`, `GameCult.Mesh` (+ `.Quic`, `.Quic.Native`),
 `GameCult.Networking` (+ `.WebSockets`), and the non-.NET runtimes
