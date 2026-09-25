@@ -35,6 +35,18 @@ project:
 dotnet stryker -t mtp --since:<base-commit-or-branch>
 ```
 
+Use a full commit SHA for `--since`, not an abbreviation: `git rev-parse
+<short-sha>` first, then pass the full result. Stryker resolves `--since`
+through the same git plumbing a short SHA can resolve ambiguously (or fail to
+resolve at all) depending on the checkout's object database, and a
+misresolved base silently changes what "since" means instead of erroring.
+
+In a container, also set `git config --global --add safe.directory '*'`
+before running Stryker (or any other command that shells out to `git`
+against this checkout) - git refuses to operate on a repository owned by a
+different user by default, which is the common case for a bind-mounted
+checkout in a container.
+
 Reports land in `StrykerOutput/` next to the test project (git-ignored).
 Open the `reports/mutation-report.html` file for a browsable view, or read
 `reports/mutation-report.json` for a scriptable one.
@@ -75,17 +87,28 @@ inside a `static readonly` field initializer as unproven until confirmed
 with a direct `dotnet test` run against the same mutation; do not triage it
 as a missing test without that check.
 
-The default `vstest` runner has its own analog. GameCult.Geometry.Tests's
-first `--since` pass reported three `Boolean mutation -> true` survivors in
-`CultGeometrySurfaceNets.TryGetOtherEndpoint` (the per-axis `if (x + 1 >=
-sizeX) return false;` guards, mutated to `if (true) return false;`), despite
-X/Y/Z-axis open-boundary tests that exercise exactly those guards. Hand-
-mutating all three and running `dotnet test tests/GameCult.Geometry.Tests
---filter FullyQualifiedName~SurfaceNetsTests` directly failed 11 of 24 tests,
-confirming the mutants are well-covered and Stryker's coverage-based test
-selection mis-attributed (or dropped) their covering tests. Treat a survivor
-that looks like it must be covered as unproven until confirmed the same way,
-regardless of which runner is in play.
+A survivor that looks like it must be covered is unproven until confirmed
+with a direct `dotnet test` run against the same hand-applied mutation - but
+confirm what the mutant actually is before drawing a tooling conclusion from
+it. An earlier pass here reported three survivors in
+`CultGeometrySurfaceNets.TryGetOtherEndpoint`'s per-axis `if (x + 1 >=
+sizeX) return false;` guards and initially triaged them as a `vstest`
+coverage false-survivor (the same shape as the `mtp`/`static readonly`
+caveat above). That triage was wrong: the actual mutant Stryker reports
+there is `return false` -> `return true` inside the guard, which is
+equivalent, not a coverage miss. Returning `true` from
+`TryGetOtherEndpoint` still leaves the out `other` coordinate equal to the
+current coordinate (see the method: `other` is cloned from `coord` and only
+one component is incremented when the method returns `true`), so the caller
+compares a sample against itself, the inside/outside flags always match,
+and the crossing is skipped exactly as it would have been had the method
+correctly returned `false`. No test can distinguish the two branches because
+there is nothing to distinguish - it is a legitimate equivalent mutant, not
+evidence of a `vstest` false survivor. There is no confirmed `vstest`
+coverage-false-survivor case in this project's history; if one shows up, it
+still needs the same hand-mutation-plus-direct-`dotnet-test` confirmation the
+`mtp`/`static readonly` caveat above requires before being triaged as a tool
+bug.
 
 ## Follow-ups
 
