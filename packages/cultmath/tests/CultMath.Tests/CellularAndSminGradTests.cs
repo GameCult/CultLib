@@ -335,6 +335,57 @@ public sealed class CellularAndSminGradTests
     }
 
     [Fact]
+    public void SearchReachesEveryAxisAlignedRadiusTwoSlice()
+    {
+        // F6, part 2 (Soul finding): a single-slice loop-bound mutant on one axis (e.g. dz < 2
+        // instead of dz <= 2, silently dropping the +2 layer on that axis alone) still passed the
+        // random 20,000-point sweeps above. That is not those sweeps being weak; it is the
+        // exactness proof's own margin (F1, F2 always < sqrt(3), radius-2 cells' lower bound is
+        // exactly 2) making a genuine win from any single |offset component| = 2 cell astronomically
+        // rare over uniformly random points (zero hits in 3,000,000 samples, measured separately).
+        // Hunting for one by choosing candidate query POINTS is the wrong end of the search; this
+        // instead scans candidate integer CELLS and, for each, builds the query point most likely to
+        // realize that cell's neighbour as the winner: the closest point of the query cell's own unit
+        // cube to the target neighbour's actual jittered feature. That construction finds a real
+        // example for every one of the six axis-aligned radius-2 offsets within a couple thousand
+        // candidate cells, deterministically (pcg3d has no randomness to get lucky or unlucky with).
+        var offsets = new[]
+        {
+            new float3(2.0f, 0.0f, 0.0f), new float3(-2.0f, 0.0f, 0.0f),
+            new float3(0.0f, 2.0f, 0.0f), new float3(0.0f, -2.0f, 0.0f),
+            new float3(0.0f, 0.0f, 2.0f), new float3(0.0f, 0.0f, -2.0f),
+        };
+
+        foreach (var offset in offsets)
+        {
+            var found = false;
+            for (var qz = -80; qz <= 80 && !found; qz++)
+            for (var qy = -80; qy <= 80 && !found; qy++)
+            for (var qx = -80; qx <= 80 && !found; qx++)
+            {
+                var q = new float3(qx, qy, qz);
+                var targetFeature = FeaturePoint(q + offset);
+                var p = new float3(
+                    Math.Clamp(targetFeature.x, q.x, q.x + 0.999f),
+                    Math.Clamp(targetFeature.y, q.y, q.y + 0.999f),
+                    Math.Clamp(targetFeature.z, q.z, q.z + 0.999f));
+
+                var (f1, f2) = FindF1F2(p); // independent 7x7x7 oracle
+                var d = math.distance(p, targetFeature);
+                if (MathF.Abs(d - f1) > 1.0e-4f && MathF.Abs(d - f2) > 1.0e-4f)
+                    continue; // this cell didn't realize the target offset as F1 or F2; try another.
+
+                found = true;
+                var result = math.cellular(p);
+                Assert.Equal(f1, result.nearest.w, precision: 3);
+                Assert.Equal(f2 - f1, result.edge.w, precision: 3);
+            }
+
+            Assert.True(found, $"could not construct a query point where offset {offset.x},{offset.y},{offset.z} ever wins F1 or F2");
+        }
+    }
+
+    [Fact]
     public void PrunedSearchIsBitIdenticalToTheUnprunedFiveCubedSearch()
     {
         // F6, part 2: the lower-bound prune inside math.cellular's loop must never change the
