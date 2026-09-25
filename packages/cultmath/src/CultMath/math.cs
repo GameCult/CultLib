@@ -713,8 +713,12 @@ public static partial class math
 
     // Worley, "A Cellular Texture Basis Function" (SIGGRAPH 1996): F1/F2 and their analytic
     // gradients, searched over the jittered neighbourhood of feature points. Feature points are
-    // selected with pcg3d (design.md, "Integer hashing"), never the sin-based hash. The gradient of
-    // a distance field, del|p - c|, is the unit vector (p - c)/|p - c|; that is undefined exactly at
+    // selected with pcg3d over each neighbour's integer cell coordinate (design.md, "Integer
+    // hashing"), never the float32 bit pattern of that coordinate and never the sin-based hash.
+    // Hashing the float bits instead of the integers correlated jitter.x across a 15-degree-of-
+    // freedom marginal chi-square test (Soul, cut 2a-i: 203.8 against a critical value of 37.7);
+    // hashing the integer coordinate directly removes that correlation (F4/jitter uniformity). The
+    // gradient of a distance field, del|p - c|, is the unit vector (p - c)/|p - c|; that is undefined exactly at
     // a feature point (F1 = 0 or F2 = 0), so cellular follows the repo's existing degenerate-normal
     // convention (GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle: guard the zero-length
     // case and return the zero vector instead of the NaN a bare normalize would produce there).
@@ -733,14 +737,29 @@ public static partial class math
     // 3 on some axis is strictly farther than 2 from p (that axis alone already gives max(0, 3-1) =
     // 2). Now bound F1 and F2 from above using two real, always-present candidates: the query's own
     // cell (d = 0), whose distance is always strictly less than sqrt(3) (every axis strictly under
-    // 1); and, choosing on each axis whichever of the two immediate neighbours has u_i closer to its
-    // shared boundary, the single-axis-offset neighbour cell one step over, whose distance bound
-    // works out to the same strict sqrt(3) ceiling. F2 is at most the larger of these two real
-    // candidates (adding candidates to a set can only lower or hold its 2nd-smallest value), so
-    // F1 < sqrt(3) and F2 < sqrt(3) always: roughly 1.732 < 2. Every cell outside the 5x5x5 block is
-    // farther than 2, hence farther than either F1 or F2, so the true global F1 and F2 are always
-    // inside it. (The matching argument for 3x3x3 only reaches radius 1, whose excluded cells start
-    // at distance > 1, which is less than the 1.732 ceiling — the gap 3x3x3's failures live in.)
+    // 1); and the near-side neighbour on whichever single axis's u_i sits closest to a cell
+    // boundary. Let m = min(u_i, 1 - u_i) on that chosen axis (m is in [0, 1/2] by construction,
+    // since it is the smaller of the two). Stepping one cell towards that nearer boundary puts the
+    // query within (1 + m) of the far face on the offset axis and within (1 - m) of the near face on
+    // each of the other two axes, so that neighbour's squared distance is at most
+    // (1 + m)^2 + 2*(1 - m)^2 = 3 - 2m + 3m^2, which is <= 3 for every m in [0, 1/2] (3 at m = 0,
+    // falling to 2.5 at m = 1/2), and strictly below 3 because the jitter never reaches exactly 0 or
+    // 1 (u_i - j_i stays strictly inside (-1, 1), so this bound, like the own-cell one, is never
+    // tight). F2 is at most the larger of these two real candidates (adding candidates to a set can
+    // only lower or hold its 2nd-smallest value), so F1 < sqrt(3) and F2 < sqrt(3) always: roughly
+    // 1.732 < 2, margin 2 - sqrt(3) ~= 0.268 (Soul's adversarial check, cut 2a-i: the worst
+    // realizable in-box F2 is exactly sqrt(3), reached only in the unattainable limit at a cell
+    // corner). Every cell outside the 5x5x5 block is farther than 2, hence farther than either F1 or
+    // F2, so the true global F1 and F2 are always inside it. (The matching argument for 3x3x3 only
+    // reaches radius 1, whose excluded cells start at distance > 1, which is less than the 1.732
+    // ceiling — the gap 3x3x3's failures live in.)
+    //
+    // An earlier version of this proof picked the near-side neighbour on a fixed axis rather than
+    // whichever axis sits closest to its boundary, and that version is wrong (Soul, cut 2a-i):
+    // u = (0.5, 0, 0) with the x-neighbour's jittered feature at (-1, 1 - 2^-24, 1 - 2^-24) gives a
+    // distance of about 2.06, outside the radius-2 exclusion the proof needs. Choosing the axis by
+    // proximity to its own boundary is what keeps m <= 1/2 and the bound at sqrt(3); x was the wrong
+    // axis to fix there because u.x = 0.5 is the point on the whole cube farthest from any boundary.
     //
     // The loop below still visits every one of the 125 cells in a fixed order, but skips the
     // pcg3d/jitter/distance work for a cell whose distance cannot possibly beat the current f2: that
@@ -771,7 +790,7 @@ public static partial class math
                         continue;
 
                     var neighbor = cell + new float3(dx, dy, dz);
-                    var hash = pcg3d(neighbor);
+                    var hash = pcg3d(int3(neighbor));
                     var jitter = new float3(cellular_unit(hash.x), cellular_unit(hash.y), cellular_unit(hash.z));
                     var feature = neighbor + jitter;
                     var d = distance(p, feature);
@@ -796,10 +815,11 @@ public static partial class math
         var grad1 = f1 > 0.0f ? (p - c1) / f1 : new float3(0.0f, 0.0f, 0.0f);
         var grad2 = f2 > 0.0f ? (p - c2) / f2 : new float3(0.0f, 0.0f, 0.0f);
 
-        // id comes from pcg4d over the winning cell alone, never from the pcg3d hash that produced
-        // its jitter: sharing a hash between id and jitter would make id a deterministic function of
-        // the jitter it is supposed to be independent from, correlated across every cell (F4).
-        var idHash = pcg4d(new float4(cellId, 0.0f));
+        // id comes from pcg4d over the winning cell's integer coordinate alone (same int-hashing
+        // rule as the jitter above), never from the pcg3d hash that produced its jitter: sharing a
+        // hash between id and jitter would make id a deterministic function of the jitter it is
+        // supposed to be independent from, correlated across every cell (F4).
+        var idHash = pcg4d(new int4(int3(cellId), 0));
 
         return new CultCellular(
             new float4(grad1, f1),

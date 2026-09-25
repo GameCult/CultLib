@@ -358,7 +358,7 @@ CultCellular cultmath_cellular(float3 p)
                     continue;
 
                 float3 neighbor = cell + float3(dx, dy, dz);
-                int3 hash = cultmath_pcg3d(neighbor);
+                int3 hash = cultmath_pcg3d(int3(neighbor));
                 float3 jitter = float3(
                     ((uint)hash.x >> 8) * (1.0 / 16777216.0),
                     ((uint)hash.y >> 8) * (1.0 / 16777216.0),
@@ -384,9 +384,9 @@ CultCellular cultmath_cellular(float3 p)
     float3 grad1 = f1 > 0.0 ? (p - c1) / f1 : float3(0.0, 0.0, 0.0);
     float3 grad2 = f2 > 0.0 ? (p - c2) / f2 : float3(0.0, 0.0, 0.0);
 
-    // id comes from pcg4d over the winning cell alone, never from the pcg3d hash that produced its
-    // jitter (F4).
-    int4 idHash = cultmath_pcg4d(float4(cellId, 0.0));
+    // id comes from pcg4d over the winning cell's integer coordinate alone (same int-hashing rule
+    // as the jitter above), never from the pcg3d hash that produced its jitter (F4).
+    int4 idHash = cultmath_pcg4d(int4(int3(cellId), 0));
 
     CultCellular result;
     result.nearest = float4(grad1, f1);
