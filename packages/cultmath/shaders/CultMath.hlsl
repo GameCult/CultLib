@@ -162,6 +162,115 @@ float cultmath_snoise(float2 value)
     return 130.0 * dot(m, g);
 }
 
+// Ashima Arts / Ian McEwan 3D simplex noise with analytic gradient (invariant 8), following the
+// differentiation in webgl-noise src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT; confirmed at
+// stegu/webgl-noise today), retargeted onto cultmath_snoise(float3)'s own constants (0.6 falloff
+// radius, permute(x) = mod289((34x+1)x), scale 42; see the C# math.snoise_grad comment for the full
+// derivation and why the differentiation itself is unaffected by that retargeting). Every local up
+// through p0..p3 and x0..x3 is cultmath_snoise(float3)'s own derivation verbatim.
+float4 cultmath_snoise_grad(float3 value)
+{
+    float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
+    float3 i = floor(value + dot(value, c.yyy));
+    float3 x0 = value - i + dot(i, c.xxx);
+    float3 g = step(x0.yzx, x0.xyz);
+    float3 l = 1.0 - g;
+    float3 i1 = min(g.xyz, l.zxy);
+    float3 i2 = max(g.xyz, l.zxy);
+    float3 x1 = x0 - i1 + c.xxx;
+    float3 x2 = x0 - i2 + c.yyy;
+    float3 x3 = x0 - 0.5;
+
+    i = cultmath_snoise_mod289(i);
+    float4 p = cultmath_snoise_permute(cultmath_snoise_permute(cultmath_snoise_permute(
+        i.z + float4(0.0, i1.z, i2.z, 1.0)) + i.y + float4(0.0, i1.y, i2.y, 1.0)) + i.x + float4(0.0, i1.x, i2.x, 1.0));
+
+    const float n_ = 0.142857142857;
+    float3 ns = float3(2.0 * n_, 0.5 * n_ - 1.0, n_);
+    float4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    float4 x_ = floor(j * ns.z);
+    float4 y_ = floor(j - 7.0 * x_);
+    float4 x = x_ * ns.x + ns.yyyy;
+    float4 y = y_ * ns.x + ns.yyyy;
+    float4 h = 1.0 - abs(x) - abs(y);
+
+    float4 b0 = float4(x.xy, y.xy);
+    float4 b1 = float4(x.zw, y.zw);
+    float4 s0 = floor(b0) * 2.0 + 1.0;
+    float4 s1 = floor(b1) * 2.0 + 1.0;
+    float4 sh = -step(h, 0.0);
+    float4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    float4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    float3 p0 = float3(a0.xy, h.x);
+    float3 p1 = float3(a0.zw, h.y);
+    float3 p2 = float3(a1.xy, h.z);
+    float3 p3 = float3(a1.zw, h.w);
+    float4 norm = 1.79284291400159 - 0.85373472095314 * float4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    float4 m0 = max(0.6 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    float4 m2 = m0 * m0;
+    float4 m3 = m2 * m0;
+    float4 m4 = m2 * m2;
+
+    float4 px = float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
+    float value2 = 42.0 * dot(m4, px);
+    float3 grad = -8.0 * m3.x * x0 * px.x + m4.x * p0
+        + -8.0 * m3.y * x1 * px.y + m4.y * p1
+        + -8.0 * m3.z * x2 * px.z + m4.z * p2
+        + -8.0 * m3.w * x3 * px.w + m4.w * p3;
+    grad *= 42.0;
+
+    return float4(grad, value2);
+}
+
+// Octave sum of cultmath_snoise_grad (invariant 8); see the C# math.fbm_grad comment for the
+// per-octave frequency/amplitude derivation and why octaves is clamped.
+float4 cultmath_fbm_grad(float3 p, int octaves, float lacunarity, float gain)
+{
+    octaves = clamp(octaves, 0, 16);
+    float amplitude = 1.0;
+    float frequency = 1.0;
+    float value = 0.0;
+    float3 gradient = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < octaves; i++)
+    {
+        float4 n = cultmath_snoise_grad(p * frequency);
+        value += amplitude * n.w;
+        gradient += amplitude * frequency * n.xyz;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return float4(gradient, value);
+}
+
+// Ridged multifractal noise (Musgrave, Texturing and Modeling, ch. 16); see the C# math.ridged_grad
+// comment for the fold/sign derivation, the deliberate crease at n = 0, and why octaves is clamped.
+float4 cultmath_ridged_grad(float3 p, int octaves, float lacunarity, float gain)
+{
+    octaves = clamp(octaves, 0, 16);
+    float amplitude = 1.0;
+    float frequency = 1.0;
+    float value = 0.0;
+    float3 gradient = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < octaves; i++)
+    {
+        float4 n = cultmath_snoise_grad(p * frequency);
+        float s = sign(n.w);
+        value += amplitude * (1.0 - abs(n.w));
+        gradient += -amplitude * frequency * s * n.xyz;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return float4(gradient, value);
+}
+
 float cultmath_lengthsq(float2 value) { return dot(value, value); }
 float cultmath_lengthsq(float3 value) { return dot(value, value); }
 float cultmath_lengthsq(float4 value) { return dot(value, value); }
