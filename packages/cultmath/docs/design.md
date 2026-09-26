@@ -233,6 +233,28 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   paths are proven bit-identical (`PrunedSearchIsBitIdenticalToTheUnprunedFiveCubedSearch`,
   which samples `[-50, 50]^3`, is comfortably inside that domain).
 
+- `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
+  following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
+  Arts / Ian McEwan, MIT) but retargeted onto `snoise(float3)`'s own falloff
+  radius (`0.6`), permutation (`mod289((34x+1)x)`), and scale (`42`) rather
+  than upstream's `0.5`/`mod289((34x+10)x)`/`105`: the differentiation itself
+  does not depend on those constants (per corner, `m0 = max(radius -
+  dot(x,x), 0)`, so `d(m0^4 * dot(p,x))/dx = -8*m0^3*dot(p,x)*x + m0^4*p`,
+  summed over the four corners and scaled by the same constant as the value),
+  so `.w` stays exactly `snoise(float3)`'s own field. `fbm_grad` and
+  `ridged_grad` are octave sums of `snoise_grad`: each octave samples at
+  `p * frequency`, so by the chain rule its gradient scales by that same
+  frequency, and both amplitude (`gain`) and frequency (`lacunarity`) compound
+  per octave rather than applying once to the whole sum. `ridged_grad` folds
+  each octave about zero (`Σ aᵢ(1 − |nᵢ|)`, gradient `−Σ aᵢfᵢ sign(nᵢ)∇nᵢ`,
+  Musgrave's ridged multifractal, *Texturing and Modeling* ch. 16); the crease
+  at `nᵢ = 0` is deliberate (the operator's dune term, 2026-09-25), not a bug.
+  Both clamp `octaves` to `[0, 16]`: `HlslSourceCompatibilityTests`'s bit-parity
+  oracle drives every mirrored `int` parameter across the full int32 range,
+  which is the right domain for `pcg3d`/`pcg4d`'s O(1) hash inputs but would
+  turn an unclamped octave count into a multi-billion-iteration loop for these
+  two mirrors.
+
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
 permutation over one LCG step, and `pcg3d`/`pcg4d` are the paper's (3 → 3) and
