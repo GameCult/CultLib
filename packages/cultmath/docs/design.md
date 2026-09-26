@@ -186,7 +186,8 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   offset axis and within `1 - m` of the near face on each of the other two
   axes, so that neighbour's squared distance is at most
   `(1 + m)^2 + 2*(1 - m)^2 = 3 - 2m + 3m^2 <= 3` for every `m` in `[0, 1/2]`
-  (3 at `m = 0`, falling to 2.5 at `m = 1/2`), and strictly below 3 because
+  (3 at `m = 0`, dipping to a minimum of `8/3 ~= 2.667` at `m = 1/3`, then
+  rising back to 2.75 at `m = 1/2`), and strictly below 3 because
   the jitter never reaches exactly 0 or 1. `F2` is at most the larger of
   these two real candidates (any two real candidates upper-bound the
   2nd-smallest value over the full infinite candidate set), so `F1 <
@@ -252,14 +253,16 @@ integer-valued float is not the same permutation as hashing the integer: two
 adjacent cells' bit patterns share more structure (both have the same
 exponent and a mantissa that differs by one increment) than two adjacent
 integers do going into `pcg3d`'s own mixing, and that residual structure
-survived into the jitter. Soul measured jitter.x's marginal chi-square
-statistic at 203.8 over 1,000,000 cells against pcg3d(float3)'s bit-pattern
-hash (15 degrees of freedom; critical value 37.7) — soundly rejecting
-uniformity — and at a value consistent with the null hypothesis once hashed
-as `pcg3d(int3(...))` instead (cut 2a-i). `CellularAndSminGradTests`
-(`JitterAndIdPassAChiSquareUniformityTest`) pins this behaviourally: the
-jitter marginals and the id pass a chi-square test at a stated significance,
-and a mutant that hashes the float bits instead of the integer fails it.
+survived into the jitter. Hashing the integer cell coordinate directly is
+exact and runtime-independent, and it is the HLSL mirror's own hash, so C#
+and shader agree bit-for-bit. What pins this is the oracle and mirror tests,
+not a uniformity measurement: reverting to hashing the float bits (or the
+sin-based hash) is caught by `ProductionSearchMatchesTheBruteForceOracleExactly`,
+`EveryMirrorFunctionMatchesCSharpMath`, `F1NeverExceedsF2`, and the other
+tests that key off the integer-hash fixtures (cut 2a-i). `CellularAndSminGradTests`
+(`JitterAndIdPassAChiSquareUniformityTest`) checks the uniformity of the hash
+as `cellular` uses it: the jitter marginals and the id pass a chi-square test
+at a stated significance against `pcg3d(int3(...))`.
 
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
 Unity.Mathematics: `hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped

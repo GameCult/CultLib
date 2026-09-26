@@ -715,9 +715,12 @@ public static partial class math
     // gradients, searched over the jittered neighbourhood of feature points. Feature points are
     // selected with pcg3d over each neighbour's integer cell coordinate (design.md, "Integer
     // hashing"), never the float32 bit pattern of that coordinate and never the sin-based hash.
-    // Hashing the float bits instead of the integers correlated jitter.x across a 15-degree-of-
-    // freedom marginal chi-square test (Soul, cut 2a-i: 203.8 against a critical value of 37.7);
-    // hashing the integer coordinate directly removes that correlation (F4/jitter uniformity). The
+    // Hashing the integer cell coordinate directly is exact and runtime-independent, and it is what
+    // the HLSL mirror does, so C# and shader stay bit-for-bit aligned. What pins this is the oracle
+    // and mirror tests, not a uniformity measurement: reverting to hashing the float32 bit pattern
+    // (or the sin-based hash) is caught by ProductionSearchMatchesTheBruteForceOracleExactly,
+    // EveryMirrorFunctionMatchesCSharpMath, F1NeverExceedsF2, and the other tests that key off the
+    // integer-hash fixtures. The
     // gradient of a distance field, del|p - c|, is the unit vector (p - c)/|p - c|; that is undefined exactly at
     // a feature point (F1 = 0 or F2 = 0), so cellular follows the repo's existing degenerate-normal
     // convention (GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle: guard the zero-length
@@ -743,7 +746,8 @@ public static partial class math
     // query within (1 + m) of the far face on the offset axis and within (1 - m) of the near face on
     // each of the other two axes, so that neighbour's squared distance is at most
     // (1 + m)^2 + 2*(1 - m)^2 = 3 - 2m + 3m^2, which is <= 3 for every m in [0, 1/2] (3 at m = 0,
-    // falling to 2.5 at m = 1/2), and strictly below 3 because the jitter never reaches exactly 0 or
+    // dipping to a minimum of 8/3 ~= 2.667 at m = 1/3, then rising back to 2.75 at m = 1/2), and
+    // strictly below 3 because the jitter never reaches exactly 0 or
     // 1 (u_i - j_i stays strictly inside (-1, 1), so this bound, like the own-cell one, is never
     // tight). F2 is at most the larger of these two real candidates (adding candidates to a set can
     // only lower or hold its 2nd-smallest value), so F1 < sqrt(3) and F2 < sqrt(3) always: roughly
