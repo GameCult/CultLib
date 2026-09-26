@@ -25,6 +25,8 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise", typeof(float2)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_value_noise_bicubic", typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_smin_grad", typeof(float4), typeof(float4), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_cellular", typeof(float3)));
     }
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
@@ -62,6 +64,41 @@ public sealed class HlslSourceCompatibilityTests
         for (var k = 0; k < 64; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i]); }
         for (var k = 0; k < 16; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i & ~1]); }
 
+        // Points aimed squarely at cellular's HLSL mirror (F6/F3 Soul findings): the generic random
+        // and special-value cases above pass ~92 inputs through cultmath_cellular and never happen to
+        // hit a point where a radius-2 cell wins (about 3.5e-5 of points, Soul measured) or an
+        // integer point at or past 2^23, so an HLSL mutant of the search radius, the prune, or the
+        // removed F2=0 guard can survive this test even though it changes cellular's real output.
+        void AddPointCase(float3 point)
+        {
+            var values = new[] { point.x, point.y, point.z };
+            cases.Add(i => i < values.Length ? values[i] : 0.0f);
+        }
+
+        // The six constructed points from CellularAndSminGradTests.SearchReachesEveryAxisAlignedRadiusTwoSlice:
+        // each one realizes a different axis-aligned radius-2 offset as F1 or F2, which is exactly
+        // the case an `if (lowerBound >= f2)` prune written as `>= f1`, or a search radius narrowed on
+        // one axis (`dz < 2`, `dx` starting at -1), changes.
+        foreach (var offset in CellularAndSminGradTests.AxisAlignedRadiusTwoOffsets)
+            AddPointCase(CellularAndSminGradTests.FindPointRealizingOffset(offset));
+
+        // Integer points at 2^24, several, both signs: past |p| ~= 2^23 distinct cells' jittered
+        // features can round onto the same float32 value (design.md, "Precision domain"), making
+        // F2 = 0 reachable and exercising the grad2 = f2 > 0 ? ... : zero guard this test would
+        // otherwise never touch.
+        const float twoTo24 = 16777216.0f;
+        AddPointCase(new float3(twoTo24, twoTo24, twoTo24));
+        AddPointCase(new float3(-twoTo24, -twoTo24, -twoTo24));
+        AddPointCase(new float3(twoTo24 + 3.0f, -twoTo24 + 5.0f, twoTo24 - 7.0f));
+        AddPointCase(new float3(-twoTo24 + 11.0f, twoTo24 - 13.0f, -twoTo24 + 17.0f));
+
+        // One exact F1 = F2 tie point: the midpoint of two adjacent cells' feature points is
+        // bit-exact-equidistant from both by construction (negating a vector does not change its
+        // length, and p - a = -(p - b) here by symmetry), without needing to search for one.
+        var tieMidpoint = (CellularAndSminGradTests.FeaturePoint(new float3(0.0f, 0.0f, 0.0f))
+            + CellularAndSminGradTests.FeaturePoint(new float3(1.0f, 0.0f, 0.0f))) * 0.5f;
+        AddPointCase(tieMidpoint);
+
         var mismatches = new List<string>();
         var compared = new HashSet<string>();
         foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_")))
@@ -82,17 +119,93 @@ public sealed class HlslSourceCompatibilityTests
                     : Activator.CreateInstance(t, Components(t).Select(f => Scalar(f.FieldType, input(slot++))).ToArray())!).ToArray();
                 var expected = Values(counterpart.Invoke(null, args)!);
                 var actual = Values(mirror.Invoke(shader, args)!);
-                if (expected.Length != actual.Length || expected.Zip(actual).Any(p => p.First is float a && p.Second is float b
-                    ? !(float.IsNaN(a) && float.IsNaN(b)) && BitConverter.SingleToInt32Bits(a) != BitConverter.SingleToInt32Bits(b)
-                    : !p.First.Equals(p.Second)))
+                if (!BitwiseEqual(expected, actual))
                 {
-                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a))))}): C# {string.Join(" ", expected)}, mirror {string.Join(" ", actual)}");
+                    mismatches.Add($"{mirror.Name}({string.Join(", ", args.Select(a => string.Join(" ", Values(a).Select(v => v.Value))))}): C# {string.Join(" ", expected.Select(v => v.Value))}, mirror {string.Join(" ", actual.Select(v => v.Value))}");
                 }
             }
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(28, compared.Count);
+        Assert.Equal(30, compared.Count);
+    }
+
+    /// <summary>
+    /// A hand-built pair of structs standing in for a mirror struct return and its C# counterpart
+    /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>): same field shape,
+    /// different concrete type, exactly like the real mirror comparison. Proves the field-by-field,
+    /// bit-for-bit walk actually rejects a struct whose field differs; without this, the walk could
+    /// have been comparing lengths only, or skipping the nested vector's own components.
+    /// </summary>
+    private struct StructMirrorProbeExpected { public float4 first; public float second; }
+    private struct StructMirrorProbeActual { public float4 first; public float second; }
+
+    [Fact]
+    public void StructReturnComparisonRejectsAMismatchedField()
+    {
+        var expected = new StructMirrorProbeExpected { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.0f };
+        var matching = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.0f };
+        var mismatchedLeaf = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, 3.0f, 4.0f), second = 5.5f };
+        var mismatchedNestedComponent = new StructMirrorProbeActual { first = new float4(1.0f, 2.0f, -3.0f, 4.0f), second = 5.0f };
+
+        Assert.True(BitwiseEqual(Values(expected), Values(matching)));
+        Assert.False(BitwiseEqual(Values(expected), Values(mismatchedLeaf)));
+        Assert.False(BitwiseEqual(Values(expected), Values(mismatchedNestedComponent)));
+    }
+
+    /// <summary>
+    /// Struct shapes standing in for CultCellular's own field order (<c>nearest; edge; id</c>), used
+    /// to falsify two named mutants (F2): H2 declares the mirror struct with its first two fields
+    /// swapped (<c>edge; nearest; id</c>) and swaps the assignments to match, so every leaf VALUE
+    /// still lands in the same POSITION as the correct struct; only the field NAME at each position
+    /// differs. H3 renames and retypes every field (id becomes an int carrying the same bits) while
+    /// keeping the original position order, so only NAME and TYPE differ, never position.
+    /// </summary>
+    private struct NearestEdgeIdExpected { public float4 nearest; public float4 edge; public float id; }
+    private struct EdgeNearestIdSwappedNames { public float4 edge; public float4 nearest; public float id; }
+    private struct RenamedAndRetypedFields { public float4 a; public float4 b; public int c; }
+
+    [Fact]
+    public void StructReturnComparisonRejectsFieldsSwappedByNameEvenWhenValuesAlign()
+    {
+        // H2: the mutant struct's field ORDER is (edge, nearest, id), and its assignments are
+        // swapped to match, so declaration-position values are identical to the correct struct's.
+        // Only checking names (not just position) can tell these apart.
+        var expected = new NearestEdgeIdExpected
+        {
+            nearest = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            edge = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            id = 9.0f,
+        };
+        var swapped = new EdgeNearestIdSwappedNames
+        {
+            edge = new float4(1.0f, 2.0f, 3.0f, 4.0f), // holds what should be "nearest"'s value.
+            nearest = new float4(5.0f, 6.0f, 7.0f, 8.0f), // holds what should be "edge"'s value.
+            id = 9.0f,
+        };
+
+        Assert.False(BitwiseEqual(Values(expected), Values(swapped)));
+    }
+
+    [Fact]
+    public void StructReturnComparisonRejectsRenamedAndRetypedFields()
+    {
+        // H3: field order matches the correct struct exactly, but every field is renamed, and id is
+        // retyped from float to int carrying the same bit pattern the correct id would round to.
+        var expected = new NearestEdgeIdExpected
+        {
+            nearest = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            edge = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            id = 9.0f,
+        };
+        var renamed = new RenamedAndRetypedFields
+        {
+            a = new float4(1.0f, 2.0f, 3.0f, 4.0f),
+            b = new float4(5.0f, 6.0f, 7.0f, 8.0f),
+            c = BitConverter.SingleToInt32Bits(9.0f),
+        };
+
+        Assert.False(BitwiseEqual(Values(expected), Values(renamed)));
     }
 
     // Integer arguments take the bit pattern of the float input, so specials become 0, 0x80000000, NaN bits, ...
@@ -101,10 +214,41 @@ public sealed class HlslSourceCompatibilityTests
     private static object Scalar(Type t, float f) => t == typeof(float) ? f
         : t == typeof(int) ? BitConverter.SingleToInt32Bits(f) : (object)(uint)BitConverter.SingleToInt32Bits(f);
 
+    // Scoped to scalar-typed fields: this only ever builds function ARGUMENTS (float2/3/4, int2/3/4, ...),
+    // never a struct-of-struct return, so it must not recurse.
     private static FieldInfo[] Components(Type t) => t.GetFields().Where(f => !f.IsStatic && Scalars.Contains(f.FieldType)).ToArray();
 
-    private static object[] Values(object value) => Scalars.Contains(value.GetType()) ? new[] { value }
-        : Components(value.GetType()).Select(field => field.GetValue(value)!).ToArray();
+    /// <summary>
+    /// One flattened scalar leaf of a (possibly nested) return value: its declaration path (field
+    /// names joined by '.'), its declared type, and its value. Carrying path and type, not just the
+    /// value, is what lets the struct-return comparison reject a field that was renamed or retyped
+    /// but landed in the same position (F2): a positional-only comparison cannot tell "edge" holding
+    /// nearest's value apart from "nearest" holding it.
+    /// </summary>
+    private readonly record struct Leaf(string Path, Type Type, object Value);
+
+    /// <summary>
+    /// Flattens a return value to its scalar leaves, recursing through struct fields of any type
+    /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>'s float4/float4/float
+    /// fields) so a struct return is compared field by field, down to bit-for-bit scalars, exactly
+    /// like a bare vector return already is. Each leaf keeps the field name (and its ancestors') and
+    /// declared type it was read from.
+    /// </summary>
+    private static Leaf[] Values(object value, string path = "") => Scalars.Contains(value.GetType())
+        ? new[] { new Leaf(path, value.GetType(), value) }
+        : value.GetType().GetFields().Where(f => !f.IsStatic)
+            .SelectMany(f => Values(f.GetValue(value)!, path.Length == 0 ? f.Name : path + "." + f.Name))
+            .ToArray();
+
+    // Compares leaves by NAME and TYPE as well as value, in declaration order, so a mirror struct
+    // whose fields are reordered, renamed, or retyped relative to its C# counterpart fails here even
+    // when the flattened values happen to line up positionally (F2's H2/H3 mutants).
+    private static bool BitwiseEqual(Leaf[] expected, Leaf[] actual) =>
+        expected.Length == actual.Length && expected.Zip(actual).All(p =>
+            p.First.Path == p.Second.Path && p.First.Type == p.Second.Type &&
+            (p.First.Value is float a && p.Second.Value is float b
+                ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
+                : p.First.Value.Equals(p.Second.Value)));
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
@@ -122,7 +266,13 @@ public sealed class HlslSourceCompatibilityTests
         // 4. Floating literals gain the `f` suffix; an unsuffixed C# literal is a double.
         source = Regex.Replace(source, @"(?<![\w.])(\d+\.\d*(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)(?![\w.])", "$1f");
 
-        // 5. The file body is wrapped in a class; C# has no free functions.
+        // 5. Struct fields gain `public`; HLSL has no field access-modifier concept, and a C# struct's
+        //    fields default to private, which would hide them from the mirror test's reflection-based
+        //    field comparison (invariant 8's one struct return shape, e.g. CultCellular).
+        source = Regex.Replace(source, @"(?ms)(struct\s+\w+\s*\{)(.*?)(\};)", m =>
+            m.Groups[1].Value + Regex.Replace(m.Groups[2].Value, @"(?m)^(\s*)(\w+\s+\w+;)", "$1public $2") + m.Groups[3].Value);
+
+        // 6. The file body is wrapped in a class; C# has no free functions.
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + source + "\n}\n";
     }
 

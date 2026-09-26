@@ -1,5 +1,10 @@
 using System;
 
+// Cut 2a-i fix batch 1: cellular_unit's [0,1) mapping bug (F7) is only reachable from cellular's
+// private call sites; this lets CultMath.Tests probe it directly instead of hunting for a hash
+// input that happens to land on the bit pattern under test.
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("CultMath.Tests")]
+
 namespace CultMath;
 
 public static partial class math
@@ -687,6 +692,152 @@ public static partial class math
     private static float4 snoise_mod289(float4 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
     private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
     private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
+
+    // Inigo Quilez, "smooth minimum" (https://iquilezles.org/articles/smin/): the quadratic-polynomial
+    // smin, carried to value-and-gradient form (invariant 8). h is affine in (b.w - a.w) inside the
+    // smoothing band, so differentiating value = lerp(b.w, a.w, h) - k*h*(1-h) with respect to
+    // position, the terms carrying dh/dp cancel exactly (dh/dp * [(a.w-b.w) - k + 2*k*h] and the
+    // bracket is identically zero given how h is built from a.w-b.w). What is left is exactly
+    // lerp(∇b, ∇a, h): the gradient blend is not an approximation, it is the analytic gradient.
+    // Outside the band (|a.w - b.w| >= k), h saturates to 0 or 1 and this is exactly min(a, b) with
+    // that input's own gradient, continuously (h and the correction term both reach the boundary at
+    // the same value from the smooth side, so there is no kink to exclude here the way cellular's
+    // F1 = F2 seam needs one).
+    public static float4 smin_grad(float4 a, float4 b, float k)
+    {
+        var h = saturate(0.5f + 0.5f * (b.w - a.w) / k);
+        var value = lerp(b.w, a.w, h) - k * h * (1.0f - h);
+        var gradient = lerp(new float3(b.x, b.y, b.z), new float3(a.x, a.y, a.z), h);
+        return new float4(gradient, value);
+    }
+
+    // Worley, "A Cellular Texture Basis Function" (SIGGRAPH 1996): F1/F2 and their analytic
+    // gradients, searched over the jittered neighbourhood of feature points. Feature points are
+    // selected with pcg3d over each neighbour's integer cell coordinate (design.md, "Integer
+    // hashing"), never the float32 bit pattern of that coordinate and never the sin-based hash.
+    // Hashing the integer cell coordinate directly is exact and runtime-independent, and it is what
+    // the HLSL mirror does, so C# and shader stay bit-for-bit aligned. What pins this is the oracle
+    // and mirror tests, not a uniformity measurement: reverting to hashing the float32 bit pattern
+    // (or the sin-based hash) is caught by ProductionSearchMatchesTheBruteForceOracleExactly,
+    // EveryMirrorFunctionMatchesCSharpMath, F1NeverExceedsF2, and the other tests that key off the
+    // integer-hash fixtures. The
+    // gradient of a distance field, del|p - c|, is the unit vector (p - c)/|p - c|; that is undefined exactly at
+    // a feature point (F1 = 0 or F2 = 0), so cellular follows the repo's existing degenerate-normal
+    // convention (GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle: guard the zero-length
+    // case and return the zero vector instead of the NaN a bare normalize would produce there).
+    //
+    // The search radius is 2 cells on every axis (5x5x5), not the classic 1-cell (3x3x3) radius,
+    // because 3x3x3 is not exact: measured 9 of 400,000 points in [-50,50]^3 land on the wrong F2
+    // (worst error 0.088), and past |p| of about 2^23 the float32 jitter can put two distinct cells'
+    // features on the same value, which 3x3x3 has no chance of noticing either way. 5x5x5 is exact,
+    // not merely safer, by the following argument:
+    //
+    // Let u = p - cell be the query's position inside its own cell (u in [0,1)^3 per component), and
+    // let a candidate feature at integer cell offset d = (dx, dy, dz) sit at d + j for some jitter j
+    // in [0,1)^3. Per axis, the displacement from p to that feature is (u_i - j_i) - d_i; since
+    // u_i - j_i is always strictly inside (-1, 1) regardless of the actual u_i and j_i values,
+    // |displacement_i| is always strictly greater than max(0, |d_i| - 1). So every cell with |d_i| >=
+    // 3 on some axis is strictly farther than 2 from p (that axis alone already gives max(0, 3-1) =
+    // 2). Now bound F1 and F2 from above using two real, always-present candidates: the query's own
+    // cell (d = 0), whose distance is always strictly less than sqrt(3) (every axis strictly under
+    // 1); and the near-side neighbour on whichever single axis's u_i sits closest to a cell
+    // boundary. Let m = min(u_i, 1 - u_i) on that chosen axis (m is in [0, 1/2] by construction,
+    // since it is the smaller of the two). Stepping one cell towards that nearer boundary puts the
+    // query within (1 + m) of the far face on the offset axis and within (1 - m) of the near face on
+    // each of the other two axes, so that neighbour's squared distance is at most
+    // (1 + m)^2 + 2*(1 - m)^2 = 3 - 2m + 3m^2, which is <= 3 for every m in [0, 1/2] (3 at m = 0,
+    // dipping to a minimum of 8/3 ~= 2.667 at m = 1/3, then rising back to 2.75 at m = 1/2), and
+    // strictly below 3 because the jitter never reaches exactly 0 or
+    // 1 (u_i - j_i stays strictly inside (-1, 1), so this bound, like the own-cell one, is never
+    // tight). F2 is at most the larger of these two real candidates (adding candidates to a set can
+    // only lower or hold its 2nd-smallest value), so F1 < sqrt(3) and F2 < sqrt(3) always: roughly
+    // 1.732 < 2, margin 2 - sqrt(3) ~= 0.268 (Soul's adversarial check, cut 2a-i: the worst
+    // realizable in-box F2 is exactly sqrt(3), reached only in the unattainable limit at a cell
+    // corner). Every cell outside the 5x5x5 block is farther than 2, hence farther than either F1 or
+    // F2, so the true global F1 and F2 are always inside it. (The matching argument for 3x3x3 only
+    // reaches radius 1, whose excluded cells start at distance > 1, which is less than the 1.732
+    // ceiling — the gap 3x3x3's failures live in.)
+    //
+    // An earlier version of this proof picked the near-side neighbour on a fixed axis rather than
+    // whichever axis sits closest to its boundary, and that version is wrong (Soul, cut 2a-i):
+    // u = (0.5, 0, 0) with the x-neighbour's jittered feature at (-1, 1 - 2^-24, 1 - 2^-24) gives a
+    // distance of about 2.06, outside the radius-2 exclusion the proof needs. Choosing the axis by
+    // proximity to its own boundary is what keeps m <= 1/2 and the bound at sqrt(3); x was the wrong
+    // axis to fix there because u.x = 0.5 is the point on the whole cube farthest from any boundary.
+    //
+    // The loop below still visits every one of the 125 cells in a fixed order, but skips the
+    // pcg3d/jitter/distance work for a cell whose distance cannot possibly beat the current f2: that
+    // per-cell lower bound (the max(0, |d_i| - 1) term above, combined across axes) depends only on
+    // the integer offset, never on p or the hash, so pruning a cell the unpruned loop would also
+    // have rejected changes no output bit (CellularExactSearchTests pins the pruned/unpruned
+    // equivalence and the exactness against a 7x7x7 brute-force oracle).
+    public static CultCellular cellular(float3 p)
+    {
+        var cell = floor(p);
+        var f1 = 1.0e30f;
+        var f2 = 1.0e30f;
+        var c1 = new float3(0.0f, 0.0f, 0.0f);
+        var c2 = new float3(0.0f, 0.0f, 0.0f);
+        var cellId = new float3(0.0f, 0.0f, 0.0f);
+
+        for (var dz = -2; dz <= 2; dz++)
+        {
+            var lz = max(0.0f, abs((float)dz) - 1.0f);
+            for (var dy = -2; dy <= 2; dy++)
+            {
+                var ly = max(0.0f, abs((float)dy) - 1.0f);
+                for (var dx = -2; dx <= 2; dx++)
+                {
+                    var lx = max(0.0f, abs((float)dx) - 1.0f);
+                    var lowerBound = sqrt(lx * lx + ly * ly + lz * lz);
+                    if (lowerBound >= f2)
+                        continue;
+
+                    var neighbor = cell + new float3(dx, dy, dz);
+                    var hash = pcg3d(int3(neighbor));
+                    var jitter = new float3(cellular_unit(hash.x), cellular_unit(hash.y), cellular_unit(hash.z));
+                    var feature = neighbor + jitter;
+                    var d = distance(p, feature);
+
+                    if (d < f1)
+                    {
+                        f2 = f1; c2 = c1;
+                        f1 = d; c1 = feature; cellId = neighbor;
+                    }
+                    else if (d < f2)
+                    {
+                        f2 = d; c2 = feature;
+                    }
+                }
+            }
+        }
+
+        // F1 = 0 is reachable (p sits exactly on a feature point). F2 = 0 needs two distinct cells'
+        // pcg3d-jittered features to land on the same float32 value in every component: unreachable
+        // at ordinary magnitudes, but confirmed reachable past roughly |p| = 2^23 (design.md,
+        // "Precision domain"), so both share the same degenerate-gradient guard.
+        var grad1 = f1 > 0.0f ? (p - c1) / f1 : new float3(0.0f, 0.0f, 0.0f);
+        var grad2 = f2 > 0.0f ? (p - c2) / f2 : new float3(0.0f, 0.0f, 0.0f);
+
+        // id comes from pcg4d over the winning cell's integer coordinate alone (same int-hashing
+        // rule as the jitter above), never from the pcg3d hash that produced its jitter: sharing a
+        // hash between id and jitter would make id a deterministic function of the jitter it is
+        // supposed to be independent from, correlated across every cell (F4).
+        var idHash = pcg4d(new int4(int3(cellId), 0));
+
+        return new CultCellular(
+            new float4(grad1, f1),
+            new float4(grad2 - grad1, f2 - f1),
+            cellular_unit(idHash.w));
+    }
+
+    // Maps a hash component's uint bit pattern to [0, 1) using the top 24 bits, so the result is
+    // always strictly less than 1: a plain divide-by-2^32 rounds 0xFFFFFF80..0xFFFFFFFF up to
+    // exactly 1.0f in float32, outside the documented range. (uint >> 8) has at most 24 significant
+    // bits, which float32's 24-bit mantissa represents exactly, and the division is by an exact power
+    // of two, so both the shift-and-convert and the divide are the same IEEE-754 round-to-nearest on
+    // dxc and C#, bit-exact on both sides.
+    internal static float cellular_unit(int bits) => ((uint)bits >> 8) * (1.0f / 16777216.0f);
 
     public static float value_noise(float2 position)
     {

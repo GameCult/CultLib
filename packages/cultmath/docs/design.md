@@ -100,7 +100,10 @@ needs anything else, the test fails:
    no CultMath analog.
 3. File-scope `static const` becomes `const`.
 4. Floating literals gain `f` (`0.5` becomes `0.5f`).
-5. The file body is wrapped in a class, since C# has no free functions; HLSL
+5. Struct fields gain `public`. HLSL struct members have no access-modifier
+   concept; a C# struct's fields default to `private`, which would hide them
+   from the mirror test's reflection-based field comparison.
+6. The file body is wrapped in a class, since C# has no free functions; HLSL
    functions become private instance methods.
 
 HLSL constructs that stay outside the target and must not appear in the mirror:
@@ -120,6 +123,116 @@ compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
+The comparison also allows exactly one struct return shape: a mirror function
+whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
+fields is compared to its C# counterpart field by field, recursing into each
+field's own components, down to bit-for-bit scalars, matching each leaf's
+declaration path (field names, not just position) and declared type as well
+as its value. `CultCellular` (`math.cs`, `cellular`) is the first and, for
+now, only consumer. A struct return with a mismatched, reordered-by-name, or
+retyped field does not get a second comparison path or a shape of its own;
+it fails the same walk that already handles a bare vector return.
+
+## Invariant 8: Value-and-Gradient Primitives
+
+A primitive tagged invariant 8 returns its value and analytic gradient
+together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
+(a value-only form would be a second path with no consumer). `smin_grad` and
+`cellular` are the first primitives in this family:
+
+- `smin_grad(float4 a, float4 b, float k)` is Inigo Quilez's quadratic-polynomial
+  smooth minimum ("smooth minimum",
+  <https://iquilezles.org/articles/smin/>), carried to value-and-gradient
+  form. Its blend factor `h` is affine in `b.w - a.w`, so differentiating the
+  value with respect to position, the terms carrying `dh/dp` cancel exactly;
+  the surviving gradient is `lerp(∇b, ∇a, h)`, the same `h` the value uses.
+  This is the analytic gradient, not an approximation, and it is continuous
+  across the `|a.w - b.w| = k` seam where `h` saturates to 0 or 1.
+- `cellular(float3 p)` is Worley's cellular texture basis function ("A
+  Cellular Texture Basis Function", SIGGRAPH 1996), searched over the
+  jittered 5×5×5 neighbourhood of feature points selected by `pcg3d` (never
+  the sin-based `hash`), with cells whose position-only lower bound already
+  exceeds the running F2 skipped before their hash is even computed. It
+  returns `CultCellular { nearest, edge, id }`: `nearest` is `(∇F1, F1)`,
+  `edge` is `(∇F2 - ∇F1, F2 - F1)`, and `id` is the nearest cell's `pcg4d`
+  hash (over the cell coordinate alone, never the `pcg3d` hash that produced
+  its jitter) mapped to `[0, 1)`. `∇F1` and `∇F2` are each undefined exactly
+  at their own feature point (`F1 = 0` or `F2 = 0`); `cellular` follows the
+  repo's existing degenerate-normal convention
+  (`GameCult.Geometry.CultGeometryIsoSurface.EmitOrientedTriangle`, which
+  guards a zero-length normal and returns the zero vector instead of the NaN
+  a bare `normalize` gives there) and returns the zero vector rather than NaN
+  for either. `F1 = 0` is ordinary (`p` sits on a feature point); `F2 = 0`
+  needs two distinct cells' `pcg3d`-jittered feature points to land on the
+  same float32 value in every component, which is unreachable at ordinary
+  magnitudes but confirmed reachable (see "Precision domain" below). The
+  identity of the nearest and second-nearest feature point changes
+  discontinuously across the `F1 = F2` set (a genuine kink, not a numerical
+  artifact), so `∇F1` and `∇F2` are only continuous away from that set.
+
+  The 5×5×5 radius is exact, not merely safer than the classic 3×3×3 radius:
+  for a query at position `u` inside its own cell (`u` in `[0, 1)^3` per
+  component) and a candidate feature at integer cell offset `d` with jitter
+  `j` in `[0, 1)^3`, the per-axis displacement `(u_i - j_i) - d_i` is always
+  strictly greater in magnitude than `max(0, |d_i| - 1)`, because
+  `u_i - j_i` is always strictly inside `(-1, 1)`. So any cell with `|d_i| >=
+  3` on some axis is strictly farther than 2 from the query. Two real,
+  always-present candidates bound `F1` and `F2`: the query's own cell, whose
+  distance is always strictly less than `sqrt(3)` (every axis strictly under
+  1); and the near-side neighbour on whichever single axis has `u_i` closest
+  to a cell boundary. Let `m = min(u_i, 1 - u_i)` on that chosen axis, so
+  `m` is in `[0, 1/2]` by construction. Stepping one cell towards that
+  nearer boundary puts the query within `1 + m` of the far face on the
+  offset axis and within `1 - m` of the near face on each of the other two
+  axes, so that neighbour's squared distance is at most
+  `(1 + m)^2 + 2*(1 - m)^2 = 3 - 2m + 3m^2 <= 3` for every `m` in `[0, 1/2]`
+  (3 at `m = 0`, dipping to a minimum of `8/3 ~= 2.667` at `m = 1/3`, then
+  rising back to 2.75 at `m = 1/2`), and strictly below 3 because
+  the jitter never reaches exactly 0 or 1. `F2` is at most the larger of
+  these two real candidates (any two real candidates upper-bound the
+  2nd-smallest value over the full infinite candidate set), so `F1 <
+  sqrt(3)` and `F2 < sqrt(3)` always, comfortably under the radius-2
+  exclusion distance of 2, with margin `2 - sqrt(3) ~= 0.268` (Soul's
+  adversarial check, cut 2a-i: the worst realizable in-box `F2` is exactly
+  `sqrt(3)`, reached only in the unattainable limit at a cell corner). 3×3×3's
+  matching argument only reaches radius 1, whose excluded cells start at
+  distance 1, short of the `sqrt(3)` ceiling — the gap its measured failures
+  (9 of 400,000 points in `[-50, 50]^3`, worst error 0.088) live in.
+
+  An earlier version of this proof picked the near-side neighbour on a fixed
+  axis instead of whichever axis sits closest to its own boundary, and that
+  version is wrong (Soul, cut 2a-i): `u = (0.5, 0, 0)` with the x-neighbour's
+  jittered feature at `(-1, 1 - 2^-24, 1 - 2^-24)` gives a distance of about
+  2.06, outside the radius-2 exclusion the proof needs — `u.x = 0.5` is the
+  point on the cell farthest from any boundary, so `x` was the wrong axis to
+  fix there. Choosing the axis by proximity to its own boundary is what keeps
+  `m <= 1/2` and the bound at `sqrt(3)`.
+
+  `CellularAndSminGradTests` pins both the prune's bit-identical equivalence
+  to an unpruned 5×5×5 reference and the search's exact agreement with an
+  independent 7×7×7 brute-force oracle.
+
+  Precision domain: `cellular`'s exactness above is a statement about the
+  search radius, not about float32. Past `|p|` of roughly `2^23`, adjacent
+  integer cells stop being distinguishable from their neighbours at float32
+  precision in some directions, and distinct cells' jittered features can
+  round onto the same value, making `F1 = F2` ties (and, per-component,
+  `F2 = 0`) increasingly common from about `1e6` and confirmed at `2^24`
+  (measured: 4096 of 4096 sampled integer points at `2^24` hit this before
+  the guard above). `cellular` stays finite there; it does not stay accurate
+  in the sense of matching the idealized real-valued Worley field.
+
+  The lower-bound prune's bit-identity to the unpruned 5×5×5 search also has
+  a domain: it holds for `|p| < 2^25`. Above that, `cell + d` (an integer
+  cell coordinate plus a small integer offset) starts to round in float32,
+  so a pruned cell's own recomputed offset can land on a different neighbour
+  than the unpruned loop visits at that same nominal `(dx, dy, dz)`, and the
+  two search paths diverge (Soul, cut 2a-i: measured 180 of 1,100,000 points
+  differ at `|p| ~= 3.4e7`). This is a float32-precision limit on the prune's
+  equivalence proof, not a bug in the prune itself: below `2^25` the two
+  paths are proven bit-identical (`PrunedSearchIsBitIdenticalToTheUnprunedFiveCubedSearch`,
+  which samples `[-50, 50]^3`, is comfortably inside that domain).
+
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
 permutation over one LCG step, and `pcg3d`/`pcg4d` are the paper's (3 → 3) and
@@ -128,9 +241,28 @@ uint multiply and add modulo 2^32 exactly as C# unchecked arithmetic does, so
 they are integer-exact in HLSL and on the CPU, GPU included, unlike the
 `sin`-based `hash`. CultMath has no uint vectors, so `pcg3d(int3)` and
 `pcg4d(int4)` carry uint bit patterns in int components. The `float2`/`float3`/`float4`
-overloads hash the IEEE-754 bits (`asuint`), so -0 and 0 hash differently.
-`pcg3d(float2)` holds z at 0, which is the paper's route for (2 → N) inputs.
-Seeds and other scalar uses take one output component.
+overloads hash the IEEE-754 bits (`asuint`), so -0 and 0 hash differently; they
+exist for callers that already hold a hash key as float bits, and `pcg3d(float2)`
+holds z at 0, which is the paper's route for (2 → N) inputs. Seeds and other
+scalar uses take one output component.
+
+`cellular`'s jitter and id always hash the integer cell coordinate directly
+(`pcg3d(int3(neighbor))`, `pcg4d(int4(int3(cellId), 0))`), never a cell
+coordinate's float32 bit pattern. Hashing the bit pattern of an
+integer-valued float is not the same permutation as hashing the integer: two
+adjacent cells' bit patterns share more structure (both have the same
+exponent and a mantissa that differs by one increment) than two adjacent
+integers do going into `pcg3d`'s own mixing, and that residual structure
+survived into the jitter. Hashing the integer cell coordinate directly is
+exact and runtime-independent, and it is the HLSL mirror's own hash, so C#
+and shader agree bit-for-bit. What pins this is the oracle and mirror tests,
+not a uniformity measurement: reverting to hashing the float bits (or the
+sin-based hash) is caught by `ProductionSearchMatchesTheBruteForceOracleExactly`,
+`EveryMirrorFunctionMatchesCSharpMath`, `F1NeverExceedsF2`, and the other
+tests that key off the integer-hash fixtures (cut 2a-i). `CellularAndSminGradTests`
+(`JitterAndIdPassAChiSquareUniformityTest`) checks the uniformity of the hash
+as `cellular` uses it: the jitter marginals and the id pass a chi-square test
+at a stated significance against `pcg3d(int3(...))`.
 
 Where HLSL is silent, CultMath keeps its own decisions and does not defer to
 Unity.Mathematics: `hash` returns float, and `Random` is CultMath's own xorshift32. Engine-shaped
