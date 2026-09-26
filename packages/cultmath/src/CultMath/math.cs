@@ -701,8 +701,9 @@ public static partial class math
     // mod289((34x+1)x) and scale 42 (Ashima's alternate, second-order-artifact-reduced noise3D.glsl
     // constants, already load-bearing here and pinned by the existing snoise tests): every local up
     // through p0..p3 and x0..x3 below is snoise(float3)'s own derivation verbatim, unchanged, so .w
-    // stays that same field (SnoiseGradTests pins the two within 1e-6 and reports whether they are
-    // bit-equal). The differentiation itself carries over unchanged from upstream, because it never
+    // stays that same field (NoiseGradTests.SnoiseGradValueIsBitEqualToSnoise pins the two bit-equal
+    // over a random sweep, stronger than the spec's 1e-6 floor). The differentiation itself carries
+    // over unchanged from upstream, because it never
     // depends on the threshold or permutation constants: per corner, m0 = max(radius - dot(x,x), 0),
     // so dm0/dx = -2x, and d(m0^4 * dot(p,x))/dx = 4*m0^3*(-2x)*dot(p,x) + m0^4*p
     // = -8*m0^3*dot(p,x)*x + m0^4*p (p is that corner's own gradient constant, independent of x, so
@@ -774,10 +775,10 @@ public static partial class math
     // running frequency, so by the chain rule its gradient scales by that same frequency
     // (d/dp[n(f*p)] = f * grad_n(f*p)); amplitude and frequency both compound per octave (gain,
     // lacunarity respectively), not applied once for the whole sum, so with 1 octave this is exactly
-    // snoise_grad (FbmGradTests). octaves is clamped to [0, 16]: HlslSourceCompatibilityTests'
-    // bit-parity oracle drives every mirrored int parameter across the full int32 range, which is
-    // the right domain for pcg3d/pcg4d's O(1) hash inputs but would turn an unclamped octave count
-    // into a multi-billion-iteration loop for this mirror.
+    // snoise_grad (NoiseGradTests.FbmGradWithOneOctaveEqualsSnoiseGrad). octaves is clamped to
+    // [0, 16]: HlslSourceCompatibilityTests' bit-parity oracle drives every mirrored int parameter
+    // across the full int32 range, which is the right domain for pcg3d/pcg4d's O(1) hash inputs but
+    // would turn an unclamped octave count into a multi-billion-iteration loop for this mirror.
     public static float4 fbm_grad(float3 p, int octaves, float lacunarity, float gain)
     {
         octaves = clamp(octaves, 0, 16);
@@ -801,7 +802,7 @@ public static partial class math
     // 2026-09-25): each octave folds snoise_grad about zero, value = Sum a_i*(1 - |n_i|), gradient =
     // -Sum a_i*f_i*sign(n_i)*grad(n_i), the same per-octave frequency scaling as fbm_grad's chain
     // rule plus the fold's sign flip (d|n|/dp = sign(n)*dn/dp). The crease at n_i = 0 is real and
-    // deliberate, not a bug: RidgedGradTests exclude a band around it, the same way cellular excludes
+    // deliberate, not a bug: NoiseGradTests excludes a band around it, the same way cellular excludes
     // its F1 = F2 seam. sign follows this codebase's HLSL-matching convention (design.md: sign
     // returns int, 0 at exactly 0), so the crease itself contributes no gradient rather than an
     // arbitrary one. Same octave clamp as fbm_grad, for the same bit-parity-oracle reason.
