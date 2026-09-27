@@ -547,10 +547,10 @@ function openProviderHealthIdentity(credentialBytes: Buffer): crypto.KeyObject {
   const [schema, identityId, publicKeyValue, protectedSeedValue, protectorKind, binding, version, assurance, createdAt, enrollmentNonceValue] = fields;
   if (schema !== "gamecult.provider_health_identity.private.v1" || version !== "v1") throw new Error("Provider-health identity schema is unsupported.");
   string(createdAt, "Provider-health identity creation time");
-  const enrollmentNonce = bytes(enrollmentNonceValue, "Provider-health enrollment nonce");
+  const enrollmentNonce = providerIdentityByteVector(enrollmentNonceValue, "Provider-health enrollment nonce");
   if (enrollmentNonce.length !== 32) throw new Error("Provider-health enrollment nonce has an invalid length.");
-  const publicKey = bytesValue(publicKeyValue, "Provider-health public key");
-  const protectedSeed = bytesValue(protectedSeedValue, "Provider-health protected seed");
+  const publicKey = Buffer.from(providerIdentityByteVector(publicKeyValue, "Provider-health public key"));
+  const protectedSeed = Buffer.from(providerIdentityByteVector(protectedSeedValue, "Provider-health protected seed"));
   const machineId = fs.readFileSync("/etc/machine-id", "utf8").trim();
   if (!machineId) throw new Error("Linux machine-id is unavailable for provider-health identity.");
   const expectedBinding = `${PROVIDER_PROTECTOR_CONTEXT}:machine-id-sha256:${sha256Hex(Buffer.from(machineId))}`;
@@ -585,6 +585,13 @@ function readProviderHealthIdentityCredential(bytes: Buffer): Uint8Array {
   }
   string(envelope[3], "Provider-health identity stored-at time");
   return bytesValue(envelope[2], "Provider-health identity payload");
+}
+
+function providerIdentityByteVector(value: unknown, label: string): Uint8Array {
+  if (!Array.isArray(value) || value.some((byte) => typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+    throw new Error(`${label} is not a byte vector.`);
+  }
+  return Uint8Array.from(value as number[]);
 }
 
 function readAuthorityRecordBytes(bytes: Buffer, type: string, schemaId: string): Uint8Array {

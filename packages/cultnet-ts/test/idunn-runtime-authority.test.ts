@@ -82,9 +82,9 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
     "gamecult-provider-health-identity",
     "gamecult.provider_health_identity.private.v1",
     Buffer.from(encode([
-      "gamecult.provider_health_identity.private.v1", providerIdentity, providerPublic, protectedSeed,
+      "gamecult.provider_health_identity.private.v1", providerIdentity, Array.from(providerPublic), Array.from(protectedSeed),
       "linux_file_mode_machine_id_binding", binding, "v1", "os_installation_file_bound_cloneable_baseline",
-      "2026-01-01T00:00:00Z", new Uint8Array(32).fill(0x2a),
+      "2026-01-01T00:00:00Z", Array(32).fill(0x2a),
     ])),
     "2026-01-01T00:00:00Z",
     "gamecult.provider_health_identity.private.v1",
