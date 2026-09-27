@@ -605,8 +605,7 @@ export function systemdListenPidMatches(listenPid: string | undefined, processPi
 }
 
 function readDescriptor(descriptor: number): Buffer {
-  const fdPath = `/proc/self/fd/${descriptor}`;
-  return fs.readFileSync(fdPath);
+  return fs.readFileSync(descriptor);
 }
 
 function privateKeyFromSeed(seed: Uint8Array): crypto.KeyObject {

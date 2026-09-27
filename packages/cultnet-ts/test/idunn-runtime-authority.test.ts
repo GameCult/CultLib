@@ -100,8 +100,8 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
   process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
   const realReadFileSync = fs.readFileSync.bind(fs);
   mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
-    if (filePath === "/proc/self/fd/3") return activationSeed;
-    if (filePath === "/proc/self/fd/4") return providerCredential;
+    if (filePath === 3) return activationSeed;
+    if (filePath === 4) return providerCredential;
     if (filePath === "/etc/machine-id") return machineId;
     return realReadFileSync(filePath as never, ...args as never[]);
   });
