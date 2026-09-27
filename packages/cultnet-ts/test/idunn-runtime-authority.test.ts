@@ -78,14 +78,18 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
     Buffer.from(binding, "utf8"),
   ])).digest();
   const protectedSeed = Buffer.from(providerSeed.map((value, index) => value ^ mask[index]!));
-  const providerCredential = cultCacheStore(
-    "gamecult.provider_health_identity", "gamecult.provider_health_identity.private.v1",
-    "gamecult-provider-health-identity", Buffer.from(encode([
+  const providerCredential = Buffer.from(encode([[
+    "gamecult-provider-health-identity",
+    "gamecult.provider_health_identity.private.v1",
+    Buffer.from(encode([
       "gamecult.provider_health_identity.private.v1", providerIdentity, providerPublic, protectedSeed,
       "linux_file_mode_machine_id_binding", binding, "v1", "os_installation_file_bound_cloneable_baseline",
       "2026-01-01T00:00:00Z", new Uint8Array(32).fill(0x2a),
     ])),
-  );
+    "2026-01-01T00:00:00Z",
+    "gamecult.provider_health_identity.private.v1",
+  ]]));
+  let descriptorProviderCredential = providerCredential;
 
   const originalEnvironment = { ...process.env };
   context.after(() => {
@@ -101,7 +105,7 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
   const realReadFileSync = fs.readFileSync.bind(fs);
   mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
     if (filePath === 3) return activationSeed;
-    if (filePath === 4) return providerCredential;
+    if (filePath === 4) return descriptorProviderCredential;
     if (filePath === "/etc/machine-id") return machineId;
     return realReadFileSync(filePath as never, ...args as never[]);
   });
@@ -121,6 +125,15 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
   const signedRecord = decode(signed.payload) as unknown[];
   assert.equal(crypto.verify(null, runtimePresenceProviderSigningMessage(proof), crypto.createPublicKey(providerKey), Buffer.from(signedRecord[21] as Uint8Array)), true);
   assert.equal(crypto.verify(null, runtimePresenceActivationSigningMessage(proof), crypto.createPublicKey(activationKey), Buffer.from(signedRecord[23] as Uint8Array)), true);
+
+  descriptorProviderCredential = Buffer.from(encode([
+    ...(decode(providerCredential) as unknown[][]),
+    ...(decode(providerCredential) as unknown[][]),
+  ]));
+  assert.throws(
+    () => loadIdunnRuntimeAuthorityFromEnvironment(target, contract, "127.0.0.1:17871"),
+    /exactly one envelope/,
+  );
 });
 
 function cultCacheStore(type: string, schemaId: string, key: string, payload: Uint8Array): Buffer {

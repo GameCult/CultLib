@@ -543,8 +543,7 @@ function decodeRoute(value: unknown): ExpectedIncarnation["route"] {
 }
 
 function openProviderHealthIdentity(credentialBytes: Buffer): crypto.KeyObject {
-  const record = readAuthorityRecordBytes(credentialBytes, "gamecult.provider_health_identity", "gamecult.provider_health_identity.private.v1");
-  const fields = decodeArray(record, 10, "provider-health identity");
+  const fields = decodeArray(readProviderHealthIdentityCredential(credentialBytes), 10, "provider-health identity");
   const [schema, identityId, publicKeyValue, protectedSeedValue, protectorKind, binding, version, assurance, createdAt, enrollmentNonceValue] = fields;
   if (schema !== "gamecult.provider_health_identity.private.v1" || version !== "v1") throw new Error("Provider-health identity schema is unsupported.");
   string(createdAt, "Provider-health identity creation time");
@@ -571,6 +570,21 @@ function openProviderHealthIdentity(credentialBytes: Buffer): crypto.KeyObject {
   const derivedId = sha256Hex(Buffer.concat([PROVIDER_ID_DOMAIN, derivedPublicKey]));
   if (!derivedPublicKey.equals(publicKey) || identityId !== derivedId) throw new Error("Provider-health private key differs from its enrolled identity.");
   return key;
+}
+
+function readProviderHealthIdentityCredential(bytes: Buffer): Uint8Array {
+  const decoded = decode(bytes);
+  if (!Array.isArray(decoded) || decoded.length !== 1) {
+    throw new Error("Provider-health identity credential must contain exactly one envelope.");
+  }
+  const envelope = array(decoded[0], 5, "Provider-health identity envelope");
+  if (envelope[0] !== "gamecult-provider-health-identity"
+    || envelope[1] !== "gamecult.provider_health_identity.private.v1"
+    || envelope[4] !== "gamecult.provider_health_identity.private.v1") {
+    throw new Error("Provider-health identity credential belongs to a different profile or schema.");
+  }
+  string(envelope[3], "Provider-health identity stored-at time");
+  return bytesValue(envelope[2], "Provider-health identity payload");
 }
 
 function readAuthorityRecordBytes(bytes: Buffer, type: string, schemaId: string): Uint8Array {
