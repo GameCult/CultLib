@@ -197,3 +197,17 @@ export {
   type RuntimePresenceHealth,
   type RuntimePresenceState,
 } from "./runtime-presence-health";
+
+export {
+  IDUNN_EXPECTED_INCARNATION_SCHEMA,
+  IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT,
+  IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
+  IDUNN_RUNTIME_BUNDLE_ENVIRONMENT,
+  IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT,
+  IDUNN_RUNTIME_ACTIVATION_SCHEMA,
+  createIdunnRuntimePresencePublisher,
+  loadIdunnRuntimeAuthorityFromEnvironment,
+  type IdunnRuntimeAuthority,
+  type IdunnRuntimePresencePublisher,
+  type IdunnRuntimePresencePublisherOptions,
+} from "./idunn-runtime-authority";
