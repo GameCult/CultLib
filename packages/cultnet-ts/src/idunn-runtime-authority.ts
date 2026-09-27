@@ -588,11 +588,25 @@ function readAuthorityRecordBytes(bytes: Buffer, type: string, schemaId: string)
 }
 
 function inheritedDescriptorMap(): Map<string, number> {
-  if (process.env.LISTEN_PID !== String(process.pid)) throw new Error("Inherited Idunn descriptors do not belong to this process.");
+  if (process.env.LISTEN_PID !== currentSystemdListenPid()) throw new Error("Inherited Idunn descriptors do not belong to this process.");
   const count = Number(process.env.LISTEN_FDS);
   const names = process.env.LISTEN_FDNAMES?.split(":") ?? [];
   if (!Number.isInteger(count) || count < 1 || names.length !== count) throw new Error("Inherited Idunn descriptor list is malformed.");
   return new Map(names.map((name, index) => [name, index + 3]));
+}
+
+function currentSystemdListenPid(): string {
+  try {
+    const status = fs.readFileSync("/proc/self/status", "utf8");
+    const namespacePids = /^NSpid:\s+([0-9]+)(?:\s|$)/mu.exec(status);
+    // systemd records LISTEN_PID in its PID namespace. In a PrivatePIDs
+    // service, Node's process.pid is namespace-local, while the first NSpid
+    // value is the same host PID systemd used for LISTEN_PID.
+    return namespacePids?.[1] ?? String(process.pid);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return String(process.pid);
+    throw error;
+  }
 }
 
 function readDescriptor(descriptor: number): Buffer {
