@@ -10,6 +10,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import {
   loadIdunnRuntimeAuthorityFromEnvironment,
   signIdunnRuntimePresence,
+  systemdListenPidMatches,
 } from "../src/idunn-runtime-authority";
 import {
   runtimePresenceActivationSigningMessage,
@@ -20,6 +21,14 @@ import {
 const providerIdentityContext = "gamecult-provider-health-identity-v1";
 const providerIdDomain = Buffer.from("gamecult.provider-health.identity.v1\0", "utf8");
 const activationIdDomain = Buffer.from("idunn.runtime-activation.id.v1\0", "utf8");
+
+test("matches systemd's host PID for the private PID namespace init only", () => {
+  assert.equal(systemdListenPidMatches(String(process.pid), process.pid), true);
+  assert.equal(systemdListenPidMatches("1725346", 1), true);
+  assert.equal(systemdListenPidMatches("1725346", 2), false);
+  assert.equal(systemdListenPidMatches("not-a-pid", 1), false);
+  assert.equal(systemdListenPidMatches(undefined, 1), false);
+});
 
 test("opens Idunn's machine-bound identity and signs the exact Expected incarnation twice", (context) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "cultnet-runtime-authority-"));
@@ -86,14 +95,11 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
   process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = bundle;
   process.env.GAMECULT_IDUNN_CANDIDATE_BIND = candidate;
   process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE = path.join(directory, "lease.cc");
-  // systemd reports the host PID while Node inside PrivatePIDs sees PID 1.
-  const listenPid = String(process.pid + 1000);
-  process.env.LISTEN_PID = listenPid;
+  process.env.LISTEN_PID = String(process.pid);
   process.env.LISTEN_FDS = "2";
   process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
   const realReadFileSync = fs.readFileSync.bind(fs);
   mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
-    if (filePath === "/proc/self/status") return `Name:\tnode\nNSpid:\t${listenPid}\t1\n`;
     if (filePath === "/proc/self/fd/3") return activationSeed;
     if (filePath === "/proc/self/fd/4") return providerCredential;
     if (filePath === "/etc/machine-id") return machineId;
