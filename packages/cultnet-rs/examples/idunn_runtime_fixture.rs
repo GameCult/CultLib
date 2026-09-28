@@ -272,5 +272,9 @@ fn write_record(path: &Path, key: &str, kind: &str, schema: &str, payload: Vec<u
         payload,
         stored_at: STORED_AT.into(),
         schema_id: Some(schema.into()),
-    })
+    })?;
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lock");
+    let _ = fs::remove_file(lock);
+    Ok(())
 }
