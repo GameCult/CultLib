@@ -86,6 +86,38 @@ Other Body facts that shape the map:
 
 ## 4. Operator questions (one batch)
 
+**Operator rulings, 2026-09-29, each asked on its own:**
+
+- **Q1: (a)**, a plain `Upsert` at a variant's key is refused loudly.
+- **Q2: (a)**, a base edit removing an overridden element is refused unless the same batch
+  resolves it. Operator's reading: "the very existence of that element in the child collection
+  must become the new override state... you can't change the parent without also changing the
+  child... that's the resolve part of (a)."
+- **Q3: ids everywhere, not opt-in.** Operator: "Opt-in sounds nice but consider the UX. We're
+  planting a footgun if we don't require ids everywhere." Rollout: **required, minted on load**.
+  The C# registry requires an id member on object-list element types. A store written before ids
+  existed loads, and ids are minted once on its first write (C2's rewrite). Other runtimes carry
+  the id as an ordinary member and enforce the rule when they gain variants. Each consumer's type
+  edit is a sweep in its own repo after C2.
+- **Q4: (c) soft drift everywhere. This reverses the recommendation and supersedes the target's
+  end "loading refuses ... an override naming a member that does not exist on the type".**
+  Operator: "Soft drift everywhere aligns with the vision... the rationale for adopting
+  migrationless changes is still valid for variants. Any member dropped in a type change is a
+  design change, the reason for it to apply to the parent also applies to the variant." A
+  dangling override, at any depth, is ignored with a warning naming the variant and the member,
+  and the variant inherits the base value. The other broken-variant refusals (a base cycle, a
+  missing base, an incompatible base type) stand.
+- **Q5: (a)**, the v2 header is written only when the store holds a variant.
+- **Q6: yes**, the directory store and CultNet refuse variants loudly until their own cuts.
+- **Q7: yes**, object-list elements are addressable by id, and dictionaries, scalar lists and
+  arrays are replaced whole. The operator asked first whether design roles and quality levels
+  use dictionaries. They do not: `CraftedItemData.Roles` is a `List<ItemRole>` and
+  `FactionProduct.Roles` is a `List<ProductRole>` (Aetheria `ItemData.cs:316`,
+  `FactionProduct.cs:30`). A market-segment product becomes a variant overriding one
+  `ProductRole` by id.
+
+*The questions as asked:*
+
 **Q1. A plain `Upsert` of a whole document at a variant's key.** It happens when Studio's
 current edit commits, when AetherDb migrations do `batch.Upsert(type, doc, key)`, and on a
 CultNet remote write.

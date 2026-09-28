@@ -51,7 +51,9 @@ edited in CultCache Studio:
   - a cycle of bases;
   - a base that does not exist;
   - a base whose type the variant's type cannot inherit from;
-  - an override naming a member that does not exist on the type.
+  - ~~an override naming a member that does not exist on the type~~ **superseded 2026-09-29
+    (operator, variants Q4 c): a dangling override soft-drifts like any dropped member, ignored
+    with a warning; see `document-variants-cut.md` section 4.**
 
   Deleting a base that still has variants is refused.
 
