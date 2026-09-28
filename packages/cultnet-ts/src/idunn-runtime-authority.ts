@@ -13,7 +13,7 @@ import {
   encodeRuntimePresenceHealth,
   type RuntimePresenceHealth,
 } from "./runtime-presence-health";
-import { encodeCultNetMessageForWire } from "./contracts";
+import { encodeCultNetMessageForWire, parseCultNetMessage } from "./contracts";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
 import dgram from "node:dgram";
@@ -306,11 +306,23 @@ async function publishDocument(
   try {
     await sendPacket(socket, endpoint, session.createConnect(Date.now(), new Uint8Array()));
     await receiveUntil(receiver, session, endpoint, (packet) => packet.packetType === "accept", 5000);
-    const wirePayload = Uint8Array.from(encodeCultNetMessageForWire(message as never, "cultnet.schema.v0") as Uint8Array);
+    const wirePayload = encode(encodeCultNetMessageForWire(message as never, "cultnet.schema.v0"));
     const packets = session.sendMany("schema", wirePayload, { reliable: true, ordered: true, nowMs: Date.now() });
-    const ack = receiveUntil(receiver, session, endpoint, (packet) => packet.packetType === "ack", 2000);
     for (const packet of packets) await sendPacket(socket, endpoint, packet);
-    await ack;
+    await receiveUntil(
+      receiver,
+      session,
+      endpoint,
+      () => session.outstandingReliablePacketCount === 0,
+      2000,
+      (frame) => {
+        if (frame.channelId !== "schema") return;
+        const response = parseCultNetMessage(decode(frame.payload));
+        if (response.schemaVersion === "cultnet.error.v0") {
+          throw new Error(`Odin rejected runtime presence: ${response.error}`);
+        }
+      },
+    );
   } finally {
     receiver.close();
     socket.close();
@@ -379,6 +391,7 @@ async function receiveUntil(
   endpoint: { host: string; port: number },
   predicate: (packet: CultNetRudpPacket) => boolean,
   timeoutMs: number,
+  onDelivered?: (frame: { channelId: string; payload: Uint8Array; sequence: number }) => void,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -386,6 +399,7 @@ async function receiveUntil(
       const packet = await receiver.next(Math.min(100, deadline - Date.now()));
       const received = session.receive(packet, Date.now());
       if (received.reply) throw new Error("Runtime presence received an unexpected reply-required packet.");
+      for (const frame of received.delivered) onDelivered?.(frame);
       if (predicate(packet)) return;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "ETIMEDOUT") throw error;

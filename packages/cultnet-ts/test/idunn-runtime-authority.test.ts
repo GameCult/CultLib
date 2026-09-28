@@ -1,6 +1,7 @@
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import dgram from "node:dgram";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,10 +9,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
+  createIdunnRuntimePresencePublisher,
   loadIdunnRuntimeAuthorityFromEnvironment,
   signIdunnRuntimePresence,
   systemdListenPidMatches,
 } from "../src/idunn-runtime-authority";
+import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "../src/rudp";
 import {
   runtimePresenceActivationSigningMessage,
   runtimePresenceProofPayload,
@@ -30,7 +33,7 @@ test("matches systemd's host PID for the private PID namespace init only", () =>
   assert.equal(systemdListenPidMatches(undefined, 1), false);
 });
 
-test("opens Idunn's machine-bound identity and signs the exact Expected incarnation twice", (context) => {
+test("opens Idunn identity and publishes valid CultNet data while surfacing piggybacked application errors", async (context) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), "cultnet-runtime-authority-"));
   context.after(() => rmSync(directory, { recursive: true, force: true }));
 
@@ -125,6 +128,64 @@ test("opens Idunn's machine-bound identity and signs the exact Expected incarnat
   const signedRecord = decode(signed.payload) as unknown[];
   assert.equal(crypto.verify(null, runtimePresenceProviderSigningMessage(proof), crypto.createPublicKey(providerKey), Buffer.from(signedRecord[21] as Uint8Array)), true);
   assert.equal(crypto.verify(null, runtimePresenceActivationSigningMessage(proof), crypto.createPublicKey(activationKey), Buffer.from(signedRecord[23] as Uint8Array)), true);
+
+  const peer = dgram.createSocket("udp4");
+  await new Promise<void>((resolve, reject) => {
+    peer.once("error", reject);
+    peer.bind(0, "127.0.0.1", resolve);
+  });
+  context.after(() => peer.close());
+  const address = peer.address();
+  assert.equal(typeof address, "object");
+  const peerPort = (address as { port: number }).port;
+  let serverSession: CultNetRudpSession | undefined;
+  let receivedMessage: unknown;
+  let responseAck: number | undefined;
+  let peerFailure: Error | undefined;
+  peer.on("message", (wire, remote) => {
+    try {
+      const packet = decodeRudpPacket(wire);
+      if (packet.packetType === "connect") {
+        serverSession = new CultNetRudpSession({ connectionId: packet.connectionId, initialSequence: 100 });
+        const accept = serverSession.acceptConnect(packet, Date.now());
+        peer.send(encodeRudpPacket(accept), remote.port, remote.address);
+        return;
+      }
+      if (!serverSession) throw new Error("Publisher sent data before establishing RUDP.");
+      const result = serverSession.receive(packet, Date.now());
+      const frame = result.delivered.find((candidate) => candidate.channelId === "schema");
+      if (!frame) return;
+      receivedMessage = decode(frame.payload);
+      const errorPayload = encode({
+        schemaVersion: "cultnet.error.v0",
+        error: "test admission denied",
+        routingHint: null,
+        code: null,
+        details: null,
+      });
+      const [response] = serverSession.sendMany("schema", errorPayload, {
+        reliable: true,
+        ordered: true,
+        nowMs: Date.now(),
+      });
+      assert.ok(response);
+      responseAck = response.ack;
+      peer.send(encodeRudpPacket(response), remote.port, remote.address);
+    } catch (error) {
+      peerFailure = error as Error;
+    }
+  });
+  const publisher = createIdunnRuntimePresencePublisher({
+    authority,
+    endpoint: `rudp://127.0.0.1:${peerPort}`,
+    healthContract: contract,
+    capabilities: [{ capability: "streampixels.service.api", schema: "streampixels.api.v1", compatibility: "v1", capacity: 1 }],
+  });
+  await assert.rejects(publisher.publish("warming", "local RUDP integration"), /Odin rejected runtime presence: test admission denied/);
+  assert.deepEqual(receivedMessage && (receivedMessage as { schemaVersion?: string }).schemaVersion, "cultnet.document_put_raw.v0");
+  assert.ok(Buffer.from(encode(receivedMessage)).byteLength > 0);
+  assert.equal(responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
+  assert.equal(peerFailure, undefined, peerFailure?.message);
 
   descriptorProviderCredential = Buffer.from(encode([
     ...(decode(providerCredential) as unknown[][]),
