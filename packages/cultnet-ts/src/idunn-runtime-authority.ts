@@ -9,6 +9,7 @@ import {
   IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
   runtimePresenceActivationSigningMessage,
   runtimePresenceProofPayload,
+  truncateRuntimePresenceDetail,
   runtimePresenceProviderSigningMessage,
   encodeRuntimePresenceHealth,
   type RuntimePresenceHealth,
@@ -241,7 +242,7 @@ export function createIdunnRuntimePresencePublisher(
     const signed = signIdunnRuntimePresence(options.authority, {
       capabilities: options.capabilities,
       state,
-      detail: detail.slice(0, 512),
+      detail: truncateRuntimePresenceDetail(detail),
       writeLeaseSha256,
       publisherSequence: sequence,
       observedAtUnixMillis: Date.now(),

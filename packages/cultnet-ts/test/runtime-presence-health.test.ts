@@ -18,6 +18,7 @@ import {
   RUNTIME_PRESENCE_FIELD_COUNT,
   encodeRuntimePresenceHealth,
   runtimePresenceProofPayload,
+  truncateRuntimePresenceDetail,
   validateRuntimePresence,
   type RuntimePresenceHealth,
 } from "../src/runtime-presence-health";
@@ -120,4 +121,33 @@ test("statements the contract forbids are refused before they are signed", () =>
 
   const partialLineage = { ...referencePresence(), stateContractSha256: null };
   assert.throws(() => validateRuntimePresence(partialLineage), /state lineage is partial/);
+});
+
+const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
+const isValidUtf8 = (text: string) => !Buffer.from(text, "utf8").toString("utf8").includes("\uFFFD") && !text.includes("\uFFFD");
+
+test("presence detail is truncated to 512 UTF-8 bytes, not UTF-16 units", () => {
+  const truncated = truncateRuntimePresenceDetail("é".repeat(300));
+  assert.ok(utf8Bytes(truncated) <= 512);
+  assert.equal(truncated, "é".repeat(256));
+  assert.ok(isValidUtf8(truncated));
+});
+
+test("presence detail drops a 4-byte character straddling the boundary whole", () => {
+  const truncated = truncateRuntimePresenceDetail("a".repeat(510) + "😀");
+  assert.equal(truncated, "a".repeat(510));
+  assert.ok(isValidUtf8(truncated));
+  assert.equal(truncateRuntimePresenceDetail("a".repeat(508) + "😀"), "a".repeat(508) + "😀");
+});
+
+test("presence detail of exactly 512 ASCII bytes passes unchanged and 513 is cut", () => {
+  const exact = "a".repeat(512);
+  assert.equal(truncateRuntimePresenceDetail(exact), exact);
+  assert.doesNotThrow(() => validateRuntimePresence({ ...referencePresence(), detail: exact }));
+  assert.equal(truncateRuntimePresenceDetail(exact + "a"), exact);
+  assert.throws(() => validateRuntimePresence({ ...referencePresence(), detail: exact + "a" }), /too long/);
+});
+
+test("validation refuses a detail that is short in UTF-16 units but over 512 UTF-8 bytes", () => {
+  assert.throws(() => validateRuntimePresence({ ...referencePresence(), detail: "é".repeat(300) }), /too long/);
 });

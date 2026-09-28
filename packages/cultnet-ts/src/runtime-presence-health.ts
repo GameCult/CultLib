@@ -171,6 +171,25 @@ function presenceTuple(
   return fields;
 }
 
+/** The Rust owner (`cultnet-rs`) bounds presence detail by UTF-8 bytes, not UTF-16 units. */
+export const RUNTIME_PRESENCE_DETAIL_MAX_BYTES = 512;
+
+/**
+ * Longest prefix of `detail` within the UTF-8 byte limit, cut on a code point
+ * boundary. The single rule for both signing and validation: a detail is valid
+ * exactly when this returns it unchanged.
+ */
+export function truncateRuntimePresenceDetail(detail: string): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of detail) {
+    bytes += Buffer.byteLength(char, "utf8");
+    if (bytes > RUNTIME_PRESENCE_DETAIL_MAX_BYTES) break;
+    end += char.length;
+  }
+  return detail.slice(0, end);
+}
+
 /**
  * Reject statements the contract forbids, before they are signed.
  *
@@ -185,7 +204,7 @@ export function validateRuntimePresence(presence: RuntimePresenceHealth): void {
   if (presence.observedAtUnixMillis <= 0 || !Number.isSafeInteger(presence.observedAtUnixMillis)) {
     throw new Error("runtime presence observation time must be a positive integer");
   }
-  if (presence.detail.length > 512 || /\p{Cc}/u.test(presence.detail)) {
+  if (truncateRuntimePresenceDetail(presence.detail) !== presence.detail || /\p{Cc}/u.test(presence.detail)) {
     throw new Error("runtime presence detail is too long or carries control characters");
   }
   if (presence.state === "warming" && presence.writeLeaseSha256 !== null) {
