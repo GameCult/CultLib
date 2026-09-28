@@ -19,6 +19,7 @@ import {
   runtimePresenceActivationSigningMessage,
   runtimePresenceProofPayload,
   runtimePresenceProviderSigningMessage,
+  RUNTIME_PRESENCE_SLOT,
 } from "../src/runtime-presence-health";
 
 const providerIdentityContext = "gamecult-provider-health-identity-v1";
@@ -53,7 +54,7 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
     "idunn.expected_incarnation.v2", target, `sha256-${"1".repeat(64)}`, "incarnation-1",
     `sha256-${"2".repeat(64)}`, "https://github.com/GameCult/StreamPixels.git", "a".repeat(40),
     `sha256-${"3".repeat(64)}`, "streampixels-service-yggdrasil", providerIdentity, contract,
-    `sha256-${"4".repeat(64)}`, "service-boundary-v1", `sha256-${"5".repeat(64)}`, true,
+    `sha256-${"4".repeat(64)}`, "service-boundary-v1", `sha256-${"5".repeat(64)}`, false,
     ["streampixels-service-http", "http", "http://127.0.0.1:8831", candidate],
     [["streampixels.service.api", "streampixels.api.v1", "v1", 1]],
     [["shared-infrastructure", "odin.verse-rendezvous", "odin.verse-topology.v1", "v1", 1, "before-promotion", null, null, null, "rudp://127.0.0.1:17871"]],
@@ -101,7 +102,7 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
   });
   process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = bundle;
   process.env.GAMECULT_IDUNN_CANDIDATE_BIND = candidate;
-  process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE = path.join(directory, "lease.cc");
+  delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
   process.env.LISTEN_PID = String(process.pid);
   process.env.LISTEN_FDS = "2";
   process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
@@ -195,12 +196,20 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
 
   rejectOdinAdmission = false;
   await publisher.publish("warming", "accepted presence");
+  const snapshotDocument = await publisher.publishRouteObservation({
+    schemaVersion: "cultnet.snapshot_request.v0",
+    messageId: "route-challenge-1",
+    schemaIds: ["gamecult.runtime_presence_health.v2"],
+    recordKeys: [target],
+  });
   const publishedDocument = (receivedMessage as { document: { payload: Uint8Array; schemaId: string; recordKey: string } }).document;
-  const snapshotDocument = publisher.latestPresenceDocument();
   assert.ok(snapshotDocument);
   assert.equal(snapshotDocument.schemaId, publishedDocument.schemaId);
   assert.equal(snapshotDocument.recordKey, publishedDocument.recordKey);
   assert.deepEqual(Buffer.from(snapshotDocument.payload), Buffer.from(publishedDocument.payload));
+  const routePresence = decode(snapshotDocument.payload) as unknown[];
+  assert.equal(routePresence[RUNTIME_PRESENCE_SLOT.state], "active");
+  assert.equal(routePresence[RUNTIME_PRESENCE_SLOT.detail], "route-observation:route-challenge-1");
   snapshotDocument.payload[0] = snapshotDocument.payload[0]! ^ 0xff;
   assert.deepEqual(Buffer.from(publisher.latestPresenceDocument()?.payload ?? []), Buffer.from(publishedDocument.payload), "snapshot readers cannot mutate publisher state");
 

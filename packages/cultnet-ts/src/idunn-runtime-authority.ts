@@ -13,7 +13,7 @@ import {
   encodeRuntimePresenceHealth,
   type RuntimePresenceHealth,
 } from "./runtime-presence-health";
-import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetRawDocumentRecord } from "./contracts";
+import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetRawDocumentRecord, type CultNetSnapshotRequestMessage } from "./contracts";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
 import dgram from "node:dgram";
@@ -80,6 +80,7 @@ export type IdunnRuntimePresencePublisher = {
   readonly runtimeInstanceId: string;
   readonly requiresWriteLease: boolean;
   latestPresenceDocument(): CultNetRawDocumentRecord | null;
+  publishRouteObservation(request: CultNetSnapshotRequestMessage): Promise<CultNetRawDocumentRecord>;
   publish(state: RuntimePresenceHealth["state"], detail: string): Promise<string>;
   waitForWriteLease(options?: { pollIntervalMs?: number; signal?: AbortSignal }): Promise<string>;
   assertWriteLease(): Promise<string>;
@@ -268,17 +269,32 @@ export function createIdunnRuntimePresencePublisher(
     return signed.canonicalSha256;
   };
 
+  const copyLatestPresenceDocument = (): CultNetRawDocumentRecord | null => {
+    if (!latestPresenceDocument) return null;
+    return {
+      ...latestPresenceDocument,
+      payload: new Uint8Array(latestPresenceDocument.payload),
+      ...(latestPresenceDocument.tags ? { tags: [...latestPresenceDocument.tags] } : {}),
+    };
+  };
+
   return {
     runtimeId: expected.runtimeId,
     runtimeInstanceId: options.authority.activation.runtimeInstanceId,
     requiresWriteLease: expected.writeLeaseRequired,
-    latestPresenceDocument() {
-      if (!latestPresenceDocument) return null;
-      return {
-        ...latestPresenceDocument,
-        payload: new Uint8Array(latestPresenceDocument.payload),
-        ...(latestPresenceDocument.tags ? { tags: [...latestPresenceDocument.tags] } : {}),
-      };
+    latestPresenceDocument: copyLatestPresenceDocument,
+    async publishRouteObservation(request) {
+      if (!request.messageId || request.messageId.trim() !== request.messageId) throw new Error("Idunn route observation requires a message id.");
+      if ((request.schemaIds && !request.schemaIds.includes(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA))
+        || (request.recordKeys && !request.recordKeys.includes(expected.target))
+        || request.shardId !== undefined
+        || request.shardEpoch !== undefined) {
+        throw new Error("Idunn route observation does not request this runtime presence document.");
+      }
+      await publish("active", `route-observation:${request.messageId}`);
+      const document = copyLatestPresenceDocument();
+      if (!document) throw new Error("Idunn route observation was published without a presence document.");
+      return document;
     },
     publish,
     async waitForWriteLease({ pollIntervalMs = 5000, signal } = {}) {
