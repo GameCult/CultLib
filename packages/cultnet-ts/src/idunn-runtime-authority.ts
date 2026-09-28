@@ -637,20 +637,6 @@ function providerIdentityByteVector(value: unknown, label: string): Uint8Array {
   return Uint8Array.from(value as number[]);
 }
 
-function readAuthorityRecordBytes(bytes: Buffer, type: string, schemaId: string): Uint8Array {
-  const decoded = decode(bytes);
-  if (!Array.isArray(decoded) || decoded[0] !== CULTCACHE_STORE_FORMAT || !Array.isArray(decoded[1]) || !Array.isArray(decoded[2])) {
-    throw new Error("Runtime credential is not a CultCache v1 store.");
-  }
-  if (decoded[2].length !== 1) throw new Error("Runtime credential must contain exactly one record.");
-  const rows = (decoded[2] as unknown[]).filter((raw) => Array.isArray(raw) && raw[1] === schemaId);
-  if (rows.length !== 1) throw new Error(`Runtime credential must contain exactly one ${schemaId} record.`);
-  const catalog = (decoded[1] as unknown[]).find((raw) => Array.isArray(raw) && raw[0] === schemaId);
-  if (!Array.isArray(catalog) || catalog[1] !== type) throw new Error("Runtime credential has an unexpected CultCache type.");
-  const row = array(rows[0], 4, "Runtime credential record");
-  return bytesValue(row[3], "Runtime credential payload");
-}
-
 function inheritedDescriptorMap(): Map<string, number> {
   if (!systemdListenPidMatches(process.env.LISTEN_PID, process.pid)) throw new Error("Inherited Idunn descriptors do not belong to this process.");
   const count = Number(process.env.LISTEN_FDS);
