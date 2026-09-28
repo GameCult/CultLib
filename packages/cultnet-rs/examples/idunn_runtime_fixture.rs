@@ -157,7 +157,7 @@ fn build(
                 provider_id: Some("odin".into()),
                 provider_authority: Some("managed-incarnation".into()),
                 provider_expected_projection_sha256: Some(digest('5')),
-                provider_endpoint: Some("rudp://127.0.0.1:17871".into()),
+                provider_endpoint: Some("rudp://127.0.0.1:47871".into()),
             }]
         } else {
             Vec::new()
