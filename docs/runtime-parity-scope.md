@@ -73,6 +73,16 @@ to speak CultNet or participate in CultMesh.
   `tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs` carry the
   semantic ones. A single rows-to-bytes path driving both halves in one call
   remains its own cut (R-AR) and is not part of this claim.
+- CultMesh content plane (`cultmesh.content_chunk_request.v1` and `.response.v1`
+  plus the CDN manifest, C#/Rust only): byte parity in both directions, and the
+  reference's answer to a chunk request, including its failure spellings.
+  `packages/cultnet-rs/tests/content.rs` and
+  `tests/GameCult.Mesh.Tests/CultMeshContentVectorTests.cs` judge
+  `contracts/cultmesh/content-vectors.cs-written.json` and
+  `content-vectors.rs-written.json`. Rust carries these chunks only on the
+  session the client already holds (see `src/GameCult.Mesh/docs/transport-planes.md`);
+  it has no authenticated content connector, so it claims no TCP+TLS or QUIC
+  content path.
 
 ## Expansion Work Outside The Current Parity Claim
 
