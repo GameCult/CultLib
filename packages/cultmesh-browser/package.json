@@ -37,7 +37,7 @@
     "directory": "packages/cultmesh-browser"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",

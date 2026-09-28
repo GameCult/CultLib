@@ -45,7 +45,7 @@
   },
   "homepage": "https://github.com/GameCult/CultLib/tree/main/packages/cultcache-ts#readme",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",

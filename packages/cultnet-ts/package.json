@@ -53,7 +53,7 @@
   },
   "homepage": "https://github.com/GameCult/CultLib/tree/main/packages/cultnet-ts#readme",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",
