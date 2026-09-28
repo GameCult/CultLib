@@ -1,3 +1,4 @@
+mod content;
 mod contracts;
 mod idunn_deployment_brake;
 mod idunn_lifecycle_brake;
@@ -19,6 +20,7 @@ mod selection;
 mod shard_catalog;
 mod transport;
 
+pub use content::*;
 pub use contracts::*;
 pub use idunn_deployment_brake::*;
 pub use idunn_lifecycle_brake::*;
