@@ -6,14 +6,15 @@ import { decode, encode } from "@msgpack/msgpack";
 import {
   GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
   GAMECULT_RUNTIME_PRESENCE_IDENTITY_NAME,
+  RUNTIME_PRESENCE_DETAIL_MAX_BYTES,
   IDUNN_RUNTIME_ACTIVATION_CREDENTIAL_NAME,
   runtimePresenceActivationSigningMessage,
   runtimePresenceProofPayload,
-  truncateRuntimePresenceDetail,
   runtimePresenceProviderSigningMessage,
   encodeRuntimePresenceHealth,
   type RuntimePresenceHealth,
 } from "./runtime-presence-health";
+import { truncateUtf8Bytes } from "./utf8-bound";
 import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetRawDocumentRecord, type CultNetSnapshotRequestMessage } from "./contracts";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
@@ -242,7 +243,7 @@ export function createIdunnRuntimePresencePublisher(
     const signed = signIdunnRuntimePresence(options.authority, {
       capabilities: options.capabilities,
       state,
-      detail: truncateRuntimePresenceDetail(detail),
+      detail: truncateUtf8Bytes(detail, RUNTIME_PRESENCE_DETAIL_MAX_BYTES),
       writeLeaseSha256,
       publisherSequence: sequence,
       observedAtUnixMillis: Date.now(),

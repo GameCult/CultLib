@@ -20,6 +20,8 @@
 
 import { encode } from "@msgpack/msgpack";
 
+import { truncateUtf8Bytes } from "./utf8-bound";
+
 export const GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA = "gamecult.runtime_presence_health.v2";
 
 /** Purpose for the stable provider-health signature over the proof payload. */
@@ -175,22 +177,6 @@ function presenceTuple(
 export const RUNTIME_PRESENCE_DETAIL_MAX_BYTES = 512;
 
 /**
- * Longest prefix of `detail` within the UTF-8 byte limit, cut on a code point
- * boundary. The single rule for both signing and validation: a detail is valid
- * exactly when this returns it unchanged.
- */
-export function truncateRuntimePresenceDetail(detail: string): string {
-  let bytes = 0;
-  let end = 0;
-  for (const char of detail) {
-    bytes += Buffer.byteLength(char, "utf8");
-    if (bytes > RUNTIME_PRESENCE_DETAIL_MAX_BYTES) break;
-    end += char.length;
-  }
-  return detail.slice(0, end);
-}
-
-/**
  * Reject statements the contract forbids, before they are signed.
  *
  * These are the same conditions `validate_shape` enforces on the Rust side. A
@@ -204,7 +190,7 @@ export function validateRuntimePresence(presence: RuntimePresenceHealth): void {
   if (presence.observedAtUnixMillis <= 0 || !Number.isSafeInteger(presence.observedAtUnixMillis)) {
     throw new Error("runtime presence observation time must be a positive integer");
   }
-  if (truncateRuntimePresenceDetail(presence.detail) !== presence.detail || /\p{Cc}/u.test(presence.detail)) {
+  if (truncateUtf8Bytes(presence.detail, RUNTIME_PRESENCE_DETAIL_MAX_BYTES) !== presence.detail || /\p{Cc}/u.test(presence.detail)) {
     throw new Error("runtime presence detail is too long or carries control characters");
   }
   if (presence.state === "warming" && presence.writeLeaseSha256 !== null) {
