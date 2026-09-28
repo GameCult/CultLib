@@ -13,7 +13,7 @@ import {
   encodeRuntimePresenceHealth,
   type RuntimePresenceHealth,
 } from "./runtime-presence-health";
-import { encodeCultNetMessageForWire, parseCultNetMessage } from "./contracts";
+import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetRawDocumentRecord } from "./contracts";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
 import dgram from "node:dgram";
@@ -79,6 +79,7 @@ export type IdunnRuntimePresencePublisher = {
   readonly runtimeId: string;
   readonly runtimeInstanceId: string;
   readonly requiresWriteLease: boolean;
+  latestPresenceDocument(): CultNetRawDocumentRecord | null;
   publish(state: RuntimePresenceHealth["state"], detail: string): Promise<string>;
   waitForWriteLease(options?: { pollIntervalMs?: number; signal?: AbortSignal }): Promise<string>;
   assertWriteLease(): Promise<string>;
@@ -219,6 +220,7 @@ export function createIdunnRuntimePresencePublisher(
   const connectionId = 0x0d1d0002;
   let sequence = 0;
   let latestLeaseSha256: string | null = null;
+  let latestPresenceDocument: CultNetRawDocumentRecord | null = null;
   const recentWarmingProofs: string[] = [];
 
   const assertWriteLease = async () => {
@@ -243,20 +245,22 @@ export function createIdunnRuntimePresencePublisher(
       publisherSequence: sequence,
       observedAtUnixMillis: Date.now(),
     });
+    const document: CultNetRawDocumentRecord = {
+      schemaId: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+      recordKey: expected.target,
+      storedAt: new Date().toISOString(),
+      payloadEncoding: "messagepack",
+      payload: new Uint8Array(signed.payload),
+      sourceRuntimeId: expected.runtimeId,
+      sourceRole: "runtime-presence-health-publisher",
+      tags: ["cultnet.transport.rudp.v0", "runtime-presence"],
+    };
     await publishDocument(endpoint, connectionId, {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId: `runtime-presence:${expected.target}:${options.authority.activation.runtimeInstanceId}:${sequence}`,
-      document: {
-        schemaId: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
-        recordKey: expected.target,
-        storedAt: new Date().toISOString(),
-        payloadEncoding: "messagepack",
-        payload: signed.payload,
-        sourceRuntimeId: expected.runtimeId,
-        sourceRole: "runtime-presence-health-publisher",
-        tags: ["cultnet.transport.rudp.v0", "runtime-presence"],
-      },
+      document,
     });
+    latestPresenceDocument = document;
     if (state === "warming") {
       recentWarmingProofs.push(signed.canonicalSha256);
       if (recentWarmingProofs.length > MAX_RECENT_WARMING_PROOFS) recentWarmingProofs.shift();
@@ -268,6 +272,14 @@ export function createIdunnRuntimePresencePublisher(
     runtimeId: expected.runtimeId,
     runtimeInstanceId: options.authority.activation.runtimeInstanceId,
     requiresWriteLease: expected.writeLeaseRequired,
+    latestPresenceDocument() {
+      if (!latestPresenceDocument) return null;
+      return {
+        ...latestPresenceDocument,
+        payload: new Uint8Array(latestPresenceDocument.payload),
+        ...(latestPresenceDocument.tags ? { tags: [...latestPresenceDocument.tags] } : {}),
+      };
+    },
     publish,
     async waitForWriteLease({ pollIntervalMs = 5000, signal } = {}) {
       if (!expected.writeLeaseRequired) return "";

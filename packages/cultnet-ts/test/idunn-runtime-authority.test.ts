@@ -142,6 +142,7 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
   let receivedMessage: unknown;
   let responseAck: number | undefined;
   let peerFailure: Error | undefined;
+  let rejectOdinAdmission = true;
   peer.on("message", (wire, remote) => {
     try {
       const packet = decodeRudpPacket(wire);
@@ -156,14 +157,18 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
       const frame = result.delivered.find((candidate) => candidate.channelId === "schema");
       if (!frame) return;
       receivedMessage = decode(frame.payload);
-      const errorPayload = encode({
+      const responsePayload = encode(rejectOdinAdmission ? {
         schemaVersion: "cultnet.error.v0",
         error: "test admission denied",
         routingHint: null,
         code: null,
         details: null,
+      } : {
+        schemaVersion: "cultnet.snapshot_response.v0",
+        messageId: "ack",
+        documents: [],
       });
-      const [response] = serverSession.sendMany("schema", errorPayload, {
+      const [response] = serverSession.sendMany("schema", responsePayload, {
         reliable: true,
         ordered: true,
         nowMs: Date.now(),
@@ -186,6 +191,18 @@ test("opens Idunn identity and publishes valid CultNet data while surfacing pigg
   assert.ok(Buffer.from(encode(receivedMessage)).byteLength > 0);
   assert.equal(responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
   assert.equal(peerFailure, undefined, peerFailure?.message);
+  assert.equal(publisher.latestPresenceDocument(), null, "a rejected publication must not become the snapshot source");
+
+  rejectOdinAdmission = false;
+  await publisher.publish("warming", "accepted presence");
+  const publishedDocument = (receivedMessage as { document: { payload: Uint8Array; schemaId: string; recordKey: string } }).document;
+  const snapshotDocument = publisher.latestPresenceDocument();
+  assert.ok(snapshotDocument);
+  assert.equal(snapshotDocument.schemaId, publishedDocument.schemaId);
+  assert.equal(snapshotDocument.recordKey, publishedDocument.recordKey);
+  assert.deepEqual(Buffer.from(snapshotDocument.payload), Buffer.from(publishedDocument.payload));
+  snapshotDocument.payload[0] = snapshotDocument.payload[0]! ^ 0xff;
+  assert.deepEqual(Buffer.from(publisher.latestPresenceDocument()?.payload ?? []), Buffer.from(publishedDocument.payload), "snapshot readers cannot mutate publisher state");
 
   descriptorProviderCredential = Buffer.from(encode([
     ...(decode(providerCredential) as unknown[][]),
