@@ -292,15 +292,17 @@ public sealed class BoundedLeastSquaresTests
     }
 
     [Fact]
-    public void FixedColumnStaysPut()
+    public void FixedColumnStaysPutEvenWhenItsGradientWantsOut()
     {
         const int m = 5, n = 3;
-        var lo = new[] { -1f, 0.25f, -1f };
-        var hi = new[] { 1f, 0.25f, 1f };
+        var lo = new[] { -1f, -1f, -1f };
+        var hi = new[] { 1f, -1f, 1f };
         var x = new float[n];
-        var status = Solve(m, n, A54, B5, lo, hi, x, out _);
+        var status = Solve(m, n, A54, B5, lo, hi, x, out var iterations);
         Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
-        Assert.Equal(0.25f, x[1]);
+        Assert.Equal(-1f, x[1]);
+        Assert.True(Gradient(m, n, A54, B5, x)[1] < -1e-3, "fixture must pull the fixed column inward");
+        Assert.Equal(0, iterations);
         AssertKkt(m, n, A54, B5, lo, hi, x);
     }
 
