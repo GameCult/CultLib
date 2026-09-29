@@ -135,9 +135,18 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Trace("publish");
     }
 
+    // Variants wait for the directory store's own cut; until then it refuses one rather than persist a resolved view as a plain page.
+    private static void RefuseVariant(CultStoredDocument entry)
+    {
+        if (entry.Variant != null)
+            throw new NotSupportedException(
+                $"Record '{entry.Key.Value}' is a variant of '{entry.Variant.BaseKey}'; the directory store does not hold document variants yet.");
+    }
+
     public override void Push(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
+        RefuseVariant(entry);
         Held(() =>
         {
             Entries[entry.Key.Value] = entry;
@@ -162,6 +171,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
     {
         ThrowIfReadOnly();
+        foreach (var entry in request.Upserts)
+            RefuseVariant(entry);
         return Held(() =>
         {
             Directory.CreateDirectory(_manifestFile.DirectoryName!);

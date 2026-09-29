@@ -105,3 +105,10 @@ lie about the payload:
 - no compatible local schema candidate
 
 This is not negotiable. Better a loud refusal than quiet bit-rot.
+
+## Variant overrides
+
+A variant's override drifts exactly as the same member would on a plain record: an
+override naming a slot the type no longer has, or holding a value that no longer decodes
+into the member's type, is ignored with a warning naming the variant and the member, and
+the variant inherits the base value. There is no separate rule for variants.

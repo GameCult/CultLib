@@ -19,13 +19,19 @@ namespace GameCult.Caching.MessagePack
 
     public static class CultCacheMessagePack
     {
-        // The inspection model over this codec. Values serialize without the document guard but with their owning document's
-        // options, resolvers included, so dictionary keys compare by the bytes the store writes; clones deserialize as
-        // registered documents.
-        public static CultInspectorModel CreateInspectorModel(CultDocumentRegistry registry) => new CultInspectorModel(
-            registry,
+        // The store's encoding as one port. Values serialize without the document guard but with their owning document's
+        // options, resolvers included, so dictionary keys compare by the bytes the store writes; a document type
+        // deserializes as a registered document, a member type as itself.
+        public static CultCodec CreateCodec(CultDocumentRegistry registry) => new CultCodec(
             (value, type, document) => global::MessagePack.MessagePackSerializer.Serialize(type, value, CultDocumentMessagePackSerialization.OptionsFor(document.Assembly)),
-            (type, bytes) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry));
+            (type, document, bytes) => type == document
+                ? CultDocumentMessagePackSerialization.DeserializeUntyped(type, bytes, registry)
+                : global::MessagePack.MessagePackSerializer.Deserialize(type, bytes, CultDocumentMessagePackSerialization.OptionsFor(document.Assembly)),
+            CultDocumentMessagePackSerialization.OverlaySlots);
+
+        // The inspection model over that codec.
+        public static CultInspectorModel CreateInspectorModel(CultDocumentRegistry registry) =>
+            new CultInspectorModel(registry, CreateCodec(registry));
 
         // Opening hydrates. A consumer that wants a fresh store removes the records it does not keep, upserts, and
         // flushes; the atomic replace does the rest.
@@ -37,7 +43,8 @@ namespace GameCult.Caching.MessagePack
             }
 
             options ??= new CultCacheOpenOptions();
-            var cache = new CultCache(options.Registry)
+            var registry = options.Registry ?? CultDocumentRegistry.Shared;
+            var cache = new CultCache(registry, CreateCodec(registry))
             {
                 FlushAttachedStoresOnDispose = options.FlushOnDispose
             };

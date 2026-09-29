@@ -393,7 +393,7 @@ namespace GameCult.Networking
                 stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
             var rows = stored
                 .Select(entry => new CultNetSelectionEvaluator.Row(
-                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
+                    entry.Descriptor, entry.Key, RefuseVariant(entry).Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
             var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
             // R-Q: a page's asOf is exact only when every matched row is committed through one shard's
@@ -487,7 +487,7 @@ namespace GameCult.Networking
                 stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
             var rows = stored
                 .Select(entry => new CultNetSelectionEvaluator.Row(
-                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
+                    entry.Descriptor, entry.Key, RefuseVariant(entry).Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
 
             var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
@@ -548,6 +548,13 @@ namespace GameCult.Networking
                 Cursor = selection.Cursor
             };
         }
+
+        // CultNet carries no variant deltas yet, and a resolved view sent as a plain record would be a lie about the store.
+        private static CultStoredDocument RefuseVariant(CultStoredDocument entry) =>
+            entry.Variant == null
+                ? entry
+                : throw new NotSupportedException(
+                    $"Record '{entry.Key.Value}' is a variant of '{entry.Variant.BaseKey}'; CultNet does not carry document variants yet.");
 
         /// <summary>
         /// Builds the wire record for one evaluated row. The shared path under snapshot and change

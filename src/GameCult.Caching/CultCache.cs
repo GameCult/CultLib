@@ -55,11 +55,17 @@ namespace GameCult.Caching
         public string SchemaId { get; set; } = string.Empty;
         public string StoredAt { get; set; } = string.Empty;
         public byte[] Payload { get; set; } = Array.Empty<byte>();
+
+        // Non-null for a variant record (slot 4): its base and overrides. Its payload is empty.
+        public CultVariantDelta? Variant { get; set; }
     }
 
     public sealed class CultPersistedStoreSnapshot
     {
-        public string FormatVersion { get; set; } = "cultcache.store.v1";
+        public const string FormatV1 = "cultcache.store.v1";
+        public const string FormatV2 = "cultcache.store.v2";
+
+        public string FormatVersion { get; set; } = FormatV1;
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
     }
@@ -336,13 +342,43 @@ namespace GameCult.Caching
             Key = key;
             StoredAt = storedAt;
             Descriptor = descriptor;
-            Document = document;
+            _document = document;
         }
+
+        // A variant: the delta is what is stored; the cache resolves it against its base in the hold that admits it.
+        internal CultStoredDocument(
+            CultRecordKey key,
+            string storedAt,
+            CultDocumentDescriptor descriptor,
+            CultVariantDelta variant,
+            object? resolved)
+        {
+            Key = key;
+            StoredAt = storedAt;
+            Descriptor = descriptor;
+            Variant = variant;
+            _document = resolved;
+        }
+
+        private readonly object? _document;
 
         public CultRecordKey Key { get; }
         public string StoredAt { get; }
         public CultDocumentDescriptor Descriptor { get; }
-        public object Document { get; }
+
+        // The complete document. For a variant, the resolved view: derived, never written back.
+        public object Document => _document ??
+            throw new InvalidOperationException($"Variant {Key.Value} has not been resolved; only the cache resolves a variant.");
+
+        // The base and overrides a variant record stores; null for a plain record.
+        public CultVariantDelta? Variant { get; }
+
+        // A plain record staged by Flatten: the one way a plain record may replace a variant at its key.
+        internal bool Flattens { get; set; }
+
+        internal bool IsResolved => _document != null;
+
+        internal CultStoredDocument Resolved(object document) => new(Key, StoredAt, Descriptor, Variant!, document);
     }
 
     public sealed class CultDocumentRegistry
@@ -1662,11 +1698,29 @@ namespace GameCult.Caching
         private static string Identity(string key, string schemaId, string storedAt) => $"{key}\n{schemaId}\n{storedAt}";
     }
 
+    // One staged write: a plain record (Stored), a variant (Variant), a flatten, or, with none of those, a removal.
+    internal sealed class StagedOperation
+    {
+        public StagedOperation(CultRecordKey key, CultStoredDocument? stored, CultVariantDelta? variant, bool flatten)
+        {
+            Key = key;
+            Stored = stored;
+            Variant = variant;
+            Flatten = flatten;
+        }
+
+        public CultRecordKey Key { get; }
+        public CultStoredDocument? Stored { get; }
+        public CultVariantDelta? Variant { get; }
+        public bool Flatten { get; }
+        public bool IsRemoval => Stored == null && Variant == null && !Flatten;
+    }
+
     // An explicit value: nothing staged here is visible to anyone until Commit returns.
     public sealed class CultCacheBatch
     {
         private readonly CultCache _cache;
-        internal readonly Dictionary<string, (CultRecordKey Key, CultStoredDocument? Stored)> Operations = new(StringComparer.Ordinal);
+        internal readonly Dictionary<string, StagedOperation> Operations = new(StringComparer.Ordinal);
         internal readonly List<(CultRecordKey Key, string? SchemaId, string? StoredAt)> Expected = new();
         internal bool ExpectsUnchanged;
         internal bool Sealed;
@@ -1691,7 +1745,24 @@ namespace GameCult.Caching
         public void Remove(CultRecordKey key)
         {
             ThrowIfSealed();
-            Operations[key.Value] = (key, null);
+            Operations[key.Value] = new StagedOperation(key, null, null, false);
+        }
+
+        // Stages a variant record: its base and a sparse set of overrides, resolved by the cache when the batch commits.
+        // A variant changes only through here; rebasing is this call with another base.
+        public CultRecordKey UpsertVariant(CultRecordKey key, CultRecordKey baseKey, IEnumerable<CultVariantOverride>? overrides = null)
+        {
+            ThrowIfSealed();
+            Operations[key.Value] = new StagedOperation(
+                key, null, new CultVariantDelta(baseKey.Value, (overrides ?? Array.Empty<CultVariantOverride>()).ToArray()), false);
+            return key;
+        }
+
+        // Replaces a variant with a plain record holding its resolved document: the explicit, separate operation (Q1a).
+        public void Flatten(CultRecordKey key)
+        {
+            ThrowIfSealed();
+            Operations[key.Value] = new StagedOperation(key, null, null, true);
         }
 
         public void Expect(CultRecordKey key, object? current)
@@ -1711,7 +1782,7 @@ namespace GameCult.Caching
         {
             ThrowIfSealed();
             var stored = _cache.CreateStoredDocument(document, key);
-            Operations[stored.Key.Value] = (stored.Key, stored);
+            Operations[stored.Key.Value] = new StagedOperation(stored.Key, stored, null, false);
             return stored.Key;
         }
 
@@ -1730,6 +1801,11 @@ namespace GameCult.Caching
         private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
         private readonly Dictionary<(Type Type, string Alias), Dictionary<string, string>> _indexes = new();
         private readonly Dictionary<Type, string> _globals = new();
+        private readonly CultCodec? _codec;
+        // Keys holding a variant, and the drift report of each variant whose overrides were partly ignored: both derived
+        // from the entries by Apply, never decided anywhere else.
+        private readonly HashSet<string> _variantKeys = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, CultSchemaMigrationReport> _variantReports = new(StringComparer.Ordinal);
         private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
         private readonly Subject<Change> _changes = new();
         private readonly object _gate = new();
@@ -1738,12 +1814,41 @@ namespace GameCult.Caching
         [ThreadStatic] private static List<(Change Change, bool Loaded)>? _held;
         private bool _dirtyInMemory;
 
-        public CultCache(CultDocumentRegistry? registry = null)
+        // The codec is the store's encoding (CultCacheMessagePack.Create supplies it). A cache without one holds no variants:
+        // resolving a variant needs to clone documents and decode override values.
+        public CultCache(CultDocumentRegistry? registry = null, CultCodec? codec = null)
         {
             _registry = registry ?? CultDocumentRegistry.Shared;
+            _codec = codec;
         }
 
         public CultDocumentRegistry Registry => _registry;
+
+        public CultCodec? Codec => _codec;
+
+        // Overrides a variant carries that no longer resolve (a slot the type dropped, a value that no longer decodes),
+        // reported as compatible drift: the override is ignored and the variant inherits the base value.
+        public IReadOnlyList<CultSchemaMigrationReport> VariantMigrationReports
+        {
+            get
+            {
+                lock (_gate)
+                    return _variantReports.Values.ToArray();
+            }
+        }
+
+        // The whole override of one member, encoded with this cache's codec, ready for UpsertVariant.
+        public CultVariantOverride Override(Type documentType, string member, object? value)
+        {
+            if (_codec == null) throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
+            var found = _registry.GetRequired(documentType).RichMembers.FirstOrDefault(entry => entry.Member.Name == member)
+                        ?? throw new ArgumentException($"{documentType.Name} has no persisted member '{member}'.", nameof(member));
+            return CultVariantOverride.Set(
+                found.Slot,
+                _codec.Serialize(value!, found.MemberType, documentType));
+        }
+
+        public CultVariantOverride Override<T>(string member, object? value) where T : class => Override(typeof(T), member, value);
 
         public bool IsDirty
         {
@@ -1841,7 +1946,7 @@ namespace GameCult.Caching
 
                 store.AttachRegistry(_registry);
                 store.Cache = this;
-                store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, _ => CultCommitOutcome.Committed);
+                store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, (_, _) => CultCommitOutcome.Committed);
                 _stores.Add(candidate);
                 try
                 {
@@ -1915,11 +2020,39 @@ namespace GameCult.Caching
             return Task.FromResult(Write(document, key));
         }
 
+        // A single-call variant write; a batch stages the same thing with CultCacheBatch.UpsertVariant.
+        public Task<CultRecordKey> UpsertVariantAsync(CultRecordKey key, CultRecordKey baseKey, IEnumerable<CultVariantOverride>? overrides = null)
+        {
+            var delta = new CultVariantDelta(baseKey.Value, (overrides ?? Array.Empty<CultVariantOverride>()).ToArray());
+            return Task.FromResult(Held(() =>
+            {
+                var stored = StampVariant(key, DescriptorOfBase(key, delta.BaseKey, null), delta);
+                Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, (home, docs) =>
+                {
+                    home?.Push(docs[0]);
+                    return CultCommitOutcome.Committed;
+                });
+                return key;
+            }));
+        }
+
+        // Replaces a variant with a plain record holding its resolved document (Q1a's explicit operation).
+        public Task<CultRecordKey> FlattenAsync(CultRecordKey key) => Task.FromResult(Held(() =>
+        {
+            var stored = StampFlatten(key);
+            Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, (home, docs) =>
+            {
+                home?.Push(docs[0]);
+                return CultCommitOutcome.Committed;
+            });
+            return key;
+        }));
+
         public bool Remove(CultRecordKey key) => Held(() =>
         {
             if (!_entries.TryGetValue(key.Value, out var existing))
                 return false;
-            Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, home =>
+            Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, (home, _) =>
             {
                 home?.Delete(existing);
                 return CultCommitOutcome.Committed;
@@ -1948,6 +2081,13 @@ namespace GameCult.Caching
             if (document == null) throw new ArgumentNullException(nameof(document));
             lock (_gate)
                 return _handles.TryGetValue(document, out var box) ? new CultRecordHandle<T>(box.Key) : null;
+        }
+
+        // The stored form of a record: for a variant, the delta beside the resolved document.
+        public CultStoredDocument? GetStored(CultRecordKey key)
+        {
+            lock (_gate)
+                return _entries.TryGetValue(key.Value, out var stored) ? stored : null;
         }
 
         public object? Get(CultRecordKey key)
@@ -2039,7 +2179,53 @@ namespace GameCult.Caching
 
         // Call under the gate that admits the result, so no load can land a later storedAt in between.
         private CultStoredDocument Stamp(CultRecordKey key, CultDocumentDescriptor descriptor, object document) =>
-            new(key, MintStoredAt(_entries.TryGetValue(key.Value, out var previous) ? previous.StoredAt : null), descriptor, document);
+            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, document);
+
+        // An unresolved variant: the admitting hold resolves it against its base before anything lands.
+        private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta) =>
+            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null);
+
+        // The plain record a Flatten stages: the variant's resolved document, under the variant's own key and schema.
+        private CultStoredDocument StampFlatten(CultRecordKey key)
+        {
+            if (!_entries.TryGetValue(key.Value, out var existing) || existing.Variant == null)
+                throw new InvalidOperationException($"Flatten({key.Value}): the record is not a variant.");
+            return new CultStoredDocument(key, MintStoredAt(existing.StoredAt), existing.Descriptor, existing.Document) { Flattens = true };
+        }
+
+        private string? PreviousStoredAt(CultRecordKey key) => _entries.TryGetValue(key.Value, out var previous) ? previous.StoredAt : null;
+
+        // The concrete type a variant takes from its base, walking bases through what the batch stages and then the cache.
+        // Refuses a cycle or a base that is not there, naming the keys, exactly as the admitting hold would.
+        private CultDocumentDescriptor DescriptorOfBase(CultRecordKey variant, string baseKey, CultCacheBatch? batch)
+        {
+            var seen = new List<string> { variant.Value };
+            var next = baseKey;
+            while (true)
+            {
+                if (seen.Contains(next))
+                    throw CycleRefusal(seen.Append(next));
+                var staged = batch != null && batch.Operations.TryGetValue(next, out var op) ? op : null;
+                if (staged != null)
+                {
+                    if (staged.Stored != null)
+                        return staged.Stored.Descriptor;
+                    if (staged.Variant != null)
+                    {
+                        seen.Add(next);
+                        next = staged.Variant.BaseKey;
+                        continue;
+                    }
+
+                    if (!staged.Flatten)
+                        throw MissingBaseRefusal(variant.Value, baseKey, removed: true);
+                }
+
+                if (!_entries.TryGetValue(next, out var existing))
+                    throw MissingBaseRefusal(variant.Value, baseKey, removed: false);
+                return existing.Descriptor;
+            }
+        }
 
         internal CultStoredDocument? Observe(CultRecordKey key, object? current)
         {
@@ -2068,9 +2254,9 @@ namespace GameCult.Caching
         private CultRecordKey Write(object document, CultRecordKey? key) => Held(() =>
         {
             var stored = CreateStoredDocument(document, key);
-            Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, home =>
+            Admit(new[] { stored }, Array.Empty<CultStoredDocument>(), null, (home, docs) =>
             {
-                home?.Push(stored);
+                home?.Push(docs[0]);
                 return CultCommitOutcome.Committed;
             });
             return stored.Key;
@@ -2094,16 +2280,19 @@ namespace GameCult.Caching
             {
                 // Staging stamped outside this gate; a pull since then may hold a later storedAt, so stamp again.
                 var upserts = batch.Operations.Values
-                    .Where(op => op.Stored != null)
-                    .Select(op => Stamp(op.Key, op.Stored!.Descriptor, op.Stored.Document))
+                    .Where(op => !op.IsRemoval)
+                    .Select(op => op.Stored != null ? Stamp(op.Key, op.Stored.Descriptor, op.Stored.Document)
+                        : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant)
+                        : StampFlatten(op.Key))
                     .ToArray();
                 var deletes = batch.Operations.Values
-                    .Where(op => op.Stored == null && _entries.ContainsKey(op.Key.Value))
+                    .Where(op => op.IsRemoval && _entries.ContainsKey(op.Key.Value))
                     .Select(op => _entries[op.Key.Value])
                     .ToArray();
-                var request = new CultCommitRequest(upserts, deletes, batch.Expected.ToArray(), batch.ExpectsUnchanged);
-                return Admit(upserts, deletes, null, home =>
+                return Admit(upserts, deletes, null, (home, resolved) =>
                 {
+                    // What the store holds is what the hold resolved: a variant's delta beside its resolved view.
+                    var request = new CultCommitRequest(resolved, deletes, batch.Expected.ToArray(), batch.ExpectsUnchanged);
                     if (home != null)
                     {
                         if (request.HasConditions && home.IsDirty)
@@ -2127,14 +2316,18 @@ namespace GameCult.Caching
             IReadOnlyList<CultStoredDocument> admitted,
             IReadOnlyList<CultStoredDocument> evicted,
             CacheBackingStore? source,
-            Func<CacheBackingStore?, CultCommitOutcome> land) => Held(() =>
+            Func<CacheBackingStore?, IReadOnlyList<CultStoredDocument>, CultCommitOutcome> land) => Held(() =>
         {
             if (_held == null)
                 throw new InvalidOperationException("An admission reached the cache under a plain lock on its gate; every admission runs in a hold.");
-            var outcome = land(Validate(admitted, evicted, source));
+            var home = Validate(admitted, evicted, source);
+            // The one resolution: a variant admitted, a base admitted or evicted, all resolved here against the post-batch
+            // set, before land and before memory. land receives the admitted records with variants resolved.
+            var plan = Resolve(admitted, evicted, source);
+            var outcome = land(home, plan.Admitted);
             if (outcome != CultCommitOutcome.Committed)
                 return outcome;
-            foreach (var change in Apply(admitted, evicted, source))
+            foreach (var change in Apply(plan, evicted, source))
                 _held.Add((change, source != null));
             return CultCommitOutcome.Committed;
         });
@@ -2262,12 +2455,215 @@ namespace GameCult.Caching
             }
         }
 
-        private List<Change> Apply(
+        private sealed class VariantPlan
+        {
+            public VariantPlan(IReadOnlyList<CultStoredDocument> admitted)
+            {
+                Admitted = admitted;
+            }
+
+            // The admitted records, variants resolved.
+            public IReadOnlyList<CultStoredDocument> Admitted { get; }
+
+            // Variants this admission did not write whose base chain it changed: re-resolved, same delta, same storedAt.
+            public List<CultStoredDocument> Dependents { get; } = new();
+
+            // The drift report of every variant resolved here; null when nothing was ignored.
+            public Dictionary<string, CultSchemaMigrationReport?> Reports { get; } = new(StringComparer.Ordinal);
+        }
+
+        // Resolves every admitted variant and every variant whose base chain this admission changes, base first, against
+        // the post-admission set. It refuses a broken variant naming the keys, and mutates nothing.
+        private VariantPlan Resolve(
             IReadOnlyList<CultStoredDocument> admitted,
             IReadOnlyList<CultStoredDocument> evicted,
             CacheBackingStore? source)
         {
-            var changes = new List<Change>(admitted.Count + evicted.Count);
+            if (_variantKeys.Count == 0 && admitted.All(stored => stored.Variant == null))
+                return new VariantPlan(admitted);
+
+            var incoming = admitted.ToDictionary(stored => stored.Key.Value, StringComparer.Ordinal);
+            var gone = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
+            CultStoredDocument? Lookup(string key) =>
+                incoming.TryGetValue(key, out var found) ? found
+                : gone.Contains(key) ? null
+                : _entries.TryGetValue(key, out var held) ? held : null;
+
+            // A variant is written only through the variant API: a plain record never lands on a variant's key, and the
+            // reverse is a rebase or a flatten, never an accident. A load reports what is on disk and is not a write.
+            if (source == null)
+            {
+                foreach (var stored in admitted)
+                {
+                    _entries.TryGetValue(stored.Key.Value, out var present);
+                    if (stored.Variant == null && !stored.Flattens && present?.Variant != null)
+                        throw new InvalidOperationException(
+                            $"Record {stored.Key.Value} is a variant of {present.Variant.BaseKey}; a plain write cannot replace it. " +
+                            "Change it through the variant API, or Flatten it.");
+                    if (stored.Variant != null && present != null && present.Variant == null)
+                        throw new InvalidOperationException(
+                            $"Record {stored.Key.Value} is a plain record; it cannot become a variant of {stored.Variant.BaseKey} in place. Use a new key.");
+                    if (stored.Variant != null && present?.Variant != null &&
+                        present.Descriptor.DocumentType != stored.Descriptor.DocumentType)
+                        throw new InvalidOperationException(
+                            $"Variant {stored.Key.Value} is a {present.Descriptor.DocumentType.Name}; " +
+                            $"rebasing it onto {stored.Variant.BaseKey} would make it a {stored.Descriptor.DocumentType.Name}.");
+                }
+            }
+
+            var changed = new HashSet<string>(incoming.Keys.Concat(gone), StringComparer.Ordinal);
+            var toResolve = new List<string>(admitted.Where(stored => stored.Variant != null).Select(stored => stored.Key.Value));
+            foreach (var variantKey in _variantKeys)
+            {
+                if (incoming.ContainsKey(variantKey) || gone.Contains(variantKey))
+                    continue;
+                var next = _entries[variantKey].Variant!.BaseKey;
+                for (var steps = 0; steps <= _entries.Count; steps++)
+                {
+                    if (changed.Contains(next))
+                    {
+                        toResolve.Add(variantKey);
+                        break;
+                    }
+
+                    var link = Lookup(next);
+                    if (link?.Variant == null)
+                        break;
+                    next = link.Variant.BaseKey;
+                }
+            }
+
+            if (toResolve.Count == 0)
+                return new VariantPlan(admitted);
+
+            var pending = new HashSet<string>(toResolve, StringComparer.Ordinal);
+            var done = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+            var reports = new Dictionary<string, CultSchemaMigrationReport?>(StringComparer.Ordinal);
+            var stack = new List<string>();
+            foreach (var key in toResolve)
+                ResolveOne(key);
+
+            var plan = new VariantPlan(admitted.Select(stored => stored.Variant != null ? done[stored.Key.Value] : stored).ToList());
+            foreach (var key in toResolve.Where(key => !incoming.ContainsKey(key)))
+                plan.Dependents.Add(done[key]);
+            foreach (var pair in reports)
+                plan.Reports[pair.Key] = pair.Value;
+            return plan;
+
+            CultStoredDocument ResolveOne(string key)
+            {
+                if (done.TryGetValue(key, out var finished))
+                    return finished;
+                var variant = Lookup(key)!;
+                if (stack.Contains(key))
+                    throw CycleRefusal(stack.SkipWhile(entry => entry != key).Append(key));
+                stack.Add(key);
+
+                var delta = variant.Variant!;
+                var baseStored = Lookup(delta.BaseKey) ?? throw MissingBaseRefusal(key, delta.BaseKey, gone.Contains(delta.BaseKey));
+                if (baseStored.Variant != null && pending.Contains(delta.BaseKey))
+                    baseStored = ResolveOne(delta.BaseKey);
+
+                var descriptor = variant.Descriptor;
+                if (_codec == null)
+                    throw new InvalidOperationException(
+                        $"Variant {key} needs a codec to resolve; this cache has none. Create it with CultCacheMessagePack.Create.");
+                if (baseStored.Descriptor.DocumentType != descriptor.DocumentType)
+                    throw new InvalidOperationException(
+                        $"Variant {key} is a {descriptor.DocumentType.Name} but its base {delta.BaseKey} is a {baseStored.Descriptor.DocumentType.Name}; " +
+                        "a variant has its base's concrete type.");
+
+                var type = descriptor.DocumentType;
+                var kept = new List<KeyValuePair<int, byte[]>>();
+                var ignored = new List<int>();
+                var warnings = new List<CultSchemaMigrationWarning>();
+                foreach (var entry in delta.Overrides)
+                {
+                    if (entry.Op != CultOverrideOp.Set || entry.Path.Count != 1 || entry.Path[0].ElementId.Length != 0 || entry.Id.Length != 0)
+                        throw new InvalidOperationException(
+                            $"Variant {key} carries {entry.Op} at {entry.PathText}; this runtime resolves top-level Set overrides only.");
+                    var slot = entry.Path[0].Slot;
+                    var member = descriptor.RichMembers.FirstOrDefault(candidate => candidate.Slot == slot);
+                    if (member == null)
+                    {
+                        var name = delta.SlotNames != null && delta.SlotNames.TryGetValue(slot, out var persistedName)
+                            ? $"'{persistedName}'" : "unnamed";
+                        ignored.Add(slot);
+                        warnings.Add(new CultSchemaMigrationWarning
+                        {
+                            Code = "ignored_extra_slot",
+                            Message = $"Variant {key} overrides slot {slot} ({name}), which {type.Name} no longer has; the override is ignored and the variant inherits the base value."
+                        });
+                        continue;
+                    }
+
+                    try
+                    {
+                        _codec.Deserialize(member.MemberType, type, entry.Value);
+                    }
+                    catch (Exception exception)
+                    {
+                        ignored.Add(slot);
+                        warnings.Add(new CultSchemaMigrationWarning
+                        {
+                            Code = "ignored_undecodable_override",
+                            Message = $"Variant {key} overrides slot {slot} ('{member.Member.Name}') with a value that no longer decodes as {member.MemberType.Name} " +
+                                      $"({exception.GetBaseException().Message}); the override is ignored and the variant inherits the base value."
+                        });
+                        continue;
+                    }
+
+                    kept.Add(new KeyValuePair<int, byte[]>(slot, entry.Value));
+                }
+
+                var payload = _codec.Serialize(baseStored.Document, type, type);
+                var document = _codec.Deserialize(type, type, kept.Count == 0 ? payload : _codec.Overlay(payload, kept))
+                               ?? throw new InvalidOperationException($"Variant {key} resolved to nothing.");
+
+                // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it.
+                if (descriptor.NameAccessor?.Invoke(document) is { Length: > 0 } variantName)
+                {
+                    for (var ancestor = baseStored; ancestor != null;
+                         ancestor = ancestor.Variant == null ? null : done.TryGetValue(ancestor.Variant.BaseKey, out var above) ? above : Lookup(ancestor.Variant.BaseKey))
+                    {
+                        if (descriptor.NameAccessor(ancestor.Document) == variantName)
+                            throw new InvalidOperationException(
+                                $"Variant {key} and its base {ancestor.Key.Value} are both named '{variantName}'; a variant must override its name.");
+                    }
+                }
+
+                reports[key] = ignored.Count == 0
+                    ? null
+                    : new CultSchemaMigrationReport
+                    {
+                        PersistedSchemaId = descriptor.SchemaId,
+                        LocalSchemaId = descriptor.SchemaId,
+                        PersistedSchemaName = descriptor.SchemaName,
+                        LocalSchemaName = descriptor.SchemaName,
+                        Kind = CultSchemaMigrationKind.CompatibleDrift,
+                        IgnoredExtraSlots = ignored.OrderBy(slot => slot).ToArray(),
+                        Warnings = warnings.ToArray()
+                    };
+                stack.RemoveAt(stack.Count - 1);
+                return done[key] = variant.Resolved(document);
+            }
+        }
+
+        private static InvalidOperationException CycleRefusal(IEnumerable<string> keys) =>
+            new($"Variant bases form a cycle: {string.Join(" -> ", keys)}.");
+
+        private static InvalidOperationException MissingBaseRefusal(string variant, string baseKey, bool removed) =>
+            new(removed
+                ? $"Record {baseKey} cannot go: variant {variant} is based on it. Remove or rebase the variant in the same commit."
+                : $"Variant {variant} is based on {baseKey}, which does not exist.");
+
+        private List<Change> Apply(
+            VariantPlan plan,
+            IReadOnlyList<CultStoredDocument> evicted,
+            CacheBackingStore? source)
+        {
+            var admitted = plan.Admitted;
+            var changes = new List<Change>(admitted.Count + evicted.Count + plan.Dependents.Count);
             foreach (var stored in evicted)
             {
                 if (!_entries.TryGetValue(stored.Key.Value, out var existing))
@@ -2275,10 +2671,12 @@ namespace GameCult.Caching
                 Unindex(existing);
                 _entries.Remove(stored.Key.Value);
                 _handles.Remove(existing.Document);
+                _variantKeys.Remove(stored.Key.Value);
+                _variantReports.Remove(stored.Key.Value);
                 changes.Add(new Change(CultCacheDocumentChangeKind.Removed, existing, null, existing.Document, ++_sequence));
             }
 
-            foreach (var stored in admitted)
+            foreach (var stored in admitted.Concat(plan.Dependents))
             {
                 _entries.TryGetValue(stored.Key.Value, out var previous);
                 if (previous != null)
@@ -2290,6 +2688,14 @@ namespace GameCult.Caching
                 _entries[stored.Key.Value] = stored;
                 _handles.AddOrUpdate(stored.Document, new KeyBox(stored.Key));
                 Index(stored);
+                if (stored.Variant == null)
+                    _variantKeys.Remove(stored.Key.Value);
+                else
+                    _variantKeys.Add(stored.Key.Value);
+                if (plan.Reports.TryGetValue(stored.Key.Value, out var report) && report != null)
+                    _variantReports[stored.Key.Value] = report;
+                else
+                    _variantReports.Remove(stored.Key.Value);
                 changes.Add(new Change(
                     previous == null ? CultCacheDocumentChangeKind.Added : CultCacheDocumentChangeKind.Updated,
                     stored,
@@ -2486,12 +2892,14 @@ namespace GameCult.Caching
 
         protected CultPersistedRecord ToPersistedRecord(CultStoredDocument entry, Func<object, byte[]> serializePayload)
         {
+            // A variant persists its delta and an empty payload; the resolved view is never written.
             return new CultPersistedRecord
             {
                 Key = entry.Key.Value,
                 SchemaId = entry.Descriptor.SchemaId,
                 StoredAt = entry.StoredAt,
-                Payload = serializePayload(entry.Document)
+                Payload = entry.Variant != null ? Array.Empty<byte>() : serializePayload(entry.Document),
+                Variant = entry.Variant == null ? null : new CultVariantDelta(entry.Variant.BaseKey, entry.Variant.Overrides)
             };
         }
 
@@ -2501,6 +2909,21 @@ namespace GameCult.Caching
             Func<Type, byte[], object> deserializePayload)
         {
             var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
+            if (record.Variant != null)
+            {
+                // The cache resolves it against its base when it admits the load; the catalog names the slots the type may have dropped.
+                var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, record.SchemaId, StringComparison.Ordinal));
+                return new CultStoredDocument(
+                    new CultRecordKey(record.Key),
+                    record.StoredAt,
+                    resolution.Descriptor,
+                    new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides)
+                    {
+                        SlotNames = persisted?.Members.ToDictionary(member => member.Slot, member => member.MemberName)
+                    },
+                    null);
+            }
+
             var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),
@@ -2675,6 +3098,10 @@ namespace GameCult.Caching
             var used = new HashSet<string>(ordered.Select(record => record.SchemaId), StringComparer.Ordinal);
             var snapshot = new CultPersistedStoreSnapshot
             {
+                // v2 exactly when the store holds a variant: a store without one stays byte-identical v1.
+                FormatVersion = ordered.Any(record => record.Variant != null)
+                    ? CultPersistedStoreSnapshot.FormatV2
+                    : CultPersistedStoreSnapshot.FormatV1,
                 SchemaCatalog = catalog
                     .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .Select(group => group.First())
