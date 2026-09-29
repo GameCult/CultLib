@@ -695,6 +695,15 @@ class CultNetTests(unittest.TestCase):
         self.assertTrue(client.check_timeout(91, 50))
         self.assertFalse(client.connected)
 
+    def test_a_repeated_connect_acknowledges_what_it_carries(self) -> None:
+        client = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=1))
+        server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=100))
+        connect = client.create_connect(0, b"join")
+        accept = server.accept_connect(connect, 0)
+        reply = server.answer_repeated_connect(replace(connect, ack=accept.sequence), 1)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        self.assertEqual(server.outstanding_reliable_packet_count, 0)
+
     def test_cultnet_rudp_session_bounds_pending_reliable_packets_before_enqueue(self) -> None:
         session = CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=102, initial_sequence=1, max_pending_reliable_packets=2)

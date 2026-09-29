@@ -2233,6 +2233,8 @@ test("server-mode transport replaces its peer when a Connect arrives from anothe
     connectionId,
     resendPollMs: 1000,
   });
+  const receivedByA: CultNetRudpPacket[] = [];
+  socketA.on("message", (wire) => receivedByA.push(decodeRudpPacket(wire)));
   const receivedByB: CultNetRudpPacket[] = [];
   socketB.on("message", (wire) => receivedByB.push(decodeRudpPacket(wire)));
   const frames: string[] = [];
@@ -2243,7 +2245,8 @@ test("server-mode transport replaces its peer when a Connect arrives from anothe
     socket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
   try {
     send(socketA, peerA.createConnect(0));
-    await waitFor(() => server.connected, "A accepted");
+    await waitFor(() => receivedByA.some((p) => p.packetType === "accept"), "A's Accept");
+    peerA.receive(receivedByA.find((p) => p.packetType === "accept")!, 0);
     send(socketB, peerB.createConnect(0));
     await waitFor(() => receivedByB.some((p) => p.packetType === "accept"), "B's Accept");
     peerB.receive(receivedByB.find((p) => p.packetType === "accept")!, 0);
@@ -2338,4 +2341,15 @@ test("a flush is bound to the session it started in, even when a disconnect list
     peerSocket.close();
     client.close();
   }
+});
+
+test("a repeated Connect acknowledges what it carries", () => {
+  const connectionId = 0x1020305a;
+  const client = new CultNetRudpSession({ connectionId });
+  const server = new CultNetRudpSession({ connectionId });
+  const connect = client.createConnect(0);
+  const accept = server.acceptConnect(connect, 0);
+  const reply = server.answerRepeatedConnect({ ...connect, ack: accept.sequence }, 1);
+  assert.equal(reply.packetType, "ack");
+  assert.equal(server.outstandingReliablePacketCount, 0);
 });

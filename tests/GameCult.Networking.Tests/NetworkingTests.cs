@@ -901,6 +901,20 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_RepeatedConnectAcknowledgesWhatItCarries()
+        {
+            var client = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 103, InitialSequence = 1 });
+            var server = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 103, InitialSequence = 100 });
+            var connect = client.CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            var accept = server.AcceptConnect(connect, 0);
+            var repeat = CultNetRudpPacketCodec.Decode(CultNetRudpPacketCodec.Encode(connect));
+            repeat.Ack = accept.Sequence;
+            var reply = server.AnswerRepeatedConnect(repeat, 1);
+            Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
+            Assert.That(server.OutstandingReliablePacketCount, Is.EqualTo(0));
+        }
+
+        [Test]
         public void RudpSession_LossyPacketsCannotCreateReliableOrderedGaps()
         {
             var client = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 198, InitialSequence = 1 });
