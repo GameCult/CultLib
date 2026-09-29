@@ -39,6 +39,12 @@ namespace GameCult.Networking
         /// the peer, or a packet the session refuses.
         /// </summary>
         public long PacketsDropped { get; internal set; }
+        /// <summary>
+        /// Gets the number of datagrams a multi-peer server could not send to one peer. Each is
+        /// that peer's lost datagram: a reliable packet stays pending and is resent, and no other
+        /// peer is affected. Zero for single-peer transports, whose callers get the send error.
+        /// </summary>
+        public long SendFailures { get; internal set; }
 
         internal CultNetTransportStats Snapshot()
         {
@@ -48,7 +54,8 @@ namespace GameCult.Networking
                 FramesReceived = FramesReceived,
                 BytesSent = BytesSent,
                 BytesReceived = BytesReceived,
-                PacketsDropped = PacketsDropped
+                PacketsDropped = PacketsDropped,
+                SendFailures = SendFailures
             };
         }
     }
@@ -2734,14 +2741,8 @@ namespace GameCult.Networking
 
                 if (outcome == null)
                 {
-                    try
-                    {
-                        SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.EndRefused());
-                    }
-                    catch (SocketException)
-                    {
-                        // Best effort: the session ends whether or not the peer hears it.
-                    }
+                    // The session ends whether or not the peer hears the goodbye.
+                    SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.EndRefused());
                 }
                 else
                 {
@@ -2826,12 +2827,29 @@ namespace GameCult.Networking
             _socket.Dispose();
         }
 
+        // A failed send is that peer's lost datagram: counted, never thrown. A reliable packet
+        // stays pending and is resent; an unreliable one was allowed to be lost. The peer's
+        // session ends by the rules that already end sessions. Only an encode failure, the
+        // listener's own bug, throws.
         private void SendPacket(EndPoint remoteEndPoint, CultNetRudpPacket packet)
         {
             var wire = CultNetRudpPacketCodec.Encode(packet);
-            var sent = _socket.SendTo(wire, remoteEndPoint);
-            _stats.BytesSent += sent;
+            try
+            {
+                if (FailingSendPeers.Contains(remoteEndPoint))
+                    throw new SocketException((int)SocketError.HostUnreachable);
+                var sent = _socket.SendTo(wire, remoteEndPoint);
+                _stats.BytesSent += sent;
+            }
+            catch (SocketException)
+            {
+                _stats.SendFailures++;
+            }
         }
+
+        // Test seam: peers whose every datagram fails to send, standing in for an unroutable or
+        // full path that a loopback peer cannot be made to have.
+        internal HashSet<EndPoint> FailingSendPeers { get; } = new HashSet<EndPoint>();
 
         private static string RemoteKey(EndPoint endpoint)
         {
