@@ -1,7 +1,7 @@
 # Idunn runtime fixtures
 
 Written by the Rust owner, not by the TypeScript tests. Regenerate with
-`packages/cultnet-rs/examples/idunn_runtime_fixture.rs` (CultLib `f5c597a`; it uses
+`packages/cultnet-rs/examples/idunn_runtime_fixture.rs` (CultLib `9ba6ac4`; it uses
 cultnet-rs only, and Idunn's `IdunnRuntimeActivationLaunch` is that same crate's).
 It needs Linux and a machine-id equal to the `machine-id` file here, because the
 provider identity is bound to it. On Yggdrasil:
