@@ -212,5 +212,47 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.GetByIndex<ProjectedRecord>("code", "base-code-2"), Is.Not.Null);
             Assert.That(cache.GetByName<ProjectedRecord>("variant"), Is.Not.Null);
         }
+
+        // The index rule counts the holders a commit leaves behind: a record removed by the same commit no longer holds its value.
+        [Test]
+        public void AVariantMayTakeAnIndexedValueFromARecordTheSameCommitRemoves()
+        {
+            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            var baseKey = new CultRecordKey("projected:base");
+            var holderKey = new CultRecordKey("projected:holder");
+            Put(cache, new ProjectedRecord { Name = "base", Code = "base-code" }, baseKey);
+            Put(cache, new ProjectedRecord { Name = "holder", Code = "shared" }, holderKey);
+
+            var landed = cache.Commit(batch =>
+            {
+                batch.Remove(holderKey);
+                batch.UpsertVariant(new CultRecordKey("projected:variant"), baseKey, new[]
+                {
+                    cache.Override<ProjectedRecord>(nameof(ProjectedRecord.Name), "variant"),
+                    cache.Override<ProjectedRecord>(nameof(ProjectedRecord.Code), "shared")
+                });
+            });
+
+            Assert.That(landed, Is.True);
+            Assert.That(cache.GetByIndex<ProjectedRecord>("code", "shared"), Is.Not.Null);
+            Assert.That(cache.Get<ProjectedRecord>(holderKey), Is.Null);
+        }
+
+        // A blank name is no name: a variant and its base that are both blank do not shadow each other.
+        [Test]
+        public void ABlankNameIsNoNameSoBlankVariantAndBaseDoNotCollide()
+        {
+            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            var baseKey = new CultRecordKey("projected:base");
+            Put(cache, new ProjectedRecord { Name = "", Code = "base-code" }, baseKey);
+
+            cache.Commit(batch => batch.UpsertVariant(new CultRecordKey("projected:variant"), baseKey, new[]
+            {
+                cache.Override<ProjectedRecord>(nameof(ProjectedRecord.Name), ""),
+                cache.Override<ProjectedRecord>(nameof(ProjectedRecord.Code), "variant-code")
+            }));
+
+            Assert.That(cache.Get<ProjectedRecord>(new CultRecordKey("projected:variant")), Is.Not.Null);
+        }
     }
 }

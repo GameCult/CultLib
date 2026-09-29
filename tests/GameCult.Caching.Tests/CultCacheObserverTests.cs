@@ -135,5 +135,40 @@ namespace GameCult.Caching.Tests
             using var after = cache.Watch<ObservedPing>().Subscribe(_ => { }, _ => completed++);
             Assert.That(completed, Is.EqualTo(2), "subscribing to a disposed cache completes at once");
         }
+
+        // Completing an observer is publication too: every observer is completed, and a fail-fast handler's exception
+        // reaches the disposer afterwards (an AggregateException for several).
+        [Test]
+        public void ACompletionThatEscapesReachesTheDisposerAfterEveryObserverCompleted()
+        {
+            var cache = new CultCache(Registry);
+            var completed = new List<string>();
+            using var one = cache.Watch<ObservedPing>().Subscribe(_ => { }, _ =>
+            {
+                completed.Add("one");
+                throw new InvalidOperationException("one");
+            });
+            using var two = cache.Watch<ObservedPing>().Subscribe(_ => { }, _ =>
+            {
+                completed.Add("two");
+                throw new InvalidOperationException("two");
+            });
+
+            var escaped = Assert.Throws<AggregateException>(() => cache.Dispose())!;
+
+            Assert.That(completed, Is.EqualTo(new[] { "one", "two" }));
+            Assert.That(escaped.InnerExceptions.Select(exception => exception.Message), Is.EqualTo(new[] { "one", "two" }));
+        }
+
+        [Test]
+        public void ASingleEscapedCompletionIsRethrownAsItself()
+        {
+            var cache = new CultCache(Registry);
+            using var only = cache.Watch<ObservedPing>().Subscribe(_ => { }, _ => throw new InvalidOperationException("only"));
+
+            var escaped = Assert.Throws<InvalidOperationException>(() => cache.Dispose())!;
+
+            Assert.That(escaped.Message, Is.EqualTo("only"));
+        }
     }
 }

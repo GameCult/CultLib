@@ -2551,7 +2551,7 @@ namespace GameCult.Caching
                 var descriptor = stored.Descriptor;
                 string? name = null;
                 if (descriptor.NameAccessor != null)
-                    name = Read(stored, $"[CultName] member {descriptor.NameMember}", descriptor.NameAccessor) is { Length: > 0 } read ? read : null;
+                    name = NameRead(stored) is { Length: > 0 } read ? read : null;
                 var indexes = new List<(string Alias, string Value)>();
                 foreach (var pair in descriptor.IndexAccessors)
                 {
@@ -2564,6 +2564,9 @@ namespace GameCult.Caching
                 plan.Projections[stored.Key.Value] = new Projection(name, indexes.ToArray());
             }
         }
+
+        private static string? NameRead(CultStoredDocument stored) =>
+            Read(stored, $"[CultName] member {stored.Descriptor.NameMember}", stored.Descriptor.NameAccessor!);
 
         private static string? Read(CultStoredDocument stored, string what, Func<object, string?> getter)
         {
@@ -2590,7 +2593,7 @@ namespace GameCult.Caching
             // The variant rules are judged only when a variant is involved.
             if (_variantKeys.Count != 0 || admitted.Any(stored => stored.Variant != null))
             {
-                RefuseVariantNameSharing(plan, evicted);
+                RefuseVariantNameSharing(plan);
                 RefuseVariantIndexSharing(plan, evicted);
             }
 
@@ -2744,20 +2747,17 @@ namespace GameCult.Caching
 
         // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it. A variant's
         // name is its projection; an ancestor that lands is read from its projection, one that stays is read as held.
-        private void RefuseVariantNameSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
+        private void RefuseVariantNameSharing(VariantPlan plan)
         {
-            var gone = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
             var landing = plan.Admitted.Concat(plan.Dependents).ToDictionary(stored => stored.Key.Value, StringComparer.Ordinal);
 
+            // Resolution already refused a base that is missing or removed, so an ancestor is landing or held.
             CultStoredDocument? Ancestor(string key) =>
                 landing.TryGetValue(key, out var landed) ? landed
-                : gone.Contains(key) ? null
                 : _entries.TryGetValue(key, out var held) ? held : null;
 
             string? NameOf(CultStoredDocument stored) =>
-                plan.Projections.TryGetValue(stored.Key.Value, out var projection)
-                    ? projection.Name
-                    : stored.Descriptor.NameAccessor == null ? null : Read(stored, $"[CultName] member {stored.Descriptor.NameMember}", stored.Descriptor.NameAccessor);
+                plan.Projections.TryGetValue(stored.Key.Value, out var projection) ? projection.Name : NameRead(stored);
 
             foreach (var variant in landing.Values.Where(stored => stored.Variant != null))
             {
