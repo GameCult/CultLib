@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -223,6 +224,190 @@ namespace GameCult.Caching.Tests
         {
             var json = JsonSerializer.Serialize(new Dictionary<T, int> { [value] = 1 }, With(handling));
             return JsonDocument.Parse(json).RootElement.EnumerateObject().Single().Name;
+        }
+
+        private const JsonNumberHandling ReadStrings = JsonNumberHandling.AllowReadingFromString;
+        private const JsonNumberHandling WriteStrings = JsonNumberHandling.WriteAsString;
+
+        // Every row was measured against System.Text.Json's own float.
+        [Test]
+        public void NamedLiterals_FollowTheSameFlagsAsSystemTextJsonFloat()
+        {
+            foreach (var handling in new[] { Named, ReadStrings, ReadStrings | Named })
+            {
+                JsonSerializer.Deserialize<float2>("""{"x":"NaN","y":"-Infinity"}""", With(handling))!.y.Should().Be(float.NegativeInfinity, handling.ToString());
+            }
+
+            foreach (var handling in new[] { JsonNumberHandling.Strict, WriteStrings })
+            {
+                Action read = () => JsonSerializer.Deserialize<float2>("""{"x":"NaN"}""", With(handling));
+                read.Should().Throw<JsonException>(handling.ToString());
+            }
+
+            foreach (var handling in new[] { Named, WriteStrings, WriteStrings | Named })
+            {
+                JsonSerializer.Serialize(new float2(float.NaN, float.PositiveInfinity), With(handling))
+                    .Should().Be("""{"x":"NaN","y":"Infinity"}""", handling.ToString());
+            }
+
+            foreach (var handling in new[] { JsonNumberHandling.Strict, ReadStrings })
+            {
+                Action write = () => JsonSerializer.Serialize(new float2(float.NaN, 0f), With(handling));
+                write.Should().Throw<JsonException>(handling.ToString());
+            }
+
+            JsonSerializer.Serialize(new float2(1f, float.NaN), With(WriteStrings)).Should().Be("""{"x":"1","y":"NaN"}""");
+            JsonSerializer.Deserialize<double3>("""{"z":"Infinity"}""", With(ReadStrings))!.z.Should().Be(double.PositiveInfinity);
+            JsonSerializer.Serialize(new double2(double.NegativeInfinity, 2d), With(WriteStrings)).Should().Be("""{"x":"-Infinity","y":"2"}""");
+        }
+
+        [Test]
+        public void QuotedNumbers_RefuseWhitespace()
+        {
+            var options = With(ReadStrings);
+            foreach (var json in new[] { """{"x":" 1.5"}""", """{"x":"1.5 "}""", """{"x":"\t1"}""" })
+            {
+                Action floatRead = () => JsonSerializer.Deserialize<float2>(json, options);
+                floatRead.Should().Throw<JsonException>(json);
+            }
+
+            Action doubleRead = () => JsonSerializer.Deserialize<double2>("""{"y":" 2"}""", options);
+            doubleRead.Should().Throw<JsonException>();
+            Action intRead = () => JsonSerializer.Deserialize<int2>("""{"x":" 1"}""", options);
+            intRead.Should().Throw<JsonException>();
+            Action padded = () => JsonSerializer.Deserialize<float2>("""{"x":" NaN"}""", With(ReadStrings | Named));
+            padded.Should().Throw<JsonException>();
+        }
+
+        [Test]
+        public void UnknownProperties_AreSkippedWhateverTheyContain()
+        {
+            var expected = new float3(1f, 2f, 3f);
+            foreach (var json in new[]
+            {
+                """{"u":{"a":[1,{"b":2}]},"x":1,"y":2,"z":3}""",
+                """{"x":1,"u":[[1],[2,[3]]],"y":2,"v":{"a":{}},"z":3}""",
+                """{"x":1,"y":2,"z":3,"u":{"a":{"b":[]}}}""",
+                """{"x":1,"y":2,"z":3,"u":[{"a":[{}]}]}""",
+            })
+            {
+                Parse<float3>(json).Should().Be(expected, json);
+            }
+
+            Parse<rect>("""{"min":{"q":[{}],"x":1,"y":2},"skip":{"a":[1]},"max":{"x":3,"y":4,"q":{"a":[]}}}""")
+                .Should().Be(new rect(1f, 2f, 3f, 4f));
+            Parse<float2x2>("""[{"x":1,"u":[1],"y":2},{"y":4,"u":{"a":1},"x":3}]""").Should().Be(new float2x2(1f, 2f, 3f, 4f));
+        }
+
+        [Test]
+        public void UnmappedMemberHandling_Disallow_RefusesUnknownProperties()
+        {
+            var options = new JsonSerializerOptions { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow }.AddCultMathConverters();
+            Action flat = () => JsonSerializer.Deserialize<float2>("""{"x":1,"z":3}""", options);
+            flat.Should().Throw<JsonException>();
+            Action nested = () => JsonSerializer.Deserialize<rect>("""{"min":{"x":1,"q":1},"max":{}}""", options);
+            nested.Should().Throw<JsonException>();
+            JsonSerializer.Deserialize<float2>("""{"x":1,"y":2}""", options).Should().Be(new float2(1f, 2f));
+        }
+
+        [Test]
+        public void DuplicateProperties_ReplaceTheWholeValue()
+        {
+            Parse<float2>("""{"x":1,"x":2,"y":5}""").Should().Be(new float2(2f, 5f));
+            Parse<rect>("""{"min":{"x":1,"y":2},"min":{"x":3},"max":{"x":4,"y":5}}""").Should().Be(new rect(3f, 0f, 4f, 5f));
+            Parse<Color32>("""{"a":9,"a":1}""").Should().Be(new Color32(0, 0, 0, 1));
+            Parse<Color32>("""{"r":3,"r":4}""").Should().Be(new Color32(4, 0, 0, 255));
+            Parse<CultCellular>("""{"nearest":{"x":1,"y":2},"nearest":{"z":3},"id":1}""")
+                .Should().Be(new CultCellular(new float4(0f, 0f, 3f, 0f), float4.zero, 1f));
+        }
+
+        [Test]
+        public void AllowDuplicatePropertiesFalse_RefusesRepeats()
+        {
+            var property = typeof(JsonSerializerOptions).GetProperty("AllowDuplicateProperties");
+            Assert.That(property, Is.Not.Null, "the test runtime's System.Text.Json has AllowDuplicateProperties");
+            var options = new JsonSerializerOptions().AddCultMathConverters();
+            property!.SetValue(options, false);
+
+            Action flat = () => JsonSerializer.Deserialize<float2>("""{"x":1,"x":2}""", options);
+            flat.Should().Throw<JsonException>();
+            Action nested = () => JsonSerializer.Deserialize<rect>("""{"min":{"x":1,"x":2}}""", options);
+            nested.Should().Throw<JsonException>();
+            JsonSerializer.Deserialize<float2>("""{"x":1,"y":2}""", options).Should().Be(new float2(1f, 2f));
+        }
+
+        [Test]
+        public void DictionaryKeys_ReadOnlyTheCanonicalSpelling()
+        {
+            foreach (var key in new[] { "1.0,2", "+1,2", " 1,2", "1, 2", "01,2", "1,2 ", "1e0,2", "1,2,", ",1" })
+            {
+                Action read = () => Parse<Dictionary<float2, int>>($$"""{"{{key}}":1}""");
+                read.Should().Throw<JsonException>(key);
+            }
+
+            foreach (var key in new[] { "01,2", "+1,2", "1,-0" })
+            {
+                Action read = () => Parse<Dictionary<int2, int>>($$"""{"{{key}}":1}""");
+                read.Should().Throw<JsonException>(key);
+            }
+
+            Action bools = () => Parse<Dictionary<bool2, int>>("""{"True,false":1}""");
+            bools.Should().Throw<JsonException>();
+            Parse<Dictionary<float2, int>>("""{"1,2":1}""").Should().ContainKey(new float2(1f, 2f));
+        }
+
+        [Test]
+        public void NegativeZero_IsADistinctKey()
+        {
+            var negative = new float2(-0f, 0f);
+            KeyOf(negative).Should().Be("-0,0");
+            KeyOf(float2.zero).Should().Be("0,0");
+            KeyOf(new double2(0d, -0d)).Should().Be("0,-0");
+
+            var parsed = Parse<Dictionary<float2, int>>("""{"-0,0":1}""").Keys.Single();
+            float.IsNegative(parsed.x).Should().BeTrue();
+            var positive = Parse<Dictionary<float2, int>>("""{"0,0":1}""").Keys.Single();
+            float.IsNegative(positive.x).Should().BeFalse();
+        }
+
+        [Test]
+        public void Culture_DoesNotChangeKeysOrValues()
+        {
+            var german = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+            german.NumberFormat.NumberDecimalSeparator = ",";
+            german.NumberFormat.NumberGroupSeparator = ".";
+            german.NumberFormat.NegativeSign = "−";
+            german.NumberFormat.PositiveSign = "➕";
+            var swedish = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+            swedish.NumberFormat.NegativeSign = "−";
+            swedish.NumberFormat.NumberDecimalSeparator = ",";
+
+            var original = CultureInfo.CurrentCulture;
+            try
+            {
+                foreach (var culture in new[] { german, swedish })
+                {
+                    CultureInfo.CurrentCulture = culture;
+                    var options = With(ReadStrings | WriteStrings | Named);
+
+                    KeyOf(new float2(-1.5f, 2.25f)).Should().Be("-1.5,2.25");
+                    KeyOf(new double3(-1e-7, 1234.5, -0d)).Should().Be("-1E-07,1234.5,-0");
+                    KeyOf(new int2(-3, 4)).Should().Be("-3,4");
+                    KeyOf(new float2(float.NaN, float.NegativeInfinity), Named).Should().Be("NaN,-Infinity");
+                    Parse<Dictionary<float2, int>>("""{"-1.5,2.25":1}""").Keys.Single().Should().Be(new float2(-1.5f, 2.25f));
+                    Parse<Dictionary<int2, int>>("""{"-3,4":1}""").Keys.Single().Should().Be(new int2(-3, 4));
+
+                    JsonSerializer.Serialize(new float2(-1.5f, 2.25f), options).Should().Be("""{"x":"-1.5","y":"2.25"}""");
+                    JsonSerializer.Deserialize<float2>("""{"x":"-1.5","y":"2.25"}""", options).Should().Be(new float2(-1.5f, 2.25f));
+                    JsonSerializer.Serialize(new int2(-3, 4), options).Should().Be("""{"x":"-3","y":"4"}""");
+                    JsonSerializer.Deserialize<int2>("""{"x":"-3","y":"4"}""", options).Should().Be(new int2(-3, 4));
+                    Json(new float2(-1.5f, 2.25f)).Should().Be("""{"x":-1.5,"y":2.25}""");
+                }
+            }
+            finally
+            {
+                CultureInfo.CurrentCulture = original;
+            }
         }
 
         private static void RoundTrip<T>(T value) => Parse<T>(Json(value)).Should().Be(value);

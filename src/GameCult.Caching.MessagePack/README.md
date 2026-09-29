@@ -65,14 +65,22 @@ in the default chain) and one JSON shape (`CultMathJson`, added to a consumer's
 options with `new JsonSerializerOptions().AddCultMathConverters()`; CultLib owns
 no JSON options of its own). MessagePack decoding skips extra elements, leaves
 missing ones at zero (`Color32` alpha at 255) and refuses nil. JSON reading
-skips unknown properties, leaves missing ones at zero, honours
-`PropertyNameCaseInsensitive`, and throws `JsonException` for a wrong token or an
-out-of-range number (a float beyond `float.MaxValue` is refused, not read as
-infinity). Numbers follow `JsonSerializerOptions.NumberHandling`: NaN and the
-infinities need `AllowNamedFloatingPointLiterals` (`"NaN"`, `"Infinity"`,
-`"-Infinity"`). Every type is also a dictionary key: its flattened components
-joined by commas, invariant culture (`"1,2"`, `"true,false"`, matrices row by
-row, `rect` as `"minX,minY,maxX,maxY"`). A consumer resolver or converter
+skips unknown properties (`UnmappedMemberHandling.Disallow` refuses them), leaves
+missing ones at zero, honours `PropertyNameCaseInsensitive`, lets a repeated
+property replace the whole earlier value (refused when `AllowDuplicateProperties`
+is false), and throws `JsonException` for a wrong token or an out-of-range number.
+Numbers follow `JsonSerializerOptions.NumberHandling` as System.Text.Json's own
+float does: `"NaN"`, `"Infinity"` and `"-Infinity"` are written under
+`AllowNamedFloatingPointLiterals` or `WriteAsString` and read under
+`AllowNamedFloatingPointLiterals` or `AllowReadingFromString`; quoted numbers read
+under `AllowReadingFromString` with no surrounding whitespace.
+Every type is also a dictionary key: its flattened components joined by commas,
+invariant culture (`"1,2"`, `"true,false"`, matrices row by row, `rect` as
+`"minX,minY,maxX,maxY"`), and only that exact spelling reads back. Two intended
+divergences from System.Text.Json: a bare number beyond a component's range
+(`1e40` as a float) is refused where System.Text.Json reads infinity, and a
+refusal on write is a `JsonException` where System.Text.Json throws
+`ArgumentException`. A consumer resolver or converter
 registered ahead of these wins.
 
 | Type | MessagePack | JSON |
