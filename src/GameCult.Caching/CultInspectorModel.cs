@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using MessagePack;
 
 namespace GameCult.Caching
@@ -653,7 +654,27 @@ namespace GameCult.Caching
         // A node's id is its members' value identities, so it survives relabelling: a ref by key, an enum by its underlying
         // value, anything else by the value's invariant string.
         private static string GroupId(IReadOnlyList<CultInspectorMember> members, IReadOnlyList<object?> values) =>
-            string.Join("/", values.Select((value, i) => members[i].Name + "=" + Uri.EscapeDataString(IdentityOf(value))));
+            string.Join("/", values.Select((value, i) => members[i].Name + "=" + EscapeIdentity(IdentityOf(value))));
+
+        // Injective: text is spelled as Uri.EscapeDataString spells it, which turns '/' and '%' into %XX; an unpaired
+        // surrogate, which that method would flatten to U+FFFD, becomes %uXXXX, a form no escaped run contains.
+        private static string EscapeIdentity(string identity)
+        {
+            var escaped = new StringBuilder();
+            var run = 0;
+            for (var i = 0; i < identity.Length; i++)
+            {
+                if (char.IsHighSurrogate(identity[i]) && i + 1 < identity.Length && char.IsLowSurrogate(identity[i + 1]))
+                    i++;
+                else if (char.IsSurrogate(identity[i]))
+                {
+                    escaped.Append(Uri.EscapeDataString(identity.Substring(run, i - run))).Append("%u").Append(((int)identity[i]).ToString("X4"));
+                    run = i + 1;
+                }
+            }
+
+            return escaped.Append(Uri.EscapeDataString(identity.Substring(run))).ToString();
+        }
 
         private static string IdentityOf(object? value) =>
             value switch
