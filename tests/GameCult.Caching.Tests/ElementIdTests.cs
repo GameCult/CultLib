@@ -726,7 +726,7 @@ namespace GameCult.Caching.Tests
                 {
                     batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
                     batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
-                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r" } }) });
+                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v"), cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r" } }) });
                 });
             }
 
