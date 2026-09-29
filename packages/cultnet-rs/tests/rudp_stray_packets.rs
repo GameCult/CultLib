@@ -620,3 +620,132 @@ fn a_write_unacknowledged_when_the_peer_disconnects_fails_its_flush() -> Result<
     );
     Ok(())
 }
+
+/// Drains what a raw peer socket has been sent.
+fn drain(socket: &UdpSocket) -> Result<Vec<CultNetRudpPacket>> {
+    let mut buffer = vec![0_u8; 65_535];
+    let mut packets = Vec::new();
+    while let Ok((received, _)) = socket.recv_from(&mut buffer) {
+        packets.push(decode_rudp_packet(&buffer[..received])?);
+    }
+    Ok(packets)
+}
+
+/// A receipt belongs to the session it was issued in. A peer's Disconnect ends
+/// that session for good: reconnecting must not bring the write back to Pending,
+/// and an ack the old peer sent late must not make it Acknowledged.
+#[test]
+fn a_receipt_invalidated_by_a_peer_disconnect_never_becomes_acknowledged() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client("client", socket()?, server_addr, CONNECTION_ID),
+    )?;
+    client.connect(b"hello".to_vec())?;
+    let mut buffer = vec![0_u8; 65_535];
+    let (received, client_addr) = server.recv_from(&mut buffer)?;
+    let mut old_peer = raw_session(CONNECTION_ID);
+    let accept = old_peer.accept_connect(&decode_rudp_packet(&buffer[..received])?, 0, Vec::new())?;
+    send_to(&server, client_addr, &accept)?;
+    let _ = client.receive_once()?;
+
+    let receipt = client.send_reliable("schema", b"written before the disconnect".to_vec())?;
+    let data = drain(&server)?
+        .into_iter()
+        .find(|packet| packet.packet_type == CultNetRudpPacketType::Data)
+        .expect("the write reached the peer");
+    old_peer.receive(&data, 0)?;
+    let late_ack = old_peer.create_ack_for_received(data.sequence);
+    send_to(&server, client_addr, &old_peer.create_disconnect(b"bye".to_vec()))?;
+    let _ = client.receive_once()?;
+    assert_eq!(client.reliable_send_status(&receipt), CultNetRudpReliableSendStatus::Invalidated);
+
+    client.connect(b"hello again".to_vec())?;
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated,
+        "reconnecting brought the write back to Pending"
+    );
+    let connect = drain(&server)?
+        .into_iter()
+        .find(|packet| packet.packet_type == CultNetRudpPacketType::Connect)
+        .expect("the reconnect reached the peer");
+    let mut new_peer = raw_session(CONNECTION_ID);
+    let new_accept = new_peer.accept_connect(&connect, 0, Vec::new())?;
+    send_to(&server, client_addr, &new_accept)?;
+    send_to(&server, client_addr, &late_ack)?;
+    while client.receive_once()?.is_some() {}
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated,
+        "the old session's write was acknowledged in the new session"
+    );
+    // The old write is not retransmitted into the new session either.
+    assert_eq!(client.outstanding_reliable_packet_count(), 1, "only the reconnect's own Connect is outstanding");
+    Ok(())
+}
+
+/// A server-mode transport that accepts a new Connect has a live session again;
+/// the reason the previous one ended is history, not state.
+#[test]
+fn server_mode_forgets_the_end_reason_once_a_new_connect_is_accepted() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID),
+    )?;
+    let peer = socket()?;
+    let mut peer_session = raw_session(CONNECTION_ID);
+    send_to(&peer, server_addr, &peer_session.create_connect(0, b"peer".to_vec())?)?;
+    let _ = server.receive_once()?;
+    send_to(&peer, server_addr, &peer_session.create_disconnect(b"bye".to_vec()))?;
+    let _ = server.receive_once()?;
+    assert_eq!(server.disconnect_reason(), Some(&b"bye"[..]));
+
+    let mut next_peer = raw_session(CONNECTION_ID);
+    send_to(&peer, server_addr, &next_peer.create_connect(0, b"peer".to_vec())?)?;
+    let _ = server.receive_once()?;
+    assert!(server.connected());
+    assert_eq!(server.disconnect_reason(), None, "a stale reason survives the new session");
+    Ok(())
+}
+
+/// A flush waits on one session. A Connect from another endpoint replaces the
+/// peer and forgets the writes being waited on; the flush must say so.
+#[test]
+fn a_flush_fails_when_a_new_endpoint_replaces_the_peer_mid_wait() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID),
+    )?;
+    let peer_a = socket()?;
+    let peer_b = socket()?;
+    send_to(&peer_a, server_addr, &raw_session(CONNECTION_ID).create_connect(0, b"a".to_vec())?)?;
+    let _ = server.receive_once()?;
+    server.send_reliable("schema", b"for A".to_vec())?;
+    send_to(&peer_b, server_addr, &raw_session(CONNECTION_ID).create_connect(0, b"b".to_vec())?)?;
+
+    let error = server.flush_reliable(Duration::from_millis(300)).expect_err("A's write was forgotten");
+    assert!(
+        error.to_string().contains("ended before its reliable writes were acknowledged"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// A repeated Connect still carries an acknowledgement field, and the session
+/// honours it: the Accept it acknowledges is no longer owed.
+#[test]
+fn a_repeated_connect_acknowledges_what_it_carries() -> Result<()> {
+    let mut client = raw_session(CONNECTION_ID);
+    let mut server = raw_session(CONNECTION_ID);
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 0, Vec::new())?;
+    let mut repeat = connect.clone();
+    repeat.ack = accept.sequence;
+    let reply = server.answer_repeated_connect(&repeat, 1)?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    assert_eq!(server.outstanding_reliable_packet_count(), 0);
+    Ok(())
+}

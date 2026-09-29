@@ -126,8 +126,8 @@ pub struct CultNetRudpSendOptions {
 }
 
 /// Identifies every transport packet belonging to one non-expiring reliable
-/// send. Receipts are local to the session that issued them and cannot survive
-/// a peer reset.
+/// send. Receipts are local to the session that issued them: a peer reset or
+/// a Disconnect invalidates them for good.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpReliableSendReceipt {
     session_scope: Uuid,
@@ -276,6 +276,10 @@ impl CultNetRudpSession {
             .find(|pending| pending.packet.packet_type == CultNetRudpPacketType::Accept)?;
         pending.last_sent_at_ms = now_ms;
         Some(pending.packet.clone())
+    }
+
+    fn session_scope(&self) -> Uuid {
+        self.session_scope
     }
 
     fn reliable_send_status(
@@ -588,7 +592,13 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Disconnect {
+            // The session is over. What it still owed the peer dies with it,
+            // and receipts it issued can never become Acknowledged in a later
+            // session.
             self.connected = false;
+            self.session_scope = Uuid::new_v4();
+            self.pending_reliable.clear();
+            self.queued_reliable.clear();
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 ready_to_send,
@@ -1920,12 +1930,7 @@ impl CultNetRudpSocketTransportConnection {
         &self,
         receipt: &CultNetRudpReliableSendReceipt,
     ) -> CultNetRudpReliableSendStatus {
-        let status = self.session.reliable_send_status(receipt);
-        // A write still unacknowledged when the session ended never will be.
-        if status == CultNetRudpReliableSendStatus::Pending && self.disconnect_reason.is_some() {
-            return CultNetRudpReliableSendStatus::Invalidated;
-        }
-        status
+        self.session.reliable_send_status(receipt)
     }
 
     fn send_data_packets(&mut self, packets: &[CultNetRudpPacket]) -> Result<()> {
@@ -1990,15 +1995,18 @@ impl CultNetRudpSocketTransportConnection {
         self.socket.set_read_timeout(Some(poll_timeout))?;
 
         let deadline = Instant::now() + timeout;
+        // A flush belongs to the session it started in: a Connect that
+        // replaces the peer mid-wait forgets the writes being waited on.
+        let scope = self.session.session_scope();
         let mut preserved_frames = VecDeque::new();
         let result = (|| {
             loop {
                 // An ended session forgot its unacknowledged writes; reporting
                 // them flushed would be a lie.
-                if let Some(reason) = &self.disconnect_reason {
+                if self.session.session_scope() != scope || self.disconnect_reason.is_some() {
                     return Err(anyhow!(
                         "RUDP session ended before its reliable writes were acknowledged: {}",
-                        String::from_utf8_lossy(reason)
+                        String::from_utf8_lossy(self.disconnect_reason.as_deref().unwrap_or(b"replaced by a new Connect"))
                     ));
                 }
                 if self.outstanding_reliable_packet_count() == 0 {
