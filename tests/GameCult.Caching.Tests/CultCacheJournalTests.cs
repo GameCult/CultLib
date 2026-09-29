@@ -120,15 +120,14 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AJournalIsCalledForAnAdmissionThatChangedSomethingAndNeverForOneThatDidNot()
+        public void AnAdmissionThatChangesNothingIsNotJournaled()
         {
             using var cache = Memory();
             var calls = 0;
             using var journal = cache.AddJournal(_ => calls++);
 
-            // Attaching a store with nothing in it is an admission with no change.
-            cache.AddBackingStore(new SingleFileMessagePackBackingStore(Path.Combine(_directory, "empty.cc")));
-            Assert.That(cache.Remove(KeyOf("absent")), Is.False);
+            // Removing a record the cache does not hold is a commit that admits nothing.
+            cache.Commit(batch => batch.Remove(KeyOf("absent")));
 
             Assert.That(calls, Is.Zero);
         }
