@@ -692,6 +692,24 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void AnIdAlreadyThereMarksTheStoreAndSoDoesARecordLoadedHoldingOne()
+        {
+            var preset = PathOf("preset.cc");
+            using (var cache = Open(preset))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "p", Reels = { new IdReel { Id = HexA } } }, new CultRecordKey("p")));
+            Assert.That(HeaderOf(preset), Is.EqualTo("cultcache.store.v3"), "the deck minted nothing, and still holds an id");
+
+            // The deck reloads holding ids it did not mint; a whole-store flush of a store now holding only that deck and an empty one.
+            using (var cache = Open(preset))
+            {
+                cache.UpsertAsync(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(preset), Is.EqualTo("cultcache.store.v3"), "a loaded record's ids count");
+        }
+
+        [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {
             var empty = PathOf("empty-dir.cc");
