@@ -58,61 +58,61 @@ public sealed class CultMathResolver : IFormatterResolver
         new(typeof(T), new ArrayShape<T>(write, read));
 
     // Each reader takes the first dst.Length elements and skips the rest.
-    private static void Singles(ref MessagePackReader r, Span<float> dst)
+    private static void Singles(ref MessagePackReader r, scoped Span<float> dst)
     {
         for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
             if (i < dst.Length) dst[i] = r.ReadSingle(); else r.Skip();
     }
 
-    private static void Doubles(ref MessagePackReader r, Span<double> dst)
+    private static void Doubles(ref MessagePackReader r, scoped Span<double> dst)
     {
         for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
             if (i < dst.Length) dst[i] = r.ReadDouble(); else r.Skip();
     }
 
-    private static void Ints(ref MessagePackReader r, Span<int> dst)
+    private static void Ints(ref MessagePackReader r, scoped Span<int> dst)
     {
         for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
             if (i < dst.Length) dst[i] = r.ReadInt32(); else r.Skip();
     }
 
-    private static void Bools(ref MessagePackReader r, Span<bool> dst)
+    private static void Bools(ref MessagePackReader r, scoped Span<bool> dst)
     {
         for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
             if (i < dst.Length) dst[i] = r.ReadBoolean(); else r.Skip();
     }
 
-    private static void Bytes(ref MessagePackReader r, Span<byte> dst)
+    private static void Bytes(ref MessagePackReader r, scoped Span<byte> dst)
     {
         for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
             if (i < dst.Length) dst[i] = r.ReadByte(); else r.Skip();
     }
 
-    private static void Put(ref MessagePackWriter w, ReadOnlySpan<float> v)
+    private static void Put(ref MessagePackWriter w, scoped ReadOnlySpan<float> v)
     {
         w.WriteArrayHeader(v.Length);
         foreach (var e in v) w.Write(e);
     }
 
-    private static void Put(ref MessagePackWriter w, ReadOnlySpan<double> v)
+    private static void Put(ref MessagePackWriter w, scoped ReadOnlySpan<double> v)
     {
         w.WriteArrayHeader(v.Length);
         foreach (var e in v) w.Write(e);
     }
 
-    private static void Put(ref MessagePackWriter w, ReadOnlySpan<int> v)
+    private static void Put(ref MessagePackWriter w, scoped ReadOnlySpan<int> v)
     {
         w.WriteArrayHeader(v.Length);
         foreach (var e in v) w.Write(e);
     }
 
-    private static void Put(ref MessagePackWriter w, ReadOnlySpan<bool> v)
+    private static void Put(ref MessagePackWriter w, scoped ReadOnlySpan<bool> v)
     {
         w.WriteArrayHeader(v.Length);
         foreach (var e in v) w.Write(e);
     }
 
-    private static void Put(ref MessagePackWriter w, ReadOnlySpan<byte> v)
+    private static void Put(ref MessagePackWriter w, scoped ReadOnlySpan<byte> v)
     {
         w.WriteArrayHeader(v.Length);
         foreach (var e in v) w.Write(e);

@@ -28,9 +28,10 @@ namespace GameCult.Caching.Tests
 
         // Bytes the pre-collapse CultVec2/CultVec3/CultRect encodings and Aetheria's Float2/Int2/Bool2/Float3/Float4
         // formatters produce: an array of components in declaration order, float32 as 0xCA.
-        [TestCase("92CA3F800000CA40000000")]
-        public void Float2_MatchesTheLegacyVectorBytes(string hex)
+        [Test]
+        public void Float2_MatchesTheLegacyVectorBytes()
         {
+            const string hex = "92CA3F800000CA40000000";
             Hex(new float2(1f, 2f)).Should().Be(hex);
             Decode<float2>(hex).Should().Be(new float2(1f, 2f));
         }
@@ -102,7 +103,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void Matrices_AreArraysOfRows()
         {
-            Hex(new float2x2(1f, 2f, 3f, 4f)).Should().Be("9292CA3F800000CA400000009 2CA40400000CA40800000".Replace(" ", ""));
+            Hex(new float2x2(1f, 2f, 3f, 4f)).Should().Be("9292CA3F800000CA4000000092CA40400000CA40800000");
         }
 
         [Test]
