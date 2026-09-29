@@ -37,11 +37,26 @@ def client_with_a_lost_write() -> tuple[CultNetRudpSession, CultNetRudpSession]:
     server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID, initial_sequence=500))
     client.receive(server.accept_connect(client.create_connect(0), 0), 0)
     client.send("schema", b"owed to the old session", CultNetRudpSendOptions(reliable=True, ordered=True))
-    assert client.outstanding_reliable_packet_count == 1
+    # A fragmented write larger than the send window leaves part of it queued.
+    client.send_many(
+        "schema", bytes(40 * 8), CultNetRudpSendOptions(reliable=True, ordered=True), max_fragment_bytes=8
+    )
+    assert client.outstanding_reliable_packet_count == 41
+    assert client.queued_reliable_packet_count > 0
     return client, server
 
 
-def connected_client() -> tuple[CultNetRudpSocketTransportConnection, socket.socket]:
+def drain(sock: socket.socket) -> list:
+    packets = []
+    while True:
+        try:
+            wire, _ = sock.recvfrom(65535)
+        except TimeoutError:
+            return packets
+        packets.append(decode_rudp_packet(wire))
+
+
+def connected_client() -> tuple[CultNetRudpSocketTransportConnection, socket.socket, tuple]:
     peer_socket = bind_udp_socket()
     client = CultNetRudpSocketTransportConnection(
         CultNetRudpSocketTransportOptions(
@@ -59,7 +74,7 @@ def connected_client() -> tuple[CultNetRudpSocketTransportConnection, socket.soc
     peer_socket.sendto(encode_rudp_packet(accept), client_addr)
     client.receive_once()
     assert client.connected
-    return client, peer_socket
+    return client, peer_socket, client_addr
 
 
 class CultNetRudpSessionEndingTests(unittest.TestCase):
@@ -88,7 +103,7 @@ class CultNetRudpSessionEndingTests(unittest.TestCase):
                     )
 
     def test_a_flush_fails_after_a_local_disconnect_or_a_timeout(self) -> None:
-        client, peer_socket = connected_client()
+        client, peer_socket, _ = connected_client()
         try:
             client.send("schema", b"owed")
             client.disconnect(b"bye")
@@ -98,7 +113,7 @@ class CultNetRudpSessionEndingTests(unittest.TestCase):
             client.close()
             peer_socket.close()
 
-        client, peer_socket = connected_client()
+        client, peer_socket, _ = connected_client()
         try:
             client.send("schema", b"owed")
             time.sleep(0.005)
@@ -110,7 +125,7 @@ class CultNetRudpSessionEndingTests(unittest.TestCase):
             peer_socket.close()
 
     def test_a_flush_that_started_before_the_end_fails_even_after_a_later_connect(self) -> None:
-        client, peer_socket = connected_client()
+        client, peer_socket, _ = connected_client()
         outcome: list[BaseException | None] = []
 
         def flush() -> None:
@@ -132,6 +147,57 @@ class CultNetRudpSessionEndingTests(unittest.TestCase):
             self.assertIsInstance(outcome[0], ConnectionError)
         finally:
             client.close()
+            peer_socket.close()
+
+
+    def test_a_flush_started_after_a_reconnect_waits_on_the_new_session(self) -> None:
+        client, peer_socket, client_addr = connected_client()
+        try:
+            client.send("schema", b"owed to the old session")
+            client.disconnect(b"bye")
+            client.connect(b"hello again")
+            connect = [p for p in drain(peer_socket) if p.packet_type == CultNetRudpPacketType.CONNECT][-1]
+            accept = CultNetRudpSession(
+                CultNetRudpSessionOptions(connection_id=CONNECTION_ID, initial_sequence=700)
+            ).accept_connect(connect, 0)
+            peer_socket.sendto(encode_rudp_packet(accept), client_addr)
+            client.receive_once()
+
+            client.flush_reliable(0.5)
+        finally:
+            client.close()
+            peer_socket.close()
+
+    def test_a_flush_started_after_the_server_accepts_a_new_connect_waits_on_the_new_session(self) -> None:
+        server_socket = bind_udp_socket()
+        peer_socket = bind_udp_socket()
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=CONNECTION_ID,
+            )
+        )
+        to_server = lambda packet: peer_socket.sendto(encode_rudp_packet(packet), server_socket.getsockname())
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID))
+            to_server(first.create_connect(0))
+            server.receive_once()
+            to_server(first.create_disconnect())
+            server.receive_once()
+
+            following = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID))
+            to_server(following.create_connect(0))
+            server.receive_once()
+            accept = [p for p in drain(peer_socket) if p.packet_type == CultNetRudpPacketType.ACCEPT][-1]
+            following.receive(accept, 0)
+            to_server(following.create_ack())
+            server.receive_once()
+
+            server.flush_reliable(0.5)
+        finally:
+            server.close()
             peer_socket.close()
 
 

@@ -94,6 +94,17 @@ from cultnet_py import (
 )
 
 
+def acknowledges(packet, sequence: int) -> bool:
+    """Whether the packet's ack field and mask cover the sequence."""
+    if packet.ack == sequence:
+        return True
+    return (
+        packet.ack > sequence
+        and packet.ack - sequence <= 32
+        and (packet.ack_mask & (1 << (packet.ack - sequence - 1))) != 0
+    )
+
+
 def bind_udp_socket() -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -1063,14 +1074,13 @@ class CultNetTests(unittest.TestCase):
             # The peer is told, and the goodbye does not acknowledge the refused frame.
             (goodbye,) = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.DISCONNECT]
             self.assertTrue(peer.receive(goodbye, 1).disconnected)
-            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+            self.assertFalse(acknowledges(goodbye, poison.sequence), "the goodbye acknowledged the refused frame")
 
             # A retransmit is dropped, not acknowledged.
             to_server(poison)
             self.assertIsNone(server.receive_once())
             self.assertEqual(server.stats.packets_dropped, 2)
             self.assertEqual(drain_peer(), [])
-            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
 
             # A Connect claims the endpoint again.
             again = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))

@@ -166,6 +166,14 @@ function createDuplexPair(): { a: Duplex; b: Duplex } {
   return { a, b };
 }
 
+/// Whether the packet's ack field and mask cover the sequence.
+function acknowledges(packet: CultNetRudpPacket, sequence: number): boolean {
+  if (packet.ack === sequence) return true;
+  return packet.ack > sequence
+    && packet.ack - sequence <= 32
+    && (packet.ackMask & (1 << (packet.ack - sequence - 1))) !== 0;
+}
+
 async function bindUdpSocket(): Promise<Socket> {
   const socket = dgram.createSocket("udp4");
   await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve));
@@ -1975,7 +1983,7 @@ test("rudp socket transport ends the session that refuses a reliable frame and n
     // neither in the goodbye nor after it retransmits.
     const goodbye = received.find((p) => p.packetType === "disconnect")!;
     assert.equal(peer.receive(goodbye, 1).disconnected, true);
-    assert.ok(peer.pendingReliableSequences.includes(poison.sequence), "the refused frame was acknowledged");
+    assert.equal(acknowledges(goodbye, poison.sequence), false, "the goodbye acknowledged the refused frame");
     const before = received.length;
     toServer(poison);
     await waitFor(() => server.stats.packetsDropped === 2, "the retransmit dropped");
@@ -2487,5 +2495,86 @@ test("operation service sweeps a session that ran a handler once it idles out", 
   } finally {
     for (const socket of sockets) socket.close();
     await server.close();
+  }
+});
+
+test("a flush started after a reconnect waits on the new session", async () => {
+  const peerSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const connectionId = 0x1020305b;
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(peerSocket),
+    connectionId,
+    resendDelayMs: 1000,
+    resendPollMs: 1000,
+  });
+  const received: CultNetRudpPacket[] = [];
+  let clientPort = 0;
+  peerSocket.on("message", (wire, remote) => {
+    clientPort = remote.port;
+    received.push(decodeRudpPacket(wire));
+  });
+  try {
+    client.connect();
+    await waitFor(() => received.some((p) => p.packetType === "connect"), "the Connect");
+    const first = new CultNetRudpSession({ connectionId });
+    peerSocket.send(encodeRudpPacket(first.acceptConnect(received[0]!, 0)), clientPort, "127.0.0.1");
+    await waitFor(() => client.connected, "the client connected");
+    client.send("schema", Buffer.from("owed to the old session"));
+    client.checkTimeout(50, Date.now() + 10_000);
+    assert.equal(client.connected, false);
+
+    client.connect();
+    await waitFor(() => received.filter((p) => p.packetType === "connect").length === 2, "the reconnect");
+    const second = new CultNetRudpSession({ connectionId });
+    const reconnect = received.filter((p) => p.packetType === "connect")[1]!;
+    peerSocket.send(encodeRudpPacket(second.acceptConnect(reconnect, 0)), clientPort, "127.0.0.1");
+    await waitFor(() => client.connected, "the client reconnected");
+    await client.flush(500);
+  } finally {
+    peerSocket.close();
+    client.close();
+  }
+});
+
+test("a flush started after the server accepts a new Connect waits on the new session", async () => {
+  const serverSocket = await bindUdpSocket();
+  const peerSocket = await bindUdpSocket();
+  const connectionId = 0x1020305c;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendDelayMs: 1000,
+    resendPollMs: 1000,
+  });
+  const received: CultNetRudpPacket[] = [];
+  peerSocket.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const toServer = (packet: CultNetRudpPacket) =>
+    peerSocket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
+  try {
+    const first = new CultNetRudpSession({ connectionId });
+    toServer(first.createConnect(0));
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the first Accept");
+    toServer(first.createDisconnect(Buffer.from("bye")));
+    await waitFor(() => !server.connected, "the first session ended");
+
+    const next = new CultNetRudpSession({ connectionId });
+    toServer(next.createConnect(0));
+    await waitFor(() => received.filter((p) => p.packetType === "accept").length === 2, "the second Accept");
+    const accept = received.filter((p) => p.packetType === "accept")[1]!;
+    next.receive(accept, 0);
+    toServer(next.createAckForReceived(accept.sequence));
+    await waitFor(() => server.outstandingReliablePacketCount === 0, "the second Accept acknowledged");
+
+    await server.flush(500);
+  } finally {
+    peerSocket.close();
+    server.close();
   }
 });

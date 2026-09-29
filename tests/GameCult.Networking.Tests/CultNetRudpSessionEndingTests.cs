@@ -33,7 +33,10 @@ namespace GameCult.Networking.Tests
             var server = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId, InitialSequence = 500 });
             client.Receive(server.AcceptConnect(client.CreateConnect(0), 0), 0);
             client.Send("schema", Encoding.UTF8.GetBytes("owed to the old session"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
-            Assert.That(client.OutstandingReliablePacketCount, Is.EqualTo(1));
+            // A fragmented write larger than the send window leaves part of it queued.
+            client.SendMany("schema", new byte[40 * 8], new CultNetRudpSendOptions { Reliable = true, Ordered = true }, maxFragmentBytes: 8);
+            Assert.That(client.OutstandingReliablePacketCount, Is.EqualTo(41));
+            Assert.That(client.QueuedReliablePacketCount, Is.GreaterThan(0));
             return (client, server);
         }
 
@@ -65,7 +68,7 @@ namespace GameCult.Networking.Tests
             }
         }
 
-        private static (CultNetRudpSocketTransportConnection Client, Socket Peer, CultNetRudpSession PeerSession) ConnectedClient()
+        private static (CultNetRudpSocketTransportConnection Client, Socket Peer, EndPoint ClientEndPoint) ConnectedClient()
         {
             var peerSocket = Bind();
             var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
@@ -85,7 +88,7 @@ namespace GameCult.Networking.Tests
             peerSocket.SendTo(CultNetRudpPacketCodec.Encode(accept), from);
             client.ReceiveOnce();
             Assert.That(client.Connected, Is.True);
-            return (client, peerSocket, peer);
+            return (client, peerSocket, from);
         }
 
         [Test]
@@ -127,6 +130,67 @@ namespace GameCult.Networking.Tests
                 var error = Assert.Throws<AggregateException>(() => flush.Wait(TimeSpan.FromSeconds(10)))!;
                 Assert.That(error.InnerException, Is.InstanceOf<InvalidOperationException>());
             }
+        }
+
+        private static List<CultNetRudpPacket> Drain(Socket socket)
+        {
+            var packets = new List<CultNetRudpPacket>();
+            var buffer = new byte[65535];
+            EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+            while (socket.Poll(20_000, SelectMode.SelectRead))
+            {
+                var received = socket.ReceiveFrom(buffer, ref from);
+                packets.Add(CultNetRudpPacketCodec.Decode(buffer.AsSpan(0, received).ToArray()));
+            }
+            return packets;
+        }
+
+        [Test]
+        public void AFlushStartedAfterAReconnectWaitsOnTheNewSession()
+        {
+            var (client, peerSocket, clientEndPoint) = ConnectedClient();
+            using (client)
+            using (peerSocket)
+            {
+                client.Send("schema", Encoding.UTF8.GetBytes("owed to the old session"));
+                client.Disconnect();
+                client.Connect("hello again");
+                var connect = Drain(peerSocket).Last(packet => packet.PacketType == CultNetRudpPacketType.Connect);
+                var accept = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId, InitialSequence = 700 }).AcceptConnect(connect, 0);
+                peerSocket.SendTo(CultNetRudpPacketCodec.Encode(accept), clientEndPoint);
+                client.ReceiveOnce();
+
+                Assert.DoesNotThrow(() => client.FlushReliable(TimeSpan.FromMilliseconds(500)));
+            }
+        }
+
+        [Test]
+        public void AFlushStartedAfterTheServerAcceptsANewConnectWaitsOnTheNewSession()
+        {
+            using var serverSocket = Bind();
+            using var peerSocket = Bind();
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = ConnectionId
+            });
+            var first = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(first.CreateConnect(0)), serverSocket.LocalEndPoint!);
+            server.ReceiveOnce();
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(first.CreateDisconnect()), serverSocket.LocalEndPoint!);
+            server.ReceiveOnce();
+
+            var next = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(next.CreateConnect(0)), serverSocket.LocalEndPoint!);
+            server.ReceiveOnce();
+            var accept = Drain(peerSocket).Last(packet => packet.PacketType == CultNetRudpPacketType.Accept);
+            next.Receive(accept, 0);
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(next.CreateAck()), serverSocket.LocalEndPoint!);
+            server.ReceiveOnce();
+
+            Assert.DoesNotThrow(() => server.FlushReliable(TimeSpan.FromMilliseconds(500)));
         }
     }
 }

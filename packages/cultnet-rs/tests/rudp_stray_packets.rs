@@ -766,7 +766,19 @@ fn client_with_a_lost_write() -> Result<(CultNetRudpSession, CultNetRudpSession)
             ..Default::default()
         },
     )?;
-    assert_eq!(client.outstanding_reliable_packet_count(), 1);
+    // A fragmented write larger than the send window leaves part of it queued.
+    client.send_many(
+        "schema",
+        vec![7u8; 40 * 8],
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            ..Default::default()
+        },
+        Some(8),
+    )?;
+    assert_eq!(client.outstanding_reliable_packet_count(), 41);
+    assert!(client.queued_reliable_packet_count() > 0);
     Ok((client, server))
 }
 
@@ -871,5 +883,58 @@ fn a_flush_fails_after_a_local_disconnect_or_a_timeout() -> Result<()> {
     assert!(client.check_timeout(1));
     let error = client.flush_reliable(Duration::from_millis(200)).expect_err("the write was dropped");
     assert!(error.to_string().contains("ended before its reliable writes were acknowledged"), "{error}");
+    Ok(())
+}
+
+/// A flush that starts after a reconnect waits on the new session: the end of
+/// the old one does not fail it.
+#[test]
+fn a_flush_started_after_a_reconnect_waits_on_the_new_session() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let (mut client, _peer, client_addr) = connected_client(&server, server_addr)?;
+    client.send_reliable("schema", b"owed to the old session".to_vec())?;
+    client.disconnect(b"bye".to_vec())?;
+    client.connect(b"hello again".to_vec())?;
+    let connect = drain(&server)?
+        .into_iter()
+        .rfind(|packet| packet.packet_type == CultNetRudpPacketType::Connect)
+        .expect("the reconnect reached the peer");
+    let accept = raw_session(CONNECTION_ID).accept_connect(&connect, 0, Vec::new())?;
+    send_to(&server, client_addr, &accept)?;
+    let _ = client.receive_once()?;
+
+    client.flush_reliable(Duration::from_millis(500))?;
+    Ok(())
+}
+
+/// A server-mode transport that accepts a new Connect after its peer left has a
+/// live session again, and a flush started in it waits on that session.
+#[test]
+fn a_flush_started_after_the_server_accepts_a_new_connect_waits_on_the_new_session() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID),
+    )?;
+    let peer = socket()?;
+    let mut first = raw_session(CONNECTION_ID);
+    send_to(&peer, server_addr, &first.create_connect(0, b"peer".to_vec())?)?;
+    let _ = server.receive_once()?;
+    send_to(&peer, server_addr, &first.create_disconnect(b"bye".to_vec()))?;
+    let _ = server.receive_once()?;
+
+    let mut next = raw_session(CONNECTION_ID);
+    send_to(&peer, server_addr, &next.create_connect(0, b"peer".to_vec())?)?;
+    let _ = server.receive_once()?;
+    let accept = drain(&peer)?
+        .into_iter()
+        .rfind(|packet| packet.packet_type == CultNetRudpPacketType::Accept)
+        .expect("the new Connect was accepted");
+    next.receive(&accept, 0)?;
+    send_to(&peer, server_addr, &next.create_ack_for_received(accept.sequence))?;
+    let _ = server.receive_once()?;
+
+    server.flush_reliable(Duration::from_millis(500))?;
     Ok(())
 }

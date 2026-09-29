@@ -13,7 +13,10 @@ function clientWithALostWrite(): { client: CultNetRudpSession; server: CultNetRu
   const server = new CultNetRudpSession({ connectionId, initialSequence: 500 });
   client.receive(server.acceptConnect(client.createConnect(0), 0), 0);
   client.send("schema", enc("owed to the old session"), { reliable: true, ordered: true });
-  assert.equal(client.outstandingReliablePacketCount, 1);
+  // A fragmented write larger than the send window leaves part of it queued.
+  client.sendMany("schema", new Uint8Array(40 * 8), { reliable: true, ordered: true, maxFragmentBytes: 8 });
+  assert.equal(client.outstandingReliablePacketCount, 41);
+  assert.ok(client.queuedReliablePacketCount > 0);
   return { client, server };
 }
 

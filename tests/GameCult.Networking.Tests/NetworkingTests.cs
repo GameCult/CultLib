@@ -1269,6 +1269,16 @@ namespace GameCult.Networking.Tests
             Assert.That(Encoding.UTF8.GetString(ReceiveRudpFrame(client).Payload), Is.EqualTo("server still here"));
         }
 
+        /// <summary>Whether the packet's ack field and mask cover the sequence.</summary>
+        private static bool Acknowledges(CultNetRudpPacket packet, uint sequence)
+        {
+            if (packet.Ack == sequence)
+                return true;
+            return packet.Ack > sequence
+                && packet.Ack - sequence <= 32
+                && (packet.AckMask & (1u << (int)(packet.Ack - sequence - 1))) != 0;
+        }
+
         private static List<CultNetRudpPacket> DrainPackets(Socket socket)
         {
             var packets = new List<CultNetRudpPacket>();
@@ -1397,7 +1407,7 @@ namespace GameCult.Networking.Tests
             var goodbye = DrainPackets(peerSocket).Single();
             Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
-            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+            Assert.That(Acknowledges(goodbye, poison.Sequence), Is.False, "the goodbye acknowledged the refused frame");
 
             // A retransmit is dropped, not acknowledged.
             peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
@@ -1444,7 +1454,7 @@ namespace GameCult.Networking.Tests
             var goodbye = DrainPackets(peerSocket).Single();
             Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
-            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+            Assert.That(Acknowledges(goodbye, poison.Sequence), Is.False, "the goodbye acknowledged the refused frame");
 
             peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
             Assert.That(server.ReceiveOnce(), Is.Null);
