@@ -61,31 +61,36 @@ public sealed class BoundedLeastSquaresTests
         }
     }
 
-    // Projected gradient with step 1/L, L bounded by the Frobenius norm squared of A.
+    // Accelerated projected gradient (FISTA) with step 1/L, L bounded by the Frobenius norm squared of A.
+    // Independent of the solver's active-set logic; run to a fixed point.
     private static double ReferenceCost(int m, int n, float[] a, float[] b, float[] lo, float[] hi)
     {
         var frob = 0.0;
         foreach (var v in a) frob += (double)v * v;
         var step = 1.0 / Math.Max(frob, 1e-12);
-        var x = new float[n];
-        for (var j = 0; j < n; j++) x[j] = Math.Clamp(0f, lo[j], hi[j]);
-        var xd = new double[n];
-        for (var j = 0; j < n; j++) xd[j] = x[j];
-        for (var it = 0; it < 200000; it++)
+        var x = new double[n];
+        var y = new double[n];
+        var xf = new float[n];
+        for (var j = 0; j < n; j++) x[j] = y[j] = Math.Clamp(0.0, lo[j], hi[j]);
+        var t = 1.0;
+        for (var it = 0; it < 100000; it++)
         {
-            for (var j = 0; j < n; j++) x[j] = (float)xd[j];
-            var g = Gradient(m, n, a, b, x);
+            for (var j = 0; j < n; j++) xf[j] = (float)y[j];
+            var g = Gradient(m, n, a, b, xf);
             var moved = 0.0;
+            var tNext = (1.0 + Math.Sqrt(1.0 + 4.0 * t * t)) / 2.0;
             for (var j = 0; j < n; j++)
             {
-                var next = Math.Clamp(xd[j] - step * g[j], lo[j], hi[j]);
-                moved = Math.Max(moved, Math.Abs(next - xd[j]));
-                xd[j] = next;
+                var next = Math.Clamp(y[j] - step * g[j], lo[j], hi[j]);
+                moved = Math.Max(moved, Math.Abs(next - x[j]));
+                y[j] = next + (t - 1.0) / tNext * (next - x[j]);
+                x[j] = next;
             }
+            t = tNext;
             if (moved < 1e-10) break;
         }
-        for (var j = 0; j < n; j++) x[j] = (float)xd[j];
-        return Cost(m, n, a, b, x);
+        for (var j = 0; j < n; j++) xf[j] = (float)x[j];
+        return Cost(m, n, a, b, xf);
     }
 
     private static BoundedLeastSquaresStatus Solve(int m, int n, float[] a, float[] b, float[] lo, float[] hi, float[] x,
