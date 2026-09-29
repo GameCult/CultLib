@@ -83,10 +83,13 @@ which route wrote it.
   exception. The subscriber stays subscribed and the commit stands. A throwing
   handler cannot undo the store's adoption of a load; the store and cache
   already agree when publication starts.
-- A record's `[CultName]` and `[CultIndex]` getters run once per landing record,
-  before the store is written and before any `Sequence` is minted. A getter that
-  throws refuses the whole change set, loads included: nothing is written,
-  minted or left in memory.
+- An admission runs a record's `[CultName]` and `[CultIndex]` getters once per
+  landing record, before the store is written and before any `Sequence` is
+  minted. A conditional commit on a store that holds variants is judged a second
+  time against the file it merges onto, which runs the getters again for the
+  records it lands and for any variant it re-resolves; that judgement is also
+  before the store is written. A getter that throws refuses the whole change
+  set, loads included: nothing is written, minted or left in memory.
 - Pulling all stores pulls every attached store even if a handler throws during
   one store's load, then rethrows.
 - Hydration failure on open is loud: a corrupt store file, or a record whose
