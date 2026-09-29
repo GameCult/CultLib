@@ -1160,6 +1160,120 @@ namespace GameCult.Networking.Tests
             Assert.That(delivered[0].Payload, Is.EqualTo(payload));
         }
 
+        // The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023
+        // above the lowest unacked one and the payload above that sequence stays within 4 MiB.
+        private const int Mib = 1024 * 1024;
+
+        private static CultNetRudpSession ConnectedFlowSession(uint initialSequence)
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 0x464c4f57,
+                InitialSequence = initialSequence,
+                ResendDelayMs = 25
+            });
+            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 0x464c4f57, Sequence = 0, ChannelId = "control" });
+            return session;
+        }
+
+        private static IReadOnlyList<CultNetRudpPacket> FlowSend(CultNetRudpSession session, int payloadBytes) =>
+            session.SendMany("state", new byte[payloadBytes], new CultNetRudpSendOptions { Reliable = true });
+
+        private static CultNetRudpPacket FlowAck(uint sequence) =>
+            new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Ack, ConnectionId = 0x464c4f57, Ack = sequence, ChannelId = "control" };
+
+        private static CultNetRudpPacket LoseGAndFillTheSpan(CultNetRudpSession session)
+        {
+            var g = FlowSend(session, 1).Single();
+            for (uint offset = 1; offset <= 1023; offset++)
+            {
+                Assert.That(FlowSend(session, 1).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                session.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            return g;
+        }
+
+        [Test]
+        public void RudpSession_ALostPacketHoldsTheSender1023SequencesAheadAndIsStillDelivered()
+        {
+            var sender = ConnectedFlowSession(1);
+            var receiver = ConnectedFlowSession(100);
+            var g = FlowSend(sender, 1).Single();
+            var admittedAfterG = 0;
+            for (var index = 0; index < 4200; index++)
+            {
+                foreach (var packet in FlowSend(sender, 1))
+                {
+                    admittedAfterG++;
+                    receiver.Receive(packet, 1);
+                    sender.Receive(receiver.CreateAck(), 1);
+                }
+            }
+            Assert.That(admittedAfterG, Is.EqualTo(1023));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(4200 - 1023));
+
+            var retransmit = sender.DueResends(1000).Single(packet => packet.Sequence == g.Sequence);
+            var delivered = receiver.Receive(retransmit, 1000).Delivered;
+            Assert.That(delivered.Select(frame => frame.Sequence), Is.EqualTo(new[] { g.Sequence }));
+
+            var promoted = sender.Receive(receiver.CreateAckForReceived(g.Sequence), 1001).ReadyToSend;
+            Assert.That(promoted.First().Sequence, Is.EqualTo(g.Sequence + 1024));
+        }
+
+        [Test]
+        public void RudpSession_ADirectSendPastTheSpanIsRefusedWithoutConsumingASequence()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = LoseGAndFillTheSpan(sender);
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.Zero);
+            sender.Receive(FlowAck(g.Sequence), 2);
+            var next = sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true });
+            Assert.That(next.Sequence, Is.EqualTo(g.Sequence + 1024));
+        }
+
+        [Test]
+        public void RudpSession_PayloadAboveTheLowestUnackedSequenceIsBoundedBy4MiB()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, Mib).Single();
+            // The lowest unacked packet's own bytes do not count: four more MiB fit above it.
+            for (var index = 0; index < 4; index++)
+                Assert.That(FlowSend(sender, Mib), Has.Count.EqualTo(1));
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(2));
+
+            // Acking g moves the floor up one packet: exactly one MiB more fits.
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpSession_APacketLargerThanTheWindowGoesOutAloneAndWaitsBehindAnythingUnacked()
+        {
+            Assert.That(FlowSend(ConnectedFlowSession(1), 5 * Mib), Has.Count.EqualTo(1));
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            Assert.That(FlowSend(sender, 5 * Mib), Is.Empty);
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 1 }));
+        }
+
+        [Test]
+        public void RudpSession_ASmallPacketDoesNotOvertakeAQueuedLargeOne()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            Assert.That(FlowSend(sender, 3 * Mib), Has.Count.EqualTo(1));
+            Assert.That(FlowSend(sender, 2 * Mib), Is.Empty);
+            // One byte would fit above g, but the 2 MiB packet is ahead of it.
+            Assert.That(FlowSend(sender, 1), Is.Empty);
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 2, g.Sequence + 3 }));
+        }
+
         [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {
