@@ -35,10 +35,12 @@ it. One thing moves for them: Cut 2 merges only together with Cut F (the Cut 2 S
   fragmented reliable frames (the default Rust `media` channel). Pass 3 absorbs it: Cut F's receiver drops
   every incomplete fragment set a notice covers; Cut 2 merges only together with Cut F; C# gets the bound
   it never had (Cut 2c). What a receiver does with a sender that never sends notices is **Q-A9**.
-- **Open:** Q-A7 (the notice names one sequence, not a cumulative point), Q-A8 (reliable expiry in the
-  four runtimes that lack it) and Q-A9 (a capability bit, so Cut 2's rule applies only to peers that send
-  notices). Each has a recommendation. Q-A7 and Q-A9 block Cut F and with it Cut 2's merge; Q-A8 blocks
-  only Cut 7.
+- **Ruled after pass 3 (operator, 2026-09-30), each the recommendation:**
+  - **Q-A7 A:** a notice names one sequence, not a cumulative point.
+  - **Q-A8 A:** C#, TypeScript, Python and Kotlin gain reliable expiry (Cut 7, K5).
+  - **Q-A9 B:** a capability bit on Connect and Accept; Cut 2's never-evict rule applies only to peers
+    that advertise it, and other peers keep pre-Cut-2 eviction.
+  Cut F is unblocked once Cuts 1 and 3 merge; the text below mapped these answers already.
 
 - **Body.** CultLib `main` at `e9469cb3`. Every transport file is byte-identical to `3bf1c0c` there
   (`git diff 3bf1c0c e9469cb3 -- src packages` is empty), so every `file:line` below is against both unless
