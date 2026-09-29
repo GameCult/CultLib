@@ -276,6 +276,107 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void ADisposeTheCacheRefusesLeavesTheJournalRegisteredAndALaterDisposeRemovesIt()
+        {
+            using var cache = Memory();
+            var calls = 0;
+            IDisposable? registration = null;
+            registration = cache.AddJournal(_ =>
+            {
+                calls++;
+                registration!.Dispose();
+            });
+
+            var thrown = Assert.Throws<InvalidOperationException>(() => Put(cache, "one"))!;
+            Assert.That(thrown.Message, Does.Contain("journal"), "disposing from inside a journal is refused");
+
+            registration.Dispose();
+            Put(cache, "two");
+
+            Assert.That(calls, Is.EqualTo(1), "the outside dispose removed it, though the first attempt threw");
+            registration.Dispose();
+        }
+
+        [Test]
+        public void ALoadIsJournaledWithItsChanges()
+        {
+            var path = Path.Combine(_directory, "notes.cc");
+            using (var writer = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
+            {
+                Put(writer, "a");
+                Put(writer, "b");
+            }
+
+            using var cache = Memory();
+            var journaled = new List<IReadOnlyList<CultCacheDocumentChange<object>>>();
+            using var journal = cache.AddJournal(changes => journaled.Add(changes));
+
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(journaled, Has.Count.EqualTo(1), "one admission, one call");
+                Assert.That(journaled[0].Select(change => change.Key).OrderBy(key => key.Value),
+                    Is.EqualTo(new[] { KeyOf("a"), KeyOf("b") }));
+            });
+        }
+
+        // A store that admits a load and then fails: the hold's body throws after the journal has already failed.
+        private sealed class LoadThenFailStore : CacheBackingStore
+        {
+            public bool Armed;
+
+            public override void PullAll() => Held(() =>
+            {
+                if (!Armed)
+                    return;
+                var record = new CultStoredDocument(
+                    KeyOf("loaded"), "2026-01-01T00:00:00.0000000+00:00", Registry.GetRequired(typeof(JournalNote)), new JournalNote { Name = "loaded" });
+                Loaded!(new[] { record }, Array.Empty<CultStoredDocument>());
+                throw new InvalidOperationException("store failed after the load");
+            });
+
+            public override void Push(CultStoredDocument entry) { }
+            public override void Delete(CultStoredDocument entry) { }
+            public override void PushAll() { }
+            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => CultCommitOutcome.Committed;
+        }
+
+        [Test]
+        public void AHoldWhoseBodyThrowsSurfacesTheBodyFirstThenTheJournalFailures()
+        {
+            using var cache = Memory();
+            var store = new LoadThenFailStore();
+            cache.AddBackingStore(store);
+            using var a = cache.AddJournal(_ => throw new InvalidOperationException("journal a"));
+            using var b = cache.AddJournal(_ => throw new InvalidOperationException("journal b"));
+            store.Armed = true;
+
+            var thrown = Assert.Throws<AggregateException>(() => store.PullAll())!;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(thrown.InnerExceptions.Select(exception => exception.Message),
+                    Is.EqualTo(new[] { "store failed after the load", "journal a", "journal b" }));
+                Assert.That(cache.Get<JournalNote>(KeyOf("loaded")), Is.Not.Null, "the load landed");
+            });
+        }
+
+        [Test]
+        public void AHoldWhoseBodyThrowsAloneRethrowsItAsItself()
+        {
+            using var cache = Memory();
+            var store = new LoadThenFailStore();
+            cache.AddBackingStore(store);
+            using var journal = cache.AddJournal(_ => { });
+            store.Armed = true;
+
+            var thrown = Assert.Throws<InvalidOperationException>(() => store.PullAll())!;
+
+            Assert.That(thrown.Message, Is.EqualTo("store failed after the load"));
+        }
+
+        [Test]
         public void AJournalThatThrowsDuringALoadLeavesTheStoreAttachedAndTheLoadAdopted()
         {
             var path = Path.Combine(_directory, "notes.cc");

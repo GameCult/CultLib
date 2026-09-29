@@ -101,10 +101,12 @@ which route wrote it.
   already agree when publication starts.
 - An admission runs a record's `[CultName]` and `[CultIndex]` getters once per
   landing record, before the store is written and before any `Sequence` is
-  minted. A conditional commit on a store that holds variants is judged a second
-  time against the file it merges onto, which runs the getters again for the
-  records it lands and for any variant it re-resolves; that judgement is also
-  before the store is written. A getter that throws refuses the whole change
+  minted. A conditional commit on a clean file store is judged a second time
+  against the file it merges onto whenever the cache holds variants in any store,
+  the batch lands a variant, or the file holds one. That second read runs the
+  getters again for the records the batch lands, for any variant it re-resolves,
+  and for the records other writers put in the file (the arriving set); that
+  judgement is also before the store is written. A getter that throws refuses the whole change
   set, loads included: nothing is written, minted or left in memory.
 - Pulling all stores pulls every attached store even if a handler throws during
   one store's load, then rethrows.

@@ -1903,6 +1903,29 @@ namespace GameCult.Caching
                     change.Sequence));
         }
 
+        // Disposing removes the journal. A dispose the cache refuses (from inside a journal, or inside another cache's hold)
+        // throws and leaves the registration live and disposable; it counts as disposed only once the removal succeeded.
+        private sealed class JournalRegistration : IDisposable
+        {
+            private readonly CultCache _cache;
+            private readonly Action<IReadOnlyList<CultCacheDocumentChange<object>>> _journal;
+            private bool _removed;
+
+            public JournalRegistration(CultCache cache, Action<IReadOnlyList<CultCacheDocumentChange<object>>> journal)
+            {
+                _cache = cache;
+                _journal = journal;
+            }
+
+            public void Dispose()
+            {
+                if (_removed)
+                    return;
+                _cache.Held(() => _cache._journals.Remove(_journal));
+                _removed = true;
+            }
+        }
+
         private IDisposable Register(Observer<Change> observer)
         {
             lock (_observerGate)
@@ -1941,7 +1964,7 @@ namespace GameCult.Caching
                 _journals.Add(journal);
                 return true;
             });
-            return Disposable.Create(() => Held(() => _journals.Remove(journal)));
+            return new JournalRegistration(this, journal);
         }
 
         // Attaching reads the store; there is no interval in which it is attached but unread.
@@ -2425,11 +2448,13 @@ namespace GameCult.Caching
                 lock (_gate)
                     result = body();
             }
-            catch
+            catch (Exception exception)
             {
                 _held = null;
                 Publish(mine);
-                throw;
+                if (mine.Failures.Count == 0)
+                    throw;
+                throw new AggregateException(mine.Failures.Prepend(exception));
             }
 
             _held = null;
