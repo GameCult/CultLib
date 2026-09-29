@@ -291,3 +291,75 @@ test("the route answer and the Odin publish report the same state, because the s
     [1, 3],
   );
 });
+
+// The lease-bound set: Rust issued lease.cc naming presence-warming.bin's digest, and presence-active.bin
+// and presence-degraded.bin carry that lease's digest.
+const STATEFUL = "service-stateful" as const;
+
+function statefulSigner(context: TestContext, lease = "lease.cc") {
+  return signerFor(context, STATEFUL, 0, lease);
+}
+
+test("stateful: warming, active and degraded match the Rust-verified vectors byte for byte, active and degraded bound to Rust's lease", (context) => {
+  freezeClock(context);
+  const signer = statefulSigner(context);
+  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-warming.bin"));
+  signer.reportHealth("active");
+  const active = signer.answerRouteObservation(CHALLENGE);
+  assert.deepEqual(Buffer.from(active.payload), fixtureFile(STATEFUL, "presence-active.bin"));
+  assert.match(String(presenceSlot(active, RUNTIME_PRESENCE_SLOT.writeLeaseSha256)), /^sha256-[0-9a-f]{64}$/);
+
+  const degraded = statefulSigner(context);
+  degraded.answerRouteObservation(CHALLENGE);
+  degraded.reportHealth("degraded");
+  assert.deepEqual(Buffer.from(degraded.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-degraded.bin"));
+});
+
+test("a warming answered on the route becomes a lease target: Rust's lease naming it is accepted", (context) => {
+  freezeClock(context);
+  const signer = statefulSigner(context);
+  assert.throws(() => signer.assertWriteLease(), /does not match the current Expected incarnation/, "no warming signed yet");
+  signer.answerRouteObservation(CHALLENGE);
+  assert.equal(signer.assertWriteLease(), presenceSlot({ payload: fixtureFile(STATEFUL, "presence-active.bin") }, RUNTIME_PRESENCE_SLOT.writeLeaseSha256));
+});
+
+for (const [lease, reason] of [["lease-other-warming.cc", "names another warming digest"], ["lease-other-target.cc", "names another target"]] as const) {
+  test(`a lease that ${reason} is refused, and the signer cannot sign active under it`, (context) => {
+    freezeClock(context);
+    const signer = statefulSigner(context, lease);
+    signer.answerRouteObservation(CHALLENGE);
+    assert.throws(() => signer.assertWriteLease(), /does not match the current Expected incarnation/);
+    signer.reportHealth("active");
+    assert.throws(() => signer.answerRouteObservation(CHALLENGE), /does not match the current Expected incarnation/);
+  });
+}
+
+test("one signer per loaded authority", (context) => {
+  const authority = openAuthority(context, "web");
+  const capabilities = expectedFacts("web").capabilities;
+  createIdunnRuntimeSigner({ authority, capabilities });
+  assert.throws(() => createIdunnRuntimeSigner({ authority, capabilities }), /already has a signer/);
+});
+
+test("the loaded authority is frozen: the bind, contract, Expected, Activation and identities cannot change, and the signer signs the loaded endpoint", (context) => {
+  freezeClock(context);
+  const authority = openAuthority(context, "web");
+  const loaded = expectedFacts("web");
+  const open = authority as unknown as { [key: string]: any };
+  const mutations: Array<[string, () => void]> = [
+    ["boundEndpoint", () => { open.boundEndpoint = "http://127.0.0.1:1"; }],
+    ["providerSignerIdentityId", () => { open.providerSignerIdentityId = "forged"; }],
+    ["activationSignerIdentityId", () => { open.activationSignerIdentityId = "forged"; }],
+    ["expected.healthContract", () => { open.expected.healthContract = "forged"; }],
+    ["expected.target", () => { open.expected.target = "forged"; }],
+    ["expected.canonicalSha256", () => { open.expected.canonicalSha256 = "forged"; }],
+    ["expected.route.candidateEndpoint", () => { open.expected.route.candidateEndpoint = "http://127.0.0.1:1"; }],
+    ["expected.capabilities[0].minimumCapacity", () => { open.expected.capabilities[0].minimumCapacity = 0; }],
+    ["expected.capabilities.push", () => { open.expected.capabilities.push({}); }],
+    ["activation.runtimeInstanceId", () => { open.activation.runtimeInstanceId = "forged"; }],
+    ["activation.canonicalSha256", () => { open.activation.canonicalSha256 = "forged"; }],
+  ];
+  for (const [name, mutate] of mutations) assert.throws(mutate, TypeError, name);
+  const signer = createIdunnRuntimeSigner({ authority, capabilities: loaded.capabilities });
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.boundEndpoint), loaded.candidate);
+});

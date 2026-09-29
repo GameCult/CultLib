@@ -30,6 +30,7 @@ const ACTIVATION_ID_DOMAIN = Buffer.from("idunn.runtime-activation.id.v1\0", "ut
 const CULTCACHE_STORE_FORMAT = "cultcache.store.v1";
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const MAX_RECENT_WARMING_PROOFS = 64;
+const authoritiesWithSigner = new WeakSet<object>();
 const authorityKeys = new WeakMap<object, { providerPrivateKey: crypto.KeyObject; activationPrivateKey: crypto.KeyObject }>();
 
 type ExpectedIncarnation = {
@@ -51,7 +52,6 @@ type ExpectedIncarnation = {
   route: { routeId: string; transport: string; stableEndpoint: string; candidateEndpoint: string } | null;
   capabilities: Array<{ capability: string; schema: string; compatibility: string; minimumCapacity: number }>;
   dependencies: Array<{ kind: string; capability: string; schema: string; compatibility: string; providerEndpoint: string | null }>;
-  canonicalBytes: Buffer;
   canonicalSha256: string;
 };
 
@@ -61,18 +61,27 @@ type RuntimeActivation = {
   runtimeId: string;
   runtimeInstanceId: string;
   activationSignerIdentityId: string;
-  activationSignerPublicKey: Buffer;
+  activationSignerPublicKeyHex: string;
   canonicalSha256: string;
 };
 
-export type IdunnRuntimeAuthority = {
+type DeepReadonly<T> = T extends readonly (infer U)[]
+  ? readonly DeepReadonly<U>[]
+  : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
+
+/**
+ * What Idunn admitted for this launch. Deeply frozen at load: bind, health
+ * contract, Expected, Activation and identities are read-only for the life of
+ * the process, so no caller can steer what the signer signs.
+ */
+export type IdunnRuntimeAuthority = DeepReadonly<{
   expected: ExpectedIncarnation;
   activation: RuntimeActivation;
   providerSignerIdentityId: string;
   activationSignerIdentityId: string;
   boundEndpoint: string;
   processWriteLeasePath?: string;
-};
+}>;
 
 export type SignedRuntimePresence = {
   document: CultNetRawDocumentRecord;
@@ -152,7 +161,7 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
   const activationPublicKey = rawEd25519PublicKey(crypto.createPublicKey(activationPrivateKey));
   const activationSignerIdentityId = sha256Hex(Buffer.concat([ACTIVATION_ID_DOMAIN, activationPublicKey]));
   if (activationSignerIdentityId !== activationValue.activationSignerIdentityId
-    || !activationPublicKey.equals(activationValue.activationSignerPublicKey)) {
+    || activationPublicKey.toString("hex") !== activationValue.activationSignerPublicKeyHex) {
     throw new Error("Idunn activation credential does not match the root-provisioned Activation witness.");
   }
 
@@ -167,7 +176,7 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
     throw new Error("Provider identity does not match Idunn Expected.");
   }
 
-  const authority: IdunnRuntimeAuthority = {
+  const authority: IdunnRuntimeAuthority = deepFreeze({
     expected: expectedValue,
     activation: activationValue,
     providerSignerIdentityId: expectedValue.expectedSignerIdentityId,
@@ -176,7 +185,7 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
     ...(process.env[IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT]
       ? { processWriteLeasePath: process.env[IDUNN_PROCESS_WRITE_LEASE_ENVIRONMENT] }
       : {}),
-  };
+  });
   authorityKeys.set(authority, { providerPrivateKey, activationPrivateKey });
   return authority;
 }
@@ -220,8 +229,15 @@ export function signIdunnRuntimePresence(
   };
 }
 
+/**
+ * One signer per loaded authority: the publisher sequence and the warming proofs
+ * are the signer's, and a second signer would restart the sequence under the
+ * same runtimeInstanceId.
+ */
 export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): IdunnRuntimeSigner {
   const { authority } = options;
+  if (authoritiesWithSigner.has(authority)) throw new Error("This Idunn runtime authority already has a signer.");
+  authoritiesWithSigner.add(authority);
   const expected = authority.expected;
   let sequence = 0;
   let health: RuntimePresenceHealth["state"] = "warming";
@@ -289,6 +305,14 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
     },
     assertWriteLease,
   };
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function readAuthorityRecord(filePath: string, type: string, schemaId: string): { payload: Uint8Array } {
@@ -360,7 +384,6 @@ function decodeExpected(payload: Uint8Array): ExpectedIncarnation {
     route,
     capabilities: decodeExpectedCapabilities(values[16]),
     dependencies: decodeExpectedDependencies(values[17]),
-    canonicalBytes,
     canonicalSha256: prefixedSha256(canonicalBytes),
   };
 }
@@ -388,7 +411,7 @@ function decodeActivation(payload: Uint8Array): RuntimeActivation {
     runtimeId: string(values[2], "Activation runtime id"),
     runtimeInstanceId: string(values[3], "Activation instance id"),
     activationSignerIdentityId,
-    activationSignerPublicKey: Buffer.from(publicKey),
+    activationSignerPublicKeyHex: Buffer.from(publicKey).toString("hex"),
     canonicalSha256: prefixedSha256(canonicalBytes),
   };
 }
