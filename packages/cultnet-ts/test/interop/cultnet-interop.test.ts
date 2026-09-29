@@ -2798,7 +2798,7 @@ async function runDotnetTestFilter(
 
 async function buildKotlinInteropPeer(): Promise<void> {
   kotlinInteropPeerBuild ??= execFileAsync(
-    "powershell",
+    process.platform === "win32" ? "powershell" : "pwsh",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolve(cultmeshKotlinRoot, "build.ps1")],
     {
       cwd: cultLibRoot,

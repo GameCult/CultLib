@@ -39,6 +39,8 @@ language now converge across the targeted runtimes, while production service
 adoption still varies by runtime and older TCP/LiteNetLib/WebSocket bodies have
 not all been lowered behind the shared transport port.
 
+> **Kotlin does not yet conform to the RUDP claims in this document.** `CultMesh.kt` lacks the stray-packet hardening of `3bf1c0c`, and it will lack the ack, receipt, FORWARD-TSN and expiry work of the ack campaign until that campaign's Cut K lands. Read every RUDP statement here as covering C#, TypeScript, Rust and Python only.
+
 ## Invariants
 
 - `cultnet.schema.v0` payloads are transport-neutral. Message schemas must not
@@ -470,6 +472,8 @@ Current progress:
   helper, C# schema-v0 service clients consume `ICultNetSchemaClient`, and the
   core schema-message RUDP matrix is live in the TypeScript interop gate;
   broader service adoption remains the unclaimed layer.
+
+> **Kotlin does not yet conform to the RUDP claims in this document.** `CultMesh.kt` lacks the stray-packet hardening of `3bf1c0c`, and it will lack the ack, receipt, FORWARD-TSN and expiry work of the ack campaign until that campaign's Cut K lands. Read every RUDP statement here as covering C#, TypeScript, Rust and Python only.
 
 ## RUDP Packet Contract V0
 
