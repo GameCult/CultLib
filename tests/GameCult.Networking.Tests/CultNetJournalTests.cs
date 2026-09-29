@@ -280,16 +280,27 @@ namespace GameCult.Networking.Tests
             var replicaCache = new CultCache();
             var replica = Database(replicaCache, primary: false, replicaStore);
             var nested = false;
+            long nestedApplied = 0;
+            Exception? nestedFailure = null;
             replica.Watch<NetworkSchemaNote>().Where(change => change.Key.Equals(One)).Subscribe(_ =>
             {
                 if (nested) return;
                 nested = true;
-                replica.ApplyShardLogResponseAsync(response).GetAwaiter().GetResult();
+                try
+                {
+                    nestedApplied = replica.ApplyShardLogResponseAsync(response).GetAwaiter().GetResult();
+                }
+                catch (Exception exception)
+                {
+                    nestedFailure = exception;
+                }
             });
 
             await replica.ApplyShardLogResponseAsync(response);
 
             Assert.That(nested, Is.True);
+            Assert.That(nestedFailure, Is.Null, "the nested apply re-records entries the outer apply already logged");
+            Assert.That(nestedApplied, Is.EqualTo(3));
             Assert.That(replica.GetMutationLog(ShardId).Select(entry => entry.Sequence), Is.EqualTo(new[] { 1L, 2L, 3L }));
             Assert.That(Sequences(replicaStore), Is.EqualTo(new[] { 1L, 2L, 3L }));
             Assert.That(replica.GetAppliedShardSequence(ShardId), Is.EqualTo(3));
@@ -319,7 +330,12 @@ namespace GameCult.Networking.Tests
         public async Task ALogStoreThatWritesTheCacheFailsThroughTheReentryGuardAndTheAdmissionStands()
         {
             var cache = new CultCache();
-            var store = new FlakyLogStore { OnAppend = () => cache.UpsertAsync(Note("from the store"), new CultRecordHandle<NetworkSchemaNote>(Three)).GetAwaiter().GetResult() };
+            var store = new FlakyLogStore();
+            store.OnAppend = () =>
+            {
+                store.OnAppend = null;
+                cache.UpsertAsync(Note("from the store"), new CultRecordHandle<NetworkSchemaNote>(Three)).GetAwaiter().GetResult();
+            };
             var database = Database(cache, primary: true, store);
             var published = Record(database);
 
