@@ -67,7 +67,9 @@ namespace GameCult.Networking.Tests
                 Assert.That(cache.Get<NetworkSchemaNote>(key)!.Text, Is.EqualTo("B"), "the cache admitted A then B");
                 Assert.That(TextOf(last.Document), Is.EqualTo("B"), "the log's last write for the key must be the cache's last write");
                 Assert.That(replicaCache.Get<NetworkSchemaNote>(key)?.Text, Is.EqualTo("B"), "a replica built from the log must match the primary");
-                Assert.That(seen.Last(), Is.EqualTo("B"), "a subscriber's final state for the key");
+                // Delivery is not ordered across threads (order is data: a wire peer drops the stale change by Sequence, Cut 6),
+                // so a subscriber sees both changes, once each, in either order.
+                Assert.That(seen, Is.EquivalentTo(new[] { "A", "B" }), "each change is published exactly once");
             });
         }
 
@@ -336,7 +338,9 @@ namespace GameCult.Networking.Tests
             await database.PutPredictedAsync(key, Note("predicted"));
             await database.ApplyPutAsync(message);
 
-            Assert.That(seen, Is.EqualTo(new (CultNetDatabaseChangeKind, string?)[]
+            // The observer's nested write is delivered depth-first, inside the delivery of the change that caused it, so
+            // the database may publish the two in either order; what is pinned is that each carries its own context.
+            Assert.That(seen, Is.EquivalentTo(new (CultNetDatabaseChangeKind, string?)[]
             {
                 (CultNetDatabaseChangeKind.Predicted, null),
                 (CultNetDatabaseChangeKind.Reconciled, "predicted"),

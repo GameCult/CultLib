@@ -303,9 +303,9 @@ namespace GameCult.Networking.Tests
             var database = Database(cache, primary: true, store);
             var message = database.Documents.CreateRawDocumentPutMessage(
                 "reentrant-two", new CultRecordHandle<NetworkSchemaNote>(Two), Note("two"));
+            var published = Record(database);
             database.Watch<NetworkSchemaNote>().Where(change => change.Key.Equals(One)).Subscribe(_ =>
                 database.ApplyPutAsync(message).GetAwaiter().GetResult());
-            var published = Record(database);
 
             await database.PutAsync(One, Note("one"));
 
