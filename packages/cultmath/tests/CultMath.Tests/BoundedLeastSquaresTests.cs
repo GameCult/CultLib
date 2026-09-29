@@ -104,6 +104,54 @@ public sealed class BoundedLeastSquaresTests
         return v;
     }
 
+    private static double[] NormalEquationSolution(int m, int n, float[] a, float[] b)
+    {
+        var mat = new double[n, n + 1];
+        for (var i = 0; i < n; i++)
+        {
+            for (var j = 0; j < n; j++)
+                for (var r = 0; r < m; r++) mat[i, j] += (double)a[r * n + i] * a[r * n + j];
+            for (var r = 0; r < m; r++) mat[i, n] += (double)a[r * n + i] * b[r];
+        }
+        for (var c = 0; c < n; c++)
+        {
+            var piv = mat[c, c];
+            for (var j = 0; j <= n; j++) mat[c, j] /= piv;
+            for (var i = 0; i < n; i++)
+            {
+                if (i == c) continue;
+                var f = mat[i, c];
+                for (var j = 0; j <= n; j++) mat[i, j] -= f * mat[c, j];
+            }
+        }
+        var x = new double[n];
+        for (var i = 0; i < n; i++) x[i] = mat[i, n];
+        return x;
+    }
+
+    private static (int m, int n, float[] a, float[] b, float[] lo, float[] hi) RandomProblem(uint seed)
+    {
+        var rng = new CultMath.Random(seed * 7919u);
+        var n = rng.NextInt(2, 17);
+        var m = rng.NextInt(n, 25);
+        var a = new float[m * n];
+        var b = new float[m];
+        for (var i = 0; i < a.Length; i++) a[i] = rng.NextFloat(-1f, 1f);
+        for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
+        var lo = new float[n];
+        var hi = new float[n];
+        for (var j = 0; j < n; j++)
+        {
+            switch (rng.NextInt(3))
+            {
+                case 0: lo[j] = -1f; hi[j] = 1f; break;
+                case 1: lo[j] = 0f; hi[j] = 1f; break;
+                default: lo[j] = -0.25f; hi[j] = 0.1f; break;
+            }
+        }
+        return (m, n, a, b, lo, hi);
+    }
+
     private static readonly float[] A54 =
     {
         1.0f, 0.3f, -0.2f,
@@ -123,26 +171,8 @@ public sealed class BoundedLeastSquaresTests
         var status = Solve(m, n, A54, B5, Fill(-100f, n), Fill(100f, n), x, out _);
         Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
 
-        // Independent solve of (A^T A) x = A^T b by Gauss-Jordan in double.
-        var mat = new double[n, n + 1];
-        for (var i = 0; i < n; i++)
-        {
-            for (var j = 0; j < n; j++)
-                for (var r = 0; r < m; r++) mat[i, j] += (double)A54[r * n + i] * A54[r * n + j];
-            for (var r = 0; r < m; r++) mat[i, n] += (double)A54[r * n + i] * B5[r];
-        }
-        for (var c = 0; c < n; c++)
-        {
-            var piv = mat[c, c];
-            for (var j = 0; j <= n; j++) mat[c, j] /= piv;
-            for (var i = 0; i < n; i++)
-            {
-                if (i == c) continue;
-                var f = mat[i, c];
-                for (var j = 0; j <= n; j++) mat[i, j] -= f * mat[c, j];
-            }
-        }
-        for (var i = 0; i < n; i++) Assert.Equal(mat[i, n], x[i], 1e-4);
+        var expected = NormalEquationSolution(m, n, A54, B5);
+        for (var i = 0; i < n; i++) Assert.Equal(expected[i], x[i], 1e-4);
     }
 
     [Fact]
@@ -151,24 +181,7 @@ public sealed class BoundedLeastSquaresTests
         var anyActive = false;
         for (uint seed = 1; seed <= 150; seed++)
         {
-            var rng = new CultMath.Random(seed * 7919u);
-            var n = rng.NextInt(2, 17);
-            var m = rng.NextInt(n, 25);
-            var a = new float[m * n];
-            var b = new float[m];
-            for (var i = 0; i < a.Length; i++) a[i] = rng.NextFloat(-1f, 1f);
-            for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
-            var lo = new float[n];
-            var hi = new float[n];
-            for (var j = 0; j < n; j++)
-            {
-                switch (rng.NextInt(3))
-                {
-                    case 0: lo[j] = -1f; hi[j] = 1f; break;
-                    case 1: lo[j] = 0f; hi[j] = 1f; break;
-                    default: lo[j] = -0.25f; hi[j] = 0.1f; break;
-                }
-            }
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
             var x = new float[n];
             var status = Solve(m, n, a, b, lo, hi, x, out _);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed} ({m}x{n}) hit the cap");
@@ -191,9 +204,10 @@ public sealed class BoundedLeastSquaresTests
         var lo = Fill(-1f, n);
         var hi = Fill(1f, n);
         var x = new float[n];
-        var status = Solve(m, n, a, b, lo, hi, x, out _);
+        var status = Solve(m, n, a, b, lo, hi, x, out var iterations);
         Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
         Assert.Equal(new[] { 1f, -1f, 1f }, x);
+        Assert.Equal(3, iterations);
         AssertKkt(m, n, a, b, lo, hi, x);
     }
 
@@ -336,9 +350,126 @@ public sealed class BoundedLeastSquaresTests
     }
 
     [Fact]
-    public void ShortSpansThrowArgumentException()
+    public void LargeInteriorOptimumEqualsNormalEquations()
     {
-        var x = new float[3];
-        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Solve(5, 3, A54, B5, Fill(-1f, 3), Fill(1f, 3), x, new float[4], out _));
+        const int m = 24, n = 16;
+        var rng = new CultMath.Random(4242u);
+        var a = new float[m * n];
+        var b = new float[m];
+        for (var i = 0; i < a.Length; i++) a[i] = rng.NextFloat(-1f, 1f);
+        for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
+        var x = new float[n];
+        var status = Solve(m, n, a, b, Fill(-1000f, n), Fill(1000f, n), x, out var iterations);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        Assert.Equal(0, iterations);
+        var expected = NormalEquationSolution(m, n, a, b);
+        for (var i = 0; i < n; i++) Assert.Equal(expected[i], x[i], 1e-3);
+    }
+
+    [Fact]
+    public void ScaledAndNearDuplicateColumnsAreOptimal()
+    {
+        const int m = 5, n = 3;
+        foreach (var noise in new[] { 0f, 1e-5f })
+        {
+            var a = (float[])A54.Clone();
+            for (var r = 0; r < m; r++) a[r * n + 2] = 0.37f * a[r * n + 0] + noise * (r - 2);
+            var lo = Fill(-1f, n);
+            var hi = new[] { 0.6f, 1f, 0.6f };
+            var x = new float[n];
+            var status = Solve(m, n, a, B5, lo, hi, x, out _);
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+            AssertKkt(m, n, a, B5, lo, hi, x);
+            var cs = Cost(m, n, a, B5, x);
+            var cr = ReferenceCost(m, n, a, B5, lo, hi);
+            Assert.True(Math.Abs(cs - cr) <= 1e-4 * cr + 1e-6, $"noise {noise}: solver cost {cs}, reference {cr}");
+        }
+    }
+
+    [Fact]
+    public void WorkspaceContentsOnEntryAreIgnored()
+    {
+        const int m = 5, n = 3;
+        var zeroCol = (float[])A54.Clone();
+        for (var r = 0; r < m; r++) zeroCol[r * n + 1] = 0f;
+        var dupCol = (float[])A54.Clone();
+        for (var r = 0; r < m; r++) dupCol[r * n + 2] = dupCol[r * n + 0];
+        foreach (var a in new[] { A54, zeroCol, dupCol })
+        {
+            var lo = new[] { -1f, -1f, -1f };
+            var hi = new[] { 0.3f, 1f, 0.3f };
+            var clean = new float[n];
+            Solve(m, n, a, B5, lo, hi, clean, out var cleanIterations);
+            foreach (var junk in new[] { float.NaN, 7f, -1e30f })
+            {
+                var workspace = new float[BoundedLeastSquares.WorkspaceLength(n)];
+                Array.Fill(workspace, junk);
+                var x = new float[n];
+                BoundedLeastSquares.Solve(m, n, a, B5, lo, hi, x, workspace, out var iterations);
+                Assert.Equal(clean, x);
+                Assert.Equal(cleanIterations, iterations);
+            }
+        }
+    }
+
+    [Fact]
+    public void WarmStartAtAVertexTakesNoIterations()
+    {
+        const int m = 4, n = 3;
+        var a = new[] { 1.0f, 0.2f, 0.1f, 0.1f, 1.0f, 0.3f, -0.2f, 0.2f, 1.0f, 0.5f, 0.5f, 0.4f };
+        var b = new[] { 10f, -10f, 10f, 1f };
+        var x = new[] { 1f, -1f, 1f };
+        var status = Solve(m, n, a, b, Fill(-1f, n), Fill(1f, n), x, out var iterations);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        Assert.Equal(0, iterations);
+        Assert.Equal(new[] { 1f, -1f, 1f }, x);
+    }
+
+    [Fact]
+    public void IterationCountFollowsTheCapExactly()
+    {
+        var sawRelease = false;
+        for (uint seed = 1; seed <= 40; seed++)
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var full = new float[n];
+            Solve(m, n, a, b, lo, hi, full, out var needed);
+            var previousCost = double.MaxValue;
+            for (var cap = 0; cap <= needed; cap++)
+            {
+                var x = new float[n];
+                var status = Solve(m, n, a, b, lo, hi, x, out var iterations, cap);
+                Assert.Equal(cap, iterations);
+                Assert.Equal(cap < needed ? BoundedLeastSquaresStatus.IterationLimit : BoundedLeastSquaresStatus.Converged, status);
+                for (var j = 0; j < n; j++) Assert.InRange(x[j], lo[j], hi[j]);
+                var cost = Cost(m, n, a, b, x);
+                Assert.True(cost <= previousCost * (1 + 1e-6) + 1e-9, $"seed {seed} cap {cap}: cost rose from {previousCost} to {cost}");
+                previousCost = cost;
+            }
+            sawRelease |= needed > n;
+        }
+        Assert.True(sawRelease, "no random problem needed more iterations than columns, so no bound was ever released");
+    }
+
+    [Fact]
+    public void EachShortSpanIsRejected()
+    {
+        const int m = 5, n = 3;
+        var ws = new float[BoundedLeastSquares.WorkspaceLength(n)];
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        void Expect(Action call) => Assert.Contains("BoundedLeastSquares", Assert.Throws<ArgumentException>(call).Message);
+        Expect(() => BoundedLeastSquares.Solve(m, n, new float[m * n - 1], B5, lo, hi, new float[n], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, n, A54, new float[m - 1], lo, hi, new float[n], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, n, A54, B5, new float[n - 1], hi, new float[n], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, n, A54, B5, lo, new float[n - 1], new float[n], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, n, A54, B5, lo, hi, new float[n - 1], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, n, A54, B5, lo, hi, new float[n], new float[ws.Length - 1], out _));
+        Expect(() => BoundedLeastSquares.Solve(-1, n, A54, B5, lo, hi, new float[n], ws, out _));
+        Expect(() => BoundedLeastSquares.Solve(m, -1, A54, B5, lo, hi, new float[n], ws, out _));
+        // Exactly sized spans, and empty problems, are accepted.
+        BoundedLeastSquares.Solve(m, n, A54, B5, lo, hi, new float[n], ws, out _);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(0, 0, default, default, default, default, default, default, out _));
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(0, n, default, default, lo, hi, new float[n], ws, out _));
     }
 }
