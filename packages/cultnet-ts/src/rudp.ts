@@ -170,6 +170,9 @@ export class CultNetRudpSession {
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
     this.#nextSequence = toUint32(options.initialSequence ?? 1, "initialSequence");
+    if (this.#nextSequence === 0xffff_ffff) {
+      throw new Error("RUDP initialSequence must leave room for a reliable packet.");
+    }
     this.resendDelayMs = options.resendDelayMs ?? 250;
     if (options.maxPendingReliablePackets !== undefined && options.maxPendingReliablePackets <= 0) {
       throw new Error("RUDP maxPendingReliablePackets must be greater than zero.");
@@ -921,6 +924,25 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
   }
 
+  #endRefusedSession(): void {
+    const reason = Buffer.from("session refused a packet", "utf8");
+    // The goodbye is built after the reset, or its ack field would acknowledge
+    // the very frame the session refused.
+    this.#session.resetPeerState();
+    try {
+      this.#sendPacket(this.#session.createDisconnect(reason));
+    } catch {
+      // Best-effort: the session ends whether or not the peer hears it.
+    }
+    if (this.#mode === "server") {
+      // Only a Connect can claim the endpoint again.
+      this.#remoteHost = undefined;
+      this.#remotePort = undefined;
+    }
+    this.emit("disconnect", { reason });
+    this.emit("close");
+  }
+
   #receiveDatagram(wire: Buffer, remote: RemoteInfo): void {
     this.#stats.bytesReceived += wire.length;
     // What a datagram carries is the sender's business, not a fault of this
@@ -975,7 +997,11 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     try {
       result = this.#session.receive(packet, Date.now());
     } catch {
+      // receive() has already recorded the packet's reliable sequence, so the
+      // session cannot be kept: a retransmit would be acknowledged and the
+      // frame silently lost. End it and tell the peer.
       this.#stats.packetsDropped += 1;
+      this.#endRefusedSession();
       return;
     }
     try {

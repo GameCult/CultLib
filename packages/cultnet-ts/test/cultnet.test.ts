@@ -38,6 +38,9 @@ import {
   createRudpTransportProfile,
   defineCultNetDocumentBinding,
   decodeRudpPacket,
+  type CultNetOperationRequestMessage,
+  type CultNetOperationResponseMessage,
+  type CultNetRudpPacket,
   encodeCultNetMessageForWire,
   encodeRudpPacket,
   ghostlightAgentStateGeneratedContract,
@@ -1928,5 +1931,137 @@ test("rudp socket transport drops strays without an error event and keeps servin
     strayHost.close();
     client.close();
     server.close();
+  }
+});
+
+/** A reliable frame no session accepts: a fragment set with no fragment id. */
+function poisonedFrame(session: CultNetRudpSession): CultNetRudpPacket {
+  const [packet] = session.sendMany("schema", Buffer.from("poison"), { reliable: true, ordered: true, nowMs: 0 });
+  return { ...packet!, fragmentCount: 2, fragmentId: 0, fragmentIndex: 0 };
+}
+
+test("rudp socket transport ends the session that refuses a reliable frame and never acknowledges it", async () => {
+  const serverSocket = await bindUdpSocket();
+  const peerSocket = await bindUdpSocket();
+  const connectionId = 0x10203051;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendPollMs: 1000,
+  });
+  const received: CultNetRudpPacket[] = [];
+  peerSocket.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const peer = new CultNetRudpSession({ connectionId });
+  const toServer = (packet: CultNetRudpPacket) =>
+    peerSocket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
+  const disconnects: string[] = [];
+  server.on("disconnect", ({ reason }) => disconnects.push(Buffer.from(reason).toString("utf8")));
+
+  try {
+    toServer(peer.createConnect(0));
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the Accept");
+    peer.receive(received.find((p) => p.packetType === "accept")!, 0);
+
+    const poison = poisonedFrame(peer);
+    toServer(poison);
+    await waitFor(() => disconnects.length === 1, "the server ending the session");
+    await waitFor(() => received.some((p) => p.packetType === "disconnect"), "the goodbye");
+    assert.equal(server.stats.packetsDropped, 1);
+    assert.equal(server.connected, false);
+
+    // The peer sees the session end and never sees the frame acknowledged,
+    // neither in the goodbye nor after it retransmits.
+    const goodbye = received.find((p) => p.packetType === "disconnect")!;
+    assert.equal(peer.receive(goodbye, 1).disconnected, true);
+    assert.ok(peer.pendingReliableSequences.includes(poison.sequence), "the refused frame was acknowledged");
+    const before = received.length;
+    toServer(poison);
+    await waitFor(() => server.stats.packetsDropped === 2, "the retransmit dropped");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(received.length, before, "the server must not answer a retransmit for an ended session");
+
+    // Only a Connect claims the endpoint again.
+    const again = new CultNetRudpSession({ connectionId });
+    toServer(again.createConnect(0));
+    await waitFor(() => received.length > before, "the new Accept");
+    assert.ok(received.slice(before).some((p) => p.packetType === "accept"));
+  } finally {
+    peerSocket.close();
+    server.close();
+  }
+});
+
+test("rudp sessions reject sequence spaces and queues that cannot admit a Connect", () => {
+  assert.throws(() => new CultNetRudpSession({ connectionId: 1, initialSequence: 0xffff_ffff }), /initialSequence/);
+  assert.throws(() => new CultNetRudpSession({ connectionId: 1, maxPendingReliablePackets: 0 }), /greater than zero/);
+  assert.doesNotThrow(() => new CultNetRudpSession({ connectionId: 1, initialSequence: 0xffff_fffe, maxPendingReliablePackets: 1 }));
+});
+
+test("operation service drops and counts a packet its session refuses and keeps serving", async () => {
+  const handler = (request: CultNetOperationRequestMessage): CultNetOperationResponseMessage => ({
+    schemaVersion: "cultnet.operation_response.v0",
+    messageId: request.messageId,
+    serviceId: request.serviceId,
+    operation: request.operation,
+    status: "ok",
+    payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: request.payload,
+    diagnostics: [],
+    sourceRuntimeId: "sai-sidecar",
+  });
+  const server = await startCultNetOperationServer({ runtimeId: "sai-sidecar", handler });
+  const raw = await bindUdpSocket();
+  const port = Number(new URL(server.endpoint).port);
+  const connectionId = 0x43554c54;
+  const received: CultNetRudpPacket[] = [];
+  raw.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const peer = new CultNetRudpSession({ connectionId });
+  const toServer = (packet: CultNetRudpPacket) => raw.send(encodeRudpPacket(packet), port, "127.0.0.1");
+  try {
+    toServer(peer.createConnect(0));
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the Accept");
+    peer.receive(received[0]!, 0);
+    toServer(poisonedFrame(peer));
+    await waitFor(() => server.packetsDropped === 1, "the poisoned frame dropped");
+    await waitFor(() => received.some((p) => p.packetType === "disconnect"), "the session ended");
+
+    const response = await invokeCultNetOperation(server.endpoint, {
+      schemaVersion: "cultnet.operation_request.v0",
+      messageId: "after-poison",
+      serviceId: "sai.vn",
+      operation: "describe",
+      payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+      payloadEncoding: "messagepack-base64",
+      payload: "gaZzY2hlbWE=",
+    }, { runtimeId: "eve-test" });
+    assert.equal(response.messageId, "after-poison");
+  } finally {
+    raw.close();
+    await server.close();
+  }
+});
+
+test("operation service drops a Connect once its session table is full", async () => {
+  const server = await startCultNetOperationServer({
+    runtimeId: "sai-sidecar",
+    handler: () => { throw new Error("no requests expected"); },
+  });
+  const port = Number(new URL(server.endpoint).port);
+  const sockets: Socket[] = [];
+  try {
+    for (let index = 0; index < 66; index += 1) {
+      const socket = await bindUdpSocket();
+      sockets.push(socket);
+      socket.send(encodeRudpPacket(new CultNetRudpSession({ connectionId: 0x43554c54 }).createConnect(0)), port, "127.0.0.1");
+    }
+    await waitFor(() => server.packetsDropped === 2, "the Connects past the cap dropped");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(server.packetsDropped, 2);
+  } finally {
+    for (const socket of sockets) socket.close();
+    await server.close();
   }
 });
