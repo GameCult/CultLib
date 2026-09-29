@@ -212,10 +212,17 @@ Example:
 The payload is the domain object only. It does not repeat the key, schema id,
 or stored timestamp.
 
-Under `cultcache.store.v1` a record has exactly these four slots. A reader refuses any
-`cultcache.store.*` header it does not know and any record with more slots than its
-header allows, naming the version or the record's key and schema id. It never skips a
-slot it does not understand.
+Under `cultcache.store.v1` and `cultcache.store.v3` a record has exactly these four slots.
+A reader refuses any `cultcache.store.*` header it does not know and any record with more
+slots than its header allows, naming the version or the record's key and schema id. It
+never skips a slot it does not understand.
+
+The headers are `v1` (no variant, no element ids), `v2` (holds a variant) and `v3` (can
+hold element ids, variants or not). A single-file store declares `v3` when any record it
+holds is of a type that reaches an object list, and a file already declared `v3` stays
+`v3` when a writer merges onto it. A directory store's manifest says
+`cultcache.store.v5.directory-content-addressed-pages` under the same rule, and
+`v4` otherwise.
 
 ## Variant Records
 
@@ -236,16 +243,41 @@ fifth slot:
   `elementId` is `""` unless the step enters an object-list element. `value` is the
   member's own MessagePack encoding, inline. A top-level Set has one step and `id` `""`;
   a reader that resolves only that shape refuses the others, naming the variant.
-- A store holding at least one variant declares `cultcache.store.v2`; a store holding
-  none declares `cultcache.store.v1` and is byte-identical to what a runtime without
-  variants writes. A `v1` header over a variant record is refused.
+- A store holding at least one variant declares `cultcache.store.v2` (`v3` when it can
+  hold element ids); a store holding none declares `cultcache.store.v1` (or `v3`) and is
+  byte-identical to what a runtime without variants writes. A `v1` header over a variant
+  record is refused.
 - A variant's resolved document is derived in memory when the cache admits the record
   or any record on its base chain, and is never written back. A plain write at a
   variant's key is refused; `Flatten` replaces a variant with a plain record holding its
   resolved document.
-- The C# runtime resolves variants. Every other runtime refuses a `v2` store by name.
+- The C# runtime resolves variants. Every other runtime refuses a `v2` store by name, and
+  refuses a variant record inside a `v3` store by its record key.
   CultMesh single-file reads, the directory store and CultNet refuse a variant record by
   name until each has its own cut.
+
+## Element Ids
+
+Every object that sits in a list, array or dictionary value of a registered document
+type, union subtypes included, carries an id: one string member with an integer `[Key]`
+and `[CultElementId]`. The id identifies the element inside its list, so an override can
+name it (a path step is `[slot, elementId]`) and a base edit that reorders or inserts
+elements retargets nothing.
+
+- A random id is 12 lowercase hex characters. A derived id
+  (`[CultElementId(nameof(Source))]`, for content-addressed elements) is the
+  invariant-culture text of its source member, which must be non-empty; it needs no
+  other format. An id is unique within its list.
+- A write mints random ids for unset elements, including inside variant override
+  values, and refuses a duplicate, a malformed random id or an empty derived source. A
+  load refuses the same things, naming the record, the list and the id. A record
+  written before ids existed loads, and its ids are minted from SHA-256 of the record
+  key and the element's path, so every reader mints the same ids; they reach disk with
+  the record's next write, or `CultCache.MintElementIds()`.
+- A store that can hold ids declares the `v3` header (above), so a reader older than ids
+  refuses it instead of skipping the id slot and rewriting the elements without ids.
+  TypeScript, Python and Rust read `v3` and keep a `v3` header they found when they
+  rewrite a store; they do not decide when a document carries ids.
 
 ## Canonical Semantic Schema Hash
 

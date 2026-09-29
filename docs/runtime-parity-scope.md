@@ -15,6 +15,9 @@ Cross-runtime parity has three layers:
   without translation folklore.
   Every store reader refuses, by name, a header or record slot it does not
   understand (vectors: `tests/vectors/document-variants-c0`).
+  Element ids: a store that can hold them declares `cultcache.store.v3`; TypeScript,
+  Python and Rust read it and keep the header, and readers older than ids refuse it
+  (vectors: `tests/vectors/document-variants-c2a`).
   Document variants: C# resolves them (`cultcache.store.v2`); every other runtime,
   CultMesh single-file reads, the directory store and CultNet refuse a variant by name
   (vector written by C#: `tests/vectors/document-variants-c1`).
