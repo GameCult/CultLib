@@ -2028,6 +2028,17 @@ test("operation service drops and counts a packet its session refuses and keeps 
     await waitFor(() => server.packetsDropped === 1, "the poisoned frame dropped");
     await waitFor(() => received.some((p) => p.packetType === "disconnect"), "the session ended");
 
+    // A frame the session accepts but the service cannot handle rejects inside
+    // the handler; that too is a dropped packet, not a dead process.
+    const garbage = new CultNetRudpSession({ connectionId });
+    received.length = 0;
+    toServer(garbage.createConnect(0));
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the second Accept");
+    garbage.receive(received[0]!, 0);
+    const [notMessagePack] = garbage.sendMany("schema", Buffer.from([0xc1]), { reliable: true, ordered: true, nowMs: 0 });
+    toServer(notMessagePack!);
+    await waitFor(() => server.packetsDropped === 2, "the unhandled frame dropped");
+
     const response = await invokeCultNetOperation(server.endpoint, {
       schemaVersion: "cultnet.operation_request.v0",
       messageId: "after-poison",
