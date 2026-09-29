@@ -946,6 +946,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   checkTimeout(timeoutMs: number, nowMs = Date.now()): boolean {
     const timedOut = this.#session.checkTimeout(nowMs, timeoutMs);
     if (timedOut) {
+      this.#endGeneration(Buffer.from("session timed out", "utf8"));
       this.emit("timeout");
       this.emit("close");
     }
@@ -1032,7 +1033,9 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       // endpoint replaces the peer: the old session's writes die with it.
       const repeated = this.#session.connected && !movedEndpoint;
       if (!repeated) {
-        if (this.#session.connected) {
+        // A timed-out session already ended its generation; any other
+        // predecessor ends here, connected or not.
+        if (this.#endedGeneration < this.#generation) {
           this.#endGeneration(Buffer.from("replaced by a new Connect", "utf8"));
         }
         this.#session.resetPeerState();

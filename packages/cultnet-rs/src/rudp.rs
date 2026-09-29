@@ -127,7 +127,9 @@ pub struct CultNetRudpSendOptions {
 
 /// Identifies every transport packet belonging to one non-expiring reliable
 /// send. Receipts are local to the session that issued them: a peer reset or
-/// a Disconnect invalidates them for good.
+/// a Disconnect received from the peer invalidates them for good. A local
+/// `disconnect()` or a timeout does not; the writes it leaves owed carry into
+/// the next session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpReliableSendReceipt {
     session_scope: Uuid,

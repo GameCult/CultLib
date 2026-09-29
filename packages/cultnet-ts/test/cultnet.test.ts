@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { z } from "zod";
+import { encode } from "@msgpack/msgpack";
 import {
   CultCache,
   SingleFileMessagePackBackingStore,
@@ -2355,4 +2356,137 @@ test("a repeated Connect acknowledges what it carries", () => {
   const reply = server.answerRepeatedConnect({ ...connect, ack: accept.sequence }, 1);
   assert.equal(reply.packetType, "ack");
   assert.equal(server.outstandingReliablePacketCount, 0);
+});
+
+async function timedOutServerWithUnackedWrite(connectionId: number) {
+  const serverSocket = await bindUdpSocket();
+  const socketA = await bindUdpSocket();
+  const socketB = await bindUdpSocket();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendDelayMs: 1000,
+    resendPollMs: 1000,
+  });
+  const receivedByA: CultNetRudpPacket[] = [];
+  socketA.on("message", (wire) => receivedByA.push(decodeRudpPacket(wire)));
+  const peerA = new CultNetRudpSession({ connectionId });
+  const send = (socket: Socket, packet: CultNetRudpPacket) =>
+    socket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
+  send(socketA, peerA.createConnect(0));
+  await waitFor(() => receivedByA.some((p) => p.packetType === "accept"), "A's Accept");
+  const acceptA = receivedByA.find((p) => p.packetType === "accept")!;
+  peerA.receive(acceptA, 0);
+  send(socketA, peerA.createAckForReceived(acceptA.sequence));
+  await waitFor(() => server.outstandingReliablePacketCount === 0, "A's Accept acknowledged");
+  server.send("schema", Buffer.from("never acknowledged"));
+  assert.ok(server.outstandingReliablePacketCount > 0);
+  const flushed = server.flush(2000);
+  const outcome = assert.rejects(flushed, /ended before its reliable writes were acknowledged/);
+  // The flush must have started before the timeout fires.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(server.checkTimeout(50, Date.now() + 10_000), true);
+  return {
+    server, socketA, socketB, outcome, send,
+    close: () => {
+      socketA.close();
+      socketB.close();
+      server.close();
+    },
+  };
+}
+
+test("a flush waiting on an unacknowledged write fails as soon as the session times out", async () => {
+  const t = await timedOutServerWithUnackedWrite(0x1020305a);
+  try {
+    await t.outcome;
+  } finally {
+    t.close();
+  }
+});
+
+test("a flush fails when a Connect from another endpoint follows a timeout", async () => {
+  const t = await timedOutServerWithUnackedWrite(0x1020305b);
+  try {
+    t.send(t.socketB, new CultNetRudpSession({ connectionId: 0x1020305b }).createConnect(0));
+    await t.outcome;
+  } finally {
+    t.close();
+  }
+});
+
+test("a flush fails when a Connect from the same endpoint follows a timeout", async () => {
+  const t = await timedOutServerWithUnackedWrite(0x1020305c);
+  try {
+    t.send(t.socketA, new CultNetRudpSession({ connectionId: 0x1020305c }).createConnect(0));
+    await t.outcome;
+  } finally {
+    t.close();
+  }
+});
+
+test("operation service sweeps a session that ran a handler once it idles out", async () => {
+  const server = await startCultNetOperationServer({
+    runtimeId: "sai-sidecar",
+    sessionIdleTimeoutMs: 300,
+    handler: (request): CultNetOperationResponseMessage => ({
+      schemaVersion: "cultnet.operation_response.v0",
+      messageId: request.messageId,
+      serviceId: request.serviceId,
+      operation: request.operation,
+      status: "ok",
+      payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+      payloadEncoding: "messagepack-base64",
+      payload: request.payload,
+      diagnostics: [],
+      sourceRuntimeId: "sai-sidecar",
+    }),
+  });
+  const port = Number(new URL(server.endpoint).port);
+  const sockets: Socket[] = [];
+  const request: CultNetOperationRequestMessage = {
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId: "after-handling",
+    serviceId: "sai.vn",
+    operation: "describe",
+    payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzY2hlbWE=",
+  };
+  const connectionId = 0x43554c54;
+  try {
+    // Sixty-four clients each run a handler and then go silent without a
+    // Disconnect. Only the idle sweep can free their slots.
+    const clients: { socket: Socket; peer: CultNetRudpSession; handled: () => boolean }[] = [];
+    for (let index = 0; index < 64; index += 1) {
+      const socket = await bindUdpSocket();
+      sockets.push(socket);
+      const peer = new CultNetRudpSession({ connectionId });
+      let handled = false;
+      let accepted = false;
+      socket.on("message", (wire) => {
+        const packet = decodeRudpPacket(wire);
+        if (packet.packetType === "accept" && !accepted) {
+          accepted = true;
+          peer.receive(packet, 0);
+          for (const out of peer.sendMany("schema", Buffer.from(encode(encodeCultNetMessageForWire(request, "cultnet.schema.v0"))), { reliable: true, ordered: true, nowMs: 0 })) {
+            socket.send(encodeRudpPacket(out), port, "127.0.0.1");
+          }
+        } else if (packet.channelId === "schema") {
+          handled = true;
+        }
+      });
+      socket.send(encodeRudpPacket(peer.createConnect(0)), port, "127.0.0.1");
+      clients.push({ socket, peer, handled: () => handled });
+    }
+    await waitFor(() => clients.every((c) => c.handled()), "every handler ran");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const response = await invokeCultNetOperation(server.endpoint, request, { runtimeId: "eve-test", timeoutMs: 1000 });
+    assert.equal(response.messageId, "after-handling");
+  } finally {
+    for (const socket of sockets) socket.close();
+    await server.close();
+  }
 });
