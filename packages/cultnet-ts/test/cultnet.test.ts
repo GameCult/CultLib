@@ -1867,3 +1867,66 @@ test("rudp receiver evicts stranded fragment sets instead of refusing new ones",
   assert.equal(second.delivered.length, 1);
   assert.equal(Buffer.from(second.delivered[0]!.payload).toString(), "hello");
 });
+
+test("rudp socket transport drops strays without an error event and keeps serving its peer", async () => {
+  const serverSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const strayHost = await bindUdpSocket();
+  const connectionId = 0x10203050;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendPollMs: 5,
+  });
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(serverSocket),
+    connectionId,
+    resendPollMs: 5,
+  });
+
+  try {
+    // No "error" listener on either side: an unhandled "error" event throws
+    // and would end the process, which is what a stray must never do.
+    const frames: string[] = [];
+    server.on("frame", (frame) => frames.push(Buffer.from(frame.payload).toString("utf8")));
+    client.connect();
+    await waitFor(() => client.connected && server.connected, "RUDP socket handshake");
+
+    const foreign = new CultNetRudpSession({ connectionId: 0x0badf10e });
+    const strays = [
+      Buffer.from("not a rudp packet"),
+      Buffer.alloc(0),
+      Buffer.from(encodeRudpPacket(foreign.createConnect(0, Buffer.from("foreign")))),
+    ];
+    for (const stray of strays) {
+      // From an unrelated address, and from the peer's own address.
+      strayHost.send(stray, udpPort(serverSocket), "127.0.0.1");
+      clientSocket.send(stray, udpPort(serverSocket), "127.0.0.1");
+    }
+    await waitFor(() => server.stats.packetsDropped >= strays.length * 2, "strays counted");
+
+    client.send("schema", Buffer.from("still here", "utf8"));
+    await waitFor(() => frames.length === 1, "the real frame");
+    assert.deepEqual(frames, ["still here"]);
+
+    // The client side too: a moved flow answers from the server address.
+    for (const stray of strays) {
+      serverSocket.send(stray, udpPort(clientSocket), "127.0.0.1");
+    }
+    await waitFor(() => client.stats.packetsDropped >= strays.length, "client strays counted");
+    const clientFrames: string[] = [];
+    client.on("frame", (frame) => clientFrames.push(Buffer.from(frame.payload).toString("utf8")));
+    server.send("schema", Buffer.from("server still here", "utf8"));
+    await waitFor(() => clientFrames.length === 1, "the real server frame");
+  } finally {
+    strayHost.close();
+    client.close();
+    server.close();
+  }
+});

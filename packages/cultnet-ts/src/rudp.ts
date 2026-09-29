@@ -807,6 +807,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     bytesSent: 0,
     framesReceived: 0,
     framesSent: 0,
+    packetsDropped: 0,
   };
 
   constructor(options: CultNetRudpSocketTransportOptions) {
@@ -922,15 +923,29 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   #receiveDatagram(wire: Buffer, remote: RemoteInfo): void {
     this.#stats.bytesReceived += wire.length;
+    // What a datagram carries is the sender's business, not a fault of this
+    // process: a malformed frame, another session's connection id and a packet
+    // the session refuses are dropped and counted, never emitted as "error"
+    // (an "error" with no listener throws and ends the process). The id is
+    // checked before the peer endpoint or session state is touched, so a stray
+    // Connect can neither move the endpoint nor reset the session.
     let packet: CultNetRudpPacket;
     try {
       packet = decodeRudpPacket(wire);
-    } catch (error) {
-      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+    } catch {
+      this.#stats.packetsDropped += 1;
+      return;
+    }
+    if (packet.connectionId !== this.#session.connectionId) {
+      this.#stats.packetsDropped += 1;
       return;
     }
 
     if (!this.#remoteHost || this.#remotePort === undefined) {
+      if (this.#mode === "server" && packet.packetType !== "connect") {
+        this.#stats.packetsDropped += 1;
+        return;
+      }
       this.#remoteHost = remote.address;
       this.#remotePort = remote.port;
     } else if (remote.address !== this.#remoteHost || remote.port !== this.#remotePort) {
@@ -938,18 +953,32 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         this.#remoteHost = remote.address;
         this.#remotePort = remote.port;
       } else {
+        this.#stats.packetsDropped += 1;
         return;
       }
     }
 
-    try {
-      if (this.#mode === "server" && packet.packetType === "connect") {
-        this.#session.resetPeerState();
-        this.#sendPacket(this.#session.acceptConnect(packet, Date.now()));
+    if (this.#mode === "server" && packet.packetType === "connect") {
+      this.#session.resetPeerState();
+      let accept: CultNetRudpPacket;
+      try {
+        accept = this.#session.acceptConnect(packet, Date.now());
+      } catch {
+        this.#stats.packetsDropped += 1;
         return;
       }
+      this.#sendPacket(accept);
+      return;
+    }
 
-      const result = this.#session.receive(packet, Date.now());
+    let result: ReturnType<CultNetRudpSession["receive"]>;
+    try {
+      result = this.#session.receive(packet, Date.now());
+    } catch {
+      this.#stats.packetsDropped += 1;
+      return;
+    }
+    try {
       if (result.reply) {
         this.#sendPacket(result.reply);
       }
