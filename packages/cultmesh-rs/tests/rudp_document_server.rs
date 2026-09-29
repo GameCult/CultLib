@@ -581,7 +581,7 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
             max_pending_reliable_packets: None,
         })
     };
-    let mut send_raw = |server: &mut Server, packet: &cultnet_rs::CultNetRudpPacket| -> Result<()> {
+    let send_raw = |server: &mut Server, packet: &cultnet_rs::CultNetRudpPacket| -> Result<()> {
         raw.send_to(&encode_rudp_packet(packet)?, target)?;
         server.poll_once()?;
         Ok(())

@@ -411,17 +411,17 @@ where
         now: u64,
     ) -> Result<bool> {
         let reply = match self.sessions.get_mut(&key) {
-            // The same key is a retransmitted Connect for the existing epoch:
-            // repeat the Accept still awaiting acknowledgement, or acknowledge
-            // if none is. It queues nothing, so a Connect storm cannot grow the
-            // session's reliable queue. A genuinely fresh client incarnation
-            // must choose a fresh id.
+            // The same key is a retransmitted Connect for the existing epoch.
+            // A genuinely fresh client incarnation must choose a fresh id.
             Some(entry) => {
                 entry.last_activity_monotonic_millis = now;
-                entry
-                    .session
-                    .pending_accept_for_resend(now)
-                    .unwrap_or_else(|| entry.session.create_ack())
+                match entry.session.answer_repeated_connect(packet, now) {
+                    Ok(reply) => reply,
+                    Err(_) => {
+                        self.sessions.remove(&key);
+                        return Ok(false);
+                    }
+                }
             }
             None => {
                 if self.sessions.len() >= self.options.max_sessions {

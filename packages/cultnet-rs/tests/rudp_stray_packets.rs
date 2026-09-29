@@ -388,9 +388,12 @@ fn client_ends_its_session_when_it_refuses_a_packet() -> Result<()> {
     assert!(client.disconnect_reason().is_some());
 
     // The server is told, not left holding a live session.
-    let (received, _) = server.recv_from(&mut buffer)?;
-    let told = decode_rudp_packet(&buffer[..received])?;
-    assert_eq!(told.packet_type, CultNetRudpPacketType::Disconnect);
+    let mut told = false;
+    while let Ok((received, _)) = server.recv_from(&mut buffer) {
+        told |= decode_rudp_packet(&buffer[..received])?.packet_type
+            == CultNetRudpPacketType::Disconnect;
+    }
+    assert!(told, "the server must be told the session ended");
     Ok(())
 }
 
