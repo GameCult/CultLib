@@ -75,7 +75,14 @@ public sealed class BoundedLeastSquaresTests
         {
             for (var j = 0; j < n; j++) x[j] = (float)xd[j];
             var g = Gradient(m, n, a, b, x);
-            for (var j = 0; j < n; j++) xd[j] = Math.Clamp(xd[j] - step * g[j], lo[j], hi[j]);
+            var moved = 0.0;
+            for (var j = 0; j < n; j++)
+            {
+                var next = Math.Clamp(xd[j] - step * g[j], lo[j], hi[j]);
+                moved = Math.Max(moved, Math.Abs(next - xd[j]));
+                xd[j] = next;
+            }
+            if (moved < 1e-10) break;
         }
         for (var j = 0; j < n; j++) x[j] = (float)xd[j];
         return Cost(m, n, a, b, x);
