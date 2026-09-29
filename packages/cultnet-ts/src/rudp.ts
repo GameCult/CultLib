@@ -824,7 +824,12 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
-  /** Why the session ended, while it is over; cleared by the next Connect. */
+  // A flush belongs to the session it started in. Each session start advances
+  // the generation; each session end records the generation it ended and why.
+  // A reconnect from a disconnect listener starts a new generation but cannot
+  // un-end the old one.
+  #generation = 0;
+  #endedGeneration = -1;
   #endedReason: Uint8Array | undefined;
   readonly #stats: CultNetTransportStats = {
     bytesReceived: 0,
@@ -887,7 +892,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     if (this.#mode !== "client") {
       throw new Error("Only a client RUDP socket transport can initiate connect.");
     }
-    this.#endedReason = undefined;
+    this.#generation += 1;
     this.#sendPacket(this.#session.createConnect(Date.now(), payload));
   }
 
@@ -905,12 +910,13 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   async flush(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
+    const generation = this.#generation;
     for (;;) {
       // An ended session forgot its unacknowledged writes; reporting them
-      // flushed would be a lie.
-      if (this.#endedReason !== undefined) {
+      // flushed would be a lie, even if a new session has since begun.
+      if (this.#endedGeneration >= generation) {
         throw new Error(
-          `RUDP session ended before its reliable writes were acknowledged: ${Buffer.from(this.#endedReason).toString("utf8")}`,
+          `RUDP session ended before its reliable writes were acknowledged: ${Buffer.from(this.#endedReason ?? new Uint8Array()).toString("utf8")}`,
         );
       }
       if (this.#session.outstandingReliablePacketCount === 0) {
@@ -926,6 +932,11 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       }
       await new Promise(resolve => setTimeout(resolve, 5));
     }
+  }
+
+  #endGeneration(reason: Uint8Array): void {
+    this.#endedGeneration = this.#generation;
+    this.#endedReason = reason;
   }
 
   ping(payload = new Uint8Array()): void {
@@ -961,7 +972,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     // The goodbye is built after the reset, or its ack field would acknowledge
     // the very frame the session refused.
     this.#session.resetPeerState();
-    this.#endedReason = reason;
+    this.#endGeneration(reason);
     try {
       this.#sendPacket(this.#session.createDisconnect(reason));
     } catch {
@@ -996,6 +1007,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       return;
     }
 
+    let movedEndpoint = false;
     if (!this.#remoteHost || this.#remotePort === undefined) {
       if (this.#mode === "server" && packet.packetType !== "connect") {
         this.#stats.packetsDropped += 1;
@@ -1005,6 +1017,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       this.#remotePort = remote.port;
     } else if (remote.address !== this.#remoteHost || remote.port !== this.#remotePort) {
       if (this.#mode === "server" && packet.packetType === "connect") {
+        movedEndpoint = true;
         this.#remoteHost = remote.address;
         this.#remotePort = remote.port;
       } else {
@@ -1014,15 +1027,20 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
 
     if (this.#mode === "server" && packet.packetType === "connect") {
-      // A repeated Connect from the accepted peer resets nothing: the session
-      // answers it with the Accept already owed.
-      if (!this.#session.connected) {
+      // Only a Connect from the endpoint already accepted repeats, and the
+      // session answers it with the Accept owed. A Connect from another
+      // endpoint replaces the peer: the old session's writes die with it.
+      const repeated = this.#session.connected && !movedEndpoint;
+      if (!repeated) {
+        if (this.#session.connected) {
+          this.#endGeneration(Buffer.from("replaced by a new Connect", "utf8"));
+        }
         this.#session.resetPeerState();
       }
       let accept: CultNetRudpPacket;
       try {
         accept = this.#session.acceptConnect(packet, Date.now());
-        this.#endedReason = undefined;
+        if (!repeated) this.#generation += 1;
       } catch {
         this.#stats.packetsDropped += 1;
         return;
@@ -1060,7 +1078,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         } satisfies CultNetTransportFrame);
       }
       if (result.disconnected) {
-        this.#endedReason = result.disconnectReason ?? new Uint8Array();
+        this.#endGeneration(result.disconnectReason ?? new Uint8Array());
         this.emit("disconnect", { reason: result.disconnectReason ?? new Uint8Array() });
         this.emit("close");
         return;

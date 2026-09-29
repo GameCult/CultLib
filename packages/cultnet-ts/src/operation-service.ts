@@ -51,6 +51,10 @@ export interface CultNetOperationClientOptions {
 interface RemoteSession {
   session: CultNetRudpSession;
   remote: RemoteInfo;
+  /** Handlers running for this session; a session serving a request is not idle. */
+  handling: number;
+  /** When the last handler finished: the response still needs its acknowledgement. */
+  lastHandledAtMs: number;
 }
 
 export async function startCultNetOperationServer(
@@ -82,6 +86,7 @@ export async function startCultNetOperationServer(
     for (const [key, peer] of sessions) {
       // An abandoned client must not hold a slot forever, or the cap locks
       // every new client out.
+      if (peer.handling > 0 || now - peer.lastHandledAtMs < idleTimeoutMs) continue;
       if (peer.session.checkTimeout(now, idleTimeoutMs)) sessions.delete(key);
     }
     for (const peer of sessions.values()) {
@@ -162,7 +167,7 @@ async function handleServerDatagram(
   if (packet.packetType === "connect") {
     if (!peer) {
       if (sessions.size >= MAX_OPERATION_SESSIONS) return false;
-      peer = { session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }), remote };
+      peer = { session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }), remote, handling: 0, lastHandledAtMs: 0 };
       sessions.set(key, peer);
     }
     // A Connect from an admitted peer repeats: the session answers with the
@@ -189,7 +194,14 @@ async function handleServerDatagram(
     try {
       const message = parseCultNetMessage(decode(frame.payload));
       if (message.schemaVersion !== "cultnet.operation_request.v0") continue;
-      const response = await options.handler(message);
+      peer.handling += 1;
+      let response: CultNetOperationResponseMessage;
+      try {
+        response = await options.handler(message);
+      } finally {
+        peer.handling -= 1;
+        peer.lastHandledAtMs = Date.now();
+      }
       const payload = encode(encodeCultNetMessageForWire(response, "cultnet.schema.v0"));
       for (const responsePacket of peer.session.sendMany("schema", payload, {
         reliable: true,
