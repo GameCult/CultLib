@@ -295,6 +295,25 @@ Subtraction: the inspector's own codec pair collapses into the port; otherwise n
 estimated +350 to 450 lines of core and +400 of tests. Build: the Caching and MessagePack
 projects, Caching.Tests, the Networking test filter, the interop peer.
 
+**C1 status, 2026-09-29 (Self).** C1 landed on `hands/variants-c1` (`136adce`). Soul (Opus) found it
+not closeable, and a fix batch is in Hands:
+- **F1:** CultNet's live-change paths leak variants as plain records, which breaks Q6.
+- **F3:** an undecodable override soft-drifted where a plain record refuses to load.
+- **F4:** invalid overrides were accepted at write.
+- **F2:** an inherited unique index value shadows the base, and the winner depends on order.
+
+**Self's readings and defaults, not new operator rulings:**
+- **Q4 (c) read literally:** an override follows the plain-record outcome. A missing slot
+  soft-drifts; a value that no longer decodes refuses loudly, as a plain record does.
+- **Invalid overrides are refused at write.** Drift covers type changes after the fact, not
+  bad writes.
+- **F2 extends R6 to indexes.** A commit that leaves a variant sharing an indexed value
+  with another record is refused.
+- **One override per slot.**
+
+**Open for the operator:** plain records with duplicate unique-index values are silently
+overwritten today. That predates variants. Fixing it could refuse existing stores.
+
 ### C2. C# element identity and nested paths (Set, Insert, Remove)
 
 Adds:
