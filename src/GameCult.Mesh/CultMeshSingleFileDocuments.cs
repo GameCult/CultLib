@@ -268,14 +268,8 @@ namespace GameCult.Mesh
 
         private static string? ExistingHeader(string path)
         {
-            try
-            {
-                return CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MessagePackSerializationException or EndOfStreamException or InvalidOperationException or NotSupportedException)
-            {
-                return null;
-            }
+            // A file that is gone has no header; one that cannot be read refuses the write rather than being overwritten.
+            return File.Exists(path) ? CultDocumentMessagePackSerialization.ReadStoreHeader(File.ReadAllBytes(path)) : null;
         }
 
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)

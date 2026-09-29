@@ -93,6 +93,31 @@ public sealed class CultMeshSingleFileElementIdTests
         HeaderOf(path).Should().Be("cultcache.store.v3", "the payload's ids are not the writer's to see");
     }
 
+    // A raw write does not read the store's records, but it does not overwrite a file it cannot read either: the runtimes agree.
+    [Test]
+    public void RawPayloadWriteRefusesAFileItCannotReadAndLeavesItUntouched()
+    {
+        var schema = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
+        var marked = Path_("marked.cc");
+        CultMesh.WriteSingleFileDocument(marked, Key, Publication(Descriptor()));
+        var whole = File.ReadAllBytes(marked);
+
+        var truncated = Path_("truncated.cc");
+        File.WriteAllBytes(truncated, whole[..^1]);
+        var unknown = Path_("v9.cc");
+        File.WriteAllBytes(unknown, MessagePackSerializer.Serialize(new object[] { "cultcache.store.v9", Array.Empty<object>(), Array.Empty<object>() }));
+
+        foreach (var path in new[] { truncated, unknown })
+        {
+            var before = File.ReadAllBytes(path);
+            Assert.Throws<NotSupportedException>(() => CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, new byte[] { 0x90 }), path);
+            File.ReadAllBytes(path).Should().Equal(before, path + " was rewritten");
+        }
+
+        CultMesh.WriteSingleFileDocumentPayload(marked, Key, schema, null, new byte[] { 0x90 });
+        HeaderOf(marked).Should().Be("cultcache.store.v3", "a whole marked file is still written and stays marked");
+    }
+
     [Test]
     public void TypedWriteRefusesADuplicateIdAndAnElementObjectTwiceAndLeavesTheFileAlone()
     {
