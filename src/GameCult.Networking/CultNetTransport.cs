@@ -1745,7 +1745,6 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportConnection : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
-        private static readonly byte[] ReplacedPeerReason = Encoding.UTF8.GetBytes("replaced by a new Connect generation");
         // One acknowledgement carries the preceding 32-packet receive mask.
         // Pace at that transport window instead of sleeping after every fragment;
         // a one-millisecond sleep can consume a full scheduler quantum on Windows.
@@ -2488,6 +2487,7 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportServer : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
+        private static readonly byte[] ReplacedPeerReason = Encoding.UTF8.GetBytes("replaced by a new Connect generation");
         // Keep server response pacing aligned with the 32-packet ACK mask. Large
         // content responses otherwise pay one Windows scheduler quantum per 1 KiB.
         private const int WireBurstPackets = 32;
