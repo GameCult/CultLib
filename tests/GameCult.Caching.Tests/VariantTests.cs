@@ -304,6 +304,14 @@ namespace GameCult.Caching.Tests
                 batch.Remove(spare);
                 batch.Remove(BigKey);
             }), Is.True, "removed in the same batch");
+
+            SeedBase(cache);
+            var removedInTheBatch = Refused(() => cache.Commit(batch =>
+            {
+                batch.Remove(BaseKey);
+                batch.UpsertVariant(BigKey, BaseKey);
+            }));
+            Assert.That(removedInTheBatch.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value));
         }
 
         [Test]
@@ -371,7 +379,9 @@ namespace GameCult.Caching.Tests
             Assert.That(Refused(() => cache.FlattenAsync(BaseKey).GetAwaiter().GetResult()).Message, Does.Contain(BaseKey.Value));
             var spare = new CultRecordKey("spare");
             cache.Commit(batch => batch.Upsert(typeof(VariantGear), new VariantGear { Name = "spare" }, spare));
-            Assert.That(Refused(() => cache.UpsertVariantAsync(spare, BaseKey).GetAwaiter().GetResult()).Message, Does.Contain(spare.Value));
+            var named = new[] { cache.Override<VariantGear>(nameof(VariantGear.Name), "spare variant") };
+            Assert.That(Refused(() => cache.UpsertVariantAsync(spare, BaseKey, named).GetAwaiter().GetResult()).Message, Does.Contain(spare.Value));
+            Assert.That(cache.GetStored(spare)!.Variant, Is.Null, "the plain record is still plain");
         }
 
         [Test]
@@ -529,10 +539,16 @@ namespace GameCult.Caching.Tests
                 SeedBig(cache);
             }
 
-            var before = File.ReadAllBytes(path);
             using var readOnly = Open(path, readOnly: true);
             Assert.That(readOnly.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
             Assert.That(readOnly.Get<VariantGear>(BigKey)!.Code, Is.EqualTo("l1"));
+
+            // A base edit another writer commits reaches the read-only cache's variant when it pulls: a re-resolution is no write.
+            using var writer = Open(path);
+            EditBase(writer, gear => gear.Tags.Add("pierce"));
+            var before = File.ReadAllBytes(path);
+            readOnly.PullAllBackingStoresAsync();
+            Assert.That(readOnly.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
         }
 
@@ -554,6 +570,24 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void AFlattenFromAnotherWriterReachesACacheHoldingTheVariant()
+        {
+            var path = PathOf("gear.cc");
+            using var a = Open(path);
+            SeedBase(a);
+            SeedBig(a);
+            using var b = Open(path);
+            Assert.That(b.GetStored(BigKey)!.Variant, Is.Not.Null);
+
+            a.FlattenAsync(BigKey).GetAwaiter().GetResult();
+            a.FlushAsync().GetAwaiter().GetResult();
+            b.PullAllBackingStoresAsync();
+
+            Assert.That(b.GetStored(BigKey)!.Variant, Is.Null, "a load reports what is on disk; it is not a plain write refused at a variant key");
+            Assert.That(b.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
+        }
+
+        [Test]
         public void ARebaseResolvesFromTheNewBase()
         {
             using var cache = Open(PathOf("gear.cc"));
@@ -567,6 +601,67 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "arc" }));
             Assert.That(cache.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
             Assert.That(cache.GetStored(BigKey)!.Variant!.BaseKey, Is.EqualTo(spare.Value));
+        }
+
+        // ---- readers ----
+
+        private string WriteStore(params CultPersistedRecord[] records) => WriteStore(CultPersistedStoreSnapshot.FormatV2, records);
+
+        private string WriteStore(string formatVersion, params CultPersistedRecord[] records)
+        {
+            var path = PathOf($"hand-{Guid.NewGuid():N}.cc");
+            var gear = Registry.GetRequired<VariantGear>();
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+            {
+                FormatVersion = formatVersion,
+                SchemaCatalog = new[] { gear.ToCatalogEntry() },
+                Records = records
+            }));
+            return path;
+        }
+
+        private static CultPersistedRecord PlainGear(string key) => new()
+        {
+            Key = key,
+            SchemaId = Registry.GetRequired<VariantGear>().SchemaId,
+            StoredAt = "2026-01-01T00:00:00.0000000Z",
+            Payload = CultDocumentMessagePackSerialization.SerializeUntyped(Laser(), typeof(VariantGear), Registry)
+        };
+
+        private static CultPersistedRecord VariantGearRecord(string key, string baseKey, byte[]? payload = null, CultOverrideOp op = CultOverrideOp.Set) => new()
+        {
+            Key = key,
+            SchemaId = Registry.GetRequired<VariantGear>().SchemaId,
+            StoredAt = "2026-01-01T00:00:00.0000000Z",
+            Payload = payload ?? Array.Empty<byte>(),
+            Variant = new CultVariantDelta(baseKey, new[]
+            {
+                new CultVariantOverride(op, new[] { new CultPathStep(0) }, string.Empty, new byte[] { 0xa1, (byte)'x' })
+            })
+        };
+
+        [Test]
+        public void AVariantRecordUnderAV1HeaderIsRefusedNamingTheRecord()
+        {
+            var path = WriteStore(CultPersistedStoreSnapshot.FormatV1, PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base"));
+            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("cultcache.store.v2"));
+        }
+
+        [Test]
+        public void AVariantRecordWithAPayloadIsRefusedNamingTheRecord()
+        {
+            var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", payload: new byte[] { 0x90 }));
+            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("payload"));
+        }
+
+        [Test]
+        public void AnOverrideWithAnUnknownOpIsRefusedNamingTheRecord()
+        {
+            var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", op: (CultOverrideOp)7));
+            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("op 7"));
         }
 
         // ---- the other stores refuse loudly until their own cuts ----
