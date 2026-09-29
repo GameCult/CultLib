@@ -28,20 +28,19 @@ use crate::contracts::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetWireContract,
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
+use crate::media_fec::{MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES, MEDIA_FEC_SCHEME_RS_GF256_V1};
 use crate::media_stream_contracts::{
-    GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA, GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
-    GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA, GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
-    GameCultMediaAudioPacketRecord, GameCultMediaReceiverFeedbackRecord,
+    GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA, GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
+    GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA, GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+    GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA, GameCultMediaAudioPacketRecord,
+    GameCultMediaAudioParityShardRecord, GameCultMediaReceiverFeedbackRecord,
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
 };
 
-/// The CultNet channel video and receiver feedback ride.
+/// The CultNet channel every media record rides: video, audio, their parity,
+/// and receiver feedback. Whether it is reliable is the transport profile's
+/// choice per session; stale media is dropped, not retransmitted.
 pub const GAMECULT_MEDIA_CHANNEL: &str = "media";
-
-/// The CultNet channel audio rides. Audio has its own channel so one session
-/// can carry it reliably with a short expiry while video stays lossy under
-/// parity; the RUDP transport profile owns each channel's delivery.
-pub const GAMECULT_MEDIA_AUDIO_CHANNEL: &str = "audio";
 
 /// One media record on its way somewhere.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +48,7 @@ pub enum GameCultMediaWireRecord {
     Video(GameCultMediaVideoAccessUnitRecord),
     VideoParity(GameCultMediaVideoParityShardRecord),
     Audio(GameCultMediaAudioPacketRecord),
+    AudioParity(GameCultMediaAudioParityShardRecord),
     Feedback(GameCultMediaReceiverFeedbackRecord),
 }
 
@@ -84,6 +84,7 @@ impl GameCultMediaWireRecord {
             Self::Video(_) => GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
             Self::VideoParity(_) => GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
             Self::Audio(_) => GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA,
+            Self::AudioParity(_) => GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
             Self::Feedback(_) => GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
         }
     }
@@ -96,12 +97,20 @@ impl GameCultMediaWireRecord {
                 record.stream_id, record.session_id, record.frame_id, record.chunk_index
             ),
             Self::VideoParity(record) => format!(
-                "{}:{}:video-parity:{}:{}",
-                record.stream_id, record.session_id, record.frame_id, record.parity_index
+                "{}:{}:video-parity:{}:{}:{}",
+                record.stream_id,
+                record.session_id,
+                record.frame_id,
+                record.block_index,
+                record.parity_index
             ),
             Self::Audio(record) => format!(
                 "{}:{}:audio:{}",
                 record.stream_id, record.session_id, record.packet_id
+            ),
+            Self::AudioParity(record) => format!(
+                "{}:{}:audio-parity:{}:{}",
+                record.stream_id, record.session_id, record.base_packet_id, record.parity_index
             ),
             Self::Feedback(record) => format!(
                 "{}:{}:feedback:{}",
@@ -124,6 +133,7 @@ impl GameCultMediaWireRecord {
             Self::Video(record) => rmp_serde::to_vec(record),
             Self::VideoParity(record) => rmp_serde::to_vec(record),
             Self::Audio(record) => rmp_serde::to_vec(record),
+            Self::AudioParity(record) => rmp_serde::to_vec(record),
             Self::Feedback(record) => rmp_serde::to_vec(record),
         }
         .map_err(Into::into)
@@ -190,6 +200,12 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<GameCultMediaWireRecor
                 rmp_serde::from_slice(&document.payload)?;
             validate_audio_record(&record)?;
             GameCultMediaWireRecord::Audio(record)
+        }
+        GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA => {
+            let record: GameCultMediaAudioParityShardRecord =
+                rmp_serde::from_slice(&document.payload)?;
+            validate_audio_parity_record(&record)?;
+            GameCultMediaWireRecord::AudioParity(record)
         }
         GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA => {
             let record: GameCultMediaReceiverFeedbackRecord =
@@ -349,39 +365,105 @@ pub fn validate_video_parity_record(record: &GameCultMediaVideoParityShardRecord
             "video parity media record deadline_ticks must not precede pts_ticks"
         ));
     }
+    if record.fec_scheme != MEDIA_FEC_SCHEME_RS_GF256_V1 {
+        return Err(anyhow!(
+            "video parity media record fec_scheme {:?} is not supported",
+            record.fec_scheme
+        ));
+    }
     if record.chunk_count == 0 {
         return Err(anyhow!(
             "video parity media record chunk_count must be non-zero"
         ));
     }
+    if record.block_count == 0 || record.block_index >= record.block_count {
+        return Err(anyhow!(
+            "video parity media record block_index {} is outside block_count {}",
+            record.block_index,
+            record.block_count
+        ));
+    }
+    if record.block_data_count == 0
+        || u32::from(record.block_data_start) + u32::from(record.block_data_count)
+            > u32::from(record.chunk_count)
+    {
+        return Err(anyhow!(
+            "video parity media record block does not lie inside the frame's chunks"
+        ));
+    }
     if record.parity_count == 0 || record.parity_index >= record.parity_count {
         return Err(anyhow!(
-            "video parity media record has invalid parity stripe metadata"
+            "video parity media record parity_index {} is outside parity_count {}",
+            record.parity_index,
+            record.parity_count
         ));
     }
-    if record.parity_count > record.chunk_count {
+    if usize::from(record.block_data_count) + usize::from(record.parity_count) > 256 {
         return Err(anyhow!(
-            "video parity media record parity_count exceeds chunk_count"
+            "video parity media record block exceeds 256 shards"
         ));
     }
-    if record.chunk_payload_bytes == 0 || record.last_chunk_payload_bytes == 0 {
+    if record.shard_payload_bytes == 0
+        || record.shard_payload_bytes as usize > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES
+    {
         return Err(anyhow!(
-            "video parity media record chunk lengths must be non-zero"
+            "video parity media record shard_payload_bytes must be in 1..={MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}"
         ));
     }
-    if record.last_chunk_payload_bytes > record.chunk_payload_bytes {
+    if record.last_chunk_payload_bytes == 0
+        || record.last_chunk_payload_bytes > record.shard_payload_bytes
+    {
         return Err(anyhow!(
-            "video parity media record last chunk length exceeds regular chunk length"
+            "video parity media record last chunk length must be in 1..=shard_payload_bytes"
         ));
     }
-    if record.payload.is_empty() {
+    if record.payload.len() != record.shard_payload_bytes as usize {
         return Err(anyhow!(
-            "video parity media record payload must be non-empty"
+            "video parity media record payload does not match declared shard length"
         ));
     }
-    if record.payload.len() > record.chunk_payload_bytes as usize {
+    Ok(())
+}
+
+pub fn validate_audio_parity_record(record: &GameCultMediaAudioParityShardRecord) -> Result<()> {
+    if record.stream_id.is_empty() || record.session_id.is_empty() || record.codec.is_empty() {
         return Err(anyhow!(
-            "video parity media record payload exceeds declared chunk length"
+            "audio parity media record stream_id, session_id and codec must be non-empty"
+        ));
+    }
+    if record.timebase_num == 0 || record.timebase_den == 0 || record.packet_duration_ticks == 0 {
+        return Err(anyhow!(
+            "audio parity media record timing metadata must be non-zero"
+        ));
+    }
+    if record.deadline_ticks < record.base_pts_ticks {
+        return Err(anyhow!(
+            "audio parity media record deadline_ticks must not precede base_pts_ticks"
+        ));
+    }
+    if record.fec_scheme != MEDIA_FEC_SCHEME_RS_GF256_V1 {
+        return Err(anyhow!(
+            "audio parity media record fec_scheme {:?} is not supported",
+            record.fec_scheme
+        ));
+    }
+    if record.data_shard_count == 0
+        || record.parity_shard_count == 0
+        || record.parity_index >= record.parity_shard_count
+        || usize::from(record.data_shard_count) + usize::from(record.parity_shard_count) > 256
+    {
+        return Err(anyhow!("audio parity media record stripe metadata is invalid"));
+    }
+    if record.shard_payload_bytes == 0
+        || record.shard_payload_bytes as usize > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES
+    {
+        return Err(anyhow!(
+            "audio parity media record shard_payload_bytes must be in 1..={MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}"
+        ));
+    }
+    if record.payload.len() != record.shard_payload_bytes as usize {
+        return Err(anyhow!(
+            "audio parity media record payload does not match declared shard length"
         ));
     }
     Ok(())

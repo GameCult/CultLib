@@ -36,15 +36,15 @@
 //! Nothing here specifies a delivery guarantee. Whether a stream rides a
 //! reliable or lossy CultNet channel, and whether it carries parity, is a
 //! transport decision made per stream — not a property of the payload shape.
-//! Video parity shards exist for producers that choose forward error correction;
-//! audio currently has no parity record, and a producer emitting audio on a
-//! lossy channel needs one.
+//! Video and audio parity shards exist for producers that choose forward error
+//! correction; [`crate::media_fec`] owns the code that makes and consumes them.
 
 use cultcache_rs::DatabaseEntry;
 
 pub const GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA: &str = "gamecult.media_video_access_unit.v1";
-pub const GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "gamecult.media_video_parity_shard.v2";
+pub const GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA: &str = "gamecult.media_video_parity_shard.v3";
 pub const GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA: &str = "gamecult.media_audio_packet.v1";
+pub const GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA: &str = "gamecult.media_audio_parity_shard.v1";
 pub const GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA: &str = "gamecult.media_receiver_feedback.v1";
 pub const GAMECULT_MEDIA_STREAM_ADVERTISEMENT_SCHEMA: &str =
     "gamecult.media_stream_advertisement.v1";
@@ -464,15 +464,25 @@ pub struct GameCultMediaVideoAccessUnitRecord {
     pub payload: Vec<u8>,
 }
 
-/// Forward-error-correction parity for one video access unit. Carries the
-/// framing fields of the access unit it protects so a receiver can recover
-/// without having seen the original, plus the shard geometry needed to run
-/// recovery: `parity_index` within `parity_count`, and the chunk sizes the
-/// parity was computed over.
+/// Forward-error-correction parity for one block of a video access unit.
+///
+/// A frame's `chunk_count` chunks are split into `block_count` contiguous
+/// blocks, and each block carries `parity_count` parity shards computed over its
+/// `block_data_count` data chunks (`block_data_start..block_data_start +
+/// block_data_count`). Any `block_data_count` of a block's
+/// `block_data_count + parity_count` shards recover it. The math is
+/// [`crate::media_fec`]'s and is named by `fec_scheme`; a decoder that does not
+/// know the scheme must drop the shard rather than guess.
+///
+/// It carries the framing fields of the access unit it protects, so a receiver
+/// can rebuild a lost chunk without having seen any chunk of the frame.
+/// `shard_payload_bytes` is the padded shard length; `last_chunk_payload_bytes`
+/// is the true length of the block's final data chunk, the only one that may be
+/// shorter.
 #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
 #[cultcache(
     type = "gamecult.media_video_parity_shard",
-    schema = "gamecult.media_video_parity_shard.v2"
+    schema = "gamecult.media_video_parity_shard.v3"
 )]
 pub struct GameCultMediaVideoParityShardRecord {
     #[cultcache(key = 0)]
@@ -500,14 +510,26 @@ pub struct GameCultMediaVideoParityShardRecord {
     #[cultcache(key = 11)]
     pub chunk_count: u16,
     #[cultcache(key = 12)]
-    pub parity_index: u16,
+    pub fec_scheme: String,
     #[cultcache(key = 13)]
-    pub parity_count: u16,
+    pub block_index: u16,
     #[cultcache(key = 14)]
-    pub chunk_payload_bytes: u32,
+    pub block_count: u16,
     #[cultcache(key = 15)]
+    pub block_data_start: u16,
+    /// `k`: how many data chunks this block protects.
+    #[cultcache(key = 16)]
+    pub block_data_count: u16,
+    #[cultcache(key = 17)]
+    pub parity_index: u16,
+    /// `m`: how many parity shards this block carries.
+    #[cultcache(key = 18)]
+    pub parity_count: u16,
+    #[cultcache(key = 19)]
+    pub shard_payload_bytes: u32,
+    #[cultcache(key = 20)]
     pub last_chunk_payload_bytes: u32,
-    #[cultcache(key = 16, bytes)]
+    #[cultcache(key = 21, bytes)]
     pub payload: Vec<u8>,
 }
 
@@ -538,6 +560,60 @@ pub struct GameCultMediaAudioPacketRecord {
     #[cultcache(key = 8)]
     pub deadline_ticks: i64,
     #[cultcache(key = 9, bytes)]
+    pub payload: Vec<u8>,
+}
+
+/// Forward-error-correction parity for a block of consecutive audio packets.
+///
+/// The block is `data_shard_count` packets with contiguous ids starting at
+/// `base_packet_id`, all with one payload length (`shard_payload_bytes`) and
+/// contiguous presentation times spaced `packet_duration_ticks` apart. A packet
+/// recovered from parity takes its id and time from that arithmetic, and its
+/// `deadline_ticks` from the block's, which is the latest in the block: the
+/// per-packet deadline is not recoverable, so a recovered packet may be held
+/// past its own but never past the block's.
+///
+/// Codecs whose frames vary in length pad each one to a shared shard length
+/// before parity is computed; that framing belongs to the codec, not to this
+/// record.
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(
+    type = "gamecult.media_audio_parity_shard",
+    schema = "gamecult.media_audio_parity_shard.v1"
+)]
+pub struct GameCultMediaAudioParityShardRecord {
+    #[cultcache(key = 0)]
+    pub stream_id: String,
+    #[cultcache(key = 1)]
+    pub session_id: String,
+    #[cultcache(key = 2)]
+    pub codec: String,
+    #[cultcache(key = 3)]
+    pub fec_scheme: String,
+    #[cultcache(key = 4)]
+    pub base_packet_id: u64,
+    #[cultcache(key = 5)]
+    pub base_pts_ticks: i64,
+    #[cultcache(key = 6)]
+    pub packet_duration_ticks: u32,
+    #[cultcache(key = 7)]
+    pub timebase_num: u32,
+    #[cultcache(key = 8)]
+    pub timebase_den: u32,
+    /// The latest `deadline_ticks` among the block's data packets.
+    #[cultcache(key = 9)]
+    pub deadline_ticks: i64,
+    /// `k`.
+    #[cultcache(key = 10)]
+    pub data_shard_count: u16,
+    #[cultcache(key = 11)]
+    pub parity_index: u16,
+    /// `m`.
+    #[cultcache(key = 12)]
+    pub parity_shard_count: u16,
+    #[cultcache(key = 13)]
+    pub shard_payload_bytes: u32,
+    #[cultcache(key = 14, bytes)]
     pub payload: Vec<u8>,
 }
 

@@ -29,7 +29,7 @@ use crate::encode_cultnet_message_to_vec;
 
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
-const RUDP_FIXED_HEADER_BYTES: usize = 36;
+pub(crate) const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
@@ -2215,17 +2215,6 @@ pub fn create_rudp_transport_profile(
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
                     reliable_expire_after_ms: options.media_reliable_expire_after_ms,
                 },
-                // Audio beside lossy video on one session: reliable, but a packet
-                // older than the media expiry is not worth a retransmit.
-                CultNetTransportChannel {
-                    channel_id: "audio".to_string(),
-                    delivery: CultNetTransportDelivery::Reliable,
-                    ordering: CultNetTransportOrdering::Unordered,
-                    max_payload_bytes: options.max_payload_bytes,
-                    max_fragment_bytes: options.max_fragment_bytes,
-                    max_pending_reliable_packets: options.max_pending_reliable_packets,
-                    reliable_expire_after_ms: options.media_reliable_expire_after_ms,
-                },
             ],
         }],
     }
@@ -2391,7 +2380,7 @@ fn channel_send_options(
         // The one channel whose delivery a caller chooses. Media that has gone
         // stale is worth dropping, not retransmitting: a reliable media channel
         // under loss adds load exactly when the link has least to give.
-        "media" | "audio" => CultNetRudpSendOptions {
+        "media" => CultNetRudpSendOptions {
             reliable: matches!(delivery, CultNetTransportDelivery::Reliable),
             ordered: false,
             sequenced: false,
