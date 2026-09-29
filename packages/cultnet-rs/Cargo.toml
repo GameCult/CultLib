@@ -36,3 +36,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [dev-dependencies]
 pretty_assertions = "1.4"
 tempfile = "3"
+
+[[example]]
+name = "cultnet_impair"
+path = "examples/cultnet_impair/main.rs"
+test = true
