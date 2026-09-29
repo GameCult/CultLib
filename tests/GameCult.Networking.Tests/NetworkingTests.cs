@@ -1194,6 +1194,68 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSocketTransport_DropsStraysAndKeepsServingItsPeer()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            using var strayHost = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            var clientEndPoint = clientSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203050;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverEndPoint,
+                ConnectionId = connectionId
+            });
+            var foreign = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 0x0BADF10E });
+            var strays = new[]
+            {
+                Encoding.UTF8.GetBytes("not a rudp packet"),
+                new byte[] { 1 },
+                CultNetRudpPacketCodec.Encode(foreign.CreateConnect(0, Encoding.UTF8.GetBytes("foreign")))
+            };
+
+            // A stray that arrives before the peer must not become the peer.
+            foreach (var stray in strays)
+                strayHost.SendTo(stray, serverEndPoint);
+            for (var index = 0; index < strays.Length; index++)
+                Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(strays.Length));
+
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+
+            // A moved flow answers from the peer's own address with someone else's session.
+            foreach (var stray in strays)
+            {
+                serverSocket.SendTo(stray, clientEndPoint);
+                clientSocket.SendTo(stray, serverEndPoint);
+            }
+            for (var index = 0; index < strays.Length; index++)
+            {
+                Assert.That(client.ReceiveOnce(), Is.Null);
+                Assert.That(server.ReceiveOnce(), Is.Null);
+            }
+            Assert.That(client.Stats.PacketsDropped, Is.EqualTo(strays.Length));
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(2 * strays.Length));
+
+            client.Send("schema", Encoding.UTF8.GetBytes("still here"));
+            Assert.That(Encoding.UTF8.GetString(ReceiveRudpFrame(server).Payload), Is.EqualTo("still here"));
+            server.Send("schema", Encoding.UTF8.GetBytes("server still here"));
+            Assert.That(Encoding.UTF8.GetString(ReceiveRudpFrame(client).Payload), Is.EqualTo("server still here"));
+        }
+
+        [Test]
         public void RudpSocketTransport_CarriesCultNetSchemaMessages()
         {
             using var serverSocket = BindUdpSocket();

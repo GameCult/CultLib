@@ -33,6 +33,12 @@ namespace GameCult.Networking
         /// Gets the number of bytes received, including transport framing.
         /// </summary>
         public long BytesReceived { get; internal set; }
+        /// <summary>
+        /// Gets the number of datagrams read and discarded because they belong to no session on
+        /// this transport: malformed frames, another session's connection id, a sender that is not
+        /// the peer, or a packet the session refuses.
+        /// </summary>
+        public long PacketsDropped { get; internal set; }
 
         internal CultNetTransportStats Snapshot()
         {
@@ -41,7 +47,8 @@ namespace GameCult.Networking
                 FramesSent = FramesSent,
                 FramesReceived = FramesReceived,
                 BytesSent = BytesSent,
-                BytesReceived = BytesReceived
+                BytesReceived = BytesReceived,
+                PacketsDropped = PacketsDropped
             };
         }
     }
@@ -2081,23 +2088,55 @@ namespace GameCult.Networking
             }
 
             _stats.BytesReceived += received;
+
+            // What a datagram carries is the sender's business, not a fault of this process: a
+            // malformed frame, another session's connection id, a sender that is not the peer and
+            // a packet the session refuses are dropped and counted. Only the socket ends a loop.
+            // The id is checked before the peer endpoint is claimed, so a stray cannot become it.
+            var wire = new byte[received];
+            Array.Copy(buffer, wire, received);
+            CultNetRudpPacket packet;
+            try
+            {
+                packet = CultNetRudpPacketCodec.Decode(wire);
+            }
+            catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
+            {
+                _stats.PacketsDropped++;
+                return true;
+            }
+            if (packet.ConnectionId != _session.ConnectionId)
+            {
+                _stats.PacketsDropped++;
+                return true;
+            }
             if (_remoteEndPoint == null)
             {
                 _remoteEndPoint = remote;
             }
             else if (!_remoteEndPoint.Equals(remote))
             {
+                _stats.PacketsDropped++;
                 return true;
             }
 
-            var wire = new byte[received];
-            Array.Copy(buffer, wire, received);
-            var packet = CultNetRudpPacketCodec.Decode(wire);
             TracePacket("rx", packet, received, remote);
             if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
             {
                 lock (_sessionGate)
-                    SendPacket(_session.AcceptConnect(packet, NowMs()));
+                {
+                    CultNetRudpPacket accept;
+                    try
+                    {
+                        accept = _session.AcceptConnect(packet, NowMs());
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        _stats.PacketsDropped++;
+                        return true;
+                    }
+                    SendPacket(accept);
+                }
                 return true;
             }
 
@@ -2105,7 +2144,15 @@ namespace GameCult.Networking
             CultNetRudpPacket? acknowledgement = null;
             lock (_sessionGate)
             {
-                result = _session.Receive(packet, NowMs());
+                try
+                {
+                    result = _session.Receive(packet, NowMs());
+                }
+                catch (InvalidOperationException)
+                {
+                    _stats.PacketsDropped++;
+                    return true;
+                }
                 if (result.Reply != null)
                     SendPacket(result.Reply);
                 SendPackets(result.ReadyToSend);
@@ -2478,13 +2525,15 @@ namespace GameCult.Networking
             {
                 packet = CultNetRudpPacketCodec.Decode(wire);
             }
-            catch (InvalidOperationException)
+            catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
             {
+                _stats.PacketsDropped++;
                 return true;
             }
 
             if (packet.ConnectionId != _connectionId)
             {
+                _stats.PacketsDropped++;
                 return true;
             }
 
@@ -2508,6 +2557,7 @@ namespace GameCult.Networking
 
             if (!_peers.TryGetValue(peerKey, out var existingPeer))
             {
+                _stats.PacketsDropped++;
                 return true;
             }
 
@@ -2515,7 +2565,15 @@ namespace GameCult.Networking
             CultNetRudpPacket? acknowledgement = null;
             lock (existingPeer.SessionGate)
             {
-                result = existingPeer.Session.Receive(packet, NowMs());
+                try
+                {
+                    result = existingPeer.Session.Receive(packet, NowMs());
+                }
+                catch (InvalidOperationException)
+                {
+                    _stats.PacketsDropped++;
+                    return true;
+                }
                 if (result.Reply != null)
                     SendPacket(existingPeer.RemoteEndPoint, result.Reply);
                 SendPackets(existingPeer, result.ReadyToSend);
