@@ -30,6 +30,7 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_grad", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_fbm_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_ridged_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float)));
     }
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
@@ -130,7 +131,63 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(33, compared.Count);
+        Assert.Equal(34, compared.Count);
+    }
+
+    /// <summary>
+    /// The generic comparison above passes about a hundred inputs through <c>cultmath_phacelle</c>, and
+    /// its prune only changes an output for the rare cell whose weight is nonzero but whose lower
+    /// bound sits just under the 2.25 cut (Soul's F6 lesson for cellular): a mirror whose cut is 2.0
+    /// survives a hundred inputs. A dense sweep of realistic arguments closes that gap.
+    /// </summary>
+    [Fact]
+    public void PhacelleMirrorMatchesCSharpBitForBitAcrossADenseSweep()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float))!;
+
+        var random = new System.Random(0x5EED2);
+        float Next(float extent) => (random.NextSingle() * 2.0f - 1.0f) * extent;
+        for (var i = 0; i < 20000; i++)
+        {
+            var p = new float3(Next(50.0f), Next(50.0f), Next(50.0f));
+            var side = new float3(Next(9.0f), Next(9.0f), Next(9.0f));
+            var offset = random.NextSingle();
+            var normalization = random.NextSingle();
+            var expected = Values(phacelle(p, side, offset, normalization));
+            var actual = Values(mirror.Invoke(shader, new object[] { p, side, offset, normalization })!);
+            Assert.True(BitwiseEqual(expected, actual), $"mirror differs from C# at p = {p}, side = {side}");
+        }
+    }
+
+    /// <summary>
+    /// The dense sweep almost never meets a cell whose box bound is just under the 2.25 cut and whose
+    /// weight is still nonzero: a mirror cut of 2.245, 2.24 or 2.2 survives it. These points sit next
+    /// to such cells (<see cref="PhacelleTests.PruneCutPoints"/>), so the mirror must match C# bit for
+    /// bit, and must match the unpruned C# sum (the shader has no prune switch, so that is the
+    /// independent statement that the cut is exact).
+    /// </summary>
+    [Fact]
+    public void PhacelleMirrorMatchesCSharpBitForBitNextToCellsJustInsideTheCut()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float))!;
+
+        foreach (var p in PhacelleTests.PruneCutPoints)
+        {
+            Assert.True(PhacelleTests.HasCellJustInsideTheCut(p), $"no cell just inside the cut at {p}");
+            var actual = Values(mirror.Invoke(shader, new object[] { p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization })!);
+            var pruned = Values(phacelle(p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization));
+            var unpruned = Values(phacelle(p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization, false));
+            Assert.True(BitwiseEqual(pruned, actual), $"mirror differs from C# at p = {p}");
+            Assert.True(BitwiseEqual(unpruned, actual), $"mirror differs from the unpruned C# sum at p = {p}");
+        }
     }
 
     /// <summary>
@@ -253,6 +310,18 @@ public sealed class HlslSourceCompatibilityTests
                 ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
                 : p.First.Value.Equals(p.Second.Value)));
 
+    /// <summary>
+    /// The text of <c>CultMath.hlsl</c> with each <c>#include "name"</c> replaced in place by the
+    /// included file from the same directory, as the shader compiler would resolve it. Only the
+    /// package's own includes exist, so a missing file is an error rather than a skip.
+    /// </summary>
+    internal static string ReadShaderSource(string cultMathRoot)
+    {
+        var shaders = Path.Combine(cultMathRoot, "shaders");
+        return Regex.Replace(File.ReadAllText(Path.Combine(shaders, "CultMath.hlsl")), @"(?m)^#include ""([^""]+)""[ \t]*\r?$",
+            match => File.ReadAllText(Path.Combine(shaders, match.Groups[1].Value)));
+    }
+
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
     {
@@ -281,7 +350,7 @@ public sealed class HlslSourceCompatibilityTests
 
     private static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
     {
-        var hlsl = File.ReadAllText(Path.Combine(FindCultMathRoot(), "shaders", "CultMath.hlsl"));
+        var hlsl = ReadShaderSource(FindCultMathRoot());
         var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl));
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
             .Split(Path.PathSeparator)

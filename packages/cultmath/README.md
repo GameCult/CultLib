@@ -33,6 +33,8 @@ shader semantics.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.
+  It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) from the same
+  directory, so ship both files.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
