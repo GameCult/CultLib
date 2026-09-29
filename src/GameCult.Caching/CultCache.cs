@@ -64,6 +64,7 @@ namespace GameCult.Caching
     {
         public const string FormatV1 = "cultcache.store.v1";
         public const string FormatV2 = "cultcache.store.v2";
+        public const string FormatV3 = "cultcache.store.v3";
 
         public string FormatVersion { get; set; } = FormatV1;
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
@@ -209,6 +210,9 @@ namespace GameCult.Caching
         internal IReadOnlyDictionary<string, Func<object, string>> IndexAccessors { get; }
         internal IReadOnlyList<CultDocumentMemberDescriptor> Members { get; }
         internal IReadOnlyList<CultDocumentRegistry.PersistedMember> RichMembers { get; }
+
+        // True when the type reaches an object list: what it writes can hold element ids, so a store holding it carries the id marker.
+        public bool CarriesElementIds { get; internal set; }
 
         // The public read surface (CultNet selection cut 1, section 6): declared addressing, and the
         // three ways to read a value through it. GameCult.Networking has no InternalsVisibleTo here on
@@ -376,9 +380,11 @@ namespace GameCult.Caching
         // A plain record staged by Flatten: the one way a plain record may replace a variant at its key.
         internal bool Flattens { get; set; }
 
-        internal bool IsResolved => _document != null;
+        // True while this record holds element ids minted when it loaded, that no write has persisted (see MintElementIds).
+        internal bool IdsInMemoryOnly { get; set; }
 
-        internal CultStoredDocument Resolved(object document) => new(Key, StoredAt, Descriptor, Variant!, document);
+        internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly) =>
+            new(Key, StoredAt, Descriptor, delta, document) { IdsInMemoryOnly = idsInMemoryOnly };
     }
 
     public sealed class CultDocumentRegistry
@@ -632,8 +638,9 @@ namespace GameCult.Caching
                             ?? throw new InvalidOperationException(
                                 $"Type {type.FullName} is not marked with {nameof(CultDocumentAttribute)}.");
             var members = DiscoverMembers(type);
-            if (CultElementIds.Problems(type) is { Count: > 0 } idProblems)
-                throw new InvalidOperationException(idProblems[0]);
+            var ids = CultElementIds.Inspect(type);
+            if (ids.Problems.Count > 0)
+                throw new InvalidOperationException(ids.Problems[0]);
             var nameMember = members.FirstOrDefault(member => member.IsName);
             var indexAccessors = members
                 .Where(member => member.IndexAlias != null)
@@ -671,7 +678,10 @@ namespace GameCult.Caching
                 nameMember?.GetterNullable,
                 indexAccessors,
                 descriptorMembers,
-                members);
+                members)
+            {
+                CarriesElementIds = ids.CarriesIds
+            };
         }
 
         private static string BuildSemanticFingerprint(
@@ -1800,8 +1810,6 @@ namespace GameCult.Caching
         private readonly CultDocumentRegistry _registry;
         private readonly List<(CacheBackingStore Store, Type[] Homes)> _stores = new();
         private readonly Dictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
-        // Keys whose element ids were minted at load and not yet written (see MintElementIds).
-        private readonly HashSet<string> _mintedOnLoad = new(StringComparer.Ordinal);
         private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
         // Every key holding a value (unordered): the index is truthful about duplicates, so removing one holder never hides another.
         private readonly Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> _indexes = new();
@@ -1830,6 +1838,19 @@ namespace GameCult.Caching
         // Read under the gate, by a store judging a merge.
         internal bool HoldsVariants => _variantKeys.Count > 0;
 
+        // A store wrote its whole view: a plain record it wrote carries the ids it held, so it is no longer in-memory only. A
+        // variant is not cleared here: the store wrote the delta it was handed, and only a write of the variant changes that.
+        internal void IdsPersisted(IEnumerable<string> keys) => Held(() =>
+        {
+            foreach (var key in keys)
+            {
+                if (_entries.TryGetValue(key, out var entry) && entry.Variant == null)
+                    entry.IdsInMemoryOnly = false;
+            }
+
+            return true;
+        });
+
         public CultCodec? Codec => _codec;
 
         // The whole override of one member, encoded with this cache's codec, ready for UpsertVariant.
@@ -1838,8 +1859,6 @@ namespace GameCult.Caching
             if (_codec == null) throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
             var found = _registry.GetRequired(documentType).RichMembers.FirstOrDefault(entry => entry.Member.Name == member)
                         ?? throw new ArgumentException($"{documentType.Name} has no persisted member '{member}'.", nameof(member));
-            if (value != null)
-                CultElementIds.Assign(value, string.Empty, deterministic: false, refuseDuplicates: true);
             return CultVariantOverride.Set(
                 found.Slot,
                 _codec.Serialize(value!, found.MemberType, documentType));
@@ -1852,18 +1871,22 @@ namespace GameCult.Caching
         // it rewrote; a second call finds none.
         public int MintElementIds()
         {
-            var groups = Held(() => _mintedOnLoad
-                .Select(key => _entries.TryGetValue(key, out var entry) ? entry : null)
-                .Where(entry => entry is { Variant: null })
-                .GroupBy(entry => Home(entry!.Descriptor.DocumentType))
-                .Select(group => group.Select(entry => entry!).ToArray())
+            var groups = Held(() => _entries.Values
+                .Where(entry => entry.IdsInMemoryOnly)
+                .GroupBy(entry => Home(entry.Descriptor.DocumentType))
+                .Select(group => group.ToArray())
                 .ToArray());
             foreach (var group in groups)
             {
                 Commit(batch =>
                 {
                     foreach (var entry in group)
-                        batch.Upsert(entry.Descriptor.DocumentType, entry.Document, entry.Key);
+                    {
+                        if (entry.Variant is { } delta)
+                            batch.UpsertVariant(entry.Key, new CultRecordKey(delta.BaseKey), delta.Overrides);
+                        else
+                            batch.Upsert(entry.Descriptor.DocumentType, entry.Document, entry.Key);
+                    }
                 });
             }
 
@@ -2348,30 +2371,47 @@ namespace GameCult.Caching
             if (_held == null)
                 throw new InvalidOperationException("An admission reached the cache under a plain lock on its gate; every admission runs in a hold.");
             var home = Validate(admitted, evicted, source);
-            // Ids are filled before anything lands: a write mints random ids and refuses a duplicate in one list; a load of a
-            // record written before ids existed mints the ids its reload will mint again, and lands in memory only.
-            var mintedOnLoad = new List<string>();
-            foreach (var stored in admitted)
+            // Ids are decided before anything lands, and the caller's documents change only inside this admission: a plan that
+            // refuses (a duplicate, a malformed id) has changed nothing, and a write that does not commit gives its ids back.
+            // A write mints random ids; a load of a record written before ids existed mints the ids its reload will mint
+            // again, and lands in memory only (variants mint inside Resolve, into their override values).
+            var idPlans = admitted
+                .Where(stored => stored.Variant == null)
+                .Select(stored => (Stored: stored, Plan: CultElementIds.Plan(stored.Document, stored.Key.Value, deterministic: source != null)))
+                .ToArray();
+            VariantPlan plan;
+            CultCommitOutcome outcome;
+            try
             {
-                if (stored.Variant == null && stored.IsResolved &&
-                    CultElementIds.Assign(stored.Document, stored.Key.Value, deterministic: source != null, refuseDuplicates: source == null) > 0 &&
-                    source != null)
-                    mintedOnLoad.Add(stored.Key.Value);
+                foreach (var (_, idPlan) in idPlans)
+                    idPlan.Apply();
+                // The one resolution: a variant admitted, a base admitted or evicted, all resolved here against the post-batch
+                // set, before land and before memory. land receives the admitted records with variants resolved.
+                plan = Resolve(admitted, evicted, source);
+                outcome = land(home, plan.Admitted);
+            }
+            catch
+            {
+                foreach (var (_, idPlan) in idPlans)
+                    idPlan.Undo();
+                throw;
             }
 
-            // The one resolution: a variant admitted, a base admitted or evicted, all resolved here against the post-batch
-            // set, before land and before memory. land receives the admitted records with variants resolved.
-            var plan = Resolve(admitted, evicted, source);
-            var outcome = land(home, plan.Admitted);
             if (outcome != CultCommitOutcome.Committed)
+            {
+                foreach (var (_, idPlan) in idPlans)
+                    idPlan.Undo();
                 return outcome;
-            // A record whose ids exist only in memory stays listed until a write persists them or the record goes.
-            foreach (var stored in admitted)
-                _mintedOnLoad.Remove(stored.Key.Value);
-            foreach (var stored in evicted)
-                _mintedOnLoad.Remove(stored.Key.Value);
-            foreach (var key in mintedOnLoad)
-                _mintedOnLoad.Add(key);
+            }
+
+            // A record whose ids exist only in memory stays marked until a write persists them (a flush of the whole store
+            // does, and so does any write of the record: a new entry is unmarked).
+            if (source != null)
+            {
+                foreach (var (stored, idPlan) in idPlans)
+                    stored.IdsInMemoryOnly = idPlan.Count > 0;
+            }
+
             foreach (var change in Apply(plan, evicted, source))
                 _held.Add((change, source != null));
             return CultCommitOutcome.Committed;
@@ -2623,6 +2663,8 @@ namespace GameCult.Caching
 
                 var type = descriptor.DocumentType;
                 var kept = new List<KeyValuePair<int, byte[]>>();
+                var overrides = new List<CultVariantOverride>(delta.Overrides.Count);
+                var minted = false;
                 var seen = new HashSet<int>();
                 foreach (var entry in delta.Overrides)
                 {
@@ -2638,9 +2680,10 @@ namespace GameCult.Caching
                     if (member == null)
                         throw new InvalidOperationException($"Variant {key} overrides slot {slot}, which {type.Name} does not have.");
 
+                    object? value;
                     try
                     {
-                        _codec.Deserialize(member.MemberType, type, entry.Value);
+                        value = _codec.Deserialize(member.MemberType, type, entry.Value);
                     }
                     catch (Exception exception)
                     {
@@ -2650,7 +2693,19 @@ namespace GameCult.Caching
                             exception.GetBaseException().Message, exception);
                     }
 
-                    kept.Add(new KeyValuePair<int, byte[]>(slot, entry.Value));
+                    // The override's value is minted like a plain record's members: ids the store never held are filled here, in the
+                    // decoded copy, and the delta this hold lands carries them.
+                    var bytes = entry.Value;
+                    var idPlan = CultElementIds.Plan(value, key + "." + slot.ToString(CultureInfo.InvariantCulture), deterministic: source != null);
+                    if (idPlan.Count > 0)
+                    {
+                        idPlan.Apply();
+                        bytes = _codec.Serialize(value!, member.MemberType, type);
+                        minted = true;
+                    }
+
+                    overrides.Add(new CultVariantOverride(entry.Op, entry.Path, entry.Id, bytes));
+                    kept.Add(new KeyValuePair<int, byte[]>(slot, bytes));
                 }
 
                 var payload = _codec.Serialize(baseStored.Document, type, type);
@@ -2674,7 +2729,7 @@ namespace GameCult.Caching
 
                 stack.RemoveAt(stack.Count - 1);
                 return done[key] = isVariant
-                    ? variant.Resolved(document)
+                    ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null))
                     : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document) { Flattens = true };
             }
         }
@@ -3168,7 +3223,9 @@ namespace GameCult.Caching
                 {
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
-                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()));
+                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()),
+                        Entries.Values.Any(entry => entry.Descriptor.CarriesElementIds));
+                    Cache?.IdsPersisted(Entries.Keys);
                 }
 
                 MarkFlushSucceeded();
@@ -3210,7 +3267,14 @@ namespace GameCult.Caching
             foreach (var entry in request.Upserts)
                 records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
 
-            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())));
+            // A file already marked stays marked: it may hold records this cache cannot read, and a rewrite must not shed the marker.
+            var carriesIds = request.Upserts.Any(entry => entry.Descriptor.CarriesElementIds) ||
+                             (ontoDisk
+                                 ? string.Equals(disk.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal)
+                                 : Entries.Values.Any(entry => entry.Descriptor.CarriesElementIds));
+            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())), carriesIds);
+            if (!ontoDisk)
+                Cache?.IdsPersisted(records.Keys);
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
@@ -3263,16 +3327,20 @@ namespace GameCult.Caching
             }
         }
 
-        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog)
+        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog, bool carriesElementIds)
         {
             var ordered = records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
             var used = new HashSet<string>(ordered.Select(record => record.SchemaId), StringComparer.Ordinal);
             var snapshot = new CultPersistedStoreSnapshot
             {
-                // v2 exactly when the store holds a variant: a store without one stays byte-identical v1.
-                FormatVersion = ordered.Any(record => record.Variant != null)
-                    ? CultPersistedStoreSnapshot.FormatV2
-                    : CultPersistedStoreSnapshot.FormatV1,
+                // v3 when the store can hold element ids: a reader older than ids refuses the header, because it would skip the id
+                // slots and rewrite the elements without them. Otherwise v2 exactly when the store holds a variant, and a store
+                // with neither stays byte-identical v1.
+                FormatVersion = carriesElementIds
+                    ? CultPersistedStoreSnapshot.FormatV3
+                    : ordered.Any(record => record.Variant != null)
+                        ? CultPersistedStoreSnapshot.FormatV2
+                        : CultPersistedStoreSnapshot.FormatV1,
                 SchemaCatalog = catalog
                     .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .Select(group => group.First())

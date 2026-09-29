@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -11,7 +12,7 @@ using MessagePack;
 namespace GameCult.Caching
 {
     // The identity of one element of an object list. A string member, keyed like any other, on every object type that
-    // sits in a list of a registered document type (union bases included: subclasses inherit the member).
+    // sits in a list of a registered document type (union bases included: every concrete subtype carries the member).
     // [CultElementId(nameof(Offset))] declares the id derived, never random: an unset id becomes the invariant-culture text of
     // that member (a keyed string or number on the same type, unique within its list). Content-addressed elements use it so the
     // same content always encodes to the same bytes.
@@ -26,19 +27,64 @@ namespace GameCult.Caching
         public string? DerivedFrom { get; }
     }
 
+    // A record the id rule refuses: a duplicate id in one list, a random id that is not 12 lowercase hex characters, or a derived
+    // id whose source member is null or empty. It names the record, the list (record key, member slot, dictionary key and
+    // element index) and, where there is one, the element id and the source member.
+    public sealed class CultElementIdException : InvalidOperationException
+    {
+        public CultElementIdException(string message, string recordKey, string listPath, string? elementId = null, string? member = null)
+            : base(message)
+        {
+            RecordKey = recordKey;
+            ListPath = listPath;
+            ElementId = elementId;
+            Member = member;
+        }
+
+        public string RecordKey { get; }
+        public string ListPath { get; }
+        public string? ElementId { get; }
+        public string? Member { get; }
+    }
+
     // The one owner of element identity: which types need an id, and how unset ids are filled.
-    // An id is 12 lowercase hex characters (48 bits); it need only be unique within one list. A write mints a random id; a
-    // load of a store written before ids existed mints from SHA-256(record key, element path), so every reader of the same
-    // store mints the same id and a reload is identical to what was read.
+    // A random id is 12 lowercase hex characters (48 bits); a derived id is the invariant text of its source and only has to be
+    // non-empty. Either need only be unique within one list. A write mints a random id; a load of a store written before ids
+    // existed mints from SHA-256(record key, element path), so every reader of the same store mints the same id and a reload is
+    // identical to what was read. A write and a load refuse the same things.
     internal static class CultElementIds
     {
         private const int IdBytes = 6;
 
-        private sealed class Shape
+        // The ids a pass would fill, decided before anything is written: nothing changes until Apply, and Undo restores what
+        // Apply replaced.
+        internal sealed class IdPlan
+        {
+            private readonly List<(object Item, Shape Shape, string? Before, string Id)> _fills = new();
+
+            public int Count => _fills.Count;
+
+            internal void Add(object item, Shape shape, string? before, string id) => _fills.Add((item, shape, before, id));
+
+            public void Apply()
+            {
+                foreach (var (item, shape, _, id) in _fills)
+                    shape.SetId!(item, id);
+            }
+
+            public void Undo()
+            {
+                foreach (var (item, shape, before, _) in _fills)
+                    shape.SetId!(item, before!);
+            }
+        }
+
+        internal sealed class Shape
         {
             public Func<object, string?>? GetId;
             public Action<object, string>? SetId;
-            public Func<object, string>? Derive;
+            public Func<object, string?>? Derive;
+            public string? DerivedFrom;
             public (int Slot, Func<object, object?> Get)[] Walk = Array.Empty<(int, Func<object, object?>)>();
         }
 
@@ -46,32 +92,41 @@ namespace GameCult.Caching
 
         // ---- registration: which element types must carry an id ----
 
-        // Every reason this document type cannot be registered under the id rule, one per offending element type.
-        internal static List<string> Problems(Type documentType)
+        internal sealed class Survey
         {
-            var problems = new List<string>();
-            VisitObject(documentType, documentType, new HashSet<Type>(), problems);
-            return problems;
+            public List<string> Problems { get; } = new();
+
+            // True when the type reaches an object list: what it writes can hold element ids.
+            public bool CarriesIds { get; set; }
         }
 
-        private static void VisitObject(Type documentType, Type type, HashSet<Type> seen, List<string> problems)
+        // Every reason this document type cannot be registered under the id rule, one per offending concrete element type,
+        // and whether it reaches any element list at all.
+        internal static Survey Inspect(Type documentType)
+        {
+            var survey = new Survey();
+            VisitObject(documentType, documentType, new HashSet<Type>(), survey);
+            return survey;
+        }
+
+        private static void VisitObject(Type documentType, Type type, HashSet<Type> seen, Survey survey)
         {
             if (!seen.Add(type))
                 return;
             foreach (var (member, memberType) in KeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, seen, problems);
+                VisitMemberType(documentType, type, member, memberType, seen, survey);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
-                VisitObject(documentType, union.SubType, seen, problems);
+                VisitObject(documentType, union.SubType, seen, survey);
         }
 
-        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, HashSet<Type> seen, List<string> problems)
+        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, HashSet<Type> seen, Survey survey)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
             if (IsLeaf(memberType))
                 return;
             if (DictionaryValueType(memberType) is { } valueType)
             {
-                VisitMemberType(documentType, owner, member, valueType, seen, problems);
+                VisitMemberType(documentType, owner, member, valueType, seen, survey);
                 return;
             }
 
@@ -79,18 +134,44 @@ namespace GameCult.Caching
             {
                 if (IsObjectType(element))
                 {
-                    var problem = IdProblem(element);
-                    if (problem != null)
-                        problems.Add($"Cult document {documentType.Name}: list element type {element.Name} (in {owner.Name}.{member.Name}) {problem}");
-                    VisitObject(documentType, element, seen, problems);
+                    survey.CarriesIds = true;
+                    foreach (var concrete in ConcreteTypes(element))
+                    {
+                        var problem = IdProblem(concrete);
+                        if (problem != null)
+                            survey.Problems.Add($"Cult document {documentType.Name}: list element type {concrete.Name} (in {owner.Name}.{member.Name}) {problem}");
+                    }
+
+                    VisitObject(documentType, element, seen, survey);
                 }
                 else
-                    VisitMemberType(documentType, owner, member, element, seen, problems);
+                    VisitMemberType(documentType, owner, member, element, seen, survey);
                 return;
             }
 
             if (IsObjectType(memberType))
-                VisitObject(documentType, memberType, seen, problems);
+                VisitObject(documentType, memberType, seen, survey);
+        }
+
+        // The types an element can actually be: the element type itself when it can be instantiated, and every union subtype
+        // under it. Shapes are built from these, so registration judges exactly what minting will meet.
+        private static IEnumerable<Type> ConcreteTypes(Type element)
+        {
+            var seen = new HashSet<Type>();
+            return Expand(element).ToList();
+
+            IEnumerable<Type> Expand(Type type)
+            {
+                if (!seen.Add(type))
+                    yield break;
+                if (!type.IsAbstract && !type.IsInterface)
+                    yield return type;
+                foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
+                {
+                    foreach (var subtype in Expand(union.SubType))
+                        yield return subtype;
+                }
+            }
         }
 
         private static string? IdProblem(Type element)
@@ -103,8 +184,11 @@ namespace GameCult.Caching
             var id = ids[0];
             if (TypeOf(id) != typeof(string))
                 return $"declares [CultElementId] on {id.Name}, which is not a string.";
-            if (KeyOf(id) == null)
+            if (KeyOf(id) is not { } idKey)
                 return $"declares [CultElementId] on {id.Name}, which has no integer [Key], so it is never persisted.";
+            var sharing = KeyedMembers(element).FirstOrDefault(entry => entry.Member != id && KeyOf(entry.Member) == idKey);
+            if (sharing.Member != null)
+                return $"declares [CultElementId] on {id.Name} with [Key({idKey})], which {sharing.Member.Name} also uses; an id needs a key of its own.";
             if (id is PropertyInfo { SetMethod: null } or FieldInfo { IsInitOnly: true })
                 return $"declares [CultElementId] on {id.Name}, which cannot be assigned; the cache mints into it.";
             var source = id.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom;
@@ -123,13 +207,14 @@ namespace GameCult.Caching
 
         // ---- write and load: mint and check ----
 
-        // Fills every unset element id under root and returns how many were unset. Writes refuse a duplicate id within one
-        // list. dryRun counts and changes nothing. rootPath (the record key) seeds deterministic minting.
-        internal static int Assign(object root, string rootPath, bool deterministic, bool refuseDuplicates, bool dryRun = false)
+        // Decides every unset element id under root, and refuses what the rule refuses, without changing anything: a random id
+        // that is not 12 lowercase hex characters, a duplicate id in one list, a derived id whose source is null or empty.
+        // rootPath (the record key) seeds deterministic minting and names the record in a refusal.
+        internal static IdPlan Plan(object? root, string rootPath, bool deterministic)
         {
-            var count = 0;
+            var plan = new IdPlan();
             Visit(root, rootPath);
-            return count;
+            return plan;
 
             void Visit(object? value, string path)
             {
@@ -141,14 +226,14 @@ namespace GameCult.Caching
                 if (value is IDictionary dictionary)
                 {
                     foreach (DictionaryEntry entry in dictionary)
-                        Visit(entry.Value, path + "{" + entry.Key + "}");
+                        Visit(entry.Value, path + "{" + Convert.ToString(entry.Key, CultureInfo.InvariantCulture) + "}");
                 }
                 else if (value is IEnumerable list)
                     Elements(list, path);
                 else if (IsObjectType(type))
                 {
                     foreach (var (slot, get) in ShapeOf(type).Walk)
-                        Visit(get(value), path + "." + slot);
+                        Visit(get(value), path + "." + slot.ToString(CultureInfo.InvariantCulture));
                 }
             }
 
@@ -158,10 +243,17 @@ namespace GameCult.Caching
                 var taken = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var item in items)
                 {
-                    var id = item != null && IsObjectType(item.GetType()) ? ShapeOf(item.GetType()).GetId?.Invoke(item) : null;
-                    if (!string.IsNullOrEmpty(id) && !taken.Add(id!) && refuseDuplicates)
-                        throw new InvalidOperationException(
-                            $"Element id '{id}' appears twice in one list ({path}); an element id is unique within its list.");
+                    if (item == null || !IsObjectType(item.GetType()) || ShapeOf(item.GetType()) is not { GetId: { } getId } shape)
+                        continue;
+                    var id = getId(item);
+                    if (string.IsNullOrEmpty(id))
+                        continue;
+                    if (shape.Derive == null && !IsRandomId(id!))
+                        throw new CultElementIdException(
+                            $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters.",
+                            rootPath, path, id);
+                    if (!taken.Add(id!))
+                        throw Duplicate(id!, path);
                 }
 
                 for (var index = 0; index < items.Length; index++)
@@ -169,26 +261,46 @@ namespace GameCult.Caching
                     var item = items[index];
                     if (item == null)
                         continue;
-                    var itemPath = path + "/" + index;
-                    if (IsObjectType(item.GetType()) && ShapeOf(item.GetType()) is { SetId: { } set, GetId: { } get } itemShape)
+                    var itemPath = path + "/" + index.ToString(CultureInfo.InvariantCulture);
+                    if (IsObjectType(item.GetType()) && ShapeOf(item.GetType()) is { SetId: { } , GetId: { } get } itemShape &&
+                        string.IsNullOrEmpty(get(item)))
                     {
-                        if (string.IsNullOrEmpty(get(item)))
+                        string id;
+                        if (itemShape.Derive != null)
                         {
-                            count++;
-                            if (!dryRun)
-                            {
-                                var id = itemShape.Derive?.Invoke(item) ?? Mint(itemPath, deterministic, rootPath, taken);
-                                if (itemShape.Derive != null && !taken.Add(id) && refuseDuplicates)
-                                    throw new InvalidOperationException(
-                                        $"Element id '{id}' appears twice in one list ({path}); an element id is unique within its list.");
-                                set(item, id);
-                            }
+                            id = itemShape.Derive(item) ?? string.Empty;
+                            if (id.Length == 0)
+                                throw new CultElementIdException(
+                                    $"Record {rootPath}: the element at {itemPath} derives its id from {itemShape.DerivedFrom}, which is null or empty.",
+                                    rootPath, itemPath, member: itemShape.DerivedFrom);
+                            if (!taken.Add(id))
+                                throw Duplicate(id, path);
                         }
+                        else
+                            id = Mint(itemPath, deterministic, rootPath, taken);
+                        plan.Add(item, itemShape, get(item), id);
                     }
 
                     Visit(item, itemPath);
                 }
             }
+
+            CultElementIdException Duplicate(string id, string path) => new(
+                $"Record {rootPath}: element id '{id}' appears twice in the list at {path}; an element id is unique within its list.",
+                rootPath, path, id);
+        }
+
+        private static bool IsRandomId(string id)
+        {
+            if (id.Length != IdBytes * 2)
+                return false;
+            foreach (var character in id)
+            {
+                if (!(character is >= '0' and <= '9' or >= 'a' and <= 'f'))
+                    return false;
+            }
+
+            return true;
         }
 
         private static string Mint(string itemPath, bool deterministic, string rootPath, HashSet<string> taken)
@@ -199,7 +311,7 @@ namespace GameCult.Caching
                 if (deterministic)
                 {
                     using var sha = SHA256.Create();
-                    var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(rootPath + "|" + itemPath + "|" + attempt));
+                    var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(rootPath + "|" + itemPath + "|" + attempt.ToString(CultureInfo.InvariantCulture)));
                     Array.Copy(hash, bytes, IdBytes);
                 }
                 else
@@ -220,7 +332,7 @@ namespace GameCult.Caching
         {
             var text = new StringBuilder(bytes.Length * 2);
             foreach (var value in bytes)
-                text.Append(value.ToString("x2"));
+                text.Append(value.ToString("x2", CultureInfo.InvariantCulture));
             return text.ToString();
         }
 
@@ -238,7 +350,10 @@ namespace GameCult.Caching
                 shape.SetId = idMember is FieldInfo f ? (o, v) => f.SetValue(o, v) : (o, v) => ((PropertyInfo)idMember).SetValue(o, v);
                 if (idMember.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom is { } source &&
                     MembersOf(type).FirstOrDefault(member => member.Name == source) is { } from)
-                    shape.Derive = o => Convert.ToString(from is FieldInfo ff ? ff.GetValue(o) : ((PropertyInfo)from).GetValue(o), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+                {
+                    shape.DerivedFrom = source;
+                    shape.Derive = o => Convert.ToString(from is FieldInfo ff ? ff.GetValue(o) : ((PropertyInfo)from).GetValue(o), CultureInfo.InvariantCulture);
+                }
             }
 
             shape.Walk = KeyedMembers(type)

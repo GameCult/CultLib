@@ -16,6 +16,9 @@ namespace GameCult.Caching.MessagePack;
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
     private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
+    // The manifest of a directory that holds element ids: a reader older than ids refuses it, because it would skip the id
+    // slots of a page and rewrite the elements without them.
+    private const string IndexedFormatVersionWithIds = "cultcache.store.v5.directory-content-addressed-pages";
     // An unleased load that has not settled after this many attempts throws.
     private const int UnleasedLoadAttempts = 5;
     private readonly FileInfo _manifestFile;
@@ -283,9 +286,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 pagePayload);
         }
 
+        // A manifest already marked stays marked: pages it names may hold ids this cache cannot read.
+        var carriesIds = string.Equals(currentManifest.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal) ||
+                         keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.Descriptor.CarriesElementIds);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
-            .ToArray());
+            .ToArray(), carriesIds);
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
@@ -295,11 +301,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         MarkFlushSucceeded();
     }
 
-    private void WriteManifest(CultSchemaCatalogEntry[] catalog, CultPersistedRecord[] index)
+    private void WriteManifest(CultSchemaCatalogEntry[] catalog, CultPersistedRecord[] index, bool carriesElementIds)
     {
         var manifest = new CultPersistedStoreSnapshot
         {
-            FormatVersion = IndexedFormatVersion,
+            FormatVersion = carriesElementIds ? IndexedFormatVersionWithIds : IndexedFormatVersion,
             SchemaCatalog = catalog,
             Records = index
         };
@@ -444,10 +450,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         }
 
         var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
-        if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal))
+        if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
+            !string.Equals(snapshot.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} is readable.");
+                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.");
         }
 
         return snapshot;

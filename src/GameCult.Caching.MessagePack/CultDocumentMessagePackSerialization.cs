@@ -185,7 +185,7 @@ public static class CultDocumentMessagePackSerialization
         if (fieldCount > 0)
         {
             snapshot.FormatVersion = reader.ReadString()
-                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
+                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
         }
 
         if (fieldCount > 1)
@@ -221,20 +221,21 @@ public static class CultDocumentMessagePackSerialization
     {
         var version = snapshot.FormatVersion;
         if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
-            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
         {
             throw new NotSupportedException(
-                $"Store format {version} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
+                $"Store format {version} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
         }
 
-        // Only a v2 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
+        // Only a v2 or v3 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
         if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
         {
             var variant = snapshot.Records.FirstOrDefault(record => record.Variant != null);
             if (variant != null)
             {
                 throw new NotSupportedException(
-                    $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2}.");
+                    $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
         }
     }
