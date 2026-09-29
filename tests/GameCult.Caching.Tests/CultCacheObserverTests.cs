@@ -127,25 +127,32 @@ namespace GameCult.Caching.Tests
         public void AnUnsubscribedObserverIsReleasedByTheCache()
         {
             using var cache = new CultCache(Registry);
-            var target = Subscribe(cache, out var subscription);
+            var kept = new List<IDisposable>();
+            var live = Subscribe(cache, kept, dispose: false);
+            var gone = Subscribe(cache, kept, dispose: true);
             Send(cache, "one");
             CollectGarbage();
-            Assert.That(target.IsAlive, Is.True, "a live subscription is held by the cache");
 
-            subscription.Dispose();
-            CollectGarbage();
-
-            Assert.That(target.IsAlive, Is.False, "an unsubscribed observer is no longer held");
+            Assert.Multiple(() =>
+            {
+                Assert.That(live.IsAlive, Is.True, "a live subscription is held by the cache");
+                Assert.That(gone.IsAlive, Is.False, "an unsubscribed observer is no longer held");
+            });
+            GC.KeepAlive(kept);
             GC.KeepAlive(cache);
         }
 
         // A disposed R3 subscription ignores OnNext, so a stale entry in the cache is invisible to a receiver; it shows as
-        // a leak: the cache keeps the subscriber alive.
+        // a leak: the cache keeps the subscriber alive. The test frame must not hold the subscription itself.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static WeakReference Subscribe(CultCache cache, out IDisposable subscription)
+        private static WeakReference Subscribe(CultCache cache, List<IDisposable> kept, bool dispose)
         {
             var target = new object();
-            subscription = cache.Watch<ObservedPing>().Subscribe(_ => GC.KeepAlive(target));
+            var subscription = cache.Watch<ObservedPing>().Subscribe(_ => GC.KeepAlive(target));
+            if (dispose)
+                subscription.Dispose();
+            else
+                kept.Add(subscription);
             return new WeakReference(target);
         }
 
