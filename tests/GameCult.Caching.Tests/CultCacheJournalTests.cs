@@ -124,12 +124,10 @@ namespace GameCult.Caching.Tests
         {
             using var cache = Memory();
             var calls = 0;
-            using var journal = cache.AddJournal(changes =>
-            {
-                calls++;
-                Assert.That(changes, Is.Not.Empty);
-            });
+            using var journal = cache.AddJournal(_ => calls++);
 
+            // Attaching a store with nothing in it is an admission with no change.
+            cache.AddBackingStore(new SingleFileMessagePackBackingStore(Path.Combine(_directory, "empty.cc")));
             Assert.That(cache.Remove(KeyOf("absent")), Is.False);
 
             Assert.That(calls, Is.Zero);

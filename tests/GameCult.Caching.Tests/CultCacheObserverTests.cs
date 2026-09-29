@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
@@ -123,17 +124,36 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnUnsubscribedObserverStopsReceiving()
+        public void AnUnsubscribedObserverIsReleasedByTheCache()
         {
             using var cache = new CultCache(Registry);
-            var seen = new List<string>();
-            var subscription = cache.Watch<ObservedPing>().Subscribe(change => seen.Add(change.Document!.Text));
+            var target = Subscribe(cache, out var subscription);
             Send(cache, "one");
+            CollectGarbage();
+            Assert.That(target.IsAlive, Is.True, "a live subscription is held by the cache");
 
             subscription.Dispose();
-            Send(cache, "two");
+            CollectGarbage();
 
-            Assert.That(seen, Is.EqualTo(new[] { "one" }));
+            Assert.That(target.IsAlive, Is.False, "an unsubscribed observer is no longer held");
+            GC.KeepAlive(cache);
+        }
+
+        // A disposed R3 subscription ignores OnNext, so a stale entry in the cache is invisible to a receiver; it shows as
+        // a leak: the cache keeps the subscriber alive.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static WeakReference Subscribe(CultCache cache, out IDisposable subscription)
+        {
+            var target = new object();
+            subscription = cache.Watch<ObservedPing>().Subscribe(_ => GC.KeepAlive(target));
+            return new WeakReference(target);
+        }
+
+        private static void CollectGarbage()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
         }
 
         // A store that admits a load and then fails: the hold's body throws after the changes were minted.
