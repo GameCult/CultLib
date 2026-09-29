@@ -722,7 +722,7 @@ public sealed class BoundedLeastSquaresTests
 
     // A = U diag(s) V^T with s geometric from 1 down to 1/cond, so cond(A) is the requested value (float rounding of A
     // perturbs it slightly). m x n with m >= n; b is generic, so it has a real residual when m > n.
-    private static (float[] a, float[] b) ConditionedProblem(int m, int n, double cond, uint seed, double aScale = 1.0)
+    private static (float[] a, float[] b) ConditionedProblem(int m, int n, double cond, uint seed, double aScale = 1.0, bool bAlongSmallestSingularVector = false)
     {
         var rng = new CultMath.Random(seed * 2654435761u + 17u);
         double[][] Orthonormal(int dim, int count)
@@ -758,7 +758,7 @@ public sealed class BoundedLeastSquaresTests
                     a[r * n + c] += (float)(u[k][r] * s * w[k][c]);
         }
         var b = new float[m];
-        for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
+        for (var i = 0; i < m; i++) b[i] = bAlongSmallestSingularVector ? (float)u[n - 1][i] : rng.NextFloat(-3f, 3f);
         return (a, b);
     }
 
@@ -806,6 +806,29 @@ public sealed class BoundedLeastSquaresTests
             if (iterations > 0) confirmed++;
         }
         Assert.InRange(confirmed, 1, 20);
+    }
+
+    // b along the smallest left singular vector makes the optimum lie along the weakest direction: |A^T b| is tiny, so
+    // the tolerance (1e-6 of it) sits below the rounding noise of the gradient (~1e-16 |A^T A| |x|) for cond(A) >= 1e6.
+    // The tolerance is then unreachable, and the solver must stop on the progress rule, after the handful of Newton
+    // passes that still lower the cost, never at the 100-iteration cap.
+    [Theory]
+    [InlineData(1e6)]
+    [InlineData(1e7)]
+    public void ToleranceBelowTheNoiseFloorStopsOnProgressNotOnTheCap(double cond)
+    {
+        const int m = 28, n = 24;
+        var confirmed = 0;
+        for (uint seed = 1; seed <= 30; seed++)
+        {
+            var (a, b) = ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: true);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
+            Assert.True(iterations <= 6, $"cond {cond} seed {seed}: {iterations} iterations");
+            if (iterations >= 1) confirmed++;
+        }
+        Assert.True(confirmed >= 15, $"cond {cond}: only {confirmed} of 30 reached the tolerance floor");
     }
 
     // Scale-freeness was only claimed for scaling A, b and the bounds together; A alone at 1e6 with the bounds left
