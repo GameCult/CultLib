@@ -2549,9 +2549,7 @@ namespace GameCult.Caching
             foreach (var stored in plan.Admitted.Concat(plan.Dependents))
             {
                 var descriptor = stored.Descriptor;
-                string? name = null;
-                if (descriptor.NameAccessor != null)
-                    name = NameRead(stored) is { Length: > 0 } read ? read : null;
+                var name = descriptor.NameAccessor == null ? null : NameRead(stored);
                 var indexes = new List<(string Alias, string Value)>();
                 foreach (var pair in descriptor.IndexAccessors)
                 {
@@ -2565,8 +2563,9 @@ namespace GameCult.Caching
             }
         }
 
+        // A blank name is no name.
         private static string? NameRead(CultStoredDocument stored) =>
-            Read(stored, $"[CultName] member {stored.Descriptor.NameMember}", stored.Descriptor.NameAccessor!);
+            Read(stored, $"[CultName] member {stored.Descriptor.NameMember}", stored.Descriptor.NameAccessor!) is { Length: > 0 } name ? name : null;
 
         private static string? Read(CultStoredDocument stored, string what, Func<object, string?> getter)
         {
