@@ -79,6 +79,8 @@ namespace GameCult.Caching.Tests
                     Reels = Enumerable.Range(0, record.Reels).Select(_ => new OldReel { Label = "reel", Marks = { new OldMark { Text = "m" }, new OldMark { Text = "m" } } }).ToList()
                 })
             })).ToArray();
+            // What a store from before ids declared.
+            snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV1;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
@@ -134,15 +136,15 @@ namespace GameCult.Caching.Tests
         {
             using var cache = Open(PathOf("dup.cc"));
             var dup = Deck("dup");
-            dup.Reels[0].Id = "same";
-            dup.Reels[1].Id = "same";
-            var refusal = Assert.Throws<InvalidOperationException>(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), dup, new CultRecordKey("dup"))))!;
-            Assert.That(refusal.Message, Does.Contain("same"));
+            dup.Reels[0].Id = "aaaaaaaaaaaa";
+            dup.Reels[1].Id = "aaaaaaaaaaaa";
+            var refusal = Assert.Throws<CultElementIdException>(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), dup, new CultRecordKey("dup"))))!;
+            Assert.That(refusal.Message, Does.Contain("aaaaaaaaaaaa"));
             Assert.That(cache.Get<IdDeck>(new CultRecordKey("dup")), Is.Null);
 
             var fine = Deck("fine");
-            fine.Reels[0].Id = "same";
-            fine.Reels[0].Marks[0].Id = "same";
+            fine.Reels[0].Id = "aaaaaaaaaaaa";
+            fine.Reels[0].Marks[0].Id = "aaaaaaaaaaaa";
             Assert.That(cache.Commit(batch => batch.Upsert(typeof(IdDeck), fine, new CultRecordKey("fine"))), Is.True);
         }
 
@@ -152,6 +154,7 @@ namespace GameCult.Caching.Tests
             var path = PathOf("old.cc");
             WritePreIdStore(path, null, ("a", "a", 2), ("b", "b", 1));
             var before = DiskRecord(path, "a").Payload;
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the fixture is a store from before ids");
 
             string[] first;
             using (var cache = Open(path))
@@ -164,6 +167,7 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
                 Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload)), Is.EqualTo(first),
                     "the store's first write persists the ids each record minted at load");
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "and the write declares that the store holds ids");
             }
 
             using (var again = Open(path))
@@ -226,24 +230,17 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnOverrideValueGetsItsIdsMintedAndItsDuplicatesRefused()
-        {
-            using var cache = Open(PathOf("override.cc"));
-            var reels = new List<IdReel> { new() { Label = "a" }, new() { Label = "a" } };
-            cache.Override<IdDeck>(nameof(IdDeck.Reels), reels);
-            Assert.That(reels.Select(reel => reel.Id), Has.All.Not.Empty);
-            Assert.That(reels[0].Id, Is.Not.EqualTo(reels[1].Id));
-            var dup = new List<IdReel> { new() { Id = "z" }, new() { Id = "z" } };
-            Assert.Throws<InvalidOperationException>(() => cache.Override<IdDeck>(nameof(IdDeck.Reels), dup));
-        }
-
-        [Test]
         public void ARemovedPreIdRecordIsNotRewrittenByMintElementIds()
         {
             var path = PathOf("removed.cc");
             WritePreIdStore(path, null, ("a", "a", 1), ("b", "b", 1));
             using var cache = Open(path);
-            cache.Commit(batch => batch.Remove(new CultRecordKey("a")));
+            // Conditional, so the file is merged onto and b's ids stay in memory only.
+            cache.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("elsewhere"), null);
+                batch.Remove(new CultRecordKey("a"));
+            });
             Assert.That(cache.MintElementIds(), Is.EqualTo(1), "only the survivor is listed; the removed record is not resurrected");
             Assert.That(cache.Get<IdDeck>(new CultRecordKey("a")), Is.Null);
         }
@@ -264,8 +261,417 @@ namespace GameCult.Caching.Tests
 
             var twice = new SpanDoc { Name = "t", Spans = { new IdSpan { Offset = 7 }, new IdSpan { Offset = 7 } } };
             using var refusing = CultCacheMessagePack.Create(PathOf("span3.cc"), new CultCacheOpenOptions { Registry = registry });
-            var refusal = Assert.Throws<InvalidOperationException>(() => refusing.Commit(batch => batch.Upsert(typeof(SpanDoc), twice, new CultRecordKey("t"))))!;
+            var refusal = Assert.Throws<CultElementIdException>(() => refusing.Commit(batch => batch.Upsert(typeof(SpanDoc), twice, new CultRecordKey("t"))))!;
             Assert.That(refusal.Message, Does.Contain("'7'"));
+        }
+
+        // ---- C2a fix batch: the marker, refusals at load, override values, atomic minting ----
+
+        private const string HexA = "aaaaaaaaaaaa";
+
+        private static CultCache OpenWith(string path, bool directory, params Type[] types) =>
+            CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(types), UseDirectoryStore = directory });
+
+        private static string HeaderOf(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
+
+        private static void UpsertPlain(CultCache cache, string key) =>
+            cache.Commit(batch => batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = key }, new CultRecordKey(key)));
+
+        private static CultElementIdException Refusal(Exception error)
+        {
+            for (var inner = error; inner != null; inner = inner.InnerException!)
+            {
+                if (inner is CultElementIdException typed)
+                    return typed;
+            }
+
+            throw new AssertionException("no CultElementIdException in the chain: " + error);
+        }
+
+        private static byte[] OldShapedReels(string label) =>
+            MessagePackSerializer.Serialize(new List<OldReel> { new() { Label = label, Marks = { new OldMark { Text = "x" }, new OldMark { Text = "y" } } } });
+
+        [Test]
+        public void AStoreThatCanHoldElementIdsCarriesTheV3MarkerAndOneThatCannotStaysV1()
+        {
+            var ids = PathOf("ids.cc");
+            using (var cache = OpenWith(ids, false, typeof(IdDeck)))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            Assert.That(HeaderOf(ids), Is.EqualTo("cultcache.store.v3"));
+
+            var plain = PathOf("plain.cc");
+            using (var cache = OpenWith(plain, false, typeof(PreCut2FixtureItem)))
+                UpsertPlain(cache, "a");
+            Assert.That(HeaderOf(plain), Is.EqualTo("cultcache.store.v1"));
+
+            using var reread = OpenWith(ids, false, typeof(IdDeck));
+            Assert.That(reread.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "a v3 store reads");
+        }
+
+        [Test]
+        public void AStagedWriteThatIsFlushedCarriesTheMarkerAndPersistsLoadMintedIds()
+        {
+            var path = PathOf("flush.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            using (var cache = Open(path))
+            {
+                cache.UpsertAsync(typeof(IdDeck), Deck("staged"), new CultRecordKey("staged")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+                Assert.That(cache.MintElementIds(), Is.EqualTo(0), "the flush wrote the whole store, a's minted ids included");
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload)), Has.All.Not.Empty);
+        }
+
+        [Test]
+        public void AnUnconditionalWriteOfAPlainRecordKeepsTheMarkerWhileTheStoreHoldsIds()
+        {
+            var path = PathOf("wholeview.cc");
+            using var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem));
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            UpsertPlain(cache, "plain");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the store still holds a deck, whatever this commit wrote");
+        }
+
+        [Test]
+        public void AMergeOntoAFileAnotherWriterMarkedKeepsTheMarkerEvenWhenThisWriterHoldsNoIds()
+        {
+            var path = PathOf("merge.cc");
+            Type[] types = { typeof(IdDeck), typeof(PreCut2FixtureItem) };
+            using var first = OpenWith(path, false, types);
+            UpsertPlain(first, "first");
+            using var second = OpenWith(path, false, types);
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
+            first.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+
+            Assert.That(second.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("second"), null);
+                batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "second" }, new CultRecordKey("second"));
+            }), Is.True);
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the file holds a deck another writer put there; second holds none");
+        }
+
+        [Test]
+        public void AnUnconditionalWriteOfAPlainRecordMarksAStoreWhoseLoadedRecordsMintedIds()
+        {
+            var path = PathOf("loaded-minted.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            using (var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
+                UpsertPlain(cache, "p");
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the write persisted a's minted ids");
+            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload)), Has.All.Not.Empty);
+        }
+
+        [Test]
+        public void AMarkedFileStaysMarkedWhenACommitOnlyTouchesOtherRecords()
+        {
+            var path = PathOf("sticky.cc");
+            using (var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            using (var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Expect(new CultRecordKey("plain"), null);
+                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
+                }), Is.True);
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "a merge onto a marked file does not shed the marker");
+        }
+
+        [Test]
+        public void ADirectoryStoreThatCanHoldElementIdsCarriesAV5ManifestAndStaysMarked()
+        {
+            var ids = PathOf("ids-dir.cc");
+            using (var cache = OpenWith(ids, true, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            Assert.That(HeaderOf(ids), Is.EqualTo("cultcache.store.v5.directory-content-addressed-pages"));
+            using (var cache = OpenWith(ids, true, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                Assert.That(cache.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "a v5 manifest reads");
+                UpsertPlain(cache, "plain");
+            }
+
+            Assert.That(HeaderOf(ids), Is.EqualTo("cultcache.store.v5.directory-content-addressed-pages"), "a rewrite that touches a plain record keeps the marker");
+
+            var mixed = PathOf("mixed-dir.cc");
+            using (var cache = OpenWith(mixed, true, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "p" }, new CultRecordKey("p"));
+                    batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d"));
+                });
+            }
+
+            Assert.That(HeaderOf(mixed), Is.EqualTo("cultcache.store.v5.directory-content-addressed-pages"), "one written record that can hold ids is enough");
+
+            var plain = PathOf("plain-dir.cc");
+            using (var cache = OpenWith(plain, true, typeof(PreCut2FixtureItem)))
+                UpsertPlain(cache, "a");
+            Assert.That(HeaderOf(plain), Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
+        }
+
+        [Test]
+        public void AVariantStoreThatCanHoldElementIdsIsV3AndItsVariantsRead()
+        {
+            var path = PathOf("variant-v3.cc");
+            using (var cache = OpenWith(path, false, typeof(IdDeck)))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), Deck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+            using var again = OpenWith(path, false, typeof(IdDeck));
+            Assert.That(again.Get<IdDeck>(new CultRecordKey("v"))!.Name, Is.EqualTo("v"));
+        }
+
+        [Test]
+        public void ADuplicateIdOnDiskRefusesTheLoadNamingTheRecordTheListAndTheId()
+        {
+            var path = PathOf("dup-disk.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var deck = Deck("dup");
+            deck.Reels[0].Id = HexA;
+            deck.Reels[1].Id = HexA;
+            deck.Reels[0].Marks[0].Id = HexA;
+            snapshot.Records[0].Payload = MessagePackSerializer.Serialize(deck);
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            var refusal = Refusal(Assert.Catch(() => Open(path).Dispose())!);
+            Assert.That(refusal.RecordKey, Is.EqualTo("a"));
+            Assert.That(refusal.ElementId, Is.EqualTo(HexA));
+            Assert.That(refusal.ListPath, Is.EqualTo("a.1"));
+        }
+
+        [Test]
+        public void AnIdOfTheWrongFormatOnDiskRefusesTheLoadAndAWriteOfItIsRefused()
+        {
+            var path = PathOf("bad-format.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var deck = Deck("bad");
+            deck.Reels[0].Id = "t00000000001";
+            snapshot.Records[0].Payload = MessagePackSerializer.Serialize(deck);
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var refusal = Refusal(Assert.Catch(() => Open(path).Dispose())!);
+            Assert.That(refusal.RecordKey, Is.EqualTo("a"));
+            Assert.That(refusal.ElementId, Is.EqualTo("t00000000001"));
+
+            using var cache = Open(PathOf("bad-write.cc"));
+            var written = Deck("w");
+            written.Reels[0].Marks[1].Id = "NOTHEX";
+            Assert.That(Assert.Throws<CultElementIdException>(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), written, new CultRecordKey("w"))))!.ElementId, Is.EqualTo("NOTHEX"));
+        }
+
+        [Test]
+        public void ABatchRefusedForADuplicateLeavesEveryDocumentItHeldUnminted()
+        {
+            using var cache = Open(PathOf("batch-refused.cc"));
+            var fine = Deck("fine");
+            var dup = Deck("dup");
+            dup.Reels[0].Id = HexA;
+            dup.Reels[1].Id = HexA;
+            Assert.Throws<CultElementIdException>(() => cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(IdDeck), fine, new CultRecordKey("fine"));
+                batch.Upsert(typeof(IdDeck), dup, new CultRecordKey("dup"));
+            }));
+            Assert.That(AllIds(fine), Has.All.Empty, "the refused batch minted nothing into the other document");
+            Assert.That(dup.Reels[0].Marks.Select(mark => mark.Id), Has.All.Empty);
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("fine")), Is.Null);
+        }
+
+        [Test]
+        public void AWriteThatDoesNotCommitGivesItsIdsBack()
+        {
+            using var cache = Open(PathOf("mismatch.cc"));
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("existing"), new CultRecordKey("existing")));
+            var fresh = Deck("fresh");
+            var outcome = cache.TryCommit(batch =>
+            {
+                batch.Expect(new CultRecordKey("existing"), null);
+                batch.Upsert(typeof(IdDeck), fresh, new CultRecordKey("fresh"));
+            });
+            Assert.That(outcome, Is.EqualTo(CultCommitOutcome.Mismatch));
+            Assert.That(AllIds(fresh), Has.All.Empty);
+        }
+
+        [Test]
+        public void AnUnconditionalWritePersistsLoadMintedIdsAndTakesThemOffTheList()
+        {
+            var path = PathOf("unconditional.cc");
+            WritePreIdStore(path, null, ("a", "a", 1), ("b", "b", 1));
+            using var cache = Open(path);
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "b").Payload)), Has.All.Not.Empty, "the write persisted b's ids");
+            Assert.That(cache.MintElementIds(), Is.EqualTo(0), "nothing is left that exists only in memory");
+        }
+
+        [Test]
+        public void AConditionalWriteThatLeavesOtherRecordsAsTheyWereLeavesThemOnTheList()
+        {
+            var path = PathOf("conditional.cc");
+            WritePreIdStore(path, null, ("a", "a", 1), ("b", "b", 1));
+            using var cache = Open(path);
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("fresh"), null);
+                batch.Upsert(typeof(IdDeck), Deck("fresh"), new CultRecordKey("fresh"));
+            }), Is.True);
+            Assert.That(cache.MintElementIds(), Is.EqualTo(2), "a and b were not written; their ids are still only in memory");
+        }
+
+        [Test]
+        public void AnOverrideValueGetsItsIdsMintedOnWriteWhoeverBuiltIt()
+        {
+            var path = PathOf("override-write.cc");
+            using (var cache = Open(path))
+            {
+                var reels = new List<IdReel> { new() { Label = "v", Marks = { new IdMark { Text = "x" } } }, new() { Label = "v" } };
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), Deck("base"), new CultRecordKey("base"));
+                    // One built by the cache's own helper, one from bytes the id rule never saw.
+                    batch.UpsertVariant(new CultRecordKey("helper"), new CultRecordKey("base"),
+                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "helper"), cache.Override<IdDeck>(nameof(IdDeck.Reels), reels) });
+                    batch.UpsertVariant(new CultRecordKey("raw"), new CultRecordKey("base"),
+                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "raw"), CultVariantOverride.Set(1, OldShapedReels("r")) });
+                });
+                Assert.That(reels.Select(reel => reel.Id), Has.All.Empty, "the caller's list is not written to; ids are minted in the admitted copy");
+                foreach (var key in new[] { "helper", "raw" })
+                {
+                    var resolved = cache.Get<IdDeck>(new CultRecordKey(key))!;
+                    var ids = resolved.Reels.Select(reel => reel.Id).Concat(resolved.Reels.SelectMany(reel => reel.Marks.Select(mark => mark.Id))).ToArray();
+                    Assert.That(ids, Has.All.Matches<string>(id => Regex.IsMatch(id, "^[0-9a-f]{12}$")), key);
+                }
+            }
+
+            foreach (var key in new[] { "helper", "raw" })
+            {
+                var stored = MessagePackSerializer.Deserialize<List<IdReel>>(DiskRecord(path, key).Variant!.Overrides.Single(entry => entry.Path[0].Slot == 1).Value);
+                Assert.That(stored.Select(reel => reel.Id), Has.All.Matches<string>(id => id.Length == 12), $"{key}: the persisted delta carries the ids");
+                using var reader = Open(path);
+                Assert.That(reader.Get<IdDeck>(new CultRecordKey(key))!.Reels.Select(reel => reel.Id), Is.EqualTo(stored.Select(reel => reel.Id)));
+            }
+        }
+
+        [Test]
+        public void AnOverrideValueWithADuplicateIdIsRefusedNamingTheVariant()
+        {
+            using var cache = Open(PathOf("override-dup.cc"));
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("base"), new CultRecordKey("base")));
+            var dup = new List<IdReel> { new() { Id = HexA }, new() { Id = HexA } };
+            var refusal = Assert.Throws<CultElementIdException>(() => cache.Commit(batch =>
+                batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                    new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v"), cache.Override<IdDeck>(nameof(IdDeck.Reels), dup) })))!;
+            Assert.That(refusal.RecordKey, Does.StartWith("v"));
+            Assert.That(refusal.ElementId, Is.EqualTo(HexA));
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("v")), Is.Null);
+        }
+
+        [Test]
+        public void AVariantWrittenBeforeIdsMintsItsOverrideIdsOnLoadAndMintElementIdsRewritesIt()
+        {
+            var path = PathOf("override-load.cc");
+            using (var seed = Open(path))
+            {
+                seed.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), Deck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                        new[] { seed.Override<IdDeck>(nameof(IdDeck.Name), "v"), seed.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() }) });
+                });
+            }
+
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var record = snapshot.Records.Single(entry => entry.Key == "v");
+            record.Variant = new CultVariantDelta(record.Variant!.BaseKey, record.Variant.Overrides
+                .Select(entry => entry.Path[0].Slot == 1 ? CultVariantOverride.Set(1, OldShapedReels("old")) : entry).ToArray());
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var untouched = File.ReadAllBytes(path);
+
+            string[] first;
+            using (var peek = Open(path))
+                first = AllIds(peek.Get<IdDeck>(new CultRecordKey("v"))!);
+            using (var cache = Open(path))
+            {
+                Assert.That(AllIds(cache.Get<IdDeck>(new CultRecordKey("v"))!), Is.EqualTo(first), "the ids minted at load are a function of the record, so a second load mints the same");
+                Assert.That(first, Has.Length.EqualTo(3));
+                Assert.That(first, Has.All.Not.Empty);
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(untouched), "loading mints in memory and writes nothing");
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+                // A base edit re-resolves the variant as a dependent; it is still only in memory.
+                var baseDeck = cache.Get<IdDeck>(new CultRecordKey("base"))!;
+                baseDeck.Reels[0].Label = "edited";
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), baseDeck, new CultRecordKey("base")));
+                Assert.That(AllIds(cache.Get<IdDeck>(new CultRecordKey("v"))!), Is.EqualTo(first), "the dependent re-resolves to the same minted ids");
+                Assert.That(cache.MintElementIds(), Is.EqualTo(1), "a flush of the store persisted the delta as it was handed over, so the variant is still in memory only");
+                Assert.That(cache.MintElementIds(), Is.EqualTo(0));
+            }
+
+            var persisted = MessagePackSerializer.Deserialize<List<IdReel>>(DiskRecord(path, "v").Variant!.Overrides.Single(entry => entry.Path[0].Slot == 1).Value);
+            Assert.That(persisted.Select(reel => reel.Id).Concat(persisted.SelectMany(reel => reel.Marks.Select(mark => mark.Id))), Is.EqualTo(first));
+            using var again = Open(path);
+            Assert.That(AllIds(again.Get<IdDeck>(new CultRecordKey("v"))!), Is.EqualTo(first));
+        }
+
+        [Test]
+        public void ARefusalAfterMintingLeavesEveryPlainDocumentInTheBatchUnminted()
+        {
+            using var cache = Open(PathOf("late-refusal.cc"));
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("base"), new CultRecordKey("base")));
+            var plain = Deck("plain");
+            var dup = new List<IdReel> { new() { Id = HexA }, new() { Id = HexA } };
+            Assert.Throws<CultElementIdException>(() => cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(IdDeck), plain, new CultRecordKey("plain"));
+                batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                    new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v"), cache.Override<IdDeck>(nameof(IdDeck.Reels), dup) });
+            }));
+            Assert.That(AllIds(plain), Has.All.Empty, "the variant's refusal came after the plain record was minted; the mint was given back");
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("plain")), Is.Null);
+        }
+
+        [Test]
+        public void ADerivedIdWhoseSourceIsEmptyIsRefusedAtWriteNamingTheSourceMember()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(LabelDoc) });
+            using var cache = CultCacheMessagePack.Create(PathOf("label.cc"), new CultCacheOpenOptions { Registry = registry });
+            var doc = new LabelDoc { Name = "l", Labels = { new IdLabel { Label = "ok" }, new IdLabel { Label = null } } };
+            var refusal = Assert.Throws<CultElementIdException>(() => cache.Commit(batch => batch.Upsert(typeof(LabelDoc), doc, new CultRecordKey("l"))))!;
+            Assert.That(refusal.Member, Is.EqualTo("Label"));
+            Assert.That(refusal.RecordKey, Is.EqualTo("l"));
+            Assert.That(cache.Get<LabelDoc>(new CultRecordKey("l")), Is.Null);
+        }
+
+        [CultDocument("tests.element_id_label_doc", "tests.element_id_label_doc.v1")]
+        [MessagePackObject]
+        public sealed class LabelDoc
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public List<IdLabel> Labels { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public sealed class IdLabel
+        {
+            [Key(0)] public string? Label { get; set; }
+            [Key(1)] [CultElementId(nameof(Label))] public string Id { get; set; } = "";
         }
 
         [CultDocument("tests.element_id_span_doc", "tests.element_id_span_doc.v1")]
