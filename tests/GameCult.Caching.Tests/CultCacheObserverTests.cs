@@ -123,6 +123,61 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void AnUnsubscribedObserverStopsReceiving()
+        {
+            using var cache = new CultCache(Registry);
+            var seen = new List<string>();
+            var subscription = cache.Watch<ObservedPing>().Subscribe(change => seen.Add(change.Document!.Text));
+            Send(cache, "one");
+
+            subscription.Dispose();
+            Send(cache, "two");
+
+            Assert.That(seen, Is.EqualTo(new[] { "one" }));
+        }
+
+        // A store that admits a load and then fails: the hold's body throws after the changes were minted.
+        private sealed class LoadThenFailStore : CacheBackingStore
+        {
+            public bool Armed;
+
+            public override void PullAll() => Held(() =>
+            {
+                if (!Armed)
+                    return;
+                var record = new CultStoredDocument(
+                    KeyOf("loaded"), "2026-01-01T00:00:00.0000000+00:00", Registry.GetRequired(typeof(ObservedPing)), new ObservedPing { Text = "loaded" });
+                Loaded!(new[] { record }, Array.Empty<CultStoredDocument>());
+                throw new InvalidOperationException("store failed after the load");
+            });
+
+            public override void Push(CultStoredDocument entry) { }
+            public override void Delete(CultStoredDocument entry) { }
+            public override void PushAll() { }
+            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => CultCommitOutcome.Committed;
+        }
+
+        [Test]
+        public void AHoldWhoseBodyThrowsStillPublishesTheChangesItMinted()
+        {
+            using var cache = new CultCache(Registry);
+            var store = new LoadThenFailStore();
+            cache.AddBackingStore(store);
+            var seen = new List<long>();
+            using var subscription = cache.Watch<ObservedPing>().Subscribe(change => seen.Add(change.Sequence));
+            store.Armed = true;
+
+            var thrown = Assert.Throws<InvalidOperationException>(() => store.PullAll())!;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(thrown.Message, Is.EqualTo("store failed after the load"), "the body's own exception wins");
+                Assert.That(cache.Get<ObservedPing>(KeyOf("loaded")), Is.Not.Null, "the load landed");
+                Assert.That(seen, Is.EqualTo(new[] { 1L }), "and reached its observers");
+            });
+        }
+
+        [Test]
         public void DisposeCompletesObserversAndACompletedCacheCompletesNewOnes()
         {
             var cache = new CultCache(Registry);

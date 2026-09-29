@@ -2391,7 +2391,7 @@ namespace GameCult.Caching
                 throw new InvalidOperationException(
                     "A cache hold was entered inside another cache's hold; a thread holds one cache's gate at a time.");
             var mine = _held = new List<(Change Change, bool Loaded)>();
-            T result;
+            var result = default(T)!;
             try
             {
                 lock (_gate)
