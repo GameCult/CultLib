@@ -38,6 +38,12 @@ static async Task<int> ProgramMainAsync(string[] args)
             case "read":
                 await ReadAsync(file);
                 return 0;
+            case "write-deck":
+                await WriteDeckAsync(file);
+                return 0;
+            case "read-deck":
+                await ReadDeckAsync(file);
+                return 0;
             default:
                 throw new InvalidOperationException($"Unknown mode {mode}.");
         }
@@ -76,6 +82,31 @@ static async Task ReadAsync(string file)
         ?? throw new InvalidOperationException("No cultcache.interop-note records found.");
     WriteJsonLine(note);
 }
+
+// A record with an object list: the cache mints each mark's element id, and every runtime reads it as an ordinary member.
+static async Task WriteDeckAsync(string file)
+{
+    var cache = BuildCache(file);
+    await cache.PullAllBackingStoresAsync();
+    var deck = new CultCacheInteropDeck
+    {
+        DocumentId = "deck:csharp",
+        Marks = [new CultCacheInteropMark { Label = "twin" }, new CultCacheInteropMark { Label = "twin" }, new CultCacheInteropMark { Label = "other" }]
+    };
+    await cache.AddAsync(deck, new CultRecordHandle<CultCacheInteropDeck>(new CultRecordKey(deck.DocumentId)));
+    cache.FlushAllBackingStores();
+    WriteDeckJsonLine(deck);
+}
+
+static async Task ReadDeckAsync(string file)
+{
+    var cache = BuildCache(file);
+    await cache.PullAllBackingStoresAsync();
+    WriteDeckJsonLine(cache.AllEntries.OfType<CultCacheInteropDeck>().Single());
+}
+
+static void WriteDeckJsonLine(CultCacheInteropDeck deck) =>
+    Console.Out.WriteLine(JsonSerializer.Serialize(new { documentId = deck.DocumentId, ids = deck.Marks.Select(mark => mark.Id).ToArray() }));
 
 // Two routed single-file stores: each file is a complete single-store snapshot holding only its own type.
 static void WriteRouted(string catalogFile, string runFile)
@@ -175,4 +206,19 @@ public sealed class CultCacheInteropRunNote
     [Key(1)] [CultName] public string DocumentId { get; set; } = string.Empty;
     [Key(2)] public string AuthorRuntimeId { get; set; } = string.Empty;
     [Key(3)] public string Body { get; set; } = string.Empty;
+}
+
+[CultDocument("cultcache.interop-deck", "cultcache.interop_deck.v1")]
+[MessagePackObject]
+public sealed class CultCacheInteropDeck
+{
+    [Key(0)] [CultName] public string DocumentId { get; set; } = string.Empty;
+    [Key(1)] public List<CultCacheInteropMark> Marks { get; set; } = new();
+}
+
+[MessagePackObject]
+public sealed class CultCacheInteropMark
+{
+    [Key(0)] public string Label { get; set; } = string.Empty;
+    [Key(1)] [CultElementId] public string Id { get; set; } = string.Empty;
 }

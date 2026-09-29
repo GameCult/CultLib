@@ -26,6 +26,38 @@ struct CultCacheInteropNote {
     tags: Vec<String>,
 }
 
+// An object list: each mark is a positional array [label, id], the id an ordinary member at slot 1.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CultCacheInteropMark(String, String);
+
+#[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+#[cultcache(type = "cultcache.interop-deck", schema = "CultCacheInteropDeck")]
+struct CultCacheInteropDeck {
+    #[cultcache(key = 0)]
+    document_id: String,
+    #[cultcache(key = 1, default)]
+    marks: Vec<CultCacheInteropMark>,
+}
+
+fn read_deck(file: &str) -> Result<()> {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<CultCacheInteropDeck>()?;
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(file))?;
+    cache.pull_all_backing_stores()?;
+    let decks = cache.get_all::<CultCacheInteropDeck>()?;
+    let deck = decks
+        .first()
+        .ok_or_else(|| anyhow!("no cultcache.interop-deck records found"))?;
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "documentId": deck.document_id,
+            "ids": deck.marks.iter().map(|mark| mark.1.clone()).collect::<Vec<_>>(),
+        }))?
+    );
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mode = args
@@ -37,6 +69,7 @@ fn main() -> Result<()> {
     match mode.as_str() {
         "write" => write_note(file, require_arg(&options, "runtime-id")?)?,
         "read" => read_note(file)?,
+        "read-deck" => read_deck(file)?,
         _ => return Err(anyhow!("unknown mode {mode}")),
     }
     Ok(())

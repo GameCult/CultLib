@@ -1173,6 +1173,43 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
   }
 });
 
+test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary members", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-deck-"));
+  const file = join(tempDir, "deck.cc");
+  const written = await runJsonCommand("csharp-write-deck", dotnetCommand, [
+    csharpInteropDll, "write-deck", "--file", file,
+  ], cultLibRoot);
+  assert.equal(written.ids.length, 3);
+  assert.equal(new Set(written.ids).size, 3, "two look-alike marks got distinct ids");
+  for (const id of written.ids) assert.match(id, /^[0-9a-f]{12}$/u);
+
+  // TypeScript: the id is slot 1 of each mark, read from the raw payload.
+  const store = decode(await readFile(file)) as any[];
+  const payload = decode(store[2][0][3]) as any[];
+  assert.deepEqual(payload[1].map((mark: any[]) => mark[1]), written.ids);
+
+  // Python and Rust read the same store.
+  const python = await runJsonCommand("python-deck", pythonCommand, [
+    "-c",
+    "import msgpack,json,sys;s=msgpack.unpackb(open(sys.argv[1],'rb').read(),raw=False);p=msgpack.unpackb(s[2][0][3],raw=False);print(json.dumps({'ids':[m[1] for m in p[1]]}))",
+    file,
+  ], cultcachePyRoot);
+  assert.deepEqual(python.ids, written.ids);
+  const rust = await runJsonCommand("rust-read-deck", rustInteropBinary, ["read-deck", "--file", file], cultcacheRsRoot);
+  assert.deepEqual(rust.ids, written.ids);
+
+  // TypeScript writes the ids; C# keeps them.
+  const tsIds = ["t00000000001", "t00000000002", "t00000000003"];
+  store[2][0][3] = encode(["deck:csharp", [["twin", tsIds[0]], ["twin", tsIds[1]], ["other", tsIds[2]]]]);
+  const tsFile = join(tempDir, "ts-deck.cc");
+  await writeFile(tsFile, encode(store));
+  const back = await runJsonCommand("csharp-read-deck", dotnetCommand, [
+    csharpInteropDll, "read-deck", "--file", tsFile,
+  ], cultLibRoot);
+  assert.deepEqual(back.ids, tsIds);
+});
+
 test("CultCache interop reader accepts missing compatible trailing slots and rejects mismatched slots", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
   const compatible = join(tempDir, "compatible.msgpack");
