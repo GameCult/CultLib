@@ -556,6 +556,10 @@ fn session_cap_and_expiry_use_monotonic_time() -> Result<()> {
 
 #[test]
 fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
+    use cultnet_rs::{
+        CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
+        encode_rudp_packet,
+    };
     let clock = Clock::new(60_000);
     let sink = Sink::default();
     let options = CultMeshRudpDocumentServerOptions {
@@ -566,23 +570,57 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     let target = server.local_addr()?;
     let mut real = client(target, 101)?;
     connect(&mut server, &mut [&mut real])?;
+    assert_eq!(server.packets_dropped(), 0);
+
+    let raw = UdpSocket::bind("127.0.0.1:0")?;
+    let session = |id| {
+        CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: id,
+            initial_sequence: 1,
+            resend_delay_ms: 10,
+            max_pending_reliable_packets: None,
+        })
+    };
+    let mut send_raw = |server: &mut Server, packet: &cultnet_rs::CultNetRudpPacket| -> Result<()> {
+        raw.send_to(&encode_rudp_packet(packet)?, target)?;
+        server.poll_once()?;
+        Ok(())
+    };
+
+    // A malformed frame.
+    raw.send_to(b"not a rudp packet", target)?;
+    server.poll_once()?;
+    assert_eq!(server.packets_dropped(), 1);
+
+    // Data for a session no Connect admitted.
+    let mut unadmitted = session(300);
+    unadmitted.assume_connected(0);
+    let reliable = CultNetRudpSendOptions {
+        reliable: true,
+        ..Default::default()
+    };
+    send_raw(&mut server, &unadmitted.send("schema", vec![1], reliable.clone())?)?;
+    assert_eq!(server.packets_dropped(), 2);
 
     // A moved flow re-sends Connect from a socket that never hears the Accept:
-    // each one asks the session to queue one more unacknowledged Accept.
-    let storm = UdpSocket::bind("127.0.0.1:0")?;
-    let mut storm_client = cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
-        connection_id: 102,
-        initial_sequence: 1,
-        resend_delay_ms: 10,
-        max_pending_reliable_packets: None,
-    });
-    let connect_packet = storm_client.create_connect(0, Vec::new())?;
+    // each one asks the session to queue one more unacknowledged Accept, and
+    // the fifth finds the queue full.
+    let mut stormer = session(102);
+    let connect_packet = stormer.create_connect(0, Vec::new())?;
     for _ in 0..12 {
-        storm.send_to(&cultnet_rs::encode_rudp_packet(&connect_packet)?, target)?;
-        server.poll_once()?;
+        send_raw(&mut server, &connect_packet)?;
     }
-    storm.send_to(b"not a rudp packet", target)?;
-    server.poll_once()?;
+    assert_eq!(server.packets_dropped(), 2 + 8);
+    assert_eq!(server.session_count(), 2);
+
+    // A packet its own admitted session refuses ends that session, not the loop.
+    stormer.assume_connected(0);
+    let mut poison = stormer.send("schema", vec![1], reliable)?;
+    poison.fragment_count = 2;
+    poison.fragment_id = 0;
+    send_raw(&mut server, &poison)?;
+    assert_eq!(server.packets_dropped(), 2 + 8 + 1);
+    assert_eq!(server.session_count(), 1);
 
     send(
         &mut real,
@@ -598,6 +636,5 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
         }
     }
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
-    assert!(server.packets_dropped() > 0, "the storm and the stray are counted");
     Ok(())
 }
