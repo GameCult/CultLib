@@ -58,7 +58,7 @@ Other Body facts that shape the map:
 | --- | --- | --- | --- |
 | Variant record | its own `CultRecordKey`, minted like any record; same `schemaId` as its type | created, re-overridden, rebased, removed; never converted to or from a plain record implicitly (Q1) | author through Studio or the variant write API; the cache validates |
 | Base reference | the base's key, in the record's variant slot | changed only by an explicit rebase; a base cannot be deleted while it has variants, unless the same batch rebases or removes them | author; the cache refuses a cycle, a missing base, a different concrete type, a global type |
-| Override entry | `(op, path, id, value)`; op is Set, Insert or Remove | added by editing; removed by clearing; survives base edits while its path resolves | author; the cache refuses unresolvable entries (Q2, Q4) |
+| Override entry | `(op, path, id, value)`; op is Set, Insert or Remove | added by editing; removed by clearing; survives base edits while its path resolves | author; the cache refuses entries a base edit strands (Q2); an entry whose member left the type soft-drifts with a warning (Q4 c) |
 | Member path | a sequence of `(slot, elementId)` steps; `slot` is the MessagePack `[Key]`; `elementId` is `""` unless the step enters an object-list element | a type change can invalidate it | the type's owner (slot authority); ids by the element's creator |
 | Element id | a `[CultElementId]` string member on an object-list element type; `""` means unset | minted by the cache on write when unset; copied unchanged into variants; a moved element is a new element | cache mints it; it is never retargeted |
 | Resolved view | `CultStoredDocument.Document` for a variant key | recomputed inside the hold that admits the variant, or any base on its chain | the cache only; never persisted, never written back (Q1) |
@@ -243,18 +243,23 @@ Adds:
 - **`Validate` resolves** every admitted variant and every dependent of an admitted or
   evicted base, in base-first order, against the post-batch set. It refuses, naming keys:
   a cycle; a missing base; a different concrete type; a global type; an evicted base with
-  surviving variants; an override slot missing on the type (Q4); a value that will not
-  decode; a variant whose resolved `[CultName]` equals its base's (R6); a plain `Upsert` at a
-  variant key (Q1a).
+  surviving variants; a variant whose resolved `[CultName]` equals its base's (R6); a plain
+  `Upsert` at a variant key (Q1a). **Not refused (Q4 c, operator 2026-09-29):** an override
+  naming a slot the type no longer has, or holding a value that no longer decodes into the
+  member's type, soft-drifts exactly as the same member would on a plain record under
+  `cultcache-schema-compatibility.md`. It is ignored with a warning naming the variant and
+  the member, and the variant inherits the base value. One rule, the existing soft-drift
+  path, never a variant-specific one.
 - **`Apply` re-resolves dependents** in the same hold. Each emits `Updated` and is re-indexed.
   A base change stamps no dependent `storedAt`.
 - **Header**: the store writes `v2` iff it holds a variant (Q5a) and reads `v1` and `v2`.
 - **Refusals** (Q6): `DirectoryMessagePackBackingStore` push and commit of a variant;
   `CultNetDocumentRegistry` row building for a variant; `CultMesh.ReadSingleFileDocument` of
   a variant key.
-- **Contracts**: the variant record section in `cultcache-persistence-format.md`; the Q4
-  exception in `cultcache-schema-compatibility.md`; a "variants: C# resolves; others refuse"
-  row in `runtime-parity-scope.md`.
+- **Contracts**: the variant record section in `cultcache-persistence-format.md`; one
+  sentence in `cultcache-schema-compatibility.md` saying overrides soft-drift like members
+  (Q4 c, no exception); a "variants: C# resolves; others refuse" row in
+  `runtime-parity-scope.md`.
 
 Authority map:
 - Owner: `CultCache.Validate`/`Apply` owns the resolved view.
@@ -293,11 +298,13 @@ projects, Caching.Tests, the Networking test filter, the interop peer.
 ### C2. C# element identity and nested paths (Set, Insert, Remove)
 
 Adds:
-- **`[CultElementId]`** (a string member) and **`[CultVariants]`** (a document-type opt-in,
-  Q3b). The registry refuses an opted-in type with an id-less object element type reachable
-  through a list, union bases included.
-- **Minting**: on write, the cache mints ids for unset ids in opted-in types, and refuses a
-  duplicate id within one list.
+- **`[CultElementId]`** (a string member). **Ids everywhere, not opt-in (Q3, operator
+  2026-09-29): there is no `[CultVariants]` attribute.** The C# registry requires an id member
+  on every object element type reachable through a list in any registered document type,
+  union bases included, and refuses a type that lacks one.
+- **Minting**: on write, the cache mints ids for unset ids in every type, and refuses a
+  duplicate id within one list. A store written before ids existed loads, and its ids are
+  minted on its first write (minted on load, per the operator's rollout ruling).
 - **Path steps below top level.**
 - **Insert** anchored after an id, where `""` means the head. An inserted run sits
   immediately after its anchor and before base elements added there later.
@@ -306,7 +313,12 @@ Adds:
 - **Q2a refusal**: a base commit that orphans an override is refused.
 - **Q7**: whole-member Set for dictionaries, scalar lists and arrays.
 - **`CultCache.MintElementIds()`**: the one-shot rewrite for existing stores (ruling 1). It
-  upserts every record of opted-in types through the normal path.
+  upserts every record that has an unset id through the normal path.
+- **The consumer sweep (Q3 rollout).** About 28 consumers carry list-element types, and each
+  needs an id member before it can take the CultLib that requires one. C2 ships the
+  requirement. Self schedules the per-repo sweep, one small type edit per consumer, before
+  those consumers bump. C2 lists the element types it finds per consumer, as data for that
+  sweep.
 
 Keeps: the C1 format unchanged. C2 fills path shapes that C1 refused.
 
@@ -317,8 +329,9 @@ Verification:
   variant, path and id.
 - A Set on a removed element is refused.
 - Minting is idempotent.
-- An opted-in type without ids is refused; a type that has not opted in is untouched. This is
-  the negative for Q3b's blast radius.
+- A registered type with an id-less list element type is refused, naming the type and member.
+- A store written before ids loads, and its ids are minted exactly once on first write
+  (idempotent).
 - A C#-written nested-override fixture joins `contracts/cultcache/`.
 
 Command: `dotnet test tests/GameCult.Caching.Tests`.
@@ -359,7 +372,7 @@ checked by the operator in the editor.
 ### C4. Aetheria adoption (Aetheria repo, its own cut, after the release)
 
 - Bump the package to `v1.5.0`.
-- Add `[CultVariants]` to `HullData`, `EquippableItemData`'s concrete types and `ConsumableItemData`.
+- Add `[CultElementId]` to every list-element type Aetheria's documents carry (ids everywhere, Q3). There is no per-type opt-in.
 - Add `[CultElementId]` to `BehaviorData` (base) and `HardpointData`.
 - Run `MintElementIds` once over `GameData/Aetheria.cc`.
 - AetherDb migrations skip variants or use the variant API (Q1a).
