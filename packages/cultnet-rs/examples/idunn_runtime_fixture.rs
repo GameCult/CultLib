@@ -11,22 +11,48 @@
 //! disagreement). Ed25519 is deterministic, so the TypeScript signer must
 //! reproduce each vector byte for byte from the same fields.
 //!
-//! The `service-stateful` set is the lease-bound shape: Expected carries a state
+//! A `stateful` set is the lease-bound shape: Expected carries a state
 //! lineage and requires a write lease, and Rust issues `lease.cc` naming the
 //! warming vector's digest. Its warming vector is sequence 1; the active and
 //! degraded vectors are sequence 2 and bind to that lease. Two further leases are
 //! deliberately wrong (`lease-other-warming.cc` names a different warming digest,
-//! `lease-other-target.cc` names another target) for the TypeScript refusal tests.
+//! `lease-other-target.cc` names another target) for refusal tests.
 //!
 //! Linux only: the provider identity is bound to `/etc/machine-id`, and the
 //! generated `machine-id` file records the value the identities were bound to.
 //!
-//! Usage: idunn_runtime_fixture <out-dir>
+//! Usage: idunn_runtime_fixture <out-dir> <spec>...
+//!
+//! The specification is command-line flags. `@<file>` splices in a response
+//! file: one flag per line, `--flag value` split at the first whitespace, blank
+//! lines and `#` lines ignored. CultLib's own sets are
+//! `packages/cultnet-ts/test/fixtures/idunn-runtime/fixture.args`.
+//!
+//! Global flags:
+//!   --source-repository <repo>        Expected.source_repository (default github.com/GameCult/Example)
+//!   --detail <text>                   presence detail (default route-observation:route-challenge-1)
+//!
+//! `--set <dir>` opens a fixture set written to `<out-dir>/<dir>`; the flags
+//! below apply to the set most recently opened:
+//!   --target <name>                   required
+//!   --transport <t> --stable <endpoint> --candidate <endpoint>   required: the route
+//!   --capability <name>               default `<target>.api`
+//!   --schema <schema>                 default `<capability>.v1`
+//!   --health-contract <contract>      default `<target>.runtime-health`
+//!   --minimum-capacity <n>            default 1; above 1 also writes presence-active-below-minimum.bin
+//!   --stateful                        state lineage, write lease and lease vectors
+//!   --state-schema-generation <id>    stateful only; default state-v1
+//!   --lease-other-target <name>       stateful only; default the first other set's target
+//!   --dependency k=v,k=v,...          repeatable; keys kind, capability, schema, provider,
+//!                                     endpoint (required), compatibility (v1), capacity (1),
+//!                                     startup (before-promotion), authority (managed-incarnation),
+//!                                     projection (one hex digit the digest is filled with, 5)
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use cultcache_rs::{
     CacheBackingStore, CultCacheEnvelope, DatabaseEntry, SingleFileMessagePackBackingStore,
 };
@@ -46,67 +72,138 @@ use cultnet_rs::{
 const OBSERVED_AT: u64 = 1_790_000_000_000;
 const ISSUED_AT: u64 = OBSERVED_AT - 5_000;
 const SEQUENCE: u64 = 1;
-const DETAIL: &str = "route-observation:route-challenge-1";
 const STORED_AT: &str = "2026-01-01T00:00:00.000Z";
 
-struct Set {
-    dir: &'static str,
-    target: &'static str,
-    transport: &'static str,
-    stable: &'static str,
-    candidate: &'static str,
-    minimum_capacity: u32,
-    odin_dependency: bool,
-    stateful: bool,
+struct Spec {
+    source_repository: String,
+    detail: String,
+    sets: Vec<Set>,
 }
 
-const SETS: [Set; 4] = [
-    Set {
-        dir: "web",
-        target: "streampixels-web",
-        transport: "http",
-        stable: "http://127.0.0.1:8830",
-        candidate: "http://127.0.0.1:18830",
-        minimum_capacity: 1,
-        odin_dependency: false,
-        stateful: false,
-    },
-    Set {
-        dir: "service",
-        target: "streampixels-service",
-        transport: "tcp",
-        stable: "tcp://127.0.0.1:8831",
-        candidate: "tcp://127.0.0.1:18831",
-        minimum_capacity: 2,
-        odin_dependency: true,
-        stateful: false,
-    },
-    Set {
-        dir: "service-stateful",
-        target: "streampixels-service",
-        transport: "tcp",
-        stable: "tcp://127.0.0.1:8833",
-        candidate: "tcp://127.0.0.1:18833",
-        minimum_capacity: 2,
-        odin_dependency: true,
-        stateful: true,
-    },
-    Set {
-        dir: "rudp-route",
-        target: "streampixels-rudp",
-        transport: "rudp",
-        stable: "rudp://127.0.0.1:8832",
-        candidate: "rudp://127.0.0.1:18832",
-        minimum_capacity: 1,
-        odin_dependency: false,
-        stateful: false,
-    },
-];
+#[derive(Default)]
+struct Set {
+    dir: String,
+    target: String,
+    transport: String,
+    stable: String,
+    candidate: String,
+    capability: Option<String>,
+    schema: Option<String>,
+    health_contract: Option<String>,
+    minimum_capacity: u32,
+    stateful: bool,
+    state_schema_generation: Option<String>,
+    lease_other_target: Option<String>,
+    dependencies: Vec<IdunnExpectedDependency>,
+}
+
+fn expand(args: impl Iterator<Item = String>) -> Result<Vec<String>> {
+    let mut flat = Vec::new();
+    for arg in args {
+        let Some(file) = arg.strip_prefix('@') else {
+            flat.push(arg);
+            continue;
+        };
+        for line in fs::read_to_string(file).with_context(|| format!("reading {file}"))?.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            match line.split_once(char::is_whitespace) {
+                Some((flag, value)) => flat.extend([flag.to_string(), value.trim().to_string()]),
+                None => flat.push(line.to_string()),
+            }
+        }
+    }
+    Ok(flat)
+}
+
+fn dependency(text: &str) -> Result<IdunnExpectedDependency> {
+    let mut fields = BTreeMap::new();
+    for pair in text.split(',') {
+        let (key, value) = pair
+            .split_once('=')
+            .with_context(|| format!("dependency field `{pair}` is not key=value"))?;
+        ensure!(fields.insert(key, value).is_none(), "dependency key `{key}` repeated");
+    }
+    let mut take = |key: &str, default: Option<&str>| -> Result<String> {
+        match (fields.remove(key), default) {
+            (Some(value), _) => Ok(value.to_string()),
+            (None, Some(default)) => Ok(default.to_string()),
+            (None, None) => bail!("dependency needs `{key}`"),
+        }
+    };
+    let dependency = IdunnExpectedDependency {
+        kind: take("kind", None)?,
+        capability: take("capability", None)?,
+        schema: take("schema", None)?,
+        compatibility: take("compatibility", Some("v1"))?,
+        minimum_capacity: take("capacity", Some("1"))?.parse()?,
+        startup: take("startup", Some("before-promotion"))?,
+        provider_id: Some(take("provider", None)?),
+        provider_authority: Some(take("authority", Some("managed-incarnation"))?),
+        provider_expected_projection_sha256: Some(digest(
+            take("projection", Some("5"))?.chars().next().context("empty projection")?,
+        )),
+        provider_endpoint: Some(take("endpoint", None)?),
+    };
+    ensure!(fields.is_empty(), "unknown dependency keys {:?}", fields.keys().collect::<Vec<_>>());
+    Ok(dependency)
+}
+
+fn parse(args: impl Iterator<Item = String>) -> Result<Spec> {
+    let mut spec = Spec {
+        source_repository: "github.com/GameCult/Example".into(),
+        detail: "route-observation:route-challenge-1".into(),
+        sets: Vec::new(),
+    };
+    let mut args = expand(args)?.into_iter();
+    while let Some(flag) = args.next() {
+        let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
+        match flag.as_str() {
+            "--source-repository" => spec.source_repository = value()?,
+            "--detail" => spec.detail = value()?,
+            "--set" => spec.sets.push(Set { dir: value()?, minimum_capacity: 1, ..Set::default() }),
+            _ => {
+                let set = spec.sets.last_mut().with_context(|| format!("{flag} before any --set"))?;
+                match flag.as_str() {
+                    "--target" => set.target = value()?,
+                    "--transport" => set.transport = value()?,
+                    "--stable" => set.stable = value()?,
+                    "--candidate" => set.candidate = value()?,
+                    "--capability" => set.capability = Some(value()?),
+                    "--schema" => set.schema = Some(value()?),
+                    "--health-contract" => set.health_contract = Some(value()?),
+                    "--minimum-capacity" => set.minimum_capacity = value()?.parse()?,
+                    "--stateful" => set.stateful = true,
+                    "--state-schema-generation" => set.state_schema_generation = Some(value()?),
+                    "--lease-other-target" => set.lease_other_target = Some(value()?),
+                    "--dependency" => set.dependencies.push(dependency(&value()?)?),
+                    other => bail!("unknown flag {other}"),
+                }
+            }
+        }
+    }
+    ensure!(!spec.sets.is_empty(), "no --set given");
+    for set in &spec.sets {
+        for (name, field) in [
+            ("target", &set.target),
+            ("transport", &set.transport),
+            ("stable", &set.stable),
+            ("candidate", &set.candidate),
+        ] {
+            ensure!(!field.is_empty(), "set {} needs --{name}", set.dir);
+        }
+    }
+    Ok(spec)
+}
 
 fn main() -> Result<()> {
-    let Some(out) = std::env::args().nth(1) else {
-        bail!("usage: idunn_runtime_fixture <out-dir>");
+    let mut args = std::env::args().skip(1);
+    let Some(out) = args.next() else {
+        bail!("usage: idunn_runtime_fixture <out-dir> <spec>... (see the file header)");
     };
+    let spec = parse(args)?;
     let machine_id = fs::read_to_string("/etc/machine-id")?;
     fs::create_dir_all(&out)?;
     fs::write(Path::new(&out).join("machine-id"), machine_id.trim())?;
@@ -116,8 +213,8 @@ fn main() -> Result<()> {
     let idunn_anchor = idunn.trust_anchor()?;
     fs::remove_file(Path::new(&out).join("idunn-identity.private"))?;
     let _ = fs::remove_file(Path::new(&out).join("idunn-identity.private.lock"));
-    for set in &SETS {
-        build(Path::new(&out).join(set.dir).as_path(), set, &idunn, &idunn_anchor)?;
+    for set in &spec.sets {
+        build(Path::new(&out).join(&set.dir).as_path(), &spec, set, &idunn, &idunn_anchor)?;
     }
     Ok(())
 }
@@ -128,6 +225,7 @@ fn digest(byte: char) -> String {
 
 fn build(
     dir: &Path,
+    spec: &Spec,
     set: &Set,
     idunn: &cultnet_rs::ServiceIdentitySigner<IdunnServiceIdentity>,
     idunn_anchor: &cultnet_rs::ServiceIdentityTrustAnchor,
@@ -138,29 +236,29 @@ fn build(
     let provider_anchor = provider.trust_anchor()?;
     let _ = fs::remove_file(dir.join("provider-identity.credential.lock"));
 
-    let capability = format!("{}.api", set.target);
-    let capability_schema = format!("{}.api.v1", set.target);
+    let capability = set.capability.clone().unwrap_or_else(|| format!("{}.api", set.target));
+    let capability_schema = set.schema.clone().unwrap_or_else(|| format!("{capability}.v1"));
     let expected = IdunnExpectedIncarnationRecord {
         schema_version: IDUNN_EXPECTED_INCARNATION_SCHEMA.into(),
-        target: set.target.into(),
+        target: set.target.clone(),
         plan_id: digest('1'),
         incarnation_id: format!("{}/incarnation-1", set.target),
         sealed_release_id: digest('2'),
-        source_repository: "github.com/GameCult/StreamPixels".into(),
+        source_repository: spec.source_repository.clone(),
         source_revision: "a".repeat(40),
         recipe_sha256: digest('3'),
         runtime_id: format!("{}-yggdrasil", set.target),
         expected_signer_identity_id: provider_anchor.identity_id.clone(),
-        health_contract: format!("{}.runtime-health", set.target),
+        health_contract: set.health_contract.clone().unwrap_or_else(|| format!("{}.runtime-health", set.target)),
         artifact_sha256: digest('4'),
-        state_schema_generation: set.stateful.then(|| "streampixels-state-v1".to_string()),
+        state_schema_generation: set.stateful.then(|| set.state_schema_generation.clone().unwrap_or_else(|| "state-v1".into())),
         state_contract_sha256: set.stateful.then(|| digest('7')),
         write_lease_required: set.stateful,
         route: Some(IdunnExpectedRoute {
             route_id: format!("{}-route", set.target),
-            transport: set.transport.into(),
-            stable_endpoint: set.stable.into(),
-            candidate_endpoint: set.candidate.into(),
+            transport: set.transport.clone(),
+            stable_endpoint: set.stable.clone(),
+            candidate_endpoint: set.candidate.clone(),
         }),
         capabilities: vec![IdunnExpectedCapability {
             capability: capability.clone(),
@@ -168,22 +266,7 @@ fn build(
             compatibility: "v1".into(),
             minimum_capacity: set.minimum_capacity,
         }],
-        dependencies: if set.odin_dependency {
-            vec![IdunnExpectedDependency {
-                kind: "shared-infrastructure".into(),
-                capability: "odin.verse-rendezvous".into(),
-                schema: "odin.verse-topology.v1".into(),
-                compatibility: "v1".into(),
-                minimum_capacity: 1,
-                startup: "before-promotion".into(),
-                provider_id: Some("odin".into()),
-                provider_authority: Some("managed-incarnation".into()),
-                provider_expected_projection_sha256: Some(digest('5')),
-                provider_endpoint: Some("rudp://127.0.0.1:47871".into()),
-            }]
-        } else {
-            Vec::new()
-        },
+        dependencies: set.dependencies.clone(),
     };
     expected.validate()?;
 
@@ -230,7 +313,7 @@ fn build(
             state_contract_sha256: expected.state_contract_sha256.clone(),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: activation.runtime_instance_id.clone(),
-            bound_endpoint: Some(set.candidate.into()),
+            bound_endpoint: Some(set.candidate.clone()),
             capabilities: vec![GameCultRuntimeCapability {
                 capability: capability.clone(),
                 schema: capability_schema.clone(),
@@ -239,7 +322,7 @@ fn build(
             }],
             health_contract: expected.health_contract.clone(),
             state: state.into(),
-            detail: DETAIL.into(),
+            detail: spec.detail.clone(),
             write_lease_sha256,
             signer_identity_id: provider_anchor.identity_id.clone(),
             publisher_sequence: sequence,
@@ -316,9 +399,12 @@ fn build(
         lease_epoch: 1,
         issued_at_unix_millis: OBSERVED_AT - 1_000,
     };
-    let lease = lease_for(set.target, &warming_sha256);
-    let other_warming = lease_for(set.target, &digest('d'));
-    let other_target = lease_for("streampixels-web", &warming_sha256);
+    let other_target_name = set.lease_other_target.clone().unwrap_or_else(|| {
+        spec.sets.iter().map(|other| other.target.clone()).find(|target| *target != set.target).unwrap_or_else(|| format!("{}-other", set.target))
+    });
+    let lease = lease_for(&set.target, &warming_sha256);
+    let other_warming = lease_for(&set.target, &digest('d'));
+    let other_target = lease_for(&other_target_name, &warming_sha256);
     for (name, record) in [
         ("lease.cc", &lease),
         ("lease-other-warming.cc", &other_warming),
