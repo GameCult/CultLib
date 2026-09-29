@@ -503,6 +503,92 @@ CultCellular cultmath_cellular(float3 p)
     return result;
 }
 
+// Invariant 8's struct return shape for cultmath_phacelle, compared field by field and bit for bit
+// against CultMath.CultPhasor, same field order.
+struct CultPhasor
+{
+    float4 cos;
+    float4 sin;
+};
+
+// Johansen's Phacelle noise on 3D cells. See math.phacelle's comment (math.cs) for the stripe wave
+// vector, the weight, the normalization, the exact gradient and why the prune is exact. Mirrors
+// the C# body operation for operation; the C#-only internal overload that switches the prune off
+// has no shader twin.
+CultPhasor cultmath_phacelle(float3 p, float3 side, float offset, float normalization)
+{
+    float3 cell = floor(p);
+    float3 local = p - cell;
+    float phaseOffset = offset * CULTMATH_TAU;
+    float sumW = 0.0;
+    float sumCos = 0.0;
+    float sumSin = 0.0;
+    float3 gradW = float3(0.0, 0.0, 0.0);
+    float3 gradCos = float3(0.0, 0.0, 0.0);
+    float3 gradSin = float3(0.0, 0.0, 0.0);
+
+    for (int dz = -1; dz <= 2; dz++)
+    {
+        float gz = max(0.0, abs(local.z - (float)dz) - 0.5);
+        for (int dy = -1; dy <= 2; dy++)
+        {
+            float gy = max(0.0, abs(local.y - (float)dy) - 0.5);
+            for (int dx = -1; dx <= 2; dx++)
+            {
+                float gx = max(0.0, abs(local.x - (float)dx) - 0.5);
+                if (gx * gx + gy * gy + gz * gz >= 2.25)
+                    continue;
+
+                float3 gridStep = float3(dx, dy, dz);
+                int3 hash = cultmath_pcg3d(int3(cell + gridStep));
+                float3 jitter = float3(
+                    ((uint)hash.x >> 8) * (1.0 / 16777216.0) - 0.5,
+                    ((uint)hash.y >> 8) * (1.0 / 16777216.0) - 0.5,
+                    ((uint)hash.z >> 8) * (1.0 / 16777216.0) - 0.5);
+                float3 v = local - gridStep - jitter;
+                float falloff = exp(-2.0 * dot(v, v));
+                float w = max(0.0, falloff - 0.01111);
+                float3 dw = w > 0.0 ? (-4.0 * falloff) * v : float3(0.0, 0.0, 0.0);
+                float phase = dot(v, side) + phaseOffset;
+                float c = cos(phase);
+                float s = sin(phase);
+
+                sumW += w;
+                sumCos += w * c;
+                sumSin += w * s;
+                gradW += dw;
+                gradCos += dw * c - (w * s) * side;
+                gradSin += dw * s + (w * c) * side;
+            }
+        }
+    }
+
+    float invW = 1.0 / sumW;
+    float rawCos = sumCos * invW;
+    float rawSin = sumSin * invW;
+    float3 gradRawCos = (gradCos - rawCos * gradW) * invW;
+    float3 gradRawSin = (gradSin - rawSin * gradW) * invW;
+    float rawLength = sqrt(rawCos * rawCos + rawSin * rawSin);
+    float floorLength = 1.0 - normalization;
+
+    CultPhasor result;
+    if (rawLength > floorLength)
+    {
+        float outCos = rawCos / rawLength;
+        float outSin = rawSin / rawLength;
+        float3 gradLength = (rawCos * gradRawCos + rawSin * gradRawSin) / rawLength;
+        result.cos = float4((gradRawCos - outCos * gradLength) / rawLength, outCos);
+        result.sin = float4((gradRawSin - outSin * gradLength) / rawLength, outSin);
+    }
+    else
+    {
+        result.cos = float4(gradRawCos / floorLength, rawCos / floorLength);
+        result.sin = float4(gradRawSin / floorLength, rawSin / floorLength);
+    }
+
+    return result;
+}
+
 float cultmath_value_noise(float2 position)
 {
     float2 cell = floor(position);
