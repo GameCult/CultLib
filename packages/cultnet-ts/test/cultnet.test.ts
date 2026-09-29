@@ -1462,7 +1462,7 @@ test("a lost packet holds the sender 1023 sequences ahead and is still delivered
   const delivered = receiver.receive(retransmit, 1000).delivered;
   assert.deepEqual(delivered.map((frame) => frame.sequence), [g.sequence]);
 
-  const promoted = sender.receive(receiver.createAckForReceived(g.sequence), 1001).readyToSend;
+  const promoted = sender.receive(receiver.createAckForReceived(g.sequence), 1001).readyToSend ?? [];
   assert.equal(promoted[0]!.sequence, g.sequence + 1024);
 });
 
@@ -1485,7 +1485,7 @@ test("payload above the lowest unacked sequence is bounded by 4 MiB", () => {
   assert.equal(sender.queuedReliablePacketCount, 2);
 
   // Acking g moves the floor up one packet: exactly one MiB more fits.
-  const promoted = sender.receive(flowAck(g.sequence), 1).readyToSend;
+  const promoted = sender.receive(flowAck(g.sequence), 1).readyToSend ?? [];
   assert.deepEqual(sequencesOf(promoted), [g.sequence + 5]);
   assert.equal(sender.queuedReliablePacketCount, 1);
 });
@@ -1495,7 +1495,7 @@ test("a packet larger than the window goes out alone and waits behind anything u
   const sender = connectedFlowSession(1);
   const g = flowSend(sender, 1)[0]!;
   assert.equal(flowSend(sender, 5 * MIB).length, 0);
-  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend), [g.sequence + 1]);
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend ?? []), [g.sequence + 1]);
 });
 
 test("a small packet does not overtake a queued large one", () => {
@@ -1508,7 +1508,7 @@ test("a small packet does not overtake a queued large one", () => {
   assert.equal(sender.queuedReliablePacketCount, 1);
   // One byte would fit above g, but the 2 MiB packet is ahead of it.
   assert.equal(flowSend(sender, 1).length, 0);
-  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend), [g.sequence + 2, g.sequence + 3]);
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend ?? []), [g.sequence + 2, g.sequence + 3]);
 });
 
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {
