@@ -15,10 +15,7 @@ import {
   type RuntimePresenceHealth,
 } from "./runtime-presence-health";
 import { truncateUtf8Bytes } from "./utf8-bound";
-import { encodeCultNetMessageForWire, parseCultNetMessage, type CultNetRawDocumentRecord, type CultNetSnapshotRequestMessage } from "./contracts";
-import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
-import type { CultNetRudpPacket } from "./rudp";
-import dgram from "node:dgram";
+import type { CultNetRawDocumentRecord, CultNetSnapshotRequestMessage } from "./contracts";
 
 export const IDUNN_EXPECTED_INCARNATION_SCHEMA = "idunn.expected_incarnation.v2";
 export const IDUNN_RUNTIME_ACTIVATION_SCHEMA = "idunn.runtime_activation.v2";
@@ -77,33 +74,50 @@ export type IdunnRuntimeAuthority = {
   processWriteLeasePath?: string;
 };
 
-export type IdunnRuntimePresencePublisher = {
+export type SignedRuntimePresence = {
+  document: CultNetRawDocumentRecord;
+  canonicalSha256: string;
+};
+
+/**
+ * Signs this launch's runtime presence and answers Idunn's route challenge. It
+ * owns no network: Odin publication, if a service wants it, is a separate
+ * consumer of `sign`.
+ */
+export type IdunnRuntimeSigner = {
+  readonly authority: IdunnRuntimeAuthority;
   readonly runtimeId: string;
   readonly runtimeInstanceId: string;
   readonly requiresWriteLease: boolean;
-  latestPresenceDocument(): CultNetRawDocumentRecord | null;
-  publishRouteObservation(request: CultNetSnapshotRequestMessage): Promise<CultNetRawDocumentRecord>;
-  publish(state: RuntimePresenceHealth["state"], detail: string): Promise<string>;
-  waitForWriteLease(options?: { pollIntervalMs?: number; signal?: AbortSignal }): Promise<string>;
-  assertWriteLease(): Promise<string>;
+  /** Signs one presence document. Every call takes the next publisher sequence. */
+  sign(state: RuntimePresenceHealth["state"], detail: string): SignedRuntimePresence;
+  /**
+   * Answers an Idunn route challenge from local authority alone: signs a fresh
+   * presence in the given state, with no network. The caller supplies the
+   * app's current health (`warming` until first healthy).
+   */
+  answerRouteObservation(request: CultNetSnapshotRequestMessage, state: RuntimePresenceHealth["state"]): CultNetRawDocumentRecord;
+  /** Reads Idunn's write lease and checks it names this incarnation and a warming proof this process published. */
+  assertWriteLease(): string;
+  /** Marks a warming presence as accepted by its consumer, making it a valid lease target. */
+  recordPublishedWarming(canonicalSha256: string): void;
 };
 
-export type IdunnRuntimePresencePublisherOptions = {
+export type IdunnRuntimeSignerOptions = {
   authority: IdunnRuntimeAuthority;
-  endpoint: string;
-  healthContract: string;
   capabilities: RuntimePresenceHealth["capabilities"];
 };
 
 /**
  * Loads the root-provisioned Idunn bundle and parent-only signing descriptors.
  * The expected record and activation witness are accepted only when their
- * exact positional contracts and mutual incarnation binding agree.
+ * exact positional contracts and mutual incarnation binding agree. Nothing
+ * here reads Odin: whether a target talks to Odin is decided by the
+ * publisher a service chooses to create.
  */
 export function loadIdunnRuntimeAuthorityFromEnvironment(
   target: string,
   healthContract: string,
-  odinEndpoint: string,
 ): IdunnRuntimeAuthority {
   const bundle = requiredEnvironment(IDUNN_RUNTIME_BUNDLE_ENVIRONMENT);
   const expected = readAuthorityRecord(path.join(bundle, "expected.cc"), "idunn.expected_incarnation", IDUNN_EXPECTED_INCARNATION_SCHEMA);
@@ -112,11 +126,6 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
   const activationValue = decodeActivation(activation.payload);
   if (expectedValue.target !== target || expectedValue.healthContract !== healthContract) {
     throw new Error("Idunn Expected target or health contract does not match this runtime.");
-  }
-  const odinDependency = expectedValue.dependencies.find((dependency) => dependency.kind === "shared-infrastructure"
-    && dependency.capability === "odin.verse-rendezvous");
-  if (!odinDependency || normalizeRudpEndpoint(odinDependency.providerEndpoint ?? "") !== normalizeRudpEndpoint(odinEndpoint)) {
-    throw new Error("Configured Odin endpoint does not match Idunn Expected dependency authority.");
   }
   if (activationValue.expectedProjectionSha256 !== expectedValue.canonicalSha256
     || activationValue.runtimeId !== expectedValue.runtimeId) {
@@ -167,6 +176,7 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
   return authority;
 }
 
+
 /**
  * Signs the fixed Idunn v2 positional runtime-presence contract with the
  * provider identity and this launch's Idunn-issued activation key.
@@ -205,42 +215,26 @@ export function signIdunnRuntimePresence(
   };
 }
 
-export function createIdunnRuntimePresencePublisher(
-  options: IdunnRuntimePresencePublisherOptions,
-): IdunnRuntimePresencePublisher {
-  const endpoint = parseRudpEndpoint(options.endpoint);
-  const expected = options.authority.expected;
-  if (options.healthContract !== expected.healthContract) throw new Error("Runtime presence contract differs from Expected.");
-  if (options.authority.boundEndpoint !== expected.route?.candidateEndpoint) throw new Error("Runtime presence bind differs from Expected.");
-  for (const required of expected.capabilities) {
-    if (!options.capabilities.some((actual) => actual.capability === required.capability
-      && actual.schema === required.schema
-      && actual.compatibility === required.compatibility
-      && actual.capacity >= required.minimumCapacity)) {
-      throw new Error(`Runtime does not provide Expected capability ${required.capability}/${required.schema}.`);
-    }
-  }
-  const connectionId = 0x0d1d0002;
+export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): IdunnRuntimeSigner {
+  const { authority } = options;
+  const expected = authority.expected;
   let sequence = 0;
-  let latestLeaseSha256: string | null = null;
-  let latestPresenceDocument: CultNetRawDocumentRecord | null = null;
   const recentWarmingProofs: string[] = [];
 
-  const assertWriteLease = async () => {
+  const assertWriteLease = () => {
     if (!expected.writeLeaseRequired) return "";
-    const leasePath = options.authority.processWriteLeasePath;
+    const leasePath = authority.processWriteLeasePath;
     if (!leasePath) throw new Error("Idunn process write lease is required but no lease path is configured.");
     const record = readAuthorityRecord(leasePath, "idunn.process_write_lease", IDUNN_PROCESS_WRITE_LEASE_SCHEMA);
     const lease = decodeArray(record.payload, 14, "Idunn process write lease");
-    assertLeaseMatches(lease, options.authority, recentWarmingProofs);
-    latestLeaseSha256 = prefixedSha256(Buffer.from(encode(lease)));
-    return latestLeaseSha256;
+    assertLeaseMatches(lease, authority, recentWarmingProofs);
+    return prefixedSha256(Buffer.from(encode(lease)));
   };
 
-  const publish = async (state: RuntimePresenceHealth["state"], detail: string) => {
-    const writeLeaseSha256 = state === "warming" || !expected.writeLeaseRequired ? null : await assertWriteLease();
+  const sign = (state: RuntimePresenceHealth["state"], detail: string): SignedRuntimePresence => {
+    const writeLeaseSha256 = state === "warming" || !expected.writeLeaseRequired ? null : assertWriteLease();
     sequence += 1;
-    const signed = signIdunnRuntimePresence(options.authority, {
+    const signed = signIdunnRuntimePresence(authority, {
       capabilities: options.capabilities,
       state,
       detail: truncateUtf8Bytes(detail, RUNTIME_PRESENCE_DETAIL_MAX_BYTES),
@@ -248,44 +242,28 @@ export function createIdunnRuntimePresencePublisher(
       publisherSequence: sequence,
       observedAtUnixMillis: Date.now(),
     });
-    const document: CultNetRawDocumentRecord = {
-      schemaId: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
-      recordKey: expected.target,
-      storedAt: new Date().toISOString(),
-      payloadEncoding: "messagepack",
-      payload: new Uint8Array(signed.payload),
-      sourceRuntimeId: expected.runtimeId,
-      sourceRole: "runtime-presence-health-publisher",
-      tags: ["cultnet.transport.rudp.v0", "runtime-presence"],
-    };
-    await publishDocument(endpoint, connectionId, {
-      schemaVersion: "cultnet.document_put_raw.v0",
-      messageId: `runtime-presence:${expected.target}:${options.authority.activation.runtimeInstanceId}:${sequence}`,
-      document,
-    });
-    latestPresenceDocument = document;
-    if (state === "warming") {
-      recentWarmingProofs.push(signed.canonicalSha256);
-      if (recentWarmingProofs.length > MAX_RECENT_WARMING_PROOFS) recentWarmingProofs.shift();
-    }
-    return signed.canonicalSha256;
-  };
-
-  const copyLatestPresenceDocument = (): CultNetRawDocumentRecord | null => {
-    if (!latestPresenceDocument) return null;
     return {
-      ...latestPresenceDocument,
-      payload: new Uint8Array(latestPresenceDocument.payload),
-      ...(latestPresenceDocument.tags ? { tags: [...latestPresenceDocument.tags] } : {}),
+      canonicalSha256: signed.canonicalSha256,
+      document: {
+        schemaId: GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA,
+        recordKey: expected.target,
+        storedAt: new Date().toISOString(),
+        payloadEncoding: "messagepack",
+        payload: new Uint8Array(signed.payload),
+        sourceRuntimeId: expected.runtimeId,
+        sourceRole: "runtime-presence-health-publisher",
+        tags: ["cultnet.transport.rudp.v0", "runtime-presence"],
+      },
     };
   };
 
   return {
+    authority,
     runtimeId: expected.runtimeId,
-    runtimeInstanceId: options.authority.activation.runtimeInstanceId,
+    runtimeInstanceId: authority.activation.runtimeInstanceId,
     requiresWriteLease: expected.writeLeaseRequired,
-    latestPresenceDocument: copyLatestPresenceDocument,
-    async publishRouteObservation(request) {
+    sign,
+    answerRouteObservation(request, state) {
       if (!request.messageId || request.messageId.trim() !== request.messageId) throw new Error("Idunn route observation requires a message id.");
       if ((request.schemaIds && !request.schemaIds.includes(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA))
         || (request.recordKeys && !request.recordKeys.includes(expected.target))
@@ -293,157 +271,14 @@ export function createIdunnRuntimePresencePublisher(
         || request.shardEpoch !== undefined) {
         throw new Error("Idunn route observation does not request this runtime presence document.");
       }
-      await publish("active", `route-observation:${request.messageId}`);
-      const document = copyLatestPresenceDocument();
-      if (!document) throw new Error("Idunn route observation was published without a presence document.");
-      return document;
-    },
-    publish,
-    async waitForWriteLease({ pollIntervalMs = 5000, signal } = {}) {
-      if (!expected.writeLeaseRequired) return "";
-      let warmingSequence = 0;
-      while (!signal?.aborted) {
-        await publish("warming", "waiting-for-process-write-lease");
-        warmingSequence += 1;
-        try {
-          return await assertWriteLease();
-        } catch (error) {
-          if (warmingSequence > 720) throw new Error("Timed out waiting for Idunn process write lease.", { cause: error });
-        }
-        await abortableDelay(pollIntervalMs, signal);
-      }
-      throw signal?.reason ?? new Error("Aborted while waiting for Idunn process write lease.");
+      return sign(state, `route-observation:${request.messageId}`).document;
     },
     assertWriteLease,
-  };
-}
-
-async function publishDocument(
-  endpoint: { host: string; port: number },
-  connectionId: number,
-  message: Record<string, unknown>,
-): Promise<void> {
-  const socket = dgram.createSocket(endpoint.host.includes(":") ? "udp6" : "udp4");
-  await new Promise<void>((resolve, reject) => {
-    socket.once("error", reject);
-    socket.bind(0, endpoint.host.includes(":") ? "::" : "0.0.0.0", () => {
-      socket.off("error", reject);
-      resolve();
-    });
-  });
-  const receiver = receivePackets(socket);
-  const session = new CultNetRudpSession({ connectionId, initialSequence: 1, resendDelayMs: 100 });
-  try {
-    await sendPacket(socket, endpoint, session.createConnect(Date.now(), new Uint8Array()));
-    await receiveUntil(receiver, session, endpoint, (packet) => packet.packetType === "accept", 5000);
-    const wirePayload = encode(encodeCultNetMessageForWire(message as never, "cultnet.schema.v0"));
-    const packets = session.sendMany("schema", wirePayload, { reliable: true, ordered: true, nowMs: Date.now() });
-    for (const packet of packets) await sendPacket(socket, endpoint, packet);
-    await receiveUntil(
-      receiver,
-      session,
-      endpoint,
-      () => session.outstandingReliablePacketCount === 0,
-      2000,
-      (frame) => {
-        if (frame.channelId !== "schema") return;
-        const response = parseCultNetMessage(decode(frame.payload));
-        if (response.schemaVersion === "cultnet.error.v0") {
-          throw new Error(`Odin rejected runtime presence: ${response.error}`);
-        }
-      },
-    );
-  } finally {
-    receiver.close();
-    socket.close();
-  }
-}
-
-type PacketReceiver = {
-  socket: dgram.Socket;
-  next(timeoutMs: number): Promise<CultNetRudpPacket>;
-  close(): void;
-};
-
-function receivePackets(socket: dgram.Socket): PacketReceiver {
-  const packets: CultNetRudpPacket[] = [];
-  const waiters: Array<{ resolve: (packet: CultNetRudpPacket) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }> = [];
-  const errors: Error[] = [];
-  const drain = () => {
-    while (waiters.length && (packets.length || errors.length)) {
-      const waiter = waiters.shift()!;
-      clearTimeout(waiter.timer);
-      if (errors.length) waiter.reject(errors.shift()!);
-      else waiter.resolve(packets.shift()!);
-    }
-  };
-  const onMessage = (wire: Buffer) => {
-    try { packets.push(decodeRudpPacket(wire)); } catch (error) { errors.push(error as Error); }
-    drain();
-  };
-  const onError = (error: Error) => { errors.push(error); drain(); };
-  socket.on("message", onMessage);
-  socket.on("error", onError);
-  return {
-    socket,
-    next(timeoutMs) {
-      if (packets.length) return Promise.resolve(packets.shift()!);
-      if (errors.length) return Promise.reject(errors.shift()!);
-      return new Promise((resolve, reject) => {
-        const waiter = {
-          resolve,
-          reject,
-          timer: setTimeout(() => {
-            const index = waiters.indexOf(waiter);
-            if (index >= 0) waiters.splice(index, 1);
-            const error = new Error("Timed out waiting for CultNet RUDP packet.") as NodeJS.ErrnoException;
-            error.code = "ETIMEDOUT";
-            reject(error);
-          }, Math.max(1, timeoutMs)),
-        };
-        waiters.push(waiter);
-      });
-    },
-    close() {
-      socket.off("message", onMessage);
-      socket.off("error", onError);
-      for (const waiter of waiters.splice(0)) {
-        clearTimeout(waiter.timer);
-        waiter.reject(new Error("CultNet RUDP publisher closed."));
-      }
+    recordPublishedWarming(canonicalSha256) {
+      recentWarmingProofs.push(canonicalSha256);
+      if (recentWarmingProofs.length > MAX_RECENT_WARMING_PROOFS) recentWarmingProofs.shift();
     },
   };
-}
-
-async function receiveUntil(
-  receiver: PacketReceiver,
-  session: CultNetRudpSession,
-  endpoint: { host: string; port: number },
-  predicate: (packet: CultNetRudpPacket) => boolean,
-  timeoutMs: number,
-  onDelivered?: (frame: { channelId: string; payload: Uint8Array; sequence: number }) => void,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const packet = await receiver.next(Math.min(100, deadline - Date.now()));
-      const received = session.receive(packet, Date.now());
-      if (received.reply) throw new Error("Runtime presence received an unexpected reply-required packet.");
-      for (const frame of received.delivered) onDelivered?.(frame);
-      if (predicate(packet)) return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "ETIMEDOUT") throw error;
-    }
-    for (const packet of session.dueResends(Date.now())) await sendPacket(receiver.socket, endpoint, packet);
-  }
-  throw new Error(`Timed out waiting for CultNet RUDP response after ${timeoutMs} ms.`);
-}
-
-async function sendPacket(socket: dgram.Socket, endpoint: { host: string; port: number }, packet: CultNetRudpPacket): Promise<void> {
-  const wire = encodeRudpPacket(packet);
-  await new Promise<void>((resolve, reject) => {
-    socket.send(wire, endpoint.port, endpoint.host, (error) => error ? reject(error) : resolve());
-  });
 }
 
 function readAuthorityRecord(filePath: string, type: string, schemaId: string): { payload: Uint8Array } {
@@ -495,9 +330,7 @@ function decodeExpected(payload: Uint8Array): ExpectedIncarnation {
     if (!/^sha256-[0-9a-f]{64}$/u.test(hash)) throw new Error(`Expected ${name} hash is malformed.`);
   }
   if (!/^[0-9a-f]{40}$/u.test(sourceRevision)) throw new Error("Expected source revision is malformed.");
-  if (!route || route.transport !== "http" || !route.candidateEndpoint.startsWith("http://")) {
-    throw new Error("Idunn Expected must include an HTTP candidate route.");
-  }
+  if (route) validateRoute(route);
   return {
     schemaVersion: string(values[0], "Expected schema"),
     target,
@@ -575,6 +408,24 @@ function decodeExpectedDependencies(value: unknown): ExpectedIncarnation["depend
   });
 }
 
+// The Rust owner (IdunnExpectedRoute::validate) accepts http, tcp and rudp
+// routes; a runtime is not entitled to a narrower admission than Idunn's.
+const ROUTE_SCHEMES: Record<string, { stable: string[]; candidate: string[] }> = {
+  http: { stable: ["http://", "https://"], candidate: ["http://"] },
+  tcp: { stable: ["tcp://"], candidate: ["tcp://"] },
+  rudp: { stable: ["rudp://"], candidate: ["rudp://"] },
+};
+
+function validateRoute(route: NonNullable<ExpectedIncarnation["route"]>): void {
+  const schemes = ROUTE_SCHEMES[route.transport];
+  if (!schemes) throw new Error("Idunn Expected route transport is unsupported.");
+  if (!schemes.stable.some((scheme) => route.stableEndpoint.startsWith(scheme))
+    || !schemes.candidate.some((scheme) => route.candidateEndpoint.startsWith(scheme))) {
+    throw new Error(`Idunn Expected ${route.transport} route endpoints use an unsupported scheme.`);
+  }
+  if (route.stableEndpoint === route.candidateEndpoint) throw new Error("Idunn Expected stable and candidate route endpoints are identical.");
+}
+
 function decodeRoute(value: unknown): ExpectedIncarnation["route"] {
   if (value === null) return null;
   const route = array(value, 4, "Expected route");
@@ -595,7 +446,7 @@ function openProviderHealthIdentity(credentialBytes: Buffer): crypto.KeyObject {
   if (enrollmentNonce.length !== 32) throw new Error("Provider-health enrollment nonce has an invalid length.");
   const publicKey = Buffer.from(providerIdentityByteVector(publicKeyValue, "Provider-health public key"));
   const protectedSeed = Buffer.from(providerIdentityByteVector(protectedSeedValue, "Provider-health protected seed"));
-  const machineId = fs.readFileSync("/etc/machine-id", "utf8").trim();
+  const machineId = readMachineId();
   if (!machineId) throw new Error("Linux machine-id is unavailable for provider-health identity.");
   const expectedBinding = `${PROVIDER_PROTECTOR_CONTEXT}:machine-id-sha256:${sha256Hex(Buffer.from(machineId))}`;
   if (protectorKind !== "linux_file_mode_machine_id_binding" || binding !== expectedBinding || assurance !== "os_installation_file_bound_cloneable_baseline") {
@@ -614,6 +465,15 @@ function openProviderHealthIdentity(credentialBytes: Buffer): crypto.KeyObject {
   const derivedId = sha256Hex(Buffer.concat([PROVIDER_ID_DOMAIN, derivedPublicKey]));
   if (!derivedPublicKey.equals(publicKey) || identityId !== derivedId) throw new Error("Provider-health private key differs from its enrolled identity.");
   return key;
+}
+
+// Same sources, same order as the Rust identity protector.
+function readMachineId(): string {
+  try {
+    return fs.readFileSync("/etc/machine-id", "utf8").trim();
+  } catch {
+    return fs.readFileSync("/var/lib/dbus/machine-id", "utf8").trim();
+  }
 }
 
 function readProviderHealthIdentityCredential(bytes: Buffer): Uint8Array {
@@ -693,40 +553,12 @@ function assertLeaseMatches(values: unknown[], authority: IdunnRuntimeAuthority,
   if (!matches) throw new Error("Idunn process write lease does not match the current Expected incarnation.");
 }
 
-function parseRudpEndpoint(value: string): { host: string; port: number } {
-  const text = value.replace(/^rudp:\/\//i, "");
-  const match = text.match(/^\[([^\]]+)\]:(\d+)$/) ?? text.match(/^([^:]+):(\d+)$/);
-  if (!match) throw new Error(`Invalid Odin RUDP endpoint: ${value}`);
-  const port = Number(match[2]);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`Invalid Odin RUDP port: ${match[2]}`);
-  return { host: match[1]!, port };
-}
-
-function normalizeRudpEndpoint(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/^rudp:\/\//, "");
-  const parsed = parseRudpEndpoint(normalized);
-  return `${parsed.host.toLowerCase()}:${parsed.port}`;
-}
-
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required for Idunn runtime presence.`);
   return value;
 }
 
-function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      }, milliseconds);
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(signal?.reason ?? new Error("Aborted."));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
 
 function array(value: unknown, length: number, label: string): unknown[] {
   if (!Array.isArray(value) || value.length !== length) throw new Error(`${label} is not a ${length}-field positional contract.`);

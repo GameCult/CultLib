@@ -205,9 +205,15 @@ export {
   IDUNN_RUNTIME_BUNDLE_ENVIRONMENT,
   IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT,
   IDUNN_RUNTIME_ACTIVATION_SCHEMA,
-  createIdunnRuntimePresencePublisher,
+  createIdunnRuntimeSigner,
   loadIdunnRuntimeAuthorityFromEnvironment,
   type IdunnRuntimeAuthority,
+  type IdunnRuntimeSigner,
+  type IdunnRuntimeSignerOptions,
+  type SignedRuntimePresence,
+} from "./idunn-runtime-authority";
+export {
+  createIdunnRuntimePresencePublisher,
   type IdunnRuntimePresencePublisher,
   type IdunnRuntimePresencePublisherOptions,
-} from "./idunn-runtime-authority";
+} from "./idunn-odin-presence-publisher";
