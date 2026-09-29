@@ -281,7 +281,8 @@ fn recovery_refuses_records_that_are_not_one_block() {
     assert!(matches!(recover_video_block(&mixed, &[]), Err(MediaFecError::Invalid(_))));
 
     // A chunk from block one handed to block zero's parity.
-    let stray = data.iter().find(|chunk| chunk.chunk_index == 20).unwrap().clone();
+    // The first chunk of block one, exactly one past block zero's last.
+    let stray = data.iter().find(|chunk| chunk.chunk_index == 16).unwrap().clone();
     assert!(matches!(recover_video_block(&block_zero, &[stray]), Err(MediaFecError::Invalid(_))));
 
     // A chunk whose length disagrees with the block's.
@@ -293,6 +294,59 @@ fn recovery_refuses_records_that_are_not_one_block() {
     ));
 
     assert!(matches!(recover_video_block(&[], &data), Err(MediaFecError::Invalid(_))));
+
+    // Another frame's chunk.
+    let mut other_frame = data.iter().find(|chunk| chunk.chunk_index == 3).unwrap().clone();
+    other_frame.frame_id += 1;
+    assert!(matches!(recover_video_block(&block_zero, &[other_frame]), Err(MediaFecError::Invalid(_))));
+}
+
+#[test]
+fn a_final_chunk_of_the_wrong_length_is_refused() {
+    let original = frame(8, 5, 100, 7);
+    let (data, parity) = split(protect_video_frame(&original, &STANDARD).unwrap());
+    let mut last = data.iter().find(|chunk| chunk.chunk_index == 4).unwrap().clone();
+    last.payload.push(0);
+    assert!(matches!(recover_video_block(&parity, &[last]), Err(MediaFecError::Invalid(_))));
+}
+
+#[test]
+fn within_a_block_data_and_parity_alternate() {
+    let records = protect_video_frame(&frame(9, 4, 20, 20), &STANDARD).unwrap();
+    let kinds: String = records
+        .iter()
+        .map(|record| match record {
+            GameCultMediaWireRecord::Video(_) => 'D',
+            GameCultMediaWireRecord::VideoParity(_) => 'P',
+            _ => '?',
+        })
+        .collect();
+    assert_eq!(kinds, "DPDPDD", "k = 4, m = 2: the longer list finishes the lane");
+}
+
+#[test]
+fn audio_recovery_refuses_packets_that_are_not_from_the_block() {
+    let original = audio_block(100, 20);
+    let parity = protect_audio_block(&original, &STANDARD).unwrap();
+    let next_block = audio_block(104, 20);
+    // One past the block's last packet, and one before its first.
+    for stray in [next_block[0].clone(), audio_block(96, 20)[3].clone()] {
+        assert!(matches!(
+            recover_audio_block(&parity, &[stray]),
+            Err(MediaFecError::Invalid(_))
+        ));
+    }
+    let mut other_session = original[0].clone();
+    other_session.session_id = "session-2".to_string();
+    assert!(matches!(recover_audio_block(&parity, &[other_session]), Err(MediaFecError::Invalid(_))));
+    let mut wrong_length = original[0].clone();
+    wrong_length.payload.push(0);
+    assert!(matches!(recover_audio_block(&parity, &[wrong_length]), Err(MediaFecError::Invalid(_))));
+    assert!(matches!(recover_audio_block(&[], &original), Err(MediaFecError::Invalid(_))));
+
+    let mut mixed = parity.clone();
+    mixed[1].base_packet_id += 1;
+    assert!(matches!(recover_audio_block(&mixed, &original[..3]), Err(MediaFecError::Invalid(_))));
 }
 
 #[test]
@@ -542,6 +596,18 @@ fn an_audio_block_is_four_contiguous_equal_length_packets() {
     let mut packets = audio_block(1, 20);
     packets[0].codec = "pcm".to_string();
     assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed codecs");
+    let mut packets = audio_block(1, 20);
+    packets[2].session_id = "session-2".to_string();
+    assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed sessions");
+    let mut packets = audio_block(1, 20);
+    packets[2].stream_id = "other".to_string();
+    assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed streams");
+    let mut packets = audio_block(1, 20);
+    packets[1].timebase_den = 44_100;
+    assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed timebases");
+    let mut packets = audio_block(1, 20);
+    packets[3].duration_ticks = 480;
+    assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed durations");
 }
 
 #[test]
