@@ -399,12 +399,12 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     )?;
     let second_set = sender.send_many("schema", vec![5, 6, 7, 8], fragment_options, Some(2))?;
     receiver.receive(&first_set[0], 2)?;
-    // The fragment-set bound evicts the stalest incomplete set rather than
-    // refusing the packet: a receiver that dies at its bound under loss is a
-    // fuse, not a limit (measured 2026-09-10, see tests/cultnet.rs).
+    // A reliable set is never evicted: its fragments were acknowledged and the
+    // sender will not resend them. With every pending set reliable, the bound
+    // refuses the next set instead (unreliable sets are evicted; see
+    // tests/cultnet.rs).
+    assert!(receiver.receive(&second_set[0], 2).is_err());
     assert_eq!(receiver.fragment_sets_evicted(), 0);
-    receiver.receive(&second_set[0], 2)?;
-    assert_eq!(receiver.fragment_sets_evicted(), 1, "the first set was evicted for the second");
 
     let server_socket = socket()?;
     let server_addr = server_socket.local_addr()?;
