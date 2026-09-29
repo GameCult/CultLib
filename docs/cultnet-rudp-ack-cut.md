@@ -16,8 +16,18 @@ Status: cut map, Imagination pass 2, 2026-09-30, committed by Self. Pass 2 re-ma
   frames as duplicates. The ending paths disagree about owed writes. One rule: a write belongs to the
   session it was issued in. Pass 2 maps this as **Cut 1b** (the ending rule) and **Cut 1c** (how a new
   generation is recognised), separate from Cut 1 (§8 says why).
-- **Open:** Q-A3 (expiring reliable traffic next to ordered traffic), Q-A4 (porting receipts), Q-A5
-  (Kotlin), and a new **Q-A6** (how a new generation is recognised; blocks Cut 1c only).
+- **Q-A3 B (ruled after pass 2):** FORWARD-TSN now (RFC 3758). On expiry the sender sends an
+  abandonment notice (Ack-typed, flag `0x10`, ignored by old peers); new receivers treat the sequence as
+  received with no frame and acknowledge it; the notice's resend has its own bound. This is a new wire
+  cut in every receiver, landing before Cut 4. The recommendation was A; the operator chose B.
+- **Q-A4 A (ruled after pass 2):** port receipts (Pending, Acknowledged, Invalidated, `WaitAcknowledged`)
+  to C#, TypeScript, Python and Kotlin in this campaign, after Cut 4. The recommendation was B.
+- **Q-A5 A (ruled after pass 2):** Kotlin is in, as trailing Cut K, verified on a Kotlin image added to
+  Yggdrasil first.
+- **Q-A6 A (ruled after pass 2):** the Connect's sequence identifies the session; the default initial
+  sequence becomes random in [1, 2^31), as TCP's ISN. No wire change; the public default changes.
+- **Pending:** the cut sections below still read these four as open. Imagination pass 3 maps the
+  FORWARD-TSN cut, the receipts port and the Kotlin image, and re-sequences Cuts 1c, 4 and K.
 
 - **Body.** CultLib `main` at `3bf1c0c` ("Merge RUDP stray-packet hardening across all four runtimes").
   Every `file:line` is against it unless it names another revision.
