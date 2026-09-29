@@ -31,9 +31,9 @@ public enum BoundedLeastSquaresStatus
 /// inside the box.
 /// </para>
 /// <para>
-/// Stopping. KKT termination uses a tolerance of 1e-6 times the problem's gradient scale (the larger of the
-/// gradient magnitudes at the origin and at the box point nearest the origin), so scaling A, b or the bounds, and
-/// the choice of warm start, do not change it. The tolerance is only a resolution: once a stationarity miss or a
+/// Stopping. KKT termination uses a tolerance of 1e-6 times the problem's gradient scale (the largest gradient
+/// component at the box point nearest the origin), so scaling A, b or the bounds, and the choice of warm start, do
+/// not change it. The tolerance is only a resolution: once a stationarity miss or a
 /// bound release has been followed by a pass that lowers the cost by no more than rounding, the solver reports
 /// <see cref="BoundedLeastSquaresStatus.Converged"/>, so an optimal point whose double gradient sits above the
 /// tolerance costs one confirming iteration rather than the iteration cap.
@@ -98,80 +98,73 @@ public static class BoundedLeastSquares
         // Double-precision vectors and matrices first, then the integer flags, all carved from the caller's floats.
         var doubleCount = 2 * n * n + 6 * n;
         var dbl = MemoryMarshal.Cast<float, double>(workspace.Slice(0, 2 * doubleCount));
-        var ata = dbl.Slice(0, n * n);
-        var chol = dbl.Slice(n * n, n * n);
-        var off = 2 * n * n;
-        var atb = dbl.Slice(off, n);
-        var g = dbl.Slice(off + n, n);
-        var p = dbl.Slice(off + 2 * n, n);
-        var y = dbl.Slice(off + 3 * n, n);
-        var rhs = dbl.Slice(off + 4 * n, n);
-        var xd = dbl.Slice(off + 5 * n, n);
+        var ata = Take(ref dbl, n * n);
+        var chol = Take(ref dbl, n * n);
+        var atb = Take(ref dbl, n);
+        var g = Take(ref dbl, n);
+        var p = Take(ref dbl, n);
+        var y = Take(ref dbl, n);
+        var rhs = Take(ref dbl, n);
+        var xd = Take(ref dbl, n);
         // One flag per column: 0 free, -1 at lo, +1 at hi. Free-list and dependency flags follow.
         var ints = MemoryMarshal.Cast<float, int>(workspace.Slice(2 * doubleCount, 3 * n));
-        var state = ints.Slice(0, n);
-        var freeIndex = ints.Slice(n, n);
-        var dependent = ints.Slice(2 * n, n);
+        var state = Take(ref ints, n);
+        var freeIndex = Take(ref ints, n);
+        var dependent = Take(ref ints, n);
 
         iterations = 0;
         for (var j = 0; j < n; j++)
             if (!(lo[j] <= hi[j]) || float.IsPositiveInfinity(lo[j]) || float.IsNegativeInfinity(hi[j]))
                 return BoundedLeastSquaresStatus.InvalidInput;
-        for (var i = 0; i < m * n; i++)
-            if (!float.IsFinite(a[i]))
-                return BoundedLeastSquaresStatus.InvalidInput;
-        for (var i = 0; i < m; i++)
-            if (!float.IsFinite(b[i]))
-                return BoundedLeastSquaresStatus.InvalidInput;
 
+        // A float is never large enough to overflow a double product or a sum of tens of them, so a non-finite
+        // A^T b entry is exactly a non-finite entry of A or b (NaN and infinity never cancel to a finite value).
         for (var j = 0; j < n; j++)
         {
             var sb = 0.0;
             for (var r = 0; r < m; r++)
                 sb += (double)a[r * n + j] * b[r];
+            if (!double.IsFinite(sb))
+                return BoundedLeastSquaresStatus.InvalidInput;
             atb[j] = sb;
             for (var k = 0; k <= j; k++)
             {
                 var sa = 0.0;
                 for (var r = 0; r < m; r++)
                     sa += (double)a[r * n + j] * a[r * n + k];
-                if (!double.IsFinite(sa) || !double.IsFinite(sb))
-                    return BoundedLeastSquaresStatus.InvalidInput;
                 ata[j * n + k] = sa;
                 ata[k * n + j] = sa;
             }
         }
 
-        // From here x is written. A warm start that is NaN or an infinite value on an unbounded side is
-        // moved onto the box; an infinite result (unbounded side) restarts from 0 clamped to the box.
-        // The working iterate lives in double; x is only the API's float view of it.
+        // From here x is written. A warm start that is NaN is moved to the lower bound, and an infinite result
+        // (an unbounded side) restarts from 0 clamped to the box. The working iterate lives in double; x is only
+        // the API's float view of it.
         for (var j = 0; j < n; j++)
         {
             var l = lo[j];
             var h = hi[j];
-            var v = x[j];
-            v = !(v > l) ? l : (v < h ? v : h);
+            var v = float.IsNaN(x[j]) ? l : Math.Clamp(x[j], l, h);
             if (float.IsInfinity(v))
-                v = 0f < l ? l : (0f > h ? h : 0f);
+                v = Math.Clamp(0f, l, h);
             x[j] = v;
             xd[j] = v;
             state[j] = v == l ? -1 : (v == h ? 1 : 0);
         }
 
-        // The tolerance's scale is the gradient magnitude the problem itself carries: the larger of the
-        // gradient at the origin (-A^T b) and at the box point nearest the origin. It depends on A, b and the
-        // bounds, never on the warm start, so a far start cannot be judged converged by its own steepness, and
-        // b = 0 with a box that excludes the origin still gets a real scale. It is zero only when that point
-        // is already stationary, and then the progress rule below does the stopping.
+        // The tolerance's scale is the gradient magnitude at the box point nearest the origin (the origin itself
+        // when it is inside the box, where the gradient is -A^T b). It depends on A, b and the bounds, never on the
+        // warm start, so a far start cannot be judged converged by its own steepness, and b = 0 with a box that
+        // excludes the origin still gets a real scale. It is zero only when that point is already stationary, and
+        // then the progress rule below does the stopping.
         var gScale = 0.0;
         for (var j = 0; j < n; j++)
         {
-            y[j] = Math.Clamp(0.0, lo[j], hi[j]);
-            gScale = Math.Max(gScale, Math.Abs(atb[j]));
+            var s = -atb[j];
+            for (var k = 0; k < n; k++)
+                s += ata[j * n + k] * Math.Clamp(0.0, lo[k], hi[k]);
+            gScale = Math.Max(gScale, Math.Abs(s));
         }
-        Gradient(ata, atb, y, g, n);
-        for (var j = 0; j < n; j++)
-            gScale = Math.Max(gScale, Math.Abs(g[j]));
         var kktTol = KktRelativeTolerance * gScale;
 
         // Cost at the last point from which the solver chose to continue past a stationarity miss or a
@@ -236,7 +229,8 @@ public static class BoundedLeastSquares
             for (var j = 0; j < n; j++)
             {
                 if (lo[j] == hi[j]) continue;
-                var violation = state[j] < 0 ? -g[j] : (state[j] > 0 ? g[j] : 0.0);
+                // A bound at lo wants a positive gradient and one at hi a negative one; a free column has state 0.
+                var violation = state[j] * g[j];
                 if (violation > worst)
                 {
                     worst = violation;
@@ -257,6 +251,13 @@ public static class BoundedLeastSquares
         for (var j = 0; j < n; j++)
             x[j] = (float)xd[j];
         return status;
+    }
+
+    private static Span<T> Take<T>(ref Span<T> pool, int length)
+    {
+        var head = pool.Slice(0, length);
+        pool = pool.Slice(length);
+        return head;
     }
 
     // 0.5 x^T A^T A x - x^T A^T b (the cost up to a constant), from the gradient at x; scale is the magnitude of
