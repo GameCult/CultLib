@@ -415,16 +415,13 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     let mut second = client(server_addr)?;
     connect(&mut hub, &mut first, b"first")?;
     second.connect(b"second".to_vec())?;
-    for _ in 0..20 {
-        match hub.receive_event_once() {
-            Err(error) => {
-                assert!(error.to_string().contains("peer limit"));
-                return Ok(());
-            }
-            Ok(_) => continue,
-        }
-    }
-    Err(anyhow!("hub did not enforce peer limit"))
+    // The peer limit refuses the second Connect without ending the hub loop:
+    // a full table is not a fault of the process that holds it.
+    std::thread::sleep(Duration::from_millis(20));
+    while hub.receive_event_once()?.is_some() {}
+    assert_eq!(hub.sessions().len(), 1);
+    assert_eq!(hub.stats().packets_dropped, 1);
+    Ok(())
 }
 
 #[test]

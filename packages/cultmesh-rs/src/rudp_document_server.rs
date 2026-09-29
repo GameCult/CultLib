@@ -207,6 +207,7 @@ pub struct CultMeshRudpDocumentServer<S, Q, C> {
     snapshot_source: Q,
     clock: C,
     options: CultMeshRudpDocumentServerOptions,
+    packets_dropped: u64,
 }
 
 impl<S, Q, C> CultMeshRudpDocumentServer<S, Q, C>
@@ -234,7 +235,16 @@ where
             snapshot_source,
             clock,
             options,
+            packets_dropped: 0,
         })
+    }
+
+    /// Datagrams read and discarded because they belong to no admissible
+    /// session: malformed frames, unknown sessions, a Connect the session cap
+    /// refuses, a packet that fails its session. Never an
+    /// error: a moved flow or a scanner must not end the daemon loop.
+    pub fn packets_dropped(&self) -> u64 {
+        self.packets_dropped
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -264,7 +274,10 @@ where
 
         let packet = match decode_rudp_packet(&wire) {
             Ok(packet) => packet,
-            Err(_) => return Ok(CultMeshRudpPollOutcome::Handled),
+            Err(_) => {
+                self.packets_dropped += 1;
+                return Ok(CultMeshRudpPollOutcome::Handled);
+            }
         };
         let now_unix = self.clock.now_unix_millis();
         let now_monotonic = self.clock.now_monotonic_millis();
@@ -274,11 +287,14 @@ where
         };
 
         if packet.packet_type == CultNetRudpPacketType::Connect {
-            self.accept_connection(key, &packet, now_monotonic)?;
+            if !self.accept_connection(key, &packet, now_monotonic)? {
+                self.packets_dropped += 1;
+            }
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
         if !self.sessions.contains_key(&key) {
+            self.packets_dropped += 1;
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
         if packet.packet_type == CultNetRudpPacketType::Data
@@ -309,7 +325,8 @@ where
         let result = match result {
             Ok(result) => result,
             Err(_) => {
-                self.sessions.remove(&key);
+                self.end_refused_session(key)?;
+                self.packets_dropped += 1;
                 return Ok(CultMeshRudpPollOutcome::Handled);
             }
         };
@@ -385,45 +402,54 @@ where
         })
     }
 
+    /// `Ok(false)` when the Connect was refused because the session cap is full;
+    /// only a socket failure is an `Err`.
     fn accept_connection(
         &mut self,
         key: CultMeshRudpSessionKey,
         packet: &CultNetRudpPacket,
         now: u64,
-    ) -> Result<()> {
-        if !self.sessions.contains_key(&key) {
-            if self.sessions.len() >= self.options.max_sessions {
-                return Ok(());
-            }
-            self.sessions.insert(
-                key,
-                SessionEntry {
-                    session: CultNetRudpSession::new(CultNetRudpSessionOptions {
-                        connection_id: key.connection_id,
-                        initial_sequence: 1,
-                        resend_delay_ms: duration_millis(self.options.resend_delay),
-                        max_pending_reliable_packets: Some(
-                            self.options.max_pending_reliable_packets_per_session,
-                        ),
-                    }),
-                    created_at_monotonic_millis: now,
-                    last_activity_monotonic_millis: now,
-                    admitted_payload_bytes: 0,
-                },
-            );
-        }
-
-        let accept = {
-            let entry = self
-                .sessions
-                .get_mut(&key)
-                .expect("accepted session must be present");
+    ) -> Result<bool> {
+        let reply = match self.sessions.get_mut(&key) {
             // The same key is a retransmitted Connect for the existing epoch.
             // A genuinely fresh client incarnation must choose a fresh id.
-            entry.last_activity_monotonic_millis = now;
-            entry.session.accept_connect(packet, now, Vec::new())?
+            Some(entry) => {
+                entry.last_activity_monotonic_millis = now;
+                match entry.session.answer_repeated_connect(packet, now) {
+                    Ok(reply) => reply,
+                    Err(_) => {
+                        self.end_refused_session(key)?;
+                        return Ok(false);
+                    }
+                }
+            }
+            None => {
+                if self.sessions.len() >= self.options.max_sessions {
+                    return Ok(false);
+                }
+                let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+                    connection_id: key.connection_id,
+                    initial_sequence: 1,
+                    resend_delay_ms: duration_millis(self.options.resend_delay),
+                    max_pending_reliable_packets: Some(
+                        self.options.max_pending_reliable_packets_per_session,
+                    ),
+                });
+                let accept = session.accept_connect(packet, now, Vec::new())?;
+                self.sessions.insert(
+                    key,
+                    SessionEntry {
+                        session,
+                        created_at_monotonic_millis: now,
+                        last_activity_monotonic_millis: now,
+                        admitted_payload_bytes: 0,
+                    },
+                );
+                accept
+            }
         };
-        self.send_packet(key.remote_addr, &accept)
+        self.send_packet(key.remote_addr, &reply)?;
+        Ok(true)
     }
 
     fn deliver_application_message(
@@ -564,6 +590,16 @@ where
             _ => {}
         }
         Ok(None)
+    }
+
+    /// The session refused a packet: it ends, and the client is told so it does
+    /// not wait on a session the server no longer holds.
+    fn end_refused_session(&mut self, key: CultMeshRudpSessionKey) -> Result<()> {
+        let Some(mut entry) = self.sessions.remove(&key) else {
+            return Ok(());
+        };
+        let goodbye = entry.session.end_refused_session();
+        self.send_packet(key.remote_addr, &goodbye)
     }
 
     fn payload_budget_allows(&self, key: CultMeshRudpSessionKey, bytes: usize) -> bool {

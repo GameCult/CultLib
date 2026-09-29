@@ -314,6 +314,61 @@ not closeable, and a fix batch is in Hands:
 **Open for the operator:** plain records with duplicate unique-index values are silently
 overwritten today. That predates variants. Fixing it could refuse existing stores.
 
+**C2a status, 2026-09-30.** Hands pushed `hands/variants-c2a` at `640ad9a`.
+- Element ids are 12 hex characters. Writes mint them at random. Load mints them deterministically.
+  Derived ids use `[CultElementId(nameof(Member))]`.
+- The CDN chunk ref's id is its offset. The witness types carry ids, and the ids cross C#, TS, Python and
+  Rust.
+
+Soul held it. Fixes are in Hands:
+- ids are never minted inside variant overrides;
+- interface unions are never minted;
+- a null derived source leaves an empty id;
+- load minting is culture-dependent;
+- the minted-on-load list goes stale;
+- a refused batch leaves minted ids behind;
+- the id format is unchecked;
+- late union-slot reuse passes registration.
+
+**C2a rulings (operator, 2026-09-30):**
+- **Old readers are tripwired.** A store that holds element ids carries a marker that every pre-C2a reader
+  refuses under C0's unknown-header rule. An old C# reader can therefore never silently strip nested ids.
+  MessagePack's generated formatters skip unknown slots inside elements.
+- **Duplicate element ids refuse at load,** naming the record, the list and the id. This matches the
+  duplicate-index ruling.
+- **C2b precondition (Soul F7).** Whether a pre-id element keeps its load-time id depends on the write path.
+  C2b must refuse an override that targets a record whose ids exist only in memory, or mint on open.
+
+**C2a Soul pass 2 (`e85b201b`), 2026-09-30: hold.** The tripwire only works against unreleased readers.
+Every published release (`cultlib-unity-v1.0.60`, `caching-unity-v1.4.0`, `cultcache-ts-v0.14.0`,
+`cultcache-py-v0.3.0`) predates C0. The 1.0.60 C# reader loads a v3 store, and its next write is v1 with the ids
+stripped (probe). Other findings:
+- F2: the same element object twice in one list commits, then the store refuses to load.
+- F3: CultMesh single-file writes bypass the marker.
+- F4: TS `pushAll` writes the header without reading it first.
+
+**C2a rulings, 2026-09-30 (operator):**
+- **Rollout order closes the released-reader hole.** Ship a CultLib release that refuses v3, move every C#
+  reader of a store onto it, then let a C2a writer touch that store. There is no format change for this.
+  This supersedes the claim above that old readers are tripwired: that claim holds only for post-C0 readers.
+- **Mark by content.** A store is written as v3 (v5 for directory stores) only when a record actually holds an
+  element id. An existing v3 header on disk stays.
+- Fix batch 3 in Hands: F2, marking by content in every runtime, F3 routed through the cache's header
+  decision and load checks, F4.
+
+**C2a Soul pass 3 (`9ed61dd2`), 2026-09-30: fix first.**
+- A flattened record's `HoldsIds` goes stale when its base changes in the same batch.
+- A conditional commit onto disk ignores content.
+- Rust `push_all` clobbers headers it cannot read.
+- TS keeps a stale header after the file goes away.
+- Self's claim that "rollout order makes the raw-writer hole benign" was wrong. The reader that strips ids
+  from a v1 store is a post-C0, pre-C2a build. That is exactly the reader the v3 marker targets, and rollout
+  order does not keep it away.
+
+**Ruling, 2026-09-30 (operator): C0 is released only together with C2a.** The first CultLib release that
+refuses v3 also contains C2a, so no released reader strips ids. C0 and C1 are never released on their own.
+Raw and cross-runtime writers that cannot see ids stay sticky-only. Fix batch 4 is in Hands.
+
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
   plain records too, so R6-for-indexes becomes one general rule:

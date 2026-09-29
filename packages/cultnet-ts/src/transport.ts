@@ -14,6 +14,8 @@ export interface CultNetTransportStats {
   bytesSent: number;
   framesReceived: number;
   framesSent: number;
+  /** Datagrams read and discarded because they belong to no session on this transport. */
+  packetsDropped: number;
 }
 
 export interface CultNetReconnectPolicy {
@@ -192,6 +194,7 @@ export class TcpFramedTransportConnection extends EventEmitter implements CultNe
     bytesSent: 0,
     framesReceived: 0,
     framesSent: 0,
+    packetsDropped: 0,
   };
 
   constructor(stream: Duplex, profile: CultNetTransportProfile) {

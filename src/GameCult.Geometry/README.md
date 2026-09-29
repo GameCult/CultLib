@@ -31,12 +31,9 @@ The package is deliberately substrate-shaped:
 ## Value Primitives
 
 The small value layer is for cross-runtime query contracts, physics probes,
-native slices, and UI surfaces:
+native slices, and UI surfaces. Vectors and rectangles are CultMath's `float2`,
+`float3` and `rect`, and `GameCult.Caching.MessagePack` serializes them.
 
-- `CultVec2` and `CultVec3`: whole-vector values for positions, velocities,
-  accelerations, and query inputs. SoA layouts may store them efficiently, but
-  the semantic API does not force callers to split x/y/z into unrelated fields.
-- `CultRect`: canonical XY viewport/query rectangle stored as min/max corners.
 - `CultCircle`: 2D influence/query brush with rect intersection helpers.
 - `CultSphere`: 3D query primitive with whole-vector center and XY projection.
 
@@ -85,8 +82,8 @@ cache miss; that is split-brain geometry.
 
 ## Documents
 
-- `CultVec2`, `CultVec3`, `CultRect`, `CultCircle`, `CultSphere`: shared value
-  primitives for query and view contracts.
+- `CultCircle`, `CultSphere`: shared value primitives for query and view
+  contracts.
 - `CultGeometryDomainDocument`: one hierarchical domain tree, suitable for
   Ragnarok/Fensalir-style feature DSL output.
 - `CultGeometryBuildRequest`: one LOD/frustum/budget request for workers.

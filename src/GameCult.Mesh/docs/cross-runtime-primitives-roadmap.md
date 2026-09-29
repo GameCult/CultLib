@@ -116,12 +116,12 @@ var aetheria = verse.Use(AetheriaRuntime.Schema);
 var viewport = await aetheria.Zone(zoneId)
     .Objects()
     .VisibleTo(controlledUnits)
-    .Within(CultRect.FromBounds(-400, -250, 400, 250))
+    .Within(new rect(-400f, -250f, 400f, 250f))
     .QueryAsync();
 
 await aetheria.Entity(ravenId)
     .Pilot()
-    .MoveAsync(CultVec2.Right, claim: "pilot-control");
+    .MoveAsync(new float2(1f, 0f), claim: "pilot-control");
 ```
 
 Current seed:
@@ -134,7 +134,7 @@ var verse = await CultMesh.ConnectVerseAsync(
     new[] { new CultMeshAuthorityClaim("pilot-control", shardId: "zone:raven") });
 
 var aetheria = verse.Use(context => new AetheriaGeneratedFacade(context));
-await aetheria.Entity(ravenId).Pilot.MoveAsync(CultVec2.Right);
+await aetheria.Entity(ravenId).Pilot.MoveAsync(new float2(1f, 0f));
 ```
 
 ```ts
@@ -177,7 +177,7 @@ let viewport = aetheria
     .zone(zone_id)
     .objects()
     .visible_to(&controlled_units)
-    .within(CultRect::from_bounds(-400.0, -250.0, 400.0, 250.0))
+    .within(rect::new(-400.0, -250.0, 400.0, 250.0))
     .query()
     .await?;
 ```

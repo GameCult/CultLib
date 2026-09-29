@@ -1,4 +1,5 @@
 using System;
+using CultMath;
 using FluentAssertions;
 using NUnit.Framework;
 
@@ -77,8 +78,8 @@ namespace GameCult.Geometry.Tests
             samples[0, 1, 1] = 1f;
             samples[1, 1, 1] = 1f;
 
-            var first = CultGeometryIsoSurface.Extract(samples, origin: new CultVec3(10f, 20f, 30f), cellSize: 2f);
-            var second = CultGeometryIsoSurface.Extract(samples, origin: new CultVec3(10f, 20f, 30f), cellSize: 2f);
+            var first = CultGeometryIsoSurface.Extract(samples, origin: new float3(10f, 20f, 30f), cellSize: 2f);
+            var second = CultGeometryIsoSurface.Extract(samples, origin: new float3(10f, 20f, 30f), cellSize: 2f);
 
             second.Positions.Should().Equal(first.Positions);
             second.Normals.Should().Equal(first.Normals);

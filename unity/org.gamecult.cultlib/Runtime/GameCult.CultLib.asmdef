@@ -8,6 +8,7 @@
   "overrideReferences": true,
   "precompiledReferences": [
     "ConcurrentCollections.dll",
+    "CultMath.dll",
     "GameCult.Caching.dll",
     "GameCult.Caching.MessagePack.dll",
     "GameCult.Logging.dll",

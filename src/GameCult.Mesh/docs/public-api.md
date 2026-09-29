@@ -407,8 +407,8 @@ var view = new CultMeshNativeSliceViewDescriptor(
     rowCount,
     new[]
     {
-        CultMeshNativeSliceColumn.For<CultVec2>("position"),
-        CultMeshNativeSliceColumn.For<CultVec2>("velocity")
+        CultMeshNativeSliceColumn.For<float2>("position"),
+        CultMeshNativeSliceColumn.For<float2>("velocity")
     },
     new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory));
 ```
