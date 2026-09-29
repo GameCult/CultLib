@@ -1,4 +1,5 @@
 using FluentAssertions;
+using CultMath;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using GameCult.Mesh;
@@ -19,54 +20,66 @@ namespace GameCult.Geometry.Tests
         [Test]
         public void GeometryPrimitives_CanonicalizeAndIntersect()
         {
-            var viewport = new CultRect(8f, 4f, -8f, -4f);
+            var viewport = new rect(8f, 4f, -8f, -4f);
 
-            viewport.Min.Should().Be(new CultVec2(-8f, -4f));
-            viewport.Max.Should().Be(new CultVec2(8f, 4f));
-            viewport.Center.Should().Be(CultVec2.Zero);
-            viewport.Contains(new CultVec2(2f, 3f)).Should().BeTrue();
-            viewport.Intersects(new CultRect(7f, 3f, 10f, 5f)).Should().BeTrue();
-            viewport.Intersects(new CultRect(9f, 5f, 10f, 6f)).Should().BeFalse();
+            viewport.min.Should().Be(new float2(-8f, -4f));
+            viewport.max.Should().Be(new float2(8f, 4f));
+            viewport.center.Should().Be(float2.zero);
+            viewport.Contains(new float2(2f, 3f)).Should().BeTrue();
+            viewport.Intersects(new rect(7f, 3f, 10f, 5f)).Should().BeTrue();
+            viewport.Intersects(new rect(9f, 5f, 10f, 6f)).Should().BeFalse();
 
-            var gravityBrush = new CultCircle(new CultVec2(10f, 0f), 3f);
+            var gravityBrush = new CultCircle(new float2(10f, 0f), 3f);
             gravityBrush.Intersects(viewport).Should().BeTrue();
-            gravityBrush.Contains(new CultVec2(12f, 0f)).Should().BeTrue();
-            gravityBrush.Contains(new CultVec2(14f, 0f)).Should().BeFalse();
+            gravityBrush.Contains(new float2(12f, 0f)).Should().BeTrue();
+            gravityBrush.Contains(new float2(14f, 0f)).Should().BeFalse();
         }
 
         [Test]
         public void GeometryPrimitives_PreserveWholeVectorsForSoaAndPhysicsQueries()
         {
-            var sphere = new CultSphere(new CultVec3(1f, 2f, 3f), 5f);
+            var sphere = new CultSphere(new float3(1f, 2f, 3f), 5f);
 
-            sphere.Contains(new CultVec3(1f, 6f, 3f)).Should().BeTrue();
-            sphere.Contains(new CultVec3(1f, 8f, 3f)).Should().BeFalse();
-            sphere.Center.Xy.Should().Be(new CultVec2(1f, 2f));
-            sphere.Center.Xz.Should().Be(new CultVec2(1f, 3f));
-            sphere.XyCircle.Bounds.Should().Be(new CultRect(-4f, -3f, 6f, 7f));
-        }
-
-        [Test]
-        public void GeometryPrimitives_RoundTripThroughMessagePack()
-        {
-            var rect = new CultRect(new CultVec2(5f, -2f), new CultVec2(-1f, 7f));
-            var payload = MessagePackSerializer.Serialize(rect);
-            var decoded = MessagePackSerializer.Deserialize<CultRect>(payload);
-
-            decoded.Should().Be(rect);
-            decoded.Min.Should().Be(new CultVec2(-1f, -2f));
-            decoded.Max.Should().Be(new CultVec2(5f, 7f));
+            sphere.Contains(new float3(1f, 6f, 3f)).Should().BeTrue();
+            sphere.Contains(new float3(1f, 8f, 3f)).Should().BeFalse();
+            sphere.Center.xy.Should().Be(new float2(1f, 2f));
+            sphere.Center.xz.Should().Be(new float2(1f, 3f));
+            sphere.XyCircle.Bounds.Should().Be(new rect(-4f, -3f, 6f, 7f));
         }
 
         [Test]
         public void GeometryPrimitives_JsonOmitsComputedConvenienceProperties()
         {
-            var json = JsonSerializer.Serialize(new CultVec3(1f, 2f, 3f));
+            var options = new JsonSerializerOptions().AddCultMathConverters();
+            var sphere = new CultSphere(new float3(1f, 2f, 3f), 5f);
+            var circle = new CultCircle(new float2(1f, 2f), 3f);
 
-            json.Should().Be("""{"X":1,"Y":2,"Z":3}""");
-            json.Should().NotContain("LengthSquared");
-            json.Should().NotContain("Xy");
-            json.Should().NotContain("Xz");
+            var sphereJson = JsonSerializer.Serialize(sphere, options);
+            var circleJson = JsonSerializer.Serialize(circle, options);
+
+            sphereJson.Should().Be("""{"Center":{"x":1,"y":2,"z":3},"Radius":5}""");
+            circleJson.Should().Be("""{"Center":{"x":1,"y":2},"Radius":3}""");
+            JsonSerializer.Deserialize<CultSphere>(sphereJson, options).Should().Be(sphere);
+            JsonSerializer.Deserialize<CultCircle>(circleJson, options).Should().Be(circle);
+        }
+
+        // The bytes CultCircle and CultSphere produced when they held CultVec2/CultVec3 (probed at 65311c9).
+        [Test]
+        public void GeometryPrimitives_KeepTheirPreCollapseBytes()
+        {
+            var options = CultDocumentMessagePackSerialization.Options;
+            var circle = new CultCircle(new float2(1f, 2f), 3f);
+            var sphere = new CultSphere(new float3(1f, 2f, 3f), 5f);
+
+            Convert.ToHexString(MessagePackSerializer.Serialize(circle, options))
+                .Should().Be("9292CA3F800000CA40000000CA40400000");
+            Convert.ToHexString(MessagePackSerializer.Serialize(sphere, options))
+                .Should().Be("9293CA3F800000CA40000000CA40400000CA40A00000");
+
+            MessagePackSerializer.Deserialize<CultCircle>(MessagePackSerializer.Serialize(circle, options), options)
+                .Should().Be(circle);
+            MessagePackSerializer.Deserialize<CultSphere>(MessagePackSerializer.Serialize(sphere, options), options)
+                .Should().Be(sphere);
         }
 
         [Test]

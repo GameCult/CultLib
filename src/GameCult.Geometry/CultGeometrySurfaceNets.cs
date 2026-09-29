@@ -44,7 +44,7 @@ namespace GameCult.Geometry
         public static CultGeometryQuadMesh Extract(
             float[,,] samples,
             float isoValue = 0f,
-            CultVec3 origin = default,
+            float3 origin = default,
             float cellSize = 1f)
         {
             if (samples == null) throw new ArgumentNullException(nameof(samples));
@@ -66,7 +66,7 @@ namespace GameCult.Geometry
                 throw new ArgumentException("The isovalue must be finite.", nameof(isoValue));
             }
 
-            if (!float.IsFinite(origin.X) || !float.IsFinite(origin.Y) || !float.IsFinite(origin.Z))
+            if (!float.IsFinite(origin.x) || !float.IsFinite(origin.y) || !float.IsFinite(origin.z))
             {
                 throw new ArgumentException("The origin must be finite.", nameof(origin));
             }
@@ -80,7 +80,6 @@ namespace GameCult.Geometry
             var sizeY = samples.GetLength(1);
             var sizeZ = samples.GetLength(2);
             var cellCounts = new[] { sizeX - 1, sizeY - 1, sizeZ - 1 };
-            var originValue = new float3(origin.X, origin.Y, origin.Z);
 
             var vertexIndex = new Dictionary<(int, int, int), uint>();
             var positions = new List<float>();
@@ -90,7 +89,7 @@ namespace GameCult.Geometry
             for (var cz = 0; cz < cellCounts[2]; cz++)
             {
                 var cellCoord = new[] { cx, cy, cz };
-                var vertex = CellVertex(samples, cellCoord, isoValue, originValue, cellSize);
+                var vertex = CellVertex(samples, cellCoord, isoValue, origin, cellSize);
                 if (vertex == null) continue;
 
                 vertexIndex[(cx, cy, cz)] = (uint)(positions.Count / 3);

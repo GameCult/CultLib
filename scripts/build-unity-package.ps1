@@ -53,6 +53,40 @@ if ($LASTEXITCODE -ne 0) {
   throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
 }
 
+
+# Release gate: cultlib's Unity package resolves CultMath through the org.gamecult.cultmath
+# dependency, so a cultlib release must not run ahead of the CultMath package it names.
+# (1) The declared dependency version must not exceed the CultMath package's own version.
+# (2) The CultMath.dll that package tracks must define every type CultMathResolver formats.
+#     The names come from the resolver source (its Shape<T> entries); scripts\check-cultmath-types.cs
+#     looks them up in the assembly's type-definition table, which Windows PowerShell cannot load
+#     the assembly to do. It checks type names, not signatures.
+$cultMathPackageRoot = Join-Path $repoRoot "packages\cultmath\unity\org.gamecult.cultmath"
+$cultMathDeclared = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
+$cultMathAvailable = (Get-Content -LiteralPath (Join-Path $cultMathPackageRoot "package.json") -Raw | ConvertFrom-Json).version
+if ([string]::IsNullOrWhiteSpace($cultMathDeclared)) {
+  throw "package.json must declare org.gamecult.cultmath, which supplies CultMath.dll."
+}
+foreach ($declared in @(@("org.gamecult.cultlib's org.gamecult.cultmath dependency", $cultMathDeclared), @("the CultMath package version", $cultMathAvailable))) {
+  if ($declared[1] -notmatch '^\d+\.\d+\.\d+$') {
+    throw "$($declared[0]) is '$($declared[1])'. The release gate compares exact release versions (major.minor.patch); prerelease and range versions are not supported."
+  }
+}
+if ([version]$cultMathDeclared -gt [version]$cultMathAvailable) {
+  throw "Release order: org.gamecult.cultlib depends on org.gamecult.cultmath $cultMathDeclared, but the CultMath package is at $cultMathAvailable. Release CultMath first."
+}
+$resolverSource = Get-Content -LiteralPath (Join-Path $repoRoot "src\GameCult.Caching.MessagePack\CultMathResolver.cs") -Raw
+$resolverTypes = @([regex]::Matches($resolverSource, '\bShape<(?!T>)(\w+)>\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+if ($resolverTypes.Count -eq 0) {
+  throw "Found no CultMath types in CultMathResolver.cs; the release gate cannot check the CultMath package."
+}
+$missingTypes = & dotnet run (Join-Path $PSScriptRoot "check-cultmath-types.cs") -- (Join-Path $cultMathPackageRoot "Runtime\Plugins\CultMath.dll") @resolverTypes
+if ($LASTEXITCODE -eq 1) {
+  throw "The CultMath.dll in org.gamecult.cultmath $cultMathAvailable lacks types CultMathResolver formats: $missingTypes. Release CultMath first."
+}
+if ($LASTEXITCODE -ne 0) {
+  throw "scripts\check-cultmath-types.cs failed with exit code $LASTEXITCODE."
+}
 # The tracked DLLs and pdbs are committed beside their source, so none may name a commit or a worktree:
 # Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
 # carries its pdb's content id. ContinuousIntegrationBuild maps the local source path to /_/.
@@ -128,6 +162,15 @@ $expectedAssemblies = @(
   "System.Text.Json.dll",
   "System.Threading.Channels.dll"
 )
+# Assemblies the package references but never ships: org.gamecult.cultmath owns CultMath.dll, and the
+# package.json dependency delivers it. A second copy in Runtime\Plugins would be a duplicate assembly.
+$externalAssemblies = @("CultMath.dll")
+$asmdef = Get-Content -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.CultLib.asmdef") -Raw | ConvertFrom-Json
+$referencedAssemblies = @($asmdef.precompiledReferences | Sort-Object)
+$declaredAssemblies = @($expectedAssemblies + $externalAssemblies | Sort-Object)
+if (($referencedAssemblies -join "|") -ne ($declaredAssemblies -join "|")) {
+  throw "GameCult.CultLib.asmdef precompiledReferences differ from the shipped plus external assembly lists."
+}
 $publishedByName = @{}
 foreach ($assembly in Get-ChildItem -LiteralPath $publishRoot -Filter "*.dll") {
   $publishedByName[$assembly.Name] = $assembly
