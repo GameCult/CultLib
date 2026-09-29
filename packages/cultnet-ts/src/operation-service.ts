@@ -19,6 +19,8 @@ import { CultNetPeer } from "./peer";
 const DEFAULT_CONNECTION_ID = 0x43554c54;
 /** Matches the document server's default session cap. A Connect past it is dropped. */
 const MAX_OPERATION_SESSIONS = 64;
+/** Matches the document server's default `session_idle_timeout` (30 s). */
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30_000;
 
 export interface CultNetOperationServerOptions {
   runtimeId: string;
@@ -26,6 +28,8 @@ export interface CultNetOperationServerOptions {
   port?: number;
   connectionId?: number;
   maxFragmentBytes?: number;
+  /** A session that has sent nothing for this long is dropped, freeing its slot. Default 30 000. */
+  sessionIdleTimeoutMs?: number;
   handler: (request: CultNetOperationRequestMessage) =>
     CultNetOperationResponseMessage | Promise<CultNetOperationResponseMessage>;
 }
@@ -72,7 +76,14 @@ export async function startCultNetOperationServer(
     );
   });
   await bindSocket(socket, options.port ?? 0, options.host ?? "127.0.0.1");
+  const idleTimeoutMs = options.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
   const resendTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [key, peer] of sessions) {
+      // An abandoned client must not hold a slot forever, or the cap locks
+      // every new client out.
+      if (peer.session.checkTimeout(now, idleTimeoutMs)) sessions.delete(key);
+    }
     for (const peer of sessions.values()) {
       for (const packet of peer.session.dueResends(Date.now())) sendPacket(peer.remote, packet);
     }
@@ -149,9 +160,13 @@ async function handleServerDatagram(
   const key = `${remote.address}:${remote.port}`;
   let peer = sessions.get(key);
   if (packet.packetType === "connect") {
-    if (!peer && sessions.size >= MAX_OPERATION_SESSIONS) return false;
-    peer = { session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }), remote };
-    sessions.set(key, peer);
+    if (!peer) {
+      if (sessions.size >= MAX_OPERATION_SESSIONS) return false;
+      peer = { session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }), remote };
+      sessions.set(key, peer);
+    }
+    // A Connect from an admitted peer repeats: the session answers with the
+    // Accept already owed and queues nothing.
     sendPacket(remote, peer.session.acceptConnect(packet, Date.now(), encode("cultnet-operation-service")));
     return true;
   }
@@ -160,12 +175,7 @@ async function handleServerDatagram(
   try {
     result = peer.session.receive(packet, Date.now());
   } catch {
-    // receive() has already recorded the packet's reliable sequence, so the
-    // session cannot be kept: end it and tell the peer. The reset comes first,
-    // or the goodbye's ack field would acknowledge the refused frame.
-    sessions.delete(key);
-    peer.session.resetPeerState();
-    sendPacket(remote, peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+    endSession(sessions, key, peer, sendPacket);
     return false;
   }
   if (result.reply) sendPacket(remote, result.reply);
@@ -176,21 +186,44 @@ async function handleServerDatagram(
   }
   for (const frame of result.delivered) {
     if (frame.channelId !== "schema") continue;
-    const message = parseCultNetMessage(decode(frame.payload));
-    if (message.schemaVersion !== "cultnet.operation_request.v0") continue;
-    const response = await options.handler(message);
-    const payload = encode(encodeCultNetMessageForWire(response, "cultnet.schema.v0"));
-    for (const responsePacket of peer.session.sendMany("schema", payload, {
-      reliable: true,
-      ordered: true,
-      nowMs: Date.now(),
-      maxFragmentBytes: options.maxFragmentBytes ?? 2048,
-    })) sendPacket(remote, responsePacket);
+    try {
+      const message = parseCultNetMessage(decode(frame.payload));
+      if (message.schemaVersion !== "cultnet.operation_request.v0") continue;
+      const response = await options.handler(message);
+      const payload = encode(encodeCultNetMessageForWire(response, "cultnet.schema.v0"));
+      for (const responsePacket of peer.session.sendMany("schema", payload, {
+        reliable: true,
+        ordered: true,
+        nowMs: Date.now(),
+        maxFragmentBytes: options.maxFragmentBytes ?? 2048,
+      })) sendPacket(remote, responsePacket);
+    } catch {
+      // The session recorded this request's sequence, so keeping it would
+      // acknowledge the retransmit of a request that was never handled.
+      endSession(sessions, key, peer, sendPacket);
+      return false;
+    }
   }
   if (packet.packetType === "data" || result.delivered.length > 0) {
     sendPacket(remote, peer.session.createAckForReceived(packet.sequence));
   }
   return true;
+}
+
+/**
+ * Ends a session that took a packet it could not serve, and tells the peer. The
+ * reset comes first, or the goodbye's ack field would acknowledge the very
+ * packet that was refused. A session already replaced under the same key is left.
+ */
+function endSession(
+  sessions: Map<string, RemoteSession>,
+  key: string,
+  peer: RemoteSession,
+  sendPacket: (remote: RemoteInfo, packet: CultNetRudpPacket) => void,
+): void {
+  if (sessions.get(key) === peer) sessions.delete(key);
+  peer.session.resetPeerState();
+  sendPacket(peer.remote, peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
 }
 
 function parseRudpEndpoint(endpoint: string): { host: string; port: number } {

@@ -245,16 +245,9 @@ export class CultNetRudpSession {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
-    const pendingAccept = [...this.#pendingReliable.values()]
-      .find(pending => pending.packet.packetType === "accept");
-    if (pendingAccept) {
-      this.#rememberReceived(packet.sequence);
-      this.#lastReceivedAtMs = nowMs;
-      pendingAccept.lastSentAtMs = nowMs;
-      return {
-        ...pendingAccept.packet,
-        payload: new Uint8Array(pendingAccept.packet.payload ?? new Uint8Array()),
-      };
+    // A Connect from a peer this session already accepted repeats.
+    if (this.#connected) {
+      return this.answerRepeatedConnect(packet, nowMs);
     }
     this.#ensureReliableCapacity(1);
     this.#rememberReceived(packet.sequence);
@@ -269,6 +262,32 @@ export class CultNetRudpSession {
     });
     this.#trackReliable(response, nowMs);
     return response;
+  }
+
+  /**
+   * Answers a Connect from a peer this session has already accepted. The packet's
+   * sequence is remembered and nothing is queued, so a Connect storm cannot grow
+   * the reliable queue. The reply is the Accept still awaiting acknowledgement,
+   * or an Ack once it was acknowledged.
+   */
+  answerRepeatedConnect(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpPacket {
+    this.#requireConnection(packet);
+    if (packet.packetType !== "connect") {
+      throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
+    }
+    this.#applyAcknowledgements(packet);
+    this.#rememberReceived(packet.sequence);
+    this.#lastReceivedAtMs = nowMs;
+    const pendingAccept = [...this.#pendingReliable.values()]
+      .find(pending => pending.packet.packetType === "accept");
+    if (!pendingAccept) {
+      return this.createAck();
+    }
+    pendingAccept.lastSentAtMs = nowMs;
+    return {
+      ...pendingAccept.packet,
+      payload: new Uint8Array(pendingAccept.packet.payload ?? new Uint8Array()),
+    };
   }
 
   send(
@@ -805,6 +824,8 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
+  /** Why the session ended, while it is over; cleared by the next Connect. */
+  #endedReason: Uint8Array | undefined;
   readonly #stats: CultNetTransportStats = {
     bytesReceived: 0,
     bytesSent: 0,
@@ -866,6 +887,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     if (this.#mode !== "client") {
       throw new Error("Only a client RUDP socket transport can initiate connect.");
     }
+    this.#endedReason = undefined;
     this.#sendPacket(this.#session.createConnect(Date.now(), payload));
   }
 
@@ -883,7 +905,17 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   async flush(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    while (this.#session.outstandingReliablePacketCount > 0) {
+    for (;;) {
+      // An ended session forgot its unacknowledged writes; reporting them
+      // flushed would be a lie.
+      if (this.#endedReason !== undefined) {
+        throw new Error(
+          `RUDP session ended before its reliable writes were acknowledged: ${Buffer.from(this.#endedReason).toString("utf8")}`,
+        );
+      }
+      if (this.#session.outstandingReliablePacketCount === 0) {
+        return;
+      }
       if (this.#closed) {
         throw new Error("RUDP transport closed before reliable packets were acknowledged.");
       }
@@ -929,6 +961,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     // The goodbye is built after the reset, or its ack field would acknowledge
     // the very frame the session refused.
     this.#session.resetPeerState();
+    this.#endedReason = reason;
     try {
       this.#sendPacket(this.#session.createDisconnect(reason));
     } catch {
@@ -981,10 +1014,15 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
 
     if (this.#mode === "server" && packet.packetType === "connect") {
-      this.#session.resetPeerState();
+      // A repeated Connect from the accepted peer resets nothing: the session
+      // answers it with the Accept already owed.
+      if (!this.#session.connected) {
+        this.#session.resetPeerState();
+      }
       let accept: CultNetRudpPacket;
       try {
         accept = this.#session.acceptConnect(packet, Date.now());
+        this.#endedReason = undefined;
       } catch {
         this.#stats.packetsDropped += 1;
         return;
@@ -1022,6 +1060,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         } satisfies CultNetTransportFrame);
       }
       if (result.disconnected) {
+        this.#endedReason = result.disconnectReason ?? new Uint8Array();
         this.emit("disconnect", { reason: result.disconnectReason ?? new Uint8Array() });
         this.emit("close");
         return;
