@@ -2465,11 +2465,82 @@ namespace GameCult.Caching
 
             // Variants this admission did not write whose base chain it changed: re-resolved, same delta, same storedAt.
             public List<CultStoredDocument> Dependents { get; } = new();
+
+            // Name and index values of every record that lands (Admitted and Dependents), by key. Filled once by Project.
+            public Dictionary<string, Projection> Projections { get; } = new(StringComparer.Ordinal);
+        }
+
+        // What a landing record's [CultName] and [CultIndex] getters said. Indexes holds only non-blank values.
+        private sealed class Projection
+        {
+            public Projection(string? name, (string Alias, string Value)[] indexes)
+            {
+                Name = name;
+                Indexes = indexes;
+            }
+
+            public string? Name { get; }
+            public (string Alias, string Value)[] Indexes { get; }
+        }
+
+        // The only place an admission runs a name or index getter on a landing record. It runs before land and before any
+        // sequence is minted, so a getter that throws refuses the whole admission with nothing written and nothing minted.
+        private static void Project(VariantPlan plan)
+        {
+            foreach (var stored in plan.Admitted.Concat(plan.Dependents))
+            {
+                var descriptor = stored.Descriptor;
+                string? name = null;
+                if (descriptor.NameAccessor != null)
+                    name = Read(stored, $"[CultName] member {descriptor.NameMember}", descriptor.NameAccessor) is { Length: > 0 } read ? read : null;
+                var indexes = new List<(string Alias, string Value)>();
+                foreach (var pair in descriptor.IndexAccessors)
+                {
+                    var member = descriptor.RichMembers.First(candidate => candidate.IndexAlias == pair.Key).Member.Name;
+                    var value = Read(stored, $"index '{pair.Key}' member {member}", pair.Value);
+                    if (!string.IsNullOrWhiteSpace(value))
+                        indexes.Add((pair.Key, value!));
+                }
+
+                plan.Projections[stored.Key.Value] = new Projection(name, indexes.ToArray());
+            }
+        }
+
+        private static string? Read(CultStoredDocument stored, string what, Func<object, string?> getter)
+        {
+            try
+            {
+                return getter(stored.Document);
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException(
+                    $"Record {stored.Key.Value} ({stored.Descriptor.SchemaName}) is refused: its {what} threw: {exception.GetBaseException().Message}", exception);
+            }
+        }
+
+        // Every admission is judged here: variants resolved, then every landing record's name and index values read once,
+        // then the rules that compare them. It refuses naming the keys, and mutates nothing.
+        private VariantPlan Resolve(
+            IReadOnlyList<CultStoredDocument> admitted,
+            IReadOnlyList<CultStoredDocument> evicted,
+            CacheBackingStore? source)
+        {
+            var plan = ResolveVariants(admitted, evicted, source);
+            Project(plan);
+            // The variant rules are judged only when a variant is involved.
+            if (_variantKeys.Count != 0 || admitted.Any(stored => stored.Variant != null))
+            {
+                RefuseVariantNameSharing(plan, evicted);
+                RefuseVariantIndexSharing(plan, evicted);
+            }
+
+            return plan;
         }
 
         // Resolves every admitted variant and every variant whose base chain this admission changes, base first, against
         // the post-admission set. It refuses a broken variant naming the keys, and mutates nothing.
-        private VariantPlan Resolve(
+        private VariantPlan ResolveVariants(
             IReadOnlyList<CultStoredDocument> admitted,
             IReadOnlyList<CultStoredDocument> evicted,
             CacheBackingStore? source)
@@ -2531,11 +2602,7 @@ namespace GameCult.Caching
             }
 
             if (toResolve.Count == 0)
-            {
-                var unchanged = new VariantPlan(admitted);
-                RefuseVariantIndexSharing(unchanged, incoming, gone);
-                return unchanged;
-            }
+                return new VariantPlan(admitted);
 
             var pending = new HashSet<string>(toResolve, StringComparer.Ordinal);
             var done = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
@@ -2546,7 +2613,6 @@ namespace GameCult.Caching
             var plan = new VariantPlan(admitted.Select(stored => done.TryGetValue(stored.Key.Value, out var resolved) ? resolved : stored).ToList());
             foreach (var key in toResolve.Where(key => !incoming.ContainsKey(key)))
                 plan.Dependents.Add(done[key]);
-            RefuseVariantIndexSharing(plan, incoming, gone);
             return plan;
 
             CultStoredDocument ResolveOne(string key)
@@ -2610,25 +2676,41 @@ namespace GameCult.Caching
                 var document = _codec.Deserialize(type, type, kept.Count == 0 ? payload : _codec.Overlay(payload, kept))
                                ?? throw new InvalidOperationException($"Variant {key} resolved to nothing.");
 
-                if (isVariant)
-                {
-                    // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it.
-                    if (descriptor.NameAccessor?.Invoke(document) is { Length: > 0 } variantName)
-                    {
-                        for (var ancestor = baseStored; ancestor != null;
-                             ancestor = ancestor.Variant == null ? null : done.TryGetValue(ancestor.Variant.BaseKey, out var above) ? above : Lookup(ancestor.Variant.BaseKey))
-                        {
-                            if (descriptor.NameAccessor(ancestor.Document) == variantName)
-                                throw new InvalidOperationException(
-                                    $"Variant {key} and its base {ancestor.Key.Value} are both named '{variantName}'; a variant must override its name.");
-                        }
-                    }
-                }
-
                 stack.RemoveAt(stack.Count - 1);
                 return done[key] = isVariant
                     ? variant.Resolved(document)
                     : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document) { Flattens = true };
+            }
+        }
+
+        // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it. A variant's
+        // name is its projection; an ancestor that lands is read from its projection, one that stays is read as held.
+        private void RefuseVariantNameSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
+        {
+            var gone = evicted.Select(stored => stored.Key.Value).ToHashSet(StringComparer.Ordinal);
+            var landing = plan.Admitted.Concat(plan.Dependents).ToDictionary(stored => stored.Key.Value, StringComparer.Ordinal);
+
+            CultStoredDocument? Ancestor(string key) =>
+                landing.TryGetValue(key, out var landed) ? landed
+                : gone.Contains(key) ? null
+                : _entries.TryGetValue(key, out var held) ? held : null;
+
+            string? NameOf(CultStoredDocument stored) =>
+                plan.Projections.TryGetValue(stored.Key.Value, out var projection)
+                    ? projection.Name
+                    : stored.Descriptor.NameAccessor == null ? null : Read(stored, $"[CultName] member {stored.Descriptor.NameMember}", stored.Descriptor.NameAccessor);
+
+            foreach (var variant in landing.Values.Where(stored => stored.Variant != null))
+            {
+                if (plan.Projections[variant.Key.Value].Name is not { } variantName)
+                    continue;
+                for (var ancestor = Ancestor(variant.Variant!.BaseKey); ancestor != null;
+                     ancestor = ancestor.Variant == null ? null : Ancestor(ancestor.Variant.BaseKey))
+                {
+                    if (NameOf(ancestor) == variantName)
+                        throw new InvalidOperationException(
+                            $"Variant {variant.Key.Value} and its base {ancestor.Key.Value} are both named '{variantName}'; a variant must override its name.");
+                }
             }
         }
 
@@ -2637,15 +2719,13 @@ namespace GameCult.Caching
         // commit replaces or removes, plus the records it lands. Plain-vs-plain sharing is not this rule's business.
         // A unique index maps a value to one key at lookup; a variant sharing it would be found in place of its
         // holder or lose the value, and the store would refuse to reopen.
-        private void RefuseVariantIndexSharing(
-            VariantPlan plan,
-            IReadOnlyDictionary<string, CultStoredDocument> incoming,
-            HashSet<string> gone)
+        private void RefuseVariantIndexSharing(VariantPlan plan, IReadOnlyList<CultStoredDocument> evicted)
         {
             var landing = plan.Admitted.Concat(plan.Dependents).ToList();
             if (landing.All(stored => stored.Descriptor.IndexAccessors.Count == 0))
                 return;
-            var replaced = new HashSet<string>(incoming.Keys.Concat(gone).Concat(plan.Dependents.Select(stored => stored.Key.Value)), StringComparer.Ordinal);
+            var replaced = new HashSet<string>(
+                plan.Admitted.Concat(evicted).Concat(plan.Dependents).Select(stored => stored.Key.Value), StringComparer.Ordinal);
             var landingByKey = landing.ToDictionary(stored => stored.Key.Value, StringComparer.Ordinal);
 
             bool IsVariant(string key) =>
@@ -2656,12 +2736,9 @@ namespace GameCult.Caching
             var landed = new Dictionary<((Type Type, string Alias) Index, string Value), List<string>>();
             foreach (var stored in landing)
             {
-                foreach (var pair in stored.Descriptor.IndexAccessors)
+                foreach (var (alias, value) in plan.Projections[stored.Key.Value].Indexes)
                 {
-                    var value = pair.Value(stored.Document);
-                    if (string.IsNullOrWhiteSpace(value))
-                        continue;
-                    var index = (stored.Descriptor.DocumentType, pair.Key);
+                    var index = (stored.Descriptor.DocumentType, alias);
                     landedValues.Add((stored, index, value));
                     if (!landed.TryGetValue((index, value), out var landedKeys))
                         landed[(index, value)] = landedKeys = new List<string>();
@@ -2733,7 +2810,7 @@ namespace GameCult.Caching
 
                 _entries[stored.Key.Value] = stored;
                 _handles.AddOrUpdate(stored.Document, new KeyBox(stored.Key));
-                Index(stored);
+                Index(stored, plan.Projections[stored.Key.Value]);
                 if (stored.Variant == null)
                     _variantKeys.Remove(stored.Key.Value);
                 else
@@ -2790,19 +2867,15 @@ namespace GameCult.Caching
             }
         }
 
-        private void Index(CultStoredDocument stored)
+        private void Index(CultStoredDocument stored, Projection projection)
         {
             var type = stored.Descriptor.DocumentType;
             if (stored.Descriptor.IsGlobal)
                 _globals[type] = stored.Key.Value;
-            if (stored.Descriptor.NameAccessor?.Invoke(stored.Document) is { Length: > 0 } name)
-                MapOf(_names, type)[name] = stored.Key.Value;
-            foreach (var pair in stored.Descriptor.IndexAccessors)
-            {
-                var value = pair.Value(stored.Document);
-                if (!string.IsNullOrWhiteSpace(value))
-                    AddHolder(_indexes, (type, pair.Key), value, stored.Key.Value);
-            }
+            if (projection.Name != null)
+                MapOf(_names, type)[projection.Name] = stored.Key.Value;
+            foreach (var (alias, value) in projection.Indexes)
+                AddHolder(_indexes, (type, alias), value, stored.Key.Value);
         }
 
         // Documents are mutable, so a name or index value may have changed since it was indexed: drop by key.
