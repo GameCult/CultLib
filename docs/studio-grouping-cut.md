@@ -1,720 +1,430 @@
 # Studio Record Grouping And Reference Drag-Drop Cut
 
-Date: 2026-09-17 (Imagination pass)
+First mapped 2026-09-17 (Imagination) against CultLib `122c217`. **Refreshed 2026-09-29
+(Imagination) against CultLib `main` `feeced8` and Aetheria `codex/fire-control-12` `4b594e11`.**
+Every `file:line` below is against those revisions unless marked. Hands re-reads an anchor
+before editing it; `main` keeps moving.
 
-**2026-09-30 (Self; the campaign was picked up by the Eureka session at the operator's request).**
-Operator rulings, each asked on its own: **Q2 A** (occupied values only), **Q3 A** (list only),
-**Q4 A** (no search in this campaign). Q1 was ruled B on 2026-09-17. **Q5 is overtaken:** the
-Studio release comes from `main` together with document-variants C3 (Studio edits the
-delta), as one `caching-unity` release. This is option A, and it takes the native-plugin drift.
-
-**Context this map predates:**
-- `[CultIndex]` now means unique (operator, 2026-09-30); see `docs/document-variants-cut.md`.
-  Grouping is this campaign's own attribute, and the operator named it as the missing
-  DatabaseListView feature.
-- Variants C1 changed `CultInspectorModel` to take a `CultCodec` (merged at `6ffe17a`).
-- C2a (element ids everywhere) is in flight.
-
-An Imagination refresh pass re-anchors every cut against current `main` before Hands. The
-map moved to `main` from `codex/studio-grouping`, which carried only this file.
-
-Status: cut map, forks open. The operator rules on forks Q1-Q5 before Hands
-starts. Where a line depends on a fork, it names the fork and follows the
-recommendation. Line references are against CultLib `122c217` and Aetheria
-`515859cf` unless marked otherwise.
-
-CultLib `main` moved during this pass, from `122c217` to `1845301`. The three
-new commits touch only `native/GameCult.Mesh.Quic.Native`,
-`scripts/mutate-cultmesh.mjs` and a QUIC doc. They were live uncommitted edits
-in the main checkout when the pass began. The Q5 audit extends to them
-unchanged. Another agent is actively working on `main`, so Hands works in its
-own worktree.
+**Rulings.** Q1 **B** (a class attribute on the model; argument order is nesting order;
+2026-09-17). Q2 **A** (occupied values only). Q3 **A** (list only, not the ref picker).
+Q4 **A** (no record search). Q5 **overtaken**: one release from `main`, together with
+document-variants C3 (`docs/document-variants-cut.md`), taking whatever native-plugin drift
+`main` carries. Open: Q6 (variants in the tree) and Q7 (Aetheria's annotations), below.
 
 ## Target
 
 ### Ends
 
-1. **Declared record grouping.** An attribute on a document type's model
-   declares that the type's records group by one or more member values. Studio's
-   record list becomes a foldout tree for that type. Tree levels nest in the
-   declared order. A declaration on a base type groups the records of every
-   derived type listed under it.
-2. **Create in a group.** Every group node offers `Create`. The new record gets
-   every grouped member on the path to that node set to that node's value, so
-   it appears in that node.
-3. **Reference drag and drop.** You can drag a record row from Studio's record
-   list onto any `CultRecordRef<T>` value the inspector draws (a member, a list
-   element, a dictionary key or value). The drop is accepted exactly when the
-   record is one the ref's picker would offer.
+1. **Declared record grouping.** `[CultInspectorGroupBy(nameof(A), nameof(B))]` on a document
+   class makes Studio's record list for that type a foldout tree, nested in argument order. A
+   declaration on a base type groups every derived type listed under it.
+2. **Create in a group.** Every group node offers `Create`. The new record gets every grouped
+   member on the path to that node set to that node's value, so it lands in that node.
+3. **Reference drag and drop.** A record row dragged from Studio's list onto any
+   `CultRecordRef<T>` value the inspector draws (member, list element, dictionary key or value)
+   is accepted exactly when the ref's picker would offer that record.
 
 Recovered from the legacy "Database Tools" window (Aetheria `d3db1730`,
 `Assets/Scripts/CultCache/Editor/DatabaseView.cs`, `AetheriaDatabaseView.cs`,
-`Inspectors/DatabaseLinkInspector.cs`). Declaring grouping by selector lambdas
-is rejected by operator ruling (2026-09-17): use attributes.
+`Inspectors/DatabaseLinkInspector.cs`). Selector lambdas are rejected (operator, 2026-09-17).
+
+**The attribute is not `[CultIndex]`.** `[CultIndex]` means unique (operator, 2026-09-30;
+`CultDocumentContracts.cs:34`). Grouping is `CultInspectorGroupByAttribute`, in
+`CultInspectorAttributes.cs`, read only by `CultInspectorModel`. It changes no schema id,
+catalog entry, index, or store byte. The index cut's deletion of grouping-only `[CultIndex]`
+declarations (CultMesh, Geometry) adds no `[CultInspectorGroupBy]` in their place: those are
+service stores, not Studio-authored catalogs.
 
 ### Invariants
 
-- **I1. Model owns grouping.** `CultInspectorModel` alone decides:
-  - which members group a listed type, and in what order;
-  - which declarations are invalid, and the notice for each;
-  - the tree's partition, node identity, node order and node labels;
-  - the object that create-in-group makes.
-  The Studio lowers the tree and never reads the attribute, calls
-  `SetValue` for a preset, or computes a label.
-- **I2. The leaves partition the candidates.** Across all leaves, the tree's
-  records are exactly `RecordCandidates(CultRecordRef<listed>, records)`. Each
-  record appears once, and records keep candidate order inside a leaf. Grouping
-  never hides a record, including one whose grouped value is unset, dangling,
-  or an undefined enum value.
-- **I3. The listed type owns the tree's shape.** Grouping comes from the type
-  selected in the type pane, never from each record's runtime type. A
-  `WeaponItemData` listed under `GearData` is grouped by `GearData`'s
-  declaration.
-- **I4. Node identity is value identity, not the label.**
-  - A `CultRecordRef` groups by key.
-  - An enum groups by its underlying value.
-  - Other kinds group by the invariant string of the value.
-  So two factions with the same label are two nodes, and foldout state keys on
-  the node id.
-- **I5. Create-in-group round-trips.** Upsert the object that
-  `CreateInGroup(listed, node)` returns, then regroup: the new record lies in a
-  node with the same id.
-- **I6. One candidate rule.** `IsRecordCandidate(refType, record)` is the only
-  test for "this record may be this ref's value". `RecordCandidates` filters
-  through it, and drop acceptance calls it. No `IsInstanceOfType` appears in
-  `src/GameCult.Unity`.
-- **I7. One ref label.** The model owns the strings `None` and `Missing <key>`.
-  The picker (`DrawRecordRef`) and group labels both use it.
-- **I8. Invalid declarations never break the window.** An invalid declaration
-  gives a flat list plus the model's notice. It never throws in `OnGUI`.
-- **I9. A drop honours the same gates as the picker.** A drop is refused:
-  - in a disabled (read-only) scope;
-  - when the payload came from another store's model;
-  - when the key equals the current key.
-  A dictionary key drop still goes through `ReplaceKey` refusal, because
-  `DrawDictionary` already routes every key change there
-  (`CultCacheStudioDrawers.cs:243-251`).
+- **I1. The model owns grouping.** `CultInspectorModel` alone decides which members group a
+  listed type and in what order, which declarations are invalid (and the notice), the tree's
+  partition, node identity, order and labels, and the object create-in-group makes. Studio
+  lowers the tree; it never reads the attribute, calls `SetValue` for a preset, or computes a
+  group label.
+- **I2. The leaves partition the candidates.** Across all leaves the tree holds exactly
+  `RecordCandidates(CultRecordRef<listed>, records)`, each record once, in candidate order
+  inside a leaf. Grouping never hides a record, including one whose grouped value is unset,
+  dangling, or an undefined enum value.
+- **I3. The listed type owns the tree's shape.** Grouping comes from the type selected in the
+  type pane, never from each record's runtime type.
+- **I4. Node identity is value identity, not the label.** A ref groups by key, an enum by its
+  underlying value, other kinds by the value's invariant string. Foldout state keys on node id.
+- **I5. Create-in-group round-trips.** Upsert what `CreateInGroup(listed, node)` returns,
+  regroup: the new record lies in a node with the same id.
+- **I6. One candidate rule.** `IsRecordCandidate(refType, record)` is the only test for "this
+  record may be this ref's value". `RecordCandidates` filters through it; drop acceptance calls it.
+- **I7. One ref label.** The model owns `None` and `Missing <key>`; the picker and group labels
+  both use it.
+- **I8. Invalid declarations never break the window.** They give a flat list plus the model's
+  notice, never a throw in `OnGUI`.
+- **I9. A drop honours the picker's gates.** Refused in a disabled (read-only) scope, when the
+  payload came from another model, and when the key equals the current key. A dictionary-key
+  drop still passes `ReplaceKey` (`CultCacheStudioDrawers.cs:303-309`).
+- **I10 (new). Grouping reads what readers read.** A variant record groups, labels, and is a
+  drop candidate by its resolved `Document` (`CultCache.cs:369-371`), never its delta.
 
-### Non-consumers and non-goals
+### Non-goals
 
-- **Sibling runtimes.** There is no port of the inspector model or the
-  inspector attributes.
-  - `packages/cultcache-ts/src/cult-cache-inspector.ts` is a raw
-    `.cc` byte and catalog dumper (`inspectCultCacheBytes`). It has no members,
-    metadata, candidates or grouping.
-  - Rust and Python have neither.
-  No parity work is needed.
-- **Wire and catalog.** Attributes are metadata only. They change no schema id,
-  catalog entry or store byte.
-- **Runtime CultUI panel.** This cut adds none. The model's API is shaped so one
-  could lower it.
-- **Not in scope:** record search (Q4), grouping in the ref picker popup (Q3),
-  drop-to-append on list headers (the legacy `DatabaseLinkListInspector`), and
-  the legacy "entry name `New <Type>`" on create.
+No sibling-runtime port (TS `cult-cache-inspector.ts` is a byte dumper; Rust and Python have
+no inspector). No runtime CultUI panel. No search (Q4), no picker grouping (Q3), no
+drop-to-append on list headers, no legacy `New <Type>` naming.
 
-## Body findings that shape the cut
+## Body findings
 
-Established by reading and by probes in scratch (`probe/`, `studio-compile/`):
+Kept from 2026-09-17, re-anchored:
 
-- **F1. Legacy grouping by gear hardpoint read a derived property.**
-  - Legacy `GearData` grouping read `HardpointType` and wrote `Hardpoint`.
-  - `EquippableItemData.HardpointType` (`ItemData.cs:401-402`) is an abstract
-    `[IgnoreMember]` property. `GearData.HardpointType => Hardpoint`
-    (`:455`), `CargoBayData` returns `Tool` (`:464`) and `HullData` returns
-    `Hull` (`:533`).
-  - The stored member is `GearData.Hardpoint` (slot 23, `:453`).
-  - The model's member list for `GearData` and `WeaponItemData` includes
-    `Hardpoint#23@GearData`, confirmed by probe. `HardpointType` is not an
-    inspector member.
-  - The declaration names `Hardpoint`. The overriding types have no stored
-    hardpoint, so they have nothing to group.
-- **F2. `Manufacturer` is declared on the abstract `ItemData`** (`ItemData.cs:281`),
-  not on `GearData`. Probe of `GameData/Aetheria.cc` (a copy):
+- **F3.** Legacy grouping matched the exact type; grouping derived records under a base
+  declaration is new.
+- **F4.** Legacy create-in-group was dead (`DatabaseView.cs:70-75` throws); legacy foldouts
+  keyed on the label hash.
+- **F5.** `member.GetCustomAttributes(true)` ignores `inherit` for a `PropertyInfo`, so a base
+  `[M] abstract P` is not seen on the override. Sites: `CultInspectorModel.cs:36` (now the only
+  metadata site: `MetadataOf` caches it per member, `:341-351`) and `:209`
+  (`CultInspectorDrawerClaims.Resolve`). Fix: `Attribute.GetCustomAttributes(member, true)`.
+- **F6.** Studio `Add` creates only the listed type (`CultCacheStudioWindow.cs:340-346`,
+  `CreateElement(type, type)`), disabled when the model cannot create it (`:141`). So
+  create-in-group never makes a derived type, and an abstract listed type offers no `Create`.
+- **F7.** Studio search filters the type pane only (`:112-120`).
+- **F8.** Foldouts are in-memory (`CultCacheStudioDrawers.cs:33`); `OnDisable` closes the store
+  (`:48-51`), domain reload included. The only `EditorPrefs` key is `LastPathKey` (`:13`).
+- **F9.** No drawer claims `CultRecordRef<>`, so every ref reaches `DrawRecordRef`
+  (`CultCacheStudioDrawers.cs:254-280`).
+- **F10.** The Studio editor sources compile outside Unity (netstandard2.1, C# 9, against
+  Unity 6000.3.24f1 `Editor\Data\Managed\UnityEngine\*.dll` without the `UnityEditor.dll`
+  facade, plus the built `GameCult.Caching*` and tracked `MessagePack*.dll`). The 09-17
+  scratch project is gone; Hands rebuilds it in its own scratch from this recipe.
+- **F11.** The record row reads its click in `GUILayout.Toggle` (`:184`); a drag start must be
+  handled on a reserved rect before the toggle draws (IMGUI convention, not probed).
 
-  | Listed type | Records | Manufacturer set | Manufacturer unset |
-  |---|---|---|---|
-  | `GearData` (includes `WeaponItemData`) | 43 | 29 | 14 |
-  | `HullData` | 3 | 3 | 0 |
-  | `CargoBayData` (includes `DockingBayData`) | 5 | 5 | 0 |
-  | `SimpleCommodityData` | 13 | 0 | 13 |
-  | `CompoundCommodityData` | 51 | 0 | 51 |
+New since the map:
 
-  `GearData` has 11 distinct manufacturers. A member attribute on
-  `ItemData.Manufacturer` would therefore also wrap all 64 commodity records in
-  one "None" level. Legacy grouped only `GearData` by manufacturer. This drives
-  Q1.
-- **F3. Legacy grouping matched the exact type** (`CanGroup: typeof(T) == type`),
-  and its tables listed exact types. So it never grouped `WeaponItemData`
-  records. Grouping derived records under a base declaration is new behaviour,
-  as the brief asks.
-- **F4. Legacy create-in-group was dead.** `DatabaseEntryGroup<T,K>.Activate`
-  (`DatabaseView.cs:70-75`) throws after invoking. Legacy groups also existed
-  only when occupied (`GroupBy`), and foldouts keyed on the label's hash, so
-  groups with the same label collapsed together.
-- **F5. Existing metadata misses inherited attributes on overriding properties.**
-  - `CultInspectorMetadata` reads `member.GetCustomAttributes(true)`
-    (`CultInspectorModel.cs:36`), and `CultInspectorDrawerClaims.Resolve` reads
-    it too (`:209`).
-  - For a `PropertyInfo`, that overload ignores `inherit`. Probe: a base
-    `[M] abstract int P` is not seen on the override.
-    `Attribute.GetCustomAttributes(member, true)` does see it.
-  - Fields are unaffected. This is a latent defect in every `Inherited = true`
-    inspector attribute.
-- **F6. Studio `Add` creates only the listed type**
-  (`CultCacheStudioWindow.cs:340-347`: `CreateElement(type, type)`), and is
-  disabled when the model cannot create it (`:141`).
-  - Create-in-group therefore never makes a derived type, and every grouped
-    member exists on the created object.
-  - "A preset value is invalid for the created derived type" cannot arise, so it
-    is recorded as a default, not a fork.
-  - An abstract listed type offers no `Create`.
-- **F7. Studio search filters the type pane only** (`:112-120`). No record
-  search exists.
-- **F8. Studio foldouts are not persisted.** The inspector keeps foldouts in an
-  in-memory dictionary (`CultCacheStudioDrawers.cs:33`). The window closes its
-  store on `OnDisable` (`:48-51`), which includes a domain reload. The only
-  `EditorPrefs` key is `LastPathKey` (`:13`).
-- **F9. No drawer claims `CultRecordRef<>`.** This was checked in CultLib Studio
-  and in Aetheria `HEAD:Assets/Scripts/Editor/CultCacheDrawers.cs`. So every
-  ref value reaches `DrawRecordRef` (`:195-221`), and the drop target added
-  there covers all of them. A future claimed ref drawer would bypass it, which
-  is acceptable: a claim owns its widget.
-- **F10. The Studio editor sources compile outside Unity.**
-  - Probe: a netstandard2.1 / C# 9 project compiles
-    `src/GameCult.Unity/Assets/Caching/Editor/*.cs` with 0 errors against:
-    - `Editor/Data/Managed/UnityEngine/*.dll` from Unity 6000.3.24f1 (the
-      `UnityEditor.dll` facade must be left out, because it duplicates the
-      module types);
-    - the tracked `GameCult.Caching*.dll` and `MessagePack*.dll`.
-  - This gives a pre-tag compile gate. The last migration only had
-    post-release Aetheria batchmode.
-- **F11. The Studio source row reads its click in `GUILayout.Toggle`**
-  (`:184`). IMGUI button-like controls take `MouseDrag` while they are the hot
-  control, so the drag start must be handled on a reserved rect *before* the
-  toggle draws. This comes from Unity's IMGUI convention and was not probed
-  here; the operator click-through proves it.
+- **F12. Variants (C1, `6ffe17a`).** `CultInspectorModel(registry, CultCodec)`
+  (`CultInspectorModel.cs:302-306`); Studio still calls `CultCacheMessagePack.CreateInspectorModel(registry)`
+  (`CultCacheMessagePack.cs:33-34`, unchanged). `CultStoredDocument.Variant` is the delta
+  (`CultCache.cs:374`); `Document` is the resolved view. A top-level override is a
+  `Set` whose path is one step at the member's slot (`CultVariants.cs:72-73`), so "is this
+  grouped member overridden on this variant" is computable from the member's `Slot`.
+- **F13. Every Studio commit to a variant key is refused until C3.** `CultInspectorEdit.Commit`
+  is a plain `UpsertAsync` (`CultInspectorModel.cs:266-282`); Q1a refuses a plain write at a
+  variant key (`CultCache.cs:2494-2496`). A drop into a variant's inspector therefore reports
+  that refusal until C3 lands. The release waits for C3, so no shipped Studio shows it, but
+  the operator click-through must run after C3.
+- **F14. Studio `Duplicate` of a variant makes a flattened plain copy**
+  (`CultCacheStudioWindow.cs:349-353` clones the resolved `Document`). Not this campaign's
+  defect; C3's `CreateVariant` sits beside it.
+- **F15. Element ids (C2a, `hands/variants-c2a`, WIP `df74f8c`).** No grouping interaction:
+  grouped members are top-level scalars and refs; ids live on list elements. Drops write a ref
+  into the edit document; ids are untouched and minted on write for new elements; C3's diff
+  keys overrides on them. Two consequences:
+  - After C2a, registration refuses a document type whose object-list element lacks a
+    `[CultElementId]` (`CultCache.cs` descriptor build, WIP). Cut 1's new fixtures carry no
+    object lists.
+  - C2a does not hide or lock the id member, so Studio shows it as an editable string.
+    Hand-editing one retargets overrides. That belongs to C3 (make `[CultElementId]` members
+    read-only in the model), not here; flagged for Self.
+- **F16. The 1.0.60/1.4.0 release shipped** (`0155ba8`, tags on `45c2f40`) and
+  `codex/asset-guid-attribute` is merged. It already carried the 302,080-byte native bridge,
+  so the 09-17 Q5 drift is spent. Native source has moved since (`git diff --stat 45c2f40 main
+  -- native/`: 5 files, +840/-118), so this release rebuilds the bridge again. The v1 exports
+  the managed side imports (`src/GameCult.Mesh.Quic.Native/*.cs:263-276`) remain at
+  `cultmesh_quic_native.cpp:1405-1465`.
+- **F17. Aetheria's schema moved.** `ItemData.Manufacturer` is gone (slot 3 retired,
+  `ItemData.cs:281-282`). The manufacturer relation now lives on `FactionProductData`
+  (`FactionProduct.cs:27`, `CultRecordRef<Faction> Manufacturer`; `:24`,
+  `CultRecordRef<CraftedItemData> Design`). Aetheria pins `cultlib-unity-v1.0.60` /
+  `caching-unity-v1.4.0` / `cultmath-unity-v0.2.4` (`Packages/manifest.json:54-56`),
+  `CultLibRevision` `45c2f40` and a separate `CultMathRevision` `6d5e209`
+  (`Directory.Build.props:6,10`).
+- **F18. After C2a, Aetheria cannot take the new CultLib without its element-id sweep**
+  (`List<ItemRole>`, `List<BehaviorData>`, `List<AudioStat>`, `List<HardpointData>`,
+  `List<ProductRole>`, `List<LoadoutSlot>`, among others). So the Aetheria re-pin belongs to
+  variants C4, and this campaign's Cut 4 shrinks to annotations and tests on top of it.
 
-## Identity, lifecycle and authority
+## Identity and authority
 
-| Thing | Identity | Lifecycle | Owner (decides) | Readers | Persisted? |
-|---|---|---|---|---|---|
-| Grouping declaration | Attribute on a document class (Q1-B) or member (Q1-A), in the consumer's engine-free assembly | Compile time; inherited per `AttributeUsage` | Consumer source (Aetheria `ServerShared`) | `CultInspectorModel` only | Source code; no store bytes |
-| Resolved grouping (`CultInspectorGrouping`) | Listed `Type` | Cached per model instance, like `_shapes` (`CultInspectorModel.cs:298-299`); dies with the model at store close | `CultInspectorModel` | Studio window | No |
-| Group tree (`CultInspectorRecordGroup`) | Root per (listed type, records snapshot) | Rebuilt each `OnGUI`, as `RecordCandidates` already is (`CultCacheStudioWindow.cs:167`) | `CultInspectorModel` | Studio window | No |
-| Node id | `<listed schema name>` + `/` + per-level value identity (I4) | Stable while the values exist | `CultInspectorModel` | Studio foldout map | No |
-| Node label | Enum name, `RecordLabel`, `None`, `Missing <key>`, invariant string, `(empty)` | Recomputed with the tree | `CultInspectorModel` | Studio | No |
-| Group foldout state | Node id → bool | Window instance memory; cleared by `CloseStore`; lost on domain reload, which already closes the store (F8) | `CultCacheStudioWindow` | Same | No (default; see Defaults) |
-| Invalid-declaration notice | Listed `Type` | With the resolved grouping | `CultInspectorModel` | Studio shows a warning HelpBox above the list | No |
-| Created-in-group object | New document | Made by the model, upserted by the window through `_cache.UpsertAsync` exactly as `Add` does | Model makes it; `CultCache` admits it | Window selects the key and expands its path | Store, on `Save` |
-| Drag payload | `CultCacheStudioRecordDrag { CultInspectorModel Model; string Key }` under generic data key `"GameCult.CultCacheStudio.Record"` | One drag gesture (Unity `DragAndDrop`) | Studio record list (source) | `CultInspector.DrawRecordRef` (target) | No |
-| Drop acceptance | (ref type, record) | Per `DragUpdated` / `DragPerform` | `CultInspectorModel.IsRecordCandidate` plus the I9 gates | Studio | No |
-
-No persistent state is introduced. No cell is empty.
+| Thing | Owner | Lifecycle | Persisted |
+|---|---|---|---|
+| `[CultInspectorGroupBy]` | consumer source | compile time; nearest declaration wins; no arguments opts out | source only |
+| `CultInspectorGrouping` (resolved) | model | cached per listed type like `_shapes` (`CultInspectorModel.cs:296`) | no |
+| `CultInspectorRecordGroup` tree, node ids, labels | model | rebuilt each `OnGUI`, as `RecordCandidates` is (`CultCacheStudioWindow.cs:167`) | no |
+| Group foldouts (node id → bool) | window | window memory; cleared by `CloseStore` (`:318-327`) | no |
+| Drag payload `{ Model, Key }` under `"GameCult.CultCacheStudio.Record"` | Studio list (source) | one drag | no |
+| Drop acceptance | `IsRecordCandidate` plus I9 gates | per `DragUpdated`/`DragPerform` | no |
+| Created-in-group object | model makes; `CultCache` admits via `UpsertAsync`, as `Add` | new plain record | store, on `Save` |
 
 ## Forks
 
-### Q1. Where does the grouping declaration live, and how is nesting ordered? (blocks Cuts 1, 4)
+Q1-Q5 are ruled (header). Two remain.
 
-**Ruled B (operator, 2026-09-17):** "I like B". The same ruling reopens the item
-schema: a crafted item's manufacturer belongs to its production lot, not its
-design (see Cut 4).
+### Q6. How does the grouped list show a variant? (blocks nothing in Cuts 1-2; shapes C3's row lowering)
 
+Mechanical defaults, not asked: a variant groups by its resolved values (I10), so a variant
+that inherits its base's `HullType` sits in the base's node and moves when the base changes;
+create-in-group always makes a plain record; C3's `CreateVariant` needs no preset because the
+variant inherits its base's group; a variant is a valid drag payload.
 
-- **A. Member attribute** `[CultInspectorGroup(int order = 0)]` on a field or
-  property.
-  - Levels are ordered by `order`, then by the member's display order
-    (`Metadata.Order ?? Slot`).
-  - Inheritance comes free.
-  - The member can't be scoped: on `ItemData.Manufacturer`, it groups every item
-    type by manufacturer, and all 64 commodity records sit under one `None`
-    level (F2).
-  - Ordering spreads across files: `Hardpoint` on `GearData` with `order: 0`,
-    `Manufacturer` on `ItemData` with `order: 1`.
-- **B. Type attribute** `[CultInspectorGroupBy(nameof(Hardpoint), nameof(Manufacturer))]`
-  on a document class. `AttributeUsage(Class, Inherited = true,
-  AllowMultiple = false)`.
-  - The argument order is the nesting order.
-  - The nearest declaration wins, so a derived type re-declares, and
-    `[CultInspectorGroupBy]` with no arguments opts out.
-  - Names resolve against the listed type's inspector members, so inherited
-    members work.
-  - `nameof` keeps it refactor-safe, and it names data rather than code.
-  - It scopes `Manufacturer` to `GearData` exactly as legacy did.
-- **C. Both forms.** Twice the surface, two ordering rules.
-- **Recommendation: B.**
-  - It is the only form that recovers the legacy grouping without the
-    commodity regression.
-  - Its nesting order sits in one place, readable.
-  - It is still an attribute, not a selector.
-  - It departs from the brief's "member attribute" working name; that is why
-    this is asked.
-- **Depends on it:**
-  - Cut 1's attribute type and its resolution tests.
-  - Cut 4's annotations: under B, four class attributes; under A, four member
-    attributes plus accepting F2.
+- **A. Flat by resolved value.** A variant is an ordinary row in its resolved group. C3 adds a
+  row marker ("variant of Longinus"). Which of its grouped values are overridden shows in the
+  inspector through C3's per-member marker, not in the tree.
+- **B. Nested under the base.** Inside a leaf, a variant row sits indented under its base's row
+  when both share the leaf; otherwise it stands alone with the marker.
+- **C. A's rows plus an inherited/overridden glyph on the row** for the grouped members.
+- **Recommendation: A.** I2 stays one rule, the tree has one shape, and the base link already
+  lives in C3's inspector. B makes the tree's shape depend on two relations, and splits
+  whenever a variant overrides a grouped value. C duplicates C3's inspector marker.
 
-### Q2. Which group nodes exist? (blocks Cut 1)
+### Q7. Which Aetheria types group, and by what? (blocks Cut 4 only)
 
-- **A. Occupied values only** (legacy parity, F4).
-  - Create into an empty category means creating at the root and then editing
-    the member.
-- **B. Enums show every defined value, including empty nodes**, so
-  create-in-group reaches empty categories. Other kinds show occupied values
-  only.
-  - Refs cannot enumerate every candidate record: 11+ factions per level times
-    the enum levels is too many.
-- **Recommendation: A.**
-  - The trees stay proportional to the data.
-  - The rule is the same for every kind.
-  - B is a small later addition.
-- **Depends on it:** the tree builder and one test.
+Candidates on `codex/fire-control-12` (enums unless noted; `[Flags]` enums excluded):
 
-### Q3. Does grouping also apply to the `CultRecordRef` picker popup? (blocks Cut 2 scope)
+| Type | Member | Anchor | Note |
+|---|---|---|---|
+| `SimpleCommodityData` | `Category` (`SimpleCommodityCategory`) | `ItemData.cs:310` | legacy parity |
+| `CompoundCommodityData` | `Category` (`CompoundCommodityCategory`) | `ItemData.cs:338` | legacy parity |
+| `GearData` | `Hardpoint` (`HardpointType`) | `ItemData.cs:454` | legacy parity; `WeaponItemData` inherits when listed under `GearData` |
+| `WeaponItemData` | `WeaponType`; or `WeaponCaliber`, `WeaponRange` | `ItemData.cs:485`, `:482`, `:479` | re-declaration, applies when listing weapons |
+| `HullData` | `HullType` | `ItemData.cs:519` | legacy parity |
+| `FactionProductData` | `Manufacturer` (ref `Faction`), then `Design` (ref `CraftedItemData`) | `FactionProduct.cs:27`, `:24` | where "by manufacturer" now lives |
+| `Loadout` | `Hull` (ref `HullData`) | `Loadout.cs:17` | optional |
 
-- **A. List only.**
-- **B. Also the popup**, as `EditorGUILayout.Popup` submenus using `/` paths
-  built from the ref target type's grouping.
-  - A label containing `/` would split wrongly unless it is escaped.
-  - A target type such as `EquippableItemData` has no declaration, so it still
-    shows flat.
-- **Recommendation: A.**
-  - With drag-drop from the grouped list, the long-popup pain is gone.
-  - B can reuse the model tree later without new model surface.
+`ConsumableItemData`, `CargoBayData`, `DockingBayData`, `Faction`, `PersonalityAttribute`
+have no groupable member worth a level.
 
-### Q4. Record search? (blocks nothing if A)
-
-- **A. None in this cut.** The Studio has no record search today (F7).
-- **B. A record search field** that filters tree leaves and auto-expands
-  matching paths.
-- **Recommendation: A.** It is a separate feature, and grouping does not need it.
-
-### Q5. Release base and re-pin scope (blocks Cuts 3, 4)
-
-`git log a0813c6..122c217` (68 commits) touches nothing under:
-
-- `src/GameCult.Caching`
-- `src/GameCult.Caching.MessagePack`
-- `src/GameCult.Unity`
-- `unity/`
-- `packages/cultmath`
-
-It touches:
-
-- the native QUIC bridge, rewritten to a C ABI v2 (`6a091ef`). The v1 exports
-  `cultmesh_quic_open/state/poll` remain at `cultmesh_quic_native.cpp:1360-1392`.
-- OpenSSL MsQuic (`c729dff`).
-- TS CultMesh/CultNet, the QUIC native tests, and docs and CI.
-- `scripts/build-unity-package.ps1`, one message line.
-
-The build script rebuilds and, with `-UpdateTemplate`, replaces
-`unity/org.gamecult.cultlib/Runtime/Plugins/x86_64/gamecult_mesh_quic_native.dll`
-and `msquic.dll`. `19d8d5c` records that the committed native plugin is the
-older 40,448-byte Schannel build and that current source builds to 302,080
-bytes. So a release from main ships a new native bridge and msquic into
-Aetheria's Unity package. Aetheria calls no QUIC (grep `Quic` in `Assets/Scripts`
-hits only a KDTree file).
-
-- **A. Release from main** after the feature merges, and accept the native
-  plugin replacement.
-  - Verify the rebuilt DLL still exports the three v1 entry points the managed
-    `GameCult.Mesh.Quic.Native.dll` imports
-    (`src/GameCult.Mesh.Quic.Native/*.cs:261-275`).
-  - The build host needs MSVC and the pinned MsQuic digests. If the native
-    build fails, stop and return to the operator.
-- **B. Release from a branch off `a0813c6`** carrying only this feature. Tag it
-  there and merge back to main.
-  - The tags sit on a commit whose native plugin stays old.
-  - The next main release takes the drift anyway, so B only defers it.
-- **C. Release from main, but hand-restore the old native plugin** in the
-  release commit.
-  - The byte check then fails by construction. Rejected unless the operator
-    wants it.
-- **Recommendation: A.** The drift is committed, reviewed work that only the
-  release step has held back. Aetheria does not load the bridge, and B leaves
-  the committed plugin already known to be stale (`19d8d5c`).
-- **Depends on it:** Cut 3's base, its verification list, and Cut 4's
-  `CultLibRevision`.
+- **A. Legacy parity minus manufacturer:** commodities by `Category`, `GearData` by
+  `Hardpoint`, `HullData` by `HullType`.
+- **B. A, plus `FactionProductData` by `Manufacturer` then `Design`, plus `WeaponItemData` by
+  `WeaponType`.**
+- **C. B with `FactionProductData` by `Design` then `Manufacturer`** (the market-segment view:
+  who makes this design).
+- **D. B plus `Loadout` by `Hull`.**
+- **Recommendation: B.** It recovers everything the legacy window grouped, puts the
+  manufacturer view where the manufacturer now is, and gives the weapon list its own axis.
+  C is the better view if the operator authors products per design rather than per faction.
+  Product record counts are unprobed; Cut 4's Hands reports them.
 
 ## Defaults (recorded, not asked)
 
-- **Group labels:**
-  - An enum shows `Enum.GetName`. An undefined value shows its number.
-  - A `CultRecordRef<T>` shows `RecordLabel` of the candidate with that key
-    (the target's `[CultName]`), so for Faction that is `Name`, not the
-    legacy `ShortName`.
-  - An unset ref shows `None`, like the picker (`CultCacheStudioDrawers.cs:207`),
-    replacing the legacy `Default`.
-  - A key with no candidate shows `Missing <key>`, as the picker does.
-  - A string shows its value, or `(empty)`.
-  - An integer shows its invariant string.
-  - A bool shows `False`/`True`.
-- **Group order within a level:**
-  - Enums sort by underlying value.
-  - Refs sort `None` first, then by label (`OrdinalIgnoreCase`, then key),
-    with `Missing` last.
-  - Strings sort `OrdinalIgnoreCase`, then ordinal.
-  - Integers sort numerically; bools sort false before true.
-- **Groupable kinds:** String, Integer, Bool, Enum, RecordRef. A grouped member
-  is refused with a notice and a flat list (I8) when:
-  - it is of any other kind, including Float, whose bit-equality makes
-    meaningless groups;
-  - it is `Hidden`;
-  - it is read-only (`IsReadOnly`, so a preset cannot assign it and an edit
-    cannot move the record);
-  - it is named but is not an inspector member of the listed type;
-  - it is named twice.
-- **Global types are never grouped.** They have one record.
-- **Foldouts:**
-  - Window memory, collapsed by default.
-  - `CloseStore` clears them.
-  - Create-in-group, `Add`, and `Duplicate` expand the path to the new
-    selection, so the selection is always visible.
-  - No `EditorPrefs` or `SessionState` (F8: a domain reload already closes the
-    store).
-- **Create-in-group into a `Missing <key>` node** presets the dangling key, which
-  keeps I5. The record joins the node it was created in.
-- **A drop of the current key is rejected** (legacy parity) so that no no-op
-  commit occurs.
-- **F5 is fixed in Cut 1.** The new attribute reads through `MetadataOf`, so
-  that path must honour inheritance on properties; the fix is one call site
-  in each of two places.
+- **Labels:** enum `Enum.GetName`, else the number; ref `RecordLabel` of the candidate with that
+  key (for `Faction`, `Name`, not legacy `ShortName`); unset ref `None`; dangling `Missing <key>`;
+  string its value or `(empty)`; integer invariant string; bool `False`/`True`.
+- **Order within a level:** enums by underlying value; refs `None` first, then label
+  (`OrdinalIgnoreCase`, then key), `Missing` last; strings `OrdinalIgnoreCase` then ordinal;
+  integers numeric; `false` before `true`.
+- **Groupable kinds:** String, Integer, Bool, Enum (not `[Flags]`), RecordRef. Refused with a
+  notice and a flat list: any other kind (Float included), a `[Flags]` enum, `Hidden`,
+  `IsReadOnly`, a name that is not an inspector member of the listed type, a name given twice.
+- **Global types are never grouped.**
+- **Foldouts:** window memory, collapsed by default, cleared by `CloseStore`. Create-in-group,
+  `Add` and `Duplicate` expand the path to the new selection. No `EditorPrefs`/`SessionState`.
+- **Create into a `Missing <key>` node** presets the dangling key (keeps I5).
+- **A drop of the current key is rejected** (no no-op commit).
+- **Variants:** see Q6's defaults and I10.
+
+## Sequence with document variants
+
+| Cut | Files | Overlaps grouping? |
+|---|---|---|
+| Variants C2a (element ids, in flight) | `CultCache.cs`, new `CultElementIds.cs`, Mesh/Geometry documents, `ElementIdTests.cs` | no |
+| Index cut (`[CultIndex]` means unique; queued behind C2a) | `CultCache.cs`, Mesh/Geometry | no |
+| Variants C2b (nested paths; inferred from the brief, not yet written in the variants map) | `CultCache.cs`, `CultVariants.cs` | no |
+| **Grouping Cuts 1-2** | `CultInspectorModel.cs`, `CultInspectorAttributes.cs`, `CultInspectorModelTests.cs`, `CultCacheStudioWindow.cs`, `CultCacheStudioDrawers.cs`, Studio README | — |
+| Variants C3 (Studio edits the delta) | `CultInspectorModel.cs` (edit, commit, diff, `CreateVariant`, `Rebase`), window (variant controls beside `Duplicate`, row marker), drawers (per-member marker and revert), `CultInspectorModelTests.cs` | **yes: all five grouping files** |
+
+**Order:** grouping Cuts 1-2 now, in parallel with C2a, the index cut and C2b (no shared
+files). Grouping merges to `main` before C3's Hands starts; C3 needs C2b anyway. C3 then
+rebases onto grouping and lowers its row marker inside the grouped row drawing that Cut 2
+writes. Then **one release (Cut 3)**, then one Aetheria pass (variants C4 plus Cut 4).
+
+Where they touch: `DrawRecords` rows (`CultCacheStudioWindow.cs:180-185`; grouping rewrites,
+C3 marks); the toolbar (`:142-157`; C3 adds variant buttons beside `Duplicate`, grouping
+leaves it alone); `DrawRecordRef` (grouping adds the drop target; C3 marks at the member
+level in `DrawValue`, not inside it); `CultInspectorModel.cs` (disjoint methods);
+`CultInspectorModelTests.cs` (disjoint fixtures; name grouping fixtures `Group*`).
+
+**One release commit:** Cut 3 below is the single release for both campaigns. The variants
+map's C3 line "Then tag `caching-unity-v1.5.0`" should point here instead of owning a second
+release step (proposal for Self).
 
 ## Cuts
 
-### Cut 1. CultLib model: declaration, grouping tree, candidate and label authority
+Hands for Cuts 1-2: branch `hands/studio-grouping` in a fresh worktree off `origin/main`
+(Self picks the path, e.g. `C:/wsNN-grouping`). `F:\Projects\CultLib-studio-grouping` holds the
+superseded docs-only `codex/studio-grouping`; do not reuse it. Do not touch the main checkout.
+Mutation testing is Stryker.NET on the cut's diff; there are no hand-applied mutations.
 
-- **Repo and branch:** CultLib `claude/studio-grouping`, in a new worktree
-  `F:\Projects\CultLib-studio-grouping` from `origin/main`. The main checkout
-  is in active use by the QUIC bridge work; do not use or touch it or the other
-  worktrees.
-- **Deletes and collapses first:**
-  - `CultInspectorModel.cs:512-520` `RecordCandidates`: its inline predicate
-    `target.IsInstanceOfType(record.Document) && record.Key.Value.Length > 0`
-    moves into `IsRecordCandidate`, and `RecordCandidates` filters through it
-    (I6).
-  - `CultCacheStudioDrawers.cs:207` builds its `"Missing " + key` / `"None"`
-    label inline. The label moves to the model (I7), and the Studio call site
-    changes in Cut 2.
-  - `CultInspectorModel.cs:36` and `:209` switch from `member.GetCustomAttributes(true)`
-    to `Attribute.GetCustomAttributes(member, true)` (F5).
-- **Adds in `CultInspectorAttributes.cs`:**
-  - Q1-B: `CultInspectorGroupByAttribute(params string[] members)`, with
-    `Class`, `Inherited = true`, `AllowMultiple = false`, and property
-    `Members`.
-  - Q1-A instead: `CultInspectorGroupAttribute(int order = 0)`, with
-    `Field|Property`, `Inherited = true`.
-  - Place it before `CultInspectorDrawerAttribute` (`:80`), with a comment in the
-    file's style stating the nesting and inheritance rules.
-- **Adds in `CultInspectorModel.cs`** (or a sibling `CultInspectorGrouping.cs`
-  in the same namespace; Hands picks, and one file is preferred while it
-  stays under ~800 lines):
-  - `public sealed class CultInspectorGrouping`: `Type ListedType`,
-    `IReadOnlyList<CultInspectorMember> Members` (outermost first), and
-    `string? Notice`. When `Notice` is set, `Members` is empty.
-  - `public sealed class CultInspectorRecordGroup`: `string Id`, `string Label`
-    (empty at the root), `int Depth`, `IReadOnlyList<object?> Values` (root to
-    here), `IReadOnlyList<CultInspectorRecordGroup> Children`,
-    `IReadOnlyList<CultStoredDocument> Records` (non-empty only at leaves), and
-    `int Count` (records beneath).
-  - `CultInspectorModel.GroupingOf(Type listedType)`, cached like `ShapeOf`:
-    - Global types, and types with no declaration, give empty members and no
-      notice.
-    - Q1-B: resolve names against `MembersOf(listedType)`.
-    - Q1-A: take members carrying the attribute, ordered by (order, display
-      order).
-    - Validate the groupable kinds, hidden, read-only and duplicates (Defaults).
-  - `CultInspectorModel.GroupRecords(Type listedType, IEnumerable<CultStoredDocument> records)`:
-    - The input is `RecordCandidates(CultRecordRef<listedType>)`, partitioned
-      level by level by value identity (I4).
-    - Nodes follow the Defaults order and labels. Records stay in candidate
-      order (I2).
-    - With no grouping members, the root holds every record as one leaf.
-  - `CultInspectorModel.CreateInGroup(Type listedType, CultInspectorRecordGroup group, out string? notice)`:
-    - Call `CreateElement(listedType, listedType, out notice)`. On null, return
-      null with that notice.
-    - Otherwise `SetValue` each grouping member with the node's value. A ref is
-      rebuilt with `CreateRecordRef(member type, key)`.
-    - Refuse (`ArgumentException`) a node whose depth or id prefix does not
-      belong to `listedType`'s current grouping.
-  - `public bool IsRecordCandidate(Type recordRefType, CultStoredDocument record)`.
-  - `public string RecordRefLabel(Type recordRefType, object? value, IEnumerable<CultStoredDocument> records)`:
-    - `None` when unset.
-    - Otherwise `RecordLabel` of the candidate with that key.
-    - Otherwise `Missing <key>`.
-- **Keeps:** `RecordLabel` (`:313-317`), `CreateElement` (`:385-396`), and every other API unchanged.
-- **Tests** go in `tests/GameCult.Caching.Tests/CultInspectorModelTests.cs`,
-  with new fixtures near `:380-459`. Fixtures:
-  - an abstract base document class, and a derived `[CultDocument]` pair
-    `GroupBase` / `GroupLeaf : GroupBase`;
-  - an enum member, a `CultRecordRef<InspectOther>` member, a string, a float,
-    a hidden int and a read-only int;
-  - a type re-declaring (Q1-B) and a type opting out.
+### Cut 1. CultLib model: declaration, tree, candidate and label authority (~150k tokens)
 
-  Each test names the mutation that must turn it red:
+- **Delete and collapse first:**
+  - `CultInspectorModel.cs:519`: the inline `target.IsInstanceOfType(record.Document) &&
+    record.Key.Value.Length > 0` in `RecordCandidates` (`:514-522`) moves into
+    `IsRecordCandidate`; `RecordCandidates` filters through it (I6).
+  - `:36` and `:209`: `member.GetCustomAttributes(true)` → `Attribute.GetCustomAttributes(member, true)` (F5).
+- **Add in `CultInspectorAttributes.cs`**, before `CultInspectorDrawerAttribute` (`:81-86`):
+  `CultInspectorGroupByAttribute(params string[] members)`, `AttributeUsage(Class,
+  Inherited = true, AllowMultiple = false)`, property `Members`, with a comment in the file's
+  style stating nesting, nearest-wins and opt-out.
+- **Add in `CultInspectorModel.cs`** (or a sibling `CultInspectorGrouping.cs`, same namespace;
+  one file while it stays under ~800 lines; it is 645 now):
+  - `CultInspectorGrouping { Type ListedType; IReadOnlyList<CultInspectorMember> Members; string? Notice }`
+    (members empty when `Notice` is set).
+  - `CultInspectorRecordGroup { string Id; string Label; int Depth; IReadOnlyList<object?> Values;
+    IReadOnlyList<CultInspectorRecordGroup> Children; IReadOnlyList<CultStoredDocument> Records; int Count }`.
+  - `GroupingOf(Type listed)`, cached like `ShapeOf` (`:324-333`): names resolve against
+    `MembersOf(listed)` (`:335-339`); validation per Defaults.
+  - `GroupRecords(Type listed, IEnumerable<CultStoredDocument> records)`: partitions
+    `RecordCandidates(CultRecordRef<listed>)` by value identity, reading each record's
+    `Document` (resolved, I10).
+  - `CreateInGroup(Type listed, CultInspectorRecordGroup group, out string? notice)`:
+    `CreateElement(listed, listed, out notice)` (`:387-398`), then `SetValue` each level; refs
+    via `CreateRecordRef` (`:524-529`). `ArgumentException` for a node not of `listed`'s current
+    grouping.
+  - `IsRecordCandidate(Type refType, CultStoredDocument record)`.
+  - `RecordRefLabel(Type refType, object? value, IEnumerable<CultStoredDocument> records)`: `None`,
+    `RecordLabel` (`:315-319`), or `Missing <key>`.
+- **Tests** in `tests/GameCult.Caching.Tests/CultInspectorModelTests.cs` (476 lines; fixtures
+  `:299-476`). New fixtures `GroupBase` (abstract) / `GroupLeaf : GroupBase` `[CultDocument]`,
+  a re-declaring type and an opting-out type; members: enum declared out of alphabetical
+  order, `CultRecordRef<InspectOther>`, string, float, `[Flags]` enum, hidden int, read-only int.
+  No object lists (F15). Behaviours, one test each:
+  1. levels nest in declared order, not slot order;
+  2. a `GroupLeaf` listed under `GroupBase` groups by the base declaration (I3);
+  3. nearest declaration wins; an empty declaration opts out;
+  4. leaves partition the candidates over unset refs, dangling refs and undefined enum values (I2);
+  5. two refs sharing one `[CultName]` give two nodes; `None` first; `Missing k` last (I4, I7);
+  6. enum nodes order by value;
+  7. create at depth 2, upsert into a temp single-file `CultCache`, regroup: same node id (I5);
+  8. each invalid declaration (unknown, float, `[Flags]`, hidden, read-only, duplicate) gives a
+     notice and a flat tree, no throw (I8);
+  9. `IsRecordCandidate` accepts a subtype, refuses a sibling and an empty key, and
+     `RecordCandidates` equals the records it accepts (I6);
+  10. a base abstract property's `[CultInspectorLabel]` reaches the override's metadata (F5);
+  11. **a variant groups by its resolved value**: base with `Enum=A`, variant overriding it to
+      `B` via `UpsertVariantAsync` and `Override`, regroup: the variant is in `B`; change the
+      base to `C` with the variant not overriding it, regroup: it follows to `C` (I10).
+- **Verify (Yggdrasil):**
+  `ygg-verify.sh /f/Projects/CultLib <rev> dotnet 'dotnet test tests/GameCult.Caching.Tests -c Release'`,
+  then
+  `ygg-verify.sh /f/Projects/CultLib <rev> dotnet 'dotnet tool install -g dotnet-stryker && export PATH="$PATH:$HOME/.dotnet/tools" && cd tests/GameCult.Caching.Tests && dotnet stryker --project GameCult.Caching.csproj --since:<base-sha> > /tmp/s.log 2>&1; rc=$?; tail -60 /tmp/s.log; exit $rc'`.
+  Survivors triaged by name in the report.
+- **Ledger:** model ~+170, attributes ~+15, tests ~+230; one predicate collapsed.
 
-  1. `GroupsNestInDeclaredOrder`. The level order equals the declaration, not
-     slot order. *Mutation:* order members by slot, and the test fails.
-  2. `BaseDeclarationGroupsDerivedRecords`. A `GroupLeaf` record listed under
-     `GroupBase` is grouped by the base declaration (I3). *Mutation:* look up the
-     attribute with `inherit: false`, or take the grouping from
-     `record.Descriptor.DocumentType`.
-  3. `NearestDeclarationWinsAndEmptyOptsOut` (Q1-B only). *Mutation:* merge base
-     and derived name lists.
-  4. `LeavesPartitionTheCandidates`. Over records with unset refs, dangling
-     refs and undefined enum values, the concatenated leaves equal
-     `RecordCandidates` as a multiset in order (I2). *Mutation:* skip records
-     whose value is unset, or dedupe by label.
-  5. `RefNodesAreKeyedByKeyAndLabelledByTheModel`. Two referenced records share
-     one `[CultName]` and give two nodes. Unset gives `None`, first. A dangling
-     key gives `Missing k`, last (I4, I7). *Mutation:* group by label.
-  6. `EnumNodesOrderByValue`. Declare the enum out of alphabetical order.
-     *Mutation:* order nodes by label.
-  7. `CreateInGroupPresetsEveryLevelAndRegroupsInPlace`. Create at depth 2,
-     upsert into a `CultCache` over a temp single-file store, and regroup: the
-     new record's leaf id equals the node id (I5). *Mutation:* preset only the
-     deepest level.
-  8. `InvalidDeclarationsGiveANoticeAndAFlatTree`. Cover an unknown name, a
-     float, a hidden member, a read-only member and a duplicate. Each gives a
-     notice, and `GroupRecords` does not throw (I8). *Mutation:* remove any one
-     validation branch.
-  9. `IsRecordCandidateIsTheRecordCandidatesRule`. A subtype record is
-     accepted; a sibling type and an empty key are refused; `RecordCandidates`
-     equals the records filtered by it (I6). *Mutation:* use an exact-type
-     comparison.
-  10. `InheritedMetadataReachesOverridingProperties`. A base abstract property
-      with `[CultInspectorLabel]` is seen on the override's member metadata
-      (F5). *Mutation:* revert `:36`.
-- **Verification:**
-  - Run `dotnet test tests\GameCult.Caching.Tests\GameCult.Caching.Tests.csproj -c Release`
-    in the worktree. All pass, and the count grows by the tests above.
-  - For each mutation listed, apply it in the worktree, confirm its test fails,
-    then revert. Record the mutation table in the landing commit message.
-- **Ledger:**
-  - Model: about +150 to 190 lines.
-  - Attributes: about +15 lines.
-  - Tests: about +200 lines.
-  - Two predicate and label duplicates deleted (one moved, one
-    collapsed in Cut 2).
+### Cut 2. CultLib Studio: lower the tree, create in group, drag source, drop target (~150k tokens)
 
-### Cut 2. CultLib Studio: lower the tree, create in group, drag source, drop target
+- **Delete first:**
+  - `CultCacheStudioDrawers.cs:266` inline `"Missing " + key : "None"` →
+    `Model.RecordRefLabel(type, value, Records)` for `names[0]` when `index == 0`.
+  - `CultCacheStudioWindow.cs:180-185` flat `foreach` → tree drawing.
+- **Window** (`CultCacheStudioWindow.cs`):
+  - fields (`:13-30`): `Dictionary<string,bool> _groupFoldouts` (ordinal), `const string RecordDragKey`;
+    `CloseStore` (`:318-327`) clears them.
+  - `DrawRecords` (`:135-189`): `GroupingOf(_selectedType)`; a `Notice` shows a warning
+    `HelpBox`. Draw `GroupRecords(_selectedType, _records)` recursively: foldout `Label (Count)`
+    indented by `Depth`; an expanded node draws children, leaf rows, then a `Create` mini
+    button under `Add`'s gate (`:141-146`). The root is not a foldout; `Add` stays root create.
+  - row: reserve the rect with `GUILayoutUtility.GetRect`, handle `MouseDrag` there first
+    (`PrepareStartDrag`, `SetGenericData(RecordDragKey, new CultCacheStudioRecordDrag(_model, key))`,
+    empty `objectReferences`, `StartDrag(label)`, `Use()`), then `GUI.Toggle(rect, ...)` (F11).
+    Keep the existing `<Type>` suffix logic (`:182-183`) in one place for C3 to extend.
+  - `AddInGroup(node)` mirrors `Add` (`:340-346`) through `Run` (`:369`); selects the key and
+    expands the node's id prefixes. `Add`/`Duplicate` reveal the new record's path (a
+    `_revealKey` resolved next frame is acceptable).
+- **Drawers** (`CultCacheStudioDrawers.cs`): `internal sealed class CultCacheStudioRecordDrag
+  { Model; Key }`. In `DrawRecordRef` (`:254-280`), capture the `HorizontalScope` rect; on
+  `DragUpdated`/`DragPerform` inside it with our payload: `Copy` when `GUI.enabled`, same
+  `Model`, key differs, record in `Records`, and `IsRecordCandidate`; else `Rejected`. Leave
+  foreign drags alone. On perform: `AcceptDrag`, `next = key`, `GUI.changed = true`, `Use()`;
+  return through the existing `:279`.
+- **README** (`src/GameCult.Unity/Assets/Caching/README.md`): grouping, create in group and
+  drag-to-reference after the paragraph at `:30-34`; the grouping API, `IsRecordCandidate`,
+  `RecordRefLabel` under `## Inspection Model` (`:39`).
+- **Verify:**
+  - Cut 1's Yggdrasil test command still passes.
+  - Negative greps (each empty):
+    `rg -n "IsInstanceOfType" src/GameCult.Unity/Assets/Caching/Editor | rg -v "assetType.IsInstanceOfType"` (I6; `:215` is the asset-GUID sub-asset check, not candidacy);
+    `rg -n "\"Missing \"" src/GameCult.Unity/Assets/Caching/Editor` (I7; the union drawer's
+    `"None"` at `:393` is not a ref label, so grep `Missing` only);
+    `rg -n "SetValue|GetCustomAttribute|CultInspectorGroupBy" src/GameCult.Unity/Assets/Caching/Editor/CultCacheStudioWindow.cs` (I1);
+    `rg -n "EditorPrefs" src/GameCult.Unity/Assets/Caching/Editor` shows only `LastPathKey`.
+  - **Starfire, one job, editor closed:** the F10 compile gate, `dotnet build` of a scratch
+    netstandard2.1 project over the worktree's `Assets/Caching/Editor/*.cs`. 0 errors.
+- **Ledger:** window ~+80, drawers ~+30, README ~+20; two inline decisions deleted.
 
-- **Repo and branch:** CultLib `claude/studio-grouping` (same worktree), after
-  Cut 1.
-- **Deletes first:**
-  - `CultCacheStudioDrawers.cs:207`: the inline `"Missing " + key : "None"`
-    becomes `Model.RecordRefLabel(type, value, Records)` for `names[0]` when
-    `index == 0`.
-  - `CultCacheStudioWindow.cs:180-185`: the flat `foreach` over records is
-    replaced by tree drawing.
-- **Changes in `CultCacheStudioWindow.cs`:**
-  - Fields (`:13-30`): add `Dictionary<string,bool> _groupFoldouts`
-    (`StringComparer.Ordinal`) and `const string RecordDragKey`.
-    `CloseStore` (`:318-327`) clears the foldouts.
-  - `DrawRecords` (`:135-190`):
-    - Take `_model.GroupingOf(_selectedType)`. When its `Notice` is set, show a
-      `HelpBox` Warning above the list.
-    - Draw `_model.GroupRecords(_selectedType, _records)` recursively. A node
-      is a foldout labelled `Label (Count)` and indented by `Depth`.
-    - An expanded node draws its children, then its leaf records, then a
-      `Create` mini button. The button is enabled under the same
-      `cannotAdd || IsGlobal` gate as `Add` (`:141-147`) and calls
-      `CreateInGroup`.
-    - The root (depth 0) is not drawn as a foldout. `Add` stays the root create.
-  - Record row:
-    - Reserve its rect with `GUILayoutUtility.GetRect` before
-      `GUI.Toggle(rect, ...)` (F11).
-    - On `MouseDrag` inside the rect with a button held, set
-      `DragAndDrop.PrepareStartDrag()`, then `SetGenericData(RecordDragKey,
-      new CultCacheStudioRecordDrag(_model, key))`, set `objectReferences` to
-      empty, call `StartDrag(label)`, and use the event.
-  - `AddInGroup(node)`: mirrors `Add` (`:340-347`) through `Run`. It upserts
-    `CreateInGroup`'s object (null means throw its notice), selects the key, and
-    expands the node's id prefixes. `Add` and `Duplicate` expand the new
-    record's path by looking up its leaf in the next tree; Hands may do that
-    on the next frame through a `_revealKey` field.
-- **Changes in `CultCacheStudioDrawers.cs`:**
-  - Add `internal sealed class CultCacheStudioRecordDrag { Model; Key }`, or
-    put it in the window file (Hands picks; one type, no interface).
-  - `DrawRecordRef` (`:195-221`): capture the `HorizontalScope` rect.
-    - On `DragUpdated` or `DragPerform` inside it, when `GUI.enabled` is true,
-      the payload's `Model == Model`, the payload key is not the current key,
-      the key's record is in `Records`, and `Model.IsRecordCandidate(type,
-      record)` holds, set the visual mode to `Copy`. Otherwise set it to
-      `Rejected` for our payload only (leave foreign drags untouched).
-    - On perform: `AcceptDrag`, `next = key`, `GUI.changed = true`, and use
-      the event.
-    - Return through the existing `next == key ? value : CreateRecordRef`
-      (`:220`).
-- **README** (`src/GameCult.Unity/Assets/Caching/README.md`, after `:36-39`):
-  - Grouping: the attribute, nesting, inheritance, labels, create in group,
-    and the notice.
-  - Drag a record onto a reference field.
-  - Under "Inspection Model", the grouping API and `IsRecordCandidate` /
-    `RecordRefLabel`.
-- **Verification:**
-  - Pre-tag compile gate (F10). Copy the scratch `studio.csproj` pattern:
-    netstandard2.1, `LangVersion 9.0`, compiling the worktree's
-    `Assets/Caching/Editor/*.cs`. Reference Unity 6000.3.24f1
-    `Editor\Data\Managed\UnityEngine\*.dll` (not `UnityEditor.dll`) and the
-    worktree's freshly built `src\GameCult.Caching` and
-    `GameCult.Caching.MessagePack` outputs (`dotnet build -c Release`), plus
-    the tracked `MessagePack*.dll`. Expect 0 errors. Keep the project in
-    scratch, not the repo.
-  - Negative greps in the worktree, each empty:
-    - `rg -n "IsInstanceOfType" src/GameCult.Unity/Assets/Caching` (I6)
-    - `rg -n "\"Missing \"|\"None\"" src/GameCult.Unity/Assets/Caching/Editor` (I7)
-    - `rg -n "SetValue|GetCustomAttribute|CultInspectorGroup" src/GameCult.Unity/Assets/Caching/Editor/CultCacheStudioWindow.cs` (I1)
-    - `rg -n "EditorPrefs" src/GameCult.Unity/Assets/Caching/Editor` shows only
-      `LastPathKey`
-  - Cut 1's tests still pass.
-  - Operator click-through happens after Cut 4, in Aetheria against the tagged
-    package, as in the migration's Cut 6 precedent. See Cut 4.
-- **Ledger:** Window about +70 to 90 lines, drawers about +25 lines, README
-  about +20 lines. Two inline decisions deleted.
+### Cut 3. Joint release: cultlib Unity 1.0.61, Studio 1.5.0 (after grouping and variants C3 merge)
 
-### Cut 3. CultLib release: cultlib Unity 1.0.61, Studio 1.5.0
+- **Base:** `main` with grouping Cuts 1-2 and variants C1-C3 merged; a clean worktree.
+- **Files:** `unity/org.gamecult.cultlib/package.json:4` `1.0.60` → `1.0.61`;
+  `src/GameCult.Unity/Assets/Caching/package.json:4` `1.4.0` → `1.5.0` and `:13` dependency
+  `1.0.61`; `CHANGELOG.md` entries in both packages (grouping, create in group, drag to
+  reference; variant editing from C3); plugins via
+  `powershell -File scripts\build-unity-package.ps1 -UpdateTemplate` (Windows: MSVC and the
+  pinned MsQuic digests; its version check is at `:168-170`).
+- **Tags:** `cultlib-unity-v1.0.61`, `caching-unity-v1.5.0`; no `cultmath-unity` tag.
+- **Verify (Starfire, one job at a time):**
+  - byte check: rerun the script; `git status --porcelain unity/` is empty;
+  - expected diff: `GameCult.Caching.dll/.pdb` changes, and `gamecult_mesh_quic_native.dll`
+    changes (F16); `msquic.dll` should not (same pinned digest). Anything else stops the release;
+  - API present: reflect over the tracked `GameCult.Caching.dll` for
+    `CultInspectorGroupByAttribute`, `GroupRecords`, `CreateInGroup`, `IsRecordCandidate`,
+    `RecordRefLabel`, and C3's `CreateVariant`;
+  - native ABI: `dumpbin /exports` lists `cultmesh_quic_open`, `_state`, `_poll`, `_error`, `_close`;
+  - `git ls-remote --tags origin` lists both tags.
 
-Versions bumped from the original 1.0.60/1.4.0 plan: `codex/asset-guid-attribute`
-took 1.0.60/1.4.0 for its own release (replacing the asset path attribute with
-`CultInspectorAssetGuid`, then adding sub-asset key support, then a built-in
-refusal fix and a stale-value Clear button); it releases first. This branch
-must rebase onto and rebuild after `codex/asset-guid-attribute` before its own
-release: same files (`CultInspectorModel.cs`, the Studio drawers, the plugin
-DLLs/pdbs), so a plain merge reports binary conflicts on the plugin DLLs/pdbs
-rather than silently picking one side; resolve by taking either side's text
-changes as needed and then rebuilding, not by hand-merging the binaries.
+### Cut 4. Aetheria: grouping annotations (inside variants C4's pass; blocked on Q7)
 
-- **Repo and branch:** CultLib `main`. Merge `claude/studio-grouping`
-  (fast-forward or merge commit), then create the release commit in the same
-  clean worktree. Q5-A is assumed.
-- **Files:**
-  - `unity/org.gamecult.cultlib/package.json:4`: `1.0.60` → `1.0.61`.
-  - `src/GameCult.Unity/Assets/Caching/package.json:4`: `1.4.0` → `1.5.0`,
-    because this is new user-facing capability. `:13`: `"org.gamecult.cultlib": "1.0.61"`.
-  - `unity/org.gamecult.cultlib/Runtime/Plugins/*.dll|pdb` and
-    `x86_64/*.dll`, via
-    `powershell -File scripts\build-unity-package.ps1 -UpdateTemplate`. The
-    script derives the assembly version from the package.json and checks it
-    (`:152-155` after the rebase onto `codex/asset-guid-attribute`, whose
-    `0c9cb57` inserted two lines above this block for the OpenSSL notice;
-    it is `:150-153` on this branch's own unrebased copy of the script).
-- **Tags on the release commit:** `cultlib-unity-v1.0.61` and
-  `caching-unity-v1.5.0`. That is two tags in one push, under GitHub's
-  three-tag workflow limit (migration cut map header). No `cultmath-unity` tag,
-  because CultMath is unchanged.
-- **Verification:**
-  - **Byte check.** Run the build script again and check that
-    `git status --porcelain unity/` is empty (a reproducible build). This is
-    manual, as recorded in the migration's follow-ups.
-  - **Expected diff.** `git diff --stat HEAD~1 -- unity/` lists
-    `GameCult.Caching.dll/.pdb` changed. Under Q5-A,
-    `x86_64/gamecult_mesh_quic_native.dll` (about 302 KB) and `msquic.dll` also
-    change. An unexpected changed assembly stops the release for review.
-  - **API present.** A throwaway scratch script loads the tracked
-    `GameCult.Caching.dll` by reflection and confirms that
-    `CultInspectorGroupByAttribute`, `CultInspectorModel.GroupRecords`,
-    `CreateInGroup`, `IsRecordCandidate` and `RecordRefLabel` exist.
-  - **Native ABI (Q5-A).** Run `dumpbin /exports` on the tracked
-    `gamecult_mesh_quic_native.dll`. It lists `cultmesh_quic_open`, `_state`,
-    `_poll`, `_error` and `_close`.
-  - **Tags pushed.** `git ls-remote --tags origin` lists both tags.
-- **Ledger:** Versions and binaries only.
+- **Where:** the Aetheria branch and worktree Self opens for variants C4. Never
+  `F:\Projects\Aetheria`'s working tree. C4 owns the pin bump (`Directory.Build.props:6`, and
+  `Packages/manifest.json:54-55` to `#caching-unity-v1.5.0` / `#cultlib-unity-v1.0.61`;
+  `:56` cultmath unchanged; `packages-lock.json` follows) and the element-id sweep (F18). This
+  cut adds only:
+  - Q7's `[CultInspectorGroupBy(...)]` class attributes (recommendation B: five declarations);
+  - `tests/Aetheria.Shared.Tests/StudioGroupingTests.cs` (xUnit): `GroupingOf` over
+    `CultCacheMessagePack.CreateInspectorModel(registry)` names exactly the declared members
+    per annotated type with no notice; `GroupingOf(typeof(WeaponItemData))` follows Q7; every
+    registered document type's `GroupingOf` has a null notice.
+- **Verify:**
+  - headless (Starfire, one job; the revision check needs `CultLibRoot` clean at the release
+    SHA and `CultMathRoot` clean at `6d5e209`):
+    `dotnet test tests\Aetheria.Shared.Tests -p:CultLibRoot=<clean worktree at release SHA> -p:CultMathRoot=<clean worktree at 6d5e209>`;
+  - Unity 6000.3.24f1 batchmode compile, editor closed:
+    `-batchmode -nographics -quit -projectPath <Aetheria worktree> -logFile <scratch>`; 0 errors,
+    both new tags resolved.
+- **Operator only, in Aetheria's Studio against a copy of `GameData/Aetheria.cc`:**
+  - each annotated type shows the declared levels; `GearData` includes `<WeaponItemData>` rows;
+  - create in a node: the record lands there and is selected;
+  - drag a `Faction` onto a `FactionProductData.Manufacturer`: accepted; drag a gear record onto
+    it: rejected;
+  - drag a `PersonalityAttribute` onto a `DemandProfile` key that already exists: refused
+    through the notice;
+  - read-only open: every drop rejected;
+  - a variant (once C4 authors one, e.g. `LonginusX`) sits in its resolved `HullType` node,
+    and a drop into its inspector writes an override (C3), not a refusal;
+  - close without edits: store bytes unchanged.
 
-### Cut 4. Aetheria: re-pin CultLib and annotate grouping
+## Subtraction ledger
 
-**Unblocked, needs re-mapping (2026-09-19).** The operator ruled that a crafted
-item's manufacturer and optional branding belong to its production lot, after
-Njordr's lot ontology, so `ItemData.Manufacturer` leaves the design. Grouping
-`GearData` by `Manufacturer` is therefore not the target. That schema ruling has
-now settled: Aetheria's provenance schema cut closed at `46efccbe` and merged to
-master at `9b85211f`, and branding is derived from the lot's `ProvenanceLedger`
-rather than stored on the design. This cut is waiting on a fresh Imagination pass
-against the landed schema, not on the ruling. Cuts 1-3 do not depend on it.
+Added: one attribute, two model types, five model methods, ~11 CultLib and ~3 Aetheria tests,
+~110 Studio lines, five annotations. Collapsed: the candidate predicate (now one method, reused
+by drop), the ref label strings, the property-inheritance miss (F5). Not added: selectors,
+registries, `EditorPrefs` keys, runtime ports, packages, targets, daemons, a second release.
+Build footprint: `GameCult.Caching` and its tests (Yggdrasil); the F10 compile gate, the
+package script (all tracked plugins including the native bridge) and Aetheria's headless and
+batchmode checks (Starfire; Windows is the target for the editor plugin and win-x64 bridge).
 
+## What the 2026-09-17 map had wrong as of `feeced8`
 
-- **Repo and branch:** Aetheria `codex/cultcache-cutover`, the current branch.
-  Stage by path only: `Assets/Scripts/Editor/CultCacheDrawers.cs` carries an
-  unrelated uncommitted edit that must stay out of the commit and untouched.
-- **Files:**
-  - `Directory.Build.props:5` `CultLibRevision`: set it to the Cut 3 release
-    commit's full SHA. Note that it lives in props, not targets; the check is in
-    `Directory.Build.targets:2-22`.
-  - `Packages/manifest.json:53`: `#caching-unity-v1.4.0` → `#caching-unity-v1.5.0`.
-    `:54`: `#cultlib-unity-v1.0.60` → `#cultlib-unity-v1.0.61`. `:55`
-    `cultmath-unity-v0.2.3` is unchanged. Unity rewrites
-    `Packages/packages-lock.json`; commit that too.
-  - `Assets/Scripts/ServerShared/ItemData.cs`, under Q1-B:
-    - `SimpleCommodityData` (`:300`): `[CultInspectorGroupBy(nameof(Category))]`
-    - `CompoundCommodityData` (`:330`): `[CultInspectorGroupBy(nameof(Category))]`
-    - `GearData` (`:449`): `[CultInspectorGroupBy(nameof(Hardpoint), nameof(Manufacturer))]`.
-      `WeaponItemData` inherits it.
-    - `HullData` (`:493`): `[CultInspectorGroupBy(nameof(HullType))]`
-  - Under Q1-A instead: `[CultInspectorGroup]` on `SimpleCommodityData.Category`
-    (`:309`), `CompoundCommodityData.Category` (`:337`),
-    `GearData.Hardpoint` (`:453`), `ItemData.Manufacturer` (`:281`, order 1)
-    and `HullData.HullType` (`:503`). Commodity lists then gain the `None`
-    manufacturer level (F2).
-- **Tests** (`tests/Aetheria.Shared.Tests`, new `StudioGroupingTests.cs`, xUnit):
-  - `AnnotatedCatalogTypesGroupAsDeclared`:
-    - Build `CultCacheMessagePack.CreateInspectorModel` over the Aetheria
-      registry, as the probe did with the `[CultDocument]` types of
-      `typeof(GearData).Assembly`.
-    - `GroupingOf` names exactly `Category`, `Category`,
-      `Hardpoint, Manufacturer` and `HullType` for the four types, each with no
-      notice.
-    - `GroupingOf(typeof(WeaponItemData))` equals `GearData`'s.
-    - *Mutation:* remove one annotation, or reorder `GearData`'s names.
-  - `NoGroupedMemberIsRefused`. Every registered document type's `GroupingOf`
-    has a null notice. This guards against a future annotation on a float or
-    hidden member.
-- **Verification:**
-  - **Headless.** Run
-    `dotnet test tests\Aetheria.Shared.Tests -p:CultLibRoot=F:\Projects\CultLib-studio-grouping`,
-    with that worktree checked out clean at the release SHA. The revision check
-    requires a clean root at exactly that SHA, and the main CultLib checkout is
-    shared with live work. All pass.
-  - **Unity batchmode compile.** With the editor closed, run
-    `-batchmode -nographics -quit -projectPath F:\Projects\Aetheria -logFile <scratch>`
-    on Unity 6000.3.24f1. Expect 0 compile errors, and the package cache
-    resolving both new tags.
-  - **Operator click-through** in Aetheria's Studio against
-    `GameData/Aetheria.cc`:
-    - `GearData` shows hardpoint then manufacturer. It includes the
-      `WeaponItemData` records marked `<WeaponItemData>`, and a `None` node
-      holds the 14 unset.
-    - Commodities show categories only. `HullData` shows hull types.
-    - Create in a gear node, then check that the record lands there and is
-      selected.
-    - Drag a faction onto a gear `Manufacturer` and see it accepted. Drag a
-      gear record onto it and see it rejected.
-    - Drag onto a `DemandProfile` dictionary key and see a duplicate refused
-      through the notice.
-    - In a read-only open, every drop is rejected.
-    - Close without edits and confirm that the store bytes are unchanged.
-  - **Negative grep.** `rg -n "HardpointType\)" Assets/Scripts/ServerShared/ItemData.cs`
-    shows no grouping declaration names the derived property.
-- **Ledger:** 4 attribute lines (Q1-B), the pin and manifest lines, and about
-  +40 test lines.
-
-## Subtraction ledger (whole change)
-
-- **Added:**
-  - One attribute type.
-  - Two model types and five model methods.
-  - About 10 CultLib tests and 2 Aetheria tests.
-  - About 100 Studio lines.
-  - 4 annotations.
-- **Removed or collapsed:**
-  - The candidate predicate duplicated at each future call site. It was
-    inline once; now it is one method, reused by drop.
-  - The ref label strings, duplicated between picker and grouping.
-  - The latent attribute-inheritance miss on overriding properties (F5).
-- **Not added:** selectors, registries, `EditorPrefs` keys, sibling-runtime
-  ports, or new packages, targets or daemons.
-- **Build footprint:**
-  - `GameCult.Caching` and its tests.
-  - The Unity package script, which rebuilds every tracked plugin including the
-    native bridge (Q5).
-  - Aetheria's headless shared build and one batchmode compile.
-  - The build host is the Windows workstation, which is also the target
-    platform for both the Unity editor plugin and the win-x64 native bridge.
+- Cut 4 grouped `GearData` by `Manufacturer`; `ItemData.Manufacturer` no longer exists (F17).
+- Q5's native-plugin drift was spent by the 1.0.60 release (F16); the Cut 3 "rebase onto
+  `codex/asset-guid-attribute`" note is obsolete (merged).
+- Cut 4 re-pinned Aetheria on its own; after C2a it cannot, without the id sweep (F18).
+- Aetheria branch `codex/cultcache-cutover`, props `:5`, manifest `:53-55`, cultmath `v0.2.3`: now
+  `codex/fire-control-12`, `:6`, `:54-56`, `v0.2.4` with a separate CultMath pin.
+- Negative greps for `IsInstanceOfType` and `"None"` would fail on unrelated lines (`:215`, `:393`).
+- Hand-applied mutations per test are retired; Stryker.NET on the diff replaces them.
+- Moved anchors: `RecordCandidates` `:512-520`→`:514-522`; `_shapes` `:298`→`:296`; `RecordLabel`
+  `:313-317`→`:315-319`; `CreateElement` `:385-396`→`:387-398`; drawer attribute `:80`→`:81-86`;
+  `DrawRecordRef` `:195-221`→`:254-280`, label `:207`→`:266`; `ReplaceKey` routing
+  `:243-251`→`:303-309`; test fixtures `:380-459`→`:299-476`; README `:36-39`→`:30-39`; build-script
+  version check `:150-155`→`:168-170`.
+- Worktree `F:\Projects\CultLib-studio-grouping` is now the superseded docs branch; Hands uses a
+  fresh one.
