@@ -1,12 +1,10 @@
 # CultCache publication: the cache owns "published once", and order stays data
 
-Status, 2026-09-30: Cuts 1-2 landed on `main` at `2a1b8a8`, from `hands/cultcache-pub-c1c2` at `5fb3fca`.
-Soul verdict: merge. Suites green: Caching 323, Networking 295, Mesh 262. Cut 3 is in Hands on
-`hands/cultcache-pub-c3`, with Soul's Cuts 1-2 follow-ups folded in:
-- F4: pin `Held`'s publish-on-throw guard. This is needed before Cut 4 relies on sequence density; Stryker could
-  not mutate `Held` (CS0165).
-- F3: pin observer removal on unsubscribe.
-- F1: the "getters run once" claim is false for conditional commits on variant stores.
+Status, 2026-09-29: Cuts 1-3 landed on `main`. Cut 3 merged at `ae8576d`. Imagination pass 4 re-took Cuts 4-6
+against `3bf1c0c`. Q-P5 is ruled (A). Cut 4 is ready for Hands.
+- F4, pinning `Held`'s publish-on-throw guard, is done: Cut 3 pinned it.
+- F3 (observer removal on unsubscribe) and F1 (the false "getters run once" claim for conditional commits on variant
+  stores) were Cut 3 follow-ups; confirm against the Cut 3 merge.
 
 Recorded:
 - F2, the Q-P2 hazard. A rethrown observer exception makes a committed write look cancelled or refused. The
@@ -40,6 +38,8 @@ exactly once. This document owns the means.
   the writer afterwards, and the observer stays subscribed. The commit stands.
 - **Q-P3 A:** a public `CultCache.AddJournal(...)`, with reentry guarded.
 - **Q-P4 A:** Cut 6, which drops stale changes per key on the wire, lands in this campaign.
+- **Q-P5 A (2026-09-29):** a primary that cannot log a committed change throws a typed `CultNetShardLogException`
+  naming the shard and the burned sequence, after publication, not derived from `InvalidOperationException`.
 
 ## The finding that shapes this map
 
@@ -112,6 +112,139 @@ throwaway worktree that no branch holds.
 | Q6 | 8 threads × 1000 writes, plus reentrant writes | 67 ms, 2645 of 8800 cross-thread inversions, and 0 writes returned undelivered. | 516 ms, 0 inversions, 0 undelivered. |
 | Q7 | Soul's P2 shape: a handler waits 1 s for another thread's write | Observed in time. | Not observed in time. |
 | Suites | Caching, Networking and Mesh | (green on main) | Caching fails `ObserverWritingTheSameCacheDoesNotWaitOnOtherDeliveries`, and Networking **hangs** until the 900 s idle kill. Rerun with `--blame-hang-timeout 90s`: 286 passed, then the test host hung and was dumped. The blame sequence file was not extracted, so **the hung test is not named**. It is consistent with, but not proven to be, `SubscriptionDemandHandlerWritingCacheDuringDeliveryDoesNotDeadlock`, whose own comment says "disposal would hang too". |
+
+## Imagination pass 4: Cut 4 re-taken on the landed journal
+
+Cut 3 landed at `ae8576d`. Its Soul left two questions that Cut 4 had to settle before relying on the
+journal: (a) what a throwing journal means for the log, and (b) whether a journal needs the change's origin.
+Both have one coherent answer. The one fork, Q-P5, was about who hears of a log failure; the operator ruled it A (2026-09-29).
+
+### Probe evidence (pass 4)
+
+- Probe file: `Pub4ProbeTests.cs` (Networking tests). It was run on Yggdrasil from scratch commits:
+  - `0d7397d`: main plus the probes;
+  - `6ec2f73`: the same, merged with the branch `28248eb`;
+  - `376cd74`: main plus probe C.
+- The commits survive on the Yggdrasil mirror. The scratch worktree is gone.
+- The probes report facts and assert nothing. `FlakyLogStore` is an in-memory `ICultNetShardMutationLogStore`
+  that can refuse `Append` or run a hook inside `GetCompactedThrough`.
+
+| # | Probe | main `3bf1c0c` | branch `28248eb` (queue) |
+|---|---|---|---|
+| A1 | Primary with a durable log. Put 1, Put 2 (its `Append` throws), Put 3. A replica pulls, then retries. | Writer gets `IOException`. The cache holds 1, 2 and 3, but **2 is never published** (2 of 3). Memory log `[1,2,3]`, durable `[1,3]`. The replica pull throws "log has a gap. Expected 2, received 3", and so does **every retry**: the replica is stuck for good. | **Writer sees nothing**: R3 swallowed the drainer's exception. 2 is not published. The replica is stuck in the same way. |
+| A2 | The same failure at the tail, then the primary restarts over the same cache and log store. | The replica applied 1. After restart, note 3 is **minted sequence 2**. The replica takes it, reports applied 2, and holds `1,3` against the primary's `1,2,3`: **silent divergence**, a reused sequence. | Same. |
+| A3 | A replica whose log `Append` throws once. | The pull throws and the cursor stays at 0. The retry converges (`1,2`), but the memory log is `[1,1,2]`: a duplicate, because memory is written before disk and kept as a `List`. | The pull "succeeds": the exception was swallowed and the cursor went to 2. The durable log is `[2]`, so **entry 1 is lost**, and a chained replica sees a gap. |
+| B1 | Primary with a file store. Another writer puts `pulled` into the file, the primary runs `PullAll`, and a replica pulls the log. | `pulled` is published but **not logged**. The replica gets nothing. | Logged. The replica converges on `pulled`. |
+| B2 | A store attached after the database exists. | Nothing is logged. | All three hydrated records are logged. |
+| S | `CreateShardSnapshotResponse` with a write landing between its document read and its sequence read (hooked in `GetCompactedThrough`). | The snapshot holds `[1]` at log sequence 2. The replica applies it and pulls, and still lacks 2: **divergence**. | Same. |
+| C | Compact through 2, restart, then Put 3. | Note 3 is **minted sequence 1**, and `GetLatestMutationLogSequence` returns 1, below the floor of 2. | (not run; the code is unchanged) |
+
+What the probes establish:
+- A1, A2, S and C are pre-existing defects on main. Cut 4 inherits them and must not build on them: the
+  resync path it relies on for (a) is itself broken by S and C.
+- On a replica, the pull loop already retries. The cursor advances only after an entry applies
+  (`CultNetDatabase.cs:1038-1083`), so a replica needs no new mechanism. It needs only to keep the exception
+  reaching that loop, which the branch's queue broke (A3).
+- Loads on a primary must be logged, or replicas diverge (B1).
+
+### (a) A journal that cannot log a committed change: one answer
+
+The facts:
+- The log store is a second durable store written after the cache's store. Without an atomic commit across
+  the two, the log can lag the store. It must never lead: a replica would then apply a change the primary
+  refused.
+- So lag is unavoidable, and it has to be detectable and repaired.
+- The protocol already has a repair, and nothing else needs to be invented.
+  - "History the primary cannot serve" is `compacted_history`: `CultNetDatabaseServer.cs:189-201` answers
+    `ResyncRequired`.
+  - `CultNetShardReplication.cs:199-214` then snapshot-resyncs.
+
+**Rule: a primary that cannot log a committed change burns that change's sequence and compacts through it.**
+
+- In the database journal, on a primary, for each change that is not `NoLog`:
+  1. Mint `S`.
+  2. Build the entry: the wire message from the door, or `ToLogEntryMessage`.
+  3. `Append` durably, **then** record it in memory. Disk goes first, so memory never serves what disk lacks.
+- If step 2 or 3 throws:
+  - record nothing;
+  - raise the database's in-memory floor for the shard to `S`;
+  - try `store.CompactThrough(shard, S)`;
+  - still set `_lastWriteSequence` to `S`, because the row was written at `S`;
+  - carry on with the rest of the admission;
+  - throw `CultNetShardLogException` once at the end of the journal call (Q-P5 A).
+- Every replica behind `S` is then told `compacted_history` and resyncs by snapshot. The sequence gap at `S`
+  is never served, because the floor covers it.
+- This **replaces** the old §4 step 3 claim, "a serialization failure then mints nothing, so the log can never
+  hold a gap". Minting nothing hides a replication gap behind a dense sequence. That is exactly A2's silent
+  divergence.
+- **Replica:** there is no floor. The journal's exception reaches `ApplyShardLogResponseAsync` and the cursor
+  does not advance. The next pull re-applies the entry: a fresh instance, so the door matches again, and the
+  entry is re-recorded under the primary's sequence. The branch's absent-key direct log follows the same
+  disk-first order.
+- **Required fixes** that the rule depends on, all in Cut 4:
+  - `GetCompactedMutationLogSequence` (`CultNetDatabase.cs:597-602`) returns
+    `max(store floor, in-memory floor)`.
+  - `InitializeLogSequencesFromStore` (`:1363-1395`) resumes at
+    `max(highest retained, store.GetCompactedThrough(shard)) + 1`. This is probe C.
+  - `GetLatestMutationLogSequence` (`:607-616`) never reports below the floor.
+  - `CreateShardSnapshotResponse` (`:624-670`) reads `GetLatestMutationLogSequence` **before** `SelectAll`, on
+    both returns, `:645` and `:668`. The documents then reflect at least that sequence, and replaying later
+    entries converges: they are whole-document puts and deletes, applied in order. This is probe S.
+  - `RecordMutationLogEntry` (`:1331-1352`) writes disk first. The in-memory log becomes
+    `SortedList<long, entry>` per shard, replacing by sequence as the durable store does. This fixes A3's
+    duplicate.
+- **Residual, recorded rather than forked.** Suppose the store refuses both `Append` and `CompactThrough`, and
+  then the process restarts.
+  - The durable log does not know about the hole, so A2's tail reuse can recur.
+  - Fixing that needs a durable write per mint, a sequence reservation, which doubles log I/O under the gate.
+  - The thrown exception names both failures, so the outage is loud.
+  - Refusing later writes ("fail closed") is not coherent. The database can refuse only its own doors, while
+    bare cache writes are journaled regardless: that would be split authority.
+
+### (b) A pulled or loaded change on a primary: no origin needed
+
+- On a primary the log is the shard's **state history**, whoever wrote the state. B1 shows that leaving loads
+  out of the log leaves replicas permanently diverged.
+- The only origins that change what is logged are already carried by the door table, keyed by instance
+  identity and matched by shape. They are:
+  - `Replica` (log the primary's entry);
+  - `NoLog` (prediction, snapshot resync);
+  - `Put`/`Delete` (the wire message);
+  - `Predicts`/`Authoritative`.
+- A load or pull has no door, so on a primary it is logged like any unattributed commit. On a replica it logs
+  nothing, like any local write. That is what the branch does, and B1 converges under it.
+- Cost:
+  - B2: a store attached **after** the database logs its hydration.
+  - `CultNetHost` opens the cache before building the database (`CultNetLocal.cs:146-152`), so production
+    hydration is not journaled.
+  - A re-pull admits only the records that changed. In B1 the seed was not re-logged.
+- `AddJournal` keeps its signature. If a future consumer (audit, say) needs "load or commit", the fact goes on
+  `CultCacheDocumentChange` as an additive property, as `Sequence` did. The cache already knows it: `Admit`'s
+  `source != null` at `CultCache.cs:2420`. It never needs a new `AddJournal` shape.
+- This is recorded, not forked: no consumer needs it today.
+
+### The two recorded hazards, settled for Cut 4
+
+- **Q-P2 typed-exception hazard.** Cut 4 makes it frequent. Every cache write on a primary with a durable log
+  now does log I/O inside its admission.
+  - AetheriaEve opts into durable logs (`Aetheria.State/AetheriaStateNode.cs:144`).
+  - Its `AetheriaHangarCommandJournal.ValidateAsync` writes an envelope (`Program.cs:6509`) inside the `catch
+    (InvalidOperationException)` at `Program.cs:3722`.
+  - A log failure surfacing as `InvalidOperationException` would therefore produce a "denied" receipt for a
+    committed envelope.
+  - Q-P5 A (ruled): the writer gets a typed `CultNetShardLogException` that **does not derive from
+    `InvalidOperationException`**.
+- **Journal deadlock (the Cut 3 note).** The database journal waits only on `_logGate` and on the log store's
+  own lock.
+  - Lock order: cache gate, then `_logGate`, then the log store's lock.
+  - Invariant: **no code holding `_logGate` calls the cache, and no log store calls the cache or waits on a
+    thread that does.**
+  - Readers that take `_logGate` read only log state: `GetMutationLog`, `LastWriteSequence`, `CurrentAsOf`.
+    Readers already inside a cache read, such as the selection evaluator's `ordinalOf`, nest `_logGate` under
+    the cache gate, which is the same order.
+  - The store rule goes into the `ICultNetShardMutationLogStore` XML doc (`CultNetShardMutationLogStorage.cs:13-34`),
+    because a user store runs under the cache's gate.
+  - A log store that writes the cache already throws, through Cut 3's guard. Cut 4 pins it with a test.
 
 ## Authority map
 
@@ -287,12 +420,9 @@ The database is rebuilt on the journal. It has no queue.
      - Soul's P6 cannot happen: the prediction is recorded before
        `PutPredictedAsync` returns.
   3. Primacy.
-     - On a shard primary, where the door is not `NoLog` (prediction, snapshot):
-       build the log entry, including the wire message from a `Put`/`Delete`
-       door or `ToLogEntryMessage`, and **only then** mint the per-shard
-       sequence and append it to memory and to the durable store. A
-       serialization failure then mints nothing, so the log can never hold a
-       gap.
+     - On a shard primary, where the door is not `NoLog`: mint, build, append disk-first and record, with a failed
+       append burning the sequence and compacting through it. See "(a) A journal that cannot log a committed
+       change" in Imagination pass 4; the earlier claim that a serialization failure mints nothing is withdrawn.
      - On a replica, record the primary's entry from the `Replica` door,
        under its own sequence.
      - For a local write on a replica, log nothing.
@@ -485,96 +615,152 @@ They are the proof that no scheduler has come back.
 
 ### Cut 4. Salvage the branch and rebuild CultNetDatabase on the journal (networking)
 
-- **4a (history).** `git merge origin/hands/cultnet-publish-commits` into the
-  cut branch. It is clean. The merge carries the tests; the queue dies in 4b.
-  Self may choose a squash-salvage instead, with the same content.
-- **4b (subtraction, then behaviour).**
-  - **Deletes first**, at branch `28248eb` `CultNetDatabase.cs`:
-    - `_parked`, `_ready`, `_nextSequence` and `_draining` (`:502-505`);
-    - the handshake at `:530`;
-    - `OnCacheChange`'s queue body (`:1083-1135`);
-    - `PendingChange` (`:1265-1275`);
-    - `_predictionGate` and `HasPrediction` (`:506-507`, `:1209-1213`) and
-      their call sites (`:916`, `:1574`);
-    - the logging in `Deliver` (`:1168-1201`).
-  - **Moves.** Logging, predictions and door consumption move into the journal
-    (§4). `Deliver` becomes the publisher that reads the stash.
-  - **Changes.**
-    - Door flags: `Predicts` and `Authoritative`.
-    - The snapshot removal door sets `Removal`.
-    - The in-memory log becomes a `SortedList`.
-  - **Keeps.** Door identity and the shape rule, primacy, `_logGate` for
-    readers, and the absent-key delete's direct log.
+- **4a (history).** `git merge origin/hands/cultnet-publish-commits` into the cut branch from main
+  `3bf1c0c`.
+  - It is clean: the probe merge `6ec2f73` auto-merged `NetworkingTests.cs` and the composition doc, then
+    built and ran.
+  - The merge brings the tests. The queue dies in 4b.
+  - Self may squash-salvage instead, with the same content.
+- **4b (subtraction first).** Delete at branch `28248eb` `CultNetDatabase.cs`:
+  - `_parked`, `_ready`, `_nextSequence` and `_draining` (`:502-505`);
+  - `_predictionGate` (`:506-507`);
+  - the Watch subscription and handshake (`:529-531`);
+  - `OnCacheChange` (`:1080-1135`);
+  - `PendingChange` (`:1265-1275`);
+  - `HasPrediction` (`:1209-1213`) and its calls (`:916`, `:1574`);
+  - the logging and prediction bookkeeping in `Deliver` (`:1137-1201`).
+
+  Main's `PublishCacheUpdate` / `OnUpdate +=` (`:505`, `:1157`, `:1161-1191`) is already gone on the branch.
+  Hands confirms it is absent after the merge.
+- **4c (the journal).** Register the Watch observer first and the journal second (`AddJournal`), in the
+  constructor. Per admission, under the cache gate, per change in Sequence order:
+  1. `TakeDoor(change)`, keeping the branch's shape rule (`:1219-1234`).
+  2. Resolve the shard and kind. Predictions: a `Predicts` door adds its key. An `Authoritative` door
+     (`ApplyPutAsync`, replica put) holding a prediction for the key makes the kind `Reconciled` and removes
+     the key.
+  3. Log, per §(a):
+     - a replica door records the primary's entry, disk first;
+     - a primary change that is not `NoLog` mints, builds, appends and records, with failure going to the
+       floor;
+     - anything else logs nothing.
+  4. Stash `(cache Sequence → CultNetDatabaseChange)` under `_logGate`.
+  5. If step 3 failed, throw once at the end of the call, after all changes are handled (Q-P5).
+- **4c, publication.** The Watch observer removes the stash entry for `change.Sequence` and publishes it. A
+  missing stash means the change was admitted before this database existed, so it is ignored. `Dispose`
+  removes the journal and the observer and clears the stash.
+- **4d (the §(a) fixes).**
+  - The floor: `GetCompactedMutationLogSequence`, `GetLatestMutationLogSequence`, and resume in
+    `InitializeLogSequencesFromStore`.
+  - Disk-first `RecordMutationLogEntry`.
+  - A `SortedList` per shard.
+  - The snapshot reads its sequence first (`:660` moves below `:668`'s read).
+  - `_logGate` around `_lastWriteSequence`/`_nextLogSequences` readers (`:1302`, `:1314`, `:1325`).
+- **Door changes.**
+  - Flags: `Predicts` and `Authoritative`.
+  - The snapshot removal door (branch `:733`) sets `Removal = true`.
+  - The replica absent-key delete logs directly and publishes nothing (branch `:1612-1621`).
+  - Doors neither log nor publish. They register context, write the cache, and dispose the registration.
 - **Verification.**
-  - Every salvaged test passes:
-    - `CultNetPublishesCommitsTests` (13);
-    - `CultNetPublicationOrderTests`: S1, S1b, S2, S3, S4, S6, S7,
-      log-before-publish, and in-place re-upsert.
-  - Soul's P1-P7 from `SoulPub3Tests.cs` are committed, all passing. P2 passes
-    because nothing orders delivery.
+  - Every salvaged test passes: `CultNetPublishesCommitsTests` (13) and `CultNetPublicationOrderTests` (S1,
+    S1b, S2, S3, S4, S6, S7, log-before-publish, in-place re-upsert).
+  - Soul pass 3's P1-P7 are committed and passing.
+  - The pass 4 probes become tests named for the rule:
+    - **A1:** a refused primary `Append` publishes the change. The writer gets `CultNetShardLogException`,
+      which names the shard and `S`. A replica pull answers `compacted_history`, and a snapshot resync
+      converges.
+    - **A2:** the same at the tail with a restart: the replica converges after resync, and no sequence is
+      reused. The store's `CompactThrough` succeeded.
+    - **A3:** a refused replica `Append` leaves the cursor unchanged. The retry converges, and the memory log
+      holds `[1,2]`.
+    - **B1:** a pull on a primary is logged, and the replica converges.
+    - **S:** a snapshot racing a write converges.
+    - **C:** after compacting through 2 and restarting, the next mint is 3.
   - New tests:
-    - a reentrant `database.PutAsync` from inside a database handler is logged
-      with its context and published once;
-    - a reentrant `ApplyShardLogResponseAsync` from inside a handler keeps the
-      replica log in primary order;
-    - a primary serialization failure mints no log sequence.
-  - Commit latency with `CultNetFileShardMutationLogStore`, main against Cut 4.
-    It is reported, not gated.
-  - Negative grep: `rg -n "_parked|_ready|_draining|_nextSequence|_predictionGate|HasPrediction" src/GameCult.Networking`
+    - a reentrant `database.PutAsync` from inside a database handler is logged with its context and published
+      once;
+    - a reentrant `ApplyShardLogResponseAsync` from inside a handler keeps the replica log in primary order;
+    - a log store whose `Append` writes the cache fails with Cut 3's reentry guard, wrapped, and the admission
+      stands.
+  - Commit latency with `CultNetFileShardMutationLogStore`, main against Cut 4. Also measure a `CultMesh` node
+    with `EnableDurableShardLogs`, where every bookkeeping write is now logged. Report it; do not gate on it.
+  - Negative grep: `rg -n "_parked|_ready|_draining|_nextSequence|_predictionGate|HasPrediction|PublishCacheUpdate" src/GameCult.Networking`
     returns nothing.
+  - Review check: no `_cache.` call inside a `lock (_logGate)` block.
   - The `4562340` tests stay green.
-  - Stryker on the diff.
-- **Ledger.** Against the branch, about −120 and +60.
+  - Test runs use `--blame-hang-timeout 2m`.
+  - Stryker on the diff: dropping the floor raise, memory-before-disk, and the snapshot read order must each
+    kill a test.
+- **Docs.**
+  - Composition doc `:50-53`: replace the "streams derive from `OnUpdate`" sentence. CultNet derives from
+    `Watch` plus one journal, and the log is written in cache order.
+  - A new paragraph: a primary that cannot log a change compacts through it.
+  - The log-store rule under Locking.
+- **Blockers.** None. Q-P5 is ruled A.
+- **Ledger.** Against the branch, about −130 and +95. The extra over the old estimate is the floor, the
+  disk-first order, the `SortedList`, the snapshot order, and the exception type.
 
 ### Cut 5. Database fan-out isolation and Sequence (networking, behaviour)
 
-- **Deletes first.** The database's `Subject<object> _changes` (main `:487`).
+- **Deletes first.** The database's `Subject<object> _changes` (main `:485`, branch `:487`) and its
+  `Dispose` (`:1158`).
 - **Adds.**
-  - The isolated observer array.
-  - `CultNetDatabaseChange<T>.Sequence` (main `:319-371`), set by the journal.
+  - The isolated observer array, the same pattern as the cache's `Register`/`Publish`
+    (`CultCache.cs:1929-1944`, `:2470-2503`), behind `Watch<T>`, `WatchAllChanges` and the rest (`:1089-1145`).
+  - `CultNetDatabaseChange<T>.Sequence` (`:319-371`), as an optional constructor argument. The journal's stash
+    sets it from the cache change. A change with no cache change behind it carries 0.
+- **Docs.** The binary-signature note, as the composition doc gave for `CultCacheDocumentChange` (`:57-58`).
 - **Verification.**
-  - With a rethrowing handler and one throwing database subscriber, the other
-    subscriber and a live subscription-server peer receive every change.
+  - With a rethrowing handler and one throwing database subscriber, the other subscriber and a live
+    subscription-server peer receive every change. The writer gets the exception after delivery (Q-P2).
   - The disposed-database test.
   - `Sequence` equals the cache change's.
-- **Ledger.** About −10 and +30.
+- **Blockers.** Cut 4.
+- **Ledger.** About −10 and +35.
 
-### Cut 6. Stale protection on wire projections (networking, behaviour)
+### Cut 6. Stale protection on wire projections (networking, behaviour; Q-P4 A)
 
-This is a separate cut that closes a pre-existing hole. Composition doc
-`:50-53` says the CultNet streams "have no ordering guarantee and no stale
-protection", and the branch's total order was reaching for this.
+- **The rule.** A projection applies a change to a key only if its `Sequence` is above what the projection
+  last applied for that key. A snapshot or reconcile applies everything at or below the cache sequence it read
+  **before** reading documents.
+  - That read is `Cache.GetWithSequence(<any key>).Sequence`, the branch's idiom (branch `:531`). No new API
+    is needed.
+- **Subscription server** (`CultNetDatabaseSubscriptionServer.cs`):
+  - `SubscriptionProjectionState` (`:630`) gains `long Floor` and `Dictionary<string, long> Applied`.
+  - The single-row fast path in `Watch` (`:296-340`) reads the change's `Sequence` (reflection, like `Key`).
+    Under `_lifecycleGate` it drops the change if `Sequence <= max(Floor, Applied[key])`. Otherwise it applies
+    the change and records it. Removals are included.
+  - `Reconcile` (`:347`) and the subscribe snapshot (`:168-181`) read `seq0` before `CreateProjectedSnapshot`
+    (`:402`), set `Floor = seq0`, and clear `Applied`.
+    - This is sound: every change applied earlier was applied under the same gate, after its admission, so
+      its `Sequence` is at most `seq0`.
+  - Hop and unauthorized paths already reconcile from current state, and they set the floor too.
+- **`CultNetDatabaseServer.CreateSubscription`** (`:501-513`):
+  - A per-subscription `(Floor, Applied)` under a per-subscription lock, held across check, record and send.
+  - `HandleSubscribeAsync`'s snapshot (`:362-369`) takes `seq0` first and sets the floor.
+- **Verification.**
+  - Two threads write one key, with a blocking cache observer that forces the inverted delivery (Q3 shape).
+    On both servers, the peer's last state for the key equals the cache's.
+  - A removal overtaken by an older upsert leaves the key absent at the peer.
+  - The negative check: without the drop, both tests fail.
+- **Blockers.** Cut 5, which provides `Sequence` on database changes.
+- **Ledger.** About +45.
 
-- **The rule.** A projection sends a record only if the change's `Sequence` is
-  above the Sequence it last applied for that key.
-  - The subscription server applies it under `_lifecycleGate`, keyed in
-    `SubscriptionProjectionState` next to `DeliveredBySourceRecordKey`
-    (`CultNetDatabaseSubscriptionServer.cs:446`).
-  - `CultNetDatabaseServer.CreateSubscription` (`:501-512`) applies it under a
-    per-subscription lock.
-  - `Reconcile` (`:347`) stamps each key it reads with a per-key atomic
-    `GetWithSequence`.
-- **Verification.** Two threads write one key with a blocking observer that
-  forces the inverted delivery (Q3 shape). The peer's last state for the key
-  equals the cache's, on both servers.
-- **Operator.** Q-P4 asks whether this cut belongs here or is recorded.
-- **Ledger.** About +40.
-
-### Salvage from `hands/cultnet-publish-commits`
+### Salvage from `hands/cultnet-publish-commits` (revised)
 
 - **Keep:**
-  - both new test files;
-  - the `NetworkingTests.cs` edits (`:1528`, `:2257`);
-  - the door-shape rule;
+  - both test files;
+  - the `NetworkingTests.cs` edits;
+  - the door table and the shape rule;
   - "replicas never mint";
   - log-before-publish;
   - "the snapshot logs nothing";
-  - the rewritten composition-doc paragraph, rewritten again by Cut 3 to name
-    the journal as the log's order source.
-- **Commit** Soul pass 3's P1-P7: P3 in Cut 2, P4 in Cut 1, and the rest in
-  Cut 4.
-- **Drop:** the reorder buffer, the drainer, `_predictionGate`, and logging
-  from the observer.
+  - "loads and pulls on a primary are logged" (B1);
+  - the composition-doc paragraph, rewritten to name the journal.
+- **Drop:**
+  - the reorder buffer and the drainer;
+  - `_predictionGate`;
+  - logging from the observer;
+  - the swallowed exception path (A1 and A3 on the branch).
 
 ## Subtraction ledger (estimate)
 
@@ -583,66 +769,28 @@ protection", and the branch's total order was reaching for this.
 | 1 | ~15 | ~45 | none |
 | 2 | ~5 | ~30 | the cache no longer uses R3 `Subject` |
 | 3 | 0 | ~50 | one public method (Q-P3) |
-| 4 | ~120 vs branch | ~60 | the merge brings +1109/−243, of which about 780 are tests |
-| 5 | ~10 | ~30 | the database `Subject` goes, and one public property |
-| 6 | 0 | ~40 | none |
+| 4 | ~130 vs branch | ~95 | the merge brings +1109/-243, of which about 780 are tests; the floor, disk-first order, `SortedList`, snapshot order and `CultNetShardLogException` are the extra over the first estimate |
+| 5 | ~10 | ~35 | the database `Subject` goes, and one public property |
+| 6 | 0 | ~45 | none |
 
-- **Source, net against main:** about +200.
-- **Source against the branch:** about −60, and no scheduler anywhere.
+- **Source, net against main:** about +245.
+- **Source against the branch:** no scheduler anywhere.
 - The budget is pressure, not a metric.
 
 ## Operator questions
 
-- **Q-P1. Order.**
-  - **A. Order as data** (the `4562340` ruling, kept).
-    - Every change is published exactly once, on its writer's thread, before
-      the write returns, and carries `Sequence`.
-    - There is no cross-thread delivery order.
-    - The shard log is in cache order because the journal writes it under the
-      gate.
-    - Wire projections drop stale changes by Sequence (Cut 6).
-  - **B. Totally ordered delivery in the cache** (a turnstile, which is Soul's
-    stated direction). It was built as `bcae483`, deleted for deadlock as
-    `4562340`, and reproduced by this pass: the networking suite hangs.
-    Making it safe needs a rule that nobody holding a lock an observer takes
-    may write the cache, and the subscription server itself breaks that rule.
-  - **C. A dedicated delivery thread or drainer** (the branch). It was refuted
-    by Soul pass 3: F3 and F4.
-  - **Recommended: A.** Only A delivers exactly-once, before-return and
-    no-deadlock together. The one consumer that needs order gets it where order
-    is decided.
-- **Q-P2. An observer whose exception escapes** (a fail-fast R3 handler, or a
-  custom observer).
-  - **A.** Rethrow it to the writer after every observer has run, and keep the
-    observer subscribed.
-  - **B.** Report it and unsubscribe.
-  - **C.** Route it to R3's unhandled handler only.
-  - **Recommended: A.**
-    - It matches the `OnUpdate` policy and R3's `OnErrorResume`.
-    - An escape only happens when the owner asked for fail-fast.
-    - B turns one bad change into permanent deafness.
-    - C sends the exception back to the handler that just rethrew it.
-  - The commit stands under every option.
-- **Q-P3. The journal's surface.**
-  - **A.** A public `IDisposable CultCache.AddJournal(Action<IReadOnlyList<CultCacheDocumentChange<object>>>)`,
-    guarded so that entering the cache from it throws.
-  - **B.** An internal method, with `InternalsVisibleTo("GameCult.Networking")`.
-    The comment at `CultCache.cs:214` shows Networking was deliberately kept
-    without it.
-  - **Recommended: A.**
-    - The contract is small, and the dangerous misuse, reentry, is enforced
-      rather than documented.
-    - An ordered admission journal is a legitimate library capability: audit,
-      replication and derived indexes.
-    - B couples two assemblies to hide one method.
-- **Q-P4. Cut 6 now or later?**
-  - **A.** Land it in this campaign.
-  - **B.** Record it.
-  - **Recommended: A.** With every commit now published, two writers of one key
-    on two threads can leave a peer holding the older state. That was already
-    true for loads; commits make it common.
+- Q-P1..Q-P4 are ruled (see Rulings). Their option analysis is in the map's git history.
 
-Not forks, recorded so they are not re-asked:
+- **Q-P5 A (ruled 2026-09-29): a primary that cannot log a committed change throws a typed
+  `CultNetShardLogException` naming the shard and the burned sequence, after publication, not derived from
+  `InvalidOperationException`.**
+  - The commit stands, the change is published, and replicas behind it snapshot-resync (Imagination pass 4 (a)).
+  - The writer hears of it. AetheriaEve `Program.cs:3722` cannot mistake it for a denial.
+
+Recorded, not forked:
+- (b): no origin on the journal. Loads and pulls are logged on primaries.
+- (a)'s restart residual when the store refuses both writes.
+- The replica keeps retry-by-cursor.
 - A throwing getter refuses loads too.
 - Reentrant writes keep main's depth-first delivery. Order is data.
 - Journal I/O under the gate follows the store precedent.
@@ -651,8 +799,6 @@ Not forks, recorded so they are not re-asked:
 
 - **`cultmesh-py` watch.** It has no isolation and no Sequence
   (`node.py:1059-1065`).
-- **`RecordMutationLogEntry` memory-before-disk.** A throwing durable `Append`
-  leaves memory ahead of disk. This predates the campaign.
 - **Durable log whole-file rewrite.** `CultNetShardMutationLogStorage.cs:83-89`
   rewrites the whole file per `Append`. It is a monolith, and under the gate
   its cost is now every writer's.
@@ -662,3 +808,9 @@ Not forks, recorded so they are not re-asked:
   serialized delivery was built, deadlocked, and was deleted". The Soul pass 3
   direction re-proposed it anyway. The Soul brief template should tell Soul to
   check `git log -S` for a proposed mechanism before recommending it.
+- **A chained replica after a snapshot.** A replica that snapshot-resyncs has no log entries below the snapshot
+  sequence. It should raise its own floor to that sequence, so a replica chained on it resyncs instead of seeing
+  a gap (`ApplyShardSnapshotResponseAsync` `:675-736`). It predates this campaign.
+- **AetheriaEve `Program.cs:3722`.** It reads a committed write's `InvalidOperationException` as a denial. Under
+  Q-P5 A, Cut 4's log failures cannot reach it. Observer and `OnUpdate` exceptions still can, so the Cuts 1-2
+  recording stands.
