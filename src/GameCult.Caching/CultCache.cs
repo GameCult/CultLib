@@ -381,9 +381,17 @@ namespace GameCult.Caching
         // True while this record holds element ids minted when it loaded, that no write has persisted (see MintElementIds).
         internal bool IdsInMemoryOnly { get; set; }
 
-        // True when some element this record persists holds a non-empty id: decided where ids are planned (an admission), and the
-        // only thing a store reads to mark its header. A variant holds ids when an override value does; its base's ids are the base's.
-        public bool HoldsIds { get; internal set; }
+        // True when some element this record persists holds a non-empty id, and the only thing a store reads to mark its header.
+        // An admission decides it (it also counts the ids the admission fills; a variant holds ids when an override value does,
+        // its base's ids being the base's). A record that never passed an admission, one a caller built and handed straight to a
+        // store, reads it off the document it stores: the flag means what the stored form persists, wherever the record came from.
+        public bool HoldsIds
+        {
+            get => _holdsIds ?? (Variant == null && CultElementIds.Plan(_document, Key.Value, deterministic: false).HeldIds);
+            internal set => _holdsIds = value;
+        }
+
+        private bool? _holdsIds;
 
         internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, bool holdsIds) =>
             new(Key, StoredAt, Descriptor, delta, document) { IdsInMemoryOnly = idsInMemoryOnly, HoldsIds = holdsIds };
@@ -3035,12 +3043,20 @@ namespace GameCult.Caching
         private const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
         private const string DirectoryFormatV5 = "cultcache.store.v5.directory-content-addressed-pages";
 
-        // The one header decision, for every writer of every store. The marked header (v3, or the directory store's v5) says the
-        // store holds an element id: a reader older than ids refuses it, because it would skip the id slots and rewrite the
-        // elements without them. A writer that rewrites the whole store decides by content, so a store may drop back when nothing
-        // holds an id. A writer that touches only part of the store keeps a header already marked, because it cannot see what
-        // the rest holds. holdsIds is about the records this write knows are on disk. Unmarked, a single-file store is v2 exactly
-        // when it holds a variant, and otherwise v1; the directory store refuses variants and is v4.
+        /// <summary>
+        /// The one header decision, for every writer of every store: the string a store file's format header must carry after
+        /// this write.
+        /// </summary>
+        /// <remarks>
+        /// The marked header (v3, or the directory store's v5) says the store holds an element id: a reader older than ids refuses
+        /// it, because it would skip the id slots and rewrite the elements without them. A writer that rewrites the whole store
+        /// (<paramref name="wholeStore"/>) decides by content, so a store drops back to unmarked when nothing in it holds an id.
+        /// A writer that touches only part of the store keeps a header already marked (<paramref name="existingHeader"/>), because
+        /// it cannot see what the rest holds. <paramref name="holdsIds"/> is about the records this write knows are on disk.
+        /// Unmarked, a single-file store is v2 exactly when it holds a variant (<paramref name="holdsVariants"/>) and otherwise v1;
+        /// the directory store refuses variants and is v4. Pass the header the file carries, or null when it has none, and refuse
+        /// a file whose header you cannot read before calling this.
+        /// </remarks>
         protected internal static string HeaderFor(bool holdsIds, string? existingHeader, bool wholeStore, bool directoryStore, bool holdsVariants = false)
         {
             var marked = directoryStore ? DirectoryFormatV5 : CultPersistedStoreSnapshot.FormatV3;

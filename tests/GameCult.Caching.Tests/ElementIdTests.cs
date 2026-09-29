@@ -709,6 +709,26 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(preset), Is.EqualTo("cultcache.store.v3"), "a loaded record's ids count");
         }
 
+        // A record a caller builds and hands straight to a store never passes an admission; the flag still means what it persists.
+        [TestCase(false, "cultcache.store.v3")]
+        [TestCase(true, "cultcache.store.v5.directory-content-addressed-pages")]
+        public void ARecordPushedStraightToAStoreIsMarkedByTheIdsItHolds(bool directory, string marked)
+        {
+            var path = PathOf(directory ? "direct-dir.cc" : "direct.cc");
+            using var cache = OpenWith(path, directory, typeof(IdDeck));
+            var store = cache.BackingStores[0];
+            var descriptor = Registry.GetRequired<IdDeck>();
+            var withId = new IdDeck { Name = "d", Reels = { new IdReel { Id = HexA } } };
+
+            store.Push(new CultStoredDocument(new CultRecordKey("d"), "2026-09-29T00:00:00.0000000+00:00", descriptor, withId));
+            store.PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo(marked));
+
+            store.Push(new CultStoredDocument(new CultRecordKey("d"), "2026-09-29T00:00:00.0000000+00:00", descriptor, EmptyDeck("d")));
+            store.PushAll();
+            Assert.That(HeaderOf(path), Is.Not.EqualTo(marked), "a whole-store flush decides by what the store now holds");
+        }
+
         [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {
