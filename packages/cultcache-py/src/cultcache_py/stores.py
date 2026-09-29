@@ -14,6 +14,8 @@ from .backing_store import (
 )
 
 STORE_FORMAT_VERSION = "cultcache.store.v1"
+_STORE_FORMAT_PREFIX = "cultcache.store."
+_PERSISTED_RECORD_SLOTS = 4
 
 
 class JsonLinesBackingStore:
@@ -153,7 +155,14 @@ def _encode_v1_snapshot(envelopes: list[CultCacheEnvelope]) -> list[Any]:
 
 
 def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
-    if not isinstance(decoded, list) or not decoded or decoded[0] != STORE_FORMAT_VERSION:
+    if not isinstance(decoded, list) or not decoded:
+        return None
+    if isinstance(decoded[0], str) and decoded[0].startswith(_STORE_FORMAT_PREFIX) and decoded[0] != STORE_FORMAT_VERSION:
+        raise ValueError(
+            f"CultCache store format {decoded[0]!r} is not readable; this runtime reads {STORE_FORMAT_VERSION!r} only. "
+            "The store needs a runtime that resolves document variants."
+        )
+    if decoded[0] != STORE_FORMAT_VERSION:
         return None
     if len(decoded) < 3 or not isinstance(decoded[1], list) or not isinstance(decoded[2], list):
         raise ValueError("CultCache v1 snapshot must contain a schema catalog and record array")
@@ -169,7 +178,12 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
     for raw_record in decoded[2]:
         if not isinstance(raw_record, list) or len(raw_record) < 4:
             raise ValueError("CultCache persisted records must be MessagePack arrays")
-        key, schema_id, stored_at, payload = raw_record[:4]
+        if len(raw_record) > _PERSISTED_RECORD_SLOTS:
+            raise ValueError(
+                f"CultCache record {raw_record[0]!r} (schema {raw_record[1]!r}) has {len(raw_record)} slots; "
+                f"this runtime reads {_PERSISTED_RECORD_SLOTS}. The store needs a runtime that resolves document variants."
+            )
+        key, schema_id, stored_at, payload = raw_record
         if not isinstance(key, str) or not key:
             raise ValueError("CultCache persisted records must declare a key")
         if not isinstance(schema_id, str) or not schema_id:

@@ -1,5 +1,7 @@
 import { decode } from "@msgpack/msgpack";
 
+import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
+
 export interface CultCacheInspection {
   filePath: string;
   fileSizeBytes: number;
@@ -38,8 +40,6 @@ export interface InspectedRecord {
   payloadPreview: unknown;
   payloadDecodeError?: string;
 }
-
-const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
 export function inspectCultCacheBytes(
   filePath: string,
@@ -197,6 +197,7 @@ function decodeV1Record(value: unknown, catalogBySchemaId: Map<string, Inspected
     throw new Error("CultCache persisted records must be MessagePack arrays.");
   }
 
+  requireV1RecordSlots(value);
   const [key = "", schemaId = "", storedAt = "", payload = new Uint8Array()] = value;
   if (!isNonEmptyString(key) || !isNonEmptyString(schemaId) || !isNonEmptyString(storedAt)) {
     throw new Error("CultCache persisted records must declare key, schemaId, and storedAt.");
@@ -347,10 +348,6 @@ function toJsonSafe(value: unknown): unknown {
   }
 
   return value;
-}
-
-function isV1Snapshot(value: unknown): value is unknown[] {
-  return Array.isArray(value) && value[0] === STORE_FORMAT_VERSION;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

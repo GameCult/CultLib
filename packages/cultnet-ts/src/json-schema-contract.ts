@@ -1,4 +1,4 @@
-import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020";
+import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
 import type { CultCacheSchema } from "@gamecult/cultcache-ts";
 
 export interface JsonSchemaContract<TValue> extends CultCacheSchema<TValue> {

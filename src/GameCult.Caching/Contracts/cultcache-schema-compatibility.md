@@ -105,3 +105,20 @@ lie about the payload:
 - no compatible local schema candidate
 
 This is not negotiable. Better a loud refusal than quiet bit-rot.
+
+## Variant overrides
+
+A variant's override follows the same outcome as the same member on a plain record; there
+is no separate rule for variants, and no separate report.
+
+- An override naming a slot the type no longer has is ignored, exactly as a plain record
+  ignores a dropped member. The drift is reported once, by the store's schema resolution
+  (`LastSchemaMigrationReports`), for the variant's record as for any other record of the
+  schema. The variant inherits the base value.
+- An override holding a value that no longer decodes into the member's type refuses the
+  load, exactly as a plain record holding such a value does; the refusal names the variant
+  and the member.
+
+Drift is for type changes after the fact. A write is validated: an override for a slot the
+type does not have, a value that does not decode as the member, or two overrides of one
+slot is refused when written.

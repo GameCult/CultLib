@@ -1,0 +1,35 @@
+# CultLib's own fixture sets, in the generator's response-file form:
+#   idunn_runtime_fixture <out-dir> @fixture.args
+--source-repository github.com/GameCult/StreamPixels
+--detail route-observation:route-challenge-1
+
+--set web
+--target streampixels-web
+--transport http
+--stable http://127.0.0.1:8830
+--candidate http://127.0.0.1:18830
+
+--set service
+--target streampixels-service
+--transport tcp
+--stable tcp://127.0.0.1:8831
+--candidate tcp://127.0.0.1:18831
+--minimum-capacity 2
+--dependency kind=shared-infrastructure,capability=odin.verse-rendezvous,schema=odin.verse-topology.v1,provider=odin,endpoint=rudp://127.0.0.1:47871
+
+--set service-stateful
+--target streampixels-service
+--transport tcp
+--stable tcp://127.0.0.1:8833
+--candidate tcp://127.0.0.1:18833
+--minimum-capacity 2
+--stateful
+--state-schema-generation streampixels-state-v1
+--lease-other-target streampixels-web
+--dependency kind=shared-infrastructure,capability=odin.verse-rendezvous,schema=odin.verse-topology.v1,provider=odin,endpoint=rudp://127.0.0.1:47871
+
+--set rudp-route
+--target streampixels-rudp
+--transport rudp
+--stable rudp://127.0.0.1:8832
+--candidate rudp://127.0.0.1:18832

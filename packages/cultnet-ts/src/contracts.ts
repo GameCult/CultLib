@@ -1,4 +1,4 @@
-import Ajv2020, { type ValidateFunction } from "ajv/dist/2020";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 
 import documentRecordSchema from "../contracts/cultnet/cultnet.document-record.schema.json";
 import helloSchema from "../contracts/cultnet/cultnet.hello.schema.json";

@@ -1413,3 +1413,55 @@ async function runJsonCommand(
 
   return JSON.parse(trimmed.split(/\r?\n/).at(-1) as string);
 }
+
+// Shared refusal vectors: tests/vectors/document-variants-c0, read by every runtime's tests.
+const variantVectors = resolve(cultLibRoot, "tests", "vectors", "document-variants-c0");
+const itemSchemaId = "sha256:88d3fdf0a927acf3b163940d8f8c7fe62b3316542ce771a67ec8bc038f594788";
+
+async function pullVector(name: string): Promise<CultCacheEnvelope[]> {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-vector-"));
+  const file = join(dir, "store.msgpack");
+  await writeFile(file, await readFile(join(variantVectors, name)));
+  return new SingleFileMessagePackBackingStore(file).pullAll();
+}
+
+test("SingleFileMessagePackBackingStore refuses an unknown store header by name", async () => {
+  await assert.rejects(() => pullVector("unknown-header.msgpack"), /cultcache\.store\.v9/u);
+});
+
+test("SingleFileMessagePackBackingStore refuses an extra record slot naming the record", async () => {
+  await assert.rejects(
+    () => pullVector("extra-slot-full-payload.msgpack"),
+    (error: Error) => error.message.includes("item:anvil") && error.message.includes(itemSchemaId),
+  );
+});
+
+test("SingleFileMessagePackBackingStore refuses a variant store by version or record", async () => {
+  await assert.rejects(
+    () => pullVector("variant-v2.msgpack"),
+    (error: Error) => error.message.includes("cultcache.store.v2") || error.message.includes("item:anvil-big"),
+  );
+});
+
+test("SingleFileMessagePackBackingStore refuses the C#-written variant store by version or record", async () => {
+  await assert.rejects(
+    () => pullVector("../document-variants-c1/variant-store.msgpack"),
+    (error: Error) => error.message.includes("cultcache.store.v2") || error.message.includes("laser-big"),
+  );
+});
+
+test("CultCache inspector refuses the same vectors by name", async () => {
+  const inspect = async (name: string) => inspectCultCacheBytes(name, await readFile(join(variantVectors, name)));
+  await assert.rejects(() => inspect("unknown-header.msgpack"), /cultcache\.store\.v9/u);
+  await assert.rejects(
+    () => inspect("extra-slot-full-payload.msgpack"),
+    (error: Error) => error.message.includes("item:anvil") && error.message.includes(itemSchemaId),
+  );
+});
+
+test("a v1 store written at the base commit still reads byte for byte", async () => {
+  const envelopes = await pullVector("v1-base.msgpack");
+  assert.deepEqual(envelopes.map((entry) => [entry.key, entry.type]), [["alpha", "vectors.item"], ["beta", "vectors.item"]]);
+  assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
+  assert.deepEqual([...envelopes[1]!.payload], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
+});

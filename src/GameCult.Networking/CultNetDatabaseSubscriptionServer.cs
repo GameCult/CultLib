@@ -204,6 +204,13 @@ namespace GameCult.Networking
                     peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
                     return Task.CompletedTask;
                 }
+                catch (NotSupportedException refusal)
+                {
+                    // Q6: a snapshot that selects a variant is refused to this subscriber as a typed error.
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
+                    peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message, subscriptionId));
+                    return Task.CompletedTask;
+                }
                 catch
                 {
                     Withdraw(key, sendRemovals: false, forgetRequest: true);
@@ -315,7 +322,18 @@ namespace GameCult.Networking
                     }
 
                     var sourceRecordKey = ResolveChangeRecordKey(change);
-                    var matched = CreateMatchedRecord(change, request, peer);
+                    CultNetRawDocumentRecord? matched;
+                    try
+                    {
+                        matched = CreateMatchedRecord(change, request, peer);
+                    }
+                    catch (NotSupportedException refusal)
+                    {
+                        // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
+                        peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message));
+                        return;
+                    }
+
                     ApplyProjectedChange(
                         projection,
                         sourceRecordKey,
@@ -331,9 +349,23 @@ namespace GameCult.Networking
             if (!_projections.TryGetValue(key, out var projection)) return;
             var legacyRequest = request.ToLegacyShape(key.Id);
             var authorized = _authorizeRequest?.Invoke(legacyRequest, key.Peer) != false;
-            var next = authorized
-                ? CreateProjectedSnapshot(request, key.Peer)
-                : ProjectedSnapshot.Empty;
+            ProjectedSnapshot next;
+            try
+            {
+                next = authorized
+                    ? CreateProjectedSnapshot(request, key.Peer)
+                    : ProjectedSnapshot.Empty;
+            }
+            catch (NotSupportedException refusal)
+            {
+                // Q6: the selection selects a variant, which CultNet cannot carry. The subscription is withdrawn, so the peer is
+                // told once, not once per store change; the rows it delivered are withdrawn too (removals first), so the peer
+                // does not keep them as live, and the typed error names the subscription that ended. A change never throws out of
+                // the change handler.
+                Withdraw(key, sendRemovals: true, forgetRequest: true);
+                key.Peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message, key.Id));
+                return;
+            }
 
             // With _projectRecord gone (docs/cultnet-selection-cut.md, S2-2), a projection's dictionary
             // key is always the record's own RecordKey/SchemaId, so the two can never disagree here;
@@ -541,6 +573,7 @@ namespace GameCult.Networking
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
                 return null;
 
+            CultNetDocumentRegistry.RefuseVariantChange(_database.Cache, key);
             return _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"));
         }
 

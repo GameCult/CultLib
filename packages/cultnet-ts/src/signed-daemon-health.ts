@@ -19,6 +19,10 @@ import { encode } from "@msgpack/msgpack";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
 import { encodeCultNetMessageForWire } from "./contracts";
+import { truncateUtf8Bytes } from "./utf8-bound";
+
+/** The Rust owner (`cultnet-rs`) bounds daemon health detail by UTF-8 bytes. */
+export const DAEMON_HEALTH_DETAIL_MAX_BYTES = 512;
 
 export const CULTNET_RUDP_PROTOCOL_ID = "cultnet.transport.rudp.v0";
 
@@ -120,15 +124,7 @@ export async function publishSignedDaemonHealth(
 
     const observedAt = health.observedAt || new Date().toISOString();
     const signed = publisher.privateKey ? signedDaemonHealthPayload(publisher, health, observedAt) : null;
-    const payload = signed?.payload || encode([
-      publisher.daemonId,
-      health.state,
-      String(health.detail || "").slice(0, 512),
-      observedAt,
-      publisher.healthContract,
-      "daemon-published",
-      CULTNET_RUDP_PROTOCOL_ID,
-    ]);
+    const payload = signed?.payload || unsignedDaemonHealthPayload(publisher, health, observedAt);
 
     const message = {
       schemaVersion: "cultnet.document_put_raw.v0",
@@ -165,6 +161,22 @@ export async function publishSignedDaemonHealth(
   }
 }
 
+export function unsignedDaemonHealthPayload(
+  publisher: SignedDaemonHealthPublisher,
+  health: DaemonHealth,
+  observedAt: string,
+): Uint8Array {
+  return encode([
+    publisher.daemonId,
+    health.state,
+    truncateUtf8Bytes(String(health.detail || ""), DAEMON_HEALTH_DETAIL_MAX_BYTES),
+    observedAt,
+    publisher.healthContract,
+    "daemon-published",
+    CULTNET_RUDP_PROTOCOL_ID,
+  ]);
+}
+
 export function signedDaemonHealthPayload(
   publisher: SignedDaemonHealthPublisher,
   health: DaemonHealth,
@@ -185,7 +197,7 @@ export function signedDaemonHealthPayload(
     publisher.healthContract,
     publisher.sourceRuntimeId,
     health.state,
-    String(health.detail || "").slice(0, 512),
+    truncateUtf8Bytes(String(health.detail || ""), DAEMON_HEALTH_DETAIL_MAX_BYTES),
     publisher.signerIdentityId,
     publisher.publisherIncarnationId,
     publisher.publisherSequence,

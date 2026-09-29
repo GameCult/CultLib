@@ -212,6 +212,41 @@ Example:
 The payload is the domain object only. It does not repeat the key, schema id,
 or stored timestamp.
 
+Under `cultcache.store.v1` a record has exactly these four slots. A reader refuses any
+`cultcache.store.*` header it does not know and any record with more slots than its
+header allows, naming the version or the record's key and schema id. It never skips a
+slot it does not understand.
+
+## Variant Records
+
+A variant record is a record whose document is a base record's document with some
+members replaced. It stores the difference, never the resolved document. It carries a
+fifth slot:
+
+```
+[key, schemaId, storedAt, payload, [baseKey, overrides[]]]
+```
+
+- `payload` is empty. An older reader that ignores the fifth slot reads an empty
+  payload as a corrupt document and refuses, which is why the delta lives outside it.
+- `schemaId` is the type's schema id, the same as the base's. A variant has its base's
+  concrete type, and lives in the same store (one home store per type).
+- An override is `[op, path[], id, value]`. `op` is `0` Set, `1` Insert or `2` Remove.
+  A path step is `[slot, elementId]`: `slot` is the member's MessagePack `[Key]` and
+  `elementId` is `""` unless the step enters an object-list element. `value` is the
+  member's own MessagePack encoding, inline. A top-level Set has one step and `id` `""`;
+  a reader that resolves only that shape refuses the others, naming the variant.
+- A store holding at least one variant declares `cultcache.store.v2`; a store holding
+  none declares `cultcache.store.v1` and is byte-identical to what a runtime without
+  variants writes. A `v1` header over a variant record is refused.
+- A variant's resolved document is derived in memory when the cache admits the record
+  or any record on its base chain, and is never written back. A plain write at a
+  variant's key is refused; `Flatten` replaces a variant with a plain record holding its
+  resolved document.
+- The C# runtime resolves variants. Every other runtime refuses a `v2` store by name.
+  CultMesh single-file reads, the directory store and CultNet refuse a variant record by
+  name until each has its own cut.
+
 ## Canonical Semantic Schema Hash
 
 `schemaId` should be derived from a canonical semantic schema hash.

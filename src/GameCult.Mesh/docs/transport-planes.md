@@ -102,6 +102,14 @@ lower priority than TCP. Existing hot-state publishers that still package
 payloads as schema messages must move to the realtime connector contract; the
 new seam does not pretend that migration has already occurred.
 
+The Rust runtime's content path is this compatibility path, chosen explicitly:
+`cultnet-rs` sends chunk requests and reads chunk responses on the session the
+client already holds, byte-identical on the wire to
+`CultMeshLegacyRudpContentServer` (`fetch_content` and
+`answer_content_chunk_request`). It is never an implicit default, and it lasts
+until Rust has an authenticated content connector (TCP+TLS or QUIC), which will
+sit behind the same `fetch_content` owner rather than beside it.
+
 ## Security and release gate
 
 The current TCP control and content connectors are plaintext and therefore

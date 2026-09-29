@@ -21,6 +21,7 @@ import {
   validateRuntimePresence,
   type RuntimePresenceHealth,
 } from "../src/runtime-presence-health";
+import { truncateUtf8Bytes } from "../src/utf8-bound";
 
 // Read from the source tree, not a copy beside the compiled test: the vectors
 // are generated output and must have exactly one home.
@@ -120,4 +121,45 @@ test("statements the contract forbids are refused before they are signed", () =>
 
   const partialLineage = { ...referencePresence(), stateContractSha256: null };
   assert.throws(() => validateRuntimePresence(partialLineage), /state lineage is partial/);
+});
+
+const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
+const isValidUtf8 = (text: string) => !Buffer.from(text, "utf8").toString("utf8").includes("\uFFFD") && !text.includes("\uFFFD");
+
+test("presence detail is truncated to 512 UTF-8 bytes, not UTF-16 units", () => {
+  const truncated = truncateUtf8Bytes("é".repeat(300), 512);
+  assert.ok(utf8Bytes(truncated) <= 512);
+  assert.equal(truncated, "é".repeat(256));
+  assert.ok(isValidUtf8(truncated));
+});
+
+test("presence detail drops a 4-byte character straddling the boundary whole", () => {
+  const truncated = truncateUtf8Bytes("a".repeat(510) + "😀", 512);
+  assert.equal(truncated, "a".repeat(510));
+  assert.ok(isValidUtf8(truncated));
+  assert.equal(truncateUtf8Bytes("a".repeat(508) + "😀", 512), "a".repeat(508) + "😀");
+});
+
+test("presence detail of exactly 512 ASCII bytes passes unchanged and 513 is cut", () => {
+  const exact = "a".repeat(512);
+  assert.equal(truncateUtf8Bytes(exact, 512), exact);
+  assert.doesNotThrow(() => validateRuntimePresence({ ...referencePresence(), detail: exact }));
+  assert.equal(truncateUtf8Bytes(exact + "a", 512), exact);
+  assert.throws(() => validateRuntimePresence({ ...referencePresence(), detail: exact + "a" }), /too long/);
+});
+
+test("validation refuses a detail that is short in UTF-16 units but over 512 UTF-8 bytes", () => {
+  assert.throws(() => validateRuntimePresence({ ...referencePresence(), detail: "é".repeat(300) }), /too long/);
+});
+
+test("a lone high surrogate at the end becomes U+FFFD and the result is valid UTF-8", () => {
+  const truncated = truncateUtf8Bytes("abc\uD83D", 512);
+  assert.equal(truncated, "abc\uFFFD");
+  assert.equal(Buffer.from(truncated, "utf8").toString("utf8"), truncated);
+});
+
+test("a lone low surrogate in the middle becomes U+FFFD and the result is valid UTF-8", () => {
+  const truncated = truncateUtf8Bytes("ab\uDE00cd", 512);
+  assert.equal(truncated, "ab\uFFFDcd");
+  assert.equal(Buffer.from(truncated, "utf8").toString("utf8"), truncated);
 });

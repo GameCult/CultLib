@@ -802,5 +802,45 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(cache.get_required_envelope(document, "item:one").key, "item:one")
 
 
+    # Shared refusal vectors: tests/vectors/document-variants-c0, read by every runtime's tests.
+    _VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "document-variants-c0"
+    _ITEM_SCHEMA_ID = "sha256:88d3fdf0a927acf3b163940d8f8c7fe62b3316542ce771a67ec8bc038f594788"
+
+    def _pull_vector(self, name: str) -> list[CultCacheEnvelope]:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes((self._VECTORS / name).read_bytes())
+            return SingleFileMessagePackBackingStore(store_path).pull_all()
+
+    def test_single_file_refuses_unknown_header_by_name(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._pull_vector("unknown-header.msgpack")
+        self.assertIn("cultcache.store.v9", str(caught.exception))
+
+    def test_single_file_refuses_extra_record_slot_naming_the_record(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._pull_vector("extra-slot-full-payload.msgpack")
+        self.assertIn("item:anvil", str(caught.exception))
+        self.assertIn(self._ITEM_SCHEMA_ID, str(caught.exception))
+
+    def test_single_file_refuses_variant_store_by_version_or_record(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._pull_vector("variant-v2.msgpack")
+        message = str(caught.exception)
+        self.assertTrue("cultcache.store.v2" in message or "item:anvil-big" in message, message)
+
+    def test_single_file_refuses_the_csharp_written_variant_store_by_version_or_record(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._pull_vector("../document-variants-c1/variant-store.msgpack")
+        message = str(caught.exception)
+        self.assertTrue("cultcache.store.v2" in message or "laser-big" in message, message)
+
+    def test_v1_store_written_at_the_base_commit_still_reads_byte_for_byte(self) -> None:
+        envelopes = self._pull_vector("v1-base.msgpack")
+        self.assertEqual([(e.key, e.type) for e in envelopes], [("alpha", "vectors.item"), ("beta", "vectors.item")])
+        self.assertEqual(envelopes[0].payload, b"\x92\xa5alpha\x01")
+        self.assertEqual(envelopes[1].payload, b"\x92\xa4beta\x02")
+
+
 if __name__ == "__main__":
     unittest.main()

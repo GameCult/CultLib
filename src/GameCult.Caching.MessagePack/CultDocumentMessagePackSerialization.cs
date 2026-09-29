@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using GameCult.Caching;
@@ -31,6 +32,7 @@ public sealed class CultDocumentResolver : IFormatterResolver
 public static class CultDocumentMessagePackSerialization
 {
     private const int PersistedRecordFieldCount = 4;
+    private const int VariantRecordFieldCount = 5;
     private const int SchemaCatalogEntryFieldCount = 7;
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
@@ -94,6 +96,49 @@ public static class CultDocumentMessagePackSerialization
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 
+    /// <summary>
+    /// Replaces slots of a serialized document payload (a MessagePack array indexed by slot) with already-encoded member
+    /// values, leaving every other slot byte for byte as it was. A slot past the end extends the array with nil.
+    /// </summary>
+    public static byte[] OverlaySlots(byte[] payload, IReadOnlyList<KeyValuePair<int, byte[]>> slots)
+    {
+        var reader = new MessagePackReader(payload);
+        if (reader.NextMessagePackType != MessagePackType.Array)
+        {
+            throw new InvalidOperationException("A document payload is a MessagePack array; this one is not, so its slots cannot be overridden.");
+        }
+
+        var count = reader.ReadArrayHeader();
+        var elements = new List<byte[]>(count);
+        for (var index = 0; index < count; index++)
+        {
+            var start = reader.Position;
+            reader.Skip();
+            elements.Add(reader.Sequence.Slice(start, reader.Position).ToArray());
+        }
+
+        foreach (var (slot, value) in slots)
+        {
+            while (elements.Count <= slot)
+            {
+                elements.Add(new byte[] { 0xc0 });
+            }
+
+            elements[slot] = value;
+        }
+
+        var buffer = new ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        writer.WriteArrayHeader(elements.Count);
+        foreach (var element in elements)
+        {
+            writer.WriteRaw(element);
+        }
+
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
     public static byte[] SerializePersistedRecord(CultPersistedRecord record)
     {
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
@@ -139,7 +184,8 @@ public static class CultDocumentMessagePackSerialization
 
         if (fieldCount > 0)
         {
-            snapshot.FormatVersion = reader.ReadString() ?? "cultcache.store.v1";
+            snapshot.FormatVersion = reader.ReadString()
+                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + " and " + CultPersistedStoreSnapshot.FormatV2 + ".");
         }
 
         if (fieldCount > 1)
@@ -170,16 +216,113 @@ public static class CultDocumentMessagePackSerialization
         return snapshot;
     }
 
+    /// <summary>Refuses a single-file snapshot this runtime cannot read, naming the format or record it found.</summary>
+    public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
+    {
+        var version = snapshot.FormatVersion;
+        if (!string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal) &&
+            !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                $"Store format {version} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1} and {CultPersistedStoreSnapshot.FormatV2}.");
+        }
+
+        // Only a v2 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
+        if (string.Equals(version, CultPersistedStoreSnapshot.FormatV1, StringComparison.Ordinal))
+        {
+            var variant = snapshot.Records.FirstOrDefault(record => record.Variant != null);
+            if (variant != null)
+            {
+                throw new NotSupportedException(
+                    $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2}.");
+            }
+        }
+    }
+
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
     {
-        writer.WriteArrayHeader(PersistedRecordFieldCount);
+        writer.WriteArrayHeader(record.Variant == null ? PersistedRecordFieldCount : VariantRecordFieldCount);
         writer.Write(record.Key);
         writer.Write(record.SchemaId);
         writer.Write(record.StoredAt);
         writer.Write(record.Payload);
+        if (record.Variant != null)
+        {
+            // Slot 4: [baseKey, overrides[]]; an override is [op, path[], id, value], a path step [slot, elementId],
+            // and the value is the member's own MessagePack encoding, inline.
+            writer.WriteArrayHeader(2);
+            writer.Write(record.Variant.BaseKey);
+            writer.WriteArrayHeader(record.Variant.Overrides.Count);
+            foreach (var entry in record.Variant.Overrides)
+            {
+                writer.WriteArrayHeader(4);
+                writer.Write((int)entry.Op);
+                writer.WriteArrayHeader(entry.Path.Count);
+                foreach (var step in entry.Path)
+                {
+                    writer.WriteArrayHeader(2);
+                    writer.Write(step.Slot);
+                    writer.Write(step.ElementId);
+                }
+
+                writer.Write(entry.Id);
+                writer.WriteRaw(entry.Value);
+            }
+        }
     }
 
-    private static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
+    private static CultVariantDelta ReadVariant(ref MessagePackReader reader, string key, string schemaId)
+    {
+        var slots = reader.ReadArrayHeader();
+        if (slots != 2)
+        {
+            throw new NotSupportedException(
+                $"Record '{key}' (schema '{schemaId}') has a variant slot of {slots} entries; this runtime reads 2 (base key, overrides).");
+        }
+
+        var baseKey = reader.ReadString() ?? string.Empty;
+        var count = reader.ReadArrayHeader();
+        var overrides = new CultVariantOverride[count];
+        for (var index = 0; index < count; index++)
+        {
+            var fields = reader.ReadArrayHeader();
+            if (fields != 4)
+            {
+                throw new NotSupportedException(
+                    $"Record '{key}' (schema '{schemaId}') has an override of {fields} entries; this runtime reads 4 (op, path, id, value).");
+            }
+
+            var op = reader.ReadInt32();
+            if (op is < 0 or > 2)
+            {
+                throw new NotSupportedException($"Record '{key}' (schema '{schemaId}') has an override with unknown op {op}.");
+            }
+
+            var stepCount = reader.ReadArrayHeader();
+            var path = new CultPathStep[stepCount];
+            for (var step = 0; step < stepCount; step++)
+            {
+                var stepFields = reader.ReadArrayHeader();
+                if (stepFields != 2)
+                {
+                    throw new NotSupportedException(
+                        $"Record '{key}' (schema '{schemaId}') has a path step of {stepFields} entries; this runtime reads 2 (slot, elementId).");
+                }
+
+                path[step] = new CultPathStep(reader.ReadInt32(), reader.ReadString() ?? string.Empty);
+            }
+
+            var id = reader.ReadString() ?? string.Empty;
+            var start = reader.Position;
+            reader.Skip();
+            var value = reader.Sequence.Slice(start, reader.Position).ToArray();
+            overrides[index] = new CultVariantOverride((CultOverrideOp)op, path, id, value);
+        }
+
+        return new CultVariantDelta(baseKey, overrides);
+    }
+
+    public static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
     {
         var fieldCount = reader.ReadArrayHeader();
         var record = new CultPersistedRecord();
@@ -204,9 +347,21 @@ public static class CultDocumentMessagePackSerialization
             record.Payload = reader.ReadBytes()?.ToArray() ?? Array.Empty<byte>();
         }
 
-        for (var index = PersistedRecordFieldCount; index < fieldCount; index++)
+        if (fieldCount > VariantRecordFieldCount)
         {
-            reader.Skip();
+            throw new NotSupportedException(
+                $"Record '{record.Key}' (schema '{record.SchemaId}') has {fieldCount} slots; this runtime reads {PersistedRecordFieldCount} " +
+                $"(or {VariantRecordFieldCount} for a variant).");
+        }
+
+        if (fieldCount == VariantRecordFieldCount)
+        {
+            record.Variant = ReadVariant(ref reader, record.Key, record.SchemaId);
+            if (record.Payload.Length != 0)
+            {
+                throw new NotSupportedException(
+                    $"Record '{record.Key}' (schema '{record.SchemaId}') is a variant and must carry an empty payload.");
+            }
         }
 
         return record;
@@ -371,7 +526,9 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
-        return CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
+        return snapshot;
     }
 
     protected override byte[] SerializePayload(object document)

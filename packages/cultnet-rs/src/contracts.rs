@@ -250,7 +250,7 @@ impl CultNetShardDescriptor {
     }
 }
 
-/// Machine-readable `cultnet.error.v0` refusal code (R-N). Mirrors the four strings
+/// Machine-readable `cultnet.error.v0` refusal code (R-N). Mirrors the five strings
 /// `contracts/cultnet/cultnet.error.schema.json` enumerates for `code`; a peer that receives a fifth
 /// string it does not know refuses to decode rather than guess a meaning for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +260,7 @@ pub enum CultNetErrorCode {
     CursorStale,
     CursorInvalid,
     ReferenceOutsideTarget,
+    VariantUnsupported,
 }
 
 impl CultNetErrorCode {
@@ -269,6 +270,7 @@ impl CultNetErrorCode {
             Self::CursorStale => "cursor_stale",
             Self::CursorInvalid => "cursor_invalid",
             Self::ReferenceOutsideTarget => "reference_outside_target",
+            Self::VariantUnsupported => "variant_unsupported",
         }
     }
 
@@ -278,6 +280,7 @@ impl CultNetErrorCode {
             "cursor_stale" => Ok(Self::CursorStale),
             "cursor_invalid" => Ok(Self::CursorInvalid),
             "reference_outside_target" => Ok(Self::ReferenceOutsideTarget),
+            "variant_unsupported" => Ok(Self::VariantUnsupported),
             other => Err(anyhow!("ErrorMessage.Code {other:?} is not a recognized cultnet.error.v0 code")),
         }
     }
@@ -508,6 +511,26 @@ pub enum CultNetMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_runtime_id: Option<String>,
     },
+    /// `cultmesh.content_chunk_request.v1`. Mirrors `CultMeshContentChunkRequestMessage`; raw path.
+    #[serde(rename = "cultmesh.content_chunk_request.v1", rename_all = "camelCase")]
+    ContentChunkRequest {
+        message_id: String,
+        chunk_hash: String,
+        record_key: String,
+        expected_size_bytes: i32,
+    },
+    /// `cultmesh.content_chunk_response.v1`. Mirrors `CultMeshContentChunkResponseMessage`. `payload`
+    /// is `bin`, so it travels the raw path; the serde attribute never runs on the wire.
+    #[serde(rename = "cultmesh.content_chunk_response.v1", rename_all = "camelCase")]
+    ContentChunkResponse {
+        message_id: String,
+        found: bool,
+        chunk_hash: String,
+        size_bytes: i32,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+        error: String,
+    },
 }
 
 fn messagepack_base64_encoding() -> String {
@@ -529,6 +552,8 @@ pub fn parse_cultnet_message(
                     "cultnet.document_put_raw.v0"
                     | "cultnet.snapshot_response_raw.v0"
                     | "cultnet.snapshot_response_raw.v1"
+                    | "cultmesh.content_chunk_request.v1"
+                    | "cultmesh.content_chunk_response.v1"
                     | "cultnet.error.v0",
                 ) => parse_raw_cultnet_schema_message(wire_value)?,
                 _ => {
@@ -553,6 +578,8 @@ pub fn encode_cultnet_message_for_wire(
             CultNetMessage::DocumentPutRaw { .. }
             | CultNetMessage::SnapshotResponseRaw { .. }
             | CultNetMessage::SnapshotResponseRawV1 { .. }
+            | CultNetMessage::ContentChunkRequest { .. }
+            | CultNetMessage::ContentChunkResponse { .. }
             | CultNetMessage::Error { .. } => encode_raw_cultnet_schema_message(message),
             _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
@@ -777,6 +804,10 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 validate_shard_descriptor(shard)?;
             }
         }
+        // The reference's serializer accepts any content chunk message. It refuses a bad request in
+        // its handler and answers `found: false` (`answer_content_chunk_request`); a bad response is
+        // refused by `fetch_content`'s verification. Refusing either here would leave a peer in silence.
+        CultNetMessage::ContentChunkRequest { .. } | CultNetMessage::ContentChunkResponse { .. } => {}
         CultNetMessage::OperationRequest {
             message_id,
             service_id,
@@ -1044,6 +1075,23 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
                 )?,
             })
         }
+        "cultmesh.content_chunk_request.v1" => Ok(CultNetMessage::ContentChunkRequest {
+            message_id: legacy_string_or_nil(get("messageId"), "messageId")?,
+            chunk_hash: legacy_string_or_nil(get("chunkHash"), "chunkHash")?,
+            record_key: legacy_string_or_nil(get("recordKey"), "recordKey")?,
+            expected_size_bytes: require_legacy_i32(get("expectedSizeBytes"), "expectedSizeBytes")?,
+        }),
+        "cultmesh.content_chunk_response.v1" => Ok(CultNetMessage::ContentChunkResponse {
+            message_id: require_legacy_string(get("messageId"), "messageId")?,
+            found: require_legacy_bool(get("found"), "found")?,
+            chunk_hash: require_legacy_string(get("chunkHash"), "chunkHash")?,
+            size_bytes: require_legacy_i32(get("sizeBytes"), "sizeBytes")?,
+            payload: get("payload")
+                .and_then(rmpv::Value::as_slice)
+                .ok_or_else(|| anyhow!("payload must be binary data"))?
+                .to_vec(),
+            error: require_legacy_string(get("error"), "error")?,
+        }),
         "cultnet.error.v0" => {
             let code = get("code")
                 .filter(|value| !value.is_nil())
@@ -1208,6 +1256,43 @@ fn encode_raw_cultnet_schema_message(message: &CultNetMessage) -> Result<rmpv::V
                     .map(rmpv::Value::from)
                     .unwrap_or(rmpv::Value::Nil),
             ),
+        ],
+        CultNetMessage::ContentChunkRequest {
+            message_id,
+            chunk_hash,
+            record_key,
+            expected_size_bytes,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultmesh.content_chunk_request.v1"),
+            ),
+            (rmpv::Value::from("messageId"), rmpv::Value::from(message_id.as_str())),
+            (rmpv::Value::from("chunkHash"), rmpv::Value::from(chunk_hash.as_str())),
+            (rmpv::Value::from("recordKey"), rmpv::Value::from(record_key.as_str())),
+            (
+                rmpv::Value::from("expectedSizeBytes"),
+                rmpv::Value::from(*expected_size_bytes),
+            ),
+        ],
+        CultNetMessage::ContentChunkResponse {
+            message_id,
+            found,
+            chunk_hash,
+            size_bytes,
+            payload,
+            error,
+        } => vec![
+            (
+                rmpv::Value::from("schemaVersion"),
+                rmpv::Value::from("cultmesh.content_chunk_response.v1"),
+            ),
+            (rmpv::Value::from("messageId"), rmpv::Value::from(message_id.as_str())),
+            (rmpv::Value::from("found"), rmpv::Value::from(*found)),
+            (rmpv::Value::from("chunkHash"), rmpv::Value::from(chunk_hash.as_str())),
+            (rmpv::Value::from("sizeBytes"), rmpv::Value::from(*size_bytes)),
+            (rmpv::Value::from("payload"), rmpv::Value::Binary(payload.clone())),
+            (rmpv::Value::from("error"), rmpv::Value::from(error.as_str())),
         ],
         // R-N: matches the landed C# `CultNetErrorMessage`
         // (src/GameCult.Networking/CultNetSchemaMessages.cs) key for key and in its declared
@@ -1422,6 +1507,13 @@ fn require_legacy_u32(value: Option<&rmpv::Value>, field_name: &str) -> Result<u
     u32::try_from(number).map_err(|_| anyhow!("{field_name} does not fit in u32"))
 }
 
+fn require_legacy_i32(value: Option<&rmpv::Value>, field_name: &str) -> Result<i32> {
+    let number = value
+        .and_then(rmpv::Value::as_i64)
+        .ok_or_else(|| anyhow!("{field_name} must be an integer"))?;
+    i32::try_from(number).map_err(|_| anyhow!("{field_name} does not fit in i32"))
+}
+
 fn require_legacy_u64(value: Option<&rmpv::Value>, field_name: &str) -> Result<u64> {
     value
         .and_then(rmpv::Value::as_u64)
@@ -1630,6 +1722,15 @@ fn require_legacy_bytes(value: Option<&rmpv::Value>, field_name: &str) -> Result
         .and_then(rmpv::Value::as_slice)
         .ok_or_else(|| anyhow!("{field_name} must be binary data in gamecult.networking.v0"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// A string the reference reads back as null when its writer set it to null (msgpack nil), which its
+/// handlers treat as blank. Only content chunk requests use it: they are answered, never dropped.
+fn legacy_string_or_nil(value: Option<&rmpv::Value>, field_name: &str) -> Result<String> {
+    match value {
+        Some(rmpv::Value::Nil) => Ok(String::new()),
+        other => require_legacy_string(other, field_name),
+    }
 }
 
 fn require_legacy_string(value: Option<&rmpv::Value>, field_name: &str) -> Result<String> {

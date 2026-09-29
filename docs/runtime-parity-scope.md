@@ -13,6 +13,11 @@ Cross-runtime parity has three layers:
 - Wire parity: shared CultCache file/state contracts, schema-v0 MessagePack
   documents, transport profiles, and RUDP packets must cross runtime boundaries
   without translation folklore.
+  Every store reader refuses, by name, a header or record slot it does not
+  understand (vectors: `tests/vectors/document-variants-c0`).
+  Document variants: C# resolves them (`cultcache.store.v2`); every other runtime,
+  CultMesh single-file reads, the directory store and CultNet refuse a variant by name
+  (vector written by C#: `tests/vectors/document-variants-c1`).
 - Feature parity: each runtime must expose the CultCache/CultNet/CultMesh
   surfaces needed for its intended role, with unsupported production-server
   ownership called out plainly.
@@ -73,6 +78,23 @@ to speak CultNet or participate in CultMesh.
   `tests/GameCult.Networking.Tests/SelectionParityVectorTests.cs` carry the
   semantic ones. A single rows-to-bytes path driving both halves in one call
   remains its own cut (R-AR) and is not part of this claim.
+- CultMesh content plane (`cultmesh.content_chunk_request.v1` and `.response.v1`
+  plus the CDN manifest, C#/Rust only): byte parity in both directions (manifest metadata keeps its wire key order and a
+  duplicate key is refused, as the reference refuses it), and the reference's answer
+  to a chunk request, including its failure spellings: every bad request is
+  answered `found: false`, never refused at decode.
+  `packages/cultnet-rs/tests/content.rs` and
+  `tests/GameCult.Mesh.Tests/CultMeshContentVectorTests.cs` judge
+  `contracts/cultmesh/content-vectors.cs-written.json` and
+  `content-vectors.rs-written.json`. Rust carries these chunks only on the
+  session the client already holds (see `src/GameCult.Mesh/docs/transport-planes.md`);
+  it has no authenticated content connector, so it claims no TCP+TLS or QUIC
+  content path.
+  Recorded limits: a caller that passes `max_bytes = u64::MAX` to `fetch_content` gets an unbounded
+  body, because the reference refuses artifacts over `int.MaxValue` bytes and Rust bounds them only by the
+  caller's cap.
+  `normalize_hash` matches the `sha256:` prefix ASCII-case-insensitively while C# `OrdinalIgnoreCase` may
+  also match non-ASCII forms (for example `ſha256:`); unprobed, and it affects hostile input only.
 
 ## Expansion Work Outside The Current Parity Claim
 

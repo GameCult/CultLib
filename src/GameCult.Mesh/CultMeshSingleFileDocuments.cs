@@ -156,6 +156,8 @@ namespace GameCult.Mesh
                     $"CultCache document '{path}' record '{key.Value}' has schema '{record.SchemaId}', expected '{expectedSchemaId}'.");
             }
 
+            RefuseVariant(path, record);
+
             if (!PublishesSchema(snapshot.SchemaCatalog, expectedSchemaId))
             {
                 throw new InvalidDataException(
@@ -198,6 +200,15 @@ namespace GameCult.Mesh
             return record.Payload;
         }
 
+        // A variant record's payload is empty; its document exists only as the cache resolves it against its base.
+        private static void RefuseVariant(string path, CultPersistedRecord record)
+        {
+            if (record.Variant != null)
+                throw new NotSupportedException(
+                    $"CultCache document '{path}' record '{record.Key}' is a variant of '{record.Variant.BaseKey}'; " +
+                    "CultMesh does not resolve document variants, open the store with a CultCache.");
+        }
+
         private static void WriteSingleFileDocumentPayload(
             string path,
             CultRecordKey key,
@@ -236,14 +247,18 @@ namespace GameCult.Mesh
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
+            CultPersistedStoreSnapshot snapshot;
             try
             {
-                return CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
             }
             catch (Exception ex) when (ex is MessagePackSerializationException or InvalidOperationException)
             {
-                return ReadLegacySingleFileSnapshot(bytes);
+                snapshot = ReadLegacySingleFileSnapshot(bytes);
             }
+
+            CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
+            return snapshot;
         }
 
         private static CultPersistedStoreSnapshot ReadLegacySingleFileSnapshot(byte[] bytes)
@@ -252,7 +267,8 @@ namespace GameCult.Mesh
             var fieldCount = reader.ReadArrayHeader();
             var snapshot = new CultPersistedStoreSnapshot();
             if (fieldCount > 0)
-                snapshot.FormatVersion = reader.ReadString() ?? "cultcache.store.v1";
+                snapshot.FormatVersion = reader.ReadString()
+                    ?? throw new NotSupportedException("Store snapshot declares no format version.");
 
             if (fieldCount > 1)
             {
@@ -267,7 +283,7 @@ namespace GameCult.Mesh
                 var recordCount = reader.ReadArrayHeader();
                 snapshot.Records = new CultPersistedRecord[recordCount];
                 for (var index = 0; index < recordCount; index++)
-                    snapshot.Records[index] = ReadLegacyPersistedRecord(ref reader);
+                    snapshot.Records[index] = CultDocumentMessagePackSerialization.ReadPersistedRecord(ref reader);
             }
 
             for (var index = 3; index < fieldCount; index++)
@@ -301,23 +317,6 @@ namespace GameCult.Mesh
                 : new[] { entry.SchemaId };
             entry.Members = Array.Empty<CultSchemaMemberCatalogEntry>();
             return entry;
-        }
-
-        private static CultPersistedRecord ReadLegacyPersistedRecord(ref MessagePackReader reader)
-        {
-            var fieldCount = reader.ReadArrayHeader();
-            var record = new CultPersistedRecord();
-            if (fieldCount > 0) record.Key = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 1) record.SchemaId = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 2) record.StoredAt = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 3)
-            {
-                var payload = reader.ReadBytes();
-                record.Payload = payload.HasValue ? payload.Value.ToArray() : Array.Empty<byte>();
-            }
-            for (var index = 4; index < fieldCount; index++)
-                reader.Skip();
-            return record;
         }
 
         private static bool PublishesSchema(CultSchemaCatalogEntry[] catalog, string schemaId)
