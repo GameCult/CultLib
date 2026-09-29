@@ -1572,8 +1572,15 @@ impl CultNetRudpServerHub {
         };
         wire.truncate(received);
         self.stats.bytes_received += received as u64;
-        let packet = decode_rudp_packet(&wire)?;
+        // What a datagram carries is the sender's business, not a fault of this
+        // process: a malformed frame, another session's id and a sender no
+        // Connect admitted are dropped and counted. Only the socket ends a loop.
+        let Ok(packet) = decode_rudp_packet(&wire) else {
+            self.stats.packets_dropped += 1;
+            return Ok(true);
+        };
         if packet.connection_id != self.connection_id {
+            self.stats.packets_dropped += 1;
             return Ok(true);
         }
 
@@ -1581,7 +1588,10 @@ impl CultNetRudpServerHub {
             if let Some(peer) = self.peers.get_mut(&remote_addr)
                 && peer.context.connect_payload == packet.payload
             {
-                let _ = peer.session.receive(&packet, now_ms())?;
+                if peer.session.receive(&packet, now_ms()).is_err() {
+                    self.stats.packets_dropped += 1;
+                    return Ok(true);
+                }
                 let reply = peer
                     .session
                     .pending_accept_for_resend(now_ms())
@@ -1590,7 +1600,8 @@ impl CultNetRudpServerHub {
                 return Ok(true);
             }
             if !self.peers.contains_key(&remote_addr) && self.peers.len() >= self.max_peers {
-                return Err(anyhow!("RUDP server hub peer limit reached"));
+                self.stats.packets_dropped += 1;
+                return Ok(true);
             }
             let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
                 connection_id: self.connection_id,
@@ -1610,7 +1621,10 @@ impl CultNetRudpServerHub {
                 session_generation: generation,
                 connect_payload: packet.payload.clone(),
             };
-            let accept = session.accept_connect(&packet, now_ms(), Vec::new())?;
+            let Ok(accept) = session.accept_connect(&packet, now_ms(), Vec::new()) else {
+                self.stats.packets_dropped += 1;
+                return Ok(true);
+            };
             self.send_packet(remote_addr, &accept)?;
             let replaced = self.peers.insert(
                 remote_addr,
@@ -1632,9 +1646,13 @@ impl CultNetRudpServerHub {
         }
 
         let Some(peer) = self.peers.get_mut(&remote_addr) else {
+            self.stats.packets_dropped += 1;
             return Ok(true);
         };
-        let result = peer.session.receive(&packet, now_ms())?;
+        let Ok(result) = peer.session.receive(&packet, now_ms()) else {
+            self.stats.packets_dropped += 1;
+            return Ok(true);
+        };
         let context = peer.context.clone();
         let ack = if packet.reliable {
             Some(peer.session.create_ack_for_received(packet.sequence))
@@ -1970,7 +1988,20 @@ impl CultNetRudpSocketTransportConnection {
         wire.truncate(received);
         self.stats.bytes_received += received as u64;
 
-        let packet = decode_rudp_packet(&wire)?;
+        // What a datagram carries is the sender's business, not a fault of this
+        // process: a malformed frame, another session's id, a sender that is not
+        // this transport's peer and a packet the session refuses are dropped and
+        // counted. Only the socket ends a loop. The id is checked before the
+        // peer endpoint or session state is touched, so a stray Connect can
+        // neither move the endpoint nor reset the session.
+        let Ok(packet) = decode_rudp_packet(&wire) else {
+            self.stats.packets_dropped += 1;
+            return Ok(true);
+        };
+        if packet.connection_id != self.session.connection_id() {
+            self.stats.packets_dropped += 1;
+            return Ok(true);
+        }
         if let Some(expected) = self.remote_addr {
             if expected != remote_addr {
                 if self.mode == CultNetRudpSocketMode::Server
@@ -1978,6 +2009,7 @@ impl CultNetRudpSocketTransportConnection {
                 {
                     self.remote_addr = Some(remote_addr);
                 } else {
+                    self.stats.packets_dropped += 1;
                     return Ok(true);
                 }
             }
@@ -1985,6 +2017,7 @@ impl CultNetRudpSocketTransportConnection {
             if self.mode == CultNetRudpSocketMode::Server
                 && packet.packet_type != CultNetRudpPacketType::Connect
             {
+                self.stats.packets_dropped += 1;
                 return Ok(true);
             }
             self.remote_addr = Some(remote_addr);
@@ -1993,12 +2026,18 @@ impl CultNetRudpSocketTransportConnection {
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
             self.session.reset_peer_state();
-            let accept = self.session.accept_connect(&packet, now_ms(), Vec::new())?;
+            let Ok(accept) = self.session.accept_connect(&packet, now_ms(), Vec::new()) else {
+                self.stats.packets_dropped += 1;
+                return Ok(true);
+            };
             self.send_packet(&accept)?;
             return Ok(true);
         }
 
-        let result = self.session.receive(&packet, now_ms())?;
+        let Ok(result) = self.session.receive(&packet, now_ms()) else {
+            self.stats.packets_dropped += 1;
+            return Ok(true);
+        };
         if let Some(reply) = result.reply {
             self.send_packet(&reply)?;
         }
