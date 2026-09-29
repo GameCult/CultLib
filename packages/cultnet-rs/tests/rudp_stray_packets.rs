@@ -680,8 +680,9 @@ fn a_receipt_invalidated_by_a_peer_disconnect_never_becomes_acknowledged() -> Re
         CultNetRudpReliableSendStatus::Invalidated,
         "the old session's write was acknowledged in the new session"
     );
-    // The old write is not retransmitted into the new session either.
-    assert_eq!(client.outstanding_reliable_packet_count(), 1, "only the reconnect's own Connect is outstanding");
+    // The old write is not retransmitted into the new session either: the
+    // Accept acknowledged the reconnect's Connect, and nothing else is owed.
+    assert_eq!(client.outstanding_reliable_packet_count(), 0, "the old write survived into the new session");
     Ok(())
 }
 
