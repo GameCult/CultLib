@@ -53,6 +53,34 @@ if ($LASTEXITCODE -ne 0) {
   throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
 }
 
+
+# Release gate: cultlib's Unity package resolves CultMath through the org.gamecult.cultmath
+# dependency, so a cultlib release must not run ahead of the CultMath package it names.
+# (1) The declared dependency version must not exceed the CultMath package's own version.
+# (2) The CultMath.dll that package tracks must define every type CultMathResolver formats.
+#     Type names come from the resolver source (its Shape<T> entries) and are looked up as
+#     NUL-delimited names in the assembly's metadata string heap, which is a name check, not a
+#     signature check; Windows PowerShell cannot load a netstandard2.1 assembly to reflect on it.
+$cultMathPackageRoot = Join-Path $repoRoot "packages\cultmath\unity\org.gamecult.cultmath"
+$cultMathDeclared = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
+$cultMathAvailable = (Get-Content -LiteralPath (Join-Path $cultMathPackageRoot "package.json") -Raw | ConvertFrom-Json).version
+if ([string]::IsNullOrWhiteSpace($cultMathDeclared)) {
+  throw "package.json must declare org.gamecult.cultmath, which supplies CultMath.dll."
+}
+if ([version]$cultMathDeclared -gt [version]$cultMathAvailable) {
+  throw "Release order: org.gamecult.cultlib depends on org.gamecult.cultmath $cultMathDeclared, but the CultMath package is at $cultMathAvailable. Release CultMath first."
+}
+$resolverSource = Get-Content -LiteralPath (Join-Path $repoRoot "src\GameCult.Caching.MessagePack\CultMathResolver.cs") -Raw
+$resolverTypes = @([regex]::Matches($resolverSource, '\bShape<(?!T>)(\w+)>\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+if ($resolverTypes.Count -eq 0) {
+  throw "Found no CultMath types in CultMathResolver.cs; the release gate cannot check the CultMath package."
+}
+$cultMathBytes = [IO.File]::ReadAllBytes((Join-Path $cultMathPackageRoot "Runtime\Plugins\CultMath.dll"))
+$cultMathText = [Text.Encoding]::GetEncoding(28591).GetString($cultMathBytes)
+$missingTypes = @($resolverTypes | Where-Object { -not $cultMathText.Contains("`0$_`0") })
+if ($missingTypes.Count -gt 0) {
+  throw "The CultMath.dll in org.gamecult.cultmath $cultMathAvailable lacks types CultMathResolver formats: $($missingTypes -join ', '). Release CultMath first."
+}
 # The tracked DLLs and pdbs are committed beside their source, so none may name a commit or a worktree:
 # Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
 # carries its pdb's content id. ContinuousIntegrationBuild maps the local source path to /_/.
@@ -137,10 +165,6 @@ $declaredAssemblies = @($expectedAssemblies + $externalAssemblies | Sort-Object)
 if (($referencedAssemblies -join "|") -ne ($declaredAssemblies -join "|")) {
   throw "GameCult.CultLib.asmdef precompiledReferences differ from the shipped plus external assembly lists."
 }
-$cultMathDependency = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
-if ([string]::IsNullOrWhiteSpace($cultMathDependency)) {
-  throw "package.json must declare org.gamecult.cultmath, which supplies CultMath.dll."
-}
 $publishedByName = @{}
 foreach ($assembly in Get-ChildItem -LiteralPath $publishRoot -Filter "*.dll") {
   $publishedByName[$assembly.Name] = $assembly
@@ -165,11 +189,6 @@ foreach ($assemblyName in $expectedAssemblies) {
   $pdb = [System.IO.Path]::ChangeExtension($assembly.FullName, ".pdb")
   if (Test-Path -LiteralPath $pdb) {
     Copy-Item -LiteralPath $pdb -Destination $pluginRoot
-  }
-}
-foreach ($external in $externalAssemblies) {
-  if (Test-Path -LiteralPath (Join-Path $pluginRoot $external)) {
-    throw "CultLib Unity package must not ship $external; org.gamecult.cultmath owns it."
   }
 }
 $nativePluginRoot = Join-Path $pluginRoot "x86_64"
