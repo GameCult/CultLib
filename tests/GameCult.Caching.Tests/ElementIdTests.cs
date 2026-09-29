@@ -758,6 +758,16 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
+
+            // Flattened, the variant is a plain record holding the ids its override brought; the base holds none.
+            using (var cache = Open(withIds))
+            {
+                cache.FlattenAsync(new CultRecordKey("v")).GetAwaiter().GetResult();
+                cache.Remove(new CultRecordKey("e"));
+                cache.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
         }
 
         [Test]
