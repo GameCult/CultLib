@@ -500,7 +500,7 @@ namespace GameCult.Caching.Tests
             foreach (var (key, kind, count, flag) in new[]
                      {
                          ("m1", "b", 10, true), ("m2", "A", 9, false), ("m3", "a", 9, true), ("m4", "", -1, false),
-                         ("m5", "a", 10, true), ("m6", "a", 10, false), ("m7", "a", -1, true)
+                         ("m5", "a", 10, true), ("m6", "a", 10, false), ("m7", "a", -1, true), ("m8", "B", 10, true)
                      })
                 await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = kind, Count = count, Flag = flag }, new CultRecordKey(key));
             Assert.That(Dump(model.GroupRecords(typeof(GroupMixed), cache.AllStoredDocuments)), Is.EqualTo(new[]
@@ -508,8 +508,32 @@ namespace GameCult.Caching.Tests
                 "(empty) (1)", "  -1 (1)", "    False (1): m4",
                 "A (1)", "  9 (1)", "    False (1): m2",
                 "a (4)", "  -1 (1)", "    True (1): m7", "  9 (1)", "    True (1): m3", "  10 (2)", "    False (1): m6", "    True (1): m5",
+                "B (1)", "  10 (1)", "    True (1): m8",
                 "b (1)", "  10 (1)", "    True (1): m1"
             }), "strings ignore case then compare exactly, integers order numerically, false before true");
+        }
+
+        [Test]
+        public async Task GroupNodeIdsStayDistinctWhateverTheValuesContain()
+        {
+            using var cache = OpenGroups();
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "x/Count=1/Flag=True" }, new CultRecordKey("a"));
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "x", Count = 1, Flag = true }, new CultRecordKey("b"));
+
+            var ids = new List<string>();
+            void Collect(IEnumerable<CultInspectorRecordGroup> groups)
+            {
+                foreach (var group in groups)
+                {
+                    ids.Add(group.Id);
+                    Collect(group.Children);
+                }
+            }
+
+            Collect(GroupModel().GroupRecords(typeof(GroupMixed), cache.AllStoredDocuments));
+
+            Assert.That(ids, Has.Count.EqualTo(6));
+            Assert.That(ids.Distinct().Count(), Is.EqualTo(6), "a path never spells another node's id");
         }
 
         [Test]
