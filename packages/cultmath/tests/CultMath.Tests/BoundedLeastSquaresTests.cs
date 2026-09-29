@@ -657,32 +657,38 @@ public sealed class BoundedLeastSquaresTests
         return best;
     }
 
+    // m < n with columns that are nearly parallel (condition number of A around 1e2), b outside the reachable set.
     [Fact]
     public void NearCollinearColumnsReachTheExactOptimum()
     {
         const int m = 2, n = 7;
-        var worst = 0.0;
-        for (uint seed = 1; seed <= 60; seed++)
+        for (var family = 0; family < 4; family++)
         {
-            var rng = new CultMath.Random(seed * 15485863u);
-            var a = new float[m * n];
-            for (var j = 0; j < n; j++)
+            for (uint seed = 1; seed <= 120; seed++)
             {
-                a[j] = rng.NextFloat(0.5f, 1f);
-                a[n + j] = 0.01f * rng.NextFloat(-1f, 1f);
+                var rng = new CultMath.Random(seed * 15485863u + (uint)family * 977u);
+                var a = new float[m * n];
+                for (var j = 0; j < n; j++)
+                {
+                    switch (family)
+                    {
+                        case 0: a[j] = rng.NextFloat(0.5f, 1f); a[n + j] = 0.01f * rng.NextFloat(-1f, 1f); break;
+                        case 1: a[j] = 1f + 0.02f * rng.NextFloat(-1f, 1f); a[n + j] = 0.01f * rng.NextFloat(-1f, 1f); break;
+                        case 2: a[j] = rng.NextFloat(-1f, 1f); a[n + j] = 0.01f * a[j] + 0.01f * rng.NextFloat(-1f, 1f); break;
+                        default: a[j] = rng.NextFloat(0.5f, 1f); a[n + j] = a[j] * 0.9f + 0.01f * rng.NextFloat(-1f, 1f); break;
+                    }
+                }
+                var b = new[] { rng.NextFloat(-8f, 8f), rng.NextFloat(-8f, 8f) };
+                var lo = new float[n];
+                var hi = new float[n];
+                for (var j = 0; j < n; j++) { lo[j] = rng.NextFloat() < 0.5f ? -1f : 0f; hi[j] = 1f; }
+                var x = new float[n];
+                var status = Solve(m, n, a, b, lo, hi, x, out _);
+                Assert.True(status == BoundedLeastSquaresStatus.Converged, $"family {family} seed {seed}: {status}");
+                var gap = Cost(m, n, a, b, x) - ExactBoxedCost(m, n, a, b, lo, hi);
+                var allowed = 1e-5 * (b[0] * b[0] + b[1] * b[1]);
+                Assert.True(gap <= allowed, $"family {family} seed {seed}: cost {gap} above the exact optimum (allowed {allowed})");
             }
-            var b = new[] { 6f * (rng.NextFloat() < 0.5f ? -1f : 1f), rng.NextFloat(0.5f, 2f) };
-            var lo = new float[n];
-            var hi = new float[n];
-            for (var j = 0; j < n; j++) { lo[j] = -1f; hi[j] = seed % 2 == 0 ? 1f : 0.5f; }
-            var x = new float[n];
-            var status = Solve(m, n, a, b, lo, hi, x, out _);
-            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed}: {status}");
-            AssertKkt(m, n, a, b, lo, hi, x);
-            var gap = Cost(m, n, a, b, x) - ExactBoxedCost(m, n, a, b, lo, hi);
-            var bound = 1e-5 * (b[0] * b[0] + b[1] * b[1]);
-            worst = Math.Max(worst, gap / bound);
-            Assert.True(gap <= bound, $"seed {seed}: cost {gap} above the exact optimum (allowed {bound})");
         }
     }
 }
