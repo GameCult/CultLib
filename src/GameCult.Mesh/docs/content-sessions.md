@@ -47,6 +47,14 @@ The content protocol uses one bounded response per manifest chunk. A snapshot
 response containing `gamecult.mesh.cdn_artifact_chunk.v1` payload records is a
 legacy transport path and must not be used for bulk delivery.
 
+The Rust runtime speaks the same chunk messages through `cultnet-rs`
+`fetch_content`, which verifies every chunk and then the whole body, and
+`answer_content_chunk_request`, which mirrors the legacy server's validation
+order and error spelling. Its transport is an explicit closure over the session
+the caller already holds, carrying the chunks as ordinary schema frames until
+Rust has an authenticated content connector; the chunk bytes, manifest shape
+and verification do not change when that connector arrives.
+
 The transfer owner may keep a bounded window of requests in flight per content
 hash (four by default, never more than 32). Candidate chunks can arrive out of
 order, but only the transfer owner writes them, and it flushes and checkpoints
