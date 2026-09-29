@@ -483,6 +483,8 @@ namespace GameCult.Networking
         private readonly Dictionary<(string SchemaId, string RecordKey), long> _lastWriteSequence =
             new();
         private readonly Subject<object> _changes = new();
+        private readonly IDisposable _cacheChanges;
+        private static readonly AsyncLocal<(string SchemaId, string Key)?> DoorOwned = new();
         private bool _disposed;
 
         /// <summary>
@@ -502,7 +504,7 @@ namespace GameCult.Networking
             _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
             CursorKey = options.CursorKey ?? CultNetSelectionCursorKey.Random();
             InitializeLogSequencesFromStore();
-            _cache.OnUpdate += PublishCacheUpdate;
+            _cacheChanges = _cache.Watch<object>().Subscribe(PublishCacheChange);
         }
 
         /// <summary>
@@ -700,7 +702,8 @@ namespace GameCult.Networking
             var local = GetLocalShardDocuments(shard).ToArray();
             foreach (var existing in local.Where(item => !incomingKeys.Contains(item.Key.Value)))
             {
-                RemoveTrackedDocument(existing.DocumentType, existing.Key);
+                using (Door(existing.SchemaId, existing.Key))
+                    _cache.Remove(existing.Key);
                 PublishUntyped(
                     existing.DocumentType,
                     CultNetDatabaseChangeKind.Removed,
@@ -716,15 +719,17 @@ namespace GameCult.Networking
                 var key = new CultRecordKey(document.RecordKey);
                 var descriptor = _documents.ResolveDescriptorForRawDocument(document);
                 var previous = _cache.Get(key);
-                var applied = await _documents.ApplyRawDocumentPutMessageAsync(
-                    _cache,
-                    new CultNetDocumentPutRawMessage
-                    {
-                        MessageId = response.MessageId,
-                        Document = document,
-                        ShardId = shard.ShardId,
-                        ShardEpoch = shard.Epoch
-                    }).ConfigureAwait(false);
+                object applied;
+                using (Door(descriptor.SchemaId, key))
+                    applied = await _documents.ApplyRawDocumentPutMessageAsync(
+                        _cache,
+                        new CultNetDocumentPutRawMessage
+                        {
+                            MessageId = response.MessageId,
+                            Document = document,
+                            ShardId = shard.ShardId,
+                            ShardEpoch = shard.Epoch
+                        }).ConfigureAwait(false);
                 PublishUntyped(
                     descriptor.DocumentType,
                     previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated,
@@ -847,7 +852,9 @@ namespace GameCult.Networking
             EnsurePrimary(shard, descriptor.SchemaId, key);
 
             var previous = _cache.Get<T>(key);
-            var handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
+            CultRecordHandle<T> handle;
+            using (Door(descriptor.SchemaId, key))
+                handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
             void PublishCommittedPut()
             {
                 AppendMutationLogEntry(
@@ -882,7 +889,9 @@ namespace GameCult.Networking
             EnsureClientAuthority(descriptor, key);
 
             var previous = _cache.Get<T>(key);
-            var handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
+            CultRecordHandle<T> handle;
+            using (Door(descriptor.SchemaId, key))
+                handle = await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
             _predictedDocuments[PredictionKey(descriptor.SchemaId, key)] = document;
             Publish(new CultNetDatabaseChange<T>(
                 CultNetDatabaseChangeKind.Predicted,
@@ -907,7 +916,8 @@ namespace GameCult.Networking
             var previous = _cache.Get<T>(key);
             if (previous != null)
             {
-                _cache.Remove(new CultRecordHandle<T>(key));
+                using (Door(descriptor.SchemaId, key))
+                    _cache.Remove(new CultRecordHandle<T>(key));
                 void PublishCommittedDelete()
                 {
                     AppendMutationLogEntry(
@@ -948,7 +958,9 @@ namespace GameCult.Networking
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var previous = _cache.Get(key);
-            var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
+            object document;
+            using (Door(descriptor.SchemaId, key))
+                document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
             var kind = previous == null ? CultNetDatabaseChangeKind.Added : CultNetDatabaseChangeKind.Updated;
             var predictionKey = PredictionKey(descriptor.SchemaId, key);
             var reconcilesPrediction = _predictedDocuments.ContainsKey(predictionKey);
@@ -1004,7 +1016,8 @@ namespace GameCult.Networking
                 return Task.CompletedTask;
             }
 
-            _cache.Remove(key);
+            using (Door(descriptor.SchemaId, key))
+                _cache.Remove(key);
             void PublishCommittedDelete()
             {
                 AppendMutationLogEntry(
@@ -1154,13 +1167,17 @@ namespace GameCult.Networking
             }
 
             _disposed = true;
-            _cache.OnUpdate -= PublishCacheUpdate;
+            _cacheChanges.Dispose();
             _changes.Dispose();
         }
 
-        private void PublishCacheUpdate(object? previous, object? current)
+        // The cache is the one owner of "a change was committed". Every admitted change reaches subscribers and the mutation
+        // log through here, except the change a write door of this database is itself committing at its own key: that door
+        // publishes it with the shard-log entry it must carry (Reconciled, a replica's wire entry). Changes at other keys
+        // in the same hold, such as variant dependents re-resolved by a base edit, are not the door's and publish here.
+        private void PublishCacheChange(CultCacheDocumentChange<object> change)
         {
-            var document = current ?? previous;
+            var document = change.Document ?? change.PreviousDocument;
             if (document == null)
             {
                 return;
@@ -1168,26 +1185,38 @@ namespace GameCult.Networking
 
             var documentType = document.GetType();
             var descriptor = _cache.Registry.GetRequired(documentType);
-            var key = current != null
-                ? GetTrackedKey(current, documentType)
-                : new CultRecordKey(string.Empty);
-            var shard = ResolveShardInternal(descriptor, key);
-            var changeType = typeof(CultNetDatabaseChange<>).MakeGenericType(documentType);
-            var change = Activator.CreateInstance(
-                changeType,
-                current == null ? CultNetDatabaseChangeKind.Removed :
-                previous == null ? CultNetDatabaseChangeKind.Added :
-                CultNetDatabaseChangeKind.Updated,
-                key,
-                descriptor.SchemaId,
-                shard,
-                current,
-                previous,
-                null);
-            if (change != null)
+            if (DoorOwned.Value is { } door &&
+                door.SchemaId == descriptor.SchemaId &&
+                door.Key == change.Key.Value)
             {
-                _changes.OnNext(change);
+                return;
             }
+
+            var kind = change.Kind switch
+            {
+                CultCacheDocumentChangeKind.Removed => CultNetDatabaseChangeKind.Removed,
+                CultCacheDocumentChangeKind.Added => CultNetDatabaseChangeKind.Added,
+                _ => CultNetDatabaseChangeKind.Updated
+            };
+            var shard = ResolveShardInternal(descriptor, change.Key);
+            AppendMutationLogEntry(shard, kind, change.Key, descriptor.SchemaId, change.Document, change.PreviousDocument);
+            PublishUntyped(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument);
+        }
+
+        private static DoorScope Door(string schemaId, CultRecordKey key)
+        {
+            var scope = new DoorScope(DoorOwned.Value);
+            DoorOwned.Value = (schemaId, key.Value);
+            return scope;
+        }
+
+        private readonly struct DoorScope : IDisposable
+        {
+            private readonly (string SchemaId, string Key)? _outer;
+
+            public DoorScope((string SchemaId, string Key)? outer) => _outer = outer;
+
+            public void Dispose() => DoorOwned.Value = _outer;
         }
 
         private CultRecordKey GetTrackedKey(object document, Type documentType)
@@ -1238,11 +1267,6 @@ namespace GameCult.Networking
             {
                 return false;
             }
-        }
-
-        private void RemoveTrackedDocument(Type documentType, CultRecordKey key)
-        {
-            _cache.Remove(key);
         }
 
         private void Publish<T>(CultNetDatabaseChange<T> change) where T : class
@@ -1454,7 +1478,9 @@ namespace GameCult.Networking
             var key = new CultRecordKey(message.Document.RecordKey);
             var descriptor = _documents.ResolveDescriptorForRawDocument(message.Document);
             var previous = _cache.Get(key);
-            var document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
+            object document;
+            using (Door(descriptor.SchemaId, key))
+                document = await _documents.ApplyRawDocumentPutMessageAsync(_cache, message).ConfigureAwait(false);
             var kind = ChangeKindFromWire(entry.ChangeKind);
             if (kind == CultNetDatabaseChangeKind.Removed)
             {
@@ -1513,7 +1539,8 @@ namespace GameCult.Networking
             var previous = _cache.Get(key);
             if (previous != null)
             {
-                _cache.Remove(key);
+                using (Door(descriptor.SchemaId, key))
+                    _cache.Remove(key);
             }
 
             RecordMutationLogEntry(new CultNetShardMutationLogEntry(
