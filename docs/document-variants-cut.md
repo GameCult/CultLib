@@ -314,6 +314,31 @@ not closeable, and a fix batch is in Hands:
 **Open for the operator:** plain records with duplicate unique-index values are silently
 overwritten today. That predates variants. Fixing it could refuse existing stores.
 
+**C2a status, 2026-09-30.** Hands pushed `hands/variants-c2a` at `640ad9a`.
+- Element ids are 12 hex characters. Writes mint them at random. Load mints them deterministically.
+  Derived ids use `[CultElementId(nameof(Member))]`.
+- The CDN chunk ref's id is its offset. The witness types carry ids, and the ids cross C#, TS, Python and
+  Rust.
+
+Soul held it. Fixes are in Hands:
+- ids are never minted inside variant overrides;
+- interface unions are never minted;
+- a null derived source leaves an empty id;
+- load minting is culture-dependent;
+- the minted-on-load list goes stale;
+- a refused batch leaves minted ids behind;
+- the id format is unchecked;
+- late union-slot reuse passes registration.
+
+**C2a rulings (operator, 2026-09-30):**
+- **Old readers are tripwired.** A store that holds element ids carries a marker that every pre-C2a reader
+  refuses under C0's unknown-header rule. An old C# reader can therefore never silently strip nested ids.
+  MessagePack's generated formatters skip unknown slots inside elements.
+- **Duplicate element ids refuse at load,** naming the record, the list and the id. This matches the
+  duplicate-index ruling.
+- **C2b precondition (Soul F7).** Whether a pre-id element keeps its load-time id depends on the write path.
+  C2b must refuse an override that targets a record whose ids exist only in memory, or mint on open.
+
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
   plain records too, so R6-for-indexes becomes one general rule:
