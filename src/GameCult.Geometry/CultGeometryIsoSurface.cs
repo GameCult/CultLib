@@ -39,7 +39,7 @@ namespace GameCult.Geometry
         public static CultGeometryTriangleMesh Extract(
             float[,,] samples,
             float isoValue = 0f,
-            CultVec3 origin = default,
+            float3 origin = default,
             float cellSize = 1f)
         {
             if (samples == null) throw new ArgumentNullException(nameof(samples));
@@ -56,7 +56,6 @@ namespace GameCult.Geometry
             var positions = new List<float>();
             var normals = new List<float>();
             var indices = new List<uint>();
-            var originValue = new float3(origin.X, origin.Y, origin.Z);
             var cornerPositions = new float3[8];
             var cornerValues = new float[8];
             var tetraPositions = new float3[4];
@@ -66,7 +65,7 @@ namespace GameCult.Geometry
             for (var y = 0; y < samples.GetLength(1) - 1; y++)
             for (var z = 0; z < samples.GetLength(2) - 1; z++)
             {
-                var cubeOrigin = originValue + new float3(x, y, z) * cellSize;
+                var cubeOrigin = origin + new float3(x, y, z) * cellSize;
                 for (var corner = 0; corner < CubeCorners.Length; corner++)
                 {
                     var offset = CubeCorners[corner];

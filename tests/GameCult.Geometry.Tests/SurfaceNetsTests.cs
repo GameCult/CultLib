@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CultMath;
 using FluentAssertions;
 using NUnit.Framework;
 
@@ -73,28 +74,28 @@ namespace GameCult.Geometry.Tests
             for (var quad = 0; quad < mesh.QuadCount; quad++)
             {
                 var edge = mesh.QuadEdges[quad];
-                var insideCoord = new CultVec3(1f, 1f, 1f);
-                var edgeStart = new CultVec3(edge.X, edge.Y, edge.Z);
+                var insideCoord = new float3(1f, 1f, 1f);
+                var edgeStart = new float3(edge.X, edge.Y, edge.Z);
                 var edgeEnd = OtherEndpoint(edge);
 
                 // The single inside sample is (1,1,1); the edge's other endpoint is outside.
                 var outsideCoord = edgeStart.Equals(insideCoord) ? edgeEnd : edgeStart;
-                var outward = Subtract(outsideCoord, insideCoord);
+                var outward = outsideCoord - insideCoord;
 
                 var baseIndex = quad * 4;
                 var v0 = Position(mesh.Positions, mesh.Quads[baseIndex]);
                 var v1 = Position(mesh.Positions, mesh.Quads[baseIndex + 1]);
                 var v2 = Position(mesh.Positions, mesh.Quads[baseIndex + 2]);
                 var v3 = Position(mesh.Positions, mesh.Quads[baseIndex + 3]);
-                var cross = Cross(Subtract(v2, v0), Subtract(v3, v1));
+                var cross = math.cross(v2 - v0, v3 - v1);
 
                 // Restricted to non-degenerate (non-zero-area) quads: the spec's geometric
                 // winding rule is only meaningful there. Degenerate/collapsed quads are covered
                 // separately by AssertEdgeDirectionsBalance, since a zero cross product carries
                 // no orientation information to check here.
-                if (cross.X == 0f && cross.Y == 0f && cross.Z == 0f) continue;
+                if (cross.Equals(float3.zero)) continue;
 
-                Dot(cross, outward).Should().BePositive($"quad for edge {edge} should wind outward");
+                math.dot(cross, outward).Should().BePositive($"quad for edge {edge} should wind outward");
             }
         }
 
@@ -209,7 +210,7 @@ namespace GameCult.Geometry.Tests
 
             samples[1, 1, 1] = -1f;
 
-            var mesh = CultGeometrySurfaceNets.Extract(samples, origin: new CultVec3(10f, 20f, 30f), cellSize: 2f);
+            var mesh = CultGeometrySurfaceNets.Extract(samples, origin: new float3(10f, 20f, 30f), cellSize: 2f);
 
             mesh.VertexCount.Should().Be(1);
             mesh.Positions[0].Should().BeApproximately(10f + (2.9f / 3f * 2f), 1e-5f);
@@ -387,10 +388,10 @@ namespace GameCult.Geometry.Tests
             // documented c0..c3 order is not swapped.
             var expected = new[]
             {
-                new CultVec3(1.5f, 0.5f, 0.5f), // c0 = (1, 0, 0)
-                new CultVec3(1.5f, 1.5f, 0.5f), // c1 = (1, 1, 0)
-                new CultVec3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
-                new CultVec3(1.5f, 0.5f, 1.5f), // c3 = (1, 0, 1)
+                new float3(1.5f, 0.5f, 0.5f), // c0 = (1, 0, 0)
+                new float3(1.5f, 1.5f, 0.5f), // c1 = (1, 1, 0)
+                new float3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
+                new float3(1.5f, 0.5f, 1.5f), // c3 = (1, 0, 1)
             };
 
             AssertQuadCorners(mesh, edge, expected);
@@ -413,10 +414,10 @@ namespace GameCult.Geometry.Tests
             // v3 trade places relative to the raw c0..c3 listing.
             var expected = new[]
             {
-                new CultVec3(0.5f, 1.5f, 0.5f), // c0 = (0, 1, 0)
-                new CultVec3(0.5f, 1.5f, 1.5f), // c3 = (0, 1, 1), swapped into v1
-                new CultVec3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
-                new CultVec3(1.5f, 1.5f, 0.5f), // c1 = (1, 1, 0), swapped into v3
+                new float3(0.5f, 1.5f, 0.5f), // c0 = (0, 1, 0)
+                new float3(0.5f, 1.5f, 1.5f), // c3 = (0, 1, 1), swapped into v1
+                new float3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
+                new float3(1.5f, 1.5f, 0.5f), // c1 = (1, 1, 0), swapped into v3
             };
 
             AssertQuadCorners(mesh, edge, expected);
@@ -438,10 +439,10 @@ namespace GameCult.Geometry.Tests
             // mirrored, so the documented c0..c3 order is not swapped.
             var expected = new[]
             {
-                new CultVec3(0.5f, 0.5f, 1.5f), // c0 = (0, 0, 1)
-                new CultVec3(1.5f, 0.5f, 1.5f), // c1 = (1, 0, 1)
-                new CultVec3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
-                new CultVec3(0.5f, 1.5f, 1.5f), // c3 = (0, 1, 1)
+                new float3(0.5f, 0.5f, 1.5f), // c0 = (0, 0, 1)
+                new float3(1.5f, 0.5f, 1.5f), // c1 = (1, 0, 1)
+                new float3(1.5f, 1.5f, 1.5f), // c2 = (1, 1, 1)
+                new float3(0.5f, 1.5f, 1.5f), // c3 = (0, 1, 1)
             };
 
             AssertQuadCorners(mesh, edge, expected);
@@ -476,7 +477,7 @@ namespace GameCult.Geometry.Tests
             // balance regardless.
             var samples = Sphere(64);
 
-            var mesh = CultGeometrySurfaceNets.Extract(samples, origin: new CultVec3(1e4f, 1e4f, 1e4f), cellSize: 0.001f);
+            var mesh = CultGeometrySurfaceNets.Extract(samples, origin: new float3(1e4f, 1e4f, 1e4f), cellSize: 0.001f);
 
             mesh.QuadCount.Should().BeGreaterThan(0);
             AssertEdgeDirectionsBalance(mesh);
@@ -651,7 +652,7 @@ namespace GameCult.Geometry.Tests
         {
             var samples = new float[2, 2, 2];
 
-            Action act = () => CultGeometrySurfaceNets.Extract(samples, origin: new CultVec3(x, y, z));
+            Action act = () => CultGeometrySurfaceNets.Extract(samples, origin: new float3(x, y, z));
 
             act.Should().Throw<ArgumentException>();
         }
@@ -725,28 +726,17 @@ namespace GameCult.Geometry.Tests
             return usage;
         }
 
-        private static CultVec3 OtherEndpoint(CultGeometryGridEdge edge) => edge.Axis switch
+        private static float3 OtherEndpoint(CultGeometryGridEdge edge) => edge.Axis switch
         {
-            0 => new CultVec3(edge.X + 1, edge.Y, edge.Z),
-            1 => new CultVec3(edge.X, edge.Y + 1, edge.Z),
-            _ => new CultVec3(edge.X, edge.Y, edge.Z + 1),
+            0 => new float3(edge.X + 1, edge.Y, edge.Z),
+            1 => new float3(edge.X, edge.Y + 1, edge.Z),
+            _ => new float3(edge.X, edge.Y, edge.Z + 1),
         };
 
-        private static CultVec3 Subtract(CultVec3 left, CultVec3 right) =>
-            new(left.X - right.X, left.Y - right.Y, left.Z - right.Z);
-
-        private static CultVec3 Cross(CultVec3 left, CultVec3 right) => new(
-            (left.Y * right.Z) - (left.Z * right.Y),
-            (left.Z * right.X) - (left.X * right.Z),
-            (left.X * right.Y) - (left.Y * right.X));
-
-        private static float Dot(CultVec3 left, CultVec3 right) =>
-            (left.X * right.X) + (left.Y * right.Y) + (left.Z * right.Z);
-
-        private static CultVec3 Position(float[] positions, uint index)
+        private static float3 Position(float[] positions, uint index)
         {
             var offset = (int)index * 3;
-            return new CultVec3(positions[offset], positions[offset + 1], positions[offset + 2]);
+            return new float3(positions[offset], positions[offset + 1], positions[offset + 2]);
         }
 
         // Hand-derived (double precision, independent of Interpolate) expected position for a
@@ -760,7 +750,7 @@ namespace GameCult.Geometry.Tests
             return (float)(amount / 3d);
         }
 
-        private static void AssertQuadCorners(CultGeometryQuadMesh mesh, CultGeometryGridEdge edge, CultVec3[] expected)
+        private static void AssertQuadCorners(CultGeometryQuadMesh mesh, CultGeometryGridEdge edge, float3[] expected)
         {
             var quadIndex = Array.IndexOf(mesh.QuadEdges, edge);
             quadIndex.Should().BeGreaterThanOrEqualTo(0, $"a quad for edge {edge} should exist");

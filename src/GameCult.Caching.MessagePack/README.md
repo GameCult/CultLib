@@ -9,6 +9,7 @@ format for the attribute-first `GameCult.Caching` stack.
 - `CultDocumentMessagePackSerialization`
 - `CultDocumentResolver`
 - `CultRecordRefFormatter<T>`
+- `CultMathResolver`: the canonical component-array encoding of every public CultMath value type, part of the default resolver chain
 
 Cult document payloads serialize through `MessagePackSerializer` with the
 options of the document's assembly (`CultDocumentMessagePackSerialization.OptionsFor`),
