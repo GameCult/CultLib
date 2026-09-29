@@ -40,7 +40,7 @@ public enum BoundedLeastSquaresStatus
 /// </para>
 /// <para>
 /// Near-singular problems. The normal equations square the condition number, so the cost gap grows with cond(A)
-/// (measured: below 1e-6 of |b|^2 through cond(A) 3e5, about 2e-5 at 1e6), independent of the absolute scale of A.
+/// (measured: below 1e-6 of |b|^2 through cond(A) 3e5, about 2e-5 at 1e6; the gap is relative to |b|^2), independent of the absolute scale of A.
 /// The solver owns optimality up to that range. Columns whose pivot falls below 1e-12 of their own diagonal (cond(A)
 /// beyond roughly 1e6) are treated as dependent and not moved, so the answer there is one optimum among many, not the
 /// minimum-norm one. Callers beyond that range, or that need the minimum-norm answer, add a small ridge row to
