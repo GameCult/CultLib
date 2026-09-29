@@ -164,6 +164,33 @@ public sealed class HlslSourceCompatibilityTests
     }
 
     /// <summary>
+    /// The dense sweep almost never meets a cell whose box bound is just under the 2.25 cut and whose
+    /// weight is still nonzero: a mirror cut of 2.245, 2.24 or 2.2 survives it. These points sit next
+    /// to such cells (<see cref="PhacelleTests.PruneCutPoints"/>), so the mirror must match C# bit for
+    /// bit, and must match the unpruned C# sum (the shader has no prune switch, so that is the
+    /// independent statement that the cut is exact).
+    /// </summary>
+    [Fact]
+    public void PhacelleMirrorMatchesCSharpBitForBitNextToCellsJustInsideTheCut()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float))!;
+
+        foreach (var p in PhacelleTests.PruneCutPoints)
+        {
+            Assert.True(PhacelleTests.HasCellJustInsideTheCut(p), $"no cell just inside the cut at {p}");
+            var actual = Values(mirror.Invoke(shader, new object[] { p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization })!);
+            var pruned = Values(phacelle(p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization));
+            var unpruned = Values(phacelle(p, PhacelleTests.PruneCutSide, PhacelleTests.PruneCutOffset, PhacelleTests.PruneCutNormalization, false));
+            Assert.True(BitwiseEqual(pruned, actual), $"mirror differs from C# at p = {p}");
+            Assert.True(BitwiseEqual(unpruned, actual), $"mirror differs from the unpruned C# sum at p = {p}");
+        }
+    }
+
+    /// <summary>
     /// A hand-built pair of structs standing in for a mirror struct return and its C# counterpart
     /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>): same field shape,
     /// different concrete type, exactly like the real mirror comparison. Proves the field-by-field,
@@ -283,6 +310,18 @@ public sealed class HlslSourceCompatibilityTests
                 ? (float.IsNaN(a) && float.IsNaN(b)) || BitConverter.SingleToInt32Bits(a) == BitConverter.SingleToInt32Bits(b)
                 : p.First.Value.Equals(p.Second.Value)));
 
+    /// <summary>
+    /// The text of <c>CultMath.hlsl</c> with each <c>#include "name"</c> replaced in place by the
+    /// included file from the same directory, as the shader compiler would resolve it. Only the
+    /// package's own includes exist, so a missing file is an error rather than a skip.
+    /// </summary>
+    internal static string ReadShaderSource(string cultMathRoot)
+    {
+        var shaders = Path.Combine(cultMathRoot, "shaders");
+        return Regex.Replace(File.ReadAllText(Path.Combine(shaders, "CultMath.hlsl")), @"(?m)^#include ""([^""]+)""[ \t]*\r?$",
+            match => File.ReadAllText(Path.Combine(shaders, match.Groups[1].Value)));
+    }
+
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
     internal static string TransformHlslToCSharp(string hlsl)
     {
@@ -311,7 +350,7 @@ public sealed class HlslSourceCompatibilityTests
 
     private static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
     {
-        var hlsl = File.ReadAllText(Path.Combine(FindCultMathRoot(), "shaders", "CultMath.hlsl"));
+        var hlsl = ReadShaderSource(FindCultMathRoot());
         var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl));
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
             .Split(Path.PathSeparator)

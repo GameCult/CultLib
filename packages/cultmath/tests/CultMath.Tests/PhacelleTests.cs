@@ -144,7 +144,7 @@ public sealed class PhacelleTests
     {
         // Above the threshold the output is I / |I|; below it, I / (1 - normalization). The gradient
         // is discontinuous where |I| crosses the threshold, and at the edge of each cell's weight support
-        // (distance 1.4998, where max(0, ...) starts: a jump of about 4 d 0.01111 in grad w), so a band
+        // (distance 1.49998, where max(0, ...) starts: a jump of 4 d 0.01111 in grad w), so a band
         // around each is excluded (by the
         // reference's raw length, since the output alone cannot say how close it is).
         const float normalization = 0.5f;
@@ -259,6 +259,71 @@ public sealed class PhacelleTests
             var normalization = random.NextSingle();
             var pruned = math.phacelle(p, side, offset, normalization);
             var unpruned = math.phacelle(p, side, offset, normalization, false);
+
+            AssertBitEqual(unpruned.cos, pruned.cos);
+            AssertBitEqual(unpruned.sin, pruned.sin);
+        }
+    }
+
+    // Points next to a cell whose jitter sits at the far corner of its cube: the cell's box bound is
+    // just under the 2.25 cut (2.2451 to 2.25) while its real distance is still under the support
+    // radius (d^2 < 2.24995), so its weight is small but nonzero and a prune that cuts even slightly
+    // low (2.245, 2.24, 2.2) drops a contribution and changes output bits. Random points meet such
+    // a cell about once in 10^4 evaluations, which is why the random sweep above let those cuts
+    // through. Each was found once by an offline search (cells K in [-12, 12]^3 whose jitter on one
+    // axis lies within 0.0008 of the cube face; p is the feature moved 1.4996 out along that axis,
+    // so |p - feature| = 1.4996 and the bound is about 1.4988). The witness check below re-derives
+    // that property from the hash, so a change to pcg3d fails loudly instead of degenerating.
+    // Shared with the HLSL mirror test.
+    internal static readonly float3[] PruneCutPoints =
+    {
+        new(1.77850008f, -2.16020727f, -0.9991166f),
+        new(1.09346282f, -2.37882328f, -3.00082445f),
+        new(-6.39144945f, -3.99953747f, -0.610023975f),
+        new(-0.99940908f, 4.16302729f, 4.07277536f),
+        new(3.99912024f, 7.21890545f, 1.09053993f),
+        new(5.43959713f, 1.99937367f, -6.14929914f),
+    };
+
+    internal static readonly float3 PruneCutSide = new(2.1f, -3.7f, 1.3f);
+    internal const float PruneCutOffset = 0.3f;
+    internal const float PruneCutNormalization = 0.5f;
+
+    // True when some cell of the 4x4x4 window has a box bound in [2.2451, 2.25) and a positive weight.
+    internal static bool HasCellJustInsideTheCut(float3 p)
+    {
+        double fx = Math.Floor(p.x), fy = Math.Floor(p.y), fz = Math.Floor(p.z);
+        double lx = p.x - fx, ly = p.y - fy, lz = p.z - fz;
+        for (var dz = -1; dz <= 2; dz++)
+        for (var dy = -1; dy <= 2; dy++)
+        for (var dx = -1; dx <= 2; dx++)
+        {
+            var gx = Math.Max(0.0, Math.Abs(lx - dx) - 0.5);
+            var gy = Math.Max(0.0, Math.Abs(ly - dy) - 0.5);
+            var gz = Math.Max(0.0, Math.Abs(lz - dz) - 0.5);
+            var bound = gx * gx + gy * gy + gz * gz;
+            if (bound < 2.2451 || bound >= 2.25)
+                continue;
+
+            var hash = math.pcg3d(new int3((int)fx + dx, (int)fy + dy, (int)fz + dz));
+            double vx = lx - dx - (math.cellular_unit(hash.x) - 0.5);
+            double vy = ly - dy - (math.cellular_unit(hash.y) - 0.5);
+            double vz = lz - dz - (math.cellular_unit(hash.z) - 0.5);
+            if (Math.Exp(-2.0 * (vx * vx + vy * vy + vz * vz)) > 0.01111)
+                return true;
+        }
+
+        return false;
+    }
+
+    [Fact]
+    public void PrunedOutputIsBitEqualToTheUnprunedSumNextToCellsJustInsideTheCut()
+    {
+        foreach (var p in PruneCutPoints)
+        {
+            Assert.True(HasCellJustInsideTheCut(p), $"no cell just inside the cut at {p}: the fixture no longer exercises the prune");
+            var pruned = math.phacelle(p, PruneCutSide, PruneCutOffset, PruneCutNormalization);
+            var unpruned = math.phacelle(p, PruneCutSide, PruneCutOffset, PruneCutNormalization, false);
 
             AssertBitEqual(unpruned.cos, pruned.cos);
             AssertBitEqual(unpruned.sin, pruned.sin);

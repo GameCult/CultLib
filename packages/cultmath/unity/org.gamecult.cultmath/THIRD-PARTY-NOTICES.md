@@ -32,5 +32,10 @@ gradient and the exact pruning are new here.
 
 - Copyright (c) 2025 Rune Skovbo Johansen.
 - Upstream: <https://github.com/lpmitchell/AdvancedTerrainErosion>
-- License: MPL-2.0 (<https://mozilla.org/MPL/2.0/>). CultMath's Unity package
-  is MPL-2.0, so the licence is compatible.
+- License: MPL-2.0 (<https://mozilla.org/MPL/2.0/>). MPL-2.0 is file-level, so it
+  covers exactly the files that carry the port and nothing else:
+  `src/CultMath/math.Phacelle.cs`, `src/CultMath/CultPhasor.cs`,
+  `shaders/CultMath.Phacelle.hlsl` and the Unity copy of that include. Each
+  carries the MPL-2.0 header and this attribution. The rest of CultMath is MIT,
+  so the `GameCult.Math` NuGet package declares `MIT AND MPL-2.0` and ships this
+  file. The Unity package as a whole is MPL-2.0.
