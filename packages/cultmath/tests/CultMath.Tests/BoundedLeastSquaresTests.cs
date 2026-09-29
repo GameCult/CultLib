@@ -849,6 +849,45 @@ public sealed class BoundedLeastSquaresTests
         Assert.True(Cost(2, 2, a, b, y) < 1e-9, $"cost {Cost(2, 2, a, b, y)}");
     }
 
+    // The tolerance scale is the gradient at the box point nearest the origin. Here that point is 1000 and the
+    // wanted release is a gradient of about 6e-5 against a 1000-scale problem: only a scale taken from the box point
+    // (about 6e-5, tolerance 6e-11) releases it; a scale taken from A^T b (about 1000, tolerance 1e-3) would not.
+    // Run with the excluded column in each position so the scale must come from the right entry.
+    [Fact]
+    public void ToleranceScaleIsTheGradientAtTheBoxPointNearestTheOrigin()
+    {
+        var a = new[] { 1f, 0f, 0f, 1f };
+        foreach (var excluded in new[] { 0, 1 })
+        {
+            var b = new float[2];
+            var lo = new[] { -1e6f, -1e6f };
+            var hi = new[] { 1e6f, 1e6f };
+            b[excluded] = 1000.0001f;
+            lo[excluded] = 1000f;
+            hi[excluded] = 2000f;
+            var x = new float[2];
+            x[excluded] = 1000f;
+            var status = Solve(2, 2, a, b, lo, hi, x, out var iterations);
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+            Assert.True(iterations >= 1, $"column {excluded}: no release");
+            Assert.Equal(b[excluded], x[excluded]);
+            Assert.Equal(0f, x[1 - excluded]);
+        }
+    }
+
+    // b = 0 with the origin in the box and the start at the origin: the gradient is exactly zero and so is the
+    // tolerance. Nothing is violated, so the solve is over without an iteration.
+    [Fact]
+    public void ZeroTargetAtTheOriginTakesNoIterations()
+    {
+        const int m = 5, n = 3;
+        var x = new float[n];
+        var status = Solve(m, n, A54, new float[m], Fill(-1f, n), Fill(1f, n), x, out var iterations);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        Assert.Equal(0, iterations);
+        Assert.Equal(new float[n], x);
+    }
+
     // One column, A = [1], with b beyond the box: the first Newton step would cross a bound, so with a cap of 0 the
     // solver returns the clamped start untouched. That makes the clamp itself the thing under test, for every
     // combination of a finite, infinite or NaN start with finite and infinite bounds.
