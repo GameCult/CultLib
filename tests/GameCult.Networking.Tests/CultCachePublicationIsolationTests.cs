@@ -59,5 +59,40 @@ namespace GameCult.Networking.Tests
                 Assert.That(database.LastWriteSequence(SchemaId, after), Is.Not.Null, "a later commit was never logged");
             });
         }
+
+        // One observer's escaped exception (a fail-fast R3 handler) does not stop the database observer after it, and the writer gets it.
+        [Test]
+        public async Task AnEscapedObserverExceptionDoesNotStopTheDatabaseOrLaterChanges()
+        {
+            var previous = ObservableSystem.GetUnhandledExceptionHandler();
+            ObservableSystem.RegisterUnhandledExceptionHandler(exception => throw exception);
+            try
+            {
+                var cache = new CultCache();
+                using var thrower = cache.Watch<NetworkSchemaNote>().Subscribe(change =>
+                {
+                    if (change.Document?.Text == "boom") throw new InvalidOperationException("observer boom");
+                });
+                var database = new CultNetDatabase(cache);
+                var seen = new ConcurrentQueue<string?>();
+                using var watch = database.Watch<NetworkSchemaNote>().Subscribe(change => seen.Enqueue(change.Document?.Text));
+                var boom = new CultRecordKey("pub:boom");
+                var escaped = Assert.ThrowsAsync<InvalidOperationException>(() => cache.UpsertAsync(Note("boom"), new CultRecordHandle<NetworkSchemaNote>(boom)));
+
+                ObservableSystem.RegisterUnhandledExceptionHandler(previous);
+                var after = new CultRecordKey("pub:after");
+                await database.PutAsync(after, Note("after"));
+                Assert.Multiple(() =>
+                {
+                    Assert.That(escaped!.Message, Is.EqualTo("observer boom"));
+                    Assert.That(seen, Is.EqualTo(new[] { "boom", "after" }), "the database observer after the thrower saw both changes");
+                    Assert.That(database.LastWriteSequence(SchemaId, after), Is.Not.Null, "a later commit was never logged");
+                });
+            }
+            finally
+            {
+                ObservableSystem.RegisterUnhandledExceptionHandler(previous);
+            }
+        }
     }
 }

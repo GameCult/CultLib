@@ -1806,7 +1806,11 @@ namespace GameCult.Caching
         // Keys holding a variant: derived from the entries by Apply, never decided anywhere else.
         private readonly HashSet<string> _variantKeys = new(StringComparer.Ordinal);
         private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
-        private readonly Subject<Change> _changes = new();
+        // The cache's own observers, copy-on-write under _observerGate: publication reads one snapshot per change and
+        // catches per observer, so no observer decides whether another receives a change.
+        private Observer<Change>[] _observers = Array.Empty<Observer<Change>>();
+        private bool _observersCompleted;
+        private readonly object _observerGate = new();
         private readonly object _gate = new();
         private long _sequence;
         // The changes admitted by this thread's outermost hold, published by that hold when it exits.
@@ -1886,7 +1890,7 @@ namespace GameCult.Caching
 
         public Observable<CultCacheDocumentChange<T>> Watch<T>() where T : class
         {
-            return _changes
+            return Observable.Create<Change>(Register)
                 .Where(change => typeof(T).IsAssignableFrom(change.Stored.Descriptor.DocumentType))
                 .Select(change => new CultCacheDocumentChange<T>(
                     change.Kind,
@@ -1894,6 +1898,25 @@ namespace GameCult.Caching
                     change.Document as T,
                     change.Previous as T,
                     change.Sequence));
+        }
+
+        private IDisposable Register(Observer<Change> observer)
+        {
+            lock (_observerGate)
+            {
+                if (!_observersCompleted)
+                {
+                    _observers = _observers.Append(observer).ToArray();
+                    return Disposable.Create(() =>
+                    {
+                        lock (_observerGate)
+                            _observers = _observers.Where(held => !ReferenceEquals(held, observer)).ToArray();
+                    });
+                }
+            }
+
+            observer.OnCompleted();
+            return Disposable.Empty;
         }
 
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
@@ -2151,7 +2174,31 @@ namespace GameCult.Caching
             foreach (var store in BackingStores)
                 store.Dispose();
 
-            _changes.Dispose();
+            Observer<Change>[] completing;
+            lock (_observerGate)
+            {
+                completing = _observers;
+                _observers = Array.Empty<Observer<Change>>();
+                _observersCompleted = true;
+            }
+
+            var failures = new List<Exception>();
+            foreach (var observer in completing)
+            {
+                try
+                {
+                    observer.OnCompleted();
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+
+            if (failures.Count == 1)
+                ExceptionDispatchInfo.Capture(failures[0]).Throw();
+            if (failures.Count > 1)
+                throw new AggregateException(failures);
         }
 
         internal static void RequireInstanceOf(Type documentType, object document)
@@ -2333,8 +2380,8 @@ namespace GameCult.Caching
         // Every admission runs in a hold. A nested hold on the same cache adds to the outermost one, which publishes
         // exactly its own changes after it leaves the gate, before it returns, on its caller's thread: observers never
         // run under the gate, and a write an observer makes is a new outermost hold. Cross-thread delivery order is not
-        // guaranteed; each change carries the Sequence it was admitted with. Every change is delivered even if an
-        // OnUpdate handler throws; then the first handler exception (an AggregateException for several) is rethrown.
+        // guaranteed; each change carries the Sequence it was admitted with. Every change reaches every observer even
+        // if an observer or an OnUpdate handler throws; then the first exception (an AggregateException for several) is rethrown.
         // If the body threw, its exception wins.
         internal T Held<T>(Func<T> body)
         {
@@ -2371,8 +2418,20 @@ namespace GameCult.Caching
             var failures = new List<Exception>();
             foreach (var (change, loaded) in changes)
             {
-                // R3 routes a throwing subscriber to its unhandled-exception handler; OnNext does not throw.
-                _changes.OnNext(change);
+                // R3 routes a throwing subscriber to its unhandled-exception handler, and a fail-fast handler rethrows: every
+                // observer still runs, the exception joins the failures, and the observer stays subscribed.
+                foreach (var observer in Volatile.Read(ref _observers))
+                {
+                    try
+                    {
+                        observer.OnNext(change);
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
+                }
+
                 if (!loaded)
                     continue;
                 try
