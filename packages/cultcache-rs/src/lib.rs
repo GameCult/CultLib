@@ -312,7 +312,6 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
     }
 }
 
-const STORE_FORMAT_PREFIX: &str = "cultcache.store.";
 const STORE_FORMAT_V1: &str = "cultcache.store.v1";
 
 /// A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id
@@ -746,47 +745,24 @@ impl SingleFileMessagePackBackingStore {
         self.read_all_unlocked()
     }
 
-    /// The header a rewrite writes: the one the file on disk carries. A file marked for element ids stays marked (the
-    /// payloads this store passes through may hold ids, and a reader older than ids would skip them); a file that is
-    /// gone, empty or legacy is written v1; a header this runtime cannot read refuses the rewrite, so a store that holds
-    /// variants is never overwritten by a runtime that would drop them. The header is the first thing in the file, so a
-    /// short prefix answers without reading the store.
-    fn header_for_rewrite(&self) -> Result<&'static str> {
-        use std::io::Read;
-        let mut prefix = [0u8; 96];
-        let Ok(mut file) = File::open(&self.path) else { return Ok(STORE_FORMAT_V1) };
-        let read = file.read(&mut prefix).unwrap_or(0);
-        let bytes = &prefix[..read];
-        // The store is an array whose first slot is the header string.
-        let Some(rest) = (match bytes.first() {
-            Some(0x90..=0x9f) => bytes.get(1..),
-            Some(0xdc) => bytes.get(3..),
-            Some(0xdd) => bytes.get(5..),
-            _ => None,
-        }) else {
-            return Ok(STORE_FORMAT_V1);
-        };
-        let (length, start) = match rest.first() {
-            Some(tag @ 0xa0..=0xbf) => ((tag & 0x1f) as usize, 1),
-            Some(0xd9) => match rest.get(1) {
-                Some(length) => (*length as usize, 2),
-                None => return Ok(STORE_FORMAT_V1),
-            },
-            _ => return Ok(STORE_FORMAT_V1),
-        };
-        match rest.get(start..start + length).and_then(|header| std::str::from_utf8(header).ok()) {
-            Some(header) if header.starts_with(STORE_FORMAT_PREFIX) => readable_store_format(header),
-            _ => Ok(STORE_FORMAT_V1),
-        }
-    }
-
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         remove_abandoned_staging_files(&self.path)?;
-        let format = self.header_for_rewrite()?;
+        // The header a rewrite writes is the one the file on disk carries: a file marked for element ids stays marked (the
+        // payloads this store passes through may hold ids), one that is gone, empty or legacy is written v1, and a header
+        // this runtime cannot read refuses the rewrite, so a store that holds variants is never overwritten by a runtime that
+        // would drop them.
+        let format = match fs::read(&self.path) {
+            Ok(bytes) => match store_header(&bytes) {
+                Some(header) => readable_store_format(&header)?,
+                None => STORE_FORMAT_V1,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => STORE_FORMAT_V1,
+            Err(error) => return Err(error).with_context(|| format!("failed to read {}", self.path.display())),
+        };
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, format)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
@@ -4793,6 +4769,31 @@ mod tests {
             );
             assert!(message.contains("is not readable"), "{vector}: {message}");
             assert_eq!(std::fs::read(&path)?, before, "{vector} was rewritten");
+        }
+        Ok(())
+    }
+
+    // The header is read by the one snapshot reader, whatever string encoding carries it.
+    #[test]
+    fn push_all_refuses_a_header_it_cannot_read_however_the_string_is_encoded() -> Result<()> {
+        let long = format!("cultcache.store.v9.{}", "x".repeat(90));
+        let mut str16 = vec![0x93, 0xda, 0x00, 18];
+        str16.extend_from_slice(b"cultcache.store.v9");
+        str16.extend_from_slice(&[0x90, 0x90]);
+        let mut str8 = vec![0x93, 0xd9, long.len() as u8];
+        str8.extend_from_slice(long.as_bytes());
+        str8.extend_from_slice(&[0x90, 0x90]);
+        for (name, bytes) in [("str16", str16), ("str8 over 90 bytes", str8)] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::write(&path, &bytes)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let message = format!(
+                "{:#}",
+                store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err()
+            );
+            assert!(message.contains("is not readable"), "{name}: {message}");
+            assert_eq!(std::fs::read(&path)?, bytes, "{name} was rewritten");
         }
         Ok(())
     }
