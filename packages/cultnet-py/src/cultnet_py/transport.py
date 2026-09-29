@@ -410,6 +410,8 @@ class CultNetRudpSession:
             raise ValueError("RUDP max_pending_reliable_packets must be greater than zero")
         self.max_pending_reliable_packets = options.max_pending_reliable_packets
         self._next_sequence = _uint32(options.initial_sequence, "initial_sequence")
+        if self._next_sequence == 0xFFFFFFFF:
+            raise ValueError("RUDP initial_sequence must leave room for a reliable packet")
         self._next_sequenced_by_channel: dict[str, int] = {}
         self._next_fragment_id = 1
         self._connected = False
@@ -452,6 +454,21 @@ class CultNetRudpSession:
     @property
     def outstanding_reliable_packet_count(self) -> int:
         return len(self._pending_reliable) + len(self._queued_reliable)
+
+    def reset_peer_state(self) -> None:
+        """Forgets everything learned from the peer; sequence numbers already issued stay issued."""
+        self._connected = False
+        self._last_received_at_ms = None
+        self._highest_received_sequence = None
+        self._received_sequences.clear()
+        self._next_sequenced_by_channel.clear()
+        self._latest_sequenced_by_channel.clear()
+        self._pending_reliable.clear()
+        self._queued_reliable.clear()
+        self._ordered_next_sequence_by_channel.clear()
+        self._ordered_buffers.clear()
+        self._fragment_buffers.clear()
+        self._fragment_sets_evicted = 0
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
         self._ensure_reliable_capacity(1)
@@ -997,6 +1014,10 @@ class CultNetRudpSocketTransportConnection:
             self._packets_dropped += 1
             return None
         if self.remote_addr is None:
+            # Only a Connect claims the endpoint of a server-mode transport.
+            if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type != CultNetRudpPacketType.CONNECT:
+                self._packets_dropped += 1
+                return None
             self.remote_addr = remote_addr
         elif remote_addr != self.remote_addr:
             self._packets_dropped += 1
@@ -1014,7 +1035,11 @@ class CultNetRudpSocketTransportConnection:
         try:
             result = self.session.receive(packet, _now_ms())
         except ValueError:
+            # receive() has already recorded the packet's reliable sequence, so the
+            # session cannot be kept: a retransmit would be acknowledged and the
+            # frame silently lost. End it and tell the peer.
             self._packets_dropped += 1
+            self._end_refused_session()
             return None
         if result.reply is not None:
             self._send_packet(result.reply)
@@ -1088,6 +1113,21 @@ class CultNetRudpSocketTransportConnection:
             return
         self._closed = True
         self.socket.close()
+
+    def _end_refused_session(self) -> None:
+        reason = b"session refused a packet"
+        # The goodbye is built after the reset, or its ack field would acknowledge
+        # the very frame the session refused.
+        self.session.reset_peer_state()
+        goodbye = self.session.create_disconnect(reason)
+        self.disconnect_reason = reason
+        try:
+            self._send_packet(goodbye)
+        except OSError:
+            pass  # Best effort: the session ends whether or not the peer hears it.
+        if self.mode == CultNetRudpSocketMode.SERVER:
+            # Only a Connect can claim the endpoint again.
+            self.remote_addr = None
 
     def _send_packet(self, packet: CultNetRudpPacket) -> None:
         if self.remote_addr is None:

@@ -8,7 +8,7 @@ import unittest
 import hashlib
 import hmac
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -976,6 +976,117 @@ class CultNetTests(unittest.TestCase):
             stray_socket.close()
             client.close()
             server.close()
+
+    def test_cultnet_rudp_server_mode_is_claimed_only_by_a_connect(self) -> None:
+        server_socket = bind_udp_socket()
+        orphan_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        connection_id = 0x10203052
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+            )
+        )
+        orphan = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+        try:
+            # A right-id packet that is not a Connect must claim nothing.
+            orphan_socket.sendto(encode_rudp_packet(orphan.create_ack()), server_socket.getsockname())
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 1)
+            self.assertIsNone(server.remote_addr)
+
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            self.assertTrue(client.connected)
+            self.assertEqual(server.remote_addr, client_socket.getsockname())
+        finally:
+            orphan_socket.close()
+            client.close()
+            server.close()
+
+    def test_cultnet_rudp_socket_transport_ends_the_session_that_refuses_a_reliable_frame(self) -> None:
+        server_socket = bind_udp_socket()
+        peer_socket = bind_udp_socket()
+        connection_id = 0x10203053
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        peer = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+
+        def to_server(packet) -> None:
+            peer_socket.sendto(encode_rudp_packet(packet), server_socket.getsockname())
+
+        def drain_peer() -> list:
+            packets = []
+            while True:
+                try:
+                    wire, _ = peer_socket.recvfrom(65535)
+                except TimeoutError:
+                    return packets
+                packets.append(decode_rudp_packet(wire))
+
+        try:
+            to_server(peer.create_connect(0, b"join"))
+            server.receive_once()
+            accept = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0]
+            peer.receive(accept, 0)
+
+            (frame,) = peer.send_many("schema", b"poison", CultNetRudpSendOptions(reliable=True, ordered=True))
+            poison = replace(frame, fragment_count=2, fragment_id=0)
+            to_server(poison)
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 1)
+            self.assertFalse(server.connected)
+            self.assertEqual(server.disconnect_reason, b"session refused a packet")
+
+            # The peer is told, and the goodbye does not acknowledge the refused frame.
+            (goodbye,) = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+            self.assertTrue(peer.receive(goodbye, 1).disconnected)
+            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+
+            # A retransmit is dropped, not acknowledged.
+            to_server(poison)
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 2)
+            self.assertEqual(drain_peer(), [])
+            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+
+            # A Connect claims the endpoint again.
+            again = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+            to_server(again.create_connect(0, b"again"))
+            server.receive_once()
+            self.assertEqual(
+                [p.packet_type for p in drain_peer()], [CultNetRudpPacketType.ACCEPT]
+            )
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_session_rejects_limits_that_cannot_admit_a_connect(self) -> None:
+        with self.assertRaises(ValueError):
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1, initial_sequence=0xFFFFFFFF))
+        with self.assertRaises(ValueError):
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1, max_pending_reliable_packets=0))
+        CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=1, initial_sequence=0xFFFFFFFE, max_pending_reliable_packets=1)
+        )
 
     def test_cultnet_rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
