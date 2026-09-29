@@ -330,6 +330,7 @@ fn store_header(bytes: &[u8]) -> Option<String> {
                     let header: String = seq
                         .next_element()?
                         .ok_or_else(|| <A::Error as serde::de::Error>::invalid_length(0, &self))?;
+                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
                     Ok(Header(header))
                 }
             }
