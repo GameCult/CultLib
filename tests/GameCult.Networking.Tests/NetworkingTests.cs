@@ -1284,7 +1284,7 @@ namespace GameCult.Networking.Tests
             {
                 PacketType = CultNetRudpPacketType.Ack,
                 ConnectionId = 0x10203054,
-                ChannelId = "c"
+                ChannelId = string.Empty
             });
             Assert.That(wire, Has.Length.EqualTo(36));
             wire[30] = 0x80;
