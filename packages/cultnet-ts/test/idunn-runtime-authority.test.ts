@@ -1,30 +1,98 @@
-import { mock, test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import dgram from "node:dgram";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
   createIdunnRuntimePresencePublisher,
+  createIdunnRuntimeSigner,
   loadIdunnRuntimeAuthorityFromEnvironment,
-  signIdunnRuntimePresence,
-  systemdListenPidMatches,
-} from "../src/idunn-runtime-authority";
+  type IdunnRuntimeAuthority,
+} from "../src";
+import { systemdListenPidMatches } from "../src/idunn-runtime-authority";
+import type { CultNetSnapshotRequestMessage } from "../src/contracts";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "../src/rudp";
-import {
-  runtimePresenceActivationSigningMessage,
-  runtimePresenceProofPayload,
-  runtimePresenceProviderSigningMessage,
-  RUNTIME_PRESENCE_SLOT,
-} from "../src/runtime-presence-health";
+import { RUNTIME_PRESENCE_SLOT } from "../src/runtime-presence-health";
 
-const providerIdentityContext = "gamecult-provider-health-identity-v1";
-const providerIdDomain = Buffer.from("gamecult.provider-health.identity.v1\0", "utf8");
-const activationIdDomain = Buffer.from("idunn.runtime-activation.id.v1\0", "utf8");
+// Every input below was written by the Rust owner; see fixtures/idunn-runtime/README.md.
+// The only values this file pins are the ones the generator also pins.
+const FIXTURES = path.join(__dirname, "..", "..", "test", "fixtures", "idunn-runtime");
+const OBSERVED_AT = 1_790_000_000_000;
+const CHALLENGE: CultNetSnapshotRequestMessage = {
+  schemaVersion: "cultnet.snapshot_request.v0",
+  messageId: "route-challenge-1",
+};
+
+type FixtureSet = "web" | "service" | "rudp-route" | "service-stateful";
+
+function fixtureFile(set: FixtureSet, name: string): Buffer {
+  return fs.readFileSync(path.join(FIXTURES, set, name));
+}
+
+/** The Expected fields the tests need, read from the Rust-written file rather than re-spelled. */
+function expectedFacts(set: FixtureSet) {
+  const store = decode(fixtureFile(set, "expected.cc")) as unknown[][][];
+  const values = decode(store[2]![0]![3] as Uint8Array) as unknown[];
+  const route = values[15] as string[];
+  const capabilities = (values[16] as Array<[string, string, string, number]>).map(([capability, schema, compatibility, minimum]) => ({
+    capability, schema, compatibility, capacity: minimum,
+  }));
+  const dependencies = values[17] as unknown[][];
+  return {
+    target: values[1] as string,
+    healthContract: values[10] as string,
+    candidate: route[3]!,
+    capabilities,
+    odinEndpoint: dependencies.map((dependency) => dependency[9] as string)[0],
+  };
+}
+
+/** Points the process at one Rust-written bundle and its inherited descriptors, as Idunn's systemd unit would. */
+function openAuthority(
+  context: TestContext,
+  set: FixtureSet,
+  options: { machineId?: "etc" | "dbus"; lease?: string } = {},
+): IdunnRuntimeAuthority {
+  const facts = expectedFacts(set);
+  const originalEnvironment = { ...process.env };
+  context.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+    Object.assign(process.env, originalEnvironment);
+  });
+  process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = path.join(FIXTURES, set);
+  process.env.GAMECULT_IDUNN_CANDIDATE_BIND = facts.candidate;
+  if (options.lease) process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE = path.join(FIXTURES, set, options.lease);
+  else delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
+  process.env.LISTEN_PID = String(process.pid);
+  process.env.LISTEN_FDS = "2";
+  process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
+  const machineId = fs.readFileSync(path.join(FIXTURES, "machine-id"), "utf8");
+  const realReadFileSync = fs.readFileSync.bind(fs);
+  context.mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+    if (filePath === 3) return fixtureFile(set, "activation-key.seed");
+    if (filePath === 4) return fixtureFile(set, "provider-identity.credential");
+    if (filePath === "/etc/machine-id") {
+      if (options.machineId === "dbus") throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      return machineId;
+    }
+    if (filePath === "/var/lib/dbus/machine-id") return machineId;
+    return realReadFileSync(filePath as never, ...args as never[]);
+  });
+  return loadIdunnRuntimeAuthorityFromEnvironment(facts.target, facts.healthContract);
+}
+
+function signerFor(context: TestContext, set: FixtureSet, capacityDelta = 0, lease?: string) {
+  const authority = openAuthority(context, set, { lease });
+  const capabilities = expectedFacts(set).capabilities.map((capability) => ({ ...capability, capacity: capability.capacity + capacityDelta }));
+  return createIdunnRuntimeSigner({ authority, capabilities });
+}
+
+function freezeClock(context: TestContext): void {
+  context.mock.method(Date, "now", () => OBSERVED_AT);
+}
 
 test("matches systemd's host PID for the private PID namespace init only", () => {
   assert.equal(systemdListenPidMatches(String(process.pid), process.pid), true);
@@ -34,216 +102,290 @@ test("matches systemd's host PID for the private PID namespace init only", () =>
   assert.equal(systemdListenPidMatches(undefined, 1), false);
 });
 
-test("opens Idunn identity and publishes valid CultNet data while surfacing piggybacked application errors", async (context) => {
-  const directory = mkdtempSync(path.join(os.tmpdir(), "cultnet-runtime-authority-"));
-  context.after(() => rmSync(directory, { recursive: true, force: true }));
+for (const set of ["web", "service", "rudp-route"] as const) {
+  test(`opens the Rust-written ${set} bundle with no Odin endpoint, whatever route transport Rust admits`, (context) => {
+    const authority = openAuthority(context, set);
+    assert.equal(authority.expected.target, expectedFacts(set).target);
+    assert.equal(authority.boundEndpoint, expectedFacts(set).candidate);
+  });
+}
 
-  const machineId = "1234567890abcdef1234567890abcdef";
-  const providerSeed = Buffer.alloc(32, 0x31);
-  const activationSeed = Buffer.alloc(32, 0x72);
-  const providerKey = privateKeyFromSeed(providerSeed);
-  const activationKey = privateKeyFromSeed(activationSeed);
-  const providerPublic = rawPublic(crypto.createPublicKey(providerKey));
-  const activationPublic = rawPublic(crypto.createPublicKey(activationKey));
-  const providerIdentity = sha256Hex(Buffer.concat([providerIdDomain, providerPublic]));
-  const activationIdentity = sha256Hex(Buffer.concat([activationIdDomain, activationPublic]));
-  const target = "streampixels-service";
-  const contract = "streampixels-service.cultnet-rudp-service-health";
-  const candidate = "http://127.0.0.1:18831";
-  const expectedValues = [
-    "idunn.expected_incarnation.v2", target, `sha256-${"1".repeat(64)}`, "incarnation-1",
-    `sha256-${"2".repeat(64)}`, "https://github.com/GameCult/StreamPixels.git", "a".repeat(40),
-    `sha256-${"3".repeat(64)}`, "streampixels-service-yggdrasil", providerIdentity, contract,
-    `sha256-${"4".repeat(64)}`, "service-boundary-v1", `sha256-${"5".repeat(64)}`, false,
-    ["streampixels-service-http", "http", "http://127.0.0.1:8831", candidate],
-    [["streampixels.service.api", "streampixels.api.v1", "v1", 1]],
-    [["shared-infrastructure", "odin.verse-rendezvous", "odin.verse-topology.v1", "v1", 1, "before-promotion", null, null, null, "rudp://127.0.0.1:17871"]],
+test("a target that declares no Odin dependency opens and answers Idunn's challenge without one", (context) => {
+  assert.equal(expectedFacts("web").odinEndpoint, undefined);
+  const signer = signerFor(context, "web");
+  assert.ok(signer.answerRouteObservation(CHALLENGE).payload.byteLength > 0);
+});
+
+test("finds the machine-id at the dbus path when /etc/machine-id is absent, as the Rust protector does", (context) => {
+  assert.ok(openAuthority(context, "web", { machineId: "dbus" }));
+});
+
+test("rejects a credential file holding more than one envelope", (context) => {
+  openAuthority(context, "web");
+  const credential = decode(fixtureFile("web", "provider-identity.credential")) as unknown[][];
+  const doubled = Buffer.from(encode([...credential, ...credential]));
+  const realReadFileSync = fs.readFileSync;
+  context.mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) =>
+    filePath === 4 ? doubled : (realReadFileSync as (...all: unknown[]) => unknown)(filePath, ...args));
+  assert.throws(
+    () => loadIdunnRuntimeAuthorityFromEnvironment(expectedFacts("web").target, expectedFacts("web").healthContract),
+    /exactly one envelope/,
+  );
+});
+
+function presenceSlot(document: { payload: Uint8Array }, slot: number): unknown {
+  return (decode(document.payload) as unknown[])[slot];
+}
+
+// Every committed vector is asserted, dead ones included. Stateless sets sign at sequence 1.
+for (const set of ["web", "service", "rudp-route"] as const) {
+  test(`${set}: a fresh signer answers warming, and after reportHealth('active') answers active, byte for byte as the Rust-verified vectors`, (context) => {
+    freezeClock(context);
+    assert.deepEqual(Buffer.from(signerFor(context, set).answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-warming.bin"));
+    const active = signerFor(context, set);
+    active.reportHealth("active");
+    assert.deepEqual(Buffer.from(active.answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-active.bin"));
+  });
+}
+
+test("a shortfall signs the vector Rust correlates to the typed capacity disagreement", (context) => {
+  freezeClock(context);
+  const signer = signerFor(context, "service", -1);
+  signer.reportHealth("active");
+  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile("service", "presence-active-below-minimum.bin"));
+});
+
+test("the signer owns the reported health: a fresh signer is warming, reportHealth moves it, the sequence keeps counting", (context) => {
+  freezeClock(context);
+  const signer = signerFor(context, "web");
+  const first = signer.answerRouteObservation(CHALLENGE);
+  assert.equal(presenceSlot(first, RUNTIME_PRESENCE_SLOT.state), "warming");
+  assert.equal(presenceSlot(signer.sign("detail").document, RUNTIME_PRESENCE_SLOT.state), "warming");
+  signer.reportHealth("active");
+  const third = signer.answerRouteObservation(CHALLENGE);
+  assert.equal(presenceSlot(third, RUNTIME_PRESENCE_SLOT.state), "active");
+  assert.equal(presenceSlot(third, RUNTIME_PRESENCE_SLOT.publisherSequence), 3);
+});
+
+test("answers locally: synchronously, with no socket opened", (context) => {
+  const sockets = context.mock.method(dgram, "createSocket");
+  const signer = signerFor(context, "web");
+  const answer = signer.answerRouteObservation(CHALLENGE);
+  assert.equal(typeof (answer as unknown as { then?: unknown }).then, "undefined");
+  assert.equal(sockets.mock.callCount(), 0);
+});
+
+test("refuses a challenge that does not ask for this runtime's presence", (context) => {
+  const signer = signerFor(context, "web");
+  const cases: CultNetSnapshotRequestMessage[] = [
+    { ...CHALLENGE, messageId: "" },
+    { ...CHALLENGE, messageId: " padded" },
+    { ...CHALLENGE, recordKeys: ["another-target"] },
+    { ...CHALLENGE, schemaIds: ["another.schema"] },
+    { ...CHALLENGE, shardId: "shard-1" },
   ];
-  const expectedBytes = Buffer.from(encode(expectedValues));
-  const expectedSha = `sha256-${sha256Hex(expectedBytes)}`;
-  const activationValues = [
-    "idunn.runtime_activation.v2", expectedSha, "streampixels-service-yggdrasil",
-    `sha256-${"6".repeat(64)}`, activationIdentity, activationPublic, Date.now(),
-    "7".repeat(64), "ed25519", new Uint8Array(64).fill(0x17),
-  ];
-  const bundle = path.join(directory, "bundle");
-  fs.mkdirSync(bundle);
-  writeFileSync(path.join(bundle, "expected.cc"), cultCacheStore(
-    "idunn.expected_incarnation", "idunn.expected_incarnation.v2", "expected", expectedBytes,
-  ));
-  writeFileSync(path.join(bundle, "activation.cc"), cultCacheStore(
-    "idunn.runtime_activation", "idunn.runtime_activation.v2", "activation", Buffer.from(encode(activationValues)),
-  ));
+  for (const request of cases) assert.throws(() => signer.answerRouteObservation(request), /route observation/);
+});
 
-  const binding = `${providerIdentityContext}:machine-id-sha256:${sha256Hex(Buffer.from(machineId))}`;
-  const mask = crypto.createHash("sha256").update(Buffer.concat([
-    Buffer.from("gamecult-linux-service-seed-v1\0", "utf8"),
-    Buffer.from(providerIdentityContext, "utf8"),
-    Buffer.from(binding, "utf8"),
-  ])).digest();
-  const protectedSeed = Buffer.from(providerSeed.map((value, index) => value ^ mask[index]!));
-  const providerCredential = Buffer.from(encode([[
-    "gamecult-provider-health-identity",
-    "gamecult.provider_health_identity.private.v1",
-    Buffer.from(encode([
-      "gamecult.provider_health_identity.private.v1", providerIdentity, Array.from(providerPublic), Array.from(protectedSeed),
-      "linux_file_mode_machine_id_binding", binding, "v1", "os_installation_file_bound_cloneable_baseline",
-      "2026-01-01T00:00:00Z", Array(32).fill(0x2a),
-    ])),
-    "2026-01-01T00:00:00Z",
-    "gamecult.provider_health_identity.private.v1",
-  ]]));
-  let descriptorProviderCredential = providerCredential;
-
-  const originalEnvironment = { ...process.env };
-  context.after(() => {
-    for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
-    Object.assign(process.env, originalEnvironment);
-  });
-  process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = bundle;
-  process.env.GAMECULT_IDUNN_CANDIDATE_BIND = candidate;
-  delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
-  process.env.LISTEN_PID = String(process.pid);
-  process.env.LISTEN_FDS = "2";
-  process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
-  const realReadFileSync = fs.readFileSync.bind(fs);
-  mock.method(fs, "readFileSync", (filePath: fs.PathOrFileDescriptor, ...args: unknown[]) => {
-    if (filePath === 3) return activationSeed;
-    if (filePath === 4) return descriptorProviderCredential;
-    if (filePath === "/etc/machine-id") return machineId;
-    return realReadFileSync(filePath as never, ...args as never[]);
-  });
-
-  const authority = loadIdunnRuntimeAuthorityFromEnvironment(target, contract, "127.0.0.1:17871");
-  const signed = signIdunnRuntimePresence(authority, {
-    capabilities: [{ capability: "streampixels.service.api", schema: "streampixels.api.v1", compatibility: "v1", capacity: 1 }],
-    state: "warming",
-    detail: "starting",
-    writeLeaseSha256: null,
-    publisherSequence: 1,
-    observedAtUnixMillis: Date.now(),
-  });
-  const proof = runtimePresenceProofPayload(signed.presence);
-  assert.equal((decode(expectedBytes) as unknown[]).length, 18);
-  assert.equal(signed.presence.expectedProjectionSha256, expectedSha);
-  const signedRecord = decode(signed.payload) as unknown[];
-  assert.equal(crypto.verify(null, runtimePresenceProviderSigningMessage(proof), crypto.createPublicKey(providerKey), Buffer.from(signedRecord[21] as Uint8Array)), true);
-  assert.equal(crypto.verify(null, runtimePresenceActivationSigningMessage(proof), crypto.createPublicKey(activationKey), Buffer.from(signedRecord[23] as Uint8Array)), true);
-
+async function startOdinPeer(context: TestContext, endpoint: string) {
   const peer = dgram.createSocket("udp4");
+  const port = Number(endpoint.slice(endpoint.lastIndexOf(":") + 1));
   await new Promise<void>((resolve, reject) => {
     peer.once("error", reject);
-    peer.bind(0, "127.0.0.1", resolve);
+    peer.bind(port, "127.0.0.1", resolve);
   });
   context.after(() => peer.close());
-  const address = peer.address();
-  assert.equal(typeof address, "object");
-  const peerPort = (address as { port: number }).port;
+  const state = {
+    reject: false,
+    received: [] as Array<{ schemaVersion?: string; document: { payload: Uint8Array } }>,
+    responseAck: undefined as number | undefined,
+    failure: undefined as Error | undefined,
+  };
   let serverSession: CultNetRudpSession | undefined;
-  let receivedMessage: unknown;
-  let responseAck: number | undefined;
-  let peerFailure: Error | undefined;
-  let rejectOdinAdmission = true;
   peer.on("message", (wire, remote) => {
     try {
       const packet = decodeRudpPacket(wire);
       if (packet.packetType === "connect") {
         serverSession = new CultNetRudpSession({ connectionId: packet.connectionId, initialSequence: 100 });
-        const accept = serverSession.acceptConnect(packet, Date.now());
-        peer.send(encodeRudpPacket(accept), remote.port, remote.address);
+        peer.send(encodeRudpPacket(serverSession.acceptConnect(packet, Date.now())), remote.port, remote.address);
         return;
       }
       if (!serverSession) throw new Error("Publisher sent data before establishing RUDP.");
-      const result = serverSession.receive(packet, Date.now());
-      const frame = result.delivered.find((candidate) => candidate.channelId === "schema");
+      const frame = serverSession.receive(packet, Date.now()).delivered.find((candidate) => candidate.channelId === "schema");
       if (!frame) return;
-      receivedMessage = decode(frame.payload);
-      const responsePayload = encode(rejectOdinAdmission ? {
-        schemaVersion: "cultnet.error.v0",
-        error: "test admission denied",
-        routingHint: null,
-        code: null,
-        details: null,
-      } : {
-        schemaVersion: "cultnet.snapshot_response.v0",
-        messageId: "ack",
-        documents: [],
-      });
-      const [response] = serverSession.sendMany("schema", responsePayload, {
+      state.received.push(decode(frame.payload) as never);
+      const [response] = serverSession.sendMany("schema", encode(state.reject
+        ? { schemaVersion: "cultnet.error.v0", error: "test admission denied", routingHint: null, code: null, details: null }
+        : { schemaVersion: "cultnet.snapshot_response.v0", messageId: "ack", documents: [] }), {
         reliable: true,
         ordered: true,
         nowMs: Date.now(),
       });
       assert.ok(response);
-      responseAck = response.ack;
+      state.responseAck = response.ack;
       peer.send(encodeRudpPacket(response), remote.port, remote.address);
     } catch (error) {
-      peerFailure = error as Error;
+      state.failure = error as Error;
     }
   });
-  const publisher = createIdunnRuntimePresencePublisher({
-    authority,
-    endpoint: `rudp://127.0.0.1:${peerPort}`,
-    healthContract: contract,
-    capabilities: [{ capability: "streampixels.service.api", schema: "streampixels.api.v1", compatibility: "v1", capacity: 1 }],
-  });
-  await assert.rejects(publisher.publish("warming", "local RUDP integration"), /Odin rejected runtime presence: test admission denied/);
-  assert.deepEqual(receivedMessage && (receivedMessage as { schemaVersion?: string }).schemaVersion, "cultnet.document_put_raw.v0");
-  assert.ok(Buffer.from(encode(receivedMessage)).byteLength > 0);
-  assert.equal(responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
-  assert.equal(peerFailure, undefined, peerFailure?.message);
-  assert.equal(publisher.latestPresenceDocument(), null, "a rejected publication must not become the snapshot source");
+  return state;
+}
 
-  rejectOdinAdmission = false;
-  await publisher.publish("warming", "accepted presence");
-  const snapshotDocument = await publisher.publishRouteObservation({
-    schemaVersion: "cultnet.snapshot_request.v0",
-    messageId: "route-challenge-1",
-    schemaIds: ["gamecult.runtime_presence_health.v2"],
-    recordKeys: [target],
-  });
-  const publishedDocument = (receivedMessage as { document: { payload: Uint8Array; schemaId: string; recordKey: string } }).document;
-  assert.ok(snapshotDocument);
-  assert.equal(snapshotDocument.schemaId, publishedDocument.schemaId);
-  assert.equal(snapshotDocument.recordKey, publishedDocument.recordKey);
-  assert.deepEqual(Buffer.from(snapshotDocument.payload), Buffer.from(publishedDocument.payload));
-  const routePresence = decode(snapshotDocument.payload) as unknown[];
-  assert.equal(routePresence[RUNTIME_PRESENCE_SLOT.state], "active");
-  assert.equal(routePresence[RUNTIME_PRESENCE_SLOT.detail], "route-observation:route-challenge-1");
-  snapshotDocument.payload[0] = snapshotDocument.payload[0]! ^ 0xff;
-  assert.deepEqual(Buffer.from(publisher.latestPresenceDocument()?.payload ?? []), Buffer.from(publishedDocument.payload), "snapshot readers cannot mutate publisher state");
+test("the Odin publisher publishes the signer's document to the endpoint Expected names and surfaces Odin's rejection", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  const signer = signerFor(context, "service");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
 
-  descriptorProviderCredential = Buffer.from(encode([
-    ...(decode(providerCredential) as unknown[][]),
-    ...(decode(providerCredential) as unknown[][]),
-  ]));
+  await publisher.publish("accepted presence");
+  assert.equal(peer.received[0]?.schemaVersion, "cultnet.document_put_raw.v0");
+  const published = decode(peer.received[0]!.document.payload) as unknown[];
+  assert.equal(published[RUNTIME_PRESENCE_SLOT.state], "warming");
+  assert.equal(published[RUNTIME_PRESENCE_SLOT.publisherSequence], 1);
+  assert.equal(peer.responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
+
+  peer.reject = true;
+  signer.reportHealth("active");
+  await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
+  assert.equal(peer.failure, undefined, peer.failure?.message);
+});
+
+test("the Odin publisher leaves a capability shortfall to the Rust correlation instead of refusing to publish", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  const signer = signerFor(context, "service", -1);
+  signer.reportHealth("active");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+  await publisher.publish("below minimum");
+  const capabilities = (decode(peer.received[0]!.document.payload) as unknown[])[RUNTIME_PRESENCE_SLOT.capabilities] as unknown[][];
+  assert.equal(capabilities[0]![3], expectedFacts("service").capabilities[0]!.capacity - 1);
+});
+
+test("the Odin publisher takes only the endpoint Expected names", (context) => {
   assert.throws(
-    () => loadIdunnRuntimeAuthorityFromEnvironment(target, contract, "127.0.0.1:17871"),
-    /exactly one envelope/,
+    () => createIdunnRuntimePresencePublisher({ signer: signerFor(context, "service"), endpoint: "rudp://127.0.0.1:1" }),
+    /does not match Idunn Expected dependency authority/,
+  );
+  assert.throws(
+    () => createIdunnRuntimePresencePublisher({ signer: signerFor(context, "web"), endpoint: expectedFacts("service").odinEndpoint! }),
+    /does not match Idunn Expected dependency authority/,
   );
 });
 
-function cultCacheStore(type: string, schemaId: string, key: string, payload: Uint8Array): Buffer {
-  return Buffer.from(encode([
-    "cultcache.store.v1",
-    [[schemaId, type, `${schemaId}.v1`, schemaId, "{}", [schemaId], []]],
-    [[key, schemaId, "2026-01-01T00:00:00Z", payload]],
-  ]));
+test("the route answer and the Odin publish report the same state, because the signer owns it", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  const signer = signerFor(context, "service");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+
+  await publisher.publish("first");
+  assert.equal(presenceSlot(peer.received[0]!.document, RUNTIME_PRESENCE_SLOT.state), "warming");
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.state), "warming");
+
+  signer.reportHealth("active");
+  await publisher.publish("second");
+  assert.equal(presenceSlot(peer.received[1]!.document, RUNTIME_PRESENCE_SLOT.state), "active");
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.state), "active");
+  // One sequence across both carriers.
+  assert.deepEqual(
+    [1, 2].map((index) => presenceSlot(peer.received[index - 1]!.document, RUNTIME_PRESENCE_SLOT.publisherSequence)),
+    [1, 3],
+  );
+});
+
+// The lease-bound set: Rust issued lease.cc naming presence-warming.bin's digest, and presence-active.bin
+// and presence-degraded.bin carry that lease's digest.
+const STATEFUL = "service-stateful" as const;
+
+function statefulSigner(context: TestContext, lease = "lease.cc") {
+  return signerFor(context, STATEFUL, 0, lease);
 }
 
-function privateKeyFromSeed(seed: Uint8Array): crypto.KeyObject {
-  return crypto.createPrivateKey({
-    key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(seed)]),
-    format: "der",
-    type: "pkcs8",
+test("stateful: warming, active and degraded match the Rust-verified vectors byte for byte, active and degraded bound to Rust's lease", (context) => {
+  freezeClock(context);
+  const signer = statefulSigner(context);
+  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-warming.bin"));
+  signer.reportHealth("active");
+  const active = signer.answerRouteObservation(CHALLENGE);
+  assert.deepEqual(Buffer.from(active.payload), fixtureFile(STATEFUL, "presence-active.bin"));
+  assert.match(String(presenceSlot(active, RUNTIME_PRESENCE_SLOT.writeLeaseSha256)), /^sha256-[0-9a-f]{64}$/);
+
+  const degraded = statefulSigner(context);
+  degraded.answerRouteObservation(CHALLENGE);
+  degraded.reportHealth("degraded");
+  assert.deepEqual(Buffer.from(degraded.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-degraded.bin"));
+});
+
+test("a warming answered on the route becomes a lease target: Rust's lease naming it is accepted", (context) => {
+  freezeClock(context);
+  const signer = statefulSigner(context);
+  assert.throws(() => signer.assertWriteLease(), /does not match the current Expected incarnation/, "no warming signed yet");
+  signer.answerRouteObservation(CHALLENGE);
+  assert.equal(signer.assertWriteLease(), presenceSlot({ payload: fixtureFile(STATEFUL, "presence-active.bin") }, RUNTIME_PRESENCE_SLOT.writeLeaseSha256));
+});
+
+for (const [lease, reason] of [["lease-other-warming.cc", "names another warming digest"], ["lease-other-target.cc", "names another target"]] as const) {
+  test(`a lease that ${reason} is refused, and the signer cannot sign active under it`, (context) => {
+    freezeClock(context);
+    const signer = statefulSigner(context, lease);
+    signer.answerRouteObservation(CHALLENGE);
+    assert.throws(() => signer.assertWriteLease(), /does not match the current Expected incarnation/);
+    signer.reportHealth("active");
+    assert.throws(() => signer.answerRouteObservation(CHALLENGE), /does not match the current Expected incarnation/);
   });
 }
 
-function rawPublic(key: crypto.KeyObject): Buffer {
-  const der = key.export({ type: "spki", format: "der" }) as Buffer;
-  return Buffer.from(der.subarray(der.length - 32));
+test("one signer per loaded authority", (context) => {
+  const authority = openAuthority(context, "web");
+  const capabilities = expectedFacts("web").capabilities;
+  createIdunnRuntimeSigner({ authority, capabilities });
+  assert.throws(() => createIdunnRuntimeSigner({ authority, capabilities }), /already has a signer/);
+});
+
+test("the loaded authority is frozen: the bind, contract, Expected, Activation and identities cannot change, and the signer signs the loaded endpoint", (context) => {
+  freezeClock(context);
+  const authority = openAuthority(context, "web");
+  const loaded = expectedFacts("web");
+  const open = authority as unknown as { [key: string]: any };
+  const mutations: Array<[string, () => void]> = [
+    ["boundEndpoint", () => { open.boundEndpoint = "http://127.0.0.1:1"; }],
+    ["providerSignerIdentityId", () => { open.providerSignerIdentityId = "forged"; }],
+    ["activationSignerIdentityId", () => { open.activationSignerIdentityId = "forged"; }],
+    ["expected.healthContract", () => { open.expected.healthContract = "forged"; }],
+    ["expected.target", () => { open.expected.target = "forged"; }],
+    ["expected.canonicalSha256", () => { open.expected.canonicalSha256 = "forged"; }],
+    ["expected.route.candidateEndpoint", () => { open.expected.route.candidateEndpoint = "http://127.0.0.1:1"; }],
+    ["expected.capabilities[0].minimumCapacity", () => { open.expected.capabilities[0].minimumCapacity = 0; }],
+    ["expected.capabilities.push", () => { open.expected.capabilities.push({}); }],
+    ["activation.runtimeInstanceId", () => { open.activation.runtimeInstanceId = "forged"; }],
+    ["activation.canonicalSha256", () => { open.activation.canonicalSha256 = "forged"; }],
+  ];
+  for (const [name, mutate] of mutations) assert.throws(mutate, TypeError, name);
+  const signer = createIdunnRuntimeSigner({ authority, capabilities: loaded.capabilities });
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.boundEndpoint), loaded.candidate);
+});
+
+// A web app must be able to import the signer without pulling the Odin publisher and dgram.
+function loadUnderDgramStub(modulePath: string): string {
+  const script = [
+    'const Module = require("node:module");',
+    "const load = Module._load;",
+    'Module._load = function (request, ...rest) { if (request === "dgram" || request === "node:dgram") throw new Error("dgram was loaded"); return load.call(this, request, ...rest); };',
+    "try { require(process.argv[1]); process.stdout.write(\"loaded\"); } catch (error) { process.stdout.write(\"failed: \" + error.message); }",
+  ].join("\n");
+  const run = spawnSync(process.execPath, ["-e", script, modulePath], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  return run.stdout;
 }
 
-function sha256Hex(bytes: Uint8Array): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
-}
+test("the idunn-runtime subpath loads the signer and loader without loading dgram; the package root does load it", () => {
+  const subpath = require.resolve("cultnet-ts/idunn-runtime");
+  assert.equal(loadUnderDgramStub(subpath), "loaded");
+  assert.equal(loadUnderDgramStub(require.resolve("cultnet-ts")), "failed: dgram was loaded");
+  const exported = require(subpath) as Record<string, unknown>;
+  assert.equal(typeof exported.createIdunnRuntimeSigner, "function");
+  assert.equal(typeof exported.loadIdunnRuntimeAuthorityFromEnvironment, "function");
+  assert.equal(exported.createIdunnRuntimePresencePublisher, undefined);
+  assert.equal(exported.signIdunnRuntimePresence, undefined);
+  assert.equal((require("cultnet-ts") as Record<string, unknown>).signIdunnRuntimePresence, undefined);
+});
