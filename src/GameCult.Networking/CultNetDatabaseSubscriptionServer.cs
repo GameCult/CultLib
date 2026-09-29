@@ -315,7 +315,18 @@ namespace GameCult.Networking
                     }
 
                     var sourceRecordKey = ResolveChangeRecordKey(change);
-                    var matched = CreateMatchedRecord(change, request, peer);
+                    CultNetRawDocumentRecord? matched;
+                    try
+                    {
+                        matched = CreateMatchedRecord(change, request, peer);
+                    }
+                    catch (NotSupportedException refusal)
+                    {
+                        // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
+                        peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                        return;
+                    }
+
                     ApplyProjectedChange(
                         projection,
                         sourceRecordKey,
@@ -541,6 +552,7 @@ namespace GameCult.Networking
             if (kind == CultNetDatabaseChangeKind.Removed || document == null)
                 return null;
 
+            CultNetDocumentRegistry.RefuseVariantChange(_database.Cache, key);
             return _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"));
         }
 

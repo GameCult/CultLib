@@ -551,10 +551,17 @@ namespace GameCult.Networking
 
         // CultNet carries no variant deltas yet, and a resolved view sent as a plain record would be a lie about the store.
         private static CultStoredDocument RefuseVariant(CultStoredDocument entry) =>
-            entry.Variant == null
-                ? entry
-                : throw new NotSupportedException(
-                    $"Record '{entry.Key.Value}' is a variant of '{entry.Variant.BaseKey}'; CultNet does not carry document variants yet.");
+            entry.Variant == null ? entry : throw VariantRefusal(entry);
+
+        // The live-change funnel's refusal: a load or write that lands a variant must not reach a subscriber as a record.
+        internal static void RefuseVariantChange(CultCache cache, CultRecordKey key)
+        {
+            if (cache.GetStored(key) is { Variant: not null } entry)
+                throw VariantRefusal(entry);
+        }
+
+        private static NotSupportedException VariantRefusal(CultStoredDocument entry) =>
+            new($"Record '{entry.Key.Value}' is a variant of '{entry.Variant!.BaseKey}'; CultNet does not carry document variants yet.");
 
         /// <summary>
         /// Builds the wire record for one evaluated row. The shared path under snapshot and change

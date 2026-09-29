@@ -504,7 +504,18 @@ namespace GameCult.Networking
         {
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                var outbound = CreateChangeMessage(change, subscriptionId, selection);
+                CultNetDatabaseChangeRawMessage? outbound;
+                try
+                {
+                    outbound = CreateChangeMessage(change, subscriptionId, selection);
+                }
+                catch (NotSupportedException refusal)
+                {
+                    // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
+                    peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                    return;
+                }
+
                 if (outbound != null)
                 {
                     peer.SendCultNet(outbound);
@@ -549,11 +560,12 @@ namespace GameCult.Networking
                 };
             }
 
+            CultNetDocumentRegistry.RefuseVariantChange(_database.Cache, key);
             return new CultNetDatabaseChangeRawMessage
             {
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
-                ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                ChangeKind = kind ==CultNetDatabaseChangeKind.Added ? "added" : "updated",
                 Document = _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"))
             };
         }
