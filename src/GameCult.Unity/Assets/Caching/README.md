@@ -33,6 +33,21 @@ fallback. `Add`, `Duplicate` and `Delete` act on the selected type and record.
 A `[CultGlobal]` type with no record shows as absent with a `Create` action; the
 Studio never creates one on its own.
 
+A document class marked `[CultInspectorGroupBy(nameof(Kind), nameof(Owner))]`
+lists its records as foldouts nested in that order, one per value in use; a
+derived type listed under a marked base groups the same way. Each foldout has
+a `Create` button that makes a new record with the grouped members preset to
+that foldout's values, so it lands there. A declaration the model refuses (an
+unknown, hidden, read-only, repeated or ungroupable member, or a global type)
+lists the records flat under a warning that says why. A variant sits in the
+foldout its resolved values name.
+
+Drag a record row onto any record-reference value in the inspector (a member,
+a list element, a dictionary key or value) to set it. The drop is accepted
+exactly when the reference's picker would offer that record; it is refused
+in a read-only store, for the record the reference already holds, and for a
+record from another Studio window. The reference picker itself is not grouped.
+
 Opening a store never writes it, directory stores included. Closing or
 reloading scripts drops unsaved edits.
 
@@ -56,6 +71,14 @@ to its type. Edits work on a copy (`CultInspectorEdit`): a refused upsert
 leaves the cached object unchanged. The Studio is one lowering of that model
 and owns only widgets and layout; a runtime CultUI panel needs only its own
 renderer and drawers to show and edit the same documents under the same rules.
+
+Grouping is the model's too: `GroupingOf` resolves a listed type's
+`[CultInspectorGroupBy]` members (or the notice for a refused declaration),
+`GroupRecords` returns the tree of nodes (id, label, depth, values, children,
+records) that a lowering draws, and `CreateInGroup` makes the record for a
+node. `IsRecordCandidate` is the one test for whether a record may be a
+reference's value, shared by the picker's candidates and a drop, and
+`RecordRefLabel` is the one spelling of `None`, a target's label and `Missing`.
 
 ## Drawers
 

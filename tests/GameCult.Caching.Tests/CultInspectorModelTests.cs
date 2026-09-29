@@ -539,6 +539,57 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public async Task GroupNodeIdsSeparateAnEscapeFromTheTextItSpells()
+        {
+            // "a/b" and "a%2Fb" collide under an id that escapes '/' alone; the unpaired surrogates, U+FFFD and "a%uD800"
+            // are the values a replacement character or a sloppy %u form would merge; the valid pair is one node, not two halves.
+            var kinds = new[] { "a/b", "a%2Fb", "a%2fb", "a%252Fb", "a", "A", "\uD800", "\uD801", "\uDC00", "�", "a%uD800", "a\uD800", "😀", "�\uDE00", "\uDE00\uD83D", "a\uD800b\uD801c" };
+            using var cache = OpenGroups();
+            for (var i = 0; i < kinds.Length; i++)
+                await cache.UpsertAsync(typeof(GroupRedeclared), new GroupRedeclared { Kind = kinds[i] }, new CultRecordKey("k" + i));
+
+            var roots = GroupModel().GroupRecords(typeof(GroupRedeclared), cache.AllStoredDocuments);
+
+            Assert.That(roots, Has.Count.EqualTo(kinds.Length), "every distinct value is its own node, 'a' and 'A' included");
+            Assert.That(roots.Select(group => group.Id).Distinct().Count(), Is.EqualTo(kinds.Length), "and none spells another's id");
+            Assert.That(roots.Select(group => group.Label).Where(label => label == "a" || label == "A"), Is.EqualTo(new[] { "A", "a" }),
+                "labels equal ignoring case fall back to ordinal order");
+        }
+
+        [Test]
+        public async Task GroupRefsWhoseKeysDifferOnlyByCaseAreTwoNodes()
+        {
+            using var cache = OpenGroups();
+            await cache.UpsertAsync(typeof(InspectOther), new InspectOther { Name = "lower" }, new CultRecordKey("o-a"));
+            await cache.UpsertAsync(typeof(InspectOther), new InspectOther { Name = "upper" }, new CultRecordKey("O-A"));
+            await PutLeaf(cache, "r1", "one", "o-a", GroupHull.Cruiser);
+            await PutLeaf(cache, "r2", "two", "O-A", GroupHull.Cruiser);
+            var model = GroupModel();
+
+            var roots = model.GroupRecords(typeof(GroupLeaf), cache.AllStoredDocuments);
+
+            Assert.That(roots.Select(group => group.Label), Is.EqualTo(new[] { "lower", "upper" }), "each key finds its own target");
+            Assert.That(roots.Select(group => group.Id).Distinct().Count(), Is.EqualTo(2));
+            Assert.That(model.RecordRefLabel(typeof(CultRecordRef<InspectOther>), OwnerRef("O-A"), cache.AllStoredDocuments), Is.EqualTo("upper"));
+        }
+
+        [Test]
+        public async Task GroupAnUngroupedListedTypeHasNoTreeAndItsCandidatesStayFlat()
+        {
+            using var cache = OpenGroups();
+            await cache.UpsertAsync(typeof(GroupGlobal), new GroupGlobal { Kind = "k" }, new CultRecordKey("global"));
+            var model = GroupModel();
+
+            var grouping = model.GroupingOf(typeof(GroupGlobal));
+
+            Assert.That(grouping.Members, Is.Empty);
+            Assert.That(grouping.Notice, Is.Not.Null, "a refused declaration still says why");
+            Assert.That(model.GroupRecords(typeof(GroupGlobal), cache.AllStoredDocuments), Is.Empty, "no tree: the lowering lists candidates flat");
+            Assert.That(model.RecordCandidates(typeof(CultRecordRef<GroupGlobal>), cache.AllStoredDocuments).Select(record => record.Key.Value),
+                Is.EqualTo(new[] { "global" }));
+        }
+
+        [Test]
         public async Task GroupCreateInGroupRoundTripsIntoTheSameNode()
         {
             using var cache = await SeededGroups();

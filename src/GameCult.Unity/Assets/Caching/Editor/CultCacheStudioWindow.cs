@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using GameCult.Caching;
@@ -11,6 +12,7 @@ namespace GameCult.Unity.Caching.Editor
     public sealed class CultCacheStudioWindow : EditorWindow
     {
         private const string LastPathKey = "GameCult.CultCacheStudio.LastPath";
+        private const float RowIndent = 14f;
 
         private CultCache _cache;
         private CultInspectorModel _model;
@@ -23,6 +25,10 @@ namespace GameCult.Unity.Caching.Editor
         private string _search = string.Empty;
         private Type _selectedType;
         private string _selectedKey;
+        private string _pressedKey;
+        private string _revealKey;
+        // Group foldouts by listed type and node id: two types grouped by the same values share node ids, not fold state.
+        private readonly Dictionary<(Type, string), bool> _groupFoldouts = new Dictionary<(Type, string), bool>();
         private Vector2 _typeScroll;
         private Vector2 _recordScroll;
         private Vector2 _inspectorScroll;
@@ -143,7 +149,7 @@ namespace GameCult.Unity.Caching.Editor
                 {
                     using (new EditorGUI.DisabledScope(cannotAdd || descriptor.IsGlobal))
                     {
-                        if (GUILayout.Button("Add", EditorStyles.miniButtonLeft)) Add();
+                        if (GUILayout.Button("Add", EditorStyles.miniButtonLeft)) Create(null);
                     }
 
                     using (new EditorGUI.DisabledScope(selected == null || selected.Descriptor.IsGlobal || ReadOnly))
@@ -165,6 +171,8 @@ namespace GameCult.Unity.Caching.Editor
                 else
                 {
                     var records = _model.RecordCandidates(typeof(CultRecordRef<>).MakeGenericType(_selectedType), _records);
+                    var grouping = _model.GroupingOf(_selectedType);
+                    if (grouping.Notice != null) EditorGUILayout.HelpBox(grouping.Notice, MessageType.Warning);
                     if (descriptor.IsGlobal && records.Count == 0)
                     {
                         using (new EditorGUILayout.HorizontalScope())
@@ -172,21 +180,98 @@ namespace GameCult.Unity.Caching.Editor
                             EditorGUILayout.LabelField("Global is absent.");
                             using (new EditorGUI.DisabledScope(cannotAdd))
                             {
-                                if (GUILayout.Button("Create", GUILayout.Width(56))) Add();
+                                if (GUILayout.Button("Create", GUILayout.Width(56))) Create(null);
                             }
                         }
                     }
 
-                    foreach (var record in records)
+                    // Nothing groups: the candidates are the list. Otherwise the model's tree is.
+                    if (grouping.Members.Count == 0)
                     {
-                        var label = CultInspectorModel.RecordLabel(record);
-                        var text = record.Descriptor.DocumentType == _selectedType ? label : label + "  <" + record.Descriptor.DocumentType.Name + ">";
-                        if (GUILayout.Toggle(_selectedKey == record.Key.Value, text, EditorStyles.miniButton)) _selectedKey = record.Key.Value;
+                        foreach (var record in records) DrawRecordRow(record, 0);
                     }
+                    else
+                    {
+                        var groups = _model.GroupRecords(_selectedType, _records);
+                        if (_revealKey != null) Reveal(groups, _revealKey);
+                        DrawGroups(groups, cannotAdd);
+                    }
+
+                    _revealKey = null;
                 }
 
                 EditorGUILayout.EndScrollView();
             }
+        }
+
+        private void DrawGroups(IReadOnlyList<CultInspectorRecordGroup> groups, bool cannotAdd)
+        {
+            foreach (var group in groups)
+            {
+                var id = (_selectedType, group.Id);
+                _groupFoldouts.TryGetValue(id, out var open);
+                EditorGUI.indentLevel = group.Depth;
+                open = EditorGUILayout.Foldout(open, group.Label + " (" + group.Count + ")", true);
+                EditorGUI.indentLevel = 0;
+                _groupFoldouts[id] = open;
+                if (!open) continue;
+
+                DrawGroups(group.Children, cannotAdd);
+                foreach (var record in group.Records) DrawRecordRow(record, group.Depth + 1);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.Space((group.Depth + 1) * RowIndent);
+                    using (new EditorGUI.DisabledScope(cannotAdd))
+                    {
+                        if (GUILayout.Button("Create", EditorStyles.miniButton, GUILayout.Width(56))) Create(group);
+                    }
+                }
+            }
+        }
+
+        // Expands every node on the path to the record, so a record just made or duplicated is on screen.
+        private bool Reveal(IReadOnlyList<CultInspectorRecordGroup> groups, string key)
+        {
+            var found = false;
+            foreach (var group in groups)
+            {
+                if (!group.Records.Any(record => record.Key.Value == key) && !Reveal(group.Children, key)) continue;
+                _groupFoldouts[(_selectedType, group.Id)] = true;
+                found = true;
+            }
+
+            return found;
+        }
+
+        // A record row selects on click and starts a record drag. The drag starts from the reserved rect on the first drag
+        // event after a press inside it; the toggle still reads the click.
+        private void DrawRecordRow(CultStoredDocument record, int depth)
+        {
+            var label = CultInspectorModel.RecordLabel(record);
+            var text = record.Descriptor.DocumentType == _selectedType ? label : label + "  <" + record.Descriptor.DocumentType.Name + ">";
+            var key = record.Key.Value;
+            var rect = GUILayoutUtility.GetRect(new GUIContent(text), EditorStyles.miniButton);
+            rect.xMin += depth * RowIndent;
+            var current = Event.current;
+            if (current.type == EventType.MouseDown && current.button == 0 && rect.Contains(current.mousePosition))
+            {
+                _pressedKey = key;
+            }
+            else if (current.type == EventType.MouseDrag && _pressedKey == key)
+            {
+                _pressedKey = null;
+                DragAndDrop.PrepareStartDrag();
+                DragAndDrop.SetGenericData(CultCacheStudioRecordDrag.DragKey, new CultCacheStudioRecordDrag(_model, key));
+                DragAndDrop.objectReferences = Array.Empty<UnityEngine.Object>();
+                DragAndDrop.StartDrag(label);
+                current.Use();
+            }
+            else if (current.type == EventType.MouseUp)
+            {
+                _pressedKey = null;
+            }
+
+            if (GUI.Toggle(rect, _selectedKey == key, text, EditorStyles.miniButton)) _selectedKey = key;
         }
 
         private void DrawInspector()
@@ -324,6 +409,9 @@ namespace GameCult.Unity.Caching.Editor
             _edit = null;
             _records = Array.Empty<CultStoredDocument>();
             _selectedKey = null;
+            _pressedKey = null;
+            _revealKey = null;
+            _groupFoldouts.Clear();
         }
 
         private bool ConfirmDiscard()
@@ -337,20 +425,31 @@ namespace GameCult.Unity.Caching.Editor
             Run("Saved " + _path + ".", () => _cache.FlushAsync().GetAwaiter().GetResult());
         }
 
-        private void Add()
+        // A new record of the selected type: at the root, or preset by the group it is created in.
+        private void Create(CultInspectorRecordGroup group)
         {
             var type = _selectedType;
-            // The model decides whether the type can be made; its notice is the refusal.
-            Run("Added " + type.Name + ".", () => _selectedKey = _cache.UpsertAsync(type,
-                _model.CreateElement(type, type, out var notice) ?? throw new InvalidOperationException(notice)).GetAwaiter().GetResult().Value);
+            Run("Added " + type.Name + ".", () =>
+            {
+                // The model decides whether the type can be made; its notice is the refusal.
+                var created = group == null ? _model.CreateElement(type, type, out var notice) : _model.CreateInGroup(type, group, out notice);
+                Focus(_cache.UpsertAsync(type, created ?? throw new InvalidOperationException(notice)).GetAwaiter().GetResult().Value);
+            });
             GUIUtility.ExitGUI();
+        }
+
+        // Selects the record and opens the groups it sits in on the next frame.
+        private void Focus(string key)
+        {
+            _selectedKey = key;
+            _revealKey = key;
         }
 
         private void Duplicate(CultStoredDocument record)
         {
             var type = record.Descriptor.DocumentType;
             Run("Duplicated " + CultInspectorModel.RecordLabel(record) + ".", () =>
-                _selectedKey = _cache.UpsertAsync(type, _model.Clone(record.Document, type)).GetAwaiter().GetResult().Value);
+                Focus(_cache.UpsertAsync(type, _model.Clone(record.Document, type)).GetAwaiter().GetResult().Value));
             GUIUtility.ExitGUI();
         }
 
