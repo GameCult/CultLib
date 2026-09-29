@@ -1870,9 +1870,9 @@ class CultNetTests(unittest.TestCase):
             witness_kind="interop-proof",
             captured_at="2026-06-13T00:00:03Z",
             subject={"documentType": "cultnet.interop-note", "subjectId": "note:python"},
-            contracts=[{"role": "payload", "schemaId": "schema-a"}],
-            artifacts=[{"role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
-            timing_witnesses=[{"stage": "roundtrip", "startedAt": "2026-06-13T00:00:03Z", "completedAt": "2026-06-13T00:00:04Z", "latencyMs": 1.0}],
+            contracts=[{"id": "c0e1a2b3c4d5", "role": "payload", "schemaId": "schema-a"}],
+            artifacts=[{"id": "a0e1a2b3c4d5", "role": "log", "uri": "cultcache://bundle-1/log", "mediaType": "text/plain"}],
+            timing_witnesses=[{"id": "e0e1a2b3c4d5", "stage": "roundtrip", "startedAt": "2026-06-13T00:00:03Z", "completedAt": "2026-06-13T00:00:04Z", "latencyMs": 1.0}],
             provenance={"pipelineId": "interop", "runId": "run-1", "runtimeId": "python-test"},
         )
         payload = encode_witness_artifact_bundle_payload(bundle)
@@ -1888,6 +1888,8 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(slots[2], "2026-06-13T00:00:03Z")
         self.assertEqual(slots[3]["subjectId"], "note:python")
         self.assertEqual(slots[4][0]["schemaId"], "schema-a")
+        self.assertEqual([slots[4][0]["id"], slots[5][0]["id"], slots[6][0]["id"]], ["c0e1a2b3c4d5", "a0e1a2b3c4d5", "e0e1a2b3c4d5"])
+        self.assertEqual(typed_decoded.contracts[0]["id"], "c0e1a2b3c4d5")
         self.assertEqual(slots[5][0]["uri"], "cultcache://bundle-1/log")
         self.assertEqual(slots[6][0]["latencyMs"], 1.0)
         self.assertEqual(slots[7]["runtimeId"], "python-test")

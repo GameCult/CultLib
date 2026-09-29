@@ -1232,9 +1232,9 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
           schemaVersion: INTEROP_SCHEMA_VERSION,
           schemaId: interopNoteSchemaId,
         },
-        [{ role: "payload", schemaId: interopNoteSchemaId, schemaVersion: INTEROP_SCHEMA_VERSION }],
-        [{ role: "log", uri: "cultcache://bundle:ts-python-witness/log", mediaType: "text/plain" }],
-        [{ stage: "roundtrip", startedAt: "2026-06-13T00:00:03Z", completedAt: "2026-06-13T00:00:04Z", latencyMs: 1 }],
+        [{ id: "c0e1a2b3c4d5", role: "payload", schemaId: interopNoteSchemaId, schemaVersion: INTEROP_SCHEMA_VERSION }],
+        [{ id: "a0e1a2b3c4d5", role: "log", uri: "cultcache://bundle:ts-python-witness/log", mediaType: "text/plain" }],
+        [{ id: "e0e1a2b3c4d5", stage: "roundtrip", startedAt: "2026-06-13T00:00:03Z", completedAt: "2026-06-13T00:00:04Z", latencyMs: 1 }],
         { pipelineId: "interop", runId: "ts-python-witness", runtimeId: "ts-witness", agentId: "ts-agent" },
       ]),
       sourceRuntimeId: "ts-witness",
@@ -1252,6 +1252,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(witnessSlots[1], "interop-proof");
   assert.equal(witnessSlots[3].subjectId, "note:python-peer");
   assert.equal(witnessSlots[7].runtimeId, "ts-witness");
+  assert.deepEqual([witnessSlots[4][0].id, witnessSlots[5][0].id, witnessSlots[6][0].id], ["c0e1a2b3c4d5", "a0e1a2b3c4d5", "e0e1a2b3c4d5"], "element ids cross TS to Python and back");
 
   const expectedPeers = ["csharp-peer", "python-peer", "rust-peer", "ts-peer"];
 
