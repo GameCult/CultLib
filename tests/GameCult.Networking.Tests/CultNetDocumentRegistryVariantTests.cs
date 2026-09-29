@@ -243,13 +243,16 @@ namespace GameCult.Networking.Tests
                 });
                 await WaitUntilAsync(() => snapshots.Count == 1, Diagnostic);
 
-                cache.Commit(batch => batch.UpsertVariant(VariantKey, BaseKey, new[]
+                await database.PutAsync(new CultRecordKey("citer-two"), Citer("citer-two", BaseKey));
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-two"), Diagnostic);
+
+                // With a variant in the store, the same subscriber keeps receiving.
+                await cache.UpsertVariantAsync(VariantKey, BaseKey, new[]
                 {
                     cache.Override<VariantWireFixture>(nameof(VariantWireFixture.Name), "big")
-                }));
-                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-two", BaseKey), new CultRecordKey("citer-two")));
-
-                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-two"), Diagnostic);
+                });
+                await database.PutAsync(new CultRecordKey("citer-three"), Citer("citer-three", BaseKey));
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-three"), Diagnostic);
                 Assert.That(errors, Is.Empty, "a subscriber that never selects the variant is never told about it");
 
                 // "cited": wire rows some citer cites. Once a citer cites the variant, it selects it.
@@ -266,15 +269,15 @@ namespace GameCult.Networking.Tests
                 });
                 await WaitUntilAsync(() => snapshots.Count == 2, Diagnostic);
                 Assert.That(errors, Is.Empty, "only the base is cited yet");
-                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-three", VariantKey), new CultRecordKey("citer-three")));
+                await database.PutAsync(new CultRecordKey("citer-four"), Citer("citer-four", VariantKey));
 
                 await WaitUntilAsync(() => errors.Any(error => error.Error.Contains(VariantKey.Value)), Diagnostic);
                 Assert.That(changes.Where(change => change.SubscriptionId == "cited").Select(change => change.Document?.RecordKey),
                     Does.Not.Contain(VariantKey.Value), "a variant never reaches a subscriber as a record");
 
                 // The first subscriber is still alive after the refusal.
-                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-four", BaseKey), new CultRecordKey("citer-four")));
-                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-four"), Diagnostic);
+                await database.PutAsync(new CultRecordKey("citer-five"), Citer("citer-five", BaseKey));
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-five"), Diagnostic);
             }
             finally
             {
