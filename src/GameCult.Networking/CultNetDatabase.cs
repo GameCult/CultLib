@@ -1252,17 +1252,12 @@ namespace GameCult.Networking
                         change.Key,
                         change.Document,
                         change.PreviousDocument);
+                    // A door's own wire message is what the log stores (its kind, sequence and shard are restated from the entry).
                     var wireEntry = _mutationLogStore == null
                         ? null
-                        : door?.Put != null
-                            ? new CultNetShardLogEntryMessage
-                            {
-                                ChangeKind = change.Kind == CultCacheDocumentChangeKind.Added ? "added" : "updated",
-                                Put = door.Put
-                            }
-                            : door?.Delete != null
-                                ? new CultNetShardLogEntryMessage { ChangeKind = "removed", Delete = door.Delete }
-                                : ToLogEntryMessage(entry);
+                        : door is { Put: not null } or { Delete: not null }
+                            ? new CultNetShardLogEntryMessage { Put = door.Put, Delete = door.Delete }
+                            : ToLogEntryMessage(entry);
                     RecordMutationLogEntry(entry, wireEntry);
                 }
                 catch (Exception cause)
