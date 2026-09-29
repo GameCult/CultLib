@@ -658,8 +658,12 @@ public sealed class BoundedLeastSquaresTests
     }
 
     // m < n with columns that are nearly parallel (condition number of A around 1e2), b outside the reachable set.
-    [Fact]
-    public void NearCollinearColumnsReachTheExactOptimum()
+    // The absolute scale of A must not matter: the KKT tolerance is relative, and the working iterate is double, so a
+    // 1e6 A with untouched bounds reaches the same optimum to the same allowance.
+    [Theory]
+    [InlineData(1f)]
+    [InlineData(1e6f)]
+    public void NearCollinearColumnsReachTheExactOptimum(float scale)
     {
         const int m = 2, n = 7;
         for (var family = 0; family < 4; family++)
@@ -678,6 +682,7 @@ public sealed class BoundedLeastSquaresTests
                         default: a[j] = rng.NextFloat(0.5f, 1f); a[n + j] = a[j] * 0.9f + 0.01f * rng.NextFloat(-1f, 1f); break;
                     }
                 }
+                for (var i = 0; i < a.Length; i++) a[i] *= scale;
                 var b = new[] { rng.NextFloat(-8f, 8f), rng.NextFloat(-8f, 8f) };
                 var lo = new float[n];
                 var hi = new float[n];
@@ -689,6 +694,250 @@ public sealed class BoundedLeastSquaresTests
                 var allowed = 1e-5 * (b[0] * b[0] + b[1] * b[1]);
                 Assert.True(gap <= allowed, $"family {family} seed {seed}: cost {gap} above the exact optimum (allowed {allowed})");
             }
+        }
+    }
+
+    // A = U diag(s) V^T with s geometric from 1 down to 1/cond, so cond(A) is the requested value (float rounding of A
+    // perturbs it slightly). m x n with m >= n; b is generic, so it has a real residual when m > n.
+    private static (float[] a, float[] b) ConditionedProblem(int m, int n, double cond, uint seed, double aScale = 1.0)
+    {
+        var rng = new CultMath.Random(seed * 2654435761u + 17u);
+        double[][] Orthonormal(int dim, int count)
+        {
+            var q = new double[count][];
+            for (var k = 0; k < count; k++)
+            {
+                var v = new double[dim];
+                for (var i = 0; i < dim; i++) v[i] = rng.NextFloat(-1f, 1f);
+                for (var pass = 0; pass < 2; pass++)
+                    for (var l = 0; l < k; l++)
+                    {
+                        var dot = 0.0;
+                        for (var i = 0; i < dim; i++) dot += v[i] * q[l][i];
+                        for (var i = 0; i < dim; i++) v[i] -= dot * q[l][i];
+                    }
+                var norm = 0.0;
+                for (var i = 0; i < dim; i++) norm += v[i] * v[i];
+                norm = Math.Sqrt(norm);
+                for (var i = 0; i < dim; i++) v[i] /= norm;
+                q[k] = v;
+            }
+            return q;
+        }
+        var u = Orthonormal(m, n);
+        var w = Orthonormal(n, n);
+        var a = new float[m * n];
+        for (var k = 0; k < n; k++)
+        {
+            var s = aScale * Math.Pow(cond, -(double)k / Math.Max(1, n - 1));
+            for (var r = 0; r < m; r++)
+                for (var c = 0; c < n; c++)
+                    a[r * n + c] += (float)(u[k][r] * s * w[k][c]);
+        }
+        var b = new float[m];
+        for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
+        return (a, b);
+    }
+
+    // Unsaturated allocator-shaped ticks: 24 columns, every column free at the optimum. The solve is one Newton step;
+    // at most one more may confirm it. Before the working iterate moved to double, the float gradient's noise floor
+    // exceeded the tolerance from cond ~1e3 and the solver spun to the 100-iteration cap on optimal points.
+    [Theory]
+    [InlineData(1e2)]
+    [InlineData(1e3)]
+    [InlineData(1e4)]
+    public void UnsaturatedIllConditionedProblemsConvergeInAtMostTwoIterations(double cond)
+    {
+        const int m = 28, n = 24;
+        for (uint seed = 1; seed <= 30; seed++)
+        {
+            var (a, b) = ConditionedProblem(m, n, cond, seed);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
+            Assert.True(iterations <= 2, $"cond {cond} seed {seed}: {iterations} iterations");
+            var bb = 0.0;
+            foreach (var v in b) bb += (double)v * v;
+            var expected = NormalEquationSolution(m, n, a, b);
+            var xs = new float[n];
+            for (var j = 0; j < n; j++) xs[j] = (float)expected[j];
+            Assert.True(Cost(m, n, a, b, x) - Cost(m, n, a, b, xs) <= 1e-6 * bb, $"cond {cond} seed {seed}: cost above the exact optimum");
+        }
+    }
+
+    // Near the pivot cutoff (cond(A) ~ 3e7, cond(A^T A) ~ 1e15) a Newton step leaves a free gradient above the
+    // tolerance on some problems. Those take one confirming iteration and stop because it lowers nothing; the rest
+    // are stationary at once. Never the cap, and never spinning.
+    [Fact]
+    public void NearSingularFreeSetsConfirmOnceAndStop()
+    {
+        const int m = 28, n = 24;
+        var confirmed = 0;
+        for (uint seed = 1; seed <= 60; seed++)
+        {
+            var (a, b) = ConditionedProblem(m, n, 3e7, seed);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed}: {status}");
+            Assert.True(iterations <= 3, $"seed {seed}: {iterations} iterations");
+            if (iterations > 0) confirmed++;
+        }
+        Assert.InRange(confirmed, 1, 20);
+    }
+
+    // Scale-freeness was only claimed for scaling A, b and the bounds together; A alone at 1e6 with the bounds left
+    // alone must also converge, and as fast.
+    [Theory]
+    [InlineData(1e2)]
+    [InlineData(1e4)]
+    public void LargeAWithUnscaledBoundsConvergesInAtMostTwoIterations(double cond)
+    {
+        const int m = 28, n = 24;
+        for (uint seed = 1; seed <= 30; seed++)
+        {
+            var (a, b) = ConditionedProblem(m, n, cond, seed, 1e6);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, Fill(-1e3f, n), Fill(1e3f, n), x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
+            Assert.True(iterations <= 2, $"cond {cond} seed {seed}: {iterations} iterations");
+        }
+    }
+
+    // b = 0 must not borrow its tolerance from the start point: a far start's own gradient is enormous, so that
+    // scale judged it converged after one iteration at cost 5001. The optimum here is ~1e-9.
+    [Fact]
+    public void ZeroTargetFromAFarStartIsNotJudgedConvergedByItsOwnSteepness()
+    {
+        var a = new[] { 1f, 1f, 1f, 1.0001f };
+        var b = new float[2];
+        var lo = new[] { 0.5f, -1e6f };
+        var hi = new[] { 1e6f, 1e6f };
+        var x = new[] { 1e6f, 1e6f };
+        var status = Solve(2, 2, a, b, lo, hi, x, out _);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        AssertKkt(2, 2, a, b, lo, hi, x);
+        Assert.True(Cost(2, 2, a, b, x) < 1e-6, $"cost {Cost(2, 2, a, b, x)}");
+        Assert.True(x[0] >= 0.5f);
+
+        // The origin inside the box: the answer is the origin, from any start.
+        var lo2 = new[] { -1e6f, -1e6f };
+        var y = new[] { 1e6f, -1e6f };
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(2, 2, a, b, lo2, hi, y, out _));
+        Assert.True(Cost(2, 2, a, b, y) < 1e-9, $"cost {Cost(2, 2, a, b, y)}");
+    }
+
+    [Fact]
+    public void WarmStartClampIsExact()
+    {
+        var inf = float.PositiveInfinity;
+        var cases = new (float lo, float hi, float start, float expected)[]
+        {
+            (-1f, 1f, 0.25f, 0.25f),
+            (-1f, 1f, 5f, 1f),
+            (-1f, 1f, -5f, -1f),
+            (-1f, 1f, float.NaN, -1f),
+            (-inf, inf, float.NaN, 0f),
+            (-inf, inf, inf, 0f),
+            (-inf, inf, -inf, 0f),
+            (0.2f, inf, inf, 0.2f),
+            (0.2f, inf, -inf, 0.2f),
+            (-inf, -2f, -inf, -2f),
+            (-inf, -2f, 3f, -2f),
+            (-inf, 3f, float.NaN, 0f),
+            (-2f, inf, float.NaN, -2f),
+        };
+        foreach (var (l, h, start, expected) in cases)
+        {
+            var x = new[] { start, start, start };
+            // No rows: every column is dependent and takes a zero step, so x is exactly the clamped start.
+            Solve(0, 3, default, default, Fill(l, 3), Fill(h, 3), x, out var iterations);
+            Assert.Equal(0, iterations);
+            Assert.Equal(new[] { expected, expected, expected }, x);
+        }
+    }
+
+    // A duplicate column that is free and interior is stepped by neither the factor nor the refinement: the columns
+    // share one gradient, and moving both along it would overshoot.
+    [Fact]
+    public void FreeDuplicateColumnGetsNoStep()
+    {
+        const int m = 5, n = 3;
+        var a = (float[])A54.Clone();
+        for (var r = 0; r < m; r++) a[r * n + 2] = a[r * n + 0];
+        var x = new float[n];
+        var status = Solve(m, n, a, B5, Fill(-100f, n), Fill(100f, n), x, out var iterations);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        Assert.Equal(0, iterations);
+        Assert.Equal(0f, x[2]);
+        var reduced = new float[m * 2];
+        for (var r = 0; r < m; r++) { reduced[r * 2] = a[r * n]; reduced[r * 2 + 1] = a[r * n + 1]; }
+        var xr = NormalEquationSolution(m, 2, reduced, B5);
+        Assert.Equal(xr[0], x[0], 1e-4);
+        Assert.Equal(xr[1], x[1], 1e-4);
+    }
+
+    // Columns 1000x apart in scale and exactly parallel: the pivot tolerance is relative to the column's own
+    // diagonal, so it catches the duplicate at any absolute scale.
+    [Theory]
+    [InlineData(1e3f)]
+    [InlineData(1e-3f)]
+    public void ParallelColumnsAreDependentAtAnyAbsoluteScale(float scale)
+    {
+        const int m = 5, n = 3;
+        var a = (float[])A54.Clone();
+        for (var r = 0; r < m; r++) a[r * n + 2] = 0.37f * a[r * n + 0];
+        for (var i = 0; i < a.Length; i++) a[i] *= scale;
+        var lo = Fill(-1000f / scale, n);
+        var hi = Fill(1000f / scale, n);
+        var x = new float[n];
+        var status = Solve(m, n, a, B5, lo, hi, x, out var iterations);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        Assert.True(iterations <= 2, $"{iterations} iterations");
+        var reduced = new float[m * 2];
+        for (var r = 0; r < m; r++) { reduced[r * 2] = a[r * n]; reduced[r * 2 + 1] = a[r * n + 1]; }
+        var xr = NormalEquationSolution(m, 2, reduced, B5);
+        var xs = new float[n];
+        xs[0] = (float)xr[0];
+        xs[1] = (float)xr[1];
+        var bb = 0.0;
+        foreach (var v in B5) bb += (double)v * v;
+        Assert.True(Cost(m, n, a, B5, x) - Cost(m, n, a, B5, xs) <= 1e-6 * bb, "cost above the reduced optimum");
+    }
+
+    // No path allocates: not the first InvalidInput, not a cap hit, not a solve that releases bounds. Each path is
+    // measured on its first call and again after, so a one-time runtime cost shows up as a difference between the two
+    // rather than as a solver allocation.
+    [Fact]
+    public void EveryPathAllocatesNothing()
+    {
+        const int m = 4, n = 3;
+        var a = new[] { 1.0f, 0.2f, 0.1f, 0.1f, 1.0f, 0.3f, -0.2f, 0.2f, 1.0f, 0.5f, 0.5f, 0.4f };
+        var b = new[] { 10f, -10f, 10f, 1f };
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        var workspace = new float[BoundedLeastSquares.WorkspaceLength(n)];
+        var x = new float[n];
+        var bad = (float[])a.Clone();
+        bad[4] = float.NaN;
+
+        var paths = new (string name, float[] a, int cap, BoundedLeastSquaresStatus expected)[]
+        {
+            ("invalid", bad, 100, BoundedLeastSquaresStatus.InvalidInput),
+            ("converged", a, 100, BoundedLeastSquaresStatus.Converged),
+            ("limit", a, 1, BoundedLeastSquaresStatus.IterationLimit),
+        };
+        foreach (var (name, matrix, cap, expected) in paths)
+        {
+            var bytes = new long[2];
+            for (var call = 0; call < 2; call++)
+            {
+                Array.Clear(x);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                var status = BoundedLeastSquares.Solve(m, n, matrix, b, lo, hi, x, workspace, out _, cap);
+                bytes[call] = GC.GetAllocatedBytesForCurrentThread() - before;
+                Assert.Equal(expected, status);
+            }
+            Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
         }
     }
 }
