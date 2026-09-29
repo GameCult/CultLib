@@ -1799,7 +1799,7 @@ namespace GameCult.Caching
         private readonly List<(CacheBackingStore Store, Type[] Homes)> _stores = new();
         private readonly Dictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
         private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
-        // Every key holding a value, oldest first: the index is truthful about duplicates, so removing one holder never hides another.
+        // Every key holding a value (unordered): the index is truthful about duplicates, so removing one holder never hides another.
         private readonly Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> _indexes = new();
         private readonly Dictionary<Type, string> _globals = new();
         private readonly CultCodec? _codec;
@@ -1822,6 +1822,9 @@ namespace GameCult.Caching
         }
 
         public CultDocumentRegistry Registry => _registry;
+
+        // Read under the gate, by a store judging a merge.
+        internal bool HoldsVariants => _variantKeys.Count > 0;
 
         public CultCodec? Codec => _codec;
 
@@ -2124,13 +2127,16 @@ namespace GameCult.Caching
                 .SelectMany(pair => pair.Value.TryGetValue(name, out var key) ? new[] { key } : Array.Empty<string>()));
         }
 
-        // A value held by one record finds it. Records of one type sharing a value (plain duplicates) find the most recently
-        // indexed holder, and removing that holder finds the one before it: a held value never finds nothing.
+        // A value held by one record finds it. Records of one type sharing a value (plain duplicates) find the holder with the
+        // smallest key (ordinal), whatever order they were written or loaded in: the choice is a function of the held set, so
+        // it is the same live, after a flush and after a reopen, and removing that holder finds the next.
         public T? GetByIndex<T>(string alias, string value) where T : class
         {
             return Single<T>($"index {alias}='{value}'", () => _indexes
                 .Where(pair => pair.Key.Alias == alias && typeof(T).IsAssignableFrom(pair.Key.Type))
-                .SelectMany(pair => pair.Value.TryGetValue(value, out var keys) ? new[] { keys[keys.Count - 1] } : Array.Empty<string>()));
+                .SelectMany(pair => pair.Value.TryGetValue(value, out var keys)
+                    ? new[] { keys.Aggregate((best, next) => string.CompareOrdinal(next, best) < 0 ? next : best) }
+                    : Array.Empty<string>()));
         }
 
         public void Dispose()
@@ -2645,6 +2651,9 @@ namespace GameCult.Caching
             bool IsVariant(string key) =>
                 landingByKey.TryGetValue(key, out var landed) ? landed.Variant != null : _variantKeys.Contains(key);
 
+            // One pass over what lands, one lookup per (index, value): the rule is linear in the records landing.
+            var landedValues = new List<(CultStoredDocument Stored, (Type Type, string Alias) Index, string Value)>();
+            var landed = new Dictionary<((Type Type, string Alias) Index, string Value), List<string>>();
             foreach (var stored in landing)
             {
                 foreach (var pair in stored.Descriptor.IndexAccessors)
@@ -2652,25 +2661,38 @@ namespace GameCult.Caching
                     var value = pair.Value(stored.Document);
                     if (string.IsNullOrWhiteSpace(value))
                         continue;
-                    var type = stored.Descriptor.DocumentType;
-                    var holders = (_indexes.TryGetValue((type, pair.Key), out var held) && held.TryGetValue(value, out var heldKeys)
+                    var index = (stored.Descriptor.DocumentType, pair.Key);
+                    landedValues.Add((stored, index, value));
+                    if (!landed.TryGetValue((index, value), out var landedKeys))
+                        landed[(index, value)] = landedKeys = new List<string>();
+                    landedKeys.Add(stored.Key.Value);
+                }
+            }
+
+            var holdersOf = new Dictionary<((Type Type, string Alias) Index, string Value), (string[] All, string[] Variants)>();
+            foreach (var (stored, index, value) in landedValues)
+            {
+                if (!holdersOf.TryGetValue((index, value), out var known))
+                {
+                    var all = (_indexes.TryGetValue(index, out var held) && held.TryGetValue(value, out var heldKeys)
                             ? heldKeys.Where(heldKey => !replaced.Contains(heldKey))
                             : Enumerable.Empty<string>())
-                        .Concat(landing
-                            .Where(other => other.Descriptor.DocumentType == type && pair.Value(other.Document) == value)
-                            .Select(other => other.Key.Value))
-                        .Where(holder => holder != stored.Key.Value)
+                        .Concat(landed[(index, value)])
                         .Distinct(StringComparer.Ordinal)
                         .ToArray();
-                    if (stored.Variant != null && holders.Length > 0)
-                        throw new InvalidOperationException(
-                            $"Variant {stored.Key.Value} and {holders[0]} both hold index {pair.Key} '{value}'; a variant must override its indexed member.");
-                    var variantHolder = holders.FirstOrDefault(IsVariant);
-                    if (stored.Variant == null && variantHolder != null)
-                        throw new InvalidOperationException(
-                            $"Record {stored.Key.Value} and variant {variantHolder} both hold index {pair.Key} '{value}'; " +
-                            "a variant may not share an indexed value with another record.");
+                    holdersOf[(index, value)] = known = (all, all.Where(IsVariant).ToArray());
                 }
+
+                var self = stored.Key.Value;
+                var holder = known.All.FirstOrDefault(candidate => candidate != self);
+                if (stored.Variant != null && holder != null)
+                    throw new InvalidOperationException(
+                        $"Variant {self} and {holder} both hold index {index.Alias} '{value}'; a variant must override its indexed member.");
+                var variantHolder = known.Variants.FirstOrDefault(candidate => candidate != self);
+                if (stored.Variant == null && variantHolder != null)
+                    throw new InvalidOperationException(
+                        $"Record {self} and variant {variantHolder} both hold index {index.Alias} '{value}'; " +
+                        "a variant may not share an indexed value with another record.");
             }
         }
 
@@ -2795,7 +2817,6 @@ namespace GameCult.Caching
                 RemoveHolder(pair.Value, stored.Key.Value);
         }
 
-        // Re-indexing a key makes it the most recent holder of its value.
         private static void AddHolder(Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> indexes, (Type, string) index, string value, string key)
         {
             if (!indexes.TryGetValue(index, out var map))
@@ -2974,9 +2995,10 @@ namespace GameCult.Caching
                     .ToArray();
                 if (shed.Length > 0)
                 {
-                    var alreadyReported = report.IgnoredExtraSlots;
-                    report.IgnoredExtraSlots = alreadyReported.Concat(shed.Except(alreadyReported)).OrderBy(slot => slot).ToArray();
-                    report.Warnings = report.Warnings.Concat(shed.Select(slot => new CultSchemaMigrationWarning
+                    // A slot the schema diff already reported is not reported twice.
+                    var unreported = shed.Except(report.IgnoredExtraSlots).ToArray();
+                    report.IgnoredExtraSlots = report.IgnoredExtraSlots.Concat(unreported).OrderBy(slot => slot).ToArray();
+                    report.Warnings = report.Warnings.Concat(unreported.Select(slot => new CultSchemaMigrationWarning
                     {
                         Code = "ignored_extra_slot",
                         Message = $"Variant {record.Key} overrides slot {slot}, which {descriptor.DocumentType.Name} does not have; the override is ignored and shed on flush."
@@ -3134,7 +3156,7 @@ namespace GameCult.Caching
             // The committer judged the batch against its own view; the file may have moved since. A merge is judged on the
             // set the file will hold, exactly as that set would be judged loading: what other processes wrote (arriving),
             // what they removed (departing), and this batch.
-            if (ontoDisk && Judging != null)
+            if (ontoDisk && Judging != null && MergeInvolvesVariants(request, disk))
                 JudgeMerge(request, disk);
             foreach (var entry in request.Deletes)
                 records.Remove(entry.Key.Value);
@@ -3149,6 +3171,14 @@ namespace GameCult.Caching
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
         }
+
+        // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote
+        // (read from the record's header, never its payload), or one this cache holds. A plain-only store never decodes
+        // another writer's records, so a schema this cache does not register cannot fail a commit that involves no variant.
+        private bool MergeInvolvesVariants(CultCommitRequest request, CultPersistedStoreSnapshot disk) =>
+            Cache?.HoldsVariants == true ||
+            request.Upserts.Any(entry => entry.Variant != null) ||
+            disk.Records.Any(record => record.Variant != null);
 
         private void JudgeMerge(CultCommitRequest request, CultPersistedStoreSnapshot disk)
         {

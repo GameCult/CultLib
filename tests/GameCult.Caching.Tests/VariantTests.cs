@@ -773,22 +773,22 @@ namespace GameCult.Caching.Tests
             }));
 
         [Test]
-        public void PlainDuplicatesFindTheMostRecentHolderAndRemovingEitherLeavesTheOtherFindable()
+        public void RemovingTheHolderADuplicateValueFindsLeavesTheOtherFindable()
         {
             var path = PathOf("gear.cc");
             using (var cache = Open(path))
             {
                 var pair = SharedCodePair(cache);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "the last writer");
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "the smallest key");
 
-                cache.Remove(pair[1]);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "removing the winner finds the other holder");
-
-                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p2", "x"), pair[1]));
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"));
                 cache.Remove(pair[0]);
-                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "removing the loser changes nothing");
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "removing the holder finds the other one");
+
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p1", "x"), pair[0]));
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
                 cache.Remove(pair[1]);
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "removing the other changes nothing");
+                cache.Remove(pair[0]);
                 Assert.That(cache.GetByIndex<VariantGear>("code", "x"), Is.Null);
                 cache.BackingStores[0].PushAll();
             }
@@ -944,6 +944,155 @@ namespace GameCult.Caching.Tests
             Assert.That(narrow.GetStored(new CultRecordKey("drift-variant"))!.Variant!.Overrides.Select(entry => entry.Path[0].Slot), Is.EqualTo(new[] { 0 }),
                 "the dropped slot's override is shed when the record is loaded, not decided again at flush");
             Assert.That(narrow.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Does.Contain(2));
+        }
+
+        // ---- batch 4: linear rule, judge only when a variant is involved, deterministic duplicates, one warning ----
+
+        [CultDocument("tests.variant_counted", "tests.variant_counted.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class CountedGear
+        {
+            public static long CodeReads;
+            [IgnoreMember]
+            private string _code = string.Empty;
+
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            [CultIndex("code")]
+            public string Code
+            {
+                get
+                {
+                    System.Threading.Interlocked.Increment(ref CodeReads);
+                    return _code;
+                }
+                set => _code = value;
+            }
+        }
+
+        // The pin is a count of index-accessor reads, not a clock: linear work doubles with the records, quadratic work quadruples.
+        private long IndexReadsOpening(int records)
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(CountedGear) });
+            var path = PathOf($"counted-{records}.cc");
+            using (var writer = Open(path, registry: registry))
+            {
+                writer.Commit(batch =>
+                {
+                    for (var index = 0; index < records; index++)
+                        batch.Upsert(typeof(CountedGear), new CountedGear { Name = $"n{index}", Code = $"c{index}" }, new CultRecordKey($"k{index}"));
+                });
+                writer.Commit(batch => batch.UpsertVariant(new CultRecordKey("kv"), new CultRecordKey("k0"), new[]
+                {
+                    writer.Override<CountedGear>(nameof(CountedGear.Name), "variant"),
+                    writer.Override<CountedGear>(nameof(CountedGear.Code), "variant-code")
+                }));
+            }
+
+            System.Threading.Interlocked.Exchange(ref CountedGear.CodeReads, 0);
+            using (Open(path, registry: registry))
+                return System.Threading.Interlocked.Read(ref CountedGear.CodeReads);
+        }
+
+        [Test]
+        public void OpeningAStoreWithAVariantReadsEachIndexedValueAFixedNumberOfTimes()
+        {
+            var small = IndexReadsOpening(1000);
+            var large = IndexReadsOpening(2000);
+            Assert.That(large, Is.LessThan(small * 3), $"index reads: {small} at 1000 records, {large} at 2000; doubling the records must not quadruple the work");
+        }
+
+        [Test]
+        public void ASchemaThisCacheDoesNotRegisterDoesNotFailAConditionalCommitThatInvolvesNoVariant()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            var narrow = CultDocumentRegistry.ForTypes(new[] { typeof(VariantGear) });
+            using (var seed = Open(path))
+                SeedBase(seed);
+
+            using (var a = Open(path))
+            using (var b = Open(path, registry: narrow))
+            {
+                a.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "foreign" }, new CultRecordKey("foreign")));
+                Assert.That(b.Commit(batch =>
+                {
+                    batch.Expect(other, null);
+                    batch.Upsert(typeof(VariantGear), Named("other", "fine"), other);
+                }), Is.True);
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get<VariantGear>(other), Is.Not.Null);
+            Assert.That(reopened.Get<VariantOther>(new CultRecordKey("foreign")), Is.Not.Null, "the other writer's record survives the merge");
+        }
+
+        [Test]
+        public void AVariantAnotherWriterLandedIsStillJudgedWhenThisCacheHoldsNoVariant()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path))
+                SeedBase(seed);
+
+            using (var a = Open(path))
+            using (var b = Open(path))
+            {
+                VariantOnCode(a, "shared");
+                Refused(() => b.Commit(batch =>
+                {
+                    batch.Expect(other, null);
+                    batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
+                }));
+            }
+        }
+
+        [Test]
+        public void PlainDuplicatesFindTheSmallestKeyLiveAfterAFlushAndAfterAReopen()
+        {
+            var path = PathOf("gear.cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("nb", "x"), new CultRecordKey("b")));
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("na", "x"), new CultRecordKey("a")));
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "live");
+                cache.BackingStores[0].PushAll();
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "after a flush");
+            }
+
+            using (var reopened = Open(path))
+            {
+                Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "after a reopen");
+                reopened.Remove(new CultRecordKey("a"));
+                reopened.Commit(batch => batch.Upsert(typeof(VariantGear), Named("na", "x"), new CultRecordKey("a")));
+                Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("na"), "rewriting the smaller key does not change the choice");
+            }
+        }
+
+        [Test]
+        public void ADroppedSlotIsReportedOncePerRecord()
+        {
+            var path = PathOf("drift.cc");
+            using (var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) })))
+            {
+                writer.Commit(batch =>
+                {
+                    batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
+                    batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
+                    {
+                        writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                        writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                    });
+                });
+            }
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            var variantReport = narrow.BackingStores[0].LastSchemaMigrationReports.Last();
+            Assert.That(variantReport.Warnings.Count(warning => warning.Code == "ignored_extra_slot"), Is.EqualTo(1));
+            Assert.That(variantReport.IgnoredExtraSlots, Is.EqualTo(new[] { 2 }));
         }
 
         // ---- the directory store refuses a variant page on load as it does on write ----
