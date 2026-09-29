@@ -1255,6 +1255,218 @@ namespace GameCult.Networking.Tests
             Assert.That(Encoding.UTF8.GetString(ReceiveRudpFrame(client).Payload), Is.EqualTo("server still here"));
         }
 
+        private static List<CultNetRudpPacket> DrainPackets(Socket socket)
+        {
+            var packets = new List<CultNetRudpPacket>();
+            var buffer = new byte[65535];
+            EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+            while (socket.Poll(20_000, SelectMode.SelectRead))
+            {
+                var received = socket.ReceiveFrom(buffer, ref from);
+                packets.Add(CultNetRudpPacketCodec.Decode(buffer.AsSpan(0, received).ToArray()));
+            }
+            return packets;
+        }
+
+        /// <summary>A reliable frame no session accepts: a fragment set with no fragment id.</summary>
+        private static CultNetRudpPacket PoisonedFrame(CultNetRudpSession session)
+        {
+            var packet = session.Send("schema", Encoding.UTF8.GetBytes("poison"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
+            packet.FragmentCount = 2;
+            packet.FragmentId = 0;
+            return packet;
+        }
+
+        [Test]
+        public void RudpPacketCodec_TreatsADeclaredLengthPastInt32AsMalformed()
+        {
+            var wire = CultNetRudpPacketCodec.Encode(new CultNetRudpPacket
+            {
+                PacketType = CultNetRudpPacketType.Ack,
+                ConnectionId = 0x10203054,
+                ChannelId = "c"
+            });
+            Assert.That(wire, Has.Length.EqualTo(36));
+            wire[30] = 0x80;
+            wire[31] = 0;
+            wire[32] = 0;
+            wire[33] = 0;
+            Assert.Throws<InvalidOperationException>(() => CultNetRudpPacketCodec.Decode(wire));
+
+            using var connectionSocket = BindUdpSocket();
+            using var listenerSocket = BindUdpSocket();
+            using var senderSocket = BindUdpSocket();
+            using var connection = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-connection",
+                Socket = connectionSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = 0x10203054
+            });
+            using var listener = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+            {
+                RuntimeId = "csharp-rudp-listener",
+                Socket = listenerSocket,
+                ConnectionId = 0x10203054
+            });
+            senderSocket.SendTo(wire, connectionSocket.LocalEndPoint!);
+            senderSocket.SendTo(wire, listenerSocket.LocalEndPoint!);
+            Assert.That(connection.ReceiveOnce(), Is.Null);
+            Assert.That(listener.ReceiveOnce(), Is.Null);
+            Assert.That(connection.Stats.PacketsDropped, Is.EqualTo(1));
+            Assert.That(listener.Stats.PacketsDropped, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpServerMode_IsClaimedOnlyByAConnect()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var orphanSocket = BindUdpSocket();
+            using var clientSocket = BindUdpSocket();
+            const uint connectionId = 0x10203055;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId
+            });
+            using var client = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-client",
+                Socket = clientSocket,
+                Mode = CultNetRudpSocketMode.Client,
+                RemoteEndPoint = serverSocket.LocalEndPoint!,
+                ConnectionId = connectionId
+            });
+            var orphan = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId });
+
+            // A right-id packet that is not a Connect must claim nothing.
+            orphanSocket.SendTo(CultNetRudpPacketCodec.Encode(orphan.CreateAck()), serverSocket.LocalEndPoint!);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(1));
+
+            client.Connect(Encoding.UTF8.GetBytes("join"));
+            PumpRudpHandshake(client, server);
+            Assert.That(client.Connected, Is.True);
+            Assert.That(server.Connected, Is.True);
+        }
+
+        [Test]
+        public void RudpSocketTransport_EndsTheSessionThatRefusesAReliableFrame()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var peerSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203056;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId
+            });
+            var peer = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId });
+
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(peer.CreateConnect(0)), serverEndPoint);
+            server.ReceiveOnce();
+            peer.Receive(DrainPackets(peerSocket).Single(p => p.PacketType == CultNetRudpPacketType.Accept), 0);
+
+            var poison = PoisonedFrame(peer);
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(1));
+            Assert.That(server.Connected, Is.False);
+            Assert.That(server.DisconnectReason, Is.Not.Null);
+
+            // The peer is told, and the goodbye does not acknowledge the refused frame.
+            var goodbye = DrainPackets(peerSocket).Single();
+            Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
+            Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
+            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+
+            // A retransmit is dropped, not acknowledged.
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(2));
+            Assert.That(DrainPackets(peerSocket), Is.Empty);
+
+            // A Connect claims the endpoint again.
+            var again = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId });
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(again.CreateConnect(0)), serverEndPoint);
+            server.ReceiveOnce();
+            Assert.That(DrainPackets(peerSocket).Select(p => p.PacketType), Is.EqualTo(new[] { CultNetRudpPacketType.Accept }));
+        }
+
+        [Test]
+        public void RudpSocketTransportServer_EndsThePeerWhoseReliableFrameItRefuses()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var peerSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203057;
+            using var server = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+            {
+                RuntimeId = "csharp-rudp-listener",
+                Socket = serverSocket,
+                ConnectionId = connectionId
+            });
+            var ended = new List<CultNetRudpSocketServerPeer>();
+            server.PeerDisconnected += ended.Add;
+            var peer = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId });
+
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(peer.CreateConnect(0)), serverEndPoint);
+            server.ReceiveOnce();
+            peer.Receive(DrainPackets(peerSocket).Single(p => p.PacketType == CultNetRudpPacketType.Accept), 0);
+            Assert.That(server.Peers, Has.Count.EqualTo(1));
+
+            var poison = PoisonedFrame(peer);
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(1));
+            Assert.That(server.Peers, Is.Empty);
+            Assert.That(ended, Has.Count.EqualTo(1));
+
+            var goodbye = DrainPackets(peerSocket).Single();
+            Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
+            Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
+            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.Stats.PacketsDropped, Is.EqualTo(2));
+            Assert.That(DrainPackets(peerSocket), Is.Empty);
+        }
+
+        [Test]
+        public void RudpConfiguration_RejectsLimitsThatCannotAdmitAConnect()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 1, InitialSequence = uint.MaxValue }));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 1, MaxPendingReliablePackets = 0 }));
+            Assert.DoesNotThrow(() =>
+                new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 1, InitialSequence = uint.MaxValue - 1, MaxPendingReliablePackets = 1 }));
+
+            using var socket = BindUdpSocket();
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+                {
+                    RuntimeId = "csharp-rudp-listener",
+                    Socket = socket,
+                    ConnectionId = 1,
+                    InitialSequence = uint.MaxValue
+                }));
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+                {
+                    RuntimeId = "csharp-rudp-listener",
+                    Socket = socket,
+                    ConnectionId = 1,
+                    MaxPendingReliablePackets = 0
+                }));
+        }
+
         [Test]
         public void RudpSocketTransport_CarriesCultNetSchemaMessages()
         {

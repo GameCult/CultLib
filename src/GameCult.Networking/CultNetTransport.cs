@@ -664,11 +664,14 @@ namespace GameCult.Networking
                 throw new InvalidOperationException("CultNet RUDP packet header length does not match the channel id length.");
             }
 
-            var payloadLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(wire.AsSpan(30, 4)));
-            if (wire.Length != headerBytes + payloadLength)
+            // Compared as a long: a declared length past int.MaxValue is a malformed packet, not an overflow.
+            var declaredPayloadLength = BinaryPrimitives.ReadUInt32BigEndian(wire.AsSpan(30, 4));
+            if (declaredPayloadLength != (long)wire.Length - headerBytes)
             {
                 throw new InvalidOperationException("CultNet RUDP packet payload length does not match the packet size.");
             }
+
+            var payloadLength = (int)declaredPayloadLength;
 
             var flags = wire[6];
             var payload = new byte[payloadLength];
@@ -923,15 +926,31 @@ namespace GameCult.Networking
         public CultNetRudpSession(CultNetRudpSessionOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
-            if (options.MaxPendingReliablePackets.HasValue && options.MaxPendingReliablePackets.Value <= 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(options), "RUDP MaxPendingReliablePackets must be greater than zero.");
-            }
+            ValidateLimits(options.InitialSequence, options.MaxPendingReliablePackets);
 
             ConnectionId = options.ConnectionId;
             _nextSequence = options.InitialSequence;
             ResendDelayMs = options.ResendDelayMs;
             _maxPendingReliablePackets = options.MaxPendingReliablePackets;
+        }
+
+        internal static readonly byte[] RefusedPacketReason = Encoding.UTF8.GetBytes("session refused a packet");
+
+        /// <summary>
+        /// A session cannot admit a Connect when its sequence space starts exhausted or its reliable
+        /// queue holds nothing, so neither is a usable configuration.
+        /// </summary>
+        internal static void ValidateLimits(uint initialSequence, int? maxPendingReliablePackets)
+        {
+            if (initialSequence == uint.MaxValue)
+            {
+                throw new ArgumentOutOfRangeException(nameof(initialSequence), "RUDP InitialSequence must leave room for a reliable packet.");
+            }
+
+            if (maxPendingReliablePackets.HasValue && maxPendingReliablePackets.Value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxPendingReliablePackets), "RUDP MaxPendingReliablePackets must be greater than zero.");
+            }
         }
 
         /// <summary>
@@ -1235,6 +1254,38 @@ namespace GameCult.Networking
         public CultNetRudpPacket CreatePing(byte[]? payload = null)
         {
             return CreatePacket(CultNetRudpPacketType.Ping, "control", payload ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
+        }
+
+        /// <summary>
+        /// Forgets everything learned from the peer; sequence numbers already issued stay issued.
+        /// </summary>
+        public void ResetPeerState()
+        {
+            _connected = false;
+            _lastReceivedAtMs = null;
+            _highestReceivedSequence = null;
+            _receivedSequences.Clear();
+            _nextSequencedByChannel.Clear();
+            _latestSequencedByChannel.Clear();
+            lock (_pendingReliableGate)
+            {
+                _pendingReliable.Clear();
+                _queuedReliable.Clear();
+            }
+            _orderedNextSequenceByChannel.Clear();
+            _orderedBuffers.Clear();
+            _fragmentBuffers.Clear();
+        }
+
+        /// <summary>
+        /// Ends a session that refused a packet. Receive has already recorded the packet's reliable
+        /// sequence, so the peer's sequences are forgotten before the goodbye is built: its ack field
+        /// would otherwise acknowledge the very frame the session refused.
+        /// </summary>
+        internal CultNetRudpPacket EndRefused()
+        {
+            ResetPeerState();
+            return CreateDisconnect(RefusedPacketReason);
         }
 
         /// <summary>
@@ -2112,6 +2163,13 @@ namespace GameCult.Networking
             }
             if (_remoteEndPoint == null)
             {
+                // Only a Connect claims the endpoint of a server-mode transport.
+                if (_mode == CultNetRudpSocketMode.Server && packet.PacketType != CultNetRudpPacketType.Connect)
+                {
+                    _stats.PacketsDropped++;
+                    return true;
+                }
+
                 _remoteEndPoint = remote;
             }
             else if (!_remoteEndPoint.Equals(remote))
@@ -2150,7 +2208,24 @@ namespace GameCult.Networking
                 }
                 catch (InvalidOperationException)
                 {
+                    // Receive has already recorded the packet's reliable sequence, so the session
+                    // cannot be kept: a retransmit would be acknowledged and the frame silently lost.
+                    // End it and tell the peer; a server-mode transport also forgets its endpoint, so
+                    // only a Connect can claim it again.
                     _stats.PacketsDropped++;
+                    var goodbye = _session.EndRefused();
+                    DisconnectReason = CultNetRudpSession.RefusedPacketReason;
+                    try
+                    {
+                        SendPacket(goodbye);
+                    }
+                    catch (SocketException)
+                    {
+                        // Best effort: the session ends whether or not the peer hears it.
+                    }
+
+                    if (_mode == CultNetRudpSocketMode.Server)
+                        _remoteEndPoint = null;
                     return true;
                 }
                 if (result.Reply != null)
@@ -2388,6 +2463,7 @@ namespace GameCult.Networking
             _socket = options.Socket ?? throw new ArgumentNullException(nameof(options.Socket));
             if (_socket.ReceiveBufferSize < MinimumReceiveBufferBytes)
                 _socket.ReceiveBufferSize = MinimumReceiveBufferBytes;
+            CultNetRudpSession.ValidateLimits(options.InitialSequence, options.MaxPendingReliablePackets);
             _connectionId = options.ConnectionId;
             _initialSequence = options.InitialSequence;
             _resendDelayMs = options.ResendDelayMs;
@@ -2561,25 +2637,51 @@ namespace GameCult.Networking
                 return true;
             }
 
-            CultNetRudpReceiveResult result;
+            CultNetRudpReceiveResult? received;
             CultNetRudpPacket? acknowledgement = null;
             lock (existingPeer.SessionGate)
             {
                 try
                 {
-                    result = existingPeer.Session.Receive(packet, NowMs());
+                    received = existingPeer.Session.Receive(packet, NowMs());
                 }
                 catch (InvalidOperationException)
                 {
+                    // Receive has already recorded the packet's reliable sequence, so the session
+                    // cannot be kept: a retransmit would be acknowledged and the frame silently lost.
                     _stats.PacketsDropped++;
-                    return true;
+                    received = null;
                 }
-                if (result.Reply != null)
-                    SendPacket(existingPeer.RemoteEndPoint, result.Reply);
-                SendPackets(existingPeer, result.ReadyToSend);
-                if (packet.PacketType == CultNetRudpPacketType.Data)
-                    acknowledgement = existingPeer.Session.CreateAckForReceived(packet.Sequence);
+
+                if (received == null)
+                {
+                    try
+                    {
+                        SendPacket(existingPeer.RemoteEndPoint, existingPeer.Session.EndRefused());
+                    }
+                    catch (SocketException)
+                    {
+                        // Best effort: the session ends whether or not the peer hears it.
+                    }
+                }
+                else
+                {
+                    if (received.Reply != null)
+                        SendPacket(existingPeer.RemoteEndPoint, received.Reply);
+                    SendPackets(existingPeer, received.ReadyToSend);
+                    if (packet.PacketType == CultNetRudpPacketType.Data)
+                        acknowledgement = existingPeer.Session.CreateAckForReceived(packet.Sequence);
+                }
             }
+            if (received == null)
+            {
+                existingPeer.DisconnectReason = CultNetRudpSession.RefusedPacketReason;
+                _peers.Remove(peerKey);
+                PeerDisconnected?.Invoke(existingPeer);
+                return true;
+            }
+
+            var result = received;
             if (result.Disconnected)
             {
                 existingPeer.DisconnectReason = result.DisconnectReason;
