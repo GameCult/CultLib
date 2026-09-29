@@ -314,6 +314,21 @@ not closeable, and a fix batch is in Hands:
 **Open for the operator:** plain records with duplicate unique-index values are silently
 overwritten today. That predates variants. Fixing it could refuse existing stores.
 
+**Operator rulings, 2026-09-30:**
+- **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
+  plain records too, so R6-for-indexes becomes one general rule:
+  - a commit that would leave two records holding one indexed value is refused;
+  - a store holding duplicates refuses to load, and the refusal names both keys and the index.
+  - The variant-specific rule `RefuseVariantIndexSharing` collapses into this rule.
+  - Before it ships, every real store is scanned, so no store stops loading by surprise.
+  - The TS/Python last-writer-wins parity gap closes by the same rule when those runtimes
+    adopt it.
+- **CultNet invisibility is a defect** ("looks like a defect to me"): `cache.Commit` and
+  `cache.UpsertAsync` on a database's cache must publish to subscribers and to the mutation
+  log (`CultCache.Publish`'s `if (!loaded) continue;`).
+- **Hop subscriptions keep refusing variants** until CultNet carries deltas (C5): "keep refusing,
+  I guess, CultNet will have deltas by the time we're done here anyway".
+
 ### C2. C# element identity and nested paths (Set, Insert, Remove)
 
 Adds:
