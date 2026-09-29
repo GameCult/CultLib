@@ -11,7 +11,7 @@ namespace GameCult.Caching.MessagePack;
 /// The canonical MessagePack encoding of every public CultMath value type. Each type is an
 /// array of its components in declaration order: vectors and quaternions are flat scalar
 /// arrays, matrices are arrays of row vectors, and <c>rect</c> is <c>[min, max]</c>. Decoding
-/// skips trailing elements and leaves missing ones at zero; nil is refused. The resolver is
+/// skips trailing elements and leaves missing ones at zero (a missing Color32 alpha is 255); nil is refused. The resolver is
 /// part of the default <see cref="CultDocumentMessagePackSerialization"/> chain, so a consumer
 /// registers nothing.
 /// </summary>
@@ -49,7 +49,6 @@ public sealed class CultMathResolver : IFormatterResolver
 
         public T Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
         {
-            if (reader.IsNil) throw new MessagePackSerializationException($"{typeof(T).Name} cannot be read from nil.");
             return read(ref reader);
         }
     }
@@ -171,7 +170,7 @@ public sealed class CultMathResolver : IFormatterResolver
             Shape<quaternion>((ref MessagePackWriter w, quaternion v) => Put(ref w, stackalloc float[] { v.x, v.y, v.z, v.w }),
                 (ref MessagePackReader r) => { Span<float> s = stackalloc float[4]; Singles(ref r, s); return new quaternion(s[0], s[1], s[2], s[3]); }),
             Shape<Color32>((ref MessagePackWriter w, Color32 v) => Put(ref w, stackalloc byte[] { v.r, v.g, v.b, v.a }),
-                (ref MessagePackReader r) => { Span<byte> s = stackalloc byte[4]; Bytes(ref r, s); return new Color32(s[0], s[1], s[2], s[3]); }),
+                (ref MessagePackReader r) => { Span<byte> s = stackalloc byte[4]; s[3] = 255; Bytes(ref r, s); return new Color32(s[0], s[1], s[2], s[3]); }),
             Shape<Random>((ref MessagePackWriter w, Random v) => { w.WriteArrayHeader(1); w.Write(v.state); },
                 (ref MessagePackReader r) =>
                 {

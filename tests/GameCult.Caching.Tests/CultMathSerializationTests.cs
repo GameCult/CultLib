@@ -5,7 +5,10 @@ using FluentAssertions;
 using GameCult.Caching.MessagePack;
 using CultMath;
 using MessagePack;
+using MessagePack.Formatters;
 using NUnit.Framework;
+
+[assembly: CultCacheFormatterResolver(typeof(GameCult.Caching.Tests.CultMathSerializationTests.Float2Override))]
 
 namespace GameCult.Caching.Tests
 {
@@ -106,6 +109,61 @@ namespace GameCult.Caching.Tests
             Hex(new float2x2(1f, 2f, 3f, 4f)).Should().Be("9292CA3F800000CA4000000092CA40400000CA40800000");
         }
 
+
+        [Test]
+        public void EveryShape_IsPinnedByteForByte()
+        {
+            Hex(new double2(1d, 2d)).Should().Be("92CB3FF0000000000000CB4000000000000000");
+            Hex(new double3(1d, 2d, 3d)).Should().Be("93CB3FF0000000000000CB4000000000000000CB4008000000000000");
+            Hex(new int3(1, -2, 3)).Should().Be("9301FE03");
+            Hex(new int4(1, 2, 3, -1)).Should().Be("94010203FF");
+            Hex(new bool3(true, false, true)).Should().Be("93C3C2C3");
+            Hex(new bool4(false, true, true, false)).Should().Be("94C2C3C3C2");
+            Hex(new quaternion(1f, 2f, 3f, 4f)).Should().Be("94CA3F800000CA40000000CA40400000CA40800000");
+            Hex(new Color32(255, 128, 0, 7)).Should().Be("94CCFFCC800007");
+            Hex(new CultMath.Random(12345u)).Should().Be("91CD3039");
+            Hex(new float3x3(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f)).Should().Be(
+                "93" +
+                "93CA3F800000CA40000000CA40400000" +
+                "93CA40800000CA40A00000CA40C00000" +
+                "93CA40E00000CA41000000CA41100000");
+            Hex(new CultCellular(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f), 0.25f)).Should().Be(
+                "93" +
+                "94CA3F800000CA40000000CA40400000CA40800000" +
+                "94CA40A00000CA40C00000CA40E00000CA41000000" +
+                "CA3E800000");
+        }
+
+        [Test]
+        public void Color32_MissingAlphaDecodesAsOpaque()
+        {
+            Decode<Color32>("93CCFFCC8000").Should().Be(new Color32(255, 128, 0, 255));
+            Decode<Color32>("94CCFFCC800007").Should().Be(new Color32(255, 128, 0, 7));
+        }
+
+        [Test]
+        public void ConsumerResolvers_WinOverCultMathResolver()
+        {
+            var overridden = CultDocumentMessagePackSerialization.OptionsFor(typeof(Float2Override).Assembly);
+
+            MessagePackSerializer.Serialize(new float2(1f, 2f), overridden).Should().Equal(0xC3);
+            Hex(new float2(1f, 2f)).Should().Be("92CA3F800000CA40000000");
+        }
+
+        public sealed class Float2Override : IFormatterResolver
+        {
+            public static readonly Float2Override Instance = new();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() =>
+                typeof(T) == typeof(float2) ? (IMessagePackFormatter<T>)(object)Formatter.Instance : null;
+
+            private sealed class Formatter : IMessagePackFormatter<float2>
+            {
+                public static readonly Formatter Instance = new();
+                public void Serialize(ref MessagePackWriter writer, float2 value, MessagePackSerializerOptions options) => writer.Write(true);
+                public float2 Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) => throw new NotSupportedException();
+            }
+        }
         [Test]
         public void EveryPublicCultMathValueType_HasAFormatter()
         {
