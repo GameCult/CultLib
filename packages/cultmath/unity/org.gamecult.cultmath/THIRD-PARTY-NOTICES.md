@@ -19,3 +19,18 @@ permutation and scale as `snoise(float3)`.
 - Copyright 2011 Ashima Arts.
 - Upstream: <https://github.com/ashima/webgl-noise>
 - License: MIT.
+
+## Phacelle Noise
+
+`math.phacelle` and `cultmath_phacelle` follow Rune Skovbo Johansen's Phacelle
+noise (Shadertoy `t3dyWl`; erosion filter `wXcfWn`; blog, March 2026), read
+from the C# port `PhacelleNoise` in `lpmitchell/AdvancedTerrainErosion`
+(`AdvancedTerrainErosion.cs`, converted to burstable C# by Luke Mitchell,
+2026). The cell weight, the phase blend and the normalization follow it. The
+3D-cell generalisation, the caller-supplied stripe wave vector, the exact
+gradient and the exact pruning are new here.
+
+- Copyright (c) 2025 Rune Skovbo Johansen.
+- Upstream: <https://github.com/lpmitchell/AdvancedTerrainErosion>
+- License: MPL-2.0 (<https://mozilla.org/MPL/2.0/>). CultMath's Unity package
+  is MPL-2.0, so the licence is compatible.
