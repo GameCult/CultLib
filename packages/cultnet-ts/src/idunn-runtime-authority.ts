@@ -29,6 +29,8 @@ const PROVIDER_PROTECTOR_CONTEXT = "gamecult-provider-health-identity-v1";
 const ACTIVATION_ID_DOMAIN = Buffer.from("idunn.runtime-activation.id.v1\0", "utf8");
 const CULTCACHE_STORE_FORMAT = "cultcache.store.v1";
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+// Limit: more than this many warmings signed between Idunn's observation and
+// assertWriteLease would push the leased one out and refuse a valid lease.
 const MAX_RECENT_WARMING_PROOFS = 64;
 const authoritiesWithSigner = new WeakSet<object>();
 const authorityKeys = new WeakMap<object, { providerPrivateKey: crypto.KeyObject; activationPrivateKey: crypto.KeyObject }>();
@@ -195,7 +197,7 @@ export function loadIdunnRuntimeAuthorityFromEnvironment(
  * Signs the fixed Idunn v2 positional runtime-presence contract with the
  * provider identity and this launch's Idunn-issued activation key.
  */
-export function signIdunnRuntimePresence(
+function signIdunnRuntimePresence(
   authority: IdunnRuntimeAuthority,
   fields: Omit<RuntimePresenceHealth, "target" | "expectedProjectionSha256" | "planId" | "incarnationId" | "sealedReleaseId" | "activationWitnessSha256" | "stateSchemaGeneration" | "stateContractSha256" | "runtimeId" | "runtimeInstanceId" | "boundEndpoint" | "healthContract" | "signerIdentityId" | "activationSignerIdentityId">,
 ): { presence: RuntimePresenceHealth; payload: Uint8Array; canonicalSha256: string } {

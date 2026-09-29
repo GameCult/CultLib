@@ -386,4 +386,6 @@ test("the idunn-runtime subpath loads the signer and loader without loading dgra
   assert.equal(typeof exported.createIdunnRuntimeSigner, "function");
   assert.equal(typeof exported.loadIdunnRuntimeAuthorityFromEnvironment, "function");
   assert.equal(exported.createIdunnRuntimePresencePublisher, undefined);
+  assert.equal(exported.signIdunnRuntimePresence, undefined);
+  assert.equal((require("cultnet-ts") as Record<string, unknown>).signIdunnRuntimePresence, undefined);
 });

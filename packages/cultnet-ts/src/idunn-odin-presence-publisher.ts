@@ -15,6 +15,11 @@ export type IdunnRuntimePresencePublisher = {
   readonly requiresWriteLease: boolean;
   /** Publishes the signer's presence in the health the signer reports. */
   publish(detail: string): Promise<string>;
+  /**
+   * Publishes warming presence until Idunn's lease names one. Call it before
+   * `reportHealth('active')`: once the signer reports a non-warming health,
+   * `publish` inside this loop throws (it needs the lease) instead of polling.
+   */
   waitForWriteLease(options?: { pollIntervalMs?: number; signal?: AbortSignal }): Promise<string>;
   assertWriteLease(): Promise<string>;
 };
