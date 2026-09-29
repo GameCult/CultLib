@@ -50,8 +50,10 @@ which route wrote it.
   `OnUpdate(previous, current)` carries none. CultNet derives its
   streams (`CultNetDatabase.WatchAllChanges`, the subscription server,
   database-backed Mesh handles) from `Watch`, so a load, a commit and a variant
-  dependent's re-resolution all reach subscribers and the mutation log; a
-  database write door publishes its own change, at its own key, itself. The
+  dependent's re-resolution all reach subscribers and the mutation log through
+  one handler over `Watch`; a database write door only hands that handler the
+  wire message or replicated entry for the change it admitted. A replica
+  publishes but never mints log sequences. The
   streams carry no `Sequence` and have no stale protection.
 - `GetWithSequence(key)` returns the document and the cache's current
   `Sequence`, read together under the gate: every change with a `Sequence` at
