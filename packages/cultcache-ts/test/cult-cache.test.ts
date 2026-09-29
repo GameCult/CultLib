@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
@@ -1511,6 +1511,28 @@ async function copyVector(directory: string, source: string, name: string): Prom
   await writeFile(file, await readFile(source));
   return file;
 }
+
+test("SingleFileMessagePackBackingStore pushAll applies the header the file on disk carries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-pushall-"));
+  const header = async (file: string) => (decode(await readFile(file)) as unknown[])[0];
+
+  // A store that never read the file still keeps a marked file marked.
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const envelopes = await new SingleFileMessagePackBackingStore(v3).pullAll();
+  await new SingleFileMessagePackBackingStore(v3).pushAll(envelopes);
+  assert.equal(await header(v3), "cultcache.store.v3");
+
+  // A store that read a marked file, whose file is then gone, writes unmarked: the disk decides, not the last read.
+  const reader = new SingleFileMessagePackBackingStore(v3);
+  await reader.pullAll();
+  await rm(v3);
+  await reader.pushAll(envelopes);
+  assert.equal(await header(v3), "cultcache.store.v1");
+
+  const v1 = await copyVector(dir, join(variantVectors, "v1-base.msgpack"), "v1.msgpack");
+  await new SingleFileMessagePackBackingStore(v1).pushAll(envelopes);
+  assert.equal(await header(v1), "cultcache.store.v1");
+});
 
 test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrite keeps the marker", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-"));

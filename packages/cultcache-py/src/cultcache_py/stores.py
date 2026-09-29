@@ -95,6 +95,8 @@ class SingleFileMessagePackBackingStore:
     def pull_all(self) -> list[CultCacheEnvelope]:
         msgpack = self._msgpack()
         with self._lock:
+            # The disk decides the header: a file that is gone or empty is not marked.
+            self._format = STORE_FORMAT_VERSION
             if not self.path.exists():
                 return []
             data = self.path.read_bytes()

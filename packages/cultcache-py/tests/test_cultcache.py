@@ -863,6 +863,18 @@ class CultCacheTests(unittest.TestCase):
     def test_single_file_rewrite_of_a_v1_store_stays_v1(self) -> None:
         self.assertEqual(self._header_after_rewrite(self._VECTORS / "v1-base.msgpack"), "cultcache.store.v1")
 
+    def test_single_file_flush_after_the_marked_file_is_gone_writes_unmarked(self) -> None:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes((self._C2A_VECTORS / "v3-base.msgpack").read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            store_path.unlink()
+            store.push_all(envelopes)
+            self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
+
 
 if __name__ == "__main__":
     unittest.main()

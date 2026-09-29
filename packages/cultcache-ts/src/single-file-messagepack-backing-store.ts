@@ -140,8 +140,25 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
         }
       }
 
+      // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
+      // stays marked, and one that is not (or is gone) is written unmarked.
+      await this.#readDiskFormat();
       await this.#writeAll(entries);
     });
+  }
+
+  async #readDiskFormat(): Promise<void> {
+    try {
+      const data = await readFile(this.filePath);
+      const decoded = data.length === 0 ? undefined : decode(data);
+      this.#format = isStoreSnapshot(decoded) ? decoded[0] : STORE_FORMAT_VERSION;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+
+      this.#format = STORE_FORMAT_VERSION;
+    }
   }
 
   async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
