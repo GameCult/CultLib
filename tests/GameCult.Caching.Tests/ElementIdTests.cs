@@ -749,6 +749,15 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
+
+            // Reloaded, the variant is the record the store keeps: a whole-store flush beside an empty deck still marks the file.
+            using (var cache = Open(withIds))
+            {
+                cache.UpsertAsync(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
         }
 
         [Test]
