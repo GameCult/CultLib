@@ -4,6 +4,10 @@ at test time. Run: python generate.py  (needs msgpack).
 
   unknown-header.msgpack          header cultcache.store.v9, otherwise the v1 store
   extra-slot-full-payload.msgpack v1 header, record item:anvil gains slot 4, payload stays full
+  legacy-catalog-extra-slot.msgpack
+                                  v1 header, catalog entry in the older layout (contentHash at slot
+                                  5), so CultMesh's legacy snapshot reader takes it, plus the
+                                  extra-slot record
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
@@ -32,3 +36,6 @@ write("extra-slot-full-payload.msgpack",
       [header, catalog, [anvil + [["item:bellows", []]]] + records[1:]])
 variant = ["item:anvil-big", anvil[1], anvil[2], b"", ["item:anvil", [[0, [[1, ""]], "", 99]]]]
 write("variant-v2.msgpack", ["cultcache.store.v2", catalog, records + [variant]])
+legacy_entry = [catalog[0][0], catalog[0][1], catalog[0][2], catalog[0][4], None, catalog[0][3], []]
+write("legacy-catalog-extra-slot.msgpack",
+      [header, [legacy_entry], [anvil + [["item:bellows", []]]]])

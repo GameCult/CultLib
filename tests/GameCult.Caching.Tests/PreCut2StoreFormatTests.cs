@@ -97,7 +97,7 @@ namespace GameCult.Caching.Tests
             throw new FileNotFoundException($"Shared vector {name} not found above {TestContext.CurrentContext.TestDirectory}.");
         }
 
-        private static async Task<string> PullRefusalAsync(string vector)
+        private static string Refusal(string vector)
         {
             var root = Path.Combine(Path.GetTempPath(), $"cultlib-vector-{Guid.NewGuid():N}");
             Directory.CreateDirectory(root);
@@ -106,8 +106,7 @@ namespace GameCult.Caching.Tests
                 var file = Path.Combine(root, "store.msgpack");
                 File.Copy(VectorPath(vector), file);
                 using var cache = new CultCache();
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
-                var error = Assert.CatchAsync(async () => await cache.PullAllBackingStoresAsync());
+                var error = Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)));
                 Assert.That(error, Is.Not.Null);
                 Assert.That(error!.ToString(), Does.Contain(nameof(NotSupportedException)));
                 return error.ToString();
@@ -119,24 +118,34 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public async Task SingleFileRefusesUnknownHeaderByName()
+        public void SingleFileRefusesUnknownHeaderByName()
         {
-            Assert.That(await PullRefusalAsync("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
+            Assert.That(Refusal("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
         }
 
         [Test]
-        public async Task SingleFileRefusesExtraRecordSlotNamingTheRecord()
+        public void SingleFileRefusesExtraRecordSlotNamingTheRecord()
         {
-            var message = await PullRefusalAsync("extra-slot-full-payload.msgpack");
+            var message = Refusal("extra-slot-full-payload.msgpack");
             Assert.That(message, Does.Contain("item:anvil"));
             Assert.That(message, Does.Contain(ItemSchemaId));
         }
 
         [Test]
-        public async Task SingleFileRefusesVariantStoreByVersionOrRecord()
+        public void SingleFileRefusesVariantStoreByVersionOrRecord()
         {
-            Assert.That(await PullRefusalAsync("variant-v2.msgpack"),
+            Assert.That(Refusal("variant-v2.msgpack"),
                 Does.Contain("cultcache.store.v2").Or.Contain("item:anvil-big"));
+        }
+
+        [Test]
+        public void SnapshotWithoutAFormatVersionIsRefusedNotDefaultedToV1()
+        {
+            // [nil, [], []]
+            var bytes = new byte[] { 0x93, 0xc0, 0x90, 0x90 };
+
+            Assert.That(() => CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes),
+                Throws.TypeOf<NotSupportedException>().With.Message.Contains("format version"));
         }
 
         [Test]

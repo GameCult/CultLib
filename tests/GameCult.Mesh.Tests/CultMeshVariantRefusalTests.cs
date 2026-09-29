@@ -39,6 +39,13 @@ public sealed class CultMeshVariantRefusalTests
     }
 
     [Test]
+    public void ReadSingleFileDocument_RefusesExtraRecordSlotInTheLegacyCatalogLayoutToo()
+    {
+        var message = Refusal("legacy-catalog-extra-slot.msgpack").Message;
+        message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
+    }
+
+    [Test]
     public void ReadSingleFileDocument_RefusesVariantStoreByVersionOrRecord()
     {
         var message = Refusal("variant-v2.msgpack").Message;
