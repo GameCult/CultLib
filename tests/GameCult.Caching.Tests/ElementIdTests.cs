@@ -225,6 +225,65 @@ namespace GameCult.Caching.Tests
             Assert.That(perElement, Is.EqualTo(13.0), "1 byte of string header and 12 of id; the element's array header does not grow");
         }
 
+        [Test]
+        public void AnOverrideValueGetsItsIdsMintedAndItsDuplicatesRefused()
+        {
+            using var cache = Open(PathOf("override.cc"));
+            var reels = new List<IdReel> { new() { Label = "a" }, new() { Label = "a" } };
+            cache.Override<IdDeck>(nameof(IdDeck.Reels), reels);
+            Assert.That(reels.Select(reel => reel.Id), Has.All.Not.Empty);
+            Assert.That(reels[0].Id, Is.Not.EqualTo(reels[1].Id));
+            var dup = new List<IdReel> { new() { Id = "z" }, new() { Id = "z" } };
+            Assert.Throws<InvalidOperationException>(() => cache.Override<IdDeck>(nameof(IdDeck.Reels), dup));
+        }
+
+        [Test]
+        public void ARemovedPreIdRecordIsNotRewrittenByMintElementIds()
+        {
+            var path = PathOf("removed.cc");
+            WritePreIdStore(path, null, ("a", "a", 1), ("b", "b", 1));
+            using var cache = Open(path);
+            cache.Commit(batch => batch.Remove(new CultRecordKey("a")));
+            Assert.That(cache.MintElementIds(), Is.EqualTo(1), "only the survivor is listed; the removed record is not resurrected");
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("a")), Is.Null);
+        }
+
+        [Test]
+        public void ADerivedIdIsTheSourceTextNeverRandomAndItsDuplicatesAreRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(SpanDoc) });
+            SpanDoc Make() => new() { Name = "s", Spans = { new IdSpan { Offset = 0, Size = 4 }, new IdSpan { Offset = 262144, Size = 4 } } };
+            var first = Make();
+            var second = Make();
+            using (var cache = CultCacheMessagePack.Create(PathOf("span1.cc"), new CultCacheOpenOptions { Registry = registry }))
+                cache.Commit(batch => batch.Upsert(typeof(SpanDoc), first, new CultRecordKey("s")));
+            using (var cache = CultCacheMessagePack.Create(PathOf("span2.cc"), new CultCacheOpenOptions { Registry = registry }))
+                cache.Commit(batch => batch.Upsert(typeof(SpanDoc), second, new CultRecordKey("s")));
+            Assert.That(first.Spans.Select(span => span.Id), Is.EqualTo(new[] { "0", "262144" }));
+            Assert.That(MessagePackSerializer.Serialize(second), Is.EqualTo(MessagePackSerializer.Serialize(first)), "the same content encodes to the same bytes");
+
+            var twice = new SpanDoc { Name = "t", Spans = { new IdSpan { Offset = 7 }, new IdSpan { Offset = 7 } } };
+            using var refusing = CultCacheMessagePack.Create(PathOf("span3.cc"), new CultCacheOpenOptions { Registry = registry });
+            var refusal = Assert.Throws<InvalidOperationException>(() => refusing.Commit(batch => batch.Upsert(typeof(SpanDoc), twice, new CultRecordKey("t"))))!;
+            Assert.That(refusal.Message, Does.Contain("'7'"));
+        }
+
+        [CultDocument("tests.element_id_span_doc", "tests.element_id_span_doc.v1")]
+        [MessagePackObject]
+        public sealed class SpanDoc
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public List<IdSpan> Spans { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public sealed class IdSpan
+        {
+            [Key(0)] public long Offset { get; set; }
+            [Key(1)] public int Size { get; set; }
+            [Key(2)] [CultElementId(nameof(Offset))] public string Id { get; set; } = "";
+        }
+
         [MessagePackObject]
         public sealed class IdMark
         {

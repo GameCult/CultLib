@@ -12,9 +12,18 @@ namespace GameCult.Caching
 {
     // The identity of one element of an object list. A string member, keyed like any other, on every object type that
     // sits in a list of a registered document type (union bases included: subclasses inherit the member).
+    // [CultElementId(nameof(Offset))] declares the id derived, never random: an unset id becomes the invariant-culture text of
+    // that member (a keyed string or number on the same type, unique within its list). Content-addressed elements use it so the
+    // same content always encodes to the same bytes.
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, Inherited = true, AllowMultiple = false)]
     public sealed class CultElementIdAttribute : Attribute
     {
+        public CultElementIdAttribute(string? derivedFrom = null)
+        {
+            DerivedFrom = derivedFrom;
+        }
+
+        public string? DerivedFrom { get; }
     }
 
     // The one owner of element identity: which types need an id, and how unset ids are filled.
@@ -29,6 +38,7 @@ namespace GameCult.Caching
         {
             public Func<object, string?>? GetId;
             public Action<object, string>? SetId;
+            public Func<object, string>? Derive;
             public (int Slot, Func<object, object?> Get)[] Walk = Array.Empty<(int, Func<object, object?>)>();
         }
 
@@ -97,6 +107,17 @@ namespace GameCult.Caching
                 return $"declares [CultElementId] on {id.Name}, which has no integer [Key], so it is never persisted.";
             if (id is PropertyInfo { SetMethod: null } or FieldInfo { IsInitOnly: true })
                 return $"declares [CultElementId] on {id.Name}, which cannot be assigned; the cache mints into it.";
+            var source = id.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom;
+            if (source != null)
+            {
+                var from = MembersOf(element).FirstOrDefault(member => member.Name == source);
+                if (from == null || KeyOf(from) == null)
+                    return $"derives its [CultElementId] from {source}, which is not a keyed member of the type.";
+                var kind = Nullable.GetUnderlyingType(TypeOf(from)) ?? TypeOf(from);
+                if (kind != typeof(string) && !kind.IsPrimitive)
+                    return $"derives its [CultElementId] from {source}, which is not a string or a number.";
+            }
+
             return null;
         }
 
@@ -149,13 +170,19 @@ namespace GameCult.Caching
                     if (item == null)
                         continue;
                     var itemPath = path + "/" + index;
-                    if (IsObjectType(item.GetType()) && ShapeOf(item.GetType()) is { SetId: { } set, GetId: { } get })
+                    if (IsObjectType(item.GetType()) && ShapeOf(item.GetType()) is { SetId: { } set, GetId: { } get } itemShape)
                     {
                         if (string.IsNullOrEmpty(get(item)))
                         {
                             count++;
                             if (!dryRun)
-                                set(item, Mint(itemPath, deterministic, rootPath, taken));
+                            {
+                                var id = itemShape.Derive?.Invoke(item) ?? Mint(itemPath, deterministic, rootPath, taken);
+                                if (itemShape.Derive != null && !taken.Add(id) && refuseDuplicates)
+                                    throw new InvalidOperationException(
+                                        $"Element id '{id}' appears twice in one list ({path}); an element id is unique within its list.");
+                                set(item, id);
+                            }
                         }
                     }
 
@@ -209,6 +236,9 @@ namespace GameCult.Caching
             {
                 shape.GetId = idMember is FieldInfo field ? o => (string?)field.GetValue(o) : o => (string?)((PropertyInfo)idMember).GetValue(o);
                 shape.SetId = idMember is FieldInfo f ? (o, v) => f.SetValue(o, v) : (o, v) => ((PropertyInfo)idMember).SetValue(o, v);
+                if (idMember.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom is { } source &&
+                    MembersOf(type).FirstOrDefault(member => member.Name == source) is { } from)
+                    shape.Derive = o => Convert.ToString(from is FieldInfo ff ? ff.GetValue(o) : ((PropertyInfo)from).GetValue(o), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
             }
 
             shape.Walk = KeyedMembers(type)

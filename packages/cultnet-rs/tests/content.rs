@@ -547,6 +547,7 @@ fn chunk_ref(hash: &str, offset: i64, size: i32) -> cultnet_rs::CultMeshCdnChunk
         offset,
         size_bytes: size,
         record_key: String::new(),
+        id: offset.to_string(),
     }
 }
 
