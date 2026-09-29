@@ -17,6 +17,15 @@ Install version `1.0.57` through Unity Package Manager with:
 https://github.com/GameCult/CultLib.git?path=/unity/org.gamecult.cultlib#cultlib-unity-v1.0.57
 ```
 
+The package depends on `org.gamecult.cultmath` (0.3.0 or later) and does not
+carry its own `CultMath.dll`. Unity Package Manager resolves git packages only
+from the project manifest, so add CultMath beside CultLib in
+`Packages/manifest.json`:
+
+```text
+"org.gamecult.cultmath": "https://github.com/GameCult/CultLib.git?path=/packages/cultmath/unity/org.gamecult.cultmath#cultmath-unity-v0.3.0"
+```
+
 CultMesh chooses mapped memory for reachable same-machine bodies and advertised
 QUIC for remote realtime state. Applications register the packaged
 `CultMeshNativeQuicRealtimeTransportConnector`; they do not load or configure

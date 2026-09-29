@@ -128,6 +128,19 @@ $expectedAssemblies = @(
   "System.Text.Json.dll",
   "System.Threading.Channels.dll"
 )
+# Assemblies the package references but never ships: org.gamecult.cultmath owns CultMath.dll, and the
+# package.json dependency delivers it. A second copy in Runtime\Plugins would be a duplicate assembly.
+$externalAssemblies = @("CultMath.dll")
+$asmdef = Get-Content -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.CultLib.asmdef") -Raw | ConvertFrom-Json
+$referencedAssemblies = @($asmdef.precompiledReferences | Sort-Object)
+$declaredAssemblies = @($expectedAssemblies + $externalAssemblies | Sort-Object)
+if (($referencedAssemblies -join "|") -ne ($declaredAssemblies -join "|")) {
+  throw "GameCult.CultLib.asmdef precompiledReferences differ from the shipped plus external assembly lists."
+}
+$cultMathDependency = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
+if ([string]::IsNullOrWhiteSpace($cultMathDependency)) {
+  throw "package.json must declare org.gamecult.cultmath, which supplies CultMath.dll."
+}
 $publishedByName = @{}
 foreach ($assembly in Get-ChildItem -LiteralPath $publishRoot -Filter "*.dll") {
   $publishedByName[$assembly.Name] = $assembly
@@ -152,6 +165,11 @@ foreach ($assemblyName in $expectedAssemblies) {
   $pdb = [System.IO.Path]::ChangeExtension($assembly.FullName, ".pdb")
   if (Test-Path -LiteralPath $pdb) {
     Copy-Item -LiteralPath $pdb -Destination $pluginRoot
+  }
+}
+foreach ($external in $externalAssemblies) {
+  if (Test-Path -LiteralPath (Join-Path $pluginRoot $external)) {
+    throw "CultLib Unity package must not ship $external; org.gamecult.cultmath owns it."
   }
 }
 $nativePluginRoot = Join-Path $pluginRoot "x86_64"
