@@ -163,6 +163,70 @@ public sealed class NoiseGradTests
     private static void AssertWithinTolerance(float expected, float actual, float tolerance) =>
         Assert.True(MathF.Abs(expected - actual) <= tolerance, $"expected {expected}, actual {actual}, tolerance {tolerance}");
 
+    // ---- snoise is continuous across simplex-cell boundaries ----
+
+    // The simplex corner set (i, i1, i2) summed by snoise(float3), derived the same way snoise does.
+    private static (float3 i, float3 i1, float3 i2) SimplexCell(float3 p)
+    {
+        var i = math.floor(p + math.dot(p, new float3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f)));
+        var x0 = p - i + math.dot(i, new float3(1.0f / 6.0f, 1.0f / 6.0f, 1.0f / 6.0f));
+        var g = math.step(new float3(x0.y, x0.z, x0.x), x0);
+        var l = 1.0f - g;
+        var lzxy = new float3(l.z, l.x, l.y);
+        return (i, math.min(g, lzxy), math.max(g, lzxy));
+    }
+
+    [Fact]
+    public void SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries()
+    {
+        // March random lines in steps of 1e-3 until the corner set changes, bisect the crossing to
+        // float precision, and compare the two sides. With a kernel radius^2 above 0.5 a lattice
+        // vertex outside the four summed corners can lie inside the kernel, which leaves a value
+        // jump at the boundary (stegu/webgl-noise fixed it in 21d9fe23d7); at 0.5 the jump is float
+        // noise. A value jump below 1e-5 and a gradient jump below 1e-4 is float noise on both sides.
+        const int lines = 400;
+        const int maxSteps = 20000;
+        const float dt = 1.0e-3f;
+        var random = new System.Random(0x5EA4);
+        var crossings = 0;
+        var maxValueJump = 0.0f;
+        var maxGradientJump = 0.0f;
+        for (var line = 0; line < lines; line++)
+        {
+            var origin = RandomPoint(random);
+            var direction = math.normalize(new float3(
+                random.NextSingle() - 0.5f, random.NextSingle() - 0.5f, random.NextSingle() - 0.5f));
+            var start = SimplexCell(origin);
+            var t = 0.0f;
+            var found = false;
+            for (var step = 0; step < maxSteps && !found; step++)
+            {
+                t += dt;
+                found = !SimplexCell(origin + direction * t).Equals(start);
+            }
+
+            Assert.True(found, $"line {line} never left its simplex cell in {maxSteps} steps");
+
+            double lo = t - dt;
+            double hi = t;
+            for (var bisect = 0; bisect < 60; bisect++)
+            {
+                var mid = 0.5 * (lo + hi);
+                if (SimplexCell(origin + direction * (float)mid).Equals(start)) lo = mid; else hi = mid;
+            }
+
+            var a = math.snoise_grad(origin + direction * (float)lo);
+            var b = math.snoise_grad(origin + direction * (float)hi);
+            crossings++;
+            maxValueJump = MathF.Max(maxValueJump, MathF.Abs(a.w - b.w));
+            maxGradientJump = MathF.Max(maxGradientJump, MathF.Max(MathF.Abs(a.x - b.x), MathF.Max(MathF.Abs(a.y - b.y), MathF.Abs(a.z - b.z))));
+        }
+
+        Assert.Equal(lines, crossings);
+        Assert.True(maxValueJump < 1.0e-5f, $"value jump {maxValueJump} across a simplex boundary");
+        Assert.True(maxGradientJump < 1.0e-4f, $"gradient jump {maxGradientJump} across a simplex boundary");
+    }
+
     // ---- snoise_grad.w vs snoise ----
 
     [Fact]
