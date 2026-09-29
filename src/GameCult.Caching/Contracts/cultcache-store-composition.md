@@ -74,6 +74,22 @@ which route wrote it.
 - Not stale-protected: schema-alias handles (`AsSchemaAlias`) get no
   `Sequence`; removals do not advance a mirror's applied `Sequence`, and the
   mirrors do not surface removals.
+- `AddJournal` registers an ordered admission journal, for audit, replication or
+  a derived index. The cache calls each journal under its gate, right after an
+  admission is applied and before that admission is published, once per
+  admission that changed something, with that admission's changes (a variant
+  re-resolved by a base edit included) in `Sequence` order. Journals of one cache
+  run in registration order, and reading the cache from one sees the new state.
+  Because the gate serializes admissions, the calls of one cache see contiguous,
+  strictly increasing `Sequence` values: a journal is the one place where cache
+  order is a fact, and delivery order is not. A refused admission, or one a store
+  declines, is not journaled. Disposing the registration removes the journal.
+- A journal that throws does not undo the admission: the remaining journals
+  still run, the change is published, and the exception is rethrown to the
+  writer after publication, with the same aggregation as an observer's. The
+  journal stays registered. Any hold on the cache while a journal runs throws
+  `InvalidOperationException`: a journal must not write to the cache or
+  register another journal.
 - An `OnUpdate` handler exception is rethrown to that caller after all of that
   call's changes are delivered (an `AggregateException` if several threw). If
   the call itself failed, its own exception is rethrown and handler exceptions
@@ -103,6 +119,11 @@ which route wrote it.
   cache takes that cache's gate as its own lock, so a store's load callback into
   the cache cannot take the two out of order. A store must not call `Loaded`
   while holding its own lock outside the cache's hold.
+- A journal runs under the cache's gate, so a slow journal slows every writer of
+  that cache. It must not enter the cache, and must not wait for anything that
+  needs the cache or its gate: another thread's write, a lock a writer holds.
+  Its own leaf locks, taken only inside the journal, are the only locks that may
+  nest under the gate.
 - A thread holds one cache's gate at a time: entering a cache's hold inside
   another cache's hold throws.
 - A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,
