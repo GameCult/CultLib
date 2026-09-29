@@ -361,7 +361,7 @@ namespace GameCult.Caching.Tests
 
         public abstract class InspectLabeledBase
         {
-            [CultInspectorLabel("Base Label")]
+            [Key(1)] [CultInspectorLabel("Base Label")]
             public abstract string Tag { get; set; }
         }
 
