@@ -561,7 +561,7 @@ namespace GameCult.Caching
             CultInspectorGrouping Refused(string reason) =>
                 new CultInspectorGrouping(listed, Array.Empty<CultInspectorMember>(), $"[CultInspectorGroupBy] on {listed.Name}: {reason} The list is not grouped.");
 
-            if (listed.GetCustomAttribute<CultGlobalAttribute>(true) != null)
+            if (listed.GetCustomAttribute<CultGlobalAttribute>() != null)
                 return Refused("a global document is never grouped.");
             var members = new List<CultInspectorMember>();
             foreach (var name in declared.Members)

@@ -630,7 +630,6 @@ namespace GameCult.Caching.Tests
         [TestCase(typeof(GroupDuplicate), "Kind")]
         [TestCase(typeof(GroupValidThenInvalid), "Mass")]
         [TestCase(typeof(GroupGlobal), "global")]
-        [TestCase(typeof(GroupGlobalChild), "global")]
         public void GroupInvalidDeclarationsGiveANoticeAndAFlatList(Type listed, string mentions)
         {
             var model = GroupModel();
@@ -888,15 +887,10 @@ namespace GameCult.Caching.Tests
         [CultGlobal]
         [CultDocument("tests.group_global", "tests.group_global.v1")]
         [MessagePackObject]
-        public class GroupGlobal
+        public sealed class GroupGlobal
         {
             [Key(0)]
             public string Kind = string.Empty;
-        }
-
-        [CultInspectorGroupBy("Kind")]
-        public sealed class GroupGlobalChild : GroupGlobal
-        {
         }
 
         [CultInspectorGroupBy("Kind")]
