@@ -566,7 +566,7 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
         max_pending_reliable_packets_per_session: 4,
         ..Default::default()
     };
-    let mut server = server(options, clock, sink.clone(), Source::default())?;
+    let mut server = server(options, clock.clone(), sink.clone(), Source::default())?;
     let target = server.local_addr()?;
     let mut real = client(target, 101)?;
     connect(&mut server, &mut [&mut real])?;
@@ -602,16 +602,22 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     send_raw(&mut server, &unadmitted.send("schema", vec![1], reliable.clone())?)?;
     assert_eq!(server.packets_dropped(), 2);
 
-    // A moved flow re-sends Connect from a socket that never hears the Accept:
-    // each one asks the session to queue one more unacknowledged Accept, and
-    // the fifth finds the queue full.
+    // A moved flow re-sends Connect from a socket that never hears the Accept.
+    // Each repeat re-sends the Accept still awaiting acknowledgement and queues
+    // nothing, so the storm neither errors nor grows the session's queue.
     let mut stormer = session(102);
     let connect_packet = stormer.create_connect(0, Vec::new())?;
-    for _ in 0..12 {
+    for _ in 0..200 {
         send_raw(&mut server, &connect_packet)?;
     }
-    assert_eq!(server.packets_dropped(), 2 + 8);
+    assert_eq!(server.packets_dropped(), 2);
     assert_eq!(server.session_count(), 2);
+    clock.set(60_000 + 1_000);
+    assert_eq!(
+        server.maintain()?.packets_resent,
+        1,
+        "one Accept awaits acknowledgement, however many Connects repeated"
+    );
 
     // A packet its own admitted session refuses ends that session, not the loop.
     stormer.assume_connected(0);
@@ -619,7 +625,7 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     poison.fragment_count = 2;
     poison.fragment_id = 0;
     send_raw(&mut server, &poison)?;
-    assert_eq!(server.packets_dropped(), 2 + 8 + 1);
+    assert_eq!(server.packets_dropped(), 3);
     assert_eq!(server.session_count(), 1);
 
     send(

@@ -240,8 +240,8 @@ where
     }
 
     /// Datagrams read and discarded because they belong to no admissible
-    /// session: malformed frames, unknown sessions, a Connect the session or
-    /// the session cap refuses, a packet that fails its session. Never an
+    /// session: malformed frames, unknown sessions, a Connect the session cap
+    /// refuses, a packet that fails its session. Never an
     /// error: a moved flow or a scanner must not end the daemon loop.
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped
@@ -402,50 +402,53 @@ where
         })
     }
 
-    /// `Ok(false)` when the Connect was refused (session cap, or the session
-    /// cannot queue another Accept); only a socket failure is an `Err`.
+    /// `Ok(false)` when the Connect was refused because the session cap is full;
+    /// only a socket failure is an `Err`.
     fn accept_connection(
         &mut self,
         key: CultMeshRudpSessionKey,
         packet: &CultNetRudpPacket,
         now: u64,
     ) -> Result<bool> {
-        if !self.sessions.contains_key(&key) {
-            if self.sessions.len() >= self.options.max_sessions {
-                return Ok(false);
+        let reply = match self.sessions.get_mut(&key) {
+            // The same key is a retransmitted Connect for the existing epoch:
+            // repeat the Accept still awaiting acknowledgement, or acknowledge
+            // if none is. It queues nothing, so a Connect storm cannot grow the
+            // session's reliable queue. A genuinely fresh client incarnation
+            // must choose a fresh id.
+            Some(entry) => {
+                entry.last_activity_monotonic_millis = now;
+                entry
+                    .session
+                    .pending_accept_for_resend(now)
+                    .unwrap_or_else(|| entry.session.create_ack())
             }
-            self.sessions.insert(
-                key,
-                SessionEntry {
-                    session: CultNetRudpSession::new(CultNetRudpSessionOptions {
-                        connection_id: key.connection_id,
-                        initial_sequence: 1,
-                        resend_delay_ms: duration_millis(self.options.resend_delay),
-                        max_pending_reliable_packets: Some(
-                            self.options.max_pending_reliable_packets_per_session,
-                        ),
-                    }),
-                    created_at_monotonic_millis: now,
-                    last_activity_monotonic_millis: now,
-                    admitted_payload_bytes: 0,
-                },
-            );
-        }
-
-        let accept = {
-            let entry = self
-                .sessions
-                .get_mut(&key)
-                .expect("accepted session must be present");
-            // The same key is a retransmitted Connect for the existing epoch.
-            // A genuinely fresh client incarnation must choose a fresh id.
-            entry.last_activity_monotonic_millis = now;
-            match entry.session.accept_connect(packet, now, Vec::new()) {
-                Ok(accept) => accept,
-                Err(_) => return Ok(false),
+            None => {
+                if self.sessions.len() >= self.options.max_sessions {
+                    return Ok(false);
+                }
+                let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+                    connection_id: key.connection_id,
+                    initial_sequence: 1,
+                    resend_delay_ms: duration_millis(self.options.resend_delay),
+                    max_pending_reliable_packets: Some(
+                        self.options.max_pending_reliable_packets_per_session,
+                    ),
+                });
+                let accept = session.accept_connect(packet, now, Vec::new())?;
+                self.sessions.insert(
+                    key,
+                    SessionEntry {
+                        session,
+                        created_at_monotonic_millis: now,
+                        last_activity_monotonic_millis: now,
+                        admitted_payload_bytes: 0,
+                    },
+                );
+                accept
             }
         };
-        self.send_packet(key.remote_addr, &accept)?;
+        self.send_packet(key.remote_addr, &reply)?;
         Ok(true)
     }
 
