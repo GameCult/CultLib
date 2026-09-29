@@ -12,6 +12,7 @@ namespace GameCult.Geometry
     public readonly struct CultCircle : IEquatable<CultCircle>
     {
         /// <summary>Creates a circle.</summary>
+        [JsonConstructor]
         public CultCircle(float2 center, float radius)
         {
             if (radius < 0f)
@@ -75,6 +76,7 @@ namespace GameCult.Geometry
     public readonly struct CultSphere : IEquatable<CultSphere>
     {
         /// <summary>Creates a sphere.</summary>
+        [JsonConstructor]
         public CultSphere(float3 center, float radius)
         {
             if (radius < 0f)

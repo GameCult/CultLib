@@ -47,6 +47,22 @@ namespace GameCult.Geometry.Tests
             sphere.XyCircle.Bounds.Should().Be(new rect(-4f, -3f, 6f, 7f));
         }
 
+        [Test]
+        public void GeometryPrimitives_JsonOmitsComputedConvenienceProperties()
+        {
+            var options = new JsonSerializerOptions().AddCultMathConverters();
+            var sphere = new CultSphere(new float3(1f, 2f, 3f), 5f);
+            var circle = new CultCircle(new float2(1f, 2f), 3f);
+
+            var sphereJson = JsonSerializer.Serialize(sphere, options);
+            var circleJson = JsonSerializer.Serialize(circle, options);
+
+            sphereJson.Should().Be("""{"Center":{"x":1,"y":2,"z":3},"Radius":5}""");
+            circleJson.Should().Be("""{"Center":{"x":1,"y":2},"Radius":3}""");
+            JsonSerializer.Deserialize<CultSphere>(sphereJson, options).Should().Be(sphere);
+            JsonSerializer.Deserialize<CultCircle>(circleJson, options).Should().Be(circle);
+        }
+
         // The bytes CultCircle and CultSphere produced when they held CultVec2/CultVec3 (probed at 65311c9).
         [Test]
         public void GeometryPrimitives_KeepTheirPreCollapseBytes()
