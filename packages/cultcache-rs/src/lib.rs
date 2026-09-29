@@ -4876,6 +4876,19 @@ mod tests {
         Ok(())
     }
 
+    // A zero-byte file is an empty store with no header, not a truncated one: a rewrite writes it v1.
+    #[test]
+    fn push_all_rewrites_a_zero_byte_file_as_v1() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        std::fs::write(&path, [])?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default())?;
+        assert_eq!(store_header(&std::fs::read(&path)?, true)?.as_deref(), Some(STORE_FORMAT_V1));
+        assert_eq!(store.pull_all()?.len(), 1);
+        Ok(())
+    }
+
     #[test]
     fn a_rewrite_of_a_v1_store_stays_v1() -> Result<()> {
         assert_eq!(
