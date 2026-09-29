@@ -304,6 +304,7 @@ namespace GameCult.Networking.Tests
             Assert.That(replica.GetMutationLog(ShardId).Select(entry => entry.Sequence), Is.EqualTo(new[] { 1L, 2L, 3L }));
             Assert.That(Sequences(replicaStore), Is.EqualTo(new[] { 1L, 2L, 3L }));
             Assert.That(replica.GetAppliedShardSequence(ShardId), Is.EqualTo(3));
+            Assert.That(replica.CurrentAsOf(ShardId), Is.EqualTo(3UL), "the replica's own watermark follows the primary's sequences");
         }
 
         [Test]
@@ -467,6 +468,104 @@ namespace GameCult.Networking.Tests
             Assert.That(TextOf(cache, One), Is.Null);
             Assert.That(TextOf(cache, Two), Is.EqualTo("two"));
             Assert.That(database.GetMutationLog(ShardId), Is.Empty, "the snapshot's removal and its put are both a resync, not a commit");
+        }
+
+        [Test]
+        public async Task ARestartOverARetainedLogResumesAboveItsHighestSequence()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var primary = Database(cache, primary: true, store);
+            await primary.PutAsync(One, Note("one"));
+            await primary.PutAsync(Two, Note("two"));
+            primary.Dispose();
+
+            var restarted = Database(cache, primary: true, store);
+            Assert.That(restarted.GetLatestMutationLogSequence(ShardId), Is.EqualTo(2), "a restarted database reads its latest sequence from the durable log");
+            await restarted.PutAsync(Three, Note("three"));
+
+            Assert.That(Sequences(store), Is.EqualTo(new[] { 1L, 2L, 3L }));
+        }
+
+        [Test]
+        public async Task APutAndDeleteDoorLogTheirOwnWireMessagesAndChangeKinds()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, store);
+            var added = database.Documents.CreateRawDocumentPutMessage("put-added", new CultRecordHandle<NetworkSchemaNote>(One), Note("one"));
+            var updated = database.Documents.CreateRawDocumentPutMessage("put-updated", new CultRecordHandle<NetworkSchemaNote>(One), Note("uno"));
+
+            await database.ApplyPutAsync(added);
+            await database.ApplyPutAsync(updated);
+            await database.ApplyDeleteAsync(new CultNetDocumentDeleteMessage { MessageId = "delete-one", SchemaId = SchemaId(cache), RecordKey = One.Value });
+
+            var entries = store.Read(ShardId);
+            Assert.That(entries.Select(entry => entry.ChangeKind), Is.EqualTo(new[] { "added", "updated", "removed" }));
+            Assert.That(entries[0].Put!.MessageId, Is.EqualTo("put-added"));
+            Assert.That(entries[1].Put!.MessageId, Is.EqualTo("put-updated"));
+            Assert.That(entries[2].Delete!.MessageId, Is.EqualTo("delete-one"));
+            Assert.That(DateTimeOffset.TryParse(entries[0].CommittedAt, out _), Is.True, "a primary stamps its entries");
+        }
+
+        [Test]
+        public async Task AReconciledPutIsLoggedAsTheUpdateItIs()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                RuntimeId = "local",
+                ClientAuthorityScopes = [new CultNetClientAuthorityScope("local")]
+            });
+            var shard = database.Shards[0];
+            var message = database.Documents.CreateRawDocumentPutMessage("authoritative", new CultRecordHandle<NetworkSchemaNote>(One), Note("authoritative"));
+            message.ShardId = shard.ShardId;
+            message.ShardEpoch = shard.Epoch;
+            var published = new List<CultNetDatabaseChangeKind>();
+            database.Watch<NetworkSchemaNote>().Subscribe(change => published.Add(change.Kind));
+
+            await database.PutPredictedAsync(One, Note("predicted"));
+            await database.ApplyPutAsync(message);
+
+            Assert.That(published, Is.EqualTo(new[] { CultNetDatabaseChangeKind.Predicted, CultNetDatabaseChangeKind.Reconciled }));
+            Assert.That(database.GetMutationLog(shard.ShardId).Select(entry => entry.Kind), Is.EqualTo(new[] { CultNetDatabaseChangeKind.Updated }),
+                "a prediction is never logged and its reconciliation is an ordinary update");
+        }
+
+        [Test]
+        public async Task AnAdmissionRacingDisposalLogsNothingAfterTheDatabaseIsDisposed()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var entered = new System.Threading.ManualResetEventSlim();
+            CultNetDatabase? database = null;
+            // Registered before the database, so it runs first inside the writer's hold, while another thread disposes the database.
+            using var holdUntilDisposed = cache.AddJournal(_ =>
+            {
+                entered.Set();
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                while (DateTime.UtcNow < deadline)
+                {
+                    try
+                    {
+                        database!.GetLatestMutationLogSequence(ShardId);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        return;
+                    }
+
+                    System.Threading.Thread.Sleep(1);
+                }
+            });
+            database = Database(cache, primary: true, store);
+            var writer = Task.Run(() => database.PutAsync(One, Note("one")));
+            Assert.That(entered.Wait(TimeSpan.FromSeconds(5)), Is.True);
+
+            database.Dispose();
+            await writer;
+
+            Assert.That(Sequences(store), Is.Empty, "the admission was journaled after disposal began and must not reach the durable log");
         }
     }
 }
