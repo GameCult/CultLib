@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace GameCult.Caching
 {
@@ -76,6 +77,21 @@ namespace GameCult.Caching
         }
 
         public Type? AssetType { get; }
+    }
+
+    // Groups a document type's record list by the named members, outermost first: the argument order is the nesting order.
+    // The nearest declaration up the inheritance chain wins, so a derived type may re-declare, and an empty declaration
+    // opts out of a base's. A member must be a visible, editable string, integer, bool, non-[Flags] enum or CultRecordRef;
+    // anything else gives a flat list and a notice. Presentation only: no schema, index or stored byte changes.
+    [AttributeUsage(AttributeTargets.Class, Inherited = true, AllowMultiple = false)]
+    public sealed class CultInspectorGroupByAttribute : Attribute
+    {
+        public CultInspectorGroupByAttribute(params string[] members)
+        {
+            Members = members ?? throw new ArgumentNullException(nameof(members));
+        }
+
+        public IReadOnlyList<string> Members { get; }
     }
 
     // Marks a lowering's drawer class as the drawer for a claimed type. Claimed is either an Attribute subclass (the

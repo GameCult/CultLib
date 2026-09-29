@@ -97,6 +97,11 @@ edited in CultCache Studio:
     observe the change atomically.
   - Compare-exchange (`Expect`) tests the stored delta. The resolved document is derived.
 - **3, cross-store bases: no.** A variant and its base live in the same store.
+  *Future direction (operator, 2026-09-30, from Aetheria moddable ships):* "we'll want cross-store variant
+  support eventually; modders should be able to add variants of existing items without modifying the
+  original". Ruling 3 holds for this campaign. A mod store layering variants over a shipped catalog is the
+  named future consumer that would reopen it. Until then, no consumer builds its own cross-store resolver:
+  Aetheria's compose step stays out of resolution.
 - **4, CultNet: deltas.**
 - **5, runtimes: C# first.** TypeScript, Python, Rust and Kotlin refuse a store
   or snapshot containing variants, loudly, until each implements resolution.

@@ -595,7 +595,10 @@ public static partial class math
     }
 
     // Ashima Arts / Ian McEwan 3D simplex noise (MIT), mirrored by cultmath_snoise(float3)
-    // in shaders/CultMath.hlsl with the same float32 evaluation order.
+    // in shaders/CultMath.hlsl with the same float32 evaluation order. Follows stegu/webgl-noise
+    // src/noise3D.glsl at 22434e04d7 (kernel radius^2 0.5, scale 105, permute (34x+10)x); see
+    // THIRD-PARTY-NOTICES.md. Continuous across simplex-cell boundaries
+    // (NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries).
     public static float snoise(float3 value)
     {
         const float cx = 1.0f / 6.0f;
@@ -642,9 +645,9 @@ public static partial class math
         p2 *= norm.z;
         p3 *= norm.w;
 
-        var m = max(0.6f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
+        var m = max(0.5f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
         m = m * m;
-        return 42.0f * dot(m * m, new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+        return 105.0f * dot(m * m, new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
     }
 
     // Ashima Arts / Ian McEwan 2D simplex noise, kept component-explicit so
@@ -690,8 +693,134 @@ public static partial class math
     private static float2 snoise_mod289(float2 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
     private static float3 snoise_mod289(float3 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
     private static float4 snoise_mod289(float4 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
-    private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
-    private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
+    private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 10.0f) * value);
+    private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 10.0f) * value);
+
+    // Analytic gradient of snoise(float3) (invariant 8), following the differentiation in
+    // webgl-noise src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT), which uses the same kernel
+    // radius^2 0.5, permutation (34x+10)x and scale 105 as snoise(float3) (stegu/webgl-noise
+    // 22434e04d7). Every local up through p0..p3 and x0..x3 below is snoise(float3)'s own derivation
+    // verbatim, so .w is that same field (NoiseGradTests.SnoiseGradValueIsBitEqualToSnoise pins the
+    // two bit-equal over a random sweep). Per corner, m0 = max(0.5 - dot(x,x), 0), so dm0/dx = -2x,
+    // and d(m0^4 * dot(p,x))/dx = 4*m0^3*(-2x)*dot(p,x) + m0^4*p = -8*m0^3*dot(p,x)*x + m0^4*p (p is
+    // that corner's own gradient constant, independent of x); summed over the four corners and
+    // scaled by the same 105 as the value.
+    public static float4 snoise_grad(float3 value)
+    {
+        const float cx = 1.0f / 6.0f;
+        const float cy = 1.0f / 3.0f;
+        var i = floor(value + dot(value, new float3(cy, cy, cy)));
+        var x0 = value - i + dot(i, new float3(cx, cx, cx));
+        var g = step(new float3(x0.y, x0.z, x0.x), x0);
+        var l = 1.0f - g;
+        var lzxy = new float3(l.z, l.x, l.y);
+        var i1 = min(g, lzxy);
+        var i2 = max(g, lzxy);
+        var x1 = x0 - i1 + cx;
+        var x2 = x0 - i2 + cy;
+        var x3 = x0 - 0.5f;
+
+        i = snoise_mod289(i);
+        var p = snoise_permute(snoise_permute(snoise_permute(
+            i.z + new float4(0.0f, i1.z, i2.z, 1.0f)) + i.y + new float4(0.0f, i1.y, i2.y, 1.0f)) + i.x + new float4(0.0f, i1.x, i2.x, 1.0f));
+
+        const float n = 0.142857142857f;
+        var ns = new float3(2.0f * n, 0.5f * n - 1.0f, n);
+        var j = p - 49.0f * floor(p * ns.z * ns.z);
+        var xs = floor(j * ns.z);
+        var ys = floor(j - 7.0f * xs);
+        var x = xs * ns.x + ns.y;
+        var y = ys * ns.x + ns.y;
+        var h = 1.0f - abs(x) - abs(y);
+
+        var b0 = new float4(x.x, x.y, y.x, y.y);
+        var b1 = new float4(x.z, x.w, y.z, y.w);
+        var s0 = floor(b0) * 2.0f + 1.0f;
+        var s1 = floor(b1) * 2.0f + 1.0f;
+        var sh = -step(h, 0.0f);
+        var a0 = new float4(b0.x, b0.z, b0.y, b0.w) + new float4(s0.x, s0.z, s0.y, s0.w) * new float4(sh.x, sh.x, sh.y, sh.y);
+        var a1 = new float4(b1.x, b1.z, b1.y, b1.w) + new float4(s1.x, s1.z, s1.y, s1.w) * new float4(sh.z, sh.z, sh.w, sh.w);
+
+        var p0 = new float3(a0.x, a0.y, h.x);
+        var p1 = new float3(a0.z, a0.w, h.y);
+        var p2 = new float3(a1.x, a1.y, h.z);
+        var p3 = new float3(a1.z, a1.w, h.w);
+        var norm = 1.79284291400159f - 0.85373472095314f * new float4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+
+        var m0 = max(0.5f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
+        var m2 = m0 * m0;
+        var m3 = m2 * m0;
+        var m4 = m2 * m2;
+
+        var px = new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
+        var value2 = 105.0f * dot(m4, px);
+        var grad = -8.0f * m3.x * x0 * px.x + m4.x * p0
+            + -8.0f * m3.y * x1 * px.y + m4.y * p1
+            + -8.0f * m3.z * x2 * px.z + m4.z * p2
+            + -8.0f * m3.w * x3 * px.w + m4.w * p3;
+        grad *= 105.0f;
+
+        return new float4(grad, value2);
+    }
+
+    // Octave sum of snoise_grad (invariant 8). Each octave samples snoise_grad at p scaled by the
+    // running frequency, so by the chain rule its gradient scales by that same frequency
+    // (d/dp[n(f*p)] = f * grad_n(f*p)); amplitude and frequency both compound per octave (gain,
+    // lacunarity respectively), not applied once for the whole sum, so with 1 octave this is exactly
+    // snoise_grad (NoiseGradTests.FbmGradWithOneOctaveEqualsSnoiseGrad). octaves is clamped to
+    // [0, 16]: HlslSourceCompatibilityTests' bit-parity oracle drives every mirrored int parameter
+    // across the full int32 range, which is the right domain for pcg3d/pcg4d's O(1) hash inputs but
+    // would turn an unclamped octave count into a multi-billion-iteration loop for this mirror.
+    public static float4 fbm_grad(float3 p, int octaves, float lacunarity, float gain)
+    {
+        octaves = clamp(octaves, 0, 16);
+        var amplitude = 1.0f;
+        var frequency = 1.0f;
+        var value = 0.0f;
+        var gradient = new float3(0.0f, 0.0f, 0.0f);
+        for (var i = 0; i < octaves; i++)
+        {
+            var n = snoise_grad(p * frequency);
+            value += amplitude * n.w;
+            gradient += amplitude * frequency * new float3(n.x, n.y, n.z);
+            frequency *= lacunarity;
+            amplitude *= gain;
+        }
+
+        return new float4(gradient, value);
+    }
+
+    // Ridged multifractal noise (Musgrave, Texturing and Modeling, ch. 16; the operator's dune term,
+    // 2026-09-25): each octave folds snoise_grad about zero, value = Sum a_i*(1 - |n_i|), gradient =
+    // -Sum a_i*f_i*sign(n_i)*grad(n_i), the same per-octave frequency scaling as fbm_grad's chain
+    // rule plus the fold's sign flip (d|n|/dp = sign(n)*dn/dp). The crease at n_i = 0 is real and
+    // deliberate, not a bug: NoiseGradTests excludes a band around it, the same way cellular excludes
+    // its F1 = F2 seam. sign follows this codebase's HLSL-matching convention (design.md: sign
+    // returns int, 0 at exactly 0), so the crease itself contributes no gradient rather than an
+    // arbitrary one. Same octave clamp as fbm_grad, for the same bit-parity-oracle reason.
+    public static float4 ridged_grad(float3 p, int octaves, float lacunarity, float gain)
+    {
+        octaves = clamp(octaves, 0, 16);
+        var amplitude = 1.0f;
+        var frequency = 1.0f;
+        var value = 0.0f;
+        var gradient = new float3(0.0f, 0.0f, 0.0f);
+        for (var i = 0; i < octaves; i++)
+        {
+            var n = snoise_grad(p * frequency);
+            var s = (float)sign(n.w);
+            value += amplitude * (1.0f - abs(n.w));
+            gradient += -amplitude * frequency * s * new float3(n.x, n.y, n.z);
+            frequency *= lacunarity;
+            amplitude *= gain;
+        }
+
+        return new float4(gradient, value);
+    }
 
     // Inigo Quilez, "smooth minimum" (https://iquilezles.org/articles/smin/): the quadratic-polynomial
     // smin, carried to value-and-gradient form (invariant 8). h is affine in (b.w - a.w) inside the

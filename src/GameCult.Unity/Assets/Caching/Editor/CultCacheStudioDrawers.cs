@@ -263,20 +263,43 @@ namespace GameCult.Unity.Caching.Editor
                 if (candidates[i].Key.Value == key) index = i + 1;
             }
 
-            names[0] = index == 0 && key.Length > 0 ? "Missing " + key : "None";
+            names[0] = index == 0 ? Model.RecordRefLabel(type, value, Records) : "None";
             var next = key;
-            using (new EditorGUILayout.HorizontalScope())
+            using (var row = new EditorGUILayout.HorizontalScope())
             {
+                var dropped = AcceptRecordDrop(row.rect, type, key);
                 var picked = EditorGUILayout.Popup(label, index, names);
                 var indent = EditorGUI.indentLevel;
                 EditorGUI.indentLevel = 0;
                 var typed = EditorGUILayout.DelayedTextField(key, GUILayout.Width(120));
                 EditorGUI.indentLevel = indent;
-                if (picked != index) next = picked == 0 ? string.Empty : candidates[picked - 1].Key.Value;
+                if (dropped != null) next = dropped;
+                else if (picked != index) next = picked == 0 ? string.Empty : candidates[picked - 1].Key.Value;
                 else if (typed != key) next = typed;
             }
 
             return next == key ? value : Model.CreateRecordRef(type, next);
+        }
+
+        // A record row dragged from the Studio list onto a CultRecordRef<T> value. Returns the dropped key when the drop is
+        // performed and the ref's picker would offer that record, or null. The payload is the Studio's own; a foreign drag is
+        // left alone. Refused in a disabled scope, from another model, and for the key already held.
+        private string AcceptRecordDrop(Rect rect, Type type, string key)
+        {
+            var current = Event.current;
+            if (current.type != EventType.DragUpdated && current.type != EventType.DragPerform) return null;
+            if (!rect.Contains(current.mousePosition) || !(DragAndDrop.GetGenericData(CultCacheStudioRecordDrag.DragKey) is CultCacheStudioRecordDrag drag)) return null;
+
+            var perform = current.type == EventType.DragPerform;
+            var record = ReferenceEquals(drag.Model, Model) && drag.Key != key ? Records.FirstOrDefault(candidate => candidate.Key.Value == drag.Key) : null;
+            var accepted = GUI.enabled && record != null && Model.IsRecordCandidate(type, record);
+            DragAndDrop.visualMode = accepted ? DragAndDropVisualMode.Copy : DragAndDropVisualMode.Rejected;
+            current.Use();
+            if (!accepted || !perform) return null;
+
+            DragAndDrop.AcceptDrag();
+            GUI.changed = true;
+            return drag.Key;
         }
 
         private object DrawDictionary(string label, CultInspectorShape shape, IDictionary dictionary, MemberInfo member)
@@ -502,5 +525,20 @@ namespace GameCult.Unity.Caching.Editor
         }
 
         private static string LabelOf(CultInspectorMember member) => member.Metadata.Label ?? ObjectNames.NicifyVariableName(member.Name);
+    }
+
+    // The payload of a Studio record drag: the record's key, and the model it came from so a drop refuses another window's.
+    internal sealed class CultCacheStudioRecordDrag
+    {
+        internal const string DragKey = "GameCult.CultCacheStudio.Record";
+
+        internal CultCacheStudioRecordDrag(CultInspectorModel model, string key)
+        {
+            Model = model;
+            Key = key;
+        }
+
+        internal CultInspectorModel Model { get; }
+        internal string Key { get; }
     }
 }

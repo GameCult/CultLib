@@ -444,11 +444,11 @@ public sealed class HlslSemanticsTests
     }
 
     [Theory]
-    [InlineData(0.0f, 0.0f, 0.0f, -0.41219875f)]
-    [InlineData(0.25f, -0.5f, 1.75f, 0.5250269f)]
-    [InlineData(12.25f, -4.5f, 3.125f, 0.008141451f)]
-    [InlineData(-7.3f, 2.9f, 101.4f, 0.578015f)]
-    public void Snoise3MatchesUnityMathematicsReference(float x, float y, float z, float expected)
+    [InlineData(0.0f, 0.0f, 0.0f, -0.435872972f)]
+    [InlineData(0.25f, -0.5f, 1.75f, 0.0492948629f)]
+    [InlineData(12.25f, -4.5f, 3.125f, 0.443114728f)]
+    [InlineData(-7.3f, 2.9f, 101.4f, -0.10221792f)]
+    public void Snoise3MatchesGoldenValues(float x, float y, float z, float expected)
     {
         Assert.Equal(expected, math.snoise(new float3(x, y, z)), precision: 5);
     }
