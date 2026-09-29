@@ -350,6 +350,12 @@ fn a_malformed_video_parity_record_is_refused_with_its_reason() {
         ("last chunk length", Box::new(|r| r.last_chunk_payload_bytes = 5)),
         ("declared shard length", Box::new(|r| r.payload.push(0))),
         ("chunk_count", Box::new(|r| r.chunk_count = 0)),
+        ("256 shards", Box::new(|r| {
+            r.block_data_count = 256;
+            r.chunk_count = 300;
+            r.parity_count = 1;
+            r.parity_index = 0;
+        })),
         ("deadline_ticks", Box::new(|r| r.deadline_ticks = -1)),
     ];
     for (expected, corrupt) in cases {
@@ -375,6 +381,10 @@ fn a_malformed_audio_parity_record_is_refused_with_its_reason() {
         })),
         ("declared shard length", Box::new(|r| { r.payload.pop(); })),
         ("codec", Box::new(|r| r.codec = String::new())),
+        ("stream_id", Box::new(|r| r.stream_id = String::new())),
+        ("stream_id", Box::new(|r| r.session_id = String::new())),
+        ("timing", Box::new(|r| r.timebase_num = 0)),
+        ("timing", Box::new(|r| r.timebase_den = 0)),
     ];
     for (expected, corrupt) in cases {
         let mut record = audio_parity();
@@ -398,4 +408,25 @@ fn a_parity_shard_at_the_size_limit_is_admitted() {
     audio.shard_payload_bytes = MAX as u32;
     audio.payload = vec![0; MAX];
     assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok());
+}
+
+/// The 256-shard ceiling and the deadline floor are inclusive on the side that
+/// keeps a valid record valid.
+#[test]
+fn records_on_the_edge_of_each_bound_are_admitted() {
+    let mut video = video_parity();
+    video.chunk_count = 300;
+    video.block_data_count = 254;
+    video.parity_count = 2;
+    video.parity_index = 1;
+    assert!(decodes(GameCultMediaWireRecord::VideoParity(video)).is_ok(), "254 + 2 = 256 shards");
+
+    let mut audio = audio_parity();
+    audio.data_shard_count = 254;
+    audio.parity_shard_count = 2;
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "254 + 2 = 256 shards");
+
+    let mut audio = audio_parity();
+    audio.deadline_ticks = audio.base_pts_ticks;
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "a deadline at the base pts");
 }
