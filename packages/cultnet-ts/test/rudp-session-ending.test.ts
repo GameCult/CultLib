@@ -1,0 +1,52 @@
+// A write belongs to the session generation it was issued in. Every way a
+// generation ends drops the writes it still owed, so none is retransmitted
+// into a later session where the new peer would deliver it.
+import assert from "node:assert/strict";
+import test from "node:test";
+import { CultNetRudpSession } from "../src";
+
+const connectionId = 0x10203070;
+const enc = (text: string) => new TextEncoder().encode(text);
+
+function clientWithALostWrite(): { client: CultNetRudpSession; server: CultNetRudpSession } {
+  const client = new CultNetRudpSession({ connectionId, initialSequence: 1 });
+  const server = new CultNetRudpSession({ connectionId, initialSequence: 500 });
+  client.receive(server.acceptConnect(client.createConnect(0), 0), 0);
+  client.send("schema", enc("owed to the old session"), { reliable: true, ordered: true });
+  assert.equal(client.outstandingReliablePacketCount, 1);
+  return { client, server };
+}
+
+const endings: Record<string, (client: CultNetRudpSession, server: CultNetRudpSession) => void> = {
+  "peer Disconnect": (client, server) => {
+    client.receive(server.createDisconnect(enc("bye")), 1);
+  },
+  "local disconnect": (client) => {
+    client.createDisconnect(enc("bye"));
+  },
+  timeout: (client) => {
+    assert.equal(client.checkTimeout(1_000, 10), true);
+  },
+  reset: (client) => {
+    client.resetPeerState();
+  },
+};
+
+for (const [name, end] of Object.entries(endings)) {
+  test(`a ${name} drops the writes the session owed`, () => {
+    const { client, server } = clientWithALostWrite();
+    end(client, server);
+
+    assert.equal(client.outstandingReliablePacketCount, 0, "the write survived the end");
+
+    const nextServer = new CultNetRudpSession({ connectionId, initialSequence: 900 });
+    nextServer.acceptConnect(client.createConnect(2_000), 2_000);
+    for (const resend of client.dueResends(60_000)) {
+      assert.deepEqual(
+        nextServer.receive(resend, 60_000).delivered,
+        [],
+        "the old session's write was delivered in the next session",
+      );
+    }
+  });
+}

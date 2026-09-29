@@ -750,3 +750,126 @@ fn a_repeated_connect_acknowledges_what_it_carries() -> Result<()> {
     assert_eq!(server.outstanding_reliable_packet_count(), 0);
     Ok(())
 }
+
+/// A connected client session with one ordered write the peer never received.
+fn client_with_a_lost_write() -> Result<(CultNetRudpSession, CultNetRudpSession)> {
+    let mut client = raw_session(CONNECTION_ID);
+    let mut server = raw_session(CONNECTION_ID);
+    let accept = server.accept_connect(&client.create_connect(0, Vec::new())?, 0, Vec::new())?;
+    client.receive(&accept, 0)?;
+    client.send(
+        "schema",
+        b"owed to the old session".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(client.outstanding_reliable_packet_count(), 1);
+    Ok((client, server))
+}
+
+/// A write belongs to the session it was issued in. Whichever way that session
+/// ends, the write it still owed dies with it: it is not retransmitted into a
+/// later session, where the new peer would deliver it.
+#[test]
+fn every_way_a_session_ends_drops_the_writes_it_owed() -> Result<()> {
+    type End = fn(&mut CultNetRudpSession, &mut CultNetRudpSession) -> Result<()>;
+    let endings: [(&str, End); 4] = [
+        ("peer Disconnect", |client, server| {
+            client.receive(&server.create_disconnect(b"bye".to_vec()), 1)?;
+            Ok(())
+        }),
+        ("local disconnect", |client, _| {
+            client.create_disconnect(b"bye".to_vec());
+            Ok(())
+        }),
+        ("timeout", |client, _| {
+            assert!(client.check_timeout(1_000, 10));
+            Ok(())
+        }),
+        ("refusal", |client, _| {
+            client.end_refused_session();
+            Ok(())
+        }),
+    ];
+    for (name, end) in endings {
+        let (mut client, mut server) = client_with_a_lost_write()?;
+        end(&mut client, &mut server)?;
+        assert_eq!(client.outstanding_reliable_packet_count(), 0, "{name}: the write survived the end");
+
+        let mut next_server = raw_session(CONNECTION_ID);
+        let connect = client.create_connect(2_000, Vec::new())?;
+        next_server.accept_connect(&connect, 2_000, Vec::new())?;
+        for resend in client.due_resends(60_000) {
+            let result = next_server.receive(&resend, 60_000)?;
+            assert!(
+                result.delivered.is_empty(),
+                "{name}: the old session's write was delivered in the next session"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn connected_client(server_socket: &UdpSocket, server_addr: SocketAddr) -> Result<(CultNetRudpSocketTransportConnection, CultNetRudpSession, SocketAddr)> {
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client("client", socket()?, server_addr, CONNECTION_ID),
+    )?;
+    client.connect(b"hello".to_vec())?;
+    let mut buffer = vec![0_u8; 65_535];
+    let (received, client_addr) = server_socket.recv_from(&mut buffer)?;
+    let mut peer = raw_session(CONNECTION_ID);
+    let accept = peer.accept_connect(&decode_rudp_packet(&buffer[..received])?, 0, Vec::new())?;
+    send_to(server_socket, client_addr, &accept)?;
+    let _ = client.receive_once()?;
+    Ok((client, peer, client_addr))
+}
+
+/// A local `disconnect()` ends the session like any other end: the receipt of a
+/// write the peer never acknowledged is Invalidated, stays so after a
+/// reconnect, and the write is not carried into the new session.
+#[test]
+fn a_receipt_invalidated_by_a_local_disconnect_stays_invalidated_after_reconnecting() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let (mut client, _peer, _) = connected_client(&server, server_addr)?;
+    let receipt = client.send_reliable("schema", b"written before the disconnect".to_vec())?;
+    assert_eq!(client.reliable_send_status(&receipt), CultNetRudpReliableSendStatus::Pending);
+
+    client.disconnect(b"bye".to_vec())?;
+    assert_eq!(client.reliable_send_status(&receipt), CultNetRudpReliableSendStatus::Invalidated);
+    assert_eq!(client.outstanding_reliable_packet_count(), 0, "the write survived the disconnect");
+
+    client.connect(b"hello again".to_vec())?;
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated,
+        "reconnecting brought the write back"
+    );
+    assert_eq!(client.outstanding_reliable_packet_count(), 1, "only the new Connect is owed");
+    Ok(())
+}
+
+/// A flush that starts after the session ended has no live session to wait on.
+#[test]
+fn a_flush_fails_after_a_local_disconnect_or_a_timeout() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let (mut client, _peer, _) = connected_client(&server, server_addr)?;
+    client.send_reliable("schema", b"owed".to_vec())?;
+    client.disconnect(b"bye".to_vec())?;
+    let error = client.flush_reliable(Duration::from_millis(200)).expect_err("the write was dropped");
+    assert!(error.to_string().contains("ended before its reliable writes were acknowledged"), "{error}");
+
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let (mut client, _peer, _) = connected_client(&server, server_addr)?;
+    client.send_reliable("schema", b"owed".to_vec())?;
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(client.check_timeout(1));
+    let error = client.flush_reliable(Duration::from_millis(200)).expect_err("the write was dropped");
+    assert!(error.to_string().contains("ended before its reliable writes were acknowledged"), "{error}");
+    Ok(())
+}
