@@ -938,3 +938,31 @@ fn a_flush_started_after_the_server_accepts_a_new_connect_waits_on_the_new_sessi
     server.flush_reliable(Duration::from_millis(500))?;
     Ok(())
 }
+
+/// The session ended, the peer did not notice: what it sent before the end is
+/// still remembered, held frames included, so its retransmits are duplicates.
+#[test]
+fn an_ending_does_not_forget_what_was_received_from_the_peer() -> Result<()> {
+    let mut client = raw_session(CONNECTION_ID);
+    let mut server = raw_session(CONNECTION_ID);
+    let accept = server.accept_connect(&client.create_connect(0, Vec::new())?, 0, Vec::new())?;
+    client.receive(&accept, 0)?;
+    let ordered = CultNetRudpSendOptions {
+        reliable: true,
+        ordered: true,
+        ..Default::default()
+    };
+    let s1 = client.send("schema", b"s1".to_vec(), ordered.clone())?;
+    let s2 = client.send("schema", b"s2".to_vec(), ordered)?;
+    assert!(server.receive(&s2, 1)?.delivered.is_empty(), "s1 is missing, so s2 is held");
+
+    assert!(server.check_timeout(1_000, 10));
+    let released = server.receive(&s1, 1_001)?.delivered;
+    assert_eq!(
+        released.iter().map(|frame| frame.payload.clone()).collect::<Vec<_>>(),
+        [b"s1".to_vec(), b"s2".to_vec()],
+        "the ending forgot the held frame"
+    );
+    assert!(server.receive(&s2, 1_002)?.delivered.is_empty(), "the ending forgot what was received");
+    Ok(())
+}

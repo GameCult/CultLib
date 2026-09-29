@@ -192,5 +192,24 @@ namespace GameCult.Networking.Tests
 
             Assert.DoesNotThrow(() => server.FlushReliable(TimeSpan.FromMilliseconds(500)));
         }
+
+        [Test]
+        public void AnEndingDoesNotForgetWhatWasReceivedFromThePeer()
+        {
+            var client = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId, InitialSequence = 1 });
+            var server = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId, InitialSequence = 500 });
+            client.Receive(server.AcceptConnect(client.CreateConnect(0), 0), 0);
+            var ordered = new CultNetRudpSendOptions { Reliable = true, Ordered = true };
+            var s1 = client.Send("schema", Encoding.UTF8.GetBytes("s1"), ordered);
+            var s2 = client.Send("schema", Encoding.UTF8.GetBytes("s2"), ordered);
+            Assert.That(server.Receive(s2, 1).Delivered, Is.Empty, "s1 is missing, so s2 is held");
+
+            Assert.That(server.CheckTimeout(1_000, 10), Is.True);
+            Assert.That(
+                server.Receive(s1, 1_001).Delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)).ToArray(),
+                Is.EqualTo(new[] { "s1", "s2" }),
+                "the ending forgot the held frame");
+            Assert.That(server.Receive(s2, 1_002).Delivered, Is.Empty, "the ending forgot what was received");
+        }
     }
 }

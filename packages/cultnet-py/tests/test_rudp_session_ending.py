@@ -201,5 +201,23 @@ class CultNetRudpSessionEndingTests(unittest.TestCase):
             peer_socket.close()
 
 
+    def test_an_ending_does_not_forget_what_was_received_from_the_peer(self) -> None:
+        client = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID, initial_sequence=1))
+        server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID, initial_sequence=500))
+        client.receive(server.accept_connect(client.create_connect(0), 0), 0)
+        ordered = CultNetRudpSendOptions(reliable=True, ordered=True)
+        s1 = client.send("schema", b"s1", ordered)
+        s2 = client.send("schema", b"s2", ordered)
+        self.assertEqual(server.receive(s2, 1).delivered, (), "s1 is missing, so s2 is held")
+
+        self.assertTrue(server.check_timeout(1_000, 10))
+        self.assertEqual(
+            [frame.payload for frame in server.receive(s1, 1_001).delivered],
+            [b"s1", b"s2"],
+            "the ending forgot the held frame",
+        )
+        self.assertEqual(server.receive(s2, 1_002).delivered, (), "the ending forgot what was received")
+
+
 if __name__ == "__main__":
     unittest.main()

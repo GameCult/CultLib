@@ -53,3 +53,20 @@ for (const [name, end] of Object.entries(endings)) {
     }
   });
 }
+
+test("an ending does not forget what was received from the peer", () => {
+  const client = new CultNetRudpSession({ connectionId, initialSequence: 1 });
+  const server = new CultNetRudpSession({ connectionId, initialSequence: 500 });
+  client.receive(server.acceptConnect(client.createConnect(0), 0), 0);
+  const s1 = client.send("schema", enc("s1"), { reliable: true, ordered: true });
+  const s2 = client.send("schema", enc("s2"), { reliable: true, ordered: true });
+  assert.deepEqual(server.receive(s2, 1).delivered, [], "s1 is missing, so s2 is held");
+
+  assert.equal(server.checkTimeout(1_000, 10), true);
+  assert.deepEqual(
+    server.receive(s1, 1_001).delivered.map((frame) => new TextDecoder().decode(frame.payload)),
+    ["s1", "s2"],
+    "the ending forgot the held frame",
+  );
+  assert.deepEqual(server.receive(s2, 1_002).delivered, [], "the ending forgot what was received");
+});
