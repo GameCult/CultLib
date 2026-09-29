@@ -191,8 +191,6 @@ namespace GameCult.Mesh
                     $"CultCache document '{path}' has schema '{record.SchemaId}', expected '{expectedSchemaId}'.");
             }
 
-            RefuseVariant(path, record);
-
             if (!PublishesSchema(snapshot.SchemaCatalog, expectedSchemaId))
             {
                 throw new InvalidDataException(

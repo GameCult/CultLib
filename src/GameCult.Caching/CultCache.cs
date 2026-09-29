@@ -2919,7 +2919,7 @@ namespace GameCult.Caching
                     resolution.Descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides)
                     {
-                        SlotNames = persisted?.Members.ToDictionary(member => member.Slot, member => member.MemberName)
+                        SlotNames = persisted?.Members.GroupBy(member => member.Slot).ToDictionary(group => group.Key, group => group.First().MemberName)
                     },
                     null);
             }
