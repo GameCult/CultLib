@@ -2637,23 +2637,23 @@ namespace GameCult.Networking
                 return true;
             }
 
-            CultNetRudpReceiveResult? received;
+            CultNetRudpReceiveResult? outcome;
             CultNetRudpPacket? acknowledgement = null;
             lock (existingPeer.SessionGate)
             {
                 try
                 {
-                    received = existingPeer.Session.Receive(packet, NowMs());
+                    outcome = existingPeer.Session.Receive(packet, NowMs());
                 }
                 catch (InvalidOperationException)
                 {
                     // Receive has already recorded the packet's reliable sequence, so the session
                     // cannot be kept: a retransmit would be acknowledged and the frame silently lost.
                     _stats.PacketsDropped++;
-                    received = null;
+                    outcome = null;
                 }
 
-                if (received == null)
+                if (outcome == null)
                 {
                     try
                     {
@@ -2666,14 +2666,14 @@ namespace GameCult.Networking
                 }
                 else
                 {
-                    if (received.Reply != null)
-                        SendPacket(existingPeer.RemoteEndPoint, received.Reply);
-                    SendPackets(existingPeer, received.ReadyToSend);
+                    if (outcome.Reply != null)
+                        SendPacket(existingPeer.RemoteEndPoint, outcome.Reply);
+                    SendPackets(existingPeer, outcome.ReadyToSend);
                     if (packet.PacketType == CultNetRudpPacketType.Data)
                         acknowledgement = existingPeer.Session.CreateAckForReceived(packet.Sequence);
                 }
             }
-            if (received == null)
+            if (outcome == null)
             {
                 existingPeer.DisconnectReason = CultNetRudpSession.RefusedPacketReason;
                 _peers.Remove(peerKey);
@@ -2681,7 +2681,7 @@ namespace GameCult.Networking
                 return true;
             }
 
-            var result = received;
+            var result = outcome;
             if (result.Disconnected)
             {
                 existingPeer.DisconnectReason = result.DisconnectReason;
