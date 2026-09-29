@@ -731,6 +731,60 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "a whole-store flush decides by what the store now holds");
         }
 
+        // Soul's P7 and P10: a store reads the header off what it writes, when it writes it. A document changed after its admission,
+        // or loaded and changed in place, is marked by what it holds at the flush, in both directions.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AFlushIsMarkedByWhatADocumentHoldsNowNotWhatItHeldWhenAdmitted(bool loaded)
+        {
+            var path = PathOf(loaded ? "mutated-loaded.cc" : "mutated-admitted.cc");
+            var key = new CultRecordKey("d");
+            using (var seed = Open(path))
+                seed.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("d"), key));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
+
+            using var cache = Open(path);
+            var deck = EmptyDeck("d");
+            if (loaded)
+                deck = cache.Get<IdDeck>(key)!;
+            else
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), deck, key));
+
+            deck.Reels.Add(new IdReel { Id = HexA });
+            cache.BackingStores[0].PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "an id added after admission marks the flush");
+
+            deck.Reels.Clear();
+            cache.BackingStores[0].PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the last id taken away after admission unmarks it");
+        }
+
+        // A store with no cache has no codec to read a variant's override values with, so it cannot see whether they hold an id: the
+        // variant counts as holding one. The same record read through a cache is marked by what its values hold.
+        [Test]
+        public void AVariantAStoreCannotReadCountsAsHoldingIds()
+        {
+            var path = PathOf("detached-variant.cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+            }
+
+            using (var cache = Open(path))
+                cache.BackingStores[0].PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "read with a codec, a name override holds no id");
+
+            var blind = new SingleFileMessagePackBackingStore(path);
+            blind.AttachRegistry(Registry);
+            blind.PullAll();
+            blind.PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without one, it cannot be seen, so it is marked");
+        }
+
         [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {

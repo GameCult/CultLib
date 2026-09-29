@@ -110,7 +110,7 @@ namespace GameCult.Mesh
                     descriptor.ToCatalogEntry(),
                     storedAt,
                     CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    ids.HoldsIds,
+                    CultElementIds.Holds(document),
                     contentKnown: true);
             }
             catch

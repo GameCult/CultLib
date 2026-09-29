@@ -64,12 +64,6 @@ namespace GameCult.Caching
 
             public int Count => _fills.Count;
 
-            // True when some element under the root already holds a non-empty id: one a store persisted, or one the caller set.
-            public bool HeldIds { get; internal set; }
-
-            // True when some element holds a non-empty id once the plan is applied: one already there, or one this plan fills.
-            public bool HoldsIds => HeldIds || _fills.Count > 0;
-
             internal void Add(object item, Shape shape, string? before, string id) => _fills.Add((item, shape, before, id));
 
             public void Apply()
@@ -206,6 +200,45 @@ namespace GameCult.Caching
             return null;
         }
 
+        // ---- write: what the stored form holds ----
+
+        // True when some element under root holds a non-empty id: the one fact a store marks its header by. It reads the value
+        // as it is now, refuses nothing and changes nothing, so a writer asks it of exactly what it is about to write.
+        internal static bool Holds(object? root)
+        {
+            if (root == null)
+                return false;
+            var type = root.GetType();
+            if (IsLeaf(type))
+                return false;
+            if (root is IDictionary dictionary)
+            {
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    if (Holds(entry.Value))
+                        return true;
+                }
+
+                return false;
+            }
+
+            if (root is IEnumerable list)
+            {
+                foreach (var item in list)
+                {
+                    if (item != null && IsObjectType(item.GetType()) && ShapeOf(item.GetType()).GetId is { } getId &&
+                        !string.IsNullOrEmpty(getId(item)))
+                        return true;
+                    if (Holds(item))
+                        return true;
+                }
+
+                return false;
+            }
+
+            return IsObjectType(type) && ShapeOf(type).Walk.Any(member => Holds(member.Get(root)));
+        }
+
         // ---- write and load: mint and check ----
 
         // Decides every unset element id under root, and refuses what the rule refuses, without changing anything: a random id
@@ -255,7 +288,6 @@ namespace GameCult.Caching
                     var id = getId(item);
                     if (string.IsNullOrEmpty(id))
                         continue;
-                    plan.HeldIds = true;
                     if (shape.Derive == null && !IsRandomId(id!))
                         throw new CultElementIdException(
                             $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters.",

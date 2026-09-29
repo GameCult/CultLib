@@ -353,16 +353,21 @@ namespace GameCult.Caching
             string storedAt,
             CultDocumentDescriptor descriptor,
             CultVariantDelta variant,
-            object? resolved)
+            object? resolved,
+            CultCodec? codec)
         {
             Key = key;
             StoredAt = storedAt;
             Descriptor = descriptor;
             Variant = variant;
             _document = resolved;
+            _codec = codec;
         }
 
         private readonly object? _document;
+
+        // What reads a variant's override values; null for a plain record.
+        private readonly CultCodec? _codec;
 
         public CultRecordKey Key { get; }
         public string StoredAt { get; }
@@ -382,19 +387,26 @@ namespace GameCult.Caching
         internal bool IdsInMemoryOnly { get; set; }
 
         // True when some element this record persists holds a non-empty id, and the only thing a store reads to mark its header.
-        // An admission decides it (it also counts the ids the admission fills; a variant holds ids when an override value does,
-        // its base's ids being the base's). A record that never passed an admission, one a caller built and handed straight to a
-        // store, reads it off the document it stores: the flag means what the stored form persists, wherever the record came from.
+        // It is read off the stored form each time it is asked, so a store asks it as it writes: a document changed after it was
+        // admitted, or loaded and changed in place, writes the header its content needs. A plain record persists its document; a
+        // variant persists its overrides, so it holds an id when an override value does (its base's ids are the base's). A
+        // variant built without a codec (a store loaded it with no cache attached) cannot see into its values and counts as holding
+        // one, so a store never writes an unmarked header over ids it could not see.
         public bool HoldsIds
         {
-            get => _holdsIds ?? (Variant == null && CultElementIds.Plan(_document, Key.Value, deterministic: false).HeldIds);
-            internal set => _holdsIds = value;
+            get
+            {
+                if (Variant == null)
+                    return CultElementIds.Holds(_document);
+                if (_codec == null)
+                    return true;
+                return Variant.Overrides.Any(entry => CultElementIds.Holds(_codec.Deserialize(
+                    Descriptor.RichMembers.First(member => member.Slot == entry.Path[0].Slot).MemberType, Descriptor.DocumentType, entry.Value)));
+            }
         }
 
-        private bool? _holdsIds;
-
-        internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, bool holdsIds) =>
-            new(Key, StoredAt, Descriptor, delta, document) { IdsInMemoryOnly = idsInMemoryOnly, HoldsIds = holdsIds };
+        internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, CultCodec codec) =>
+            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly };
     }
 
     public sealed class CultDocumentRegistry
@@ -2330,7 +2342,7 @@ namespace GameCult.Caching
 
         // An unresolved variant: the admitting hold resolves it against its base before anything lands.
         private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta) =>
-            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null);
+            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null, _codec);
 
         // The plain record a Flatten stages: the variant's resolved document, under the variant's own key and schema.
         private CultStoredDocument StampFlatten(CultRecordKey key)
@@ -2476,8 +2488,6 @@ namespace GameCult.Caching
                 .Where(stored => stored.Variant == null)
                 .Select(stored => (Stored: stored, Plan: CultElementIds.Plan(stored.Document, stored.Key.Value, deterministic: source != null)))
                 .ToArray();
-            foreach (var (stored, idPlan) in idPlans)
-                stored.HoldsIds = idPlan.HoldsIds;
             VariantPlan plan;
             CultCommitOutcome outcome;
             try
@@ -2487,10 +2497,6 @@ namespace GameCult.Caching
                 // The one resolution: a variant admitted, a base admitted or evicted, all resolved here against the post-batch
                 // set, before land and before memory. land receives the admitted records with variants resolved.
                 plan = Resolve(admitted, evicted, source);
-                // A variant's own record is resolved into a copy; the record a loading store keeps is the original.
-                var resolvedByKey = plan.Admitted.ToDictionary(resolved => resolved.Key.Value, StringComparer.Ordinal);
-                foreach (var stored in admitted.Where(stored => stored.Variant != null))
-                    stored.HoldsIds = resolvedByKey[stored.Key.Value].HoldsIds;
                 outcome = land(home, plan.Admitted);
             }
             catch
@@ -2889,7 +2895,6 @@ namespace GameCult.Caching
                 var kept = new List<KeyValuePair<int, byte[]>>();
                 var overrides = new List<CultVariantOverride>(delta.Overrides.Count);
                 var minted = false;
-                var holdsIds = false;
                 var seen = new HashSet<int>();
                 foreach (var entry in delta.Overrides)
                 {
@@ -2922,9 +2927,6 @@ namespace GameCult.Caching
                     // decoded copy, and the delta this hold lands carries them.
                     var bytes = entry.Value;
                     var idPlan = CultElementIds.Plan(value, key + "." + slot.ToString(CultureInfo.InvariantCulture), deterministic: source != null);
-                    // What the record persists: a write persists the ids it mints, a load keeps the delta as the store held it, so
-                    // the ids a load mints exist only in memory.
-                    holdsIds |= source == null ? idPlan.HoldsIds : idPlan.HeldIds;
                     if (idPlan.Count > 0)
                     {
                         idPlan.Apply();
@@ -2942,13 +2944,10 @@ namespace GameCult.Caching
 
                 stack.RemoveAt(stack.Count - 1);
                 return done[key] = isVariant
-                    ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null), holdsIds)
+                    ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null), _codec)
                     : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document)
                     {
-                        Flattens = true,
-                        // The flattened record is the document it stores, resolved against the post-batch base: the flag is read
-                        // off that document, not carried from the variant or from the document the flatten was planned against.
-                        HoldsIds = CultElementIds.Plan(document, key, deterministic: source != null).HoldsIds
+                        Flattens = true
                     };
             }
         }
@@ -3384,7 +3383,8 @@ namespace GameCult.Caching
                     record.StoredAt,
                     descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides.Where(Has).ToArray()),
-                    null);
+                    null,
+                    Cache?.Codec);
             }
 
             var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
