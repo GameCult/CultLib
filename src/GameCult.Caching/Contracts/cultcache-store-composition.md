@@ -47,14 +47,19 @@ which route wrote it.
 - Changes published through `Watch`/`WatchRecord` carry a `Sequence`: a
   per-cache, in-memory number assigned when the cache admits the change, under
   its gate. It increases in admission order and is not persisted.
-  `OnUpdate(previous, current)` carries none. CultNet derives its
-  streams (`CultNetDatabase.WatchAllChanges`, the subscription server,
-  database-backed Mesh handles) from `Watch`, so a load, a commit and a variant
-  dependent's re-resolution all reach subscribers and the mutation log through
-  one handler over `Watch`; a database write door only hands that handler the
-  wire message or replicated entry for the change it admitted. That handler releases
-  changes in cache `Sequence` order, so the log and the stream agree with the
-  cache. A replica publishes but never mints log sequences. The
+  `OnUpdate(previous, current)` carries none. CultNet derives its streams
+  (`CultNetDatabase.WatchAllChanges`, the subscription server, database-backed
+  Mesh handles) from `Watch` plus one journal (`AddJournal`), so a load, a
+  commit and a variant dependent's re-resolution all reach subscribers and the
+  mutation log. The journal runs under the gate in `Sequence` order, so the
+  shard log is written in cache order; the `Watch` observer publishes what the
+  journal decided. A database write door only hands the journal the wire message
+  or replicated entry for the change it admitted. A replica publishes but never
+  mints log sequences. A primary logs every change it admits, loads and pulls
+  included; a store attached after the database exists has its hydration logged
+  too. A primary that cannot log a change compacts through that change's
+  sequence and throws `CultNetShardLogException` to the writer after publication:
+  the commit stands, and a replica behind it resynchronizes from a snapshot. The
   streams carry no `Sequence` and have no stale protection.
 - `GetWithSequence(key)` returns the document and the cache's current
   `Sequence`, read together under the gate: every change with a `Sequence` at
@@ -131,6 +136,10 @@ which route wrote it.
   needs the cache or its gate: another thread's write, a lock a writer holds.
   Its own leaf locks, taken only inside the journal, are the only locks that may
   nest under the gate.
+- A shard mutation log store (`ICultNetShardMutationLogStore`) runs inside the
+  CultNet journal, under the cache's gate: it must not call the cache or wait
+  for a thread that does. A store that writes its own cache throws through the
+  journal's reentry guard, and the admission stands.
 - A thread holds one cache's gate at a time: entering a cache's hold inside
   another cache's hold throws.
 - A store doing I/O on behalf of its cache (pull, flush, commit) holds the gate,

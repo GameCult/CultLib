@@ -464,6 +464,36 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Raised to the writer when a shard primary committed a change and could not log it. The commit stands and the
+    /// change was published; the shard's log burned <see cref="Sequence"/> and compacted past it, so every replica
+    /// behind it resynchronizes from a snapshot. It is deliberately not an <see cref="InvalidOperationException"/>:
+    /// callers that read that type as a refused write must not mistake a committed one for it. When several things
+    /// fail in one admission, the writer sees an <see cref="AggregateException"/> that contains this one.
+    /// </summary>
+    public sealed class CultNetShardLogException : Exception
+    {
+        /// <summary>
+        /// Creates a shard log exception.
+        /// </summary>
+        public CultNetShardLogException(string shardId, long sequence, Exception cause)
+            : base($"Shard '{shardId}' committed a change but could not log it; sequence {sequence} is burned and compacted past.", cause)
+        {
+            ShardId = shardId;
+            Sequence = sequence;
+        }
+
+        /// <summary>
+        /// Gets the shard whose log refused the change.
+        /// </summary>
+        public string ShardId { get; }
+
+        /// <summary>
+        /// Gets the shard-log sequence that was minted for the change and burned.
+        /// </summary>
+        public long Sequence { get; }
+    }
+
+    /// <summary>
     /// Database-style CultNet facade over a CultCache shard set.
     /// </summary>
     public sealed class CultNetDatabase : IDisposable
@@ -474,38 +504,39 @@ namespace GameCult.Networking
         private readonly List<CultNetShardDescriptor> _shards;
         private readonly List<CultNetClientAuthorityScope> _clientAuthorityScopes;
         private readonly ICultNetShardMutationLogStore? _mutationLogStore;
-        private readonly HashSet<string> _predictedDocuments = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, List<CultNetShardMutationLogEntry>> _mutationLogs =
+        // Keyed by sequence, like the durable store: recording an entry twice replaces it.
+        private readonly Dictionary<string, SortedList<long, CultNetShardMutationLogEntry>> _mutationLogs =
             new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _nextLogSequences = new(StringComparer.Ordinal);
+        // The highest sequence this primary burned per shard (a change it committed and could not log). Serves as the
+        // shard's compaction floor beside the store's own, so history the log cannot serve is answered compacted_history.
+        private readonly Dictionary<string, long> _burnedThrough = new(StringComparer.Ordinal);
         private readonly Dictionary<string, long> _appliedShardSequences = new(StringComparer.Ordinal);
         // CultNet typed selection, section 2: "ordinal is the sequence of the commit that last wrote
-        // the row". Kept on every append (AppendMutationLogEntry is the one site), keyed by (schemaId,
+        // the row". Kept on every append (LogPrimaryChange and RecordReplicatedEntry are the sites), keyed by (schemaId,
         // recordKey) so the evaluator's order and cursor never read a clock.
         private readonly Dictionary<(string SchemaId, string RecordKey), long> _lastWriteSequence =
             new();
         private readonly Subject<object> _changes = new();
         private readonly IDisposable _cacheChanges;
+        private readonly IDisposable _cacheJournal;
         // What a write door of this database knows about the change it is admitting and the cache does not: the wire
-        // message it carries, a prediction it reconciles, the replicated log entry it applies. The cache's Watch stream
-        // is the only publisher and the only logger; a door registers this context under the identity of the change it
-        // admits (the instance it writes, or the instance it removes) and the stream handler consumes it once, for that
-        // change alone. A write to the same key by anyone else is a different instance and gets no context.
+        // message it carries, a prediction it reconciles, the replicated log entry it applies. The journal is the only
+        // logger and consumes the context under the cache gate; a door registers it under the identity of the change it
+        // admits (the instance it writes, or the instance it removes), and the journal takes it once, for that change
+        // alone. A write to the same key by anyone else is a different instance and gets no context.
         private readonly ConcurrentDictionary<object, DoorContext> _doors = new(ReferenceIdentity.Instance);
-        // One gate over the mutation log, its sequence counters and the last-write map. Publication stays outside it: a
-        // subscriber may write the cache from its handler.
+        // One gate over the mutation log, its sequence counters, the last-write map and the publication stash. Lock order:
+        // the cache gate, then this, then the log store's own lock. Nothing holding this calls the cache, and a log store
+        // must not either (ICultNetShardMutationLogStore). Publication stays outside it: a subscriber may write the cache
+        // from its handler.
         private readonly object _logGate = new();
-        // The cache admits a change to a key under its gate, but each thread reaches this handler after leaving it, in any
-        // order. Changes are therefore released strictly in cache Sequence order: a change ahead of a gap is parked until the
-        // gap fills, and one thread at a time drains the ready queue, outside every lock, so a subscriber that writes the
-        // cache from its handler queues behind the change it is handling instead of running inside it.
-        private readonly SortedDictionary<long, PendingChange> _parked = new();
-        private readonly Queue<PendingChange> _ready = new();
-        private long _nextSequence;
-        private bool _draining;
-        // Predictions this runtime made and has not seen reconciled. Every read and write takes _predictionGate.
-        private readonly object _predictionGate = new();
-        private bool _disposed;
+        // Changes the journal has decided and the Watch observer has not yet published, by cache Sequence. The journal
+        // runs under the cache gate before any observer, so each change is stashed before it can be published.
+        private readonly Dictionary<long, Publication> _stash = new();
+        // Predictions this runtime made and has not seen reconciled. Only the journal reads or writes it, under the cache gate.
+        private readonly HashSet<string> _predictedDocuments = new(StringComparer.Ordinal);
+        private volatile bool _disposed;
 
         /// <summary>
         /// Creates a database surface over a CultCache instance.
@@ -524,12 +555,9 @@ namespace GameCult.Networking
             _clientAuthorityScopes = (options.ClientAuthorityScopes ?? Array.Empty<CultNetClientAuthorityScope>()).ToList();
             CursorKey = options.CursorKey ?? CultNetSelectionCursorKey.Random();
             InitializeLogSequencesFromStore();
-            lock (_logGate)
-            {
-                _cacheChanges = _cache.Watch<object>().Subscribe(OnCacheChange);
-                // Changes admitted before this read are released as they arrive; the next one is the first this handler waits for.
-                _nextSequence = _cache.GetWithSequence(new CultRecordKey(string.Empty)).Sequence + 1;
-            }
+            // The observer first, the journal second: a change the journal stashed always finds its publisher.
+            _cacheChanges = _cache.Watch<object>().Subscribe(Publish);
+            _cacheJournal = _cache.AddJournal(Journal);
         }
 
         /// <summary>
@@ -591,7 +619,7 @@ namespace GameCult.Networking
                     return Array.Empty<CultNetShardMutationLogEntry>();
                 }
 
-                var query = entries.Where(entry => entry.Sequence > afterSequence);
+                var query = entries.Values.Where(entry => entry.Sequence > afterSequence);
                 if (limit.HasValue)
                 {
                     query = query.Take(limit.Value);
@@ -628,7 +656,15 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
-            return _mutationLogStore?.GetCompactedThrough(shardId) ?? 0;
+            lock (_logGate)
+                return CompactedFloor(shardId);
+        }
+
+        // The store's compaction point or this primary's own burned sequences, whichever is higher. Under _logGate.
+        private long CompactedFloor(string shardId)
+        {
+            var burned = _burnedThrough.TryGetValue(shardId, out var through) ? through : 0;
+            return Math.Max(burned, _mutationLogStore?.GetCompactedThrough(shardId) ?? 0);
         }
 
         /// <summary>
@@ -638,11 +674,13 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             if (string.IsNullOrWhiteSpace(shardId)) throw new ArgumentException("Value must be non-empty.", nameof(shardId));
-            var compactedThrough = GetCompactedMutationLogSequence(shardId);
-            var retained = _mutationLogStore != null
-                ? _mutationLogStore.Read(shardId).Select(entry => entry.Sequence)
-                : GetMutationLog(shardId).Select(entry => entry.Sequence);
-            return retained.DefaultIfEmpty(compactedThrough).Max();
+            lock (_logGate)
+            {
+                var retained = _mutationLogStore != null
+                    ? _mutationLogStore.Read(shardId).Select(entry => entry.Sequence)
+                    : GetMutationLog(shardId).Select(entry => entry.Sequence);
+                return retained.Append(CompactedFloor(shardId)).Max();
+            }
         }
 
         /// <summary>
@@ -659,6 +697,10 @@ namespace GameCult.Networking
             ThrowIfDisposed();
             if (shard == null) throw new ArgumentNullException(nameof(shard));
 
+            // The log sequence is read before any document: a write that lands in between is then replayed from the log on
+            // top of documents that already hold it (whole-document puts and deletes, applied in order), and a snapshot can
+            // never claim a sequence whose write its documents lack.
+            var logSequence = GetLatestMutationLogSequence(shard.ShardId);
             var lowSchemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds);
             var lowKeys = CultNetV0SelectionLowering.Lower(filter?.RecordKeys);
 
@@ -672,7 +714,7 @@ namespace GameCult.Networking
                     Documents = Array.Empty<CultNetRawDocumentRecord>(),
                     ShardId = shard.ShardId,
                     ShardEpoch = shard.Epoch,
-                    ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
+                    ShardLogSequence = logSequence
                 };
             }
 
@@ -695,7 +737,7 @@ namespace GameCult.Networking
                 Documents = page.Documents ?? Array.Empty<CultNetRawDocumentRecord>(),
                 ShardId = shard.ShardId,
                 ShardEpoch = shard.Epoch,
-                ShardLogSequence = GetLatestMutationLogSequence(shard.ShardId)
+                ShardLogSequence = logSequence
             };
         }
 
@@ -730,7 +772,7 @@ namespace GameCult.Networking
             var local = GetLocalShardDocuments(shard).ToArray();
             foreach (var existing in local.Where(item => !incomingKeys.Contains(item.Key.Value)))
             {
-                using (Door(existing.Document, new DoorContext(shard) { NoLog = true }))
+                using (Door(existing.Document, new DoorContext(shard) { NoLog = true, Removal = true }))
                     _cache.Remove(existing.Key);
             }
 
@@ -912,14 +954,7 @@ namespace GameCult.Networking
             var shard = ResolveShardInternal(descriptor, key);
             EnsurePrimary(shard, descriptor.SchemaId, key, message.ShardEpoch);
             var document = _documents.DeserializeRawDocument(message.Document);
-            var predictionKey = PredictionKey(descriptor.SchemaId, key);
-            var reconcilesPrediction = HasPrediction(predictionKey);
-            using (Door(document, new DoorContext(shard)
-            {
-                Put = message,
-                Kind = reconcilesPrediction ? CultNetDatabaseChangeKind.Reconciled : null,
-                PredictionKey = reconcilesPrediction ? predictionKey : null
-            }))
+            using (Door(document, new DoorContext(shard) { Put = message, PredictionKey = PredictionKey(descriptor.SchemaId, key) }))
                 await _cache.UpsertAsync(descriptor.DocumentType, document, key).ConfigureAwait(false);
             return document;
         }
@@ -1057,7 +1092,6 @@ namespace GameCult.Networking
                 (change.Document != null && ReferenceEquals(_cache.GetByIndex<T>(alias, value), change.Document)) ||
                 (change.PreviousDocument != null && ReferenceEquals(_cache.GetByIndex<T>(alias, value), change.PreviousDocument)));
         }
-
         /// <summary>
         /// Releases database subscriptions.
         /// </summary>
@@ -1070,146 +1104,182 @@ namespace GameCult.Networking
 
             _disposed = true;
             _cacheChanges.Dispose();
+            _cacheJournal.Dispose();
+            lock (_logGate)
+                _stash.Clear();
             _changes.Dispose();
         }
 
-        // The cache is the one owner of "a change was committed", and this is its one publisher and one logger: every admitted
-        // change reaches subscribers and, when this runtime is the shard's primary, the mutation log, exactly once, in cache
-        // Sequence order. A replica publishes what it admits but never mints log sequences: its log holds only the primary's
-        // own entries, which the replica door hands over.
-        private void OnCacheChange(CultCacheDocumentChange<object> change)
+        // The cache is the one owner of "a change was committed"; the journal is this database's one decision point and its
+        // one logger. It runs under the cache gate, in cache Sequence order, before any observer: it takes the change's door,
+        // settles the change kind and the prediction bookkeeping, logs the change when this runtime is the shard's primary
+        // (a replica records only the primary's own entry, which its door carries), and stashes what the publisher needs.
+        // A change with no door was written by someone else (a bare cache write, a load, a pull) and is logged like any
+        // unattributed commit. It never enters the cache and calls nothing that does.
+        private void Journal(IReadOnlyList<CultCacheDocumentChange<object>> changes)
         {
-            var pending = new PendingChange(change, TakeDoor(change));
-            lock (_logGate)
-            {
-                if (_disposed)
-                {
-                    return;
-                }
-
-                if (change.Sequence < _nextSequence)
-                {
-                    _ready.Enqueue(pending);
-                }
-                else
-                {
-                    _parked[change.Sequence] = pending;
-                    while (_parked.Remove(_nextSequence, out var next))
-                    {
-                        _ready.Enqueue(next);
-                        _nextSequence++;
-                    }
-                }
-
-                if (_draining)
-                {
-                    return;
-                }
-
-                _draining = true;
-            }
-
-            try
-            {
-                while (true)
-                {
-                    PendingChange? item;
-                    lock (_logGate)
-                    {
-                        if (_disposed || !_ready.TryDequeue(out item))
-                        {
-                            _draining = false;
-                            return;
-                        }
-                    }
-
-                    Deliver(item);
-                }
-            }
-            catch
-            {
-                lock (_logGate)
-                    _draining = false;
-                throw;
-            }
-        }
-
-        private void Deliver(PendingChange item)
-        {
-            var change = item.Change;
-            var door = item.Door;
-            var identity = change.Document ?? change.PreviousDocument;
-            if (identity == null)
+            if (_disposed)
             {
                 return;
             }
 
-            var documentType = identity.GetType();
-            var descriptor = _cache.Registry.GetRequired(documentType);
-            var shard = door?.Shard ?? ResolveShardInternal(descriptor, change.Key);
-            var kind = door?.Kind ?? change.Kind switch
+            List<Exception>? failures = null;
+            foreach (var change in changes)
             {
-                CultCacheDocumentChangeKind.Removed => CultNetDatabaseChangeKind.Removed,
-                CultCacheDocumentChangeKind.Added => CultNetDatabaseChangeKind.Added,
-                _ => CultNetDatabaseChangeKind.Updated
-            };
-            var logKind = kind == CultNetDatabaseChangeKind.Reconciled ? CultNetDatabaseChangeKind.Updated : kind;
-            if (door?.PredictionKey is { } predictionKey)
-            {
-                lock (_predictionGate)
+                var identity = change.Document ?? change.PreviousDocument;
+                if (identity == null)
+                {
+                    continue;
+                }
+
+                var door = TakeDoor(change);
+                var documentType = identity.GetType();
+                var descriptor = _cache.Registry.GetRequired(documentType);
+                var shard = door?.Shard ?? ResolveShardInternal(descriptor, change.Key);
+                var kind = door?.Kind ?? change.Kind switch
+                {
+                    CultCacheDocumentChangeKind.Removed => CultNetDatabaseChangeKind.Removed,
+                    CultCacheDocumentChangeKind.Added => CultNetDatabaseChangeKind.Added,
+                    _ => CultNetDatabaseChangeKind.Updated
+                };
+                if (door?.PredictionKey is { } predictionKey)
                 {
                     if (door.Predicts)
                         _predictedDocuments.Add(predictionKey);
-                    else
-                        _predictedDocuments.Remove(predictionKey);
+                    else if (_predictedDocuments.Remove(predictionKey))
+                        kind = CultNetDatabaseChangeKind.Reconciled;
                 }
-            }
 
-            if (door?.Replica is { } replicated)
-            {
-                lock (_logGate)
+                // The log records a reconciled change as the update it is.
+                var logKind = kind == CultNetDatabaseChangeKind.Reconciled ? CultNetDatabaseChangeKind.Updated : kind;
+                try
                 {
-                    RecordMutationLogEntry(new CultNetShardMutationLogEntry(
-                        shard.ShardId,
-                        shard.Epoch,
-                        replicated.Sequence,
-                        replicated.CommittedAt,
-                        logKind,
-                        descriptor.SchemaId,
-                        change.Key,
-                        change.Document,
-                        change.PreviousDocument),
-                        replicated);
-                    _lastWriteSequence[(descriptor.SchemaId, change.Key.Value)] = replicated.Sequence;
+                    if (door?.Replica is { } replicated)
+                    {
+                        RecordReplicatedEntry(shard, logKind, descriptor.SchemaId, change, replicated);
+                    }
+                    else if (door?.NoLog != true && shard.IsPrimary)
+                    {
+                        LogPrimaryChange(shard, logKind, descriptor.SchemaId, change, door);
+                    }
                 }
-            }
-            else if (door?.NoLog != true && shard.IsPrimary)
-            {
-                AppendMutationLogEntry(
-                    shard,
-                    logKind,
-                    change.Key,
-                    descriptor.SchemaId,
-                    change.Document,
-                    change.PreviousDocument,
-                    door?.Put != null
-                        ? new CultNetShardLogEntryMessage
-                        {
-                            ChangeKind = change.Kind == CultCacheDocumentChangeKind.Added ? "added" : "updated",
-                            Put = door.Put
-                        }
-                        : door?.Delete != null
-                            ? new CultNetShardLogEntryMessage { ChangeKind = "removed", Delete = door.Delete }
-                            : null);
+                catch (Exception exception)
+                {
+                    (failures ??= new List<Exception>()).Add(exception);
+                }
+
+                lock (_logGate)
+                    _stash[change.Sequence] = new Publication(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument);
             }
 
-            PublishUntyped(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument);
+            // Every change is stashed and will be published; the writer hears of a failed log afterwards.
+            if (failures != null)
+            {
+                throw failures.Count == 1 ? failures[0] : new AggregateException(failures);
+            }
         }
 
-        private bool HasPrediction(string predictionKey)
+        // The Watch observer publishes, on the writer's thread after the cache gate opens and before the write returns, what
+        // the journal stashed for this change. A change with no stash was admitted before this database existed.
+        private void Publish(CultCacheDocumentChange<object> change)
         {
-            lock (_predictionGate)
-                return _predictedDocuments.Contains(predictionKey);
+            Publication? publication;
+            lock (_logGate)
+            {
+                if (!_stash.Remove(change.Sequence, out publication))
+                {
+                    return;
+                }
+            }
+
+            PublishUntyped(
+                publication.DocumentType,
+                publication.Kind,
+                publication.Key,
+                publication.SchemaId,
+                publication.Shard,
+                publication.Document,
+                publication.PreviousDocument);
+        }
+
+        private void RecordReplicatedEntry(
+            CultNetShardDescriptor shard,
+            CultNetDatabaseChangeKind logKind,
+            string schemaId,
+            CultCacheDocumentChange<object> change,
+            CultNetShardLogEntryMessage replicated)
+        {
+            lock (_logGate)
+            {
+                RecordMutationLogEntry(new CultNetShardMutationLogEntry(
+                    shard.ShardId,
+                    shard.Epoch,
+                    replicated.Sequence,
+                    replicated.CommittedAt,
+                    logKind,
+                    schemaId,
+                    change.Key,
+                    change.Document,
+                    change.PreviousDocument),
+                    replicated);
+                _lastWriteSequence[(schemaId, change.Key.Value)] = replicated.Sequence;
+            }
+        }
+
+        // A primary mints the sequence, appends durably, then records in memory. If it cannot log the change, the change is
+        // still committed: the sequence is burned and compacted past, so a replica behind it is told compacted_history and
+        // resynchronizes by snapshot, and the writer is told with a CultNetShardLogException.
+        private void LogPrimaryChange(
+            CultNetShardDescriptor shard,
+            CultNetDatabaseChangeKind logKind,
+            string schemaId,
+            CultCacheDocumentChange<object> change,
+            DoorContext? door)
+        {
+            lock (_logGate)
+            {
+                var sequence = NextMutationLogSequence(shard.ShardId);
+                _lastWriteSequence[(schemaId, change.Key.Value)] = sequence;
+                try
+                {
+                    var entry = new CultNetShardMutationLogEntry(
+                        shard.ShardId,
+                        shard.Epoch,
+                        sequence,
+                        DateTimeOffset.UtcNow.ToString("O"),
+                        logKind,
+                        schemaId,
+                        change.Key,
+                        change.Document,
+                        change.PreviousDocument);
+                    var wireEntry = _mutationLogStore == null
+                        ? null
+                        : door?.Put != null
+                            ? new CultNetShardLogEntryMessage
+                            {
+                                ChangeKind = change.Kind == CultCacheDocumentChangeKind.Added ? "added" : "updated",
+                                Put = door.Put
+                            }
+                            : door?.Delete != null
+                                ? new CultNetShardLogEntryMessage { ChangeKind = "removed", Delete = door.Delete }
+                                : ToLogEntryMessage(entry);
+                    RecordMutationLogEntry(entry, wireEntry);
+                }
+                catch (Exception cause)
+                {
+                    _burnedThrough[shard.ShardId] = Math.Max(_burnedThrough.TryGetValue(shard.ShardId, out var burned) ? burned : 0, sequence);
+                    try
+                    {
+                        _mutationLogStore?.CompactThrough(shard.ShardId, sequence);
+                    }
+                    catch (Exception compactCause)
+                    {
+                        cause = new AggregateException(cause, compactCause);
+                    }
+
+                    throw new CultNetShardLogException(shard.ShardId, sequence, cause);
+                }
+            }
         }
 
         // A door's context belongs to one specific change, recognised by shape: a put door wrote an instance no cache had
@@ -1252,7 +1322,7 @@ namespace GameCult.Networking
                 _owned = owned;
             }
 
-            // True when the stream handler took the context: the door's write was admitted.
+            // True when the journal took the context: the door's write was admitted.
             public bool Consumed => !_owned || !_doors.TryGetValue(_identity, out var held) || !ReferenceEquals(held, _context);
 
             public void Dispose()
@@ -1262,16 +1332,34 @@ namespace GameCult.Networking
             }
         }
 
-        private sealed class PendingChange
+        // What the publisher needs of a change the journal decided.
+        private sealed class Publication
         {
-            public PendingChange(CultCacheDocumentChange<object> change, DoorContext? door)
+            public Publication(
+                Type documentType,
+                CultNetDatabaseChangeKind kind,
+                CultRecordKey key,
+                string schemaId,
+                CultNetShardDescriptor shard,
+                object? document,
+                object? previousDocument)
             {
-                Change = change;
-                Door = door;
+                DocumentType = documentType;
+                Kind = kind;
+                Key = key;
+                SchemaId = schemaId;
+                Shard = shard;
+                Document = document;
+                PreviousDocument = previousDocument;
             }
 
-            public CultCacheDocumentChange<object> Change { get; }
-            public DoorContext? Door { get; }
+            public Type DocumentType { get; }
+            public CultNetDatabaseChangeKind Kind { get; }
+            public CultRecordKey Key { get; }
+            public string SchemaId { get; }
+            public CultNetShardDescriptor Shard { get; }
+            public object? Document { get; }
+            public object? PreviousDocument { get; }
         }
 
         private sealed class DoorContext
@@ -1365,36 +1453,6 @@ namespace GameCult.Networking
             public object Document { get; }
         }
 
-        private void AppendMutationLogEntry(
-            CultNetShardDescriptor shard,
-            CultNetDatabaseChangeKind kind,
-            CultRecordKey key,
-            string schemaId,
-            object? document,
-            object? previousDocument,
-            CultNetShardLogEntryMessage? wireEntry = null)
-        {
-            lock (_logGate)
-            {
-            var sequence = NextMutationLogSequence(shard.ShardId);
-            var committedAt = DateTimeOffset.UtcNow.ToString("O");
-            var entry = new CultNetShardMutationLogEntry(
-                shard.ShardId,
-                shard.Epoch,
-                sequence,
-                committedAt,
-                kind,
-                schemaId,
-                key,
-                document,
-                previousDocument);
-            var storedWireEntry = _mutationLogStore == null
-                ? null
-                : wireEntry ?? ToLogEntryMessage(entry);
-            RecordMutationLogEntry(entry, storedWireEntry);
-            _lastWriteSequence[(schemaId, key.Value)] = sequence;
-            }
-        }
 
         /// <summary>
         /// The shard-log sequence of the commit that last wrote this row, or null when the row has
@@ -1444,20 +1502,21 @@ namespace GameCult.Networking
         {
             if (!_mutationLogs.TryGetValue(entry.ShardId, out var entries))
             {
-                entries = new List<CultNetShardMutationLogEntry>();
+                entries = new SortedList<long, CultNetShardMutationLogEntry>();
                 _mutationLogs[entry.ShardId] = entries;
             }
 
-            entries.Add(entry);
+            // Disk first: memory never serves an entry the durable log lacks, and a refused append records nothing.
+            if (_mutationLogStore != null && wireEntry != null)
+            {
+                _mutationLogStore.Append(entry.ShardId, NormalizeWireLogEntry(entry, wireEntry));
+            }
+
+            entries[entry.Sequence] = entry;
             if (!_nextLogSequences.TryGetValue(entry.ShardId, out var next) ||
                 next <= entry.Sequence)
             {
                 _nextLogSequences[entry.ShardId] = entry.Sequence + 1;
-            }
-
-            if (_mutationLogStore != null && wireEntry != null)
-            {
-                _mutationLogStore.Append(entry.ShardId, NormalizeWireLogEntry(entry, wireEntry));
             }
         }
 
@@ -1481,7 +1540,7 @@ namespace GameCult.Networking
             {
                 // R-Q: the log is the durable record of every commit, replica-applied ones included, so
                 // the last-write sequence a restart resumes with is rebuilt from it exactly as
-                // AppendMutationLogEntry/the replica apply paths maintain it live - a row's ordinal for
+                // LogPrimaryChange/the replica apply paths maintain it live - a row's ordinal for
                 // the selection evaluator's order and cursor must not reset to "never written" on restart.
                 var entries = _mutationLogStore.Read(shard.ShardId);
                 var highest = 0L;
@@ -1499,6 +1558,8 @@ namespace GameCult.Networking
                     }
                 }
 
+                // Sequences at or below the compaction point are spent even when the log holds none of them.
+                highest = Math.Max(highest, _mutationLogStore.GetCompactedThrough(shard.ShardId));
                 if (highest > 0)
                 {
                     _nextLogSequences[shard.ShardId] = highest + 1;
@@ -1570,17 +1631,11 @@ namespace GameCult.Networking
                     $"Shard '{shard.ShardId}' log entry {entry.Sequence} has a removed kind with a put payload.");
             }
 
-            var predictionKey = PredictionKey(descriptor.SchemaId, key);
-            var reconcilesPrediction = HasPrediction(predictionKey);
-            if (reconcilesPrediction)
-            {
-                kind = CultNetDatabaseChangeKind.Reconciled;
-            }
-
             // The replica's log records the primary's own entry under the primary's own sequence, in the same hold that
-            // admits the change; the stream handler does both.
+            // admits the change; the journal does both. A retry after a refused append is a fresh instance, so it matches
+            // its door again and re-records the entry.
             var document = _documents.DeserializeRawDocument(message.Document);
-            using (Door(document, new DoorContext(shard) { Kind = kind, Replica = entry, PredictionKey = reconcilesPrediction ? predictionKey : null }))
+            using (Door(document, new DoorContext(shard) { Kind = kind, Replica = entry, PredictionKey = PredictionKey(descriptor.SchemaId, key) }))
                 await _cache.UpsertAsync(descriptor.DocumentType, document, key).ConfigureAwait(false);
         }
 
