@@ -2762,16 +2762,18 @@ fn rudp_ordered_frame_waits_for_a_gap_filled_by_another_channel() -> Result<()> 
     let u = sender.send("media", b"u".to_vec(), rudp_send_options(false))?;
     let o2 = sender.send("schema", b"o2".to_vec(), rudp_send_options(true))?;
     let o3 = sender.send("schema", b"o3".to_vec(), rudp_send_options(true))?;
+    let o4 = sender.send("schema", b"o4".to_vec(), rudp_send_options(true))?;
 
     assert_eq!(rudp_delivered_names(&receiver.receive(&o1, 1)?.delivered), ["o1"]);
     // `u` is lost, so nothing behind it may be delivered.
     assert!(receiver.receive(&o2, 2)?.delivered.is_empty());
     assert!(receiver.receive(&o3, 3)?.delivered.is_empty());
-    // The other channel's packet fills the gap and releases the ordered frames
-    // in the same call.
+    assert!(receiver.receive(&o4, 4)?.delivered.is_empty());
+    // The other channel's packet fills the gap and releases every ordered
+    // frame behind it in the same call.
     assert_eq!(
-        rudp_delivered_names(&receiver.receive(&u, 4)?.delivered),
-        ["u", "o2", "o3"]
+        rudp_delivered_names(&receiver.receive(&u, 5)?.delivered),
+        ["u", "o2", "o3", "o4"]
     );
     Ok(())
 }
@@ -2827,6 +2829,30 @@ fn rudp_accept_seeds_the_watermark_of_the_connecting_side() -> Result<()> {
 }
 
 #[test]
+fn rudp_reset_forgets_held_frames_and_reseeds_the_watermark_from_the_next_handshake() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    sender.send("schema", b"s1".to_vec(), rudp_send_options(true))?;
+    let s2 = sender.send("schema", b"s2".to_vec(), rudp_send_options(true))?;
+    assert!(receiver.receive(&s2, 1)?.delivered.is_empty());
+
+    receiver.reset_peer_state();
+    let mut next = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: 100,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let accept = receiver.accept_connect(&next.create_connect(0, Vec::new())?, 2, Vec::new())?;
+    next.receive(&accept, 2)?;
+    let d1 = next.send("schema", b"d1".to_vec(), rudp_send_options(true))?;
+    let d2 = next.send("schema", b"d2".to_vec(), rudp_send_options(true))?;
+
+    // The held s2 died with the reset, and the watermark follows the new peer.
+    assert!(receiver.receive(&d2, 3)?.delivered.is_empty());
+    assert_eq!(rudp_delivered_names(&receiver.receive(&d1, 4)?.delivered), ["d1", "d2"]);
+    Ok(())
+}
+
+#[test]
 fn rudp_large_ordered_frame_without_a_gap_is_never_held_or_refused() -> Result<()> {
     let (mut sender, mut receiver) = rudp_ordered_pair()?;
     let packets = sender.send_many(
@@ -2848,6 +2874,32 @@ fn rudp_large_ordered_frame_without_a_gap_is_never_held_or_refused() -> Result<(
     }
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].payload.len(), 5 * 1024 * 1024);
+    Ok(())
+}
+
+#[test]
+fn rudp_ordered_hold_buffer_is_bounded_in_bytes() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let withheld = sender.send("schema", b"first".to_vec(), rudp_send_options(true))?;
+    sender.receive(&receiver.create_ack_for(withheld.sequence), 1)?;
+
+    // Four 1 MiB frames fit the 4 MiB hold; the fifth does not.
+    let mut refused_at = None;
+    for step in 0..8u32 {
+        let packet = sender.send("schema", vec![7u8; 1024 * 1024], rudp_send_options(true))?;
+        match receiver.receive(&packet, 2) {
+            Ok(result) => {
+                assert!(result.delivered.is_empty(), "the gap holds every frame");
+                sender.receive(&receiver.create_ack_for(packet.sequence), 2)?;
+            }
+            Err(refusal) => {
+                assert!(refusal.to_string().contains("ordered hold buffer is full"), "{refusal}");
+                refused_at = Some(step);
+                break;
+            }
+        }
+    }
+    assert_eq!(refused_at, Some(4));
     Ok(())
 }
 

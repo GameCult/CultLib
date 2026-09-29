@@ -10,7 +10,6 @@ import unittest
 
 from cultnet_py.transport import (
     CultNetRudpPacket,
-    CultNetRudpPacketType,
     CultNetRudpSendOptions,
     CultNetRudpSession,
     CultNetRudpSessionOptions,
@@ -40,11 +39,13 @@ class CultNetRudpOrderedDeliveryTests(unittest.TestCase):
         u = send(sender, "rel", "u", False)
         o2 = send(sender, "schema", "o2", True)
         o3 = send(sender, "schema", "o3", True)
+        o4 = send(sender, "schema", "o4", True)
 
         self.assertEqual(names(receiver.receive(o1, 1)), ["o1"])
         self.assertEqual(names(receiver.receive(o2, 2)), [], "u is missing")
         self.assertEqual(names(receiver.receive(o3, 3)), [], "u is missing")
-        self.assertEqual(names(receiver.receive(u, 4)), ["u", "o2", "o3"])
+        self.assertEqual(names(receiver.receive(o4, 4)), [], "u is missing")
+        self.assertEqual(names(receiver.receive(u, 5)), ["u", "o2", "o3", "o4"])
 
     def test_two_ordered_channels_release_each_other_in_sequence_order(self) -> None:
         sender, receiver = handshake()
@@ -93,16 +94,21 @@ class CultNetRudpOrderedDeliveryTests(unittest.TestCase):
         self.assertEqual(names(receiver.receive(s1, 3)), ["s1", "s2"])
         self.assertEqual(names(receiver.receive(s2, 4)), [])
 
-    def test_reset_peer_state_forgets_held_frames_and_the_watermark(self) -> None:
+    def test_reset_peer_state_forgets_held_frames_and_reseeds_the_watermark_from_the_next_handshake(self) -> None:
         sender, receiver = handshake()
-        s1 = send(sender, "schema", "s1", True)
+        send(sender, "schema", "s1", True)
         s2 = send(sender, "schema", "s2", True)
         self.assertEqual(names(receiver.receive(s2, 1)), [])
 
         receiver.reset_peer_state()
-        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 410, 1, 0, 0, "control"), 2)
+        following = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=410, initial_sequence=100))
+        following.receive(receiver.accept_connect(following.create_connect(0), 2), 2)
+        d1 = send(following, "schema", "d1", True)
+        d2 = send(following, "schema", "d2", True)
 
-        self.assertEqual(names(receiver.receive(s1, 3)), ["s1"], "the held s2 died with the reset")
+        # The held s2 died with the reset, and the watermark follows the new peer.
+        self.assertEqual(names(receiver.receive(d2, 3)), [])
+        self.assertEqual(names(receiver.receive(d1, 4)), ["d1", "d2"])
 
 
 if __name__ == "__main__":

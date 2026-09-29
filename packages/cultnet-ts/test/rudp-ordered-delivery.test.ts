@@ -27,11 +27,13 @@ test("an ordered frame waits for a gap filled by another channel", () => {
   const u = send(sender, "rel", "u", false);
   const o2 = send(sender, "schema", "o2", true);
   const o3 = send(sender, "schema", "o3", true);
+  const o4 = send(sender, "schema", "o4", true);
 
   assert.deepEqual(names(receiver.receive(o1, 1)), ["o1"]);
   assert.deepEqual(names(receiver.receive(o2, 2)), [], "u is missing");
   assert.deepEqual(names(receiver.receive(o3, 3)), [], "u is missing");
-  assert.deepEqual(names(receiver.receive(u, 4)), ["u", "o2", "o3"]);
+  assert.deepEqual(names(receiver.receive(o4, 4)), [], "u is missing");
+  assert.deepEqual(names(receiver.receive(u, 5)), ["u", "o2", "o3", "o4"]);
 });
 
 test("two ordered channels release each other in sequence order", () => {
@@ -90,14 +92,19 @@ test("a duplicate of a held frame is not delivered twice", () => {
   assert.deepEqual(names(receiver.receive(s2, 4)), []);
 });
 
-test("resetting peer state forgets held frames and the watermark", () => {
+test("resetting peer state forgets held frames and reseeds the watermark from the next handshake", () => {
   const { client: sender, server: receiver } = handshake();
-  const s1 = send(sender, "schema", "s1", true);
+  send(sender, "schema", "s1", true);
   const s2 = send(sender, "schema", "s2", true);
   assert.deepEqual(names(receiver.receive(s2, 1)), []);
 
   receiver.resetPeerState();
-  receiver.receive({ packetType: "accept", connectionId: 410, sequence: 1, ack: 0, ackMask: 0, channelId: "control" }, 2);
+  const next = new CultNetRudpSession({ connectionId: 410, initialSequence: 100 });
+  next.receive(receiver.acceptConnect(next.createConnect(0), 2), 2);
+  const d1 = send(next, "schema", "d1", true);
+  const d2 = send(next, "schema", "d2", true);
 
-  assert.deepEqual(names(receiver.receive(s1, 3)), ["s1"], "the held s2 died with the reset");
+  // The held s2 died with the reset, and the watermark follows the new peer.
+  assert.deepEqual(names(receiver.receive(d2, 3)), []);
+  assert.deepEqual(names(receiver.receive(d1, 4)), ["d1", "d2"]);
 });

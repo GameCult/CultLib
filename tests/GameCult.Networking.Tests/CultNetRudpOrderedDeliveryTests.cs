@@ -38,11 +38,13 @@ namespace GameCult.Networking.Tests
             var u = Send(sender, "rel", "u", false);
             var o2 = Send(sender, "schema", "o2", true);
             var o3 = Send(sender, "schema", "o3", true);
+            var o4 = Send(sender, "schema", "o4", true);
 
             Assert.That(Names(receiver.Receive(o1, 1)), Is.EqualTo(new[] { "o1" }));
             Assert.That(Names(receiver.Receive(o2, 2)), Is.Empty, "u is missing");
             Assert.That(Names(receiver.Receive(o3, 3)), Is.Empty, "u is missing");
-            Assert.That(Names(receiver.Receive(u, 4)), Is.EqualTo(new[] { "u", "o2", "o3" }));
+            Assert.That(Names(receiver.Receive(o4, 4)), Is.Empty, "u is missing");
+            Assert.That(Names(receiver.Receive(u, 5)), Is.EqualTo(new[] { "u", "o2", "o3", "o4" }));
         }
 
         [Test]
@@ -111,17 +113,22 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public void ResetPeerStateForgetsHeldFramesAndTheWatermark()
+        public void ResetPeerStateForgetsHeldFramesAndReseedsTheWatermarkFromTheNextHandshake()
         {
             var (sender, receiver) = Handshake();
-            var s1 = Send(sender, "schema", "s1", true);
+            Send(sender, "schema", "s1", true);
             var s2 = Send(sender, "schema", "s2", true);
             Assert.That(Names(receiver.Receive(s2, 1)), Is.Empty);
 
             receiver.ResetPeerState();
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 410, Sequence = 1, ChannelId = "control" }, 2);
+            var next = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 410, InitialSequence = 100 });
+            next.Receive(receiver.AcceptConnect(next.CreateConnect(0), 2), 2);
+            var d1 = Send(next, "schema", "d1", true);
+            var d2 = Send(next, "schema", "d2", true);
 
-            Assert.That(Names(receiver.Receive(s1, 3)), Is.EqualTo(new[] { "s1" }), "the held s2 died with the reset");
+            // The held s2 died with the reset, and the watermark follows the new peer.
+            Assert.That(Names(receiver.Receive(d2, 3)), Is.Empty);
+            Assert.That(Names(receiver.Receive(d1, 4)), Is.EqualTo(new[] { "d1", "d2" }));
         }
     }
 }
