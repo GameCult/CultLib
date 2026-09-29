@@ -135,9 +135,18 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         Trace("publish");
     }
 
+    // Variants wait for the directory store's own cut; until then it refuses one rather than persist a resolved view as a plain page.
+    private static void RefuseVariant(CultStoredDocument entry)
+    {
+        if (entry.Variant != null)
+            throw new NotSupportedException(
+                $"Record '{entry.Key.Value}' is a variant of '{entry.Variant.BaseKey}'; the directory store does not hold document variants yet.");
+    }
+
     public override void Push(CultStoredDocument entry)
     {
         ThrowIfReadOnly();
+        RefuseVariant(entry);
         Held(() =>
         {
             Entries[entry.Key.Value] = entry;
@@ -162,6 +171,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait)
     {
         ThrowIfReadOnly();
+        foreach (var entry in request.Upserts)
+            RefuseVariant(entry);
         return Held(() =>
         {
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
@@ -328,11 +339,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var record = ReadPersistedRecordPage(metadata, out var pagePayload);
-                recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalogEntries);
                 storedRecords[index] = ToStoredDocument(
                     record,
                     catalogEntries,
-                    (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry));
+                    (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
+                    out recordReports[index]);
                 if (tracePages)
                 {
                     pageBytes[index] = pagePayload.LongLength;
@@ -491,6 +502,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
         if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
             throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
+        // The shared decoder reads a variant page; this store does not hold variants, so a load refuses it as a write does.
+        if (record.Variant != null)
+            throw new NotSupportedException(
+                $"Record '{record.Key}' is a variant of '{record.Variant.BaseKey}'; the directory store does not hold document variants yet.");
         return record;
     }
 

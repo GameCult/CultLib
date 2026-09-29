@@ -15,6 +15,9 @@ Cross-runtime parity has three layers:
   without translation folklore.
   Every store reader refuses, by name, a header or record slot it does not
   understand (vectors: `tests/vectors/document-variants-c0`).
+  Document variants: C# resolves them (`cultcache.store.v2`); every other runtime,
+  CultMesh single-file reads, the directory store and CultNet refuse a variant by name
+  (vector written by C#: `tests/vectors/document-variants-c1`).
 - Feature parity: each runtime must expose the CultCache/CultNet/CultMesh
   surfaces needed for its intended role, with unsupported production-server
   ownership called out plainly.

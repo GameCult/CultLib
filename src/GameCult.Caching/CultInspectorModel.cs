@@ -292,21 +292,23 @@ namespace GameCult.Caching
             typeof(int), typeof(long), typeof(uint), typeof(short), typeof(ushort), typeof(byte), typeof(sbyte)
         };
 
-        private readonly Func<object, Type, Type, byte[]> _serialize;
-        private readonly Func<Type, byte[], object> _deserialize;
+        private readonly CultCodec _codec;
         private readonly Dictionary<Type, CultInspectorShape> _shapes = new Dictionary<Type, CultInspectorShape>();
         private readonly Dictionary<MemberInfo, CultInspectorMetadata> _metadata = new Dictionary<MemberInfo, CultInspectorMetadata>();
 
-        // serialize (value, value type, owning document type) and deserialize are the store's codec
-        // (CultCacheMessagePack.CreateInspectorModel for .cc stores). Edits clone documents through both; dictionary keys
-        // compare by serialize under their owning document, exactly as the store writes them inside it, so serialize must
-        // take any value, not only documents.
-        public CultInspectorModel(CultDocumentRegistry registry, Func<object, Type, Type, byte[]> serialize, Func<Type, byte[], object> deserialize)
+        // The codec is the store's (CultCacheMessagePack.CreateInspectorModel for .cc stores), the one a CultCache resolves
+        // variants with. Edits clone documents through it; dictionary keys compare by its Serialize under their owning
+        // document, exactly as the store writes them inside it.
+        public CultInspectorModel(CultDocumentRegistry registry, CultCodec codec)
         {
             Registry = registry ?? throw new ArgumentNullException(nameof(registry));
-            _serialize = serialize ?? throw new ArgumentNullException(nameof(serialize));
-            _deserialize = deserialize ?? throw new ArgumentNullException(nameof(deserialize));
+            _codec = codec ?? throw new ArgumentNullException(nameof(codec));
         }
+
+        private byte[] _serialize(object value, Type type, Type document) => _codec.Serialize(value, type, document);
+
+        private object _deserialize(Type type, byte[] bytes) =>
+            _codec.Deserialize(type, type, bytes) ?? throw new InvalidOperationException($"The codec returned null for {type.FullName}.");
 
         public CultDocumentRegistry Registry { get; }
 

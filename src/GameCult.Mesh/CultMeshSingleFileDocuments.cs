@@ -156,6 +156,8 @@ namespace GameCult.Mesh
                     $"CultCache document '{path}' record '{key.Value}' has schema '{record.SchemaId}', expected '{expectedSchemaId}'.");
             }
 
+            RefuseVariant(path, record);
+
             if (!PublishesSchema(snapshot.SchemaCatalog, expectedSchemaId))
             {
                 throw new InvalidDataException(
@@ -196,6 +198,15 @@ namespace GameCult.Mesh
             }
 
             return record.Payload;
+        }
+
+        // A variant record's payload is empty; its document exists only as the cache resolves it against its base.
+        private static void RefuseVariant(string path, CultPersistedRecord record)
+        {
+            if (record.Variant != null)
+                throw new NotSupportedException(
+                    $"CultCache document '{path}' record '{record.Key}' is a variant of '{record.Variant.BaseKey}'; " +
+                    "CultMesh does not resolve document variants, open the store with a CultCache.");
         }
 
         private static void WriteSingleFileDocumentPayload(

@@ -11,9 +11,11 @@ at test time. Run: python generate.py  (needs msgpack).
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
-  variant-v2.msgpack              what C1 writes for a variant: header v2, record slot 4 =
-                                  [baseKey, overrides[]], empty payload (override op Set = 0,
-                                  path steps are [slot, elementId])
+  variant-v2.msgpack              the wire shape of a variant record, hand-built: header v2, record slot 4 =
+                                  [baseKey, overrides[]], empty payload (override op Set = 0, path steps
+                                  are [slot, elementId]). C1 does not write this store and refuses to load
+                                  it: the variant resolves to its base's name (R6). It exercises readers
+                                  that refuse a variant by version or record.
 """
 import pathlib
 
