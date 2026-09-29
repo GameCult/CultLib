@@ -439,6 +439,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        [Platform("Win", Reason = "Holds an open FileShare.Read handle and expects a delete or replace to fail; Linux unlink and rename ignore open handles.")]
         public void BatchIsAllOrNothingOnStoreFailure()
         {
             var registry = Registry();
