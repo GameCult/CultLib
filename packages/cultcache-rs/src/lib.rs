@@ -320,17 +320,17 @@ const STORE_FORMAT_V1: &str = "cultcache.store.v1";
 const STORE_FORMAT_ELEMENT_IDS: &str = "cultcache.store.v3";
 
 /// The store header string, `None` for the legacy envelope array (its first slot is not a string), and an error for
-/// bytes that are not one complete MessagePack value: a truncated store is refused as the snapshot reader refuses it,
-/// never taken for a legacy file. The header itself is read from the prefix; the value is walked once only to prove
-/// the file whole.
+/// bytes that are not one complete MessagePack array: a truncated store is refused as the snapshot reader refuses it,
+/// never taken for a legacy file. One pass reads the first slot and walks the rest to prove the file whole.
 fn store_header(bytes: &[u8]) -> Result<Option<String>> {
-    rmp_serde::from_slice::<serde::de::IgnoredAny>(bytes)
-        .map_err(|error| anyhow!("the store is not a complete MessagePack value: {error}"))?;
-    Ok(store_header_prefix(bytes))
-}
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum FirstSlot {
+        Text(String),
+        Other(serde::de::IgnoredAny),
+    }
 
-fn store_header_prefix(bytes: &[u8]) -> Option<String> {
-    struct Header(String);
+    struct Header(Option<String>);
     impl<'de> serde::Deserialize<'de> for Header {
         fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
             struct HeaderVisitor;
@@ -338,20 +338,24 @@ fn store_header_prefix(bytes: &[u8]) -> Option<String> {
                 type Value = Header;
 
                 fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("an array whose first slot is the store header")
+                    formatter.write_str("an array whose first slot may be the store header")
                 }
 
                 fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Header, A::Error> {
-                    let header: String = seq
-                        .next_element()?
-                        .ok_or_else(|| <A::Error as serde::de::Error>::invalid_length(0, &self))?;
-                    Ok(Header(header))
+                    let first = seq.next_element::<FirstSlot>()?;
+                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                    Ok(Header(match first {
+                        Some(FirstSlot::Text(header)) => Some(header),
+                        _ => None,
+                    }))
                 }
             }
             deserializer.deserialize_seq(HeaderVisitor)
         }
     }
-    rmp_serde::from_slice::<Header>(bytes).ok().map(|header| header.0)
+    rmp_serde::from_slice::<Header>(bytes)
+        .map(|header| header.0)
+        .map_err(|error| anyhow!("the store is not one complete MessagePack array: {error}"))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -733,7 +737,7 @@ impl SingleFileMessagePackBackingStore {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
-        match store_header_prefix(&bytes) {
+        match store_header(&bytes).ok().flatten() {
             Some(header) if header.starts_with("cultcache.store.") => decode_store_snapshot(&bytes),
             _ => rmp_serde::from_slice(&bytes).map_err(anyhow::Error::from),
         }
@@ -2620,7 +2624,7 @@ fn readable_store_format(header: &str) -> Result<&'static str> {
 }
 
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
-    if let Some(header) = store_header_prefix(bytes) {
+    if let Ok(Some(header)) = store_header(bytes) {
         readable_store_format(&header)?;
     }
     let snapshot: PersistedStoreSnapshot =
