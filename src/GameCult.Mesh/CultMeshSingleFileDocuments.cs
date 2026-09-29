@@ -98,12 +98,25 @@ namespace GameCult.Mesh
 
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
-            WriteSingleFileDocumentPayload(
-                path,
-                key,
-                descriptor.ToCatalogEntry(),
-                storedAt,
-                CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)));
+            // Element ids are decided as a cache write decides them, before anything is written: an unset id is minted, a
+            // refused list refuses the write, and the file is marked when it holds an id. A failed write gives the ids back.
+            var ids = CultElementIds.Plan(document, key.Value, deterministic: false);
+            ids.Apply();
+            try
+            {
+                WriteSingleFileDocumentPayload(
+                    path,
+                    key,
+                    descriptor.ToCatalogEntry(),
+                    storedAt,
+                    CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
+                    ids.HoldsIds);
+            }
+            catch
+            {
+                ids.Undo();
+                throw;
+            }
         }
 
         /// <summary>
@@ -118,7 +131,10 @@ namespace GameCult.Mesh
             var resolvedRegistry = registry ?? CultDocumentRegistry.Shared;
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
             var payload = ReadSingleFileDocumentPayload(path, key, descriptor.SchemaId);
-            return (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
+            var document = (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
+            // A load refuses what a write refuses, and mints the ids a cache load of the same file would mint.
+            CultElementIds.Plan(document, key.Value, deterministic: true).Apply();
+            return document;
         }
 
         /// <summary>
@@ -132,7 +148,7 @@ namespace GameCult.Mesh
             byte[] payload)
         {
             if (schema == null) throw new ArgumentNullException(nameof(schema));
-            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload);
+            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: false);
         }
 
         /// <summary>
@@ -214,7 +230,8 @@ namespace GameCult.Mesh
             CultRecordKey key,
             CultSchemaCatalogEntry catalogEntry,
             string? storedAt,
-            byte[] payload)
+            byte[] payload,
+            bool holdsIds)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
@@ -222,8 +239,11 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
+            // A raw payload is opaque: whether it holds element ids is the typed caller's to say. A file already marked stays
+            // marked, as it does in a cache's own store.
             var snapshot = new CultPersistedStoreSnapshot
             {
+                FormatVersion = CultPersistedStoreSnapshot.FormatFor(holdsIds || IsMarkedOnDisk(path), holdsVariants: false),
                 SchemaCatalog = new[] { catalogEntry },
                 Records = new[]
                 {
@@ -242,6 +262,20 @@ namespace GameCult.Mesh
                 Directory.CreateDirectory(directory);
 
             WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        }
+
+        private static bool IsMarkedOnDisk(string path)
+        {
+            try
+            {
+                var reader = new MessagePackReader(File.ReadAllBytes(path));
+                reader.ReadArrayHeader();
+                return string.Equals(reader.ReadString(), CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MessagePackSerializationException or EndOfStreamException or InvalidOperationException)
+            {
+                return false;
+            }
         }
 
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)

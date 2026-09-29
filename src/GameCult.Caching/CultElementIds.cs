@@ -64,6 +64,10 @@ namespace GameCult.Caching
 
             public int Count => _fills.Count;
 
+            // True when some element under the root holds a non-empty id once the plan is applied: one already there, or one this
+            // plan fills. It decides whether the store that writes the root carries the v3 header.
+            public bool HoldsIds { get; internal set; }
+
             internal void Add(object item, Shape shape, string? before, string id) => _fills.Add((item, shape, before, id));
 
             public void Apply()
@@ -95,13 +99,9 @@ namespace GameCult.Caching
         internal sealed class Survey
         {
             public List<string> Problems { get; } = new();
-
-            // True when the type reaches an object list: what it writes can hold element ids.
-            public bool CarriesIds { get; set; }
         }
 
-        // Every reason this document type cannot be registered under the id rule, one per offending concrete element type,
-        // and whether it reaches any element list at all.
+        // Every reason this document type cannot be registered under the id rule, one per offending concrete element type.
         internal static Survey Inspect(Type documentType)
         {
             var survey = new Survey();
@@ -134,7 +134,6 @@ namespace GameCult.Caching
             {
                 if (IsObjectType(element))
                 {
-                    survey.CarriesIds = true;
                     foreach (var concrete in ConcreteTypes(element))
                     {
                         var problem = IdProblem(concrete);
@@ -209,7 +208,8 @@ namespace GameCult.Caching
 
         // Decides every unset element id under root, and refuses what the rule refuses, without changing anything: a random id
         // that is not 12 lowercase hex characters, a duplicate id in one list, a derived id whose source is null or empty.
-        // rootPath (the record key) seeds deterministic minting and names the record in a refusal.
+        // rootPath (the record key) seeds deterministic minting and names the record in a refusal. An element object that sits
+        // twice in one list is refused too: planning would give it two ids and it would then be a duplicate on load.
         internal static IdPlan Plan(object? root, string rootPath, bool deterministic)
         {
             var plan = new IdPlan();
@@ -241,13 +241,19 @@ namespace GameCult.Caching
             {
                 var items = list.Cast<object?>().ToArray();
                 var taken = new HashSet<string>(StringComparer.Ordinal);
+                var objects = new HashSet<object>(ReferenceComparer.Instance);
                 foreach (var item in items)
                 {
                     if (item == null || !IsObjectType(item.GetType()) || ShapeOf(item.GetType()) is not { GetId: { } getId } shape)
                         continue;
+                    if (!objects.Add(item))
+                        throw new CultElementIdException(
+                            $"Record {rootPath}: the same {item.GetType().Name} object appears twice in the list at {path}; an element is one object with one id.",
+                            rootPath, path);
                     var id = getId(item);
                     if (string.IsNullOrEmpty(id))
                         continue;
+                    plan.HoldsIds = true;
                     if (shape.Derive == null && !IsRandomId(id!))
                         throw new CultElementIdException(
                             $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters.",
@@ -279,6 +285,7 @@ namespace GameCult.Caching
                         else
                             id = Mint(itemPath, deterministic, rootPath, taken);
                         plan.Add(item, itemShape, get(item), id);
+                        plan.HoldsIds = true;
                     }
 
                     Visit(item, itemPath);
@@ -288,6 +295,15 @@ namespace GameCult.Caching
             CultElementIdException Duplicate(string id, string path) => new(
                 $"Record {rootPath}: element id '{id}' appears twice in the list at {path}; an element id is unique within its list.",
                 rootPath, path, id);
+        }
+
+        private sealed class ReferenceComparer : IEqualityComparer<object>
+        {
+            public static readonly ReferenceComparer Instance = new();
+
+            bool IEqualityComparer<object>.Equals(object? left, object? right) => ReferenceEquals(left, right);
+
+            int IEqualityComparer<object>.GetHashCode(object value) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(value);
         }
 
         private static bool IsRandomId(string id)

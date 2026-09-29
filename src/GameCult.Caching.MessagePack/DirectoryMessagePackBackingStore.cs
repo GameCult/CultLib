@@ -288,7 +288,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         // A manifest already marked stays marked: pages it names may hold ids this cache cannot read.
         var carriesIds = string.Equals(currentManifest.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal) ||
-                         keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.Descriptor.CarriesElementIds);
+                         keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.HoldsIds);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
             .ToArray(), carriesIds);

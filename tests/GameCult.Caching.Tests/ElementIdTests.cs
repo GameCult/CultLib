@@ -647,6 +647,110 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Get<IdDeck>(new CultRecordKey("plain")), Is.Null);
         }
 
+        // ---- C2a fix batch 3: mark by content, one object twice ----
+
+        private static IdDeck EmptyDeck(string name) => new() { Name = name };
+
+        [Test]
+        public void ASingleFileStoreIsMarkedByTheIdsItHoldsNotByTheTypesItCouldHold()
+        {
+            var empty = PathOf("empty-deck.cc");
+            using (var cache = Open(empty))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e")));
+            Assert.That(HeaderOf(empty), Is.EqualTo("cultcache.store.v1"), "a deck with no elements holds no id");
+
+            var flushed = PathOf("flushed.cc");
+            using (var cache = Open(flushed))
+            {
+                cache.UpsertAsync(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(flushed), Is.EqualTo("cultcache.store.v1"), "the whole-store flush decides by content too");
+
+            using (var cache = Open(flushed))
+            {
+                cache.UpsertAsync(typeof(IdDeck), Deck("d"), new CultRecordKey("d")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+            }
+
+            Assert.That(HeaderOf(flushed), Is.EqualTo("cultcache.store.v3"), "one element with an id marks the flush");
+
+            var marked = PathOf("marked.cc");
+            using (var cache = Open(marked))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            using (var cache = Open(marked))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Expect(new CultRecordKey("e"), null);
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e"));
+                }), Is.True);
+            }
+
+            Assert.That(HeaderOf(marked), Is.EqualTo("cultcache.store.v3"), "a file already marked on disk stays marked");
+        }
+
+        [Test]
+        public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
+        {
+            var empty = PathOf("empty-dir.cc");
+            using (var cache = OpenWith(empty, true, typeof(IdDeck)))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("e"), new CultRecordKey("e")));
+            Assert.That(HeaderOf(empty), Is.EqualTo("cultcache.store.v4.directory-content-addressed-pages"));
+
+            using (var cache = OpenWith(empty, true, typeof(IdDeck)))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            Assert.That(HeaderOf(empty), Is.EqualTo("cultcache.store.v5.directory-content-addressed-pages"));
+        }
+
+        [Test]
+        public void AVariantIsMarkedByItsOverrideIdsAndOtherwiseIsV2()
+        {
+            var plain = PathOf("variant-plain.cc");
+            using (var cache = Open(plain))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+            }
+
+            Assert.That(HeaderOf(plain), Is.EqualTo("cultcache.store.v2"));
+
+            var withIds = PathOf("variant-ids.cc");
+            using (var cache = Open(withIds))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r" } }) });
+                });
+            }
+
+            Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
+        }
+
+        [Test]
+        public void AnElementObjectTwiceInOneListIsRefusedAtWriteAndNothingIsPersisted()
+        {
+            var path = PathOf("shared.cc");
+            using (var cache = Open(path))
+            {
+                var shared = new IdMark { Text = "s" };
+                var deck = new IdDeck { Name = "shared", Reels = { new IdReel { Label = "r", Marks = { shared, shared } } } };
+                var refusal = Assert.Throws<CultElementIdException>(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), deck, new CultRecordKey("shared"))))!;
+                Assert.That(refusal.Message, Does.Contain("shared").And.Contain("twice"));
+                Assert.That(refusal.RecordKey, Is.EqualTo("shared"));
+                Assert.That(shared.Id, Is.Empty, "the refusal minted nothing");
+                Assert.That(cache.Get<IdDeck>(new CultRecordKey("shared")), Is.Null);
+            }
+
+            Assert.That(File.Exists(path), Is.False, "nothing was persisted");
+        }
+
         [Test]
         public void ADerivedIdWhoseSourceIsEmptyIsRefusedAtWriteNamingTheSourceMember()
         {
