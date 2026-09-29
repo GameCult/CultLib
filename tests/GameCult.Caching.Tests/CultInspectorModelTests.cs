@@ -542,8 +542,8 @@ namespace GameCult.Caching.Tests
         public async Task GroupNodeIdsSeparateAnEscapeFromTheTextItSpells()
         {
             // "a/b" and "a%2Fb" collide under an id that escapes '/' alone; the unpaired surrogates, U+FFFD and "a%uD800"
-            // are the values a replacement character or a sloppy %u form would merge.
-            var kinds = new[] { "a/b", "a%2Fb", "a%2fb", "a%252Fb", "a", "A", "\uD800", "\uD801", "\uDC00", "�", "a%uD800", "a\uD800" };
+            // are the values a replacement character or a sloppy %u form would merge; the valid pair is one node, not two halves.
+            var kinds = new[] { "a/b", "a%2Fb", "a%2fb", "a%252Fb", "a", "A", "\uD800", "\uD801", "\uDC00", "�", "a%uD800", "a\uD800", "😀", "�\uDE00", "\uDE00\uD83D", "a\uD800b\uD801c" };
             using var cache = OpenGroups();
             for (var i = 0; i < kinds.Length; i++)
                 await cache.UpsertAsync(typeof(GroupRedeclared), new GroupRedeclared { Kind = kinds[i] }, new CultRecordKey("k" + i));
