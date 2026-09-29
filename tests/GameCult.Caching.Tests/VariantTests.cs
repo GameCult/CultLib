@@ -587,6 +587,140 @@ namespace GameCult.Caching.Tests
             Assert.That(refused.Message, Does.Contain("hand-variant").And.Contain("hand-base").And.Contain("code"));
         }
 
+        // ---- the index rule holds for the commit's result, in either write order, and the store always reopens ----
+
+        private static VariantGear Other(string code) => new() { Name = "other", Power = 1, Code = code };
+
+        [Test]
+        public async Task APlainWriteThatWouldShareAVariantsIndexedValueIsRefusedNamingBothKeysAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var cache = Open(path))
+            {
+                SeedBase(cache);
+                SeedBig(cache);
+
+                var refused = Refused(() => cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("laser big"), other)));
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("laser big"));
+
+                var single = Assert.ThrowsAsync<InvalidOperationException>(
+                    () => cache.UpsertAsync(Other("laser big"), new CultRecordHandle<VariantGear>(other)))!;
+                Assert.That(single.Message, Does.Contain(other.Value).And.Contain(BigKey.Value));
+
+                Assert.That(cache.Get(other), Is.Null, "nothing landed");
+                Assert.That(cache.GetByIndex<VariantGear>("code", "laser big")!.Name, Is.EqualTo("laser big"), "the variant is still found by its value");
+                EditBase(cache, gear => gear.Power = 11);
+                Assert.That(cache.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25), "the variant is still editable through its base");
+                await Task.CompletedTask;
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "laser big")!.Name, Is.EqualTo("laser big"));
+            Assert.That(reopened.Get(other), Is.Null);
+        }
+
+        [Test]
+        public void ABaseEditOrANewPlainRecordFirstThenAVariantOnTheSameValueIsRefusedAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var cache = Open(path))
+            {
+                SeedBase(cache);
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("laser big"), other));
+
+                var refused = Refused(() => SeedBig(cache));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(other.Value).And.Contain("code").And.Contain("laser big"));
+                Assert.That(cache.Get(BigKey), Is.Null, "nothing landed");
+
+                // The same batch, either staging order: the result is what is judged.
+                var sameBatchPlainFirst = Refused(() => cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(VariantGear), Other("taken"), new CultRecordKey("taker"));
+                    batch.UpsertVariant(BigKey, BaseKey, new[]
+                    {
+                        cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                        cache.Override<VariantGear>(nameof(VariantGear.Code), "taken")
+                    });
+                }));
+                Assert.That(sameBatchPlainFirst.Message, Does.Contain(BigKey.Value).And.Contain("taker"));
+                var sameBatchVariantFirst = Refused(() => cache.Commit(batch =>
+                {
+                    batch.UpsertVariant(BigKey, BaseKey, new[]
+                    {
+                        cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                        cache.Override<VariantGear>(nameof(VariantGear.Code), "taken")
+                    });
+                    batch.Upsert(typeof(VariantGear), Other("taken"), new CultRecordKey("taker"));
+                }));
+                Assert.That(sameBatchVariantFirst.Message, Does.Contain(BigKey.Value).And.Contain("taker"));
+
+                // Plain-vs-plain sharing is not this rule's business.
+                Assert.DoesNotThrow(() => cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("l1"), new CultRecordKey("twin"))));
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(BigKey), Is.Null);
+            Assert.That(reopened.Get(other), Is.Not.Null);
+        }
+
+        // ---- a variant sheds overrides its type lacks when it is flushed, as a plain record sheds the member ----
+
+        [Test]
+        public void AFlushShedsAnOverrideOfADroppedSlotSoALaterTypeReusingTheSlotDoesNotResurrectIt()
+        {
+            var path = PathOf("drift.cc");
+            var wide = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) });
+            using (var writer = Open(path, registry: wide))
+            {
+                writer.Commit(batch =>
+                {
+                    batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
+                    batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
+                    {
+                        writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                        writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                    });
+                });
+            }
+
+            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
+                narrow.BackingStores[0].PushAll();
+
+            Assert.That(OverriddenSlotsOn(path, "drift-variant"), Is.EqualTo(new[] { 0 }), "the dropped slot's override is gone from the flushed record");
+
+            using var reused = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftReused) }));
+            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-base"))!.Colour, Is.Empty);
+            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-variant"))!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
+        }
+
+        [Test]
+        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnLoadAndShedOnTheNextFlush()
+        {
+            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
+                CultVariantOverride.Set(99, new byte[] { 0x01 }),
+                TextOverride(0, "hand variant"),
+                TextOverride(2, "hand-code")));
+            using (var cache = Open(path))
+            {
+                var variantReport = cache.BackingStores[0].LastSchemaMigrationReports.Single(report => report.IgnoredExtraSlots.Length > 0);
+                Assert.That(variantReport.IgnoredExtraSlots, Is.EqualTo(new[] { 99 }));
+                Assert.That(variantReport.Warnings.Select(warning => warning.Code), Has.Some.EqualTo("ignored_extra_slot"));
+                Assert.That(variantReport.Warnings.Select(warning => warning.Message), Has.Some.Contain("hand-variant"));
+                cache.BackingStores[0].PushAll();
+            }
+
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }));
+            using var reopened = Open(path);
+            Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.Empty);
+            Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+        }
+
+        private static int[] OverriddenSlotsOn(string path, string key) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records
+                .Single(record => record.Key == key).Variant!.Overrides.Select(entry => entry.Path[0].Slot).ToArray();
+
         // ---- flatten resolves against the same batch ----
 
         [Test]
@@ -948,6 +1082,22 @@ namespace GameCult.Caching.Tests
 
             [Key(2)]
             public string Wing = string.Empty;
+        }
+
+        // A later type that reuses the slot Narrow dropped, for another member.
+        [CultDocument("tests.variant_drift", "tests.variant_drift.v3")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class DriftReused
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public int Power;
+
+            [Key(2)]
+            public string Colour = string.Empty;
         }
 
         [CultDocument("tests.variant_drift", "tests.variant_drift.v2")]
