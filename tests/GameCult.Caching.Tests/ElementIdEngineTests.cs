@@ -67,6 +67,24 @@ namespace GameCult.Caching.Tests
             Assert.That(Assign(root, "r", deterministic: false), Is.EqualTo(0), "a second pass finds nothing unset");
         }
 
+        // Holds is what a store marks its header by: an id anywhere a list can sit counts, and an unset one does not.
+        [Test]
+        public void HoldsFindsASetIdWhereverAListCanSitAndNothingElse()
+        {
+            const string id = "0123456789ab";
+            Assert.That(CultElementIds.Holds(null), Is.False);
+            Assert.That(CultElementIds.Holds(new HAll
+            {
+                Dict = { ["k"] = new HHasIds { Items = { new EIded() } } },
+                Grid = { new List<EIded> { new EIded() } },
+                Nest = { new ENest { Sub = { new EIded() } } },
+            }), Is.False, "unset ids hold nothing");
+            Assert.That(CultElementIds.Holds(new HAll { Dict = { ["k"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "a dictionary value");
+            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded { Id = id } } } }), Is.True, "a list of lists");
+            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "a list under an unset element");
+            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Id = id } } }), Is.True, "an element");
+        }
+
         [Test]
         public void APlanCountsAndChangesNothingUntilApplied()
         {

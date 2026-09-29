@@ -270,9 +270,8 @@ public static class CultDocumentMessagePackSerialization
         var reader = new MessagePackReader(bytes);
         if (reader.ReadArrayHeader() == 0 || reader.NextMessagePackType != MessagePackType.String)
             return null;
+        // A first slot that is a string is a header, and one this runtime does not read is refused, whatever the string says.
         var header = reader.ReadString() ?? string.Empty;
-        if (!header.StartsWith("cultcache.store.", StringComparison.Ordinal))
-            throw new NotSupportedException($"The store's first slot is the string '{header}', not a store header; it is not rewritten.");
         RequireSingleFileFormat(new CultPersistedStoreSnapshot { FormatVersion = header });
         return header;
     }
