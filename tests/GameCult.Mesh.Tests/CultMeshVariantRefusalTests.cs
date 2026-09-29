@@ -45,10 +45,16 @@ public sealed class CultMeshVariantRefusalTests
         message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
     }
 
+    // Q6: CultMesh does not resolve variants. It refuses a variant key naming it and its base, and still reads the plain
+    // records of the same v2 store.
     [Test]
-    public void ReadSingleFileDocument_RefusesVariantStoreByVersionOrRecord()
+    public void ReadSingleFileDocument_RefusesAVariantKeyByNameButReadsItsPlainNeighbours()
     {
-        var message = Refusal("variant-v2.msgpack").Message;
-        (message.Contains("cultcache.store.v2") || message.Contains("item:anvil-big")).Should().BeTrue(message);
+        var refusal = Assert.Throws<NotSupportedException>(() =>
+            CultMesh.ReadSingleFileDocumentPayload(VectorPath("variant-v2.msgpack"), new CultRecordKey("item:anvil-big"), ItemSchemaId))!;
+        refusal.Message.Should().Contain("item:anvil-big").And.Contain("item:anvil'");
+
+        CultMesh.ReadSingleFileDocumentPayload(VectorPath("variant-v2.msgpack"), new CultRecordKey("item:bellows"), ItemSchemaId)
+            .Should().NotBeEmpty();
     }
 }

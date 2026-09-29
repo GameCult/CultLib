@@ -1,0 +1,3 @@
+# Refusal vectors are byte-exact; never convert line endings.
+* binary
+*.py text

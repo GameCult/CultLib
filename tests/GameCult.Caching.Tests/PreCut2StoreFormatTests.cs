@@ -131,11 +131,30 @@ namespace GameCult.Caching.Tests
             Assert.That(message, Does.Contain(ItemSchemaId));
         }
 
+        // C1 reads v2. This vector was written by hand before C1 existed and its variant keeps its base's name, so a
+        // cache with a codec refuses it under R6, naming both records; a cache without one cannot resolve it at all.
         [Test]
-        public void SingleFileRefusesVariantStoreByVersionOrRecord()
+        public void SingleFileRefusesTheHandWrittenVariantVectorNamingTheRecords()
         {
-            Assert.That(Refusal("variant-v2.msgpack"),
-                Does.Contain("cultcache.store.v2").Or.Contain("item:anvil-big"));
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-vector-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(root);
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                File.Copy(VectorPath("variant-v2.msgpack"), file);
+
+                using var withCodec = new CultCache(CultDocumentRegistry.Shared, CultCacheMessagePack.CreateCodec(CultDocumentRegistry.Shared));
+                var named = Assert.Throws<InvalidOperationException>(() => withCodec.AddBackingStore(new SingleFileMessagePackBackingStore(file)))!;
+                Assert.That(named.Message, Does.Contain("item:anvil-big").And.Contain("item:anvil"));
+
+                using var without = new CultCache();
+                var codecless = Assert.Throws<InvalidOperationException>(() => without.AddBackingStore(new SingleFileMessagePackBackingStore(file)))!;
+                Assert.That(codecless.Message, Does.Contain("item:anvil-big").And.Contain("codec"));
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
         }
 
         [Test]
