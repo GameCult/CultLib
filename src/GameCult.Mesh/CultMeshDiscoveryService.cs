@@ -417,6 +417,10 @@ namespace GameCult.Mesh
     [MessagePackObject]
     public sealed class CultMeshDiscoveryCandidateDocument
     {
+        [Key(5)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         [Key(0)] public CultMeshVerseDescriptorMessage Descriptor { get; set; } = new CultMeshVerseDescriptorMessage();
         [Key(1)] public string SourceId { get; set; } = "";
         [Key(2)] public string ObservedAtUtc { get; set; } = "";

@@ -632,6 +632,8 @@ namespace GameCult.Caching
                             ?? throw new InvalidOperationException(
                                 $"Type {type.FullName} is not marked with {nameof(CultDocumentAttribute)}.");
             var members = DiscoverMembers(type);
+            if (CultElementIds.Problems(type) is { Count: > 0 } idProblems)
+                throw new InvalidOperationException(idProblems[0]);
             var nameMember = members.FirstOrDefault(member => member.IsName);
             var indexAccessors = members
                 .Where(member => member.IndexAlias != null)
@@ -1798,6 +1800,8 @@ namespace GameCult.Caching
         private readonly CultDocumentRegistry _registry;
         private readonly List<(CacheBackingStore Store, Type[] Homes)> _stores = new();
         private readonly Dictionary<string, CultStoredDocument> _entries = new(StringComparer.Ordinal);
+        // Keys whose element ids were minted at load and not yet written (see MintElementIds).
+        private readonly HashSet<string> _mintedOnLoad = new(StringComparer.Ordinal);
         private readonly Dictionary<Type, Dictionary<string, string>> _names = new();
         // Every key holding a value (unordered): the index is truthful about duplicates, so removing one holder never hides another.
         private readonly Dictionary<(Type Type, string Alias), Dictionary<string, List<string>>> _indexes = new();
@@ -1834,12 +1838,37 @@ namespace GameCult.Caching
             if (_codec == null) throw new InvalidOperationException("This cache has no codec; create it with CultCacheMessagePack.Create.");
             var found = _registry.GetRequired(documentType).RichMembers.FirstOrDefault(entry => entry.Member.Name == member)
                         ?? throw new ArgumentException($"{documentType.Name} has no persisted member '{member}'.", nameof(member));
+            if (value != null)
+                CultElementIds.Assign(value, string.Empty, deterministic: false, refuseDuplicates: true);
             return CultVariantOverride.Set(
                 found.Slot,
                 _codec.Serialize(value!, found.MemberType, documentType));
         }
 
         public CultVariantOverride Override<T>(string member, object? value) where T : class => Override(typeof(T), member, value);
+
+        // The one-shot rewrite for stores written before element ids existed: upserts every record whose ids exist only in
+        // memory (minted when it loaded), through the normal write path, one commit per home store. Returns how many records
+        // it rewrote; a second call finds none.
+        public int MintElementIds()
+        {
+            var groups = Held(() => _mintedOnLoad
+                .Select(key => _entries.TryGetValue(key, out var entry) ? entry : null)
+                .Where(entry => entry is { Variant: null })
+                .GroupBy(entry => Home(entry!.Descriptor.DocumentType))
+                .Select(group => group.Select(entry => entry!).ToArray())
+                .ToArray());
+            foreach (var group in groups)
+            {
+                Commit(batch =>
+                {
+                    foreach (var entry in group)
+                        batch.Upsert(entry.Descriptor.DocumentType, entry.Document, entry.Key);
+                });
+            }
+
+            return groups.Sum(group => group.Length);
+        }
 
         public bool IsDirty
         {
@@ -2319,12 +2348,30 @@ namespace GameCult.Caching
             if (_held == null)
                 throw new InvalidOperationException("An admission reached the cache under a plain lock on its gate; every admission runs in a hold.");
             var home = Validate(admitted, evicted, source);
+            // Ids are filled before anything lands: a write mints random ids and refuses a duplicate in one list; a load of a
+            // record written before ids existed mints the ids its reload will mint again, and lands in memory only.
+            var mintedOnLoad = new List<string>();
+            foreach (var stored in admitted)
+            {
+                if (stored.Variant == null && stored.IsResolved &&
+                    CultElementIds.Assign(stored.Document, stored.Key.Value, deterministic: source != null, refuseDuplicates: source == null) > 0 &&
+                    source != null)
+                    mintedOnLoad.Add(stored.Key.Value);
+            }
+
             // The one resolution: a variant admitted, a base admitted or evicted, all resolved here against the post-batch
             // set, before land and before memory. land receives the admitted records with variants resolved.
             var plan = Resolve(admitted, evicted, source);
             var outcome = land(home, plan.Admitted);
             if (outcome != CultCommitOutcome.Committed)
                 return outcome;
+            // A record whose ids exist only in memory stays listed until a write persists them or the record goes.
+            foreach (var stored in admitted)
+                _mintedOnLoad.Remove(stored.Key.Value);
+            foreach (var stored in evicted)
+                _mintedOnLoad.Remove(stored.Key.Value);
+            foreach (var key in mintedOnLoad)
+                _mintedOnLoad.Add(key);
             foreach (var change in Apply(plan, evicted, source))
                 _held.Add((change, source != null));
             return CultCommitOutcome.Committed;

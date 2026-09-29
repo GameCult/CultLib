@@ -1,3 +1,4 @@
+using GameCult.Caching;
 using System;
 using System.IO;
 using System.IO.MemoryMappedFiles;
@@ -34,6 +35,10 @@ namespace GameCult.Mesh
     [MessagePackObject]
     public sealed class CultMeshBodyDescriptor
     {
+        [Key(13)]
+        [CultElementId]
+        public string Id { get; set; } = string.Empty;
+
         [Key(0)] public string BodyId { get; set; } = string.Empty;
         [Key(1)] public string SchemaId { get; set; } = string.Empty;
         [Key(2)] public int LayoutVersion { get; set; }
