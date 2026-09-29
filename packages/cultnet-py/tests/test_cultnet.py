@@ -918,6 +918,65 @@ class CultNetTests(unittest.TestCase):
             client.close()
             server.close()
 
+    def test_cultnet_rudp_socket_transport_drops_strays_and_keeps_serving_its_peer(self) -> None:
+        server_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        stray_socket = bind_udp_socket()
+        connection_id = 0x10203050
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+            )
+        )
+        foreign = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=0x0BADF10E))
+        strays = [
+            b"not a rudp packet",
+            b"",
+            encode_rudp_packet(foreign.create_connect(0, b"foreign")),
+        ]
+
+        try:
+            # A stray that arrives before the peer must not become the peer.
+            for stray in strays:
+                stray_socket.sendto(stray, server_socket.getsockname())
+            for _ in strays:
+                self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, len(strays))
+
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+
+            # A moved flow answers from the peer's own address with someone else's session.
+            for stray in strays:
+                server_socket.sendto(stray, client_socket.getsockname())
+                client_socket.sendto(stray, server_socket.getsockname())
+            for _ in strays:
+                self.assertIsNone(client.receive_once())
+                self.assertIsNone(server.receive_once())
+            self.assertEqual(client.stats.packets_dropped, len(strays))
+            self.assertEqual(server.stats.packets_dropped, 2 * len(strays))
+
+            client.send("schema", b"still here")
+            self.assertEqual(receive_rudp_frame(server).payload, b"still here")
+            server.send("schema", b"server still here")
+            self.assertEqual(receive_rudp_frame(client).payload, b"server still here")
+        finally:
+            stray_socket.close()
+            client.close()
+            server.close()
+
     def test_cultnet_rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()

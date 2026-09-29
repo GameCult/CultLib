@@ -23,6 +23,10 @@ class CultNetTransportStats:
     bytes_sent: int = 0
     frames_received: int = 0
     frames_sent: int = 0
+    # Datagrams read and discarded because they belong to no session on this
+    # transport: malformed frames, another session's connection id, a sender
+    # that is not the peer, or a packet the session refuses.
+    packets_dropped: int = 0
 
 
 @dataclass(frozen=True)
@@ -921,6 +925,7 @@ class CultNetRudpSocketTransportConnection:
         self._bytes_sent = 0
         self._frames_received = 0
         self._frames_sent = 0
+        self._packets_dropped = 0
         self._delivered_frames: deque[CultNetTransportFrame] = deque()
         self._closed = False
         self.disconnect_reason: bytes | None = None
@@ -943,6 +948,7 @@ class CultNetRudpSocketTransportConnection:
             bytes_sent=self._bytes_sent,
             frames_received=self._frames_received,
             frames_sent=self._frames_sent,
+            packets_dropped=self._packets_dropped,
         )
 
     @property
@@ -977,17 +983,39 @@ class CultNetRudpSocketTransportConnection:
             return None
         self._bytes_received += len(wire)
 
+        # What a datagram carries is the sender's business, not a fault of this
+        # process: a malformed frame, another session's connection id, a sender
+        # that is not the peer and a packet the session refuses are dropped and
+        # counted. Only the socket ends a loop. The id is checked before the peer
+        # endpoint is claimed, so a stray cannot become the peer.
+        try:
+            packet = decode_rudp_packet(wire)
+        except ValueError:
+            self._packets_dropped += 1
+            return None
+        if packet.connection_id != self.session.connection_id:
+            self._packets_dropped += 1
+            return None
         if self.remote_addr is None:
             self.remote_addr = remote_addr
         elif remote_addr != self.remote_addr:
+            self._packets_dropped += 1
             return None
 
-        packet = decode_rudp_packet(wire)
         if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type == CultNetRudpPacketType.CONNECT:
-            self._send_packet(self.session.accept_connect(packet, _now_ms()))
+            try:
+                accept = self.session.accept_connect(packet, _now_ms())
+            except ValueError:
+                self._packets_dropped += 1
+                return None
+            self._send_packet(accept)
             return None
 
-        result = self.session.receive(packet, _now_ms())
+        try:
+            result = self.session.receive(packet, _now_ms())
+        except ValueError:
+            self._packets_dropped += 1
+            return None
         if result.reply is not None:
             self._send_packet(result.reply)
         for ready in result.ready_to_send:
