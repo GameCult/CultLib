@@ -358,8 +358,10 @@ namespace GameCult.Networking
             }
             catch (NotSupportedException refusal)
             {
-                // Q6: the selection selects a variant, which CultNet cannot carry. This subscriber is told, by key, and keeps what
-                // it was delivered; a change never throws out of the change handler.
+                // Q6: the selection selects a variant, which CultNet cannot carry. Refused as the subscribe path refuses it: the
+                // subscription is withdrawn, so the peer is told once, not once per store change; a change never throws out of
+                // the change handler.
+                Withdraw(key, sendRemovals: false, forgetRequest: true);
                 key.Peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
                 return;
             }

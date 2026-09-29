@@ -275,9 +275,103 @@ namespace GameCult.Networking.Tests
                 Assert.That(changes.Where(change => change.SubscriptionId == "cited").Select(change => change.Document?.RecordKey),
                     Does.Not.Contain(VariantKey.Value), "a variant never reaches a subscriber as a record");
 
-                // The first subscriber is still alive after the refusal.
+                // The first subscriber is still alive after the refusal; the refused one is withdrawn, not told again per change.
+                var told = errors.Count;
                 await database.PutAsync(new CultRecordKey("citer-five"), Citer("citer-five", BaseKey));
                 await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-five"), Diagnostic);
+                await Task.Delay(200);
+                Assert.That(errors.Count, Is.EqualTo(told), "a refused subscription is withdrawn: one error, not one per store change");
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // An edge carries its citer's reference payload, read from the citer's resolved document. A selection whose hop
+        // reaches a variant citer is refused as a selection of a variant row is, though only the cited row is selected.
+        private static async Task<(CultCache Cache, CultNetDocumentRegistry Documents, CultNetSelection Selection, CultRecordKey CiterVariant)> BuildCitedByVariantFixtureAsync()
+        {
+            var registry = CultDocumentRegistry.Shared;
+            var cache = new CultCache(registry, CultCacheMessagePack.CreateCodec(registry));
+            var documents = new CultNetDocumentRegistry(registry)
+                .Register(CultNetDocumentBinding.ForDocument<VariantWireFixture>(registry))
+                .Register(CultNetDocumentBinding.ForDocument<VariantCiterFixture>(registry));
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(VariantWireFixture), new VariantWireFixture { Name = "base", Power = 1 }, BaseKey);
+                batch.Upsert(typeof(VariantCiterFixture), Citer("citer-one", BaseKey), new CultRecordKey("citer-one"));
+            });
+            var citerVariant = new CultRecordKey("citer-variant");
+            await cache.UpsertVariantAsync(citerVariant, new CultRecordKey("citer-one"), new[]
+            {
+                cache.Override<VariantCiterFixture>(nameof(VariantCiterFixture.Name), "citer variant")
+            });
+            var selection = new CultNetSelection
+            {
+                Schemas = new[] { cache.Registry.GetRequired<VariantWireFixture>().SchemaId },
+                Cited = new CultNetIncoming { Role = "Ref", Exists = true },
+                Projection = CultNetSelectionProjections.Document
+            };
+            return (cache, documents, selection, citerVariant);
+        }
+
+        [Test]
+        public async Task AHopEdgeWhoseCiterIsAVariantIsRefusedNamingItAndAStoreWithoutOneAnswers()
+        {
+            var (cache, documents, selection, citerVariant) = await BuildCitedByVariantFixtureAsync();
+
+            var error = Assert.Throws<NotSupportedException>(() =>
+                documents.CreateSelectionResponse(cache, "m1", selection, ordinalOf: (_, _) => 1, asOf: 1))!;
+            Assert.That(error.Message, Does.Contain(citerVariant.Value));
+
+            cache.Commit(batch => batch.Remove(citerVariant));
+            var answered = documents.CreateSelectionResponse(cache, "m2", selection, ordinalOf: (_, _) => 1, asOf: 1);
+            Assert.That(answered.Edges, Has.Length.EqualTo(1));
+            Assert.That(answered.Edges![0].From.RecordKey, Is.EqualTo("citer-one"));
+        }
+
+        [Test]
+        public async Task AHopSubscriptionWhoseEdgeCiterIsAVariantIsRefusedOnceAndWithdrawn()
+        {
+            var (cache, documents, selection, citerVariant) = await BuildCitedByVariantFixtureAsync();
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions { DocumentRegistry = documents });
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            socket.ReceiveTimeout = 20;
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions { RuntimeId = "variant-edge-server", Socket = socket });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("variant-edge-client");
+                var snapshots = new ConcurrentQueue<CultNetSnapshotResponseRawV1Message>();
+                var errors = new ConcurrentQueue<CultNetErrorMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(snapshots.Enqueue);
+                client.OnCultNet<CultNetErrorMessage>(errors.Enqueue);
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected);
+
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "edges",
+                    SubscriptionId = "edges",
+                    IncludeSnapshot = true,
+                    Selection = selection
+                });
+                await WaitUntilAsync(() => errors.Any(error => error.Error.Contains(citerVariant.Value)));
+                Assert.That(snapshots, Is.Empty, "the snapshot's edges would carry the variant's resolved reference");
+                Assert.That(errors, Has.Count.EqualTo(1));
             }
             finally
             {
