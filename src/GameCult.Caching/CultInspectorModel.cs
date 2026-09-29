@@ -33,7 +33,7 @@ namespace GameCult.Caching
 
         internal CultInspectorMetadata(MemberInfo? member)
         {
-            Attributes = member == null ? Array.Empty<Attribute>() : member.GetCustomAttributes(true).OfType<Attribute>().ToArray();
+            Attributes = member == null ? Array.Empty<Attribute>() : Attribute.GetCustomAttributes(member, true);
             var label = Find<CultInspectorLabelAttribute>()?.Label;
             Label = string.IsNullOrWhiteSpace(label) ? null : label;
             Hidden = Find<CultInspectorHiddenAttribute>() != null;
@@ -206,7 +206,7 @@ namespace GameCult.Caching
         private CultInspectorClaim ResolveCore(Type valueType, MemberInfo? member)
         {
             Type? drawer = null;
-            foreach (var attribute in member?.GetCustomAttributes(true).OfType<Attribute>() ?? Enumerable.Empty<Attribute>())
+            foreach (var attribute in member == null ? Array.Empty<Attribute>() : Attribute.GetCustomAttributes(member, true))
             {
                 for (var type = attribute.GetType(); type != null && type != typeof(Attribute); type = type.BaseType)
                 {
@@ -513,13 +513,23 @@ namespace GameCult.Caching
         // The records a CultRecordRef<T> may point at: every record whose document is a T, by label.
         public IReadOnlyList<CultStoredDocument> RecordCandidates(Type recordRefType, IEnumerable<CultStoredDocument> records)
         {
-            var target = ShapeOf(recordRefType).RecordTarget
-                         ?? throw new ArgumentException($"{recordRefType.Name} is not a CultRecordRef<T>.", nameof(recordRefType));
+            var target = RecordTargetOf(recordRefType);
             return records
-                .Where(record => target.IsInstanceOfType(record.Document) && record.Key.Value.Length > 0)
+                .Where(record => IsCandidateFor(target, record))
                 .OrderBy(RecordLabel, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
         }
+
+        // Whether record may be the value of a recordRefType: the one rule the picker's candidates and a drop share.
+        public bool IsRecordCandidate(Type recordRefType, CultStoredDocument record) =>
+            IsCandidateFor(RecordTargetOf(recordRefType), record ?? throw new ArgumentNullException(nameof(record)));
+
+        private Type RecordTargetOf(Type recordRefType) =>
+            ShapeOf(recordRefType).RecordTarget
+            ?? throw new ArgumentException($"{recordRefType.Name} is not a CultRecordRef<T>.", nameof(recordRefType));
+
+        private static bool IsCandidateFor(Type target, CultStoredDocument record) =>
+            target.IsInstanceOfType(record.Document) && record.Key.Value.Length > 0;
 
         public object CreateRecordRef(Type recordRefType, string key)
         {

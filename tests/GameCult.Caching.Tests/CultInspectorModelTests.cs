@@ -14,7 +14,7 @@ namespace GameCult.Caching.Tests
     public class CultInspectorModelTests
     {
         private static readonly CultDocumentRegistry Registry =
-            CultDocumentRegistry.ForTypes(new[] { typeof(InspectItem), typeof(InspectOther), typeof(InspectFixed) });
+            CultDocumentRegistry.ForTypes(new[] { typeof(InspectItem), typeof(InspectOther), typeof(InspectFixed), typeof(InspectLabeled) });
 
         private static CultInspectorModel Model() => CultCacheMessagePack.CreateInspectorModel(Registry);
 
@@ -126,6 +126,35 @@ namespace GameCult.Caching.Tests
             Assert.That(candidates.Select(candidate => candidate.Key), Is.EqualTo(new[] { a, b }));
             Assert.That(CultInspectorModel.RecordKey(default(CultRecordRef<InspectItem>)), Is.EqualTo(string.Empty));
             Assert.That(CultInspectorModel.RecordKey(new CultRecordRef<InspectItem>(a)), Is.EqualTo(a.Value));
+        }
+
+        [Test]
+        public void OneRuleDecidesWhichRecordsMayBeARefsValue()
+        {
+            var model = Model();
+            CultStoredDocument Record(string key, object document) =>
+                new(new CultRecordKey(key), "test", Registry.GetRequired(document.GetType()), document);
+            var leaf = Record("leaf", new InspectLabeled { Name = "a" });
+            var sibling = Record("other", new InspectOther { Name = "b" });
+            var unkeyed = Record("", new InspectLabeled { Name = "c" });
+            var records = new[] { sibling, leaf, unkeyed };
+            var baseRef = typeof(CultRecordRef<InspectLabeledBase>);
+
+            Assert.That(model.IsRecordCandidate(baseRef, leaf), Is.True, "a subtype of the target");
+            Assert.That(model.IsRecordCandidate(baseRef, sibling), Is.False, "a sibling type");
+            Assert.That(model.IsRecordCandidate(baseRef, unkeyed), Is.False, "an empty key");
+            Assert.That(model.RecordCandidates(baseRef, records), Is.EqualTo(records.Where(record => model.IsRecordCandidate(baseRef, record))));
+            Assert.That(() => model.IsRecordCandidate(typeof(string), leaf), Throws.ArgumentException);
+        }
+
+        [Test]
+        public void ABaseMembersLabelReachesItsOverride()
+        {
+            var member = Model().MembersOf(typeof(InspectLabeled)).Single(candidate => candidate.Name == nameof(InspectLabeled.Tag));
+
+            Assert.That(member.Metadata.Label, Is.EqualTo("Base Label"));
+            var claims = new CultInspectorDrawerClaims(new[] { typeof(LabelClaimDrawer) }, typeof(IFakeDrawer));
+            Assert.That(claims.Resolve(typeof(string), member.Member).Drawer, Is.EqualTo(typeof(LabelClaimDrawer)), "attribute claims see the base attribute too");
         }
 
         [Test]
@@ -328,6 +357,28 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName]
             public string Name = string.Empty;
+        }
+
+        public abstract class InspectLabeledBase
+        {
+            [CultInspectorLabel("Base Label")]
+            public abstract string Tag { get; set; }
+        }
+
+        [CultDocument("tests.inspect_labeled", "tests.inspect_labeled.v1")]
+        [MessagePackObject]
+        public sealed class InspectLabeled : InspectLabeledBase
+        {
+            [Key(0)] [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public override string Tag { get; set; } = string.Empty;
+        }
+
+        [CultInspectorDrawer(typeof(CultInspectorLabelAttribute))]
+        public sealed class LabelClaimDrawer : IFakeDrawer
+        {
         }
 
         [CultDocument("tests.inspect_asset", "tests.inspect_asset.v1")]
