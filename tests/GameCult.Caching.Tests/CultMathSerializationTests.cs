@@ -141,6 +141,20 @@ namespace GameCult.Caching.Tests
             Decode<Color32>("94CCFFCC800007").Should().Be(new Color32(255, 128, 0, 7));
         }
 
+
+        [Test]
+        public void Random_StateZero_IsTheGeneratorDefaultSeed()
+        {
+            // CultMath's generator maps state 0 to its default seed, so a zero or missing state is not degenerate.
+            var reference = new CultMath.Random(0u);
+            var expected = new[] { reference.NextUInt(), reference.NextUInt(), reference.NextUInt() };
+
+            foreach (var hex in new[] { "9100", "90" })
+            {
+                var decoded = Decode<CultMath.Random>(hex);
+                new[] { decoded.NextUInt(), decoded.NextUInt(), decoded.NextUInt() }.Should().Equal(expected);
+            }
+        }
         [Test]
         public void ConsumerResolvers_WinOverCultMathResolver()
         {
