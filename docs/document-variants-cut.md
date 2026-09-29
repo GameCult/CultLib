@@ -372,7 +372,7 @@ checked by the operator in the editor.
 ### C4. Aetheria adoption (Aetheria repo, its own cut, after the release)
 
 - Bump the package to `v1.5.0`.
-- Add `[CultVariants]` to `HullData`, `EquippableItemData`'s concrete types and `ConsumableItemData`.
+- Add `[CultElementId]` to every list-element type Aetheria's documents carry (ids everywhere, Q3). There is no per-type opt-in.
 - Add `[CultElementId]` to `BehaviorData` (base) and `HardpointData`.
 - Run `MintElementIds` once over `GameData/Aetheria.cc`.
 - AetherDb migrations skip variants or use the variant API (Q1a).
