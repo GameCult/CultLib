@@ -77,7 +77,7 @@ namespace GameCult.Networking.Tests
                 var seen = new ConcurrentQueue<string?>();
                 using var watch = database.Watch<NetworkSchemaNote>().Subscribe(change => seen.Enqueue(change.Document?.Text));
                 var boom = new CultRecordKey("pub:boom");
-                var escaped = Assert.ThrowsAsync<InvalidOperationException>(() => cache.UpsertAsync(Note("boom"), new CultRecordHandle<NetworkSchemaNote>(boom)));
+                var escaped = Assert.ThrowsAsync<InvalidOperationException>(() => database.PutAsync(boom, Note("boom")));
 
                 ObservableSystem.RegisterUnhandledExceptionHandler(previous);
                 var after = new CultRecordKey("pub:after");
