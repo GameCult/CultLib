@@ -595,7 +595,10 @@ public static partial class math
     }
 
     // Ashima Arts / Ian McEwan 3D simplex noise (MIT), mirrored by cultmath_snoise(float3)
-    // in shaders/CultMath.hlsl with the same float32 evaluation order.
+    // in shaders/CultMath.hlsl with the same float32 evaluation order. Follows stegu/webgl-noise
+    // src/noise3D.glsl at 22434e04d7 (kernel radius^2 0.5, scale 105, permute (34x+10)x); see
+    // THIRD-PARTY-NOTICES.md. Continuous across simplex-cell boundaries
+    // (NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries).
     public static float snoise(float3 value)
     {
         const float cx = 1.0f / 6.0f;
@@ -642,9 +645,9 @@ public static partial class math
         p2 *= norm.z;
         p3 *= norm.w;
 
-        var m = max(0.6f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
+        var m = max(0.5f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
         m = m * m;
-        return 42.0f * dot(m * m, new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+        return 105.0f * dot(m * m, new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
     }
 
     // Ashima Arts / Ian McEwan 2D simplex noise, kept component-explicit so
@@ -690,25 +693,18 @@ public static partial class math
     private static float2 snoise_mod289(float2 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
     private static float3 snoise_mod289(float3 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
     private static float4 snoise_mod289(float4 value) => value - floor(value * (1.0f / 289.0f)) * 289.0f;
-    private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
-    private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 1.0f) * value);
+    private static float3 snoise_permute(float3 value) => snoise_mod289(((value * 34.0f) + 10.0f) * value);
+    private static float4 snoise_permute(float4 value) => snoise_mod289(((value * 34.0f) + 10.0f) * value);
 
-    // Ashima Arts / Ian McEwan 3D simplex noise with analytic gradient (invariant 8), following the
-    // differentiation in webgl-noise src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT; confirmed at
-    // stegu/webgl-noise today), retargeted onto THIS file's own snoise(float3) constants: upstream's
-    // noise3Dgrad.glsl uses a 0.5 falloff radius, permute(x) = mod289((34x+10)x) and an overall scale
-    // of 105, while this repo's existing snoise(float3) (and cultmath_snoise) use 0.6, permute(x) =
-    // mod289((34x+1)x) and scale 42 (Ashima's alternate, second-order-artifact-reduced noise3D.glsl
-    // constants, already load-bearing here and pinned by the existing snoise tests): every local up
-    // through p0..p3 and x0..x3 below is snoise(float3)'s own derivation verbatim, unchanged, so .w
-    // stays that same field (NoiseGradTests.SnoiseGradValueIsBitEqualToSnoise pins the two bit-equal
-    // over a random sweep, stronger than the spec's 1e-6 floor). The differentiation itself carries
-    // over unchanged from upstream, because it never
-    // depends on the threshold or permutation constants: per corner, m0 = max(radius - dot(x,x), 0),
-    // so dm0/dx = -2x, and d(m0^4 * dot(p,x))/dx = 4*m0^3*(-2x)*dot(p,x) + m0^4*p
-    // = -8*m0^3*dot(p,x)*x + m0^4*p (p is that corner's own gradient constant, independent of x, so
-    // only the dot(p,x) factor contributes there); summed over the four corners and scaled by the
-    // same 42 as the value.
+    // Analytic gradient of snoise(float3) (invariant 8), following the differentiation in
+    // webgl-noise src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT), which uses the same kernel
+    // radius^2 0.5, permutation (34x+10)x and scale 105 as snoise(float3) (stegu/webgl-noise
+    // 22434e04d7). Every local up through p0..p3 and x0..x3 below is snoise(float3)'s own derivation
+    // verbatim, so .w is that same field (NoiseGradTests.SnoiseGradValueIsBitEqualToSnoise pins the
+    // two bit-equal over a random sweep). Per corner, m0 = max(0.5 - dot(x,x), 0), so dm0/dx = -2x,
+    // and d(m0^4 * dot(p,x))/dx = 4*m0^3*(-2x)*dot(p,x) + m0^4*p = -8*m0^3*dot(p,x)*x + m0^4*p (p is
+    // that corner's own gradient constant, independent of x); summed over the four corners and
+    // scaled by the same 105 as the value.
     public static float4 snoise_grad(float3 value)
     {
         const float cx = 1.0f / 6.0f;
@@ -755,18 +751,18 @@ public static partial class math
         p2 *= norm.z;
         p3 *= norm.w;
 
-        var m0 = max(0.6f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
+        var m0 = max(0.5f - new float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0f);
         var m2 = m0 * m0;
         var m3 = m2 * m0;
         var m4 = m2 * m2;
 
         var px = new float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
-        var value2 = 42.0f * dot(m4, px);
+        var value2 = 105.0f * dot(m4, px);
         var grad = -8.0f * m3.x * x0 * px.x + m4.x * p0
             + -8.0f * m3.y * x1 * px.y + m4.y * p1
             + -8.0f * m3.z * x2 * px.z + m4.z * p2
             + -8.0f * m3.w * x3 * px.w + m4.w * p3;
-        grad *= 42.0f;
+        grad *= 105.0f;
 
         return new float4(grad, value2);
     }

@@ -233,15 +233,25 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   paths are proven bit-identical (`PrunedSearchIsBitIdenticalToTheUnprunedFiveCubedSearch`,
   which samples `[-50, 50]^3`, is comfortably inside that domain).
 
+- `snoise(float3)` follows webgl-noise `src/noise3D.glsl` as of
+  stegu/webgl-noise `22434e04d7`: kernel radius squared `0.5`, output scale
+  `105`, permutation `mod289((34x+10)x)`. Upstream's `21d9fe23d7` (2020-10-14,
+  "an age-old bug that caused slight discontinuities along simplex
+  boundaries") moved the radius from `0.6` to `0.5`; at `0.6` a lattice vertex
+  outside the four summed corners can lie inside the kernel, leaving a value
+  jump at the cell boundary (3.1e-3 over the committed probe's 400 lines). `ff3b5d34ea` set the scale
+  to `105` and `a3e6d57095` (2021-06-30) the permutation; the 2D `snoise` shares
+  that permutation helper, so its values changed too, while its own kernel
+  (`0.5`) and scale (`130`) already matched upstream.
+  `NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries`
+  pins the continuity.
 - `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
   following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
-  Arts / Ian McEwan, MIT) but retargeted onto `snoise(float3)`'s own falloff
-  radius (`0.6`), permutation (`mod289((34x+1)x)`), and scale (`42`) rather
-  than upstream's `0.5`/`mod289((34x+10)x)`/`105`: the differentiation itself
-  does not depend on those constants (per corner, `m0 = max(radius -
-  dot(x,x), 0)`, so `d(m0^4 * dot(p,x))/dx = -8*m0^3*dot(p,x)*x + m0^4*p`,
-  summed over the four corners and scaled by the same constant as the value),
-  so `.w` stays exactly `snoise(float3)`'s own field. `fbm_grad` and
+  Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
+  `snoise(float3)`: per corner, `m0 = max(0.5 - dot(x,x), 0)`, so
+  `d(m0^4 * dot(p,x))/dx = -8*m0^3*dot(p,x)*x + m0^4*p`, summed over the four
+  corners and scaled by the same constant as the value, so `.w` is exactly
+  `snoise(float3)`. `fbm_grad` and
   `ridged_grad` are octave sums of `snoise_grad`: each octave samples at
   `p * frequency`, so by the chain rule its gradient scales by that same
   frequency, and both amplitude (`gain`) and frequency (`lacunarity`) compound

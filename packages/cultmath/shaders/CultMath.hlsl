@@ -76,8 +76,8 @@ float cultmath_smootherstep(float value)
 float2 cultmath_snoise_mod289(float2 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
 float3 cultmath_snoise_mod289(float3 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
 float4 cultmath_snoise_mod289(float4 value) { return value - floor(value * (1.0 / 289.0)) * 289.0; }
-float3 cultmath_snoise_permute(float3 value) { return cultmath_snoise_mod289(((value * 34.0) + 1.0) * value); }
-float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((value * 34.0) + 1.0) * value); }
+float3 cultmath_snoise_permute(float3 value) { return cultmath_snoise_mod289(((value * 34.0) + 10.0) * value); }
+float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((value * 34.0) + 10.0) * value); }
 
 // Ashima Arts / Ian McEwan 3D simplex noise (MIT), same float32 evaluation
 // order as the C# math.snoise(float3) mirror.
@@ -125,9 +125,9 @@ float cultmath_snoise(float3 value)
     p2 *= norm.z;
     p3 *= norm.w;
 
-    float4 m = max(0.6 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    float4 m = max(0.5 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
     m = m * m;
-    return 42.0 * dot(m * m, float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+    return 105.0 * dot(m * m, float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
 }
 
 float cultmath_snoise(float2 value)
@@ -162,12 +162,11 @@ float cultmath_snoise(float2 value)
     return 130.0 * dot(m, g);
 }
 
-// Ashima Arts / Ian McEwan 3D simplex noise with analytic gradient (invariant 8), following the
-// differentiation in webgl-noise src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT; confirmed at
-// stegu/webgl-noise today), retargeted onto cultmath_snoise(float3)'s own constants (0.6 falloff
-// radius, permute(x) = mod289((34x+1)x), scale 42; see the C# math.snoise_grad comment for the full
-// derivation and why the differentiation itself is unaffected by that retargeting). Every local up
-// through p0..p3 and x0..x3 is cultmath_snoise(float3)'s own derivation verbatim.
+// Analytic gradient of cultmath_snoise(float3) (invariant 8), following webgl-noise
+// src/noise3Dgrad.glsl (Ashima Arts / McEwan, MIT); same kernel, permutation and scale as
+// cultmath_snoise(float3) (stegu/webgl-noise 22434e04d7). See the C# math.snoise_grad comment for the
+// derivation. Every local up through p0..p3 and x0..x3 is cultmath_snoise(float3)'s own derivation
+// verbatim.
 float4 cultmath_snoise_grad(float3 value)
 {
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
@@ -212,18 +211,18 @@ float4 cultmath_snoise_grad(float3 value)
     p2 *= norm.z;
     p3 *= norm.w;
 
-    float4 m0 = max(0.6 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    float4 m0 = max(0.5 - float4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
     float4 m2 = m0 * m0;
     float4 m3 = m2 * m0;
     float4 m4 = m2 * m2;
 
     float4 px = float4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
-    float value2 = 42.0 * dot(m4, px);
+    float value2 = 105.0 * dot(m4, px);
     float3 grad = -8.0 * m3.x * x0 * px.x + m4.x * p0
         + -8.0 * m3.y * x1 * px.y + m4.y * p1
         + -8.0 * m3.z * x2 * px.z + m4.z * p2
         + -8.0 * m3.w * x3 * px.w + m4.w * p3;
-    grad *= 42.0;
+    grad *= 105.0;
 
     return float4(grad, value2);
 }
