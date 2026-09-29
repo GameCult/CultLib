@@ -4498,5 +4498,74 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(streams.latest_frame("mimir:kiyo-pro").sequence, 42)
 
 
+class CultMeshRudpSendFailureTests(unittest.TestCase):
+    """One peer whose datagrams cannot be sent must not stop the RUDP thread
+    serving the others."""
+
+    def _client(self, server: Any, name: str) -> tuple[CultNetRudpSocketTransportConnection, tuple[str, int]]:
+        sock = bind_udp_socket()
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id=name,
+                socket=sock,
+                mode=CultNetRudpSocketMode.CLIENT,
+                connection_id=server.rudp_connection_id,
+                remote_addr=("127.0.0.1", server.port),
+                resend_delay_ms=25,
+            )
+        )
+        client.connect(b"join")
+        for _ in range(200):
+            client.receive_once()
+            if client.connected:
+                break
+        self.assertTrue(client.connected)
+        return client, sock.getsockname()[:2]
+
+    def test_a_failed_send_to_one_peer_does_not_kill_the_rudp_thread(self) -> None:
+        import msgpack  # type: ignore
+
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            x, x_addr = self._client(server, "peer-x")
+            y, _ = self._client(server, "peer-y")
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(x_addr):
+                    raise OSError("injected send failure")
+                return original_sendto(sock, data, *args)
+
+            request = msgpack.packb(hello(runtime_id="probe"), use_bin_type=True)
+            with patch.object(socket.socket, "sendto", sendto):
+                # The server's reply and ack to X both fail to send.
+                x.send("schema", request)
+                self._wait_for(lambda: server.rudp_send_failures > 0)
+                self.assertTrue(server._rudp_thread.is_alive())
+
+                y.send("schema", request)
+                response = None
+                for _ in range(200):
+                    response = y.receive_once()
+                    if response is not None:
+                        break
+                    time.sleep(0.005)
+
+            self.assertIsNotNone(response, "Y is still served after X's send failed")
+            self.assertEqual(msgpack.unpackb(response.payload, raw=False)["runtimeId"], "mesh-server")
+            self.assertTrue(server._rudp_thread.is_alive())
+            self.assertGreater(server.rudp_send_failures, 0)
+        finally:
+            server.stop()
+
+    def _wait_for(self, predicate: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("condition not reached")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,14 @@ class CultMeshLocalServer:
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _rudp_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _rudp_send_failures: int = field(default=0, init=False, repr=False)
+
+    @property
+    def rudp_send_failures(self) -> int:
+        """Datagrams that could not be sent to a peer. Each is that peer's lost
+        datagram: a reliable packet stays pending and is resent, and no other
+        peer is affected."""
+        return self._rudp_send_failures
 
     def __post_init__(self) -> None:
         if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
@@ -298,13 +306,19 @@ class CultMeshLocalServer:
         ):
             self._send_rudp_packet(rudp_socket, remote_addr, packet)
 
-    @staticmethod
     def _send_rudp_packet(
+        self,
         rudp_socket: socket.socket,
         remote_addr: tuple[str, int],
         packet: CultNetRudpPacket,
     ) -> None:
-        rudp_socket.sendto(encode_rudp_packet(packet), remote_addr)
+        # A failed send is that peer's lost datagram: counted, never raised.
+        # Raising here ended the RUDP thread for every peer.
+        wire = encode_rudp_packet(packet)
+        try:
+            rudp_socket.sendto(wire, remote_addr)
+        except OSError:
+            self._rudp_send_failures += 1
 
     def _handle_connection_message(
         self,
