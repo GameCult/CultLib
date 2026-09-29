@@ -77,14 +77,21 @@ which route wrote it.
 - An `OnUpdate` handler exception is rethrown to that caller after all of that
   call's changes are delivered (an `AggregateException` if several threw). If
   the call itself failed, its own exception is rethrown and handler exceptions
-  are dropped. A `Watch` subscriber exception is not rethrown; it follows R3's
-  unhandled-exception handling. A throwing handler cannot undo the store's
-  adoption of a load; the store and cache already agree when publication starts.
+  are dropped. Every `Watch` subscriber receives every change: R3 routes a
+  subscriber's exception to its unhandled-exception handler, and if that handler
+  rethrows (fail-fast), the exception is treated as an `OnUpdate` handler
+  exception. The subscriber stays subscribed and the commit stands. A throwing
+  handler cannot undo the store's adoption of a load; the store and cache
+  already agree when publication starts.
+- A record's `[CultName]` and `[CultIndex]` getters run once per landing record,
+  before the store is written and before any `Sequence` is minted. A getter that
+  throws refuses the whole change set, loads included: nothing is written,
+  minted or left in memory.
 - Pulling all stores pulls every attached store even if a handler throws during
   one store's load, then rethrows.
 - Hydration failure on open is loud: a corrupt store file, or a record whose
-  schema the registry cannot resolve, makes the open throw and leaves the file
-  byte-identical. Consumers never delete and rewrite a store they failed to
+  schema the registry cannot resolve or whose name or index getter throws, makes
+  the open throw and leaves the file byte-identical. Consumers never delete and rewrite a store they failed to
   open.
 
 ## Locking
