@@ -491,10 +491,18 @@ fn hub_owes_one_reliable_accept_however_many_connects_repeat() -> Result<()> {
     let peer = socket()?;
     let mut peer_session = raw_session(CONNECTION_ID);
     let connect = peer_session.create_connect(0, b"peer".to_vec())?;
+    let mut connected = 0;
     for _ in 0..20 {
         send_to(&peer, hub_addr, &connect)?;
-        while hub.receive_event_once()?.is_some() {}
+        while let Some(event) = hub.receive_event_once()? {
+            assert!(
+                matches!(event, CultNetRudpServerEvent::Connected { .. }),
+                "a repeated Connect must not replace the admitted session"
+            );
+            connected += 1;
+        }
     }
+    assert_eq!(connected, 1);
     assert_eq!(accept_sequences(&peer)?.len(), 1);
     Ok(())
 }
@@ -576,6 +584,36 @@ fn a_write_unacknowledged_when_the_session_is_refused_fails_its_flush() -> Resul
 
     let flushed = client.flush_reliable(Duration::from_millis(200));
     assert!(flushed.is_err(), "the write was never acknowledged");
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated
+    );
+    Ok(())
+}
+
+/// A peer's Disconnect ends the session as surely as a refusal: writes it never
+/// acknowledged are lost, and the transport says so.
+#[test]
+fn a_write_unacknowledged_when_the_peer_disconnects_fails_its_flush() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client("client", socket()?, server_addr, CONNECTION_ID),
+    )?;
+    client.connect(b"hello".to_vec())?;
+    let mut buffer = vec![0_u8; 65_535];
+    let (received, client_addr) = server.recv_from(&mut buffer)?;
+    let mut server_session = raw_session(CONNECTION_ID);
+    let accept =
+        server_session.accept_connect(&decode_rudp_packet(&buffer[..received])?, 0, Vec::new())?;
+    send_to(&server, client_addr, &accept)?;
+    let _ = client.receive_once()?;
+
+    let receipt = client.send_reliable("schema", b"never acknowledged".to_vec())?;
+    send_to(&server, client_addr, &server_session.create_disconnect(b"bye".to_vec()))?;
+    let _ = client.receive_once()?;
+
+    assert!(client.flush_reliable(Duration::from_millis(200)).is_err());
     assert_eq!(
         client.reliable_send_status(&receipt),
         CultNetRudpReliableSendStatus::Invalidated

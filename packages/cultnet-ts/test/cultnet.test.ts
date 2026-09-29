@@ -2145,20 +2145,30 @@ test("server-mode transport and operation service owe one reliable Accept howeve
     handler: () => { throw new Error("no requests expected"); },
   });
   const raw = await bindUdpSocket();
-  const accepts = new Set<number>();
-  raw.on("message", (wire) => {
-    const packet = decodeRudpPacket(wire);
-    if (packet.packetType === "accept" && packet.reliable) accepts.add(packet.sequence);
-  });
+  let received: CultNetRudpPacket[] = [];
+  raw.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
   try {
-    const connect = new CultNetRudpSession({ connectionId }).createConnect(0);
     for (const port of [udpPort(serverSocket), Number(new URL(service.endpoint).port)]) {
-      accepts.clear();
+      const peer = new CultNetRudpSession({ connectionId });
+      const connect = peer.createConnect(0);
+      received = [];
       for (let attempt = 0; attempt < 20; attempt += 1) raw.send(encodeRudpPacket(connect), port, "127.0.0.1");
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      assert.equal(accepts.size, 1, `reliable Accepts sent by port ${port}`);
+      await settle();
+      const accepts = received.filter((p) => p.packetType === "accept");
+      assert.equal(new Set(accepts.map((p) => p.sequence)).size, 1, `reliable Accepts sent by port ${port}`);
+
+      // Once the Accept is acknowledged, a repeated Connect is answered with an Ack, never a new Accept.
+      peer.receive(accepts[0]!, 0);
+      raw.send(encodeRudpPacket(peer.createAckForReceived(accepts[0]!.sequence)), port, "127.0.0.1");
+      await settle();
+      received = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) raw.send(encodeRudpPacket(connect), port, "127.0.0.1");
+      await settle();
+      assert.equal(received.filter((p) => p.packetType === "accept").length, 0, `Accepts sent by port ${port} after the ack`);
+      assert.ok(received.some((p) => p.packetType === "ack"), `an Ack from port ${port}`);
     }
-    assert.ok(transport.outstandingReliablePacketCount <= 1);
+    assert.equal(transport.outstandingReliablePacketCount, 0);
   } finally {
     raw.close();
     transport.close();
