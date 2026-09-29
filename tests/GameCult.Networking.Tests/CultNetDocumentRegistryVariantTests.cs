@@ -272,6 +272,10 @@ namespace GameCult.Networking.Tests
                 await database.PutAsync(new CultRecordKey("citer-four"), Citer("citer-four", VariantKey));
 
                 await WaitUntilAsync(() => errors.Any(error => error.Error.Contains(VariantKey.Value)), Diagnostic);
+                var refusal = errors.First(error => error.Error.Contains(VariantKey.Value));
+                Assert.That(refusal.Code, Is.EqualTo("variant_unsupported"));
+                Assert.That(refusal.Details?.Value, Is.EqualTo("cited"), "the peer can tell which subscription ended");
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "cited" && change.ChangeKind == "removed" && change.RecordKey == BaseKey.Value), Diagnostic);
                 Assert.That(changes.Where(change => change.SubscriptionId == "cited").Select(change => change.Document?.RecordKey),
                     Does.Not.Contain(VariantKey.Value), "a variant never reaches a subscriber as a record");
 

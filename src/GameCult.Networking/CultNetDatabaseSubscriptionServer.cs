@@ -208,7 +208,7 @@ namespace GameCult.Networking
                 {
                     // Q6: a snapshot that selects a variant is refused to this subscriber as a typed error.
                     Withdraw(key, sendRemovals: false, forgetRequest: true);
-                    peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                    peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message, subscriptionId));
                     return Task.CompletedTask;
                 }
                 catch
@@ -330,7 +330,7 @@ namespace GameCult.Networking
                     catch (NotSupportedException refusal)
                     {
                         // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
-                        peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                        peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message));
                         return;
                     }
 
@@ -358,11 +358,12 @@ namespace GameCult.Networking
             }
             catch (NotSupportedException refusal)
             {
-                // Q6: the selection selects a variant, which CultNet cannot carry. Refused as the subscribe path refuses it: the
-                // subscription is withdrawn, so the peer is told once, not once per store change; a change never throws out of
+                // Q6: the selection selects a variant, which CultNet cannot carry. The subscription is withdrawn, so the peer is
+                // told once, not once per store change; the rows it delivered are withdrawn too (removals first), so the peer
+                // does not keep them as live, and the typed error names the subscription that ended. A change never throws out of
                 // the change handler.
-                Withdraw(key, sendRemovals: false, forgetRequest: true);
-                key.Peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                Withdraw(key, sendRemovals: true, forgetRequest: true);
+                key.Peer.SendCultNet(CultNetErrorMessage.ForVariantUnsupported(refusal.Message, key.Id));
                 return;
             }
 

@@ -547,6 +547,18 @@ namespace GameCult.Networking
             };
 
         /// <summary>
+        /// Builds the wire error for a selection that selects a document variant, which CultNet does not carry yet: code
+        /// <c>variant_unsupported</c>, details <c>{ field: "subscriptionId", value }</c> when a subscription was ended by it.
+        /// </summary>
+        public static CultNetErrorMessage ForVariantUnsupported(string message, string? subscriptionId = null) =>
+            new CultNetErrorMessage
+            {
+                Error = message,
+                Code = "variant_unsupported",
+                Details = subscriptionId == null ? null : new CultNetErrorDetails { Field = "subscriptionId", Value = subscriptionId }
+            };
+
+        /// <summary>
         /// Builds the wire error for an out-of-target reference refusal (R-N): code
         /// <c>reference_outside_target</c>, no details.
         /// </summary>

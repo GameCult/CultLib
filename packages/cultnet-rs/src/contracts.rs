@@ -250,7 +250,7 @@ impl CultNetShardDescriptor {
     }
 }
 
-/// Machine-readable `cultnet.error.v0` refusal code (R-N). Mirrors the four strings
+/// Machine-readable `cultnet.error.v0` refusal code (R-N). Mirrors the five strings
 /// `contracts/cultnet/cultnet.error.schema.json` enumerates for `code`; a peer that receives a fifth
 /// string it does not know refuses to decode rather than guess a meaning for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +260,7 @@ pub enum CultNetErrorCode {
     CursorStale,
     CursorInvalid,
     ReferenceOutsideTarget,
+    VariantUnsupported,
 }
 
 impl CultNetErrorCode {
@@ -269,6 +270,7 @@ impl CultNetErrorCode {
             Self::CursorStale => "cursor_stale",
             Self::CursorInvalid => "cursor_invalid",
             Self::ReferenceOutsideTarget => "reference_outside_target",
+            Self::VariantUnsupported => "variant_unsupported",
         }
     }
 
@@ -278,6 +280,7 @@ impl CultNetErrorCode {
             "cursor_stale" => Ok(Self::CursorStale),
             "cursor_invalid" => Ok(Self::CursorInvalid),
             "reference_outside_target" => Ok(Self::ReferenceOutsideTarget),
+            "variant_unsupported" => Ok(Self::VariantUnsupported),
             other => Err(anyhow!("ErrorMessage.Code {other:?} is not a recognized cultnet.error.v0 code")),
         }
     }
