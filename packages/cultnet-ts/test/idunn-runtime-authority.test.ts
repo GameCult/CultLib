@@ -160,7 +160,7 @@ test("the signer owns the reported health: a fresh signer is warming, reportHeal
   const signer = signerFor(context, "web");
   const first = signer.answerRouteObservation(CHALLENGE);
   assert.equal(presenceSlot(first, RUNTIME_PRESENCE_SLOT.state), "warming");
-  assert.equal(presenceSlot(signer.sign("detail"), RUNTIME_PRESENCE_SLOT.state), "warming");
+  assert.equal(presenceSlot(signer.sign("detail").document, RUNTIME_PRESENCE_SLOT.state), "warming");
   signer.reportHealth("active");
   const third = signer.answerRouteObservation(CHALLENGE);
   assert.equal(presenceSlot(third, RUNTIME_PRESENCE_SLOT.state), "active");
