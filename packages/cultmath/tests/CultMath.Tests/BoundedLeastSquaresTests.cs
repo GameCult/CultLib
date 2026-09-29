@@ -616,8 +616,15 @@ public sealed class BoundedLeastSquaresTests
     }
 
     // Exact reference: every assignment of each column to {lo, hi, free}, free set solved in double.
-    private static double ExactBoxedCost(int m, int n, float[] a, float[] b, float[] lo, float[] hi)
+    private static double ExactBoxedCost(int m, int n, float[] a, float[] b, float[] lo, float[] hi, double pivotTol = 1e-9, double ridge = 0.0)
     {
+        var maxDiag = 0.0;
+        for (var j = 0; j < n; j++)
+        {
+            var d = 0.0;
+            for (var r = 0; r < m; r++) d += (double)a[r * n + j] * a[r * n + j];
+            maxDiag = Math.Max(maxDiag, d);
+        }
         var best = double.MaxValue;
         var total = 1;
         for (var j = 0; j < n; j++) total *= 3;
@@ -646,12 +653,13 @@ public sealed class BoundedLeastSquaresTests
                         mat[i, k] += (double)a[r * n + free[i]] * (b[r] - fixedPart);
                     }
                 }
+                for (var i = 0; i < k; i++) mat[i, i] += ridge * maxDiag;
                 var ok = true;
                 for (var col = 0; col < k && ok; col++)
                 {
                     var piv = col;
                     for (var r = col + 1; r < k; r++) if (Math.Abs(mat[r, col]) > Math.Abs(mat[piv, col])) piv = r;
-                    if (Math.Abs(mat[piv, col]) < 1e-9) { ok = false; break; }
+                    if (Math.Abs(mat[piv, col]) < pivotTol) { ok = false; break; }
                     for (var l = 0; l <= k; l++) (mat[col, l], mat[piv, l]) = (mat[piv, l], mat[col, l]);
                     for (var r = 0; r < k; r++)
                     {
@@ -760,6 +768,102 @@ public sealed class BoundedLeastSquaresTests
         var b = new float[m];
         for (var i = 0; i < m; i++) b[i] = bAlongSmallestSingularVector ? (float)u[n - 1][i] : rng.NextFloat(-3f, 3f);
         return (a, b);
+    }
+
+    // A pass can end with the KKT test still failing and the cost exactly where it was: a dependent free column keeps a
+    // gradient above the tolerance, or a bound release lands on a column the factor drops. The solver must call that
+    // converged; if the stall rule mis-reads the cost scale or the progress, it spins to the iteration cap instead.
+    // Each kind is a fixed-seed batch of small boxed problems with warm starts on and off the bounds and pinned columns:
+    // rank-deficient (duplicate and zero columns), nearly collinear (1e-2 to 1e-5), integer-tied, wide, cond(A) 1e5 to
+    // 3e5, and "weak", where b lies along the weakest singular direction of a cond(A) 1e6 to 1e7 matrix so the gradient
+    // tolerance sits below the rounding noise with interior columns nonzero. Every kind must converge; all but "weak"
+    // (past the documented condition range) must also land within the documented cost gap, relative to |b|^2, of an
+    // exact enumeration of the active sets (a 1e-15 ridge keeps singular free sets solvable).
+    [Theory]
+    [InlineData("plain", 300)]
+    [InlineData("rankdef", 300)]
+    [InlineData("collinear", 300)]
+    [InlineData("integer-tie", 300)]
+    [InlineData("wide", 300)]
+    [InlineData("cond", 300)]
+    [InlineData("weak", 6000)]
+    public void StalledPassesConvergeInsteadOfSpinningToTheCap(string kind, int seeds)
+    {
+        var failures = new System.Collections.Generic.List<string>();
+        for (uint seed = 1; seed <= seeds; seed++)
+        {
+            var rng = new CultMath.Random(seed * 2246822519u + (uint)kind.Length * 3266489917u);
+            double Gauss() => Math.Sqrt(-2.0 * Math.Log(1.0 - rng.NextFloat() * 0.999999)) * Math.Cos(2.0 * Math.PI * rng.NextFloat());
+            var n = rng.NextInt(2, 8);
+            var m = rng.NextInt(2, 12);
+            if (kind == "wide") m = Math.Max(1, n - rng.NextInt(1, 4));
+            if (kind == "cond" || kind == "weak") m = n + rng.NextInt(0, 5);
+            float[] a;
+            float[] bWeak = null;
+            if (kind == "weak")
+            {
+                (a, bWeak) = ConditionedProblem(m, n, Math.Pow(10.0, 6.0 + rng.NextFloat()), seed, 1.0, true);
+            }
+            else if (kind == "cond")
+            {
+                a = ConditionedProblem(m, n, Math.Pow(10.0, 5.0 + 0.5 * rng.NextFloat()), seed).a;
+            }
+            else
+            {
+                a = new float[m * n];
+                for (var i = 0; i < m; i++)
+                {
+                    var row = new double[n];
+                    for (var j = 0; j < n; j++) row[j] = kind == "integer-tie" ? rng.NextInt(-2, 3) : Gauss();
+                    for (var j = 1; j < n; j++)
+                    {
+                        if (kind == "rankdef" && j % 3 == 1) row[j] = row[j - 1];
+                        if (kind == "rankdef" && j % 3 == 2) row[j] = 0.0;
+                        if (kind == "collinear" && j % 2 == 1) row[j] = row[j - 1] + Math.Pow(10.0, -rng.NextInt(2, 6)) * Gauss();
+                    }
+                    for (var j = 0; j < n; j++) a[i * n + j] = (float)row[j];
+                }
+            }
+            var lo = new float[n];
+            var hi = new float[n];
+            var x = new float[n];
+            var xt = new double[n];
+            for (var j = 0; j < n; j++)
+            {
+                var w = Math.Pow(10.0, rng.NextInt(-2, 2));
+                lo[j] = (float)(-w * rng.NextFloat());
+                hi[j] = (float)(w * rng.NextFloat());
+                if (rng.NextInt(6) == 0) hi[j] = lo[j];
+                else if (rng.NextInt(8) == 0) lo[j] = hi[j] = 0f;
+                else if (rng.NextInt(8) == 0) { lo[j] = (float)(0.5 + rng.NextFloat()); hi[j] = lo[j] + 0.5f; }
+                if (kind == "weak") { var c = (float)Math.Pow(10.0, rng.NextInt(3, 9)); lo[j] = rng.NextInt(2) == 0 ? -c : 0f; hi[j] = c; }
+                if (kind == "integer-tie") { lo[j] = -1f; hi[j] = rng.NextInt(4) == 0 ? -1f : 1f; }
+                x[j] = rng.NextInt(3) == 0 ? lo[j] : rng.NextInt(2) == 0 ? hi[j] : lo[j] + (hi[j] - lo[j]) * rng.NextFloat();
+                xt[j] = (lo[j] + hi[j]) / 2.0 + (hi[j] - lo[j]) * 3.0 * (rng.NextFloat() - 0.5);
+            }
+            var noise = Math.Pow(10.0, rng.NextInt(-2, 4));
+            var mode = rng.NextInt(4);
+            var b = new float[m];
+            for (var i = 0; i < m; i++)
+            {
+                var s = 0.0;
+                for (var j = 0; j < n; j++) s += (double)a[i * n + j] * xt[j];
+                b[i] = bWeak != null ? bWeak[i] : mode == 0 ? 0f : (float)(s + noise * Gauss() * (mode == 3 ? 1.0 : 0.01));
+            }
+            var status = Solve(m, n, a, b, lo, hi, x, out var iterations);
+            if (status != BoundedLeastSquaresStatus.Converged)
+            {
+                failures.Add($"seed {seed}: {status} after {iterations}");
+                continue;
+            }
+            if (kind == "weak") continue;
+            var bb = 0.0;
+            foreach (var v in b) bb += (double)v * v;
+            if (bb == 0.0) bb = 1.0;
+            var gap = Cost(m, n, a, b, x) - ExactBoxedCost(m, n, a, b, lo, hi, 1e-300, 1e-15);
+            if (gap > 1e-5 * bb) failures.Add($"seed {seed}: cost gap {gap / bb:E2} of |b|^2");
+        }
+        Assert.True(failures.Count == 0, $"{kind}: {failures.Count} of {seeds} failed; first: {string.Join("; ", failures.GetRange(0, Math.Min(3, failures.Count)))}");
     }
 
     // Unsaturated allocator-shaped ticks: 24 columns, every column free at the optimum. The solve is one Newton step;
