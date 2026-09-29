@@ -271,13 +271,73 @@ struct PersistedSchemaCatalogMember(
     Option<String>,
 );
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct PersistedRecord(
     String,
     String,
     String,
     #[serde(with = "serde_bytes")] Vec<u8>,
 );
+
+impl<'de> serde::Deserialize<'de> for PersistedRecord {
+    /// Reads the four v1 slots and refuses a fifth, naming the record. A record with more
+    /// slots was written by a runtime that resolves document variants.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+
+        struct RecordVisitor;
+        impl<'de> Visitor<'de> for RecordVisitor {
+            type Value = PersistedRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a CultCache persisted record of 4 slots")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<PersistedRecord, A::Error> {
+                let key: String = seq.next_element()?.ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let schema_id: String = seq.next_element()?.ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                let stored_at: String = seq.next_element()?.ok_or_else(|| A::Error::invalid_length(2, &self))?;
+                let payload: serde_bytes::ByteBuf =
+                    seq.next_element()?.ok_or_else(|| A::Error::invalid_length(3, &self))?;
+                if seq.next_element::<IgnoredAny>()?.is_some() {
+                    return Err(A::Error::custom(format!(
+                        "CultCache record {key:?} (schema {schema_id:?}) has more than 4 slots; this runtime reads 4. The store needs a runtime that resolves document variants."
+                    )));
+                }
+                Ok(PersistedRecord(key, schema_id, stored_at, payload.into_vec()))
+            }
+        }
+
+        deserializer.deserialize_seq(RecordVisitor)
+    }
+}
+
+/// The store header string, or `None` when the bytes are not a snapshot-shaped array
+/// (the legacy envelope array starts with a map).
+fn store_header(bytes: &[u8]) -> Option<String> {
+    struct Header(String);
+    impl<'de> serde::Deserialize<'de> for Header {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+            struct HeaderVisitor;
+            impl<'de> serde::de::Visitor<'de> for HeaderVisitor {
+                type Value = Header;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("an array whose first slot is the store header")
+                }
+
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Header, A::Error> {
+                    let header: String = seq
+                        .next_element()?
+                        .ok_or_else(|| <A::Error as serde::de::Error>::invalid_length(0, &self))?;
+                    Ok(Header(header))
+                }
+            }
+            deserializer.deserialize_seq(HeaderVisitor)
+        }
+    }
+    rmp_serde::from_slice::<Header>(bytes).ok().map(|header| header.0)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
@@ -658,9 +718,11 @@ impl SingleFileMessagePackBackingStore {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
-        decode_store_snapshot(&bytes)
-            .or_else(|_| rmp_serde::from_slice(&bytes))
-            .with_context(|| format!("failed to decode MessagePack {}", self.path.display()))
+        match store_header(&bytes) {
+            Some(header) if header.starts_with("cultcache.store.") => decode_store_snapshot(&bytes),
+            _ => rmp_serde::from_slice(&bytes).map_err(anyhow::Error::from),
+        }
+        .map_err(|error| anyhow!("failed to decode MessagePack {}: {error:#}", self.path.display()))
     }
 
     /// Reads one filesystem snapshot without creating or opening the sibling
@@ -2518,11 +2580,15 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
 }
 
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
+    if let Some(header) = store_header(bytes) {
+        if header != "cultcache.store.v1" {
+            return Err(anyhow!(
+                "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" only. The store needs a runtime that resolves document variants."
+            ));
+        }
+    }
     let snapshot: PersistedStoreSnapshot =
         rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
-    if snapshot.0 != "cultcache.store.v1" {
-        return Err(anyhow!("unsupported CultCache snapshot {}", snapshot.0));
-    }
 
     let catalog = snapshot
         .1
@@ -4571,6 +4637,54 @@ mod tests {
             &[snapshot_envelope("admitted", b"two")],
         )?);
         assert_eq!(store.pull_all_read_only_snapshot()?, vec![admitted]);
+        Ok(())
+    }
+
+    // Shared refusal vectors: tests/vectors/document-variants-c0, read by every runtime's tests.
+    const ITEM_SCHEMA_ID: &str = "sha256:88d3fdf0a927acf3b163940d8f8c7fe62b3316542ce771a67ec8bc038f594788";
+
+    fn pull_vector(name: &str) -> Result<Vec<CultCacheEnvelope>> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let vector = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/vectors/document-variants-c0")
+            .join(name);
+        std::fs::copy(vector, &path)?;
+        SingleFileMessagePackBackingStore::new(&path).pull_all()
+    }
+
+    fn refusal(name: &str) -> String {
+        format!("{:#}", pull_vector(name).unwrap_err())
+    }
+
+    #[test]
+    fn single_file_refuses_unknown_header_by_name() {
+        assert!(refusal("unknown-header.msgpack").contains("cultcache.store.v9"));
+    }
+
+    #[test]
+    fn single_file_refuses_extra_record_slot_naming_the_record() {
+        let message = refusal("extra-slot-full-payload.msgpack");
+        assert!(message.contains("item:anvil"), "{message}");
+        assert!(message.contains(ITEM_SCHEMA_ID), "{message}");
+    }
+
+    #[test]
+    fn single_file_refuses_variant_store_by_version_or_record() {
+        let message = refusal("variant-v2.msgpack");
+        assert!(
+            message.contains("cultcache.store.v2") || message.contains("item:anvil-big"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn v1_store_written_at_the_base_commit_still_reads_byte_for_byte() -> Result<()> {
+        let envelopes = pull_vector("v1-base.msgpack")?;
+        let rows: Vec<_> = envelopes.iter().map(|e| (e.key.as_str(), e.r#type.as_str())).collect();
+        assert_eq!(rows, vec![("alpha", "vectors.item"), ("beta", "vectors.item")]);
+        assert_eq!(envelopes[0].payload, b"\x92\xa5alpha\x01");
+        assert_eq!(envelopes[1].payload, b"\x92\xa4beta\x02");
         Ok(())
     }
 }
