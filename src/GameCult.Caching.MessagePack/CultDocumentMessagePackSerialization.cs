@@ -30,6 +30,7 @@ public sealed class CultDocumentResolver : IFormatterResolver
 
 public static class CultDocumentMessagePackSerialization
 {
+    private const string SingleFileFormatVersion = "cultcache.store.v1";
     private const int PersistedRecordFieldCount = 4;
     private const int SchemaCatalogEntryFieldCount = 7;
     private const int SchemaCatalogMemberFieldCount = 8;
@@ -139,7 +140,8 @@ public static class CultDocumentMessagePackSerialization
 
         if (fieldCount > 0)
         {
-            snapshot.FormatVersion = reader.ReadString() ?? "cultcache.store.v1";
+            snapshot.FormatVersion = reader.ReadString()
+                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + SingleFileFormatVersion + " only.");
         }
 
         if (fieldCount > 1)
@@ -170,6 +172,17 @@ public static class CultDocumentMessagePackSerialization
         return snapshot;
     }
 
+    /// <summary>Refuses a single-file snapshot this runtime cannot read, naming the format it found.</summary>
+    public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
+    {
+        if (!string.Equals(snapshot.FormatVersion, SingleFileFormatVersion, StringComparison.Ordinal))
+        {
+            throw new NotSupportedException(
+                $"Store format {snapshot.FormatVersion} is not readable; this runtime reads {SingleFileFormatVersion} only. " +
+                "The store needs a runtime that resolves document variants.");
+        }
+    }
+
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
     {
         writer.WriteArrayHeader(PersistedRecordFieldCount);
@@ -179,7 +192,7 @@ public static class CultDocumentMessagePackSerialization
         writer.Write(record.Payload);
     }
 
-    private static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
+    public static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
     {
         var fieldCount = reader.ReadArrayHeader();
         var record = new CultPersistedRecord();
@@ -204,9 +217,11 @@ public static class CultDocumentMessagePackSerialization
             record.Payload = reader.ReadBytes()?.ToArray() ?? Array.Empty<byte>();
         }
 
-        for (var index = PersistedRecordFieldCount; index < fieldCount; index++)
+        if (fieldCount > PersistedRecordFieldCount)
         {
-            reader.Skip();
+            throw new NotSupportedException(
+                $"Record '{record.Key}' (schema '{record.SchemaId}') has {fieldCount} slots; this runtime reads {PersistedRecordFieldCount}. " +
+                "The store needs a runtime that resolves document variants.");
         }
 
         return record;
@@ -371,7 +386,9 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
 
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
-        return CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
+        CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
+        return snapshot;
     }
 
     protected override byte[] SerializePayload(object document)
