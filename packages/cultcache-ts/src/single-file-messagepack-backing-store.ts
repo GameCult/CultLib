@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
-import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, type StoreFormat, isStoreSnapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -36,6 +36,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   #writeQueue: Promise<void> = Promise.resolve();
 
+  // The header this store read; a rewrite keeps it, so a store that holds element ids never sheds its marker.
+  #format: StoreFormat = STORE_FORMAT_VERSION;
+
   constructor(filePath: string) {
     this.filePath = resolve(filePath);
   }
@@ -50,6 +53,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const decoded = decode(data);
       const snapshot = decodeSnapshot(decoded);
       if (snapshot) {
+        this.#format = snapshot.format;
         return snapshot.records.map((record) => {
           const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
           if (!catalogEntry) {
@@ -164,7 +168,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       .slice(2)}`;
 
     try {
-      await writeFile(tempPath, encode(encodeSnapshot(entries)));
+      await writeFile(tempPath, encode(encodeSnapshot(entries, this.#format)));
       await renameWithRetry(tempPath, this.filePath);
     } catch (error) {
       await rm(tempPath, { force: true }).catch(() => undefined);
@@ -207,11 +211,12 @@ type PersistedRecord = {
 };
 
 type DecodedSnapshot = {
+  format: StoreFormat;
   catalogBySchemaId: Map<string, CultCacheSchemaCatalogEntry>;
   records: PersistedRecord[];
 };
 
-function encodeSnapshot(entries: CultCacheEnvelope[]): unknown[] {
+function encodeSnapshot(entries: CultCacheEnvelope[], format: StoreFormat): unknown[] {
   const catalog = [...catalogEntriesFor(entries).values()]
     .sort((left, right) => compareOrdinal(left.schemaName, right.schemaName));
   const records = [...entries]
@@ -224,7 +229,7 @@ function encodeSnapshot(entries: CultCacheEnvelope[]): unknown[] {
     ]);
 
   return [
-    STORE_FORMAT_VERSION,
+    format,
     catalog.map(encodeCatalogEntry),
     records,
   ];
@@ -284,7 +289,7 @@ function encodeCatalogMember(member: CultCacheSchemaCatalogMember): unknown[] {
 }
 
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
-  if (!isV1Snapshot(decoded)) {
+  if (!isStoreSnapshot(decoded)) {
     return undefined;
   }
 
@@ -304,7 +309,7 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
   }
 
   const records = recordsRaw.map(decodeRecord);
-  return { catalogBySchemaId, records };
+  return { format: decoded[0], catalogBySchemaId, records };
 }
 
 function resolveCatalogEntryForRecord(

@@ -1,11 +1,11 @@
 import { decode } from "@msgpack/msgpack";
 
-import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
+import { type StoreFormat, isStoreSnapshot, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
   filePath: string;
   fileSizeBytes: number;
-  format: "cultcache.store.v1" | "legacy.envelope-array";
+  format: StoreFormat | "legacy.envelope-array";
   catalog: InspectedCatalogEntry[];
   records: InspectedRecord[];
 }
@@ -48,7 +48,7 @@ export function inspectCultCacheBytes(
 ): CultCacheInspection {
   const decoded = decode(bytes);
 
-  if (isV1Snapshot(decoded)) {
+  if (isStoreSnapshot(decoded)) {
     return inspectV1Snapshot(filePath, fileSizeBytes, decoded);
   }
 
@@ -59,7 +59,7 @@ export function inspectCultCacheBytes(
   throw new Error("CultCache file is not a recognized v1 snapshot or legacy envelope array.");
 }
 
-function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: unknown[]): CultCacheInspection {
+function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: [StoreFormat, ...unknown[]]): CultCacheInspection {
   const catalogRaw = decoded[1];
   const recordsRaw = decoded[2];
   if (!Array.isArray(catalogRaw) || !Array.isArray(recordsRaw)) {
@@ -96,7 +96,7 @@ function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: unk
   return {
     filePath,
     fileSizeBytes,
-    format: STORE_FORMAT_VERSION,
+    format: decoded[0],
     catalog,
     records,
   };

@@ -14,6 +14,11 @@ from .backing_store import (
 )
 
 STORE_FORMAT_VERSION = "cultcache.store.v1"
+# A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id slots of a
+# nested element and rewrite the element without them. This runtime writes it back only for a store it read under it; it
+# does not decide when a document carries ids.
+STORE_FORMAT_ELEMENT_IDS = "cultcache.store.v3"
+_READABLE_STORE_FORMATS = (STORE_FORMAT_VERSION, STORE_FORMAT_ELEMENT_IDS)
 _STORE_FORMAT_PREFIX = "cultcache.store."
 _PERSISTED_RECORD_SLOTS = 4
 
@@ -84,6 +89,8 @@ class SingleFileMessagePackBackingStore:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
+        # The header this store read; a rewrite keeps it, so a store that holds element ids never sheds its marker.
+        self._format = STORE_FORMAT_VERSION
 
     def pull_all(self) -> list[CultCacheEnvelope]:
         msgpack = self._msgpack()
@@ -94,9 +101,10 @@ class SingleFileMessagePackBackingStore:
             if not data:
                 return []
             decoded = msgpack.unpackb(data, raw=False)
-            snapshot = _decode_v1_snapshot(decoded)
+            snapshot = _decode_snapshot(decoded)
             if snapshot is not None:
-                return snapshot
+                self._format, envelopes = snapshot
+                return envelopes
             return _decode_legacy_envelopes(decoded, msgpack)
 
     def push(self, envelope: CultCacheEnvelope) -> None:
@@ -121,7 +129,7 @@ class SingleFileMessagePackBackingStore:
         msgpack = self._msgpack()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_bytes(msgpack.packb(_encode_v1_snapshot(envelopes), use_bin_type=True))
+        temp.write_bytes(msgpack.packb(_encode_snapshot(envelopes, self._format), use_bin_type=True))
         temp.replace(self.path)
 
     @staticmethod
@@ -136,7 +144,7 @@ class SingleFileMessagePackBackingStore:
         return msgpack
 
 
-def _encode_v1_snapshot(envelopes: list[CultCacheEnvelope]) -> list[Any]:
+def _encode_snapshot(envelopes: list[CultCacheEnvelope], format_version: str) -> list[Any]:
     catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}
     for envelope in envelopes:
         schema_id = _schema_id_for(envelope)
@@ -151,18 +159,18 @@ def _encode_v1_snapshot(envelopes: list[CultCacheEnvelope]) -> list[Any]:
         [envelope.key, _schema_id_for(envelope), envelope.stored_at, envelope.payload]
         for envelope in sorted(envelopes, key=lambda item: item.key)
     ]
-    return [STORE_FORMAT_VERSION, catalog, records]
+    return [format_version, catalog, records]
 
 
-def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
+def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None:
     if not isinstance(decoded, list) or not decoded:
         return None
-    if isinstance(decoded[0], str) and decoded[0].startswith(_STORE_FORMAT_PREFIX) and decoded[0] != STORE_FORMAT_VERSION:
+    if isinstance(decoded[0], str) and decoded[0].startswith(_STORE_FORMAT_PREFIX) and decoded[0] not in _READABLE_STORE_FORMATS:
         raise ValueError(
-            f"CultCache store format {decoded[0]!r} is not readable; this runtime reads {STORE_FORMAT_VERSION!r} only. "
+            f"CultCache store format {decoded[0]!r} is not readable; this runtime reads {STORE_FORMAT_VERSION!r} and {STORE_FORMAT_ELEMENT_IDS!r} only. "
             "The store needs a runtime that resolves document variants."
         )
-    if decoded[0] != STORE_FORMAT_VERSION:
+    if decoded[0] not in _READABLE_STORE_FORMATS:
         return None
     if len(decoded) < 3 or not isinstance(decoded[1], list) or not isinstance(decoded[2], list):
         raise ValueError("CultCache v1 snapshot must contain a schema catalog and record array")
@@ -216,7 +224,7 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
                 catalog_entry=catalog_entry,
             )
         )
-    return envelopes
+    return decoded[0], envelopes
 
 
 def _decode_legacy_envelopes(decoded: Any, msgpack: Any) -> list[CultCacheEnvelope]:

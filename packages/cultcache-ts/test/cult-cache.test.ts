@@ -1200,7 +1200,7 @@ test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary me
   assert.deepEqual(rust.ids, written.ids);
 
   // TypeScript writes the ids; C# keeps them.
-  const tsIds = ["t00000000001", "t00000000002", "t00000000003"];
+  const tsIds = ["a00000000001", "a00000000002", "a00000000003"];
   store[2][0][3] = encode(["deck:csharp", [["twin", tsIds[0]], ["twin", tsIds[1]], ["other", tsIds[2]]]]);
   const tsFile = join(tempDir, "ts-deck.cc");
   await writeFile(tsFile, encode(store));
@@ -1501,4 +1501,34 @@ test("a v1 store written at the base commit still reads byte for byte", async ()
   assert.deepEqual(envelopes.map((entry) => [entry.key, entry.type]), [["alpha", "vectors.item"], ["beta", "vectors.item"]]);
   assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
   assert.deepEqual([...envelopes[1]!.payload], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
+});
+
+// The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+const c2aVectors = resolve(cultLibRoot, "tests", "vectors", "document-variants-c2a");
+
+async function copyVector(directory: string, source: string, name: string): Promise<string> {
+  const file = join(directory, name);
+  await writeFile(file, await readFile(source));
+  return file;
+}
+
+test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrite keeps the marker", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-"));
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const store = new SingleFileMessagePackBackingStore(v3);
+  const envelopes = await store.pullAll();
+  assert.deepEqual(envelopes.map((entry) => entry.key), ["alpha", "beta"]);
+  assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
+  await store.push({ ...envelopes[0]!, storedAt: "2026-09-30T00:00:00.0000000Z" });
+  assert.equal((decode(await readFile(v3)) as unknown[])[0], "cultcache.store.v3");
+
+  // A v1 store stays v1: the marker is carried, never invented.
+  const v1 = await copyVector(dir, join(variantVectors, "v1-base.msgpack"), "v1.msgpack");
+  const plain = new SingleFileMessagePackBackingStore(v1);
+  const plainEnvelopes = await plain.pullAll();
+  await plain.push({ ...plainEnvelopes[0]!, storedAt: "2026-09-30T00:00:00.0000000Z" });
+  assert.equal((decode(await readFile(v1)) as unknown[])[0], "cultcache.store.v1");
+
+  const inspection = inspectCultCacheBytes("v3.msgpack", await readFile(join(c2aVectors, "v3-base.msgpack")));
+  assert.equal(inspection.format, "cultcache.store.v3");
 });

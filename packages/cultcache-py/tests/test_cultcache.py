@@ -842,5 +842,27 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(envelopes[1].payload, b"\x92\xa4beta\x02")
 
 
+    # The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+    _C2A_VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "document-variants-c2a"
+
+    def _header_after_rewrite(self, vector: Path) -> str:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes(vector.read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            self.assertEqual([e.key for e in envelopes], ["alpha", "beta"])
+            store.push(envelopes[0])
+            return msgpack.unpackb(store_path.read_bytes(), raw=False)[0]
+
+    def test_single_file_reads_a_v3_element_id_store_and_a_rewrite_keeps_the_marker(self) -> None:
+        self.assertEqual(self._header_after_rewrite(self._C2A_VECTORS / "v3-base.msgpack"), "cultcache.store.v3")
+
+    def test_single_file_rewrite_of_a_v1_store_stays_v1(self) -> None:
+        self.assertEqual(self._header_after_rewrite(self._VECTORS / "v1-base.msgpack"), "cultcache.store.v1")
+
+
 if __name__ == "__main__":
     unittest.main()

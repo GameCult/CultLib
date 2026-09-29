@@ -312,6 +312,13 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
     }
 }
 
+const STORE_FORMAT_V1: &str = "cultcache.store.v1";
+
+/// A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id
+/// slots of a nested element and rewrite the element without them. This runtime writes it back only for a file it
+/// found under it; it does not decide when a document carries ids.
+const STORE_FORMAT_ELEMENT_IDS: &str = "cultcache.store.v3";
+
 /// The store header string, or `None` when the bytes are not a snapshot-shaped array
 /// (the legacy envelope array starts with a map).
 fn store_header(bytes: &[u8]) -> Option<String> {
@@ -738,13 +745,27 @@ impl SingleFileMessagePackBackingStore {
         self.read_all_unlocked()
     }
 
+    /// Whether the file on disk carries the element-id header. A rewrite keeps it: the payloads this store
+    /// passes through may hold ids, and a reader older than ids would skip them. The header is the first thing in
+    /// the file, so a short prefix answers without reading the store.
+    fn is_marked_on_disk(&self) -> bool {
+        use std::io::Read;
+        let mut prefix = [0u8; 24];
+        let Ok(mut file) = File::open(&self.path) else { return false };
+        let read = file.read(&mut prefix).unwrap_or(0);
+        prefix[..read]
+            .windows(STORE_FORMAT_ELEMENT_IDS.len())
+            .any(|window| window == STORE_FORMAT_ELEMENT_IDS.as_bytes())
+    }
+
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         remove_abandoned_staging_files(&self.path)?;
-        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries)?)
+        let format = if self.is_marked_on_disk() { STORE_FORMAT_ELEMENT_IDS } else { STORE_FORMAT_V1 };
+        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, format)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
         let mut staged = OpenOptions::new()
@@ -2524,7 +2545,7 @@ fn now_utc_second() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStoreSnapshot> {
+fn encode_store_snapshot(entries: &[CultCacheEnvelope], format: &str) -> Result<PersistedStoreSnapshot> {
     let mut schema_types = BTreeMap::<String, String>::new();
     for entry in entries {
         let schema_id = entry
@@ -2574,7 +2595,7 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
         .collect();
 
     Ok(PersistedStoreSnapshot(
-        "cultcache.store.v1".to_string(),
+        format.to_string(),
         catalog,
         records,
     ))
@@ -2582,9 +2603,9 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
 
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     if let Some(header) = store_header(bytes) {
-        if header != "cultcache.store.v1" {
+        if header != STORE_FORMAT_V1 && header != STORE_FORMAT_ELEMENT_IDS {
             return Err(anyhow!(
-                "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" only. The store needs a runtime that resolves document variants."
+                "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" and \"cultcache.store.v3\" only. The store needs a runtime that resolves document variants."
             ));
         }
     }
@@ -4696,6 +4717,40 @@ mod tests {
         assert_eq!(rows, vec![("alpha", "vectors.item"), ("beta", "vectors.item")]);
         assert_eq!(envelopes[0].payload, b"\x92\xa5alpha\x01");
         assert_eq!(envelopes[1].payload, b"\x92\xa4beta\x02");
+        Ok(())
+    }
+
+    // The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.
+    fn header_after_rewrite(vector: &str) -> Result<String> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/vectors")
+            .join(vector);
+        std::fs::copy(source, &path)?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        let envelopes = store.pull_all()?;
+        let keys: Vec<_> = envelopes.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["alpha", "beta"]);
+        store.push(&envelopes[0])?;
+        Ok(store_header(&std::fs::read(&path)?).expect("a store header"))
+    }
+
+    #[test]
+    fn a_v3_element_id_store_reads_and_a_rewrite_keeps_the_marker() -> Result<()> {
+        assert_eq!(
+            header_after_rewrite("document-variants-c2a/v3-base.msgpack")?,
+            "cultcache.store.v3"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rewrite_of_a_v1_store_stays_v1() -> Result<()> {
+        assert_eq!(
+            header_after_rewrite("document-variants-c0/v1-base.msgpack")?,
+            "cultcache.store.v1"
+        );
         Ok(())
     }
 }
