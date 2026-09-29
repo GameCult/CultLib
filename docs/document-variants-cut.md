@@ -339,6 +339,23 @@ Soul held it. Fixes are in Hands:
 - **C2b precondition (Soul F7).** Whether a pre-id element keeps its load-time id depends on the write path.
   C2b must refuse an override that targets a record whose ids exist only in memory, or mint on open.
 
+**C2a Soul pass 2 (`e85b201b`), 2026-09-30: hold.** The tripwire only works against unreleased readers.
+Every published release (`cultlib-unity-v1.0.60`, `caching-unity-v1.4.0`, `cultcache-ts-v0.14.0`,
+`cultcache-py-v0.3.0`) predates C0. The 1.0.60 C# reader loads a v3 store, and its next write is v1 with the ids
+stripped (probe). Other findings:
+- F2: the same element object twice in one list commits, then the store refuses to load.
+- F3: CultMesh single-file writes bypass the marker.
+- F4: TS `pushAll` writes the header without reading it first.
+
+**C2a rulings, 2026-09-30 (operator):**
+- **Rollout order closes the released-reader hole.** Ship a CultLib release that refuses v3, move every C#
+  reader of a store onto it, then let a C2a writer touch that store. There is no format change for this.
+  This supersedes the claim above that old readers are tripwired: that claim holds only for post-C0 readers.
+- **Mark by content.** A store is written as v3 (v5 for directory stores) only when a record actually holds an
+  element id. An existing v3 header on disk stays.
+- Fix batch 3 in Hands: F2, marking by content in every runtime, F3 routed through the cache's header
+  decision and load checks, F4.
+
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
   plain records too, so R6-for-indexes becomes one general rule:

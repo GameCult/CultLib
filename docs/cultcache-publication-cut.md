@@ -1,7 +1,21 @@
 # CultCache publication: the cache owns "published once", and order stays data
 
-Status: cut map, Imagination pass 1, 2026-09-29. It is not committed yet. Self
-commits it to `main` as `docs/cultcache-publication-cut.md`. The ends are the
+Status, 2026-09-30: Cuts 1-2 landed on `main` at `2a1b8a8`, from `hands/cultcache-pub-c1c2` at `5fb3fca`.
+Soul verdict: merge. Suites green: Caching 323, Networking 295, Mesh 262. Cut 3 is in Hands on
+`hands/cultcache-pub-c3`, with Soul's Cuts 1-2 follow-ups folded in:
+- F4: pin `Held`'s publish-on-throw guard. This is needed before Cut 4 relies on sequence density; Stryker could
+  not mutate `Held` (CS0165).
+- F3: pin observer removal on unsubscribe.
+- F1: the "getters run once" claim is false for conditional commits on variant stores.
+
+Recorded:
+- F2, the Q-P2 hazard. A rethrown observer exception makes a committed write look cancelled or refused. The
+  only live typed catch around a cache write is AetheriaEve `Aetheria.State.Daemon/Program.cs:3722`. It needs a
+  fail-fast handler, and no production code installs one.
+- F5: subscribe and unsubscribe cost O(n).
+- F6: writes after `Dispose` are dropped silently.
+
+Map written by Imagination pass 1, 2026-09-29. The ends are the
 operator ruling of 2026-09-30: every committed cache change reaches subscribers
 exactly once. This document owns the means.
 
