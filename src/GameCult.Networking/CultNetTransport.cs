@@ -881,6 +881,10 @@ namespace GameCult.Networking
     {
         /// <summary>Maximum reliable packets admitted to the wire before acknowledgements advance the window.</summary>
         public const int ReliableSendWindowPackets = 32;
+        // Flow window: a reliable packet is admitted only while its sequence is at most FlowWindowSequences above the
+        // lowest unacked one and the payload above that sequence stays within FlowWindowBytes.
+        private const uint FlowWindowSequences = 1023;
+        private const int FlowWindowBytes = 4 * 1024 * 1024;
         private const int ReceivedSequenceWindow = 4096;
         private sealed class PendingReliablePacket
         {
@@ -1063,7 +1067,7 @@ namespace GameCult.Networking
             options ??= new CultNetRudpSendOptions();
             lock (_pendingReliableGate)
             {
-                if (options.Reliable && _pendingReliable.Count >= ReliableSendWindowPackets)
+                if (options.Reliable && (_queuedReliable.Count > 0 || !WindowAdmits(_nextSequence, payload.Length)))
                     throw new InvalidOperationException("RUDP reliable send window is full; receive acknowledgements before sending.");
             }
             return SendMany(channelId, payload, options).First();
@@ -1436,17 +1440,37 @@ namespace GameCult.Networking
             }
         }
 
+        /// <summary>
+        /// Whether a reliable packet may go on the wire now: the window has a slot, and its sequence and the
+        /// payload above the lowest unacked sequence stay inside the flow window. With nothing pending, any
+        /// packet is admissible. Callers hold the pending gate.
+        /// </summary>
+        private bool WindowAdmits(uint sequence, int payloadLength)
+        {
+            if (_pendingReliable.Count >= ReliableSendWindowPackets)
+                return false;
+            if (_pendingReliable.Count == 0)
+                return true;
+            var lowest = _pendingReliable.Keys.Min();
+            long bytesAbove = 0;
+            foreach (var pending in _pendingReliable)
+            {
+                if (pending.Key > lowest)
+                    bytesAbove += pending.Value.Packet.Payload.Length;
+            }
+            return sequence - lowest <= FlowWindowSequences && bytesAbove + payloadLength <= FlowWindowBytes;
+        }
+
         private IReadOnlyList<CultNetRudpPacket> AdmitReliablePackets(
             IReadOnlyList<CultNetRudpPacket> packets,
             long nowMs)
         {
             lock (_pendingReliableGate)
             {
-                var available = Math.Max(0, ReliableSendWindowPackets - _pendingReliable.Count);
-                var ready = new List<CultNetRudpPacket>(Math.Min(available, packets.Count));
+                var ready = new List<CultNetRudpPacket>();
                 foreach (var packet in packets)
                 {
-                    if (ready.Count < available)
+                    if (_queuedReliable.Count == 0 && WindowAdmits(packet.Sequence, packet.Payload.Length))
                     {
                         _pendingReliable[packet.Sequence] = new PendingReliablePacket
                         {
@@ -1468,9 +1492,9 @@ namespace GameCult.Networking
         {
             lock (_pendingReliableGate)
             {
-                var available = Math.Max(0, ReliableSendWindowPackets - _pendingReliable.Count);
-                var ready = new List<CultNetRudpPacket>(Math.Min(available, _queuedReliable.Count));
-                while (ready.Count < available && _queuedReliable.Count > 0)
+                var ready = new List<CultNetRudpPacket>();
+                while (_queuedReliable.Count > 0
+                    && WindowAdmits(_queuedReliable.Peek().Sequence, _queuedReliable.Peek().Payload.Length))
                 {
                     var packet = _queuedReliable.Dequeue();
                     _pendingReliable[packet.Sequence] = new PendingReliablePacket

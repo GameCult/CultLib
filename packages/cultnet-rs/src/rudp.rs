@@ -46,6 +46,13 @@ const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
 const RUDP_RECEIVE_AHEAD_WINDOW: u32 = 1_024;
 const RUDP_MAX_ORDERED_BUFFERED_FRAMES: usize = 1_024;
 const RUDP_MAX_ORDERED_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+/// The sender's flow window: a reliable packet goes on the wire only while its
+/// sequence is at most this far above the lowest unacked one, and the payload
+/// above that sequence stays within the byte bound. A receiver holds
+/// `RUDP_RECEIVE_AHEAD_WINDOW - 1` sequences and `RUDP_MAX_ORDERED_BUFFERED_BYTES`
+/// beyond its watermark, so a sender that obeys this never overruns it.
+const RUDP_FLOW_WINDOW_SEQUENCES: u32 = RUDP_RECEIVE_AHEAD_WINDOW - 1;
+const RUDP_FLOW_WINDOW_BYTES: usize = RUDP_MAX_ORDERED_BUFFERED_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CultNetRudpPacketType {
@@ -441,7 +448,8 @@ impl CultNetRudpSession {
         options: CultNetRudpSendOptions,
     ) -> Result<CultNetRudpPacket> {
         if options.reliable
-            && self.pending_reliable.len() >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS
+            && (!self.queued_reliable.is_empty()
+                || !self.window_admits(self.next_sequence, payload.len()))
         {
             return Err(anyhow!(
                 "RUDP reliable send window is full; receive acknowledgements before sending"
@@ -907,17 +915,37 @@ impl CultNetRudpSession {
             .saturating_add((before - after) as u64);
     }
 
+    /// Whether a reliable packet may go on the wire now: the window has a slot,
+    /// and its sequence and the payload above the lowest unacked sequence stay
+    /// inside the flow window. With nothing pending, any packet is admissible.
+    fn window_admits(&self, sequence: u32, payload_len: usize) -> bool {
+        if self.pending_reliable.len() >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS {
+            return false;
+        }
+        let Some((&lowest, _)) = self.pending_reliable.first_key_value() else {
+            return true;
+        };
+        let bytes_above: usize = self
+            .pending_reliable
+            .iter()
+            .filter(|(pending_sequence, _)| **pending_sequence > lowest)
+            .map(|(_, pending)| pending.packet.payload.len())
+            .sum();
+        sequence.saturating_sub(lowest) <= RUDP_FLOW_WINDOW_SEQUENCES
+            && bytes_above + payload_len <= RUDP_FLOW_WINDOW_BYTES
+    }
+
     fn admit_reliable_packets(
         &mut self,
         packets: Vec<CultNetRudpPacket>,
         now_ms: u64,
         expires_at_ms: Option<u64>,
     ) -> Vec<CultNetRudpPacket> {
-        let available =
-            CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
-        let mut ready = Vec::with_capacity(available.min(packets.len()));
+        let mut ready = Vec::new();
         for packet in packets {
-            if ready.len() < available {
+            if self.queued_reliable.is_empty()
+                && self.window_admits(packet.sequence, packet.payload.len())
+            {
                 self.track_reliable(packet.clone(), now_ms, expires_at_ms);
                 ready.push(packet);
             } else {
@@ -928,10 +956,12 @@ impl CultNetRudpSession {
     }
 
     fn promote_queued_reliable(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
-        let available =
-            CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS.saturating_sub(self.pending_reliable.len());
-        let mut ready = Vec::with_capacity(available.min(self.queued_reliable.len()));
-        for _ in 0..available {
+        let mut ready = Vec::new();
+        while self
+            .queued_reliable
+            .front()
+            .is_some_and(|(packet, _)| self.window_admits(packet.sequence, packet.payload.len()))
+        {
             let Some((packet, expires_at_ms)) = self.queued_reliable.pop_front() else {
                 break;
             };

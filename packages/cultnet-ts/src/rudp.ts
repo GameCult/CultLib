@@ -18,6 +18,10 @@ const RUDP_FIXED_HEADER_BYTES = 36;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
+// Flow window: a reliable packet is admitted only while its sequence is at most RUDP_FLOW_WINDOW_SEQUENCES above the
+// lowest unacked one and the payload above that sequence stays within RUDP_FLOW_WINDOW_BYTES.
+const RUDP_FLOW_WINDOW_SEQUENCES = 1_023;
+const RUDP_FLOW_WINDOW_BYTES = 4 * 1024 * 1024;
 
 export type CultNetRudpPacketType =
   | "connect"
@@ -295,7 +299,7 @@ export class CultNetRudpSession {
     payload: Uint8Array,
     options: { reliable?: boolean; ordered?: boolean; sequenced?: boolean; nowMs?: number } = {},
   ): CultNetRudpPacket {
-    if (options.reliable && this.#pendingReliable.size >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS) {
+    if (options.reliable && (this.#queuedReliable.length > 0 || !this.#windowAdmits(this.#nextSequence, payload.length))) {
       throw new Error("RUDP reliable send window is full; receive acknowledgements before sending.");
     }
     return this.sendMany(channelId, payload, options)[0]!;
@@ -583,18 +587,43 @@ export class CultNetRudpSession {
     });
   }
 
+  /**
+   * Whether a reliable packet may go on the wire now: the window has a slot, and its sequence and the payload above
+   * the lowest unacked sequence stay inside the flow window. With nothing pending, any packet is admissible.
+   */
+  #windowAdmits(sequence: number, payloadLength: number): boolean {
+    if (this.#pendingReliable.size >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS) return false;
+    if (this.#pendingReliable.size === 0) return true;
+    const lowest = Math.min(...this.#pendingReliable.keys());
+    let bytesAbove = 0;
+    for (const [pendingSequence, pending] of this.#pendingReliable) {
+      if (pendingSequence > lowest) bytesAbove += pending.packet.payload?.length ?? 0;
+    }
+    return sequence - lowest <= RUDP_FLOW_WINDOW_SEQUENCES && bytesAbove + payloadLength <= RUDP_FLOW_WINDOW_BYTES;
+  }
+
   #admitReliablePackets(packets: CultNetRudpPacket[], nowMs: number): CultNetRudpPacket[] {
-    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
-    const ready = packets.slice(0, available);
-    for (const packet of ready) this.#trackReliable(packet, nowMs);
-    this.#queuedReliable.push(...packets.slice(available));
+    const ready: CultNetRudpPacket[] = [];
+    for (const packet of packets) {
+      if (this.#queuedReliable.length === 0 && this.#windowAdmits(packet.sequence, packet.payload?.length ?? 0)) {
+        this.#trackReliable(packet, nowMs);
+        ready.push(packet);
+      } else {
+        this.#queuedReliable.push(packet);
+      }
+    }
     return ready;
   }
 
   #promoteQueuedReliable(nowMs: number): CultNetRudpPacket[] {
-    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
-    const ready = this.#queuedReliable.splice(0, available);
-    for (const packet of ready) this.#trackReliable(packet, nowMs);
+    const ready: CultNetRudpPacket[] = [];
+    while (this.#queuedReliable.length > 0) {
+      const packet = this.#queuedReliable[0];
+      if (!this.#windowAdmits(packet.sequence, packet.payload?.length ?? 0)) break;
+      this.#queuedReliable.shift();
+      this.#trackReliable(packet, nowMs);
+      ready.push(packet);
+    }
     return ready;
   }
 
