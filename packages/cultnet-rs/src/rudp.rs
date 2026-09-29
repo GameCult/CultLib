@@ -166,6 +166,9 @@ struct PendingOrderedFrame {
 struct FragmentBuffer {
     channel_id: String,
     ordered: bool,
+    /// Fragments of a reliable set are acknowledged on arrival, so dropping
+    /// the set would lose data the sender will not resend.
+    reliable: bool,
     fragment_count: u16,
     payloads: BTreeMap<u16, Vec<u8>>,
     sequences: BTreeMap<u16, u32>,
@@ -1029,17 +1032,19 @@ impl CultNetRudpSession {
         if !self.fragment_buffers.contains_key(&key)
             && self.fragment_buffers.len() >= self.max_pending_fragment_sets
         {
-            // A set that is still incomplete when the bound is reached has
-            // almost certainly lost a fragment; its siblings were delivered
-            // long ago. Drop the one untouched longest so the session keeps
-            // receiving. Erroring here made any lossy fragmenting channel a
-            // countdown to a dead receiver.
+            // A set of unreliable fragments that is still incomplete when the
+            // bound is reached has almost certainly lost one; drop the one
+            // untouched longest so the session keeps receiving. A set holding
+            // reliable fragments is never dropped: its fragments were
+            // acknowledged, so the sender will not resend them. If every set
+            // is reliable the packet is refused instead.
             let stalest = self
                 .fragment_buffers
                 .iter()
+                .filter(|(_, buffer)| !buffer.reliable)
                 .min_by_key(|(_, buffer)| buffer.last_touched)
                 .map(|(key, _)| key.clone())
-                .expect("bound reached implies a pending set exists");
+                .ok_or_else(|| anyhow!("RUDP pending reliable fragment sets exceed the bound"))?;
             self.fragment_buffers.remove(&stalest);
             self.fragment_sets_evicted += 1;
         }
@@ -1065,6 +1070,7 @@ impl CultNetRudpSession {
             .or_insert_with(|| FragmentBuffer {
                 channel_id: packet.channel_id.clone(),
                 ordered: packet.ordered,
+                reliable: packet.reliable,
                 fragment_count: packet.fragment_count,
                 payloads: BTreeMap::new(),
                 sequences: BTreeMap::new(),

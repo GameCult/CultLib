@@ -676,18 +676,25 @@ export class CultNetRudpSession {
         payloads: new Map(),
         sequences: new Map(),
       };
-      // Evict the oldest stranded set rather than refusing the payload. A
-      // receiver that stops accepting fragmented traffic after a bounded
-      // number of losses is a denial of service delivered by the network;
-      // dropping the least recent incomplete set costs one payload that was
-      // already incomplete. Map iteration is insertion-ordered, so the first
-      // key is the oldest.
-      while (this.#fragmentBuffers.size >= this.#maxPendingFragmentSets) {
-        const oldest = this.#fragmentBuffers.keys().next();
-        if (oldest.done) {
-          break;
+      // Evict the oldest stranded set of unreliable fragments rather than
+      // refusing the payload: a receiver that stops accepting fragmented
+      // traffic after a bounded number of losses is a denial of service
+      // delivered by the network. A set holding reliable fragments is never
+      // evicted, because its fragments were acknowledged and will not be
+      // resent; when every set is reliable the packet is refused. Map
+      // iteration is insertion-ordered, so the first match is the oldest.
+      if (this.#fragmentBuffers.size >= this.#maxPendingFragmentSets) {
+        let oldest: string | undefined;
+        for (const [pendingKey, pending] of this.#fragmentBuffers) {
+          if (!pending.reliable) {
+            oldest = pendingKey;
+            break;
+          }
         }
-        this.#fragmentBuffers.delete(oldest.value);
+        if (oldest === undefined) {
+          throw new Error("RUDP pending reliable fragment sets exceed the bound.");
+        }
+        this.#fragmentBuffers.delete(oldest);
         this.#fragmentSetsEvicted += 1;
       }
       this.#fragmentBuffers.set(key, buffer);

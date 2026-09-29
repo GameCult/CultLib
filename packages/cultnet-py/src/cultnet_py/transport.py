@@ -836,15 +836,25 @@ class CultNetRudpSession:
 
         key = (packet.channel_id, packet.fragment_id)
         if key not in self._fragment_buffers and len(self._fragment_buffers) >= self._max_pending_fragment_sets:
-            # Evict the oldest stranded set rather than refusing the payload; dicts
-            # iterate in insertion order, so the first key is the oldest.
-            del self._fragment_buffers[next(iter(self._fragment_buffers))]
+            # Evict the oldest stranded set of unreliable fragments rather than
+            # refusing the payload; dicts iterate in insertion order. A set holding
+            # reliable fragments is never evicted, because its fragments were
+            # acknowledged and will not be resent; when every set is reliable the
+            # packet is refused.
+            oldest = next(
+                (pending_key for pending_key, pending in self._fragment_buffers.items() if not pending["reliable"]),
+                None,
+            )
+            if oldest is None:
+                raise ValueError("RUDP pending reliable fragment sets exceed the bound")
+            del self._fragment_buffers[oldest]
             self._fragment_sets_evicted += 1
         buffer = self._fragment_buffers.setdefault(
             key,
             {
                 "fragment_count": packet.fragment_count,
                 "ordered": packet.ordered,
+                "reliable": packet.reliable,
                 "payloads": {},
                 "sequences": {},
             },
