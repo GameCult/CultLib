@@ -294,6 +294,7 @@ namespace GameCult.Caching
 
         private readonly CultCodec _codec;
         private readonly Dictionary<Type, CultInspectorShape> _shapes = new Dictionary<Type, CultInspectorShape>();
+        private readonly Dictionary<Type, CultInspectorGrouping> _groupings = new Dictionary<Type, CultInspectorGrouping>();
         private readonly Dictionary<MemberInfo, CultInspectorMetadata> _metadata = new Dictionary<MemberInfo, CultInspectorMetadata>();
 
         // The codec is the store's (CultCacheMessagePack.CreateInspectorModel for .cc stores), the one a CultCache resolves
@@ -536,6 +537,183 @@ namespace GameCult.Caching
             if (ShapeOf(recordRefType).Kind != CultInspectorValueKind.RecordRef)
                 throw new ArgumentException($"{recordRefType.Name} is not a CultRecordRef<T>.", nameof(recordRefType));
             return Activator.CreateInstance(recordRefType, new CultRecordKey(key))!;
+        }
+
+        // How a listed document type's records group, from the nearest [CultInspectorGroupBy] up its inheritance chain. Members
+        // is empty when nothing groups, with a Notice when a declaration was refused.
+        public CultInspectorGrouping GroupingOf(Type listed)
+        {
+            if (listed == null) throw new ArgumentNullException(nameof(listed));
+            lock (_groupings)
+            {
+                if (!_groupings.TryGetValue(listed, out var grouping))
+                    _groupings[listed] = grouping = ResolveGrouping(listed);
+                return grouping;
+            }
+        }
+
+        private CultInspectorGrouping ResolveGrouping(Type listed)
+        {
+            var declared = (CultInspectorGroupByAttribute?)Attribute.GetCustomAttribute(listed, typeof(CultInspectorGroupByAttribute), true);
+            if (declared == null || declared.Members.Count == 0)
+                return new CultInspectorGrouping(listed, Array.Empty<CultInspectorMember>(), null);
+
+            CultInspectorGrouping Refused(string reason) =>
+                new CultInspectorGrouping(listed, Array.Empty<CultInspectorMember>(), $"[CultInspectorGroupBy] on {listed.Name}: {reason} The list is not grouped.");
+
+            if (listed.GetCustomAttribute<CultGlobalAttribute>(true) != null)
+                return Refused("a global document is never grouped.");
+            var members = new List<CultInspectorMember>();
+            foreach (var name in declared.Members)
+            {
+                var member = MembersOf(listed).FirstOrDefault(candidate => candidate.Name == name);
+                if (member == null) return Refused($"{name} is not an inspector member.");
+                if (members.Contains(member)) return Refused($"{name} is named twice.");
+                if (member.Metadata.Hidden) return Refused($"{name} is hidden.");
+                if (member.IsReadOnly) return Refused($"{name} is read-only.");
+                var kind = ShapeOf(member.ValueType).Kind;
+                var groupable = kind is CultInspectorValueKind.String or CultInspectorValueKind.Integer or CultInspectorValueKind.Bool or CultInspectorValueKind.RecordRef
+                                || kind == CultInspectorValueKind.Enum && !member.ValueType.IsDefined(typeof(FlagsAttribute), false);
+                if (!groupable) return Refused($"{name} is a {member.ValueType.Name}, which does not group.");
+                members.Add(member);
+            }
+
+            return new CultInspectorGrouping(listed, members, null);
+        }
+
+        // The tree of listed's candidate records: one level per grouped member, occupied values only. Leaves hold the records,
+        // in candidate order, and together exactly RecordCandidates(CultRecordRef<listed>, records); a variant groups by its
+        // resolved values. Empty when GroupingOf(listed) groups nothing: the lowering lists the candidates flat.
+        public IReadOnlyList<CultInspectorRecordGroup> GroupRecords(Type listed, IEnumerable<CultStoredDocument> records)
+        {
+            var grouping = GroupingOf(listed);
+            if (grouping.Members.Count == 0)
+                return Array.Empty<CultInspectorRecordGroup>();
+            var all = records.ToArray();
+            var targets = grouping.Members
+                .Where(member => ShapeOf(member.ValueType).Kind == CultInspectorValueKind.RecordRef)
+                .ToDictionary(member => member, member => RefTargets(member.ValueType, all));
+            var candidates = RecordCandidates(typeof(CultRecordRef<>).MakeGenericType(listed), all);
+            return Partition(grouping, candidates, 0, Array.Empty<object?>(), targets);
+        }
+
+        private IReadOnlyList<CultInspectorRecordGroup> Partition(
+            CultInspectorGrouping grouping,
+            IReadOnlyList<CultStoredDocument> records,
+            int depth,
+            IReadOnlyList<object?> path,
+            IReadOnlyDictionary<CultInspectorMember, Dictionary<string, CultStoredDocument>> targets)
+        {
+            var member = grouping.Members[depth];
+            targets.TryGetValue(member, out var refTargets);
+            return records
+                .Select(record => (Record: record, Key: LevelOf(member, member.GetValue(record.Document), refTargets)))
+                .GroupBy(entry => entry.Key.Identity)
+                .Select(bucket => (Key: bucket.First().Key, Records: bucket.Select(entry => entry.Record).ToArray()))
+                .OrderBy(bucket => bucket.Key, GroupLevel.Order)
+                .Select(bucket =>
+                {
+                    var values = path.Append(bucket.Key.Value).ToArray();
+                    var children = depth + 1 < grouping.Members.Count
+                        ? Partition(grouping, bucket.Records, depth + 1, values, targets)
+                        : Array.Empty<CultInspectorRecordGroup>();
+                    return new CultInspectorRecordGroup(
+                        GroupId(grouping.Members, values), bucket.Key.Label, depth, values, children,
+                        children.Count == 0 ? bucket.Records : Array.Empty<CultStoredDocument>(), bucket.Records.Length);
+                })
+                .ToArray();
+        }
+
+        // A new listed document set to every grouped value on group's path, so it lands in group. Null with a notice when
+        // listed cannot be created. The group must come from GroupRecords for this listed type.
+        public object? CreateInGroup(Type listed, CultInspectorRecordGroup group, out string? notice)
+        {
+            if (group == null) throw new ArgumentNullException(nameof(group));
+            var members = GroupingOf(listed).Members;
+            if (group.Values.Count == 0 || group.Values.Count > members.Count || group.Id != GroupId(members, group.Values))
+                throw new ArgumentException($"Group {group.Id} is not a node of {listed.Name}'s grouping.", nameof(group));
+            var created = CreateElement(listed, listed, out notice);
+            if (created == null)
+                return null;
+            for (var i = 0; i < group.Values.Count; i++)
+                members[i].SetValue(created, group.Values[i]);
+            return created;
+        }
+
+        // What a CultRecordRef<T> value shows: None, the target's label, or Missing <key> when the key names no candidate.
+        public string RecordRefLabel(Type recordRefType, object? value, IEnumerable<CultStoredDocument> records) =>
+            RefLabel(RecordKey(value), RefTargets(recordRefType, records));
+
+        private Dictionary<string, CultStoredDocument> RefTargets(Type recordRefType, IEnumerable<CultStoredDocument> records) =>
+            RecordCandidates(recordRefType, records).ToDictionary(record => record.Key.Value, StringComparer.Ordinal);
+
+        private static string RefLabel(string key, IReadOnlyDictionary<string, CultStoredDocument> targets) =>
+            key.Length == 0 ? "None" : targets.TryGetValue(key, out var target) ? RecordLabel(target) : "Missing " + key;
+
+        // A node's id is its members' value identities, so it survives relabelling: a ref by key, an enum by its underlying
+        // value, anything else by the value's invariant string.
+        private static string GroupId(IReadOnlyList<CultInspectorMember> members, IReadOnlyList<object?> values) =>
+            string.Join("/", values.Select((value, i) => members[i].Name + "=" + Uri.EscapeDataString(IdentityOf(value))));
+
+        private static string IdentityOf(object? value) =>
+            value switch
+            {
+                null => string.Empty,
+                ICultRecordRef reference => reference.Key.Value,
+                Enum enumeration => Convert.ToString(Convert.ChangeType(enumeration, Enum.GetUnderlyingType(enumeration.GetType())), System.Globalization.CultureInfo.InvariantCulture)!,
+                _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)!
+            };
+
+        private GroupLevel LevelOf(CultInspectorMember member, object? value, IReadOnlyDictionary<string, CultStoredDocument>? refTargets)
+        {
+            var identity = IdentityOf(value);
+            switch (ShapeOf(member.ValueType).Kind)
+            {
+                case CultInspectorValueKind.RecordRef:
+                    var label = RefLabel(identity, refTargets!);
+                    var rank = identity.Length == 0 ? 0 : refTargets!.ContainsKey(identity) ? 1 : 2;
+                    return new GroupLevel(identity, label, CreateRecordRef(member.ValueType, identity), rank, 0m, label, identity);
+                case CultInspectorValueKind.Enum:
+                    var number = Convert.ToDecimal(Convert.ChangeType(value, Enum.GetUnderlyingType(member.ValueType)), System.Globalization.CultureInfo.InvariantCulture);
+                    return new GroupLevel(identity, Enum.GetName(member.ValueType, value!) ?? identity, value, 1, number, string.Empty, string.Empty);
+                case CultInspectorValueKind.Integer:
+                    return new GroupLevel(identity, identity, value, 1, Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture), string.Empty, string.Empty);
+                case CultInspectorValueKind.Bool:
+                    return new GroupLevel(identity, identity, value, 1, (bool)value! ? 1m : 0m, string.Empty, string.Empty);
+                default:
+                    return new GroupLevel(identity, identity.Length == 0 ? "(empty)" : identity, identity, 1, 0m, identity, identity);
+            }
+        }
+
+        private sealed class GroupLevel
+        {
+            public GroupLevel(string identity, string label, object? value, int rank, decimal number, string text, string tie)
+            {
+                Identity = identity;
+                Label = label;
+                Value = value;
+                Rank = rank;
+                Number = number;
+                Text = text;
+                Tie = tie;
+            }
+
+            public string Identity { get; }
+            public string Label { get; }
+            public object? Value { get; }
+            private int Rank { get; }
+            private decimal Number { get; }
+            private string Text { get; }
+            private string Tie { get; }
+
+            // None first and Missing last among refs; then the value, the text ignoring case, then the text exactly.
+            public static readonly IComparer<GroupLevel> Order = Comparer<GroupLevel>.Create((a, b) =>
+            {
+                var order = a.Rank.CompareTo(b.Rank);
+                if (order == 0) order = a.Number.CompareTo(b.Number);
+                if (order == 0) order = StringComparer.OrdinalIgnoreCase.Compare(a.Text, b.Text);
+                return order != 0 ? order : StringComparer.Ordinal.Compare(a.Tie, b.Tie);
+            });
         }
 
         private CultInspectorShape Classify(Type type)
