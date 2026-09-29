@@ -189,7 +189,8 @@ namespace GameCult.Caching.Tests
         [Test]
         public void EachLandedRecordIsReadOncePerGetterIncludingAVariantDependent()
         {
-            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            var codec = CultCacheMessagePack.CreateCodec(Registry);
+            using var cache = new CultCache(Registry, codec);
             var baseKey = new CultRecordKey("projected:base");
             Put(cache, new ProjectedRecord { Name = "base", Code = "base-code" }, baseKey);
             cache.Commit(batch => batch.UpsertVariant(new CultRecordKey("projected:variant"), baseKey, new[]
@@ -198,11 +199,16 @@ namespace GameCult.Caching.Tests
                 cache.Override<ProjectedRecord>(nameof(ProjectedRecord.Code), "variant-code")
             }));
 
+            // Resolving a variant serializes its base, and the serializer reads the same getters: count those reads apart.
+            ProjectedRecord.Reads = 0;
+            codec.Serialize(new ProjectedRecord(), typeof(ProjectedRecord), typeof(ProjectedRecord));
+            var serializerReads = Interlocked.Read(ref ProjectedRecord.Reads);
+
             ProjectedRecord.Reads = 0;
             Put(cache, new ProjectedRecord { Name = "base", Code = "base-code-2" }, baseKey);
 
-            // Two landing records (the base, and the variant re-resolved against it), two getters each.
-            Assert.That(Interlocked.Read(ref ProjectedRecord.Reads), Is.EqualTo(4));
+            // Two landing records (the base, and the variant re-resolved against it), two getters each, plus the one serialization.
+            Assert.That(Interlocked.Read(ref ProjectedRecord.Reads), Is.EqualTo(4 + serializerReads));
             Assert.That(cache.GetByIndex<ProjectedRecord>("code", "base-code-2"), Is.Not.Null);
             Assert.That(cache.GetByName<ProjectedRecord>("variant"), Is.Not.Null);
         }
