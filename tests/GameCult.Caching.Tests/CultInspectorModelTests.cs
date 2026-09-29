@@ -329,7 +329,7 @@ namespace GameCult.Caching.Tests
 
         private static readonly CultDocumentRegistry GroupRegistry = CultDocumentRegistry.ForTypes(new[]
         {
-            typeof(GroupLeaf), typeof(GroupRedeclared), typeof(GroupOptOut), typeof(GroupMixed), typeof(GroupGlobal), typeof(GroupNoCtor), typeof(InspectOther)
+            typeof(GroupLeaf), typeof(GroupRedeclared), typeof(GroupOptOut), typeof(GroupMixed), typeof(GroupGlobal), typeof(GroupNoCtor), typeof(GroupTagged), typeof(InspectOther)
         });
 
         private string _groupPath = string.Empty;
@@ -580,7 +580,7 @@ namespace GameCult.Caching.Tests
 
             await cache.UpsertAsync(typeof(GroupRedeclared), new GroupRedeclared { Kind = "k" }, new CultRecordKey("g1"));
             var kindNode = model.GroupRecords(typeof(GroupRedeclared), cache.AllStoredDocuments).Single();
-            Assert.That(() => model.CreateInGroup(typeof(GroupLeaf), kindNode, out _), Throws.ArgumentException, "same depth, other members");
+            Assert.That(() => model.CreateInGroup(typeof(GroupTagged), kindNode, out _), Throws.ArgumentException, "a value that would fit another grouping's member");
         }
 
         [Test]
@@ -891,6 +891,15 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)]
             public string Kind = string.Empty;
+        }
+
+        [CultInspectorGroupBy("Tag")]
+        [CultDocument("tests.group_tagged", "tests.group_tagged.v1")]
+        [MessagePackObject]
+        public sealed class GroupTagged
+        {
+            [Key(0)]
+            public string Tag = string.Empty;
         }
 
         [CultInspectorGroupBy("Kind")]
