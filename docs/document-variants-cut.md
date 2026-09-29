@@ -321,6 +321,20 @@ overwritten today. That predates variants. Fixing it could refuse existing store
   - a store holding duplicates refuses to load, and the refusal names both keys and the index.
   - The variant-specific rule `RefuseVariantIndexSharing` collapses into this rule.
   - Before it ships, every real store is scanned, so no store stops loading by surprise.
+  - **Scan result (Eyes, 2026-09-30):** `[CultIndex]` had been recycled as a grouping and
+    selection-filter declaration: `Category`, `Kind`, `HardpointType`, `ShardId`, and others in
+    CultMesh, Geometry and docs. AetheriaEve's `aetheria-world.cc` (taxidermy) is the only store
+    holding duplicates. The only single-result lookups in real code are unique:
+    `PlayerData.PlayerId` and `Email` in `Server.cs`. The operator: "Pretty sure indexes are
+    supposed to be unique, it was not my decision to recycle that mechanism for grouping
+    purposes" and "Grouping was a desirable feature from my old DatabaseListView that didn't
+    quite make it into the initial CultCache Studio port".
+  - **Resolution (Self, from those answers):** `[CultIndex]` means unique. Grouping belongs to
+    the Studio record-grouping campaign's own attribute (`docs/studio-grouping-cut.md` on
+    `codex/studio-grouping`, attribute-based per the 2026-09-17 ruling). CultNet selection
+    filters any declared member by its catalog name, so no index is needed for filtering. The
+    grouping-only `[CultIndex]` declarations are deleted. This is one CultLib cut, queued
+    behind C2a because both edit `CultCache.cs`.
   - The TS/Python last-writer-wins parity gap closes by the same rule when those runtimes
     adopt it.
 - **CultNet invisibility is a defect** ("looks like a defect to me"): `cache.Commit` and
