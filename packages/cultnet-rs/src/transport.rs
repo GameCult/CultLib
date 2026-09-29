@@ -31,6 +31,11 @@ pub struct CultNetTransportStats {
     /// unadmitted sender, or a packet the session refused. A steady rate means
     /// a flow is being moved or scanned, not that this transport is failing.
     pub packets_dropped: u64,
+    /// Datagrams a multi-peer server could not send to one peer. Each is a lost
+    /// datagram attributed to that peer: reliable packets stay pending and are
+    /// resent, and no other peer's poll is affected. Zero for single-peer
+    /// transports, whose callers get the send error itself.
+    pub send_failures: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

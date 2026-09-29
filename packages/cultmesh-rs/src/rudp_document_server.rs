@@ -6,6 +6,8 @@ use cultnet_rs::{
     encode_rudp_packet,
 };
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -208,6 +210,11 @@ pub struct CultMeshRudpDocumentServer<S, Q, C> {
     clock: C,
     options: CultMeshRudpDocumentServerOptions,
     packets_dropped: u64,
+    send_failures: u64,
+    /// Peers whose every datagram fails to send, standing in for an unroutable
+    /// or full path that a loopback peer cannot be made to have.
+    #[cfg(test)]
+    failing_peers: BTreeSet<SocketAddr>,
 }
 
 impl<S, Q, C> CultMeshRudpDocumentServer<S, Q, C>
@@ -236,6 +243,9 @@ where
             clock,
             options,
             packets_dropped: 0,
+            send_failures: 0,
+            #[cfg(test)]
+            failing_peers: BTreeSet::new(),
         })
     }
 
@@ -245,6 +255,15 @@ where
     /// error: a moved flow or a scanner must not end the daemon loop.
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped
+    }
+
+    /// Datagrams that could not be sent to a peer. Each is that peer's lost
+    /// datagram: a reliable packet stays pending and is resent, and the peer's
+    /// session ends by idle timeout, lifetime, refusal or Disconnect, never by
+    /// the failure. Never an error: one unreachable peer must not stop the
+    /// poll that serves the others.
+    pub fn send_failures(&self) -> u64 {
+        self.send_failures
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -265,7 +284,14 @@ where
         let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            // Windows reports an earlier ICMP port-unreachable on the next
+            // receive; it names no datagram of this poll.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::ConnectionReset
+                ) =>
+            {
                 return Ok(CultMeshRudpPollOutcome::Idle);
             }
             Err(error) => return Err(error.into()),
@@ -627,10 +653,23 @@ where
 
     fn send_packet(&mut self, remote_addr: SocketAddr, packet: &CultNetRudpPacket) -> Result<()> {
         let wire = encode_rudp_packet(packet)?;
-        self.socket.send_to(&wire, remote_addr)?;
+        #[cfg(test)]
+        let sent = if self.failing_peers.contains(&remote_addr) {
+            Err(std::io::Error::other("injected send failure"))
+        } else {
+            self.socket.send_to(&wire, remote_addr)
+        };
+        #[cfg(not(test))]
+        let sent = self.socket.send_to(&wire, remote_addr);
+        if sent.is_err() {
+            self.send_failures += 1;
+        }
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod send_failure_tests;
 
 fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     if options.max_sessions == 0 {

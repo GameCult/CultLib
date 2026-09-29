@@ -27,6 +27,9 @@ use crate::create_reconnect_policy;
 use crate::decode_cultnet_message_from_slice;
 use crate::encode_cultnet_message_to_vec;
 
+#[cfg(test)]
+mod send_failure_tests;
+
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
 const RUDP_FIXED_HEADER_BYTES: usize = 36;
@@ -1440,6 +1443,10 @@ pub struct CultNetRudpServerHub {
     pending_events: VecDeque<CultNetRudpServerEvent>,
     pub profile: CultNetTransportProfile,
     stats: CultNetTransportStats,
+    /// Peers whose every datagram fails to send, standing in for an unroutable
+    /// or full path that a loopback peer cannot be made to have.
+    #[cfg(test)]
+    failing_peers: BTreeSet<SocketAddr>,
 }
 
 impl CultNetRudpServerHub {
@@ -1488,6 +1495,8 @@ impl CultNetRudpServerHub {
             pending_events: VecDeque::new(),
             profile,
             stats: CultNetTransportStats::default(),
+            #[cfg(test)]
+            failing_peers: BTreeSet::new(),
         })
     }
 
@@ -1796,11 +1805,25 @@ impl CultNetRudpServerHub {
         timed_out.into_iter().map(|(_, context)| context).collect()
     }
 
+    /// A failed send is that peer's lost datagram: counted, never an error. A
+    /// reliable packet stays pending and is resent; an unreliable one was
+    /// allowed to be lost. The peer's session ends by the rules that already
+    /// end sessions. Only an encode failure, the hub's own bug, is an error.
     fn send_packet(&mut self, remote_addr: SocketAddr, packet: &CultNetRudpPacket) -> Result<()> {
         let wire = encode_rudp_packet(packet)?;
-        let sent = self.socket.send_to(&wire, remote_addr)?;
-        self.stats.bytes_sent += sent as u64;
+        match self.send_datagram(&wire, remote_addr) {
+            Ok(sent) => self.stats.bytes_sent += sent as u64,
+            Err(_) => self.stats.send_failures += 1,
+        }
         Ok(())
+    }
+
+    fn send_datagram(&self, wire: &[u8], remote_addr: SocketAddr) -> std::io::Result<usize> {
+        #[cfg(test)]
+        if self.failing_peers.contains(&remote_addr) {
+            return Err(std::io::Error::other("injected send failure"));
+        }
+        self.socket.send_to(wire, remote_addr)
     }
 }
 
