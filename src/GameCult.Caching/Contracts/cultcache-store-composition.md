@@ -47,10 +47,15 @@ which route wrote it.
 - Changes published through `Watch`/`WatchRecord` carry a `Sequence`: a
   per-cache, in-memory number assigned when the cache admits the change, under
   its gate. It increases in admission order and is not persisted.
-  `OnUpdate(previous, current)` carries none. Streams CultNet derives from
-  `OnUpdate` (`CultNetDatabase.WatchAllChanges`, the subscription server,
-  database-backed Mesh handles) have no ordering guarantee and no stale
-  protection.
+  `OnUpdate(previous, current)` carries none. CultNet derives its
+  streams (`CultNetDatabase.WatchAllChanges`, the subscription server,
+  database-backed Mesh handles) from `Watch`, so a load, a commit and a variant
+  dependent's re-resolution all reach subscribers and the mutation log through
+  one handler over `Watch`; a database write door only hands that handler the
+  wire message or replicated entry for the change it admitted. That handler releases
+  changes in cache `Sequence` order, so the log and the stream agree with the
+  cache. A replica publishes but never mints log sequences. The
+  streams carry no `Sequence` and have no stale protection.
 - `GetWithSequence(key)` returns the document and the cache's current
   `Sequence`, read together under the gate: every change with a `Sequence` at
   or below it is reflected in the document.
