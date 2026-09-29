@@ -1032,8 +1032,8 @@ namespace GameCult.Networking.Tests
                 ConnectionId = 123,
                 InitialSequence = 100
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 90, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 91, ChannelId = "control" });
+            var accept = receiver.AcceptConnect(sender.CreateConnect(0), 0);
+            sender.Receive(accept);
 
             var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });

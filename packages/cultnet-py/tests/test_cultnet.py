@@ -731,12 +731,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=100))
-        sender.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 90, 0, 0, "control")
-        )
-        receiver.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 91, 0, 0, "control")
-        )
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0))
 
         first = sender.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
         second = sender.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))

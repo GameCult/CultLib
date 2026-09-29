@@ -628,8 +628,7 @@ test("rudp session bounds pending reliable packets before enqueue", () => {
 test("rudp session suppresses duplicates and delivers reliable ordered payloads in sequence", () => {
   const sender = new CultNetRudpSession({ connectionId: 123, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 123, initialSequence: 100 });
-  sender.receive({ packetType: "accept", connectionId: 123, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId: 123, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0));
 
   const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
   const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true });

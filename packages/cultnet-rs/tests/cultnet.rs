@@ -1009,42 +1009,9 @@ fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_
         initial_sequence: 100,
         ..CultNetRudpSessionOptions::default()
     });
-    sender.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 123,
-            sequence: 90,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    receiver.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 123,
-            sequence: 91,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let options = CultNetRudpSendOptions {
         reliable: true,
@@ -2667,6 +2634,18 @@ fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
     let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
     sender.receive(&accept, 2)?;
 
+    // Channels are tracked only while they hold a frame, so the bound is on
+    // channels held behind one missing sequence.
+    let gap = sender.send(
+        "gap",
+        b"lost".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    sender.receive(&receiver.create_ack_for(gap.sequence), 3)?;
     let mut error = None;
     for channel in 0..256u32 {
         let packet = sender.send(
@@ -2679,7 +2658,8 @@ fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
             },
         )?;
         match receiver.receive(&packet, 3) {
-            Ok(_) => {
+            Ok(result) => {
+                assert!(result.delivered.is_empty(), "the gap holds every frame");
                 sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
             }
             Err(refused) => {
@@ -2740,6 +2720,134 @@ fn rudp_ordered_hold_buffer_is_bounded() -> Result<()> {
         error.to_string().contains("ordered hold buffer is full"),
         "unexpected refusal: {error}"
     );
+    Ok(())
+}
+
+fn rudp_ordered_pair() -> Result<(CultNetRudpSession, CultNetRudpSession)> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: 1,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: 500,
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 0, Vec::new())?;
+    client.receive(&accept, 0)?;
+    Ok((client, server))
+}
+
+fn rudp_send_options(ordered: bool) -> CultNetRudpSendOptions {
+    CultNetRudpSendOptions {
+        reliable: true,
+        ordered,
+        ..CultNetRudpSendOptions::default()
+    }
+}
+
+fn rudp_delivered_names(delivered: &[cultnet_rs::CultNetRudpDeliveredFrame]) -> Vec<String> {
+    delivered
+        .iter()
+        .map(|frame| String::from_utf8(frame.payload.clone()).unwrap())
+        .collect()
+}
+
+#[test]
+fn rudp_ordered_frame_waits_for_a_gap_filled_by_another_channel() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let o1 = sender.send("schema", b"o1".to_vec(), rudp_send_options(true))?;
+    let u = sender.send("media", b"u".to_vec(), rudp_send_options(false))?;
+    let o2 = sender.send("schema", b"o2".to_vec(), rudp_send_options(true))?;
+    let o3 = sender.send("schema", b"o3".to_vec(), rudp_send_options(true))?;
+
+    assert_eq!(rudp_delivered_names(&receiver.receive(&o1, 1)?.delivered), ["o1"]);
+    // `u` is lost, so nothing behind it may be delivered.
+    assert!(receiver.receive(&o2, 2)?.delivered.is_empty());
+    assert!(receiver.receive(&o3, 3)?.delivered.is_empty());
+    // The other channel's packet fills the gap and releases the ordered frames
+    // in the same call.
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&u, 4)?.delivered),
+        ["u", "o2", "o3"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_two_ordered_channels_release_each_other_in_sequence_order() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let a1 = sender.send("schema", b"A1".to_vec(), rudp_send_options(true))?;
+    let b1 = sender.send("other", b"B1".to_vec(), rudp_send_options(true))?;
+    let a2 = sender.send("schema", b"A2".to_vec(), rudp_send_options(true))?;
+    let a3 = sender.send("schema", b"A3".to_vec(), rudp_send_options(true))?;
+
+    let mut delivered = rudp_delivered_names(&receiver.receive(&a1, 1)?.delivered);
+    delivered.extend(rudp_delivered_names(&receiver.receive(&a2, 2)?.delivered));
+    delivered.extend(rudp_delivered_names(&receiver.receive(&a3, 3)?.delivered));
+    assert_eq!(delivered, ["A1"], "B1 is missing, so A2 and A3 wait");
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&b1, 4)?.delivered),
+        ["B1", "A2", "A3"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_channel_first_used_after_other_traffic_loses_nothing() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let c1 = sender.send("late", b"C1".to_vec(), rudp_send_options(true))?;
+    let c2 = sender.send("late", b"C2".to_vec(), rudp_send_options(true))?;
+    let x = sender.send("schema", b"X".to_vec(), rudp_send_options(true))?;
+
+    // X, then C2, arrive while C1 is still in flight.
+    let mut delivered = rudp_delivered_names(&receiver.receive(&x, 1)?.delivered);
+    delivered.extend(rudp_delivered_names(&receiver.receive(&c2, 2)?.delivered));
+    assert!(delivered.is_empty(), "C1 is missing, so nothing is delivered");
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&c1, 3)?.delivered),
+        ["C1", "C2", "X"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_accept_seeds_the_watermark_of_the_connecting_side() -> Result<()> {
+    let (mut client, mut server) = rudp_ordered_pair()?;
+    let s1 = server.send("schema", b"s1".to_vec(), rudp_send_options(true))?;
+    let s2 = server.send("schema", b"s2".to_vec(), rudp_send_options(true))?;
+    assert!(client.receive(&s2, 1)?.delivered.is_empty());
+    assert_eq!(
+        rudp_delivered_names(&client.receive(&s1, 2)?.delivered),
+        ["s1", "s2"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_large_ordered_frame_without_a_gap_is_never_held_or_refused() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let packets = sender.send_many(
+        "schema",
+        vec![7u8; 5 * 1024 * 1024],
+        rudp_send_options(true),
+        Some(60_000),
+    )?;
+    let mut queue = packets;
+    let mut delivered = Vec::new();
+    while !queue.is_empty() {
+        let mut next = Vec::new();
+        for packet in &queue {
+            delivered.extend(receiver.receive(packet, 1)?.delivered);
+            let ack = receiver.create_ack_for_received(packet.sequence);
+            next.extend(sender.receive(&ack, 1)?.ready_to_send);
+        }
+        queue = next;
+    }
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload.len(), 5 * 1024 * 1024);
     Ok(())
 }
 
