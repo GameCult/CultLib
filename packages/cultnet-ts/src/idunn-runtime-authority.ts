@@ -82,25 +82,30 @@ export type SignedRuntimePresence = {
 /**
  * Signs this launch's runtime presence and answers Idunn's route challenge. It
  * owns no network: Odin publication, if a service wants it, is a separate
- * consumer of `sign`.
+ * consumer of `sign`. The signer is the single owner of the reported health:
+ * it starts `warming`, the app moves it with `reportHealth`, and every
+ * presence it signs, however it is carried, states that health.
  */
 export type IdunnRuntimeSigner = {
   readonly authority: IdunnRuntimeAuthority;
   readonly runtimeId: string;
   readonly runtimeInstanceId: string;
   readonly requiresWriteLease: boolean;
-  /** Signs one presence document. Every call takes the next publisher sequence. */
-  sign(state: RuntimePresenceHealth["state"], detail: string): SignedRuntimePresence;
+  /** Records the app's health. Until the first call the signer reports `warming`. */
+  reportHealth(state: RuntimePresenceHealth["state"]): void;
+  /**
+   * Signs one presence document in the reported health. Every call takes the
+   * next publisher sequence; every warming presence signed becomes a valid
+   * write-lease target.
+   */
+  sign(detail: string): SignedRuntimePresence;
   /**
    * Answers an Idunn route challenge from local authority alone: signs a fresh
-   * presence in the given state, with no network. The caller supplies the
-   * app's current health (`warming` until first healthy).
+   * presence in the reported health, with no network.
    */
-  answerRouteObservation(request: CultNetSnapshotRequestMessage, state: RuntimePresenceHealth["state"]): CultNetRawDocumentRecord;
-  /** Reads Idunn's write lease and checks it names this incarnation and a warming proof this process published. */
+  answerRouteObservation(request: CultNetSnapshotRequestMessage): CultNetRawDocumentRecord;
+  /** Reads Idunn's write lease and checks it names this incarnation and a warming presence this signer signed. */
   assertWriteLease(): string;
-  /** Marks a warming presence as accepted by its consumer, making it a valid lease target. */
-  recordPublishedWarming(canonicalSha256: string): void;
 };
 
 export type IdunnRuntimeSignerOptions = {
@@ -219,6 +224,7 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
   const { authority } = options;
   const expected = authority.expected;
   let sequence = 0;
+  let health: RuntimePresenceHealth["state"] = "warming";
   const recentWarmingProofs: string[] = [];
 
   const assertWriteLease = () => {
@@ -231,7 +237,8 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
     return prefixedSha256(Buffer.from(encode(lease)));
   };
 
-  const sign = (state: RuntimePresenceHealth["state"], detail: string): SignedRuntimePresence => {
+  const sign = (detail: string): SignedRuntimePresence => {
+    const state = health;
     const writeLeaseSha256 = state === "warming" || !expected.writeLeaseRequired ? null : assertWriteLease();
     sequence += 1;
     const signed = signIdunnRuntimePresence(authority, {
@@ -242,6 +249,10 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
       publisherSequence: sequence,
       observedAtUnixMillis: Date.now(),
     });
+    if (state === "warming") {
+      recentWarmingProofs.push(signed.canonicalSha256);
+      if (recentWarmingProofs.length > MAX_RECENT_WARMING_PROOFS) recentWarmingProofs.shift();
+    }
     return {
       canonicalSha256: signed.canonicalSha256,
       document: {
@@ -262,8 +273,11 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
     runtimeId: expected.runtimeId,
     runtimeInstanceId: authority.activation.runtimeInstanceId,
     requiresWriteLease: expected.writeLeaseRequired,
+    reportHealth(state) {
+      health = state;
+    },
     sign,
-    answerRouteObservation(request, state) {
+    answerRouteObservation(request) {
       if (!request.messageId || request.messageId.trim() !== request.messageId) throw new Error("Idunn route observation requires a message id.");
       if ((request.schemaIds && !request.schemaIds.includes(GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA))
         || (request.recordKeys && !request.recordKeys.includes(expected.target))
@@ -271,13 +285,9 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
         || request.shardEpoch !== undefined) {
         throw new Error("Idunn route observation does not request this runtime presence document.");
       }
-      return sign(state, `route-observation:${request.messageId}`).document;
+      return sign(`route-observation:${request.messageId}`).document;
     },
     assertWriteLease,
-    recordPublishedWarming(canonicalSha256) {
-      recentWarmingProofs.push(canonicalSha256);
-      if (recentWarmingProofs.length > MAX_RECENT_WARMING_PROOFS) recentWarmingProofs.shift();
-    },
   };
 }
 

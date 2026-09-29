@@ -25,7 +25,7 @@ const CHALLENGE: CultNetSnapshotRequestMessage = {
   messageId: "route-challenge-1",
 };
 
-type FixtureSet = "web" | "service" | "rudp-route";
+type FixtureSet = "web" | "service" | "rudp-route" | "service-stateful";
 
 function fixtureFile(set: FixtureSet, name: string): Buffer {
   return fs.readFileSync(path.join(FIXTURES, set, name));
@@ -50,7 +50,11 @@ function expectedFacts(set: FixtureSet) {
 }
 
 /** Points the process at one Rust-written bundle and its inherited descriptors, as Idunn's systemd unit would. */
-function openAuthority(context: TestContext, set: FixtureSet, options: { machineId?: "etc" | "dbus" } = {}): IdunnRuntimeAuthority {
+function openAuthority(
+  context: TestContext,
+  set: FixtureSet,
+  options: { machineId?: "etc" | "dbus"; lease?: string } = {},
+): IdunnRuntimeAuthority {
   const facts = expectedFacts(set);
   const originalEnvironment = { ...process.env };
   context.after(() => {
@@ -59,7 +63,8 @@ function openAuthority(context: TestContext, set: FixtureSet, options: { machine
   });
   process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = path.join(FIXTURES, set);
   process.env.GAMECULT_IDUNN_CANDIDATE_BIND = facts.candidate;
-  delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
+  if (options.lease) process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE = path.join(FIXTURES, set, options.lease);
+  else delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
   process.env.LISTEN_PID = String(process.pid);
   process.env.LISTEN_FDS = "2";
   process.env.LISTEN_FDNAMES = "gamecult-idunn-runtime-activation-key:gamecult-runtime-presence-identity";
@@ -78,8 +83,8 @@ function openAuthority(context: TestContext, set: FixtureSet, options: { machine
   return loadIdunnRuntimeAuthorityFromEnvironment(facts.target, facts.healthContract);
 }
 
-function signerFor(context: TestContext, set: FixtureSet, capacityDelta = 0) {
-  const authority = openAuthority(context, set);
+function signerFor(context: TestContext, set: FixtureSet, capacityDelta = 0, lease?: string) {
+  const authority = openAuthority(context, set, { lease });
   const capabilities = expectedFacts(set).capabilities.map((capability) => ({ ...capability, capacity: capability.capacity + capacityDelta }));
   return createIdunnRuntimeSigner({ authority, capabilities });
 }
@@ -107,7 +112,7 @@ for (const set of ["web", "service", "rudp-route"] as const) {
 test("a target that declares no Odin dependency opens and answers Idunn's challenge without one", (context) => {
   assert.equal(expectedFacts("web").odinEndpoint, undefined);
   const signer = signerFor(context, "web");
-  assert.ok(signer.answerRouteObservation(CHALLENGE, "warming").payload.byteLength > 0);
+  assert.ok(signer.answerRouteObservation(CHALLENGE).payload.byteLength > 0);
 });
 
 test("finds the machine-id at the dbus path when /etc/machine-id is absent, as the Rust protector does", (context) => {
@@ -127,35 +132,44 @@ test("rejects a credential file holding more than one envelope", (context) => {
   );
 });
 
-test("answers a route challenge byte for byte as the Rust-verified vectors, in the state the app reports", (context) => {
+function presenceSlot(document: { payload: Uint8Array }, slot: number): unknown {
+  return (decode(document.payload) as unknown[])[slot];
+}
+
+// Every committed vector is asserted, dead ones included. Stateless sets sign at sequence 1.
+for (const set of ["web", "service", "rudp-route"] as const) {
+  test(`${set}: a fresh signer answers warming, and after reportHealth('active') answers active, byte for byte as the Rust-verified vectors`, (context) => {
+    freezeClock(context);
+    assert.deepEqual(Buffer.from(signerFor(context, set).answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-warming.bin"));
+    const active = signerFor(context, set);
+    active.reportHealth("active");
+    assert.deepEqual(Buffer.from(active.answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-active.bin"));
+  });
+}
+
+test("a shortfall signs the vector Rust correlates to the typed capacity disagreement", (context) => {
   freezeClock(context);
-  const signer = signerFor(context, "web");
-  const warming = signer.answerRouteObservation(CHALLENGE, "warming");
-  assert.deepEqual(Buffer.from(warming.payload), fixtureFile("web", "presence-warming.bin"));
-  assert.equal((decode(warming.payload) as unknown[])[RUNTIME_PRESENCE_SLOT.state], "warming");
-  const second = signer.answerRouteObservation(CHALLENGE, "active");
-  assert.equal((decode(second.payload) as unknown[])[RUNTIME_PRESENCE_SLOT.publisherSequence], 2);
-  // Sequence 2 cannot match a vector written at sequence 1; sign the same fields from a fresh signer.
-  const fresh = signerFor(context, "web");
-  assert.deepEqual(Buffer.from(fresh.answerRouteObservation(CHALLENGE, "active").payload), fixtureFile("web", "presence-active.bin"));
+  const signer = signerFor(context, "service", -1);
+  signer.reportHealth("active");
+  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile("service", "presence-active-below-minimum.bin"));
 });
 
-test("a service with an Odin dependency signs the Rust-verified vectors, including a shortfall Rust correlates to a capacity disagreement", (context) => {
+test("the signer owns the reported health: a fresh signer is warming, reportHealth moves it, the sequence keeps counting", (context) => {
   freezeClock(context);
-  assert.deepEqual(
-    Buffer.from(signerFor(context, "service").answerRouteObservation(CHALLENGE, "active").payload),
-    fixtureFile("service", "presence-active.bin"),
-  );
-  assert.deepEqual(
-    Buffer.from(signerFor(context, "service", -1).answerRouteObservation(CHALLENGE, "active").payload),
-    fixtureFile("service", "presence-active-below-minimum.bin"),
-  );
+  const signer = signerFor(context, "web");
+  const first = signer.answerRouteObservation(CHALLENGE);
+  assert.equal(presenceSlot(first, RUNTIME_PRESENCE_SLOT.state), "warming");
+  assert.equal(presenceSlot(signer.sign("detail"), RUNTIME_PRESENCE_SLOT.state), "warming");
+  signer.reportHealth("active");
+  const third = signer.answerRouteObservation(CHALLENGE);
+  assert.equal(presenceSlot(third, RUNTIME_PRESENCE_SLOT.state), "active");
+  assert.equal(presenceSlot(third, RUNTIME_PRESENCE_SLOT.publisherSequence), 3);
 });
 
 test("answers locally: synchronously, with no socket opened", (context) => {
   const sockets = context.mock.method(dgram, "createSocket");
   const signer = signerFor(context, "web");
-  const answer = signer.answerRouteObservation(CHALLENGE, "warming");
+  const answer = signer.answerRouteObservation(CHALLENGE);
   assert.equal(typeof (answer as unknown as { then?: unknown }).then, "undefined");
   assert.equal(sockets.mock.callCount(), 0);
 });
@@ -169,7 +183,7 @@ test("refuses a challenge that does not ask for this runtime's presence", (conte
     { ...CHALLENGE, schemaIds: ["another.schema"] },
     { ...CHALLENGE, shardId: "shard-1" },
   ];
-  for (const request of cases) assert.throws(() => signer.answerRouteObservation(request, "active"), /route observation/);
+  for (const request of cases) assert.throws(() => signer.answerRouteObservation(request), /route observation/);
 });
 
 async function startOdinPeer(context: TestContext, endpoint: string) {
@@ -222,7 +236,7 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
   const signer = signerFor(context, "service");
   const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
 
-  await publisher.publish("warming", "accepted presence");
+  await publisher.publish("accepted presence");
   assert.equal(peer.received[0]?.schemaVersion, "cultnet.document_put_raw.v0");
   const published = decode(peer.received[0]!.document.payload) as unknown[];
   assert.equal(published[RUNTIME_PRESENCE_SLOT.state], "warming");
@@ -230,15 +244,18 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
   assert.equal(peer.responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
 
   peer.reject = true;
-  await assert.rejects(publisher.publish("active", "denied presence"), /Odin rejected runtime presence: test admission denied/);
+  signer.reportHealth("active");
+  await assert.rejects(publisher.publish("denied presence"), /Odin rejected runtime presence: test admission denied/);
   assert.equal(peer.failure, undefined, peer.failure?.message);
 });
 
 test("the Odin publisher leaves a capability shortfall to the Rust correlation instead of refusing to publish", async (context) => {
   const endpoint = expectedFacts("service").odinEndpoint!;
   const peer = await startOdinPeer(context, endpoint);
-  const publisher = createIdunnRuntimePresencePublisher({ signer: signerFor(context, "service", -1), endpoint });
-  await publisher.publish("active", "below minimum");
+  const signer = signerFor(context, "service", -1);
+  signer.reportHealth("active");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+  await publisher.publish("below minimum");
   const capabilities = (decode(peer.received[0]!.document.payload) as unknown[])[RUNTIME_PRESENCE_SLOT.capabilities] as unknown[][];
   assert.equal(capabilities[0]![3], expectedFacts("service").capabilities[0]!.capacity - 1);
 });
@@ -251,5 +268,26 @@ test("the Odin publisher takes only the endpoint Expected names", (context) => {
   assert.throws(
     () => createIdunnRuntimePresencePublisher({ signer: signerFor(context, "web"), endpoint: expectedFacts("service").odinEndpoint! }),
     /does not match Idunn Expected dependency authority/,
+  );
+});
+
+test("the route answer and the Odin publish report the same state, because the signer owns it", async (context) => {
+  const endpoint = expectedFacts("service").odinEndpoint!;
+  const peer = await startOdinPeer(context, endpoint);
+  const signer = signerFor(context, "service");
+  const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
+
+  await publisher.publish("first");
+  assert.equal(presenceSlot(peer.received[0]!.document, RUNTIME_PRESENCE_SLOT.state), "warming");
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.state), "warming");
+
+  signer.reportHealth("active");
+  await publisher.publish("second");
+  assert.equal(presenceSlot(peer.received[1]!.document, RUNTIME_PRESENCE_SLOT.state), "active");
+  assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.state), "active");
+  // One sequence across both carriers.
+  assert.deepEqual(
+    [1, 2].map((index) => presenceSlot(peer.received[index - 1]!.document, RUNTIME_PRESENCE_SLOT.publisherSequence)),
+    [1, 3],
   );
 });

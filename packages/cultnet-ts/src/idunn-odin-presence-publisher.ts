@@ -5,7 +5,6 @@ import { encodeCultNetMessageForWire, parseCultNetMessage } from "./contracts";
 import type { IdunnRuntimeSigner } from "./idunn-runtime-authority";
 import { CultNetRudpSession, decodeRudpPacket, encodeRudpPacket } from "./rudp";
 import type { CultNetRudpPacket } from "./rudp";
-import type { RuntimePresenceHealth } from "./runtime-presence-health";
 
 const ODIN_CAPABILITY = "odin.verse-rendezvous";
 const MAX_LEASE_WAIT_ROUNDS = 720;
@@ -14,7 +13,8 @@ export type IdunnRuntimePresencePublisher = {
   readonly runtimeId: string;
   readonly runtimeInstanceId: string;
   readonly requiresWriteLease: boolean;
-  publish(state: RuntimePresenceHealth["state"], detail: string): Promise<string>;
+  /** Publishes the signer's presence in the health the signer reports. */
+  publish(detail: string): Promise<string>;
   waitForWriteLease(options?: { pollIntervalMs?: number; signal?: AbortSignal }): Promise<string>;
   assertWriteLease(): Promise<string>;
 };
@@ -44,15 +44,14 @@ export function createIdunnRuntimePresencePublisher(
   const connectionId = 0x0d1d0002;
   let messageSequence = 0;
 
-  const publish = async (state: RuntimePresenceHealth["state"], detail: string) => {
-    const signed = signer.sign(state, detail);
+  const publish = async (detail: string) => {
+    const signed = signer.sign(detail);
     messageSequence += 1;
     await publishDocument(endpoint, connectionId, {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId: `runtime-presence:${signer.authority.expected.target}:${signer.runtimeInstanceId}:${messageSequence}`,
       document: signed.document,
     });
-    if (state === "warming") signer.recordPublishedWarming(signed.canonicalSha256);
     return signed.canonicalSha256;
   };
 
@@ -65,7 +64,7 @@ export function createIdunnRuntimePresencePublisher(
       if (!signer.requiresWriteLease) return "";
       let warmingSequence = 0;
       while (!signal?.aborted) {
-        await publish("warming", "waiting-for-process-write-lease");
+        await publish("waiting-for-process-write-lease");
         warmingSequence += 1;
         try {
           return signer.assertWriteLease();
