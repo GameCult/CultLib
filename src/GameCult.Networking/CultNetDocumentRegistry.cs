@@ -391,11 +391,13 @@ namespace GameCult.Networking
             var stored = cache.AllStoredDocuments;
             if (rowFilter != null)
                 stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
-            var rows = stored
+            var entries = stored.ToArray();
+            var rows = entries
                 .Select(entry => new CultNetSelectionEvaluator.Row(
-                    entry.Descriptor, entry.Key, RefuseVariant(entry).Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
+                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
             var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
+            RefuseSelectedVariants(entries, full.Ordered);
             // R-Q: a page's asOf is exact only when every matched row is committed through one shard's
             // log - a caller that knows about shards (CultNetDatabaseServer) supplies shardIdOf; one
             // that does not (the raw v0/shard-scoped rowFilter paths, which are already bounded to a
@@ -485,12 +487,14 @@ namespace GameCult.Networking
             var stored = cache.AllStoredDocuments;
             if (rowFilter != null)
                 stored = stored.Where(entry => rowFilter(entry.Descriptor, entry.Key));
-            var rows = stored
+            var entries = stored.ToArray();
+            var rows = entries
                 .Select(entry => new CultNetSelectionEvaluator.Row(
-                    entry.Descriptor, entry.Key, RefuseVariant(entry).Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
+                    entry.Descriptor, entry.Key, entry.Document, ordinalOf(entry.Descriptor.SchemaId, entry.Key), entry.StoredAt))
                 .ToArray();
 
             var full = CultNetSelectionEvaluator.EvaluateAll(_documents, rows, selection);
+            RefuseSelectedVariants(entries, full.Ordered);
             var records = full.Ordered.Select(row => ToRawRecord(row, options)).ToArray();
             var wantDocument = selection.Projection == CultNetSelectionProjections.Document;
             var edges = selection.HasHop
@@ -550,12 +554,24 @@ namespace GameCult.Networking
         }
 
         // CultNet carries no variant deltas yet, and a resolved view sent as a plain record would be a lie about the store.
-        private static CultStoredDocument RefuseVariant(CultStoredDocument entry) =>
-            entry.Variant == null ? entry : throw VariantRefusal(entry);
+        // The refusal follows the selection: a variant is refused only when the selection selects it, never for existing.
+        private static void RefuseSelectedVariants(IReadOnlyList<CultStoredDocument> entries, IReadOnlyList<CultNetSelectionEvaluator.Row> selected)
+        {
+            if (selected.Count == 0 || !entries.Any(entry => entry.Variant != null))
+                return;
+            var variants = entries.Where(entry => entry.Variant != null).ToDictionary(entry => entry.Key.Value, StringComparer.Ordinal);
+            foreach (var row in selected)
+            {
+                if (variants.TryGetValue(row.Key.Value, out var variant))
+                    throw VariantRefusal(variant);
+            }
+        }
 
         // The live-change funnel's refusal: a load or write that lands a variant must not reach a subscriber as a record.
         internal static void RefuseVariantChange(CultCache cache, CultRecordKey key)
         {
+            // Recorded, not fixed: a Flatten committed on another thread between the change's admission and this read makes
+            // the record plain here, and its resolved view is delivered. The window is one thread hop wide.
             if (cache.GetStored(key) is { Variant: not null } entry)
                 throw VariantRefusal(entry);
         }

@@ -204,6 +204,13 @@ namespace GameCult.Networking
                     peer.SendCultNet(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
                     return Task.CompletedTask;
                 }
+                catch (NotSupportedException refusal)
+                {
+                    // Q6: a snapshot that selects a variant is refused to this subscriber as a typed error.
+                    Withdraw(key, sendRemovals: false, forgetRequest: true);
+                    peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                    return Task.CompletedTask;
+                }
                 catch
                 {
                     Withdraw(key, sendRemovals: false, forgetRequest: true);
@@ -342,9 +349,20 @@ namespace GameCult.Networking
             if (!_projections.TryGetValue(key, out var projection)) return;
             var legacyRequest = request.ToLegacyShape(key.Id);
             var authorized = _authorizeRequest?.Invoke(legacyRequest, key.Peer) != false;
-            var next = authorized
-                ? CreateProjectedSnapshot(request, key.Peer)
-                : ProjectedSnapshot.Empty;
+            ProjectedSnapshot next;
+            try
+            {
+                next = authorized
+                    ? CreateProjectedSnapshot(request, key.Peer)
+                    : ProjectedSnapshot.Empty;
+            }
+            catch (NotSupportedException refusal)
+            {
+                // Q6: the selection selects a variant, which CultNet cannot carry. This subscriber is told, by key, and keeps what
+                // it was delivered; a change never throws out of the change handler.
+                key.Peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
+                return;
+            }
 
             // With _projectRecord gone (docs/cultnet-selection-cut.md, S2-2), a projection's dictionary
             // key is always the record's own RecordKey/SchemaId, so the two can never disagree here;

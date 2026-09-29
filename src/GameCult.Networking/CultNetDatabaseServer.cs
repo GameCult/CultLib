@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -502,25 +503,46 @@ namespace GameCult.Networking
             string subscriptionId,
             CultNetServerPeer peer)
         {
+            // Keys this subscriber only ever received as a refusal: it was never given them as records.
+            var refused = new HashSet<string>(StringComparer.Ordinal);
             return _database.WatchAllChanges().Subscribe(change =>
             {
-                CultNetDatabaseChangeRawMessage? outbound;
-                try
-                {
-                    outbound = CreateChangeMessage(change, subscriptionId, selection);
-                }
-                catch (NotSupportedException refusal)
-                {
-                    // Q6: a variant is not a record CultNet can carry; the subscriber that would have received it is told, by key.
-                    peer.SendCultNet(new CultNetErrorMessage { Error = refusal.Message });
-                    return;
-                }
-
+                var outbound = DeliverChange(change, subscriptionId, selection, refused, error => peer.SendCultNet(error));
                 if (outbound != null)
-                {
                     peer.SendCultNet(outbound);
-                }
             });
+        }
+
+        // One subscriber's view of one change. A variant is not a record CultNet can carry (Q6): the subscriber is told, by key, and
+        // is not later told the variant was removed, because it never held it.
+        internal CultNetDatabaseChangeRawMessage? DeliverChange(
+            object change,
+            string subscriptionId,
+            CultNetSelection selection,
+            HashSet<string> refused,
+            Action<CultNetErrorMessage> sendError)
+        {
+            CultNetDatabaseChangeRawMessage? outbound;
+            try
+            {
+                outbound = CreateChangeMessage(change, subscriptionId, selection);
+            }
+            catch (NotSupportedException refusal)
+            {
+                var refusedKey = change.GetType().GetProperty("Key")?.GetValue(change) is CultRecordKey changed ? changed.Value : string.Empty;
+                lock (refused)
+                    refused.Add(refusedKey);
+                sendError(new CultNetErrorMessage { Error = refusal.Message });
+                return null;
+            }
+
+            if (outbound == null)
+                return null;
+            var recordKey = outbound.RecordKey ?? outbound.Document?.RecordKey ?? string.Empty;
+            bool wasRefused;
+            lock (refused)
+                wasRefused = refused.Remove(recordKey);
+            return wasRefused && outbound.ChangeKind == "removed" ? null : outbound;
         }
 
         internal CultNetDatabaseChangeRawMessage? CreateChangeMessage(
@@ -565,7 +587,7 @@ namespace GameCult.Networking
             {
                 MessageId = Guid.NewGuid().ToString("N"),
                 SubscriptionId = subscriptionId,
-                ChangeKind = kind ==CultNetDatabaseChangeKind.Added ? "added" : "updated",
+                ChangeKind = kind == CultNetDatabaseChangeKind.Added ? "added" : "updated",
                 Document = _database.Documents.ToRawRecord(descriptor, key, document, DateTimeOffset.UtcNow.ToString("O"))
             };
         }

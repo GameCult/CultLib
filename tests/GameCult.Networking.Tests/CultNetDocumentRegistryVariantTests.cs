@@ -182,6 +182,153 @@ namespace GameCult.Networking.Tests
             Assert.That(refused.InnerException!.Message, Does.Contain(VariantKey.Value).And.Contain(BaseKey.Value));
         }
 
+
+        // A hop-bearing selection reconciles the whole store on every change. The refusal follows the selection: a subscriber
+        // whose selection never selects the variant keeps receiving; one that does is told, as a typed error, not a silent stop.
+        [Test]
+        public async Task AHopBearingSubscriptionReconcilesPastAVariantItDoesNotSelectAndIsToldWhenItDoes()
+        {
+            var registry = CultDocumentRegistry.Shared;
+            var cache = new CultCache(registry, CultCacheMessagePack.CreateCodec(registry));
+            var documents = new CultNetDocumentRegistry(registry)
+                .Register(CultNetDocumentBinding.ForDocument<VariantWireFixture>(registry))
+                .Register(CultNetDocumentBinding.ForDocument<VariantCiterFixture>(registry));
+            var wireSchemaId = registry.GetRequired<VariantWireFixture>().SchemaId;
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(VariantWireFixture), new VariantWireFixture { Name = "base", Power = 1 }, BaseKey);
+                batch.Upsert(typeof(VariantCiterFixture), Citer("citer-one", BaseKey), new CultRecordKey("citer-one"));
+            });
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions { DocumentRegistry = documents });
+            var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            socket.ReceiveTimeout = 20;
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions { RuntimeId = "variant-hop-server", Socket = socket });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("variant-hop-client");
+                var snapshots = new ConcurrentQueue<CultNetSnapshotResponseRawV1Message>();
+                var changes = new ConcurrentQueue<CultNetDatabaseChangeRawMessage>();
+                var errors = new ConcurrentQueue<CultNetErrorMessage>();
+                client.OnCultNet<CultNetSnapshotResponseRawV1Message>(snapshots.Enqueue);
+                client.OnCultNet<CultNetDatabaseChangeRawMessage>(changes.Enqueue);
+                client.OnCultNet<CultNetErrorMessage>(errors.Enqueue);
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                await WaitUntilAsync(() => client.Connected);
+                string Diagnostic() =>
+                    $"changes={string.Join(",", changes.Select(c => c.SubscriptionId + ":" + c.ChangeKind + ":" + (c.Document?.RecordKey ?? c.RecordKey)))} " +
+                    $"errors={string.Join(",", errors.Select(e => e.Error))}";
+
+                // "citers": rows citing the base. It never selects the variant.
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "citers",
+                    SubscriptionId = "citers",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Cites = new CultNetCitation { Target = new CultNetRecordRef { SchemaId = wireSchemaId, RecordKey = BaseKey.Value }, Role = "Ref" }
+                    }
+                });
+                await WaitUntilAsync(() => snapshots.Count == 1, Diagnostic);
+
+                cache.Commit(batch => batch.UpsertVariant(VariantKey, BaseKey, new[]
+                {
+                    cache.Override<VariantWireFixture>(nameof(VariantWireFixture.Name), "big")
+                }));
+                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-two", BaseKey), new CultRecordKey("citer-two")));
+
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-two"), Diagnostic);
+                Assert.That(errors, Is.Empty, "a subscriber that never selects the variant is never told about it");
+
+                // "cited": wire rows some citer cites. Once a citer cites the variant, it selects it.
+                client.SendCultNet(new CultNetDatabaseSubscribeV1Message
+                {
+                    MessageId = "cited",
+                    SubscriptionId = "cited",
+                    IncludeSnapshot = true,
+                    Selection = new CultNetSelection
+                    {
+                        Schemas = new[] { wireSchemaId },
+                        Cited = new CultNetIncoming { Role = "Ref", Exists = true }
+                    }
+                });
+                await WaitUntilAsync(() => snapshots.Count == 2, Diagnostic);
+                Assert.That(errors, Is.Empty, "only the base is cited yet");
+                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-three", VariantKey), new CultRecordKey("citer-three")));
+
+                await WaitUntilAsync(() => errors.Any(error => error.Error.Contains(VariantKey.Value)), Diagnostic);
+                Assert.That(changes.Where(change => change.SubscriptionId == "cited").Select(change => change.Document?.RecordKey),
+                    Does.Not.Contain(VariantKey.Value), "a variant never reaches a subscriber as a record");
+
+                // The first subscriber is still alive after the refusal.
+                cache.Commit(batch => batch.Upsert(typeof(VariantCiterFixture), Citer("citer-four", BaseKey), new CultRecordKey("citer-four")));
+                await WaitUntilAsync(() => changes.Any(change => change.SubscriptionId == "citers" && change.Document?.RecordKey == "citer-four"), Diagnostic);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        private static CultNetDatabaseChangeRawMessage? Deliver(
+            CultNetDatabaseServer server,
+            object change,
+            CultNetSelection selection,
+            System.Collections.Generic.HashSet<string> refused,
+            System.Collections.Generic.List<CultNetErrorMessage> errors)
+        {
+            var method = typeof(CultNetDatabaseServer).GetMethod("DeliverChange", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            return (CultNetDatabaseChangeRawMessage?)method.Invoke(server, new object[]
+            {
+                change, "sub", selection, refused, (Action<CultNetErrorMessage>)errors.Add
+            });
+        }
+
+        private static VariantCiterFixture Citer(string name, CultRecordKey target) =>
+            new() { Name = name, Ref = new CultRecordRef<VariantWireFixture>(target) };
+
+        // A subscriber told a variant only as an error is not later told it was removed: it never held it.
+        [Test]
+        public async Task RemovingAVariantTheSubscriberWasOnlyToldAboutAsAnErrorSendsNoRemoval()
+        {
+            var (cache, documents) = await BuildFixtureAsync(withVariant: true);
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions { DocumentRegistry = documents });
+            using var server = new Server(cache, ServerSecurityOptions.Development());
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var schemaId = cache.Registry.GetRequired<VariantWireFixture>().SchemaId;
+            var selection = new CultNetSelection { Projection = CultNetSelectionProjections.Document };
+            var refused = new System.Collections.Generic.HashSet<string>();
+            var errors = new System.Collections.Generic.List<CultNetErrorMessage>();
+
+            var added = new CultNetDatabaseChange<VariantWireFixture>(
+                CultNetDatabaseChangeKind.Added, VariantKey, schemaId, database.Shards[0], cache.Get<VariantWireFixture>(VariantKey)!, previousDocument: null);
+            Assert.That(Deliver(databaseServer, added, selection, refused, errors), Is.Null);
+            Assert.That(errors, Has.Count.EqualTo(1));
+
+            var removed = new CultNetDatabaseChange<VariantWireFixture>(
+                CultNetDatabaseChangeKind.Removed, VariantKey, schemaId, database.Shards[0], document: null, previousDocument: cache.Get<VariantWireFixture>(VariantKey)!);
+            Assert.That(Deliver(databaseServer, removed, selection, refused, errors), Is.Null,
+                "no removal for a key the subscriber never held as a record");
+
+            // A record it did hold is still told about.
+            var baseRemoved = new CultNetDatabaseChange<VariantWireFixture>(
+                CultNetDatabaseChangeKind.Removed, BaseKey, schemaId, database.Shards[0], document: null, previousDocument: cache.Get<VariantWireFixture>(BaseKey)!);
+            Assert.That(Deliver(databaseServer, baseRemoved, selection, refused, errors)?.ChangeKind, Is.EqualTo("removed"));
+        }
+
         private static async Task WaitUntilAsync(Func<bool> condition, Func<string>? diagnostic = null)
         {
             var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
@@ -204,6 +351,19 @@ namespace GameCult.Networking.Tests
 
             [Key(1)]
             public int Power;
+        }
+
+        [CultDocument("variants.wire-citer-fixture", "variants.wire-citer-fixture.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        public sealed class VariantCiterFixture
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            [CultReference(typeof(VariantWireFixture))]
+            public CultRecordRef<VariantWireFixture> Ref;
         }
     }
 }
