@@ -2246,7 +2246,10 @@ test("server-mode transport replaces its peer when a Connect arrives from anothe
   try {
     send(socketA, peerA.createConnect(0));
     await waitFor(() => receivedByA.some((p) => p.packetType === "accept"), "A's Accept");
-    peerA.receive(receivedByA.find((p) => p.packetType === "accept")!, 0);
+    const acceptA = receivedByA.find((p) => p.packetType === "accept")!;
+    peerA.receive(acceptA, 0);
+    send(socketA, peerA.createAckForReceived(acceptA.sequence));
+    await waitFor(() => server.outstandingReliablePacketCount === 0, "A's Accept acknowledged");
     send(socketB, peerB.createConnect(0));
     await waitFor(() => receivedByB.some((p) => p.packetType === "accept"), "B's Accept");
     peerB.receive(receivedByB.find((p) => p.packetType === "accept")!, 0);
