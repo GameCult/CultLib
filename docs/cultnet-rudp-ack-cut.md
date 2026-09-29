@@ -15,6 +15,12 @@ need re-mapping to them before Hands.
 - **Added to Cut 1's scope** (from stray-packet Soul pass 3, pre-existing): a restarted client on the same
   endpoint and payload is locked out by repeated-Connect answers. A reconnect on the same transport treats a new
   server session's frames as duplicates. Session generation belongs to the sequence space this cut owns.
+- **Also in Cut 1's scope** (stray-packet Soul pass 4): the ending paths disagree about what a session owed.
+  - In Rust, a peer's Disconnect invalidates receipts.
+  - A local `disconnect()` or a timeout carries owed writes into the next session. There, a receipt from the old
+    session can become Acknowledged (probe R1).
+  - TS, Python and C# also carry owed writes across a peer Disconnect.
+  - One rule: a write belongs to the session it was issued in.
 
 - **Body.** `origin/hands/rudp-stray-packets` at `d85877a7` ("the session no
   longer keeps an initial sequence nothing reads"). Every `file:line` is against
