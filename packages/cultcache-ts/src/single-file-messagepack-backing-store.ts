@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
+import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -11,8 +12,6 @@ import type {
   CultCacheSchemaCatalogMember,
   PushAllOptions,
 } from "./types";
-
-const STORE_FORMAT_VERSION = "cultcache.store.v1";
 
 const envelopeSchema = z.object({
   key: z.string().min(1),
@@ -285,7 +284,7 @@ function encodeCatalogMember(member: CultCacheSchemaCatalogMember): unknown[] {
 }
 
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
-  if (!Array.isArray(decoded) || decoded.length === 0 || decoded[0] !== STORE_FORMAT_VERSION) {
+  if (!isV1Snapshot(decoded)) {
     return undefined;
   }
 
@@ -436,6 +435,7 @@ function decodeRecord(value: unknown): PersistedRecord {
     throw new Error("CultCache persisted records must be MessagePack arrays.");
   }
 
+  requireV1RecordSlots(value);
   const [key = "", schemaId = "", storedAt = "", payload = new Uint8Array()] = value;
   if (!isNonEmptyString(key) || !isNonEmptyString(schemaId) || !isNonEmptyString(storedAt)) {
     throw new Error("CultCache persisted records must declare key, schemaId, and storedAt.");
