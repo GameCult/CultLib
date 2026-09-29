@@ -6,8 +6,6 @@
 //! This is the only owner of these rules in Rust. A consumer hands `fetch_content` a transport
 //! closure and gets verified bytes; it never hashes, chunks or validates a manifest itself.
 
-use std::collections::BTreeMap;
-
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,7 +42,9 @@ pub struct CultMeshCdnArtifactManifest {
     pub created_at_utc: String,
     pub chunks: Vec<CultMeshCdnChunkRef>,
     pub tags: Vec<String>,
-    pub metadata: BTreeMap<String, String>,
+    /// Caller metadata in wire order. The reference writes a `Dictionary` in insertion order and
+    /// refuses a duplicate key at read, so this keeps the order it was read in and refuses a duplicate.
+    pub metadata: Vec<(String, String)>,
 }
 
 // The tuple mirrors: `to_vec_named` would write a map for a named-field struct, but a tuple
@@ -63,8 +63,45 @@ struct ManifestWire(
     String,
     Vec<CultMeshCdnChunkRef>,
     Vec<String>,
-    BTreeMap<String, String>,
+    #[serde(with = "ordered_map")] Vec<(String, String)>,
 );
+
+/// A string map that keeps its key order and refuses a duplicate key, as `Dictionary<string, string>`
+/// deserialises. `Vec<(String, String)>` is the in-memory shape; the wire shape is a msgpack map.
+mod ordered_map {
+    use std::fmt;
+
+    use serde::de::{self, MapAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(pairs: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(pairs.iter().map(|(key, value)| (key, value)))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, String)>, D::Error> {
+        struct Pairs;
+        impl<'de> Visitor<'de> for Pairs {
+            type Value = Vec<(String, String)>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a map of strings")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut seen = std::collections::HashSet::new();
+                let mut pairs = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if !seen.insert(key.clone()) {
+                        return Err(de::Error::custom(format!("duplicate metadata key '{key}'")));
+                    }
+                    pairs.push((key, value));
+                }
+                Ok(pairs)
+            }
+        }
+        deserializer.deserialize_map(Pairs)
+    }
+}
 
 impl From<CultMeshCdnChunkRef> for ChunkRefWire {
     fn from(value: CultMeshCdnChunkRef) -> Self {
@@ -138,6 +175,15 @@ pub fn normalize_hash(hash: &str) -> Result<String> {
     Ok(stripped.trim().to_lowercase())
 }
 
+/// A hash the client will put on the wire or compare against: normalized and not empty.
+fn non_empty_hash(hash: &str) -> Result<String> {
+    let normalized = normalize_hash(hash)?;
+    if normalized.is_empty() {
+        bail!("Hash must be non-empty.");
+    }
+    Ok(normalized)
+}
+
 /// `CultMeshCdn.PackArtifact`: splits `bytes` into content-addressed chunks and builds the manifest.
 /// An empty body packs as one zero-length chunk, as the reference does.
 pub fn pack_content(
@@ -188,7 +234,7 @@ pub fn pack_content(
         created_at_utc: created_at_utc.to_string(),
         chunks: refs,
         tags: Vec::new(),
-        metadata: BTreeMap::new(),
+        metadata: Vec::new(),
     };
     validate_manifest(&manifest)?;
     Ok((manifest, chunks))
@@ -277,13 +323,17 @@ pub fn answer_content_chunk_request<'a>(
         if message_id.trim().is_empty() {
             return Err("InvalidDataException: Content chunk request requires a message identity.".to_string());
         }
-        let hash = normalize_hash(chunk_hash)
-            .map_err(|_| "ArgumentException: Hash must be non-empty. (Parameter 'ChunkHash')".to_string())?;
-        if !record_key.trim().is_empty() && *record_key != chunk_record_key(&hash) {
+        // The handler normalises the wire hash, then `CreateRecordKey` normalises that result again
+        // (and spells its parameter `chunkHash`); the lookup, the size check and the hash check all
+        // use the second result, and the answer echoes the first.
+        let blank = |parameter: &str| format!("ArgumentException: Hash must be non-empty. (Parameter '{parameter}')");
+        let hash = normalize_hash(chunk_hash).map_err(|_| blank("ChunkHash"))?;
+        let canonical = normalize_hash(&hash).map_err(|_| blank("chunkHash"))?;
+        if !record_key.trim().is_empty() && *record_key != chunk_record_key(&canonical) {
             return Err("InvalidDataException: Content chunk record key disagrees with its content hash.".to_string());
         }
-        let payload = lookup(&hash).ok_or_else(|| "FileNotFoundException: Content chunk is not available.".to_string())?;
-        validate_chunk(&hash, *expected_size_bytes, &hash, payload.len() as i64, payload)
+        let payload = lookup(&canonical).ok_or_else(|| "FileNotFoundException: Content chunk is not available.".to_string())?;
+        validate_chunk(&canonical, *expected_size_bytes, &canonical, payload.len() as i64, payload)
             .map_err(|error| format!("InvalidDataException: {error}"))?;
         Ok((hash, payload.to_vec()))
     })();
@@ -323,9 +373,20 @@ pub fn fetch_content(
             manifest.size_bytes
         );
     }
+    // Everything the client will send or compare is settled before the first request. A zero-size
+    // chunk is legal only as an empty body's single chunk (the reference packs it so); anywhere else
+    // it is a request that yields nothing, and a manifest of them is a request flood.
+    let ordered = in_offset_order(manifest);
+    if ordered.len() > 1 && ordered.iter().any(|chunk| chunk.size_bytes == 0) {
+        bail!("CDN artifact has a zero-size chunk beside other chunks.");
+    }
+    let content_hash = non_empty_hash(&manifest.content_hash)?;
+    let hashes = ordered
+        .iter()
+        .map(|chunk| non_empty_hash(&chunk.chunk_hash))
+        .collect::<Result<Vec<_>>>()?;
     let mut body = Vec::new();
-    for chunk in in_offset_order(manifest) {
-        let hash = normalize_hash(&chunk.chunk_hash)?;
+    for (chunk, hash) in ordered.into_iter().zip(hashes) {
         let message_id = uuid::Uuid::new_v4().simple().to_string();
         let record_key = if chunk.record_key.trim().is_empty() {
             chunk_record_key(&hash)
@@ -358,7 +419,7 @@ pub fn fetch_content(
         validate_chunk(&hash, chunk.size_bytes, &chunk_hash, i64::from(size_bytes), &payload)?;
         body.extend_from_slice(&payload);
     }
-    if sha256_hex(&body) != normalize_hash(&manifest.content_hash)? {
+    if sha256_hex(&body) != content_hash {
         bail!("CDN artifact content hash does not match its manifest.");
     }
     Ok(body)

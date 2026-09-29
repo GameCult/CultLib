@@ -61,6 +61,24 @@ fn manifest_bytes(manifest: &CultMeshCdnArtifactManifest) -> Vec<u8> {
     rmp_serde::to_vec_named(manifest).expect("encodes")
 }
 
+fn decode_manifest(bytes: &[u8]) -> CultMeshCdnArtifactManifest {
+    rmp_serde::from_slice(bytes).expect("decodes")
+}
+
+/// The manifest's bytes with its metadata map replaced by `pairs`, written in exactly that order
+/// (and with duplicates, if given): what a peer that is not this crate can put on the wire.
+fn manifest_with_metadata(manifest: &CultMeshCdnArtifactManifest, pairs: &[(&str, &str)]) -> Vec<u8> {
+    let encoded = manifest_bytes(manifest);
+    let mut value = rmpv::decode::read_value(&mut encoded.as_slice()).expect("a msgpack value");
+    let rmpv::Value::Array(fields) = &mut value else {
+        panic!("the manifest is a positional array");
+    };
+    fields[9] = rmpv::Value::Map(pairs.iter().map(|(k, v)| (rmpv::Value::from(*k), rmpv::Value::from(*v))).collect());
+    let mut out = Vec::new();
+    rmpv::encode::write_value(&mut out, &value).expect("writes");
+    out
+}
+
 fn request(id: &str, hash: &str, key: &str, size: i32) -> CultNetMessage {
     CultNetMessage::ContentChunkRequest {
         message_id: id.to_string(),
@@ -171,6 +189,21 @@ fn local_vectors() -> Vec<Vector> {
             request("vector-key", &last.chunk_hash, "mesh:cdn:chunk:other", last_size),
         ),
         ("answer_size_mismatch", request("vector-size", &last.chunk_hash, &key, last_size - 1)),
+        ("answer_blank_message_id", request("", &last.chunk_hash, &key, last_size)),
+        ("answer_whitespace_message_id", request("   ", &last.chunk_hash, &key, last_size)),
+        ("answer_blank_hash", request("vector-blank-hash", "", "", 100)),
+        ("answer_whitespace_hash", request("vector-space-hash", "   ", "", 100)),
+        ("answer_prefix_only_hash", request("vector-prefix-hash", "sha256:   ", "", 100)),
+        ("answer_negative_size", request("vector-negative", &last.chunk_hash, &key, -1)),
+        (
+            "answer_record_key_case",
+            request("vector-key-case", &last.chunk_hash, &key.to_uppercase(), last_size),
+        ),
+        ("answer_blank_record_key", request("vector-key-blank", &last.chunk_hash, "   ", last_size)),
+        (
+            "answer_double_prefix",
+            request("vector-double", &format!("sha256:sha256:{}", last.chunk_hash), "", last_size),
+        ),
     ];
     for (name, request) in &answers {
         push_message(format!("{name}.request"), "request", request);
@@ -200,6 +233,8 @@ fn local_vectors() -> Vec<Vector> {
     let mut shuffled = manifest.clone();
     shuffled.chunks = [3, 0, 5, 1, 4, 2].iter().map(|&i| manifest.chunks[i].clone()).collect();
     push_manifest("manifest_out_of_order", &shuffled);
+    let tagged = decode_manifest(&manifest_with_metadata(&manifest, &[("zeta", "1"), ("alpha", "2"), ("mid", "3")]));
+    push_manifest("manifest_metadata_order", &tagged);
     push_manifest("manifest_empty_body", &pack(&[]).0);
     vectors
 }
@@ -479,7 +514,7 @@ fn answer_serves_found_false_with_the_reference_error_spelling() {
             .expect("paired response");
         assert_eq!(&wire(&answer), expected_bytes, "{name}: answer differs from the reference's");
         let (_, found, _, payload, error) = response_of(&answer);
-        if name == "answer_found" {
+        if ["answer_found", "answer_blank_record_key", "answer_double_prefix"].contains(&name) {
             assert!(found && error.is_empty() && !payload.is_empty());
         } else {
             assert!(!found && payload.is_empty(), "{name}");
@@ -487,28 +522,7 @@ fn answer_serves_found_false_with_the_reference_error_spelling() {
         }
         judged += 1;
     }
-    assert_eq!(judged, 4);
-}
-
-#[test]
-fn content_messages_refuse_what_the_reference_never_produces() {
-    let refused = |message: CultNetMessage| assert!(encode_cultnet_message_for_wire(&message, SCHEMA_V0).is_err(), "{message:?}");
-    refused(request("", "abc", "", 1));
-    refused(request("m", "sha256:  ", "", 1));
-    refused(request("m", "abc", "", -1));
-    let response = |found: bool, size: i32, payload: &[u8], error: &str| CultNetMessage::ContentChunkResponse {
-        message_id: "m".to_string(),
-        found,
-        chunk_hash: "abc".to_string(),
-        size_bytes: size,
-        payload: payload.to_vec(),
-        error: error.to_string(),
-    };
-    refused(response(true, 3, &[1, 2], ""));
-    refused(response(true, 2, &[1, 2], "boom"));
-    refused(response(false, 0, &[1], "boom"));
-    assert!(encode_cultnet_message_for_wire(&response(true, 2, &[1, 2], ""), SCHEMA_V0).is_ok());
-    assert!(encode_cultnet_message_for_wire(&response(false, 0, &[], "boom"), SCHEMA_V0).is_ok());
+    assert_eq!(judged, 13);
 }
 
 #[test]
@@ -517,4 +531,237 @@ fn gamecult_networking_contract_refuses_content_messages() {
     let message = request("m", "abc", "", 1);
     assert!(encode_cultnet_message_for_wire(&message, legacy).is_err());
     assert!(decode_cultnet_message_from_slice(&wire(&message), legacy).is_err());
+}
+
+// ------------------------------------------------------------------------------------------
+// BP-1 fixes
+// ------------------------------------------------------------------------------------------
+
+fn chunk_ref(hash: &str, offset: i64, size: i32) -> cultnet_rs::CultMeshCdnChunkRef {
+    cultnet_rs::CultMeshCdnChunkRef {
+        chunk_hash: hash.to_string(),
+        offset,
+        size_bytes: size,
+        record_key: String::new(),
+    }
+}
+
+/// A manifest with the given chunk list and stated size, everything else from a real pack.
+fn manifest_of(size: i64, chunks: Vec<cultnet_rs::CultMeshCdnChunkRef>) -> CultMeshCdnArtifactManifest {
+    let mut manifest = pack(&[]).0;
+    manifest.size_bytes = size;
+    manifest.chunks = chunks;
+    manifest
+}
+
+// F1: a zero-size chunk is legal only as an empty body's single chunk.
+#[test]
+fn a_zero_size_chunk_flood_is_refused_before_any_request() {
+    let (empty, empty_chunks) = pack(&[]);
+    let empty_store = store(&empty_chunks);
+    let flood = manifest_of(0, (0..100_000).map(|_| chunk_ref(&empty.content_hash, 0, 0)).collect());
+    validate_manifest(&flood).expect("the shared shape rule accepts it, as the reference does");
+    let calls = std::cell::Cell::new(0);
+    assert!(fetch_content(&flood, u64::MAX, serving(&empty_store, &calls)).is_err());
+    assert_eq!(calls.get(), 0, "100,000 empty chunks must not become 100,000 requests");
+
+    // A zero-size chunk beside real ones is refused too, so skipping it is never the client's job.
+    let (good, chunks) = pack(&body());
+    let body_store = store(&chunks);
+    let mut zero_inside = good.clone();
+    let boundary = zero_inside.chunks[2].offset;
+    zero_inside.chunks.insert(2, chunk_ref(&empty.content_hash, boundary, 0));
+    validate_manifest(&zero_inside).expect("shape-valid");
+    let calls = std::cell::Cell::new(0);
+    assert!(fetch_content(&zero_inside, u64::MAX, serving(&body_store, &calls)).is_err());
+    assert_eq!(calls.get(), 0);
+
+    // An empty body still fetches, through its one zero-length chunk.
+    let calls = std::cell::Cell::new(0);
+    assert_eq!(fetch_content(&empty, 0, serving(&empty_store, &calls)).expect("fetches"), Vec::<u8>::new());
+    assert_eq!(calls.get(), 1);
+}
+
+// F2, F5: every bad request is answered, in the reference's validation order and spelling. The
+// byte-identity against the reference server's own answers is `answer_serves_found_false_...`.
+#[test]
+fn a_bad_request_is_answered_never_dropped() {
+    let (_, chunks) = pack(&body());
+    let store = store(&chunks);
+    let last = chunks.last().unwrap();
+    let size = last.payload.len() as i32;
+    let size_mismatch = "InvalidDataException: CDN artifact chunk payload metadata does not match its manifest reference.";
+    for (label, bad, spelling) in [
+        (
+            "blank id",
+            request("", &last.chunk_hash, "", size),
+            "InvalidDataException: Content chunk request requires a message identity.",
+        ),
+        ("blank hash", request("m", "", "", size), "ArgumentException: Hash must be non-empty. (Parameter 'ChunkHash')"),
+        (
+            "prefix-only hash",
+            request("m", "sha256:   ", "", size),
+            "ArgumentException: Hash must be non-empty. (Parameter 'chunkHash')",
+        ),
+        ("negative size", request("m", &last.chunk_hash, "", -1), size_mismatch),
+    ] {
+        let answer = answer_content_chunk_request(&bad, lookup_in(&store));
+        let (_, found, _, payload, error) = response_of(&answer);
+        assert!(!found && payload.is_empty(), "{label}");
+        assert_eq!(error, spelling, "{label}");
+        // And both travel: neither the request nor its answer is stopped at decode or encode.
+        assert_eq!(unwire(&wire(&bad)).expect("the request decodes"), bad, "{label}");
+        assert_eq!(unwire(&wire(&answer)).expect("the answer encodes and decodes"), answer, "{label}");
+    }
+}
+
+// F3: metadata keeps the order it was read in and refuses a duplicate key.
+#[test]
+fn manifest_metadata_keeps_wire_order_and_refuses_a_duplicate_key() {
+    let reference = read_vectors("content-vectors.cs-written.json");
+    let (_, _, bytes) = reference.iter().find(|(l, _, _)| l == "manifest_metadata_order").expect("vector");
+    let decoded = decode_manifest(bytes);
+    assert_eq!(&manifest_bytes(&decoded), bytes, "zeta, alpha, mid re-encode as zeta, alpha, mid");
+
+    let base = pack(&body()).0;
+    let duplicated = manifest_with_metadata(&base, &[("k", "1"), ("other", "2"), ("k", "3")]);
+    assert!(rmp_serde::from_slice::<CultMeshCdnArtifactManifest>(&duplicated).is_err());
+    let unique = manifest_with_metadata(&base, &[("k", "1"), ("other", "2")]);
+    assert_eq!(manifest_bytes(&decode_manifest(&unique)), unique);
+}
+
+// F4: hashes are settled before the first request.
+#[test]
+fn a_blank_hash_is_refused_before_any_request() {
+    let (good, chunks) = pack(&body());
+    let store = store(&chunks);
+    let mut blank_content = good.clone();
+    blank_content.content_hash = "   ".to_string();
+    let mut prefix_content = good.clone();
+    prefix_content.content_hash = "sha256:   ".to_string();
+    let mut blank_chunk = good.clone();
+    blank_chunk.chunks[3].chunk_hash = "   ".to_string();
+    let mut prefix_chunk = good.clone();
+    prefix_chunk.chunks[3].chunk_hash = "SHA256:  ".to_string();
+    for (label, manifest) in [
+        ("blank content hash", blank_content),
+        ("prefix-only content hash", prefix_content),
+        ("blank chunk hash at 3", blank_chunk),
+        ("prefix-only chunk hash at 3", prefix_chunk),
+    ] {
+        let calls = std::cell::Cell::new(0);
+        assert!(fetch_content(&manifest, u64::MAX, serving(&store, &calls)).is_err(), "{label}");
+        assert_eq!(calls.get(), 0, "{label}: refused before any request");
+    }
+}
+
+// F6: `pack_content` refuses a chunk size the reference's int cannot hold, without panicking.
+#[test]
+fn pack_content_refuses_an_unusable_chunk_size() {
+    for size in [0usize, i32::MAX as usize + 1, usize::MAX] {
+        let refused = std::panic::catch_unwind(|| pack_content("a", "", "", "", "", b"abc", size));
+        assert!(matches!(refused, Ok(Err(_))), "chunk size {size} must be refused cleanly");
+    }
+    let (manifest, _) =
+        pack_content("a", "", "", "", "", b"abc", i32::MAX as usize).expect("i32::MAX is a valid chunk size");
+    assert_eq!(manifest.chunks.len(), 1);
+}
+
+// F6: `PackArtifact` defaults a blank kind and mime type and otherwise uses the value untouched.
+#[test]
+fn pack_defaults_only_a_blank_kind_and_mime_type_and_never_trims() {
+    let packed = |kind: &str, mime: &str| pack_content("a", kind, "v", mime, CREATED, b"abc", 2).expect("packs").0;
+    for blank in ["", " ", "\t \n"] {
+        let manifest = packed(blank, blank);
+        assert_eq!(
+            (manifest.kind.as_str(), manifest.mime_type.as_str()),
+            ("asset", "application/octet-stream"),
+            "{blank:?}"
+        );
+    }
+    let manifest = packed("  build ", " text/plain ");
+    assert_eq!((manifest.kind.as_str(), manifest.mime_type.as_str()), ("  build ", " text/plain "));
+}
+
+/// The honest answer to `request`, taken apart so a test can lie in one field.
+fn honest(request: &CultNetMessage, store: &HashMap<String, Vec<u8>>) -> (String, bool, String, i32, Vec<u8>, String) {
+    match answer_content_chunk_request(request, lookup_in(store)) {
+        CultNetMessage::ContentChunkResponse { message_id, found, chunk_hash, size_bytes, payload, error } => {
+            (message_id, found, chunk_hash, size_bytes, payload, error)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// F6: the two halves of the per-chunk check, each on its own.
+#[test]
+fn a_chunk_whose_length_or_claim_disagrees_with_the_manifest_is_refused() {
+    let (manifest, chunks) = pack(&body());
+    let store = store(&chunks);
+    // Each lie maps (honest size, honest payload) to (claimed size, payload served).
+    type Lie = fn(i32, Vec<u8>) -> (i32, Vec<u8>);
+    let lies: [(&str, Lie); 4] = [
+        ("a payload of the claimed length that is not the manifest's length", |size, mut p| {
+            p.truncate(p.len() - 1);
+            (size - 1, p)
+        }),
+        ("a payload whose length is not its claimed size, the claim being the manifest's", |size, mut p| {
+            p.truncate(p.len() - 1);
+            (size, p)
+        }),
+        ("the right payload under a wrong claimed size", |size, p| (size - 1, p)),
+        ("a longer payload of its claimed length", |size, mut p| {
+            p.push(0);
+            (size + 1, p)
+        }),
+    ];
+    for (label, lie) in lies {
+        let error = fetch_content(&manifest, u64::MAX, |message| {
+            let (message_id, found, chunk_hash, honest_size, payload, error) = honest(&message, &store);
+            let (size_bytes, payload) = lie(honest_size, payload);
+            Ok(CultNetMessage::ContentChunkResponse { message_id, found, chunk_hash, size_bytes, payload, error })
+        })
+        .expect_err(label);
+        assert!(error.to_string().contains("payload metadata does not match"), "{label}: {error}");
+    }
+}
+
+// F6: `[5@0, 0@0]` is not contiguous under the reference's stable sort by offset alone.
+#[test]
+fn equal_offsets_keep_their_manifest_order() {
+    let hash = "0".repeat(64);
+    let five_then_zero = manifest_of(5, vec![chunk_ref(&hash, 0, 5), chunk_ref(&hash, 0, 0)]);
+    assert!(validate_manifest(&five_then_zero).is_err(), "the stable sort keeps 5@0 first, so 0@0 lands at offset 5");
+    let zero_then_five = manifest_of(5, vec![chunk_ref(&hash, 0, 0), chunk_ref(&hash, 0, 5)]);
+    validate_manifest(&zero_then_five).expect("0@0 first leaves 5@0 at offset 0");
+}
+
+// F6: what goes on the wire is the normalized hash and the canonical record key.
+#[test]
+fn the_client_sends_the_normalized_hash_and_canonical_record_key() {
+    let (mut manifest, chunks) = pack(&body());
+    let store = store(&chunks);
+    let honest_hashes: Vec<String> = manifest.chunks.iter().map(|c| c.chunk_hash.clone()).collect();
+    manifest.content_hash = format!("SHA256:{}", manifest.content_hash.to_uppercase());
+    for (index, chunk) in manifest.chunks.iter_mut().enumerate() {
+        chunk.chunk_hash = format!("sha256:{}", chunk.chunk_hash.to_uppercase());
+        // Alternate chunks name their key; the rest leave it blank for the client to derive.
+        chunk.record_key =
+            if index % 2 == 0 { format!("mesh:cdn:chunk:{}", honest_hashes[index]) } else { "  ".to_string() };
+    }
+    let mut sent = Vec::new();
+    let fetched = fetch_content(&manifest, u64::MAX, |message| {
+        sent.push(message.clone());
+        Ok(answer_content_chunk_request(&message, lookup_in(&store)))
+    })
+    .expect("fetches");
+    assert_eq!(fetched, body());
+    assert_eq!(sent.len(), honest_hashes.len());
+    for (message, hash) in sent.iter().zip(&honest_hashes) {
+        let CultNetMessage::ContentChunkRequest { chunk_hash, record_key, .. } = message else {
+            panic!("not a request");
+        };
+        assert_eq!(chunk_hash, hash, "the normalized hash is what is sent");
+        assert_eq!(record_key, &format!("mesh:cdn:chunk:{hash}"), "and the canonical key");
+    }
 }

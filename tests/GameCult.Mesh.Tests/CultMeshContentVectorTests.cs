@@ -164,6 +164,16 @@ public sealed class CultMeshContentVectorTests
         AddAnswer("answer_not_found", Request("vector-missing", new string('0', 64), string.Empty, 100));
         AddAnswer("answer_record_key_disagrees", Request("vector-key", last.ChunkHash, "mesh:cdn:chunk:other", last.SizeBytes));
         AddAnswer("answer_size_mismatch", Request("vector-size", last.ChunkHash, key, last.SizeBytes - 1));
+        // Requests the reference refuses in its handler, never at deserialisation: each is answered.
+        AddAnswer("answer_blank_message_id", Request(string.Empty, last.ChunkHash, key, last.SizeBytes));
+        AddAnswer("answer_whitespace_message_id", Request("   ", last.ChunkHash, key, last.SizeBytes));
+        AddAnswer("answer_blank_hash", Request("vector-blank-hash", string.Empty, string.Empty, 100));
+        AddAnswer("answer_whitespace_hash", Request("vector-space-hash", "   ", string.Empty, 100));
+        AddAnswer("answer_prefix_only_hash", Request("vector-prefix-hash", "sha256:   ", string.Empty, 100));
+        AddAnswer("answer_negative_size", Request("vector-negative", last.ChunkHash, key, -1));
+        AddAnswer("answer_record_key_case", Request("vector-key-case", last.ChunkHash, key.ToUpperInvariant(), last.SizeBytes));
+        AddAnswer("answer_blank_record_key", Request("vector-key-blank", last.ChunkHash, "   ", last.SizeBytes));
+        AddAnswer("answer_double_prefix", Request("vector-double", "sha256:sha256:" + last.ChunkHash, string.Empty, last.SizeBytes));
         AddResponse("response_hash_last_digit", new CultMeshContentChunkResponseMessage
         {
             MessageId = "vector-digit",
@@ -184,6 +194,9 @@ public sealed class CultMeshContentVectorTests
         var shuffled = CultMeshCdn.PackArtifact(ArtifactId, Body(), Options()).Manifest;
         shuffled.Chunks = new[] { 3, 0, 5, 1, 4, 2 }.Select(i => shuffled.Chunks[i]).ToArray();
         AddManifest("manifest_out_of_order", shuffled);
+        var tagged = CultMeshCdn.PackArtifact(ArtifactId, Body(), Options()).Manifest;
+        tagged.Metadata = new Dictionary<string, string> { ["zeta"] = "1", ["alpha"] = "2", ["mid"] = "3" };
+        AddManifest("manifest_metadata_order", tagged);
         AddManifest("manifest_empty_body", CultMeshCdn.PackArtifact(ArtifactId, Array.Empty<byte>(), Options()).Manifest);
         return vectors;
     }

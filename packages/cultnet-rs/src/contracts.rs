@@ -801,40 +801,10 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
                 validate_shard_descriptor(shard)?;
             }
         }
-        CultNetMessage::ContentChunkRequest {
-            message_id,
-            chunk_hash,
-            record_key: _,
-            expected_size_bytes,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            if crate::normalize_hash(chunk_hash)?.is_empty() {
-                return Err(anyhow!("CultNet field chunkHash must be non-empty"));
-            }
-            if *expected_size_bytes < 0 {
-                return Err(anyhow!("CultNet field expectedSizeBytes must not be negative"));
-            }
-        }
-        CultNetMessage::ContentChunkResponse {
-            message_id,
-            found,
-            chunk_hash: _,
-            size_bytes,
-            payload,
-            error,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            if *found {
-                if i64::try_from(payload.len()).ok() != Some(i64::from(*size_bytes)) {
-                    return Err(anyhow!("CultNet field payload length must equal sizeBytes"));
-                }
-                if !error.is_empty() {
-                    return Err(anyhow!("CultNet field error must be empty when found"));
-                }
-            } else if !payload.is_empty() {
-                return Err(anyhow!("CultNet field payload must be empty when not found"));
-            }
-        }
+        // The reference's serializer accepts any content chunk message. It refuses a bad request in
+        // its handler and answers `found: false` (`answer_content_chunk_request`); a bad response is
+        // refused by `fetch_content`'s verification. Refusing either here would leave a peer in silence.
+        CultNetMessage::ContentChunkRequest { .. } | CultNetMessage::ContentChunkResponse { .. } => {}
         CultNetMessage::OperationRequest {
             message_id,
             service_id,
