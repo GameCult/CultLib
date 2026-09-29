@@ -1,8 +1,20 @@
-# CultNet RUDP: a frame is Received, then Delivered, and the receiver owns ordered delivery with one watermark
+# CultNet RUDP: Acknowledged means delivered, and the receiver owns ordered delivery with one watermark
 
-Status: cut map, Imagination pass 1, 2026-09-30. It is not committed yet. Self
-commits it to `main` as `docs/cultnet-rudp-ack-cut.md`. The ends are the operator
-ruling of 2026-09-30, summarised below. This document owns the means.
+Status: cut map, Imagination pass 1, 2026-09-30, committed by Self.
+
+**Rulings (operator, 2026-09-30).** These supersede the two-state proposal in the text below. Cuts 4 and 5
+need re-mapping to them before Hands.
+- **Q-A1 (a):** Delivered is derived at the sender from a correct receiver's cumulative watermark. The wire
+  does not change.
+- **Q-A2:** "I think this is telling us we don't actually need both received and delivered."
+  - There is one public meaning: Acknowledged means delivered.
+  - Receipts go Pending, then Acknowledged (delivered), or Invalidated. No public Received state exists.
+  - Retransmission still stops on each packet's own ack, so resending stays bounded.
+  - Flush waits for Acknowledged.
+- **Open:** Q-A3 (expiring reliable traffic next to ordered traffic), Q-A4 (porting receipts), Q-A5 (Kotlin).
+- **Added to Cut 1's scope** (from stray-packet Soul pass 3, pre-existing): a restarted client on the same
+  endpoint and payload is locked out by repeated-Connect answers. A reconnect on the same transport treats a new
+  server session's frames as duplicates. Session generation belongs to the sequence space this cut owns.
 
 - **Body.** `origin/hands/rudp-stray-packets` at `d85877a7` ("the session no
   longer keeps an initial sequence nothing reads"). Every `file:line` is against
