@@ -85,6 +85,7 @@ type FragmentBuffer = {
   fragmentCount: number;
   payloads: Map<number, Uint8Array>;
   sequences: Map<number, number>;
+  lastTouched: number;
 };
 
 export interface RudpTransportProfileOptions {
@@ -160,6 +161,7 @@ export class CultNetRudpSession {
   readonly #orderedNextSequenceByChannel = new Map<string, number>();
   readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
   readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
+  #fragmentTouches = 0;
   /// Matches cultnet-rs's `max_pending_fragment_sets`. A fragment set is only
   /// removed on successful reassembly, so a set that loses one fragment is
   /// stranded for the life of the session. Without a bound the map grows
@@ -367,6 +369,14 @@ export class CultNetRudpSession {
       : packets;
   }
 
+  /**
+   * Feeds one packet to the session. A thrown refusal error (an oversized
+   * payload, a full reliable fragment bound) ends the session: the packet's
+   * sequence is already recorded, so a caller that swallows the error would
+   * acknowledge the refused packet and drop its retransmit as a duplicate.
+   * The socket transports end the session on such an error; a caller driving
+   * the session directly must do the same.
+   */
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
     this.#requireConnection(packet);
     this.#applyAcknowledgements(packet);
@@ -675,26 +685,29 @@ export class CultNetRudpSession {
         fragmentCount,
         payloads: new Map(),
         sequences: new Map(),
+        lastTouched: 0,
       };
-      // Evict the oldest stranded set of unreliable fragments rather than
+      // Evict the stalest stranded set of unreliable fragments rather than
       // refusing the payload: a receiver that stops accepting fragmented
       // traffic after a bounded number of losses is a denial of service
       // delivered by the network. A set holding reliable fragments is never
       // evicted, because its fragments were acknowledged and will not be
-      // resent; when every set is reliable the packet is refused. Map
-      // iteration is insertion-ordered, so the first match is the oldest.
+      // resent; when every set is reliable the packet is refused. Stalest
+      // means least recently touched by a fragment, so a set that is still
+      // receiving is never the victim.
       if (this.#fragmentBuffers.size >= this.#maxPendingFragmentSets) {
-        let oldest: string | undefined;
+        let stalest: string | undefined;
+        let stalestTouched = Number.POSITIVE_INFINITY;
         for (const [pendingKey, pending] of this.#fragmentBuffers) {
-          if (!pending.reliable) {
-            oldest = pendingKey;
-            break;
+          if (!pending.reliable && pending.lastTouched < stalestTouched) {
+            stalest = pendingKey;
+            stalestTouched = pending.lastTouched;
           }
         }
-        if (oldest === undefined) {
+        if (stalest === undefined) {
           throw new Error("RUDP pending reliable fragment sets exceed the bound.");
         }
-        this.#fragmentBuffers.delete(oldest);
+        this.#fragmentBuffers.delete(stalest);
         this.#fragmentSetsEvicted += 1;
       }
       this.#fragmentBuffers.set(key, buffer);
@@ -703,6 +716,8 @@ export class CultNetRudpSession {
       throw new Error("RUDP fragment metadata changed within a fragment set.");
     }
 
+    this.#fragmentTouches += 1;
+    buffer.lastTouched = this.#fragmentTouches;
     buffer.payloads.set(fragmentIndex, payload);
     buffer.sequences.set(fragmentIndex, packet.sequence);
     if (buffer.payloads.size < fragmentCount) {

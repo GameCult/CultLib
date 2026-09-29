@@ -3103,6 +3103,39 @@ fn rudp_evicts_stalest_incomplete_fragment_set_instead_of_dying() -> Result<()> 
 }
 
 #[test]
+fn rudp_eviction_takes_the_least_recently_touched_set_not_the_actively_receiving_one() -> Result<()> {
+    let (mut client, mut server) = connected_rudp_pair()?;
+    client.set_max_pending_fragment_sets(4)?;
+    let mut sets = Vec::new();
+    for fill in 1..=4u8 {
+        let packets = server.send_many(
+            "media",
+            vec![fill; 2500],
+            CultNetRudpSendOptions::default(),
+            Some(1000),
+        )?;
+        assert!(client.receive(&packets[0], 10)?.delivered.is_empty());
+        sets.push(packets);
+    }
+    // Set 1 is the oldest but is still receiving.
+    assert!(client.receive(&sets[0][1], 11)?.delivered.is_empty());
+    // A fifth set forces an eviction: the stalled set 2, not set 1.
+    let fifth = server.send_many(
+        "media",
+        vec![5u8; 2500],
+        CultNetRudpSendOptions::default(),
+        Some(1000),
+    )?;
+    assert!(client.receive(&fifth[0], 12)?.delivered.is_empty());
+    assert_eq!(client.fragment_sets_evicted(), 1);
+    assert_eq!(
+        client.receive(&sets[0][2], 13)?.delivered[0].payload,
+        vec![1u8; 2500]
+    );
+    Ok(())
+}
+
+#[test]
 fn rudp_never_evicts_a_reliable_fragment_set_whose_fragments_were_acknowledged() -> Result<()> {
     let (mut client, mut server) = connected_rudp_pair()?;
     client.set_max_pending_fragment_sets(4)?;

@@ -424,6 +424,7 @@ class CultNetRudpSession:
         self._ordered_next_sequence_by_channel: dict[str, int] = {}
         self._ordered_buffers: dict[str, dict[int, tuple[CultNetRudpDeliveredFrame, int]]] = {}
         self._fragment_buffers: dict[tuple[str, int], dict[str, Any]] = {}
+        self._fragment_touches = 0
         # Matches cultnet-rs max_pending_fragment_sets. A set that loses one
         # fragment is never completed; without a bound it is kept for the life
         # of the session and the map grows under any loss on a fragmenting channel.
@@ -588,6 +589,14 @@ class CultNetRudpSession:
         return self._admit_reliable_packets(tuple(packets), options.now_ms) if options.reliable else tuple(packets)
 
     def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
+        """Feed one packet to the session.
+
+        A raised refusal error (an oversized payload, a full reliable fragment
+        bound) ends the session: the packet's sequence is already recorded, so a
+        caller that swallows the error would acknowledge the refused packet and
+        drop its retransmit as a duplicate. The socket transports end the session
+        on such an error; a caller driving the session directly must do the same.
+        """
         self._require_connection(packet)
         self._apply_acknowledgements(packet)
         ready_to_send = self._promote_queued_reliable(now_ms)
@@ -836,18 +845,19 @@ class CultNetRudpSession:
 
         key = (packet.channel_id, packet.fragment_id)
         if key not in self._fragment_buffers and len(self._fragment_buffers) >= self._max_pending_fragment_sets:
-            # Evict the oldest stranded set of unreliable fragments rather than
-            # refusing the payload; dicts iterate in insertion order. A set holding
-            # reliable fragments is never evicted, because its fragments were
-            # acknowledged and will not be resent; when every set is reliable the
-            # packet is refused.
-            oldest = next(
+            # Evict the stalest stranded set of unreliable fragments (least recently
+            # touched by a fragment, so a set still receiving is never the victim)
+            # rather than refusing the payload. A set holding reliable fragments is
+            # never evicted, because its fragments were acknowledged and will not be
+            # resent; when every set is reliable the packet is refused.
+            stalest = min(
                 (pending_key for pending_key, pending in self._fragment_buffers.items() if not pending["reliable"]),
-                None,
+                key=lambda pending_key: self._fragment_buffers[pending_key]["last_touched"],
+                default=None,
             )
-            if oldest is None:
+            if stalest is None:
                 raise ValueError("RUDP pending reliable fragment sets exceed the bound")
-            del self._fragment_buffers[oldest]
+            del self._fragment_buffers[stalest]
             self._fragment_sets_evicted += 1
         buffer = self._fragment_buffers.setdefault(
             key,
@@ -857,10 +867,13 @@ class CultNetRudpSession:
                 "reliable": packet.reliable,
                 "payloads": {},
                 "sequences": {},
+                "last_touched": 0,
             },
         )
         if buffer["fragment_count"] != packet.fragment_count or buffer["ordered"] != packet.ordered:
             raise ValueError("RUDP fragment metadata changed within a fragment set")
+        self._fragment_touches += 1
+        buffer["last_touched"] = self._fragment_touches
         buffer["payloads"][packet.fragment_index] = bytes(packet.payload)
         buffer["sequences"][packet.fragment_index] = packet.sequence
         if len(buffer["payloads"]) < packet.fragment_count:

@@ -1872,6 +1872,27 @@ test("rudp receiver evicts stranded fragment sets instead of refusing new ones",
   assert.equal(Buffer.from(second.delivered[0]!.payload).toString(), "hello");
 });
 
+test("rudp eviction takes the least recently touched set, not the one still receiving", () => {
+  const receiver = new CultNetRudpSession({ connectionId: 9, initialSequence: 1, resendDelayMs: 50 });
+  receiver.receive({ packetType: "accept", connectionId: 9, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
+  const fragment = (id: number, index: number, sequence: number) => receiver.receive({
+    packetType: "data", connectionId: 9, sequence, ack: 0, ackMask: 0,
+    channelId: "schema", fragmentId: id, fragmentIndex: index, fragmentCount: 3,
+    payload: Buffer.from([id & 0xff, index]),
+  });
+  let sequence = 100;
+  for (let id = 1; id <= 64; id += 1) {
+    assert.equal(fragment(id, 0, sequence++).delivered.length, 0);
+  }
+  assert.equal(receiver.fragmentSetsEvicted, 0);
+  // Set 1 is the oldest but is still receiving.
+  assert.equal(fragment(1, 1, sequence++).delivered.length, 0);
+  // A new set forces one eviction: the stalled set 2, not set 1.
+  assert.equal(fragment(1000, 0, sequence++).delivered.length, 0);
+  assert.equal(receiver.fragmentSetsEvicted, 1);
+  assert.equal(fragment(1, 2, sequence++).delivered.length, 1, "the actively receiving set was evicted");
+});
+
 test("rudp receiver never evicts a reliable fragment set, and refuses when every pending set is reliable", () => {
   const fragment = (sequence: number, id: number, index: number, reliable: boolean, count = 3) => ({
     packetType: "data" as const, connectionId: 9, sequence, ack: 0, ackMask: 0,

@@ -2308,6 +2308,22 @@ class CultNetRudpFragmentBoundTests(unittest.TestCase):
         self.assertEqual(receiver.receive(stranded[0]).delivered, ())
 
 
+    def test_eviction_takes_the_least_recently_touched_set_not_the_actively_receiving_one(self) -> None:
+        sender, receiver = self._pair()
+        receiver._max_pending_fragment_sets = 4
+        sets = []
+        for fill in range(1, 5):
+            packets = sender.send_many("media", bytes([fill]) * 2500, max_fragment_bytes=1000)
+            self.assertEqual(receiver.receive(packets[0]).delivered, ())
+            sets.append(packets)
+        # Set 1 is the oldest but is still receiving.
+        self.assertEqual(receiver.receive(sets[0][1]).delivered, ())
+        # A fifth set forces an eviction: the stalled set 2, not set 1.
+        fifth = sender.send_many("media", bytes([5]) * 2500, max_fragment_bytes=1000)
+        self.assertEqual(receiver.receive(fifth[0]).delivered, ())
+        self.assertEqual(receiver.fragment_sets_evicted, 1)
+        self.assertEqual(receiver.receive(sets[0][2]).delivered[0].payload, bytes([1]) * 2500)
+
     def test_a_reliable_fragment_set_is_never_evicted_and_a_full_reliable_bound_refuses(self) -> None:
         sender, receiver = self._pair()
         receiver._max_pending_fragment_sets = 4

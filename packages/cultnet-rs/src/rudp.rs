@@ -530,6 +530,12 @@ impl CultNetRudpSession {
         Ok(vec![packet])
     }
 
+    /// Feeds one packet to the session. An `Err` refusal (an oversized payload,
+    /// a full reliable fragment bound) ends the session: the packet's sequence
+    /// is already recorded, so a caller that ignores the error would acknowledge
+    /// the refused packet and drop its retransmit as a duplicate. The socket
+    /// transports end the session on such an error; a caller driving the session
+    /// directly must do the same.
     pub fn receive(
         &mut self,
         packet: &CultNetRudpPacket,
