@@ -1439,6 +1439,91 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpFlushReliable_FailsForAWriteTheEndedSessionForgot()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var peerSocket = BindUdpSocket();
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            const uint connectionId = 0x10203058;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId
+            });
+            var peer = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId });
+
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(peer.CreateConnect(0)), serverEndPoint);
+            server.ReceiveOnce();
+            peer.Receive(DrainPackets(peerSocket).Single(p => p.PacketType == CultNetRudpPacketType.Accept), 0);
+            server.Send("schema", Encoding.UTF8.GetBytes("never acknowledged"));
+
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(PoisonedFrame(peer)), serverEndPoint);
+            Assert.That(server.ReceiveOnce(), Is.Null);
+            Assert.That(server.DisconnectReason, Is.Not.Null);
+            Assert.Throws<InvalidOperationException>(() => server.FlushReliable(TimeSpan.FromMilliseconds(200)));
+        }
+
+        [Test]
+        public void RudpServerMode_OwesOneReliableAcceptHoweverManyConnectsRepeat()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var peerSocket = BindUdpSocket();
+            const uint connectionId = 0x10203059;
+            using var server = new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
+            {
+                RuntimeId = "csharp-rudp-server",
+                Socket = serverSocket,
+                Mode = CultNetRudpSocketMode.Server,
+                ConnectionId = connectionId
+            });
+            var connect = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId }).CreateConnect(0);
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                peerSocket.SendTo(CultNetRudpPacketCodec.Encode(connect), serverSocket.LocalEndPoint!);
+                server.ReceiveOnce();
+            }
+
+            var accepts = DrainPackets(peerSocket).Where(p => p.PacketType == CultNetRudpPacketType.Accept && p.Reliable);
+            Assert.That(accepts.Select(p => p.Sequence).Distinct().Count(), Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpListener_OwesOneReliableAcceptPerGenerationAndReportsAReplacedPeer()
+        {
+            using var serverSocket = BindUdpSocket();
+            using var peerSocket = BindUdpSocket();
+            const uint connectionId = 0x1020305a;
+            using var server = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+            {
+                RuntimeId = "csharp-rudp-listener",
+                Socket = serverSocket,
+                ConnectionId = connectionId
+            });
+            var ended = new List<CultNetRudpSocketServerPeer>();
+            server.PeerDisconnected += ended.Add;
+            var connect = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId }).CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                peerSocket.SendTo(CultNetRudpPacketCodec.Encode(connect), serverSocket.LocalEndPoint!);
+                server.ReceiveOnce();
+            }
+
+            var accepts = DrainPackets(peerSocket).Where(p => p.PacketType == CultNetRudpPacketType.Accept && p.Reliable);
+            Assert.That(accepts.Select(p => p.Sequence).Distinct().Count(), Is.EqualTo(1));
+            Assert.That(server.Peers, Has.Count.EqualTo(1));
+            Assert.That(ended, Is.Empty);
+
+            // A different payload from the same endpoint is a new generation, and the old one is reported.
+            var other = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = connectionId }).CreateConnect(0, Encoding.UTF8.GetBytes("rejoin"));
+            peerSocket.SendTo(CultNetRudpPacketCodec.Encode(other), serverSocket.LocalEndPoint!);
+            server.ReceiveOnce();
+            Assert.That(server.Peers, Has.Count.EqualTo(1));
+            Assert.That(ended, Has.Count.EqualTo(1));
+        }
+
+        [Test]
         public void RudpConfiguration_RejectsLimitsThatCannotAdmitAConnect()
         {
             Assert.Throws<ArgumentOutOfRangeException>(() =>

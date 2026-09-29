@@ -1026,6 +1026,36 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Answers a connect from a peer this session has already accepted. The packet's sequence is
+        /// remembered and nothing is queued, so a connect storm cannot grow the reliable queue. The reply
+        /// is the accept still awaiting acknowledgement, or an ack once it was acknowledged.
+        /// </summary>
+        public CultNetRudpPacket AnswerRepeatedConnect(CultNetRudpPacket packet, long nowMs = 0)
+        {
+            RequireConnection(packet);
+            if (packet.PacketType != CultNetRudpPacketType.Connect)
+            {
+                throw new InvalidOperationException($"Expected RUDP connect packet, got {packet.PacketType}.");
+            }
+
+            ApplyAcknowledgements(packet);
+            RememberReceived(packet.Sequence);
+            _lastReceivedAtMs = nowMs;
+            lock (_pendingReliableGate)
+            {
+                foreach (var pending in _pendingReliable.Values)
+                {
+                    if (pending.Packet.PacketType != CultNetRudpPacketType.Accept)
+                        continue;
+                    pending.LastSentAtMs = nowMs;
+                    return ClonePacket(pending.Packet);
+                }
+            }
+
+            return CreateAck();
+        }
+
+        /// <summary>
         /// Creates a data packet.
         /// </summary>
         public CultNetRudpPacket Send(string channelId, byte[] payload, CultNetRudpSendOptions? options = null)
@@ -1715,6 +1745,7 @@ namespace GameCult.Networking
     public sealed class CultNetRudpSocketTransportConnection : IDisposable
     {
         private const int MinimumReceiveBufferBytes = 4 * 1024 * 1024;
+        private static readonly byte[] ReplacedPeerReason = Encoding.UTF8.GetBytes("replaced by a new Connect generation");
         // One acknowledgement carries the preceding 32-packet receive mask.
         // Pace at that transport window instead of sleeping after every fragment;
         // a one-millisecond sleep can consume a full scheduler quantum on Windows.
@@ -1810,6 +1841,7 @@ namespace GameCult.Networking
                 throw new InvalidOperationException("Only a client RUDP socket transport can initiate connect.");
             }
 
+            DisconnectReason = null;
             lock (_sessionGate)
                 SendPacket(_session.CreateConnect(NowMs(), payload ?? Array.Empty<byte>()));
         }
@@ -1890,6 +1922,12 @@ namespace GameCult.Networking
             {
                 while (true)
                 {
+                    // An ended session forgot its unacknowledged writes; reporting them
+                    // flushed would be a lie.
+                    var ended = DisconnectReason;
+                    if (ended != null)
+                        throw new InvalidOperationException(
+                            "RUDP session ended before its reliable writes were acknowledged: " + Encoding.UTF8.GetString(ended));
                     lock (_sessionGate)
                     {
                         if (_session.OutstandingReliablePacketCount == 0)
@@ -2186,7 +2224,17 @@ namespace GameCult.Networking
                     CultNetRudpPacket accept;
                     try
                     {
-                        accept = _session.AcceptConnect(packet, NowMs());
+                        // A connect from the peer this transport already accepted repeats: answer it
+                        // with the accept already owed and queue nothing.
+                        if (_session.Connected)
+                        {
+                            accept = _session.AnswerRepeatedConnect(packet, NowMs());
+                        }
+                        else
+                        {
+                            accept = _session.AcceptConnect(packet, NowMs());
+                            DisconnectReason = null;
+                        }
                     }
                     catch (InvalidOperationException)
                     {
@@ -2390,12 +2438,14 @@ namespace GameCult.Networking
     /// </summary>
     public sealed class CultNetRudpSocketServerPeer
     {
-        internal CultNetRudpSocketServerPeer(EndPoint remoteEndPoint, CultNetRudpSession session)
+        internal CultNetRudpSocketServerPeer(EndPoint remoteEndPoint, byte[] connectPayload, CultNetRudpSession session)
         {
             RemoteEndPoint = remoteEndPoint;
+            ConnectPayload = connectPayload;
             Session = session;
         }
 
+        internal byte[] ConnectPayload { get; }
         internal CultNetRudpSession Session { get; }
         internal object SessionGate { get; } = new object();
 
@@ -2616,8 +2666,32 @@ namespace GameCult.Networking
             var peerKey = RemoteKey(remote);
             if (packet.PacketType == CultNetRudpPacketType.Connect)
             {
+                var connectPayload = packet.Payload ?? Array.Empty<byte>();
+                _peers.TryGetValue(peerKey, out var admitted);
+                // The same payload from an admitted peer is a repeated Connect: answer it with the
+                // Accept already owed and queue nothing. A different payload is a new generation.
+                if (admitted != null && admitted.ConnectPayload.AsSpan().SequenceEqual(connectPayload))
+                {
+                    lock (admitted.SessionGate)
+                    {
+                        CultNetRudpPacket reply;
+                        try
+                        {
+                            reply = admitted.Session.AnswerRepeatedConnect(packet, NowMs());
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            _stats.PacketsDropped++;
+                            return true;
+                        }
+                        SendPacket(admitted.RemoteEndPoint, reply);
+                    }
+                    return true;
+                }
+
                 var peer = new CultNetRudpSocketServerPeer(
                     CloneEndPoint(remote),
+                    connectPayload,
                     new CultNetRudpSession(new CultNetRudpSessionOptions
                     {
                         ConnectionId = _connectionId,
@@ -2628,6 +2702,11 @@ namespace GameCult.Networking
                 _peers[peerKey] = peer;
                 lock (peer.SessionGate)
                     SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
+                if (admitted != null)
+                {
+                    admitted.DisconnectReason = ReplacedPeerReason;
+                    PeerDisconnected?.Invoke(admitted);
+                }
                 return true;
             }
 
