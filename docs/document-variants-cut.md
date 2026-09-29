@@ -243,18 +243,23 @@ Adds:
 - **`Validate` resolves** every admitted variant and every dependent of an admitted or
   evicted base, in base-first order, against the post-batch set. It refuses, naming keys:
   a cycle; a missing base; a different concrete type; a global type; an evicted base with
-  surviving variants; an override slot missing on the type (Q4); a value that will not
-  decode; a variant whose resolved `[CultName]` equals its base's (R6); a plain `Upsert` at a
-  variant key (Q1a).
+  surviving variants; a variant whose resolved `[CultName]` equals its base's (R6); a plain
+  `Upsert` at a variant key (Q1a). **Not refused (Q4 c, operator 2026-09-29):** an override
+  naming a slot the type no longer has, or holding a value that no longer decodes into the
+  member's type, soft-drifts exactly as the same member would on a plain record under
+  `cultcache-schema-compatibility.md`. It is ignored with a warning naming the variant and
+  the member, and the variant inherits the base value. One rule, the existing soft-drift
+  path, never a variant-specific one.
 - **`Apply` re-resolves dependents** in the same hold. Each emits `Updated` and is re-indexed.
   A base change stamps no dependent `storedAt`.
 - **Header**: the store writes `v2` iff it holds a variant (Q5a) and reads `v1` and `v2`.
 - **Refusals** (Q6): `DirectoryMessagePackBackingStore` push and commit of a variant;
   `CultNetDocumentRegistry` row building for a variant; `CultMesh.ReadSingleFileDocument` of
   a variant key.
-- **Contracts**: the variant record section in `cultcache-persistence-format.md`; the Q4
-  exception in `cultcache-schema-compatibility.md`; a "variants: C# resolves; others refuse"
-  row in `runtime-parity-scope.md`.
+- **Contracts**: the variant record section in `cultcache-persistence-format.md`; one
+  sentence in `cultcache-schema-compatibility.md` saying overrides soft-drift like members
+  (Q4 c, no exception); a "variants: C# resolves; others refuse" row in
+  `runtime-parity-scope.md`.
 
 Authority map:
 - Owner: `CultCache.Validate`/`Apply` owns the resolved view.
