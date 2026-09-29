@@ -312,6 +312,7 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
     }
 }
 
+const STORE_FORMAT_PREFIX: &str = "cultcache.store.";
 const STORE_FORMAT_V1: &str = "cultcache.store.v1";
 
 /// A store that can hold element ids. A reader older than element ids refuses this header: it would skip the id
@@ -745,17 +746,38 @@ impl SingleFileMessagePackBackingStore {
         self.read_all_unlocked()
     }
 
-    /// Whether the file on disk carries the element-id header. A rewrite keeps it: the payloads this store
-    /// passes through may hold ids, and a reader older than ids would skip them. The header is the first thing in
-    /// the file, so a short prefix answers without reading the store.
-    fn is_marked_on_disk(&self) -> bool {
+    /// The header a rewrite writes: the one the file on disk carries. A file marked for element ids stays marked (the
+    /// payloads this store passes through may hold ids, and a reader older than ids would skip them); a file that is
+    /// gone, empty or legacy is written v1; a header this runtime cannot read refuses the rewrite, so a store that holds
+    /// variants is never overwritten by a runtime that would drop them. The header is the first thing in the file, so a
+    /// short prefix answers without reading the store.
+    fn header_for_rewrite(&self) -> Result<&'static str> {
         use std::io::Read;
-        let mut prefix = [0u8; 24];
-        let Ok(mut file) = File::open(&self.path) else { return false };
+        let mut prefix = [0u8; 96];
+        let Ok(mut file) = File::open(&self.path) else { return Ok(STORE_FORMAT_V1) };
         let read = file.read(&mut prefix).unwrap_or(0);
-        prefix[..read]
-            .windows(STORE_FORMAT_ELEMENT_IDS.len())
-            .any(|window| window == STORE_FORMAT_ELEMENT_IDS.as_bytes())
+        let bytes = &prefix[..read];
+        // The store is an array whose first slot is the header string.
+        let Some(rest) = (match bytes.first() {
+            Some(0x90..=0x9f) => bytes.get(1..),
+            Some(0xdc) => bytes.get(3..),
+            Some(0xdd) => bytes.get(5..),
+            _ => None,
+        }) else {
+            return Ok(STORE_FORMAT_V1);
+        };
+        let (length, start) = match rest.first() {
+            Some(tag @ 0xa0..=0xbf) => ((tag & 0x1f) as usize, 1),
+            Some(0xd9) => match rest.get(1) {
+                Some(length) => (*length as usize, 2),
+                None => return Ok(STORE_FORMAT_V1),
+            },
+            _ => return Ok(STORE_FORMAT_V1),
+        };
+        match rest.get(start..start + length).and_then(|header| std::str::from_utf8(header).ok()) {
+            Some(header) if header.starts_with(STORE_FORMAT_PREFIX) => readable_store_format(header),
+            _ => Ok(STORE_FORMAT_V1),
+        }
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
@@ -764,7 +786,7 @@ impl SingleFileMessagePackBackingStore {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         remove_abandoned_staging_files(&self.path)?;
-        let format = if self.is_marked_on_disk() { STORE_FORMAT_ELEMENT_IDS } else { STORE_FORMAT_V1 };
+        let format = self.header_for_rewrite()?;
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, format)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
@@ -2601,13 +2623,19 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], format: &str) -> Result<
     ))
 }
 
+fn readable_store_format(header: &str) -> Result<&'static str> {
+    match header {
+        STORE_FORMAT_V1 => Ok(STORE_FORMAT_V1),
+        STORE_FORMAT_ELEMENT_IDS => Ok(STORE_FORMAT_ELEMENT_IDS),
+        _ => Err(anyhow!(
+            "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" and \"cultcache.store.v3\" only. The store needs a runtime that resolves document variants."
+        )),
+    }
+}
+
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     if let Some(header) = store_header(bytes) {
-        if header != STORE_FORMAT_V1 && header != STORE_FORMAT_ELEMENT_IDS {
-            return Err(anyhow!(
-                "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" and \"cultcache.store.v3\" only. The store needs a runtime that resolves document variants."
-            ));
-        }
+        readable_store_format(&header)?;
     }
     let snapshot: PersistedStoreSnapshot =
         rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
@@ -4742,6 +4770,30 @@ mod tests {
             header_after_rewrite("document-variants-c2a/v3-base.msgpack")?,
             "cultcache.store.v3"
         );
+        Ok(())
+    }
+
+    // A whole-store flush reads the header the file carries first: one it cannot read refuses, and the file is untouched.
+    #[test]
+    fn push_all_refuses_a_store_whose_header_it_cannot_read_and_leaves_it_untouched() -> Result<()> {
+        for vector in [
+            "document-variants-c0/unknown-header.msgpack",
+            "document-variants-c0/variant-v2.msgpack",
+            "document-variants-c1/variant-store.msgpack",
+        ] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors").join(vector);
+            std::fs::copy(source, &path)?;
+            let before = std::fs::read(&path)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let message = format!(
+                "{:#}",
+                store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err()
+            );
+            assert!(message.contains("is not readable"), "{vector}: {message}");
+            assert_eq!(std::fs::read(&path)?, before, "{vector} was rewritten");
+        }
         Ok(())
     }
 

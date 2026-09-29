@@ -44,6 +44,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
+    // The disk decides the header: a file that is gone, empty or legacy is not marked.
+    this.#format = STORE_FORMAT_VERSION;
     try {
       const data = await readFile(this.filePath);
       if (data.length === 0) {

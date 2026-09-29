@@ -875,6 +875,18 @@ class CultCacheTests(unittest.TestCase):
             store.push_all(envelopes)
             self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
 
+    def test_single_file_push_after_the_marked_file_is_gone_writes_unmarked(self) -> None:
+        import msgpack
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "store.msgpack"
+            store_path.write_bytes((self._C2A_VECTORS / "v3-base.msgpack").read_bytes())
+            store = SingleFileMessagePackBackingStore(store_path)
+            envelopes = store.pull_all()
+            store_path.unlink()
+            store.push(envelopes[0])
+            self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
+
 
 if __name__ == "__main__":
     unittest.main()

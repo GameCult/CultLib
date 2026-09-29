@@ -1534,6 +1534,16 @@ test("SingleFileMessagePackBackingStore pushAll applies the header the file on d
   assert.equal(await header(v1), "cultcache.store.v1");
 });
 
+test("SingleFileMessagePackBackingStore push after a read of a marked file that is gone writes v1", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-gone-"));
+  const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
+  const store = new SingleFileMessagePackBackingStore(v3);
+  const envelopes = await store.pullAll();
+  await rm(v3);
+  await store.push(envelopes[0]!);
+  assert.equal((decode(await readFile(v3)) as unknown[])[0], "cultcache.store.v1");
+});
+
 test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrite keeps the marker", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-v3-"));
   const v3 = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "v3.msgpack");
