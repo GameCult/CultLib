@@ -356,6 +356,19 @@ stripped (probe). Other findings:
 - Fix batch 3 in Hands: F2, marking by content in every runtime, F3 routed through the cache's header
   decision and load checks, F4.
 
+**C2a Soul pass 3 (`9ed61dd2`), 2026-09-30: fix first.**
+- A flattened record's `HoldsIds` goes stale when its base changes in the same batch.
+- A conditional commit onto disk ignores content.
+- Rust `push_all` clobbers headers it cannot read.
+- TS keeps a stale header after the file goes away.
+- Self's claim that "rollout order makes the raw-writer hole benign" was wrong. The reader that strips ids
+  from a v1 store is a post-C0, pre-C2a build. That is exactly the reader the v3 marker targets, and rollout
+  order does not keep it away.
+
+**Ruling, 2026-09-30 (operator): C0 is released only together with C2a.** The first CultLib release that
+refuses v3 also contains C2a, so no released reader strips ids. C0 and C1 are never released on their own.
+Raw and cross-runtime writers that cannot see ids stay sticky-only. Fix batch 4 is in Hands.
+
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
   plain records too, so R6-for-indexes becomes one general rule:
