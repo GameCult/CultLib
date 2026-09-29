@@ -95,6 +95,18 @@ public sealed class CultMeshSingleFileElementIdTests
     }
 
     [Test]
+    public void AFailedTypedWriteGivesTheMintedIdsBack()
+    {
+        var blocked = Path_("blocked.cc");
+        Directory.CreateDirectory(blocked);
+        var element = Descriptor();
+
+        Assert.That(() => CultMesh.WriteSingleFileDocument(blocked, Key, Publication(element)), Throws.Exception);
+
+        element.Id.Should().BeEmpty("a write that does not land gives its ids back");
+    }
+
+    [Test]
     public void TypedReadRefusesWhatALoadRefusesAndMintsWhatALoadMints()
     {
         var path = Path_("disk.cc");

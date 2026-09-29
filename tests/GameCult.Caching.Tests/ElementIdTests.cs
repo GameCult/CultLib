@@ -770,6 +770,125 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(withIds), Is.EqualTo("cultcache.store.v3"));
         }
 
+        // Soul's probe: the base gains ids in the batch that flattens the variant, then leaves. The flattened record is the
+        // document it stores, so its ids mark the file whatever the base did before or after.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AFlattenedVariantIsMarkedByTheDocumentItStoresNotByTheOneItWasPlannedAgainst(bool viaFlush)
+        {
+            var path = PathOf(viaFlush ? "flatten-flush.cc" : "flatten-commit.cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"), new[] { cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"));
+
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), Deck("base", reels: 1), new CultRecordKey("base"));
+                    batch.Flatten(new CultRecordKey("v"));
+                });
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+
+                if (viaFlush)
+                {
+                    cache.Remove(new CultRecordKey("base"));
+                    cache.FlushAllBackingStores();
+                }
+                else
+                {
+                    Assert.That(cache.Commit(batch => batch.Remove(new CultRecordKey("base"))), Is.True);
+                }
+            }
+
+            var flattenedIds = AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "v").Payload));
+            Assert.That(flattenedIds, Is.Not.Empty, "the flattened record holds the base's ids");
+            Assert.That(flattenedIds, Has.All.Not.Empty);
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the file holds ids, so it is marked");
+        }
+
+        // A conditional commit lands onto the file as it is, and decides its header as every writer does: by the ids the file
+        // will hold. Ids on disk mark it whatever header the file carried; ids only this cache minted are on no disk.
+        [Test]
+        public void AConditionalCommitOntoAFileHoldingIdsMarksItAndOneOntoLoadMintedIdsDoesNot()
+        {
+            var held = PathOf("conditional-held.cc");
+            Type[] types = { typeof(IdDeck), typeof(PreCut2FixtureItem) };
+            using (var cache = OpenWith(held, false, types))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(held));
+            snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV1;
+            File.WriteAllBytes(held, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            using (var cache = OpenWith(held, false, types))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Expect(new CultRecordKey("plain"), null);
+                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
+                }), Is.True);
+            }
+
+            Assert.That(HeaderOf(held), Is.EqualTo("cultcache.store.v3"), "the deck on disk holds ids");
+
+            var preId = PathOf("conditional-minted.cc");
+            WritePreIdStore(preId, null, ("a", "a", 1));
+            using (var cache = OpenWith(preId, false, types))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Expect(new CultRecordKey("plain"), null);
+                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
+                }), Is.True);
+            }
+
+            Assert.That(HeaderOf(preId), Is.EqualTo("cultcache.store.v1"), "a's ids exist only in memory; the file holds none");
+        }
+
+        // The last id leaves the store in this commit: an unconditional commit writes the store it will hold, not the one it held.
+        [Test]
+        public void AnUnconditionalCommitThatRemovesOrReplacesTheLastIdWritesV1()
+        {
+            var removed = PathOf("last-removed.cc");
+            using (var cache = Open(removed))
+            {
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+                Assert.That(HeaderOf(removed), Is.EqualTo("cultcache.store.v3"));
+                cache.Commit(batch => batch.Remove(new CultRecordKey("d")));
+            }
+
+            Assert.That(HeaderOf(removed), Is.EqualTo("cultcache.store.v1"));
+
+            var replaced = PathOf("last-replaced.cc");
+            using (var cache = Open(replaced))
+            {
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("d"), new CultRecordKey("d")));
+            }
+
+            Assert.That(HeaderOf(replaced), Is.EqualTo("cultcache.store.v1"));
+        }
+
+        // Any override holding an id marks the variant, wherever it sits among the overrides.
+        [Test]
+        public void AVariantWhoseIdBearingOverrideIsNotTheLastIsStillMarked()
+        {
+            var path = PathOf("variant-order.cc");
+            using (var cache = Open(path))
+            {
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                        new[] { cache.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() { Label = "r" } }), cache.Override<IdDeck>(nameof(IdDeck.Name), "v") });
+                });
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
+        }
+
         [Test]
         public void AnElementObjectTwiceInOneListIsRefusedAtWriteAndNothingIsPersisted()
         {

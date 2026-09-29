@@ -15,10 +15,8 @@ namespace GameCult.Caching.MessagePack;
 // A small hot manifest indexes the store; each record lives in one cold content-addressed page.
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
-    private const string IndexedFormatVersion = "cultcache.store.v4.directory-content-addressed-pages";
-    // The manifest of a directory that holds element ids: a reader older than ids refuses it, because it would skip the id
-    // slots of a page and rewrite the elements without them.
-    private const string IndexedFormatVersionWithIds = "cultcache.store.v5.directory-content-addressed-pages";
+    private const string IndexedFormatVersion = CultPersistedStoreSnapshot.DirectoryFormatV4;
+    private const string IndexedFormatVersionWithIds = CultPersistedStoreSnapshot.DirectoryFormatV5;
     // An unleased load that has not settled after this many attempts throws.
     private const int UnleasedLoadAttempts = 5;
     private readonly FileInfo _manifestFile;
@@ -305,7 +303,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         var manifest = new CultPersistedStoreSnapshot
         {
-            FormatVersion = carriesElementIds ? IndexedFormatVersionWithIds : IndexedFormatVersion,
+            FormatVersion = CultPersistedStoreSnapshot.DirectoryFormatFor(carriesElementIds),
             SchemaCatalog = catalog,
             Records = index
         };

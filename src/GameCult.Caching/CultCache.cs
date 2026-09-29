@@ -65,6 +65,9 @@ namespace GameCult.Caching
         public const string FormatV1 = "cultcache.store.v1";
         public const string FormatV2 = "cultcache.store.v2";
         public const string FormatV3 = "cultcache.store.v3";
+        // The directory store's manifest formats: v5 when the directory holds an element id, for the reason v3 exists.
+        public const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
+        public const string DirectoryFormatV5 = "cultcache.store.v5.directory-content-addressed-pages";
 
         public string FormatVersion { get; set; } = FormatV1;
 
@@ -73,6 +76,9 @@ namespace GameCult.Caching
         // with neither stays byte-identical v1. A file already marked stays marked; the writer that knows that says so.
         internal static string FormatFor(bool holdsIds, bool holdsVariants) =>
             holdsIds ? FormatV3 : holdsVariants ? FormatV2 : FormatV1;
+
+        // The directory store's header decision (it refuses variants): the same owner as FormatFor.
+        internal static string DirectoryFormatFor(bool holdsIds) => holdsIds ? DirectoryFormatV5 : DirectoryFormatV4;
 
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
@@ -2743,7 +2749,13 @@ namespace GameCult.Caching
                 stack.RemoveAt(stack.Count - 1);
                 return done[key] = isVariant
                     ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null), holdsIds)
-                    : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document) { Flattens = true, HoldsIds = variant.HoldsIds };
+                    : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document)
+                    {
+                        Flattens = true,
+                        // The flattened record is the document it stores, resolved against the post-batch base: the flag is read
+                        // off that document, not carried from the variant or from the document the flatten was planned against.
+                        HoldsIds = CultElementIds.Plan(document, key, deterministic: source != null).HoldsIds
+                    };
             }
         }
 
@@ -3280,12 +3292,13 @@ namespace GameCult.Caching
             foreach (var entry in request.Upserts)
                 records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
 
-            // A file already marked stays marked: it may hold records this cache cannot read, and a rewrite must not shed the marker.
+            // One rule for every writer: the file holds ids when a record it will hold does. A record this commit replaces or removes
+            // no longer counts. Onto the file, only ids already persisted count (a load-minted id is on no disk), and a file already
+            // marked stays marked: it may hold records this cache cannot read, and a rewrite must not shed the marker.
             var replaced = request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
             var holdsIds = request.Upserts.Any(entry => entry.HoldsIds) ||
-                             (ontoDisk
-                                 ? string.Equals(disk.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal)
-                                 : Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value)));
+                           Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value) && !(ontoDisk && entry.IdsInMemoryOnly)) ||
+                           (ontoDisk && string.Equals(disk.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal));
             WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())), holdsIds);
             if (!ontoDisk)
                 Cache?.IdsPersisted(records.Keys);
