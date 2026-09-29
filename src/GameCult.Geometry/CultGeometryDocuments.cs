@@ -153,8 +153,7 @@ namespace GameCult.Geometry
         public string RequestId { get; set; } = string.Empty;
 
         [Key(1)]
-        [CultReference(typeof(CultGeometryDomainDocument))]
-        public string DomainKey { get; set; } = string.Empty;
+        public CultRecordRef<CultGeometryDomainDocument> DomainKey { get; set; }
 
         [Key(2)]
         [CultIndex]
@@ -200,7 +199,7 @@ namespace GameCult.Geometry
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
             return new CultRecordKey("geometry:request:" + StableHash(
-                request.DomainKey,
+                request.DomainKey.Key.Value,
                 request.WorkerGroup,
                 StableVector(request.CameraPosition),
                 StableVector(request.FrustumMin),
@@ -228,8 +227,7 @@ namespace GameCult.Geometry
         public string CutId { get; set; } = string.Empty;
 
         [Key(1)]
-        [CultReference(typeof(CultGeometryBuildRequest))]
-        public string RequestKey { get; set; } = string.Empty;
+        public CultRecordRef<CultGeometryBuildRequest> RequestKey { get; set; }
 
         [Key(2)]
         public string[] SelectedNodes { get; set; } = Array.Empty<string>();
@@ -247,7 +245,7 @@ namespace GameCult.Geometry
         {
             if (cut == null) throw new ArgumentNullException(nameof(cut));
             return new CultRecordKey("geometry:cut:" + StableHash(
-                cut.RequestKey,
+                cut.RequestKey.Key.Value,
                 cut.CutId,
                 StableArray(cut.SelectedNodes),
                 StableArray(cut.DeferredChildRequests),
@@ -313,8 +311,7 @@ namespace GameCult.Geometry
         public string ChunkId { get; set; } = string.Empty;
 
         [Key(1)]
-        [CultReference(typeof(CultGeometrySelectedCutManifest))]
-        public string CutKey { get; set; } = string.Empty;
+        public CultRecordRef<CultGeometrySelectedCutManifest> CutKey { get; set; }
 
         [Key(2)]
         [CultIndex]
@@ -357,7 +354,7 @@ namespace GameCult.Geometry
         {
             if (chunk == null) throw new ArgumentNullException(nameof(chunk));
             return new CultRecordKey("geometry:chunk:" + StableHash(
-                chunk.CutKey,
+                chunk.CutKey.Key.Value,
                 chunk.ChunkId,
                 chunk.SelectedCutId,
                 StableArray(chunk.SourceDomainKeys),

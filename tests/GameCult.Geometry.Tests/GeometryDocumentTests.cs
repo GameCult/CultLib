@@ -104,7 +104,7 @@ namespace GameCult.Geometry.Tests
             var domainKey = CultGeometryDomainDocument.CreateRecordKey(domain);
             var request = new CultGeometryBuildRequest
             {
-                DomainKey = domainKey.Value,
+                DomainKey = new CultRecordRef<CultGeometryDomainDocument>(domainKey),
                 WorkerGroup = "ragnarok-column-workers",
                 CameraPosition = [36f, -42f, 30f],
                 FrustumMin = [-75f, -75f, -30f],
@@ -127,6 +127,26 @@ namespace GameCult.Geometry.Tests
             second.Should().Be(first);
             changed.Should().NotBe(first);
             first.Value.Should().StartWith("geometry:request:");
+        }
+
+        // The geometry documents reference each other by record key. The reference members are
+        // CultRecordRef<T> so the cache can walk them, and they stay a bare msgpack string on the wire.
+        [Test]
+        public void GeometryReferences_AreWalkableByTheCache_AndStayStringsOnTheWire()
+        {
+            var cache = new CultCache();
+            var descriptor = cache.Registry.GetRequired<CultGeometryBuildRequest>();
+            descriptor.DeclaredMembers.Should().Contain(m => m.MemberName == "DomainKey" && m.IsReference && !m.IsMany);
+
+            var chunk = SampleChunk();
+            var references = cache.Registry.GetRequired<CultGeometryChunkArtifact>().ReferencesOf(chunk, "CutKey").ToArray();
+            references.Should().ContainSingle().Which.Target.Value.Should().Be("geometry:cut:test");
+
+            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(chunk, typeof(CultGeometryChunkArtifact));
+            var reader = new MessagePackReader(payload);
+            reader.ReadArrayHeader();
+            reader.ReadString().Should().Be(chunk.ChunkId);
+            reader.ReadString().Should().Be("geometry:cut:test");
         }
 
         [Test]
@@ -382,7 +402,7 @@ namespace GameCult.Geometry.Tests
             return new CultGeometryChunkArtifact
             {
                 ChunkId = "chunk/ragnarok-column/column-00",
-                CutKey = "geometry:cut:test",
+                CutKey = new CultRecordRef<CultGeometrySelectedCutManifest>(new CultRecordKey("geometry:cut:test")),
                 SelectedCutId = "cut-test",
                 BoundsMin = [-1f, -1f, 0f],
                 BoundsMax = [1f, 1f, 1f],
