@@ -2761,7 +2761,8 @@ namespace GameCult.Caching
 
             foreach (var variant in landing.Values.Where(stored => stored.Variant != null))
             {
-                if (plan.Projections[variant.Key.Value].Name is not { } variantName)
+                var variantName = plan.Projections[variant.Key.Value].Name;
+                if (variantName == null)
                     continue;
                 for (var ancestor = Ancestor(variant.Variant!.BaseKey); ancestor != null;
                      ancestor = ancestor.Variant == null ? null : Ancestor(ancestor.Variant.BaseKey))
