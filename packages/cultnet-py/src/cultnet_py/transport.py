@@ -505,6 +505,25 @@ class CultNetRudpSession:
         self._track_reliable(response, now_ms)
         return response
 
+    def answer_repeated_connect(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpPacket:
+        """Answers a Connect from a peer this session already accepted.
+
+        The packet's sequence is remembered and nothing is queued, so a Connect
+        storm cannot grow the reliable queue. The reply is the Accept still awaiting
+        acknowledgement, or an Ack once it was acknowledged.
+        """
+        self._require_connection(packet)
+        if packet.packet_type != CultNetRudpPacketType.CONNECT:
+            raise ValueError(f"Expected RUDP connect packet, got {packet.packet_type.value}")
+        self._apply_acknowledgements(packet)
+        self._remember_received(packet.sequence)
+        self._last_received_at_ms = now_ms
+        for pending in self._pending_reliable.values():
+            if pending.packet.packet_type == CultNetRudpPacketType.ACCEPT:
+                pending.last_sent_at_ms = now_ms
+                return pending.packet
+        return self.create_ack()
+
     def send(
         self,
         channel_id: str,
@@ -975,6 +994,7 @@ class CultNetRudpSocketTransportConnection:
     def connect(self, payload: bytes = b"") -> None:
         if self.mode != CultNetRudpSocketMode.CLIENT:
             raise ValueError("Only a client RUDP socket transport can initiate connect")
+        self.disconnect_reason = None
         self._send_packet(self.session.create_connect(_now_ms(), payload))
 
     def send(self, channel_id: str, payload: bytes) -> None:
@@ -1024,12 +1044,18 @@ class CultNetRudpSocketTransportConnection:
             return None
 
         if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type == CultNetRudpPacketType.CONNECT:
+            # A Connect from the peer this transport already accepted repeats:
+            # answer it with the Accept already owed and queue nothing.
             try:
-                accept = self.session.accept_connect(packet, _now_ms())
+                if self.session.connected:
+                    reply = self.session.answer_repeated_connect(packet, _now_ms())
+                else:
+                    reply = self.session.accept_connect(packet, _now_ms())
+                    self.disconnect_reason = None
             except ValueError:
                 self._packets_dropped += 1
                 return None
-            self._send_packet(accept)
+            self._send_packet(reply)
             return None
 
         try:
@@ -1080,7 +1106,16 @@ class CultNetRudpSocketTransportConnection:
         self._delivered_frames.clear()
         self.socket.settimeout(poll_timeout)
         try:
-            while self.session.outstanding_reliable_packet_count > 0:
+            while True:
+                # An ended session forgot its unacknowledged writes; reporting
+                # them flushed would be a lie.
+                if self.disconnect_reason is not None:
+                    raise ConnectionError(
+                        "RUDP session ended before its reliable writes were acknowledged: "
+                        + self.disconnect_reason.decode("utf-8", errors="replace")
+                    )
+                if self.session.outstanding_reliable_packet_count == 0:
+                    return
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
                         "RUDP reliable flush timed out with "
