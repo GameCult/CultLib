@@ -11,6 +11,13 @@
 //! disagreement). Ed25519 is deterministic, so the TypeScript signer must
 //! reproduce each vector byte for byte from the same fields.
 //!
+//! The `service-stateful` set is the lease-bound shape: Expected carries a state
+//! lineage and requires a write lease, and Rust issues `lease.cc` naming the
+//! warming vector's digest. Its warming vector is sequence 1; the active and
+//! degraded vectors are sequence 2 and bind to that lease. Two further leases are
+//! deliberately wrong (`lease-other-warming.cc` names a different warming digest,
+//! `lease-other-target.cc` names another target) for the TypeScript refusal tests.
+//!
 //! Linux only: the provider identity is bound to `/etc/machine-id`, and the
 //! generated `machine-id` file records the value the identities were bound to.
 //!
@@ -26,9 +33,10 @@ use cultcache_rs::{
 use cultnet_rs::{
     GameCultProviderHealthIdentity, GameCultRuntimeCapability,
     GameCultRuntimePresenceHealthPurpose, GameCultRuntimePresenceHealthRecord,
-    IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_RUNTIME_ACTIVATION_SCHEMA,
-    IdunnExpectedCapability, IdunnExpectedDependency, IdunnExpectedIncarnationRecord,
-    IdunnExpectedRoute, IdunnRuntimeActivationLaunch, IdunnRuntimeActivationRecord,
+    IDUNN_EXPECTED_INCARNATION_SCHEMA, IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
+    IDUNN_RUNTIME_ACTIVATION_SCHEMA, IdunnExpectedCapability, IdunnExpectedDependency,
+    IdunnExpectedIncarnationRecord, IdunnExpectedRoute, IdunnProcessWriteLeaseRecord,
+    IdunnRuntimeActivationLaunch, IdunnRuntimeActivationRecord,
     IdunnRuntimeActivationSigner, IdunnServiceIdentity, RuntimePresenceAuthenticationContext,
     authenticate_runtime_presence_claim, correlate_runtime_presence_claim,
     enroll_service_identity_at, verify_runtime_authority,
@@ -49,9 +57,10 @@ struct Set {
     candidate: &'static str,
     minimum_capacity: u32,
     odin_dependency: bool,
+    stateful: bool,
 }
 
-const SETS: [Set; 3] = [
+const SETS: [Set; 4] = [
     Set {
         dir: "web",
         target: "streampixels-web",
@@ -60,6 +69,7 @@ const SETS: [Set; 3] = [
         candidate: "http://127.0.0.1:18830",
         minimum_capacity: 1,
         odin_dependency: false,
+        stateful: false,
     },
     Set {
         dir: "service",
@@ -69,6 +79,17 @@ const SETS: [Set; 3] = [
         candidate: "tcp://127.0.0.1:18831",
         minimum_capacity: 2,
         odin_dependency: true,
+        stateful: false,
+    },
+    Set {
+        dir: "service-stateful",
+        target: "streampixels-service",
+        transport: "tcp",
+        stable: "tcp://127.0.0.1:8833",
+        candidate: "tcp://127.0.0.1:18833",
+        minimum_capacity: 2,
+        odin_dependency: true,
+        stateful: true,
     },
     Set {
         dir: "rudp-route",
@@ -78,6 +99,7 @@ const SETS: [Set; 3] = [
         candidate: "rudp://127.0.0.1:18832",
         minimum_capacity: 1,
         odin_dependency: false,
+        stateful: false,
     },
 ];
 
@@ -131,9 +153,9 @@ fn build(
         expected_signer_identity_id: provider_anchor.identity_id.clone(),
         health_contract: format!("{}.runtime-health", set.target),
         artifact_sha256: digest('4'),
-        state_schema_generation: None,
-        state_contract_sha256: None,
-        write_lease_required: false,
+        state_schema_generation: set.stateful.then(|| "streampixels-state-v1".to_string()),
+        state_contract_sha256: set.stateful.then(|| digest('7')),
+        write_lease_required: set.stateful,
         route: Some(IdunnExpectedRoute {
             route_id: format!("{}-route", set.target),
             transport: set.transport.into(),
@@ -189,20 +211,13 @@ fn build(
 
     let authority =
         verify_runtime_authority(&expected, &activation, idunn_anchor, &provider_anchor.public_key)?;
-    let vectors = [
-        ("presence-active.bin", "active", set.minimum_capacity, None),
-        ("presence-warming.bin", "warming", set.minimum_capacity, None),
-        (
-            "presence-active-below-minimum.bin",
-            "active",
-            set.minimum_capacity.saturating_sub(1),
-            Some("expected-capability-000-capacity"),
-        ),
-    ];
-    for (name, state, capacity, disagreement) in vectors {
-        if capacity == 0 {
-            continue;
-        }
+    let sign_vector = |name: &str,
+                       state: &str,
+                       capacity: u32,
+                       sequence: u64,
+                       write_lease_sha256: Option<String>,
+                       disagreement: Option<&str>|
+     -> Result<String> {
         let mut presence = GameCultRuntimePresenceHealthRecord {
             schema_version: cultnet_rs::GAMECULT_RUNTIME_PRESENCE_HEALTH_SCHEMA.into(),
             target: expected.target.clone(),
@@ -211,8 +226,8 @@ fn build(
             incarnation_id: expected.incarnation_id.clone(),
             sealed_release_id: expected.sealed_release_id.clone(),
             activation_witness_sha256: activation.canonical_sha256()?,
-            state_schema_generation: None,
-            state_contract_sha256: None,
+            state_schema_generation: expected.state_schema_generation.clone(),
+            state_contract_sha256: expected.state_contract_sha256.clone(),
             runtime_id: expected.runtime_id.clone(),
             runtime_instance_id: activation.runtime_instance_id.clone(),
             bound_endpoint: Some(set.candidate.into()),
@@ -225,9 +240,9 @@ fn build(
             health_contract: expected.health_contract.clone(),
             state: state.into(),
             detail: DETAIL.into(),
-            write_lease_sha256: None,
+            write_lease_sha256,
             signer_identity_id: provider_anchor.identity_id.clone(),
-            publisher_sequence: SEQUENCE,
+            publisher_sequence: sequence,
             observed_at_unix_millis: OBSERVED_AT,
             signature_algorithm: "ed25519".into(),
             signature: Vec::new(),
@@ -250,6 +265,7 @@ fn build(
                 maximum_future_skew_millis: 0,
             },
         )?;
+        let presence_sha256 = claim.signed_presence_sha256().to_string();
         let correlation = correlate_runtime_presence_claim(claim, &authority)?;
         let codes: Vec<&str> = correlation
             .disagreements()
@@ -261,6 +277,69 @@ fn build(
             Some(code) => ensure!(codes == [code], "{name}: expected only {code}, got {codes:?}"),
         }
         fs::write(dir.join(name), bytes)?;
+        Ok(presence_sha256)
+    };
+
+    if !set.stateful {
+        sign_vector("presence-active.bin", "active", set.minimum_capacity, SEQUENCE, None, None)?;
+        sign_vector("presence-warming.bin", "warming", set.minimum_capacity, SEQUENCE, None, None)?;
+        if set.minimum_capacity > 1 {
+            sign_vector(
+                "presence-active-below-minimum.bin",
+                "active",
+                set.minimum_capacity - 1,
+                SEQUENCE,
+                None,
+                Some("expected-capability-000-capacity"),
+            )?;
+        }
+        return Ok(());
+    }
+
+    // Lease-bound set. The warming vector comes first because the lease names it.
+    let warming_sha256 =
+        sign_vector("presence-warming.bin", "warming", set.minimum_capacity, SEQUENCE, None, None)?;
+    let activation_sha256 = activation.canonical_sha256()?;
+    let lease_for = |target: &str, warming_presence_sha256: &str| IdunnProcessWriteLeaseRecord {
+        schema_version: IDUNN_PROCESS_WRITE_LEASE_SCHEMA.into(),
+        target: target.into(),
+        expected_projection_sha256: activation.expected_projection_sha256.clone(),
+        plan_id: expected.plan_id.clone(),
+        incarnation_id: expected.incarnation_id.clone(),
+        sealed_release_id: expected.sealed_release_id.clone(),
+        activation_witness_sha256: activation_sha256.clone(),
+        state_schema_generation: expected.state_schema_generation.clone().unwrap_or_default(),
+        state_contract_sha256: expected.state_contract_sha256.clone().unwrap_or_default(),
+        runtime_id: expected.runtime_id.clone(),
+        runtime_instance_id: activation.runtime_instance_id.clone(),
+        warming_presence_sha256: warming_presence_sha256.into(),
+        lease_epoch: 1,
+        issued_at_unix_millis: OBSERVED_AT - 1_000,
+    };
+    let lease = lease_for(set.target, &warming_sha256);
+    let other_warming = lease_for(set.target, &digest('d'));
+    let other_target = lease_for("streampixels-web", &warming_sha256);
+    for (name, record) in [
+        ("lease.cc", &lease),
+        ("lease-other-warming.cc", &other_warming),
+        ("lease-other-target.cc", &other_target),
+    ] {
+        let bytes = record.canonical_bytes()?;
+        ensure!(
+            IdunnProcessWriteLeaseRecord::decode_canonical(&bytes)? == *record,
+            "{name}: lease does not round-trip"
+        );
+        write_record(
+            &dir.join(name),
+            &record.target,
+            IdunnProcessWriteLeaseRecord::TYPE,
+            IDUNN_PROCESS_WRITE_LEASE_SCHEMA,
+            bytes,
+        )?;
+    }
+    let lease_sha256 = lease.canonical_sha256()?;
+    for (name, state) in [("presence-active.bin", "active"), ("presence-degraded.bin", "degraded")] {
+        sign_vector(name, state, set.minimum_capacity, SEQUENCE + 1, Some(lease_sha256.clone()), None)?;
     }
     Ok(())
 }
