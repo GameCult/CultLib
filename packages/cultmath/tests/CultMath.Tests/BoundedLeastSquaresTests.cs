@@ -472,4 +472,217 @@ public sealed class BoundedLeastSquaresTests
         Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(0, 0, default, default, default, default, default, default, out _));
         Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(0, n, default, default, lo, hi, new float[n], ws, out _));
     }
+
+    // Well-conditioned enough (m = n + 6) that x is comparable across scales.
+    private static (int m, int n, float[] a, float[] b, float[] lo, float[] hi) ScaleProblem(uint seed)
+    {
+        var rng = new CultMath.Random(seed * 104729u);
+        var n = rng.NextInt(3, 11);
+        var m = n + 6;
+        var a = new float[m * n];
+        var b = new float[m];
+        for (var i = 0; i < a.Length; i++) a[i] = rng.NextFloat(-1f, 1f);
+        for (var i = 0; i < m; i++) b[i] = rng.NextFloat(-3f, 3f);
+        var lo = new float[n];
+        var hi = new float[n];
+        for (var j = 0; j < n; j++)
+        {
+            lo[j] = rng.NextFloat(-0.6f, -0.05f);
+            hi[j] = rng.NextFloat(0.05f, 0.6f);
+        }
+        return (m, n, a, b, lo, hi);
+    }
+
+    private static float[] Scaled(float[] v, float k)
+    {
+        var r = new float[v.Length];
+        for (var i = 0; i < v.Length; i++) r[i] = v[i] * k;
+        return r;
+    }
+
+    [Fact]
+    public void SolutionIsScaleFree()
+    {
+        var sawActive = false;
+        for (uint seed = 1; seed <= 40; seed++)
+        {
+            var (m, n, a, b, lo, hi) = ScaleProblem(seed);
+            var x = (float[])lo.Clone();
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(m, n, a, b, lo, hi, x, out _));
+            AssertKkt(m, n, a, b, lo, hi, x);
+            for (var j = 0; j < n; j++) sawActive |= x[j] == lo[j] || x[j] == hi[j];
+
+            foreach (var k in new[] { 1e-6f, 1e3f, 1e6f })
+            {
+                // b and the bounds scaled: x scales with them.
+                var xb = Scaled(lo, k);
+                var status = Solve(m, n, a, Scaled(b, k), Scaled(lo, k), Scaled(hi, k), xb, out _);
+                Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed} k {k}: {status}");
+                for (var j = 0; j < n; j++)
+                    Assert.True(Math.Abs(xb[j] - x[j] * k) <= 1e-3 * Math.Abs(k) * (1 + Math.Abs(x[j])), $"seed {seed} b*{k} col {j}: {xb[j]} vs {x[j] * k}");
+
+                // A scaled: x scales inversely, so the bounds stay put and only b is scaled with A to keep the same box.
+                var xa = (float[])lo.Clone();
+                var lo2 = Scaled(lo, 1f / k);
+                var hi2 = Scaled(hi, 1f / k);
+                for (var j = 0; j < n; j++) xa[j] = lo2[j];
+                status = Solve(m, n, Scaled(a, k), b, lo2, hi2, xa, out _);
+                Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed} A*{k}: {status}");
+                for (var j = 0; j < n; j++)
+                    Assert.True(Math.Abs(xa[j] - x[j] / k) <= 1e-3 * Math.Abs(1 / k) * (1 + Math.Abs(x[j])), $"seed {seed} A*{k} col {j}: {xa[j]} vs {x[j] / k}");
+            }
+        }
+        Assert.True(sawActive);
+    }
+
+    [Fact]
+    public void NonFiniteOrInvertedInputIsRejectedAndLeavesXUntouched()
+    {
+        const int m = 5, n = 3;
+        var nan = float.NaN;
+        var inf = float.PositiveInfinity;
+        var cases = new (string name, Action<float[], float[], float[], float[]> corrupt)[]
+        {
+            ("A NaN", (a, b, lo, hi) => a[4] = nan),
+            ("A +Inf", (a, b, lo, hi) => a[7] = inf),
+            ("A -Inf", (a, b, lo, hi) => a[1] = -inf),
+            ("b NaN", (a, b, lo, hi) => b[2] = nan),
+            ("b +Inf", (a, b, lo, hi) => b[0] = inf),
+            ("lo NaN", (a, b, lo, hi) => lo[1] = nan),
+            ("hi NaN", (a, b, lo, hi) => hi[2] = nan),
+            ("lo > hi", (a, b, lo, hi) => { lo[1] = 0.5f; hi[1] = 0.25f; }),
+            ("lo = +Inf", (a, b, lo, hi) => { lo[0] = inf; hi[0] = inf; }),
+            ("hi = -Inf", (a, b, lo, hi) => { lo[0] = -inf; hi[0] = -inf; }),
+        };
+        foreach (var (name, corrupt) in cases)
+        {
+            var a = (float[])A54.Clone();
+            var b = (float[])B5.Clone();
+            var lo = Fill(-1f, n);
+            var hi = Fill(1f, n);
+            corrupt(a, b, lo, hi);
+            foreach (var start in new[] { new[] { 0.5f, -3f, 9f }, new[] { nan, 0f, 0f } })
+            {
+                var x = (float[])start.Clone();
+                var status = Solve(m, n, a, b, lo, hi, x, out var iterations);
+                Assert.True(status == BoundedLeastSquaresStatus.InvalidInput, $"{name}: {status}");
+                Assert.Equal(0, iterations);
+                for (var j = 0; j < n; j++)
+                    Assert.Equal(BitConverter.SingleToInt32Bits(start[j]), BitConverter.SingleToInt32Bits(x[j]));
+            }
+        }
+    }
+
+    [Fact]
+    public void InfiniteBoundsMeanUnbounded()
+    {
+        const int m = 5, n = 3;
+        var inf = float.PositiveInfinity;
+        var x = new float[n];
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(m, n, A54, B5, Fill(-inf, n), Fill(inf, n), x, out _));
+        var expected = NormalEquationSolution(m, n, A54, B5);
+        for (var j = 0; j < n; j++) Assert.Equal(expected[j], x[j], 1e-4);
+
+        // One-sided, with an infinite warm start: the start is clamped to a finite point first.
+        var y = new[] { -inf, inf, float.NaN };
+        var lo = new[] { -inf, 0.2f, -inf };
+        var hi = new[] { inf, inf, 0.1f };
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(m, n, A54, B5, lo, hi, y, out _));
+        AssertKkt(m, n, A54, B5, lo, hi, y);
+        Assert.All(y, v => Assert.True(float.IsFinite(v)));
+    }
+
+    // Exact reference: every assignment of each column to {lo, hi, free}, free set solved in double.
+    private static double ExactBoxedCost(int m, int n, float[] a, float[] b, float[] lo, float[] hi)
+    {
+        var best = double.MaxValue;
+        var total = 1;
+        for (var j = 0; j < n; j++) total *= 3;
+        var x = new double[n];
+        for (var code = 0; code < total; code++)
+        {
+            var c = code;
+            var free = new System.Collections.Generic.List<int>();
+            for (var j = 0; j < n; j++)
+            {
+                var d = c % 3; c /= 3;
+                if (d == 0) x[j] = lo[j]; else if (d == 1) x[j] = hi[j]; else free.Add(j);
+            }
+            var k = free.Count;
+            if (k > 0)
+            {
+                var mat = new double[k, k + 1];
+                for (var i = 0; i < k; i++)
+                {
+                    for (var l = 0; l < k; l++)
+                        for (var r = 0; r < m; r++) mat[i, l] += (double)a[r * n + free[i]] * a[r * n + free[l]];
+                    for (var r = 0; r < m; r++)
+                    {
+                        var fixedPart = 0.0;
+                        for (var j = 0; j < n; j++) if (!free.Contains(j)) fixedPart += (double)a[r * n + j] * x[j];
+                        mat[i, k] += (double)a[r * n + free[i]] * (b[r] - fixedPart);
+                    }
+                }
+                var ok = true;
+                for (var col = 0; col < k && ok; col++)
+                {
+                    var piv = col;
+                    for (var r = col + 1; r < k; r++) if (Math.Abs(mat[r, col]) > Math.Abs(mat[piv, col])) piv = r;
+                    if (Math.Abs(mat[piv, col]) < 1e-9) { ok = false; break; }
+                    for (var l = 0; l <= k; l++) (mat[col, l], mat[piv, l]) = (mat[piv, l], mat[col, l]);
+                    for (var r = 0; r < k; r++)
+                    {
+                        if (r == col) continue;
+                        var f = mat[r, col] / mat[col, col];
+                        for (var l = col; l <= k; l++) mat[r, l] -= f * mat[col, l];
+                    }
+                }
+                if (!ok) continue;
+                for (var i = 0; i < k; i++)
+                {
+                    x[free[i]] = mat[i, k] / mat[i, i];
+                    if (x[free[i]] < lo[free[i]] - 1e-12 || x[free[i]] > hi[free[i]] + 1e-12) ok = false;
+                }
+                if (!ok) continue;
+            }
+            var cost = 0.0;
+            for (var r = 0; r < m; r++)
+            {
+                var s = -(double)b[r];
+                for (var j = 0; j < n; j++) s += (double)a[r * n + j] * x[j];
+                cost += s * s;
+            }
+            best = Math.Min(best, cost);
+        }
+        return best;
+    }
+
+    [Fact]
+    public void NearCollinearColumnsReachTheExactOptimum()
+    {
+        const int m = 2, n = 7;
+        var worst = 0.0;
+        for (uint seed = 1; seed <= 60; seed++)
+        {
+            var rng = new CultMath.Random(seed * 15485863u);
+            var a = new float[m * n];
+            for (var j = 0; j < n; j++)
+            {
+                a[j] = rng.NextFloat(0.5f, 1f);
+                a[n + j] = 0.01f * rng.NextFloat(-1f, 1f);
+            }
+            var b = new[] { 6f * (rng.NextFloat() < 0.5f ? -1f : 1f), rng.NextFloat(0.5f, 2f) };
+            var lo = new float[n];
+            var hi = new float[n];
+            for (var j = 0; j < n; j++) { lo[j] = -1f; hi[j] = seed % 2 == 0 ? 1f : 0.5f; }
+            var x = new float[n];
+            var status = Solve(m, n, a, b, lo, hi, x, out _);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed}: {status}");
+            AssertKkt(m, n, a, b, lo, hi, x);
+            var gap = Cost(m, n, a, b, x) - ExactBoxedCost(m, n, a, b, lo, hi);
+            var bound = 1e-5 * (b[0] * b[0] + b[1] * b[1]);
+            worst = Math.Max(worst, gap / bound);
+            Assert.True(gap <= bound, $"seed {seed}: cost {gap} above the exact optimum (allowed {bound})");
+        }
+    }
 }

@@ -10,6 +10,9 @@ public enum BoundedLeastSquaresStatus
 
     /// <summary>The iteration cap was reached. <c>x</c> holds the last feasible iterate, which is never worse than the clamped start.</summary>
     IterationLimit,
+
+    /// <summary>The input broke the contract; nothing was solved and <c>x</c> is exactly as passed.</summary>
+    InvalidInput,
 }
 
 /// <summary>
