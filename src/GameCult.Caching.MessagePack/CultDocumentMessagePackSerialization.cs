@@ -563,6 +563,8 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         return snapshot;
     }
 
+    protected override string? ReadStoreHeader(byte[] data) => CultDocumentMessagePackSerialization.ReadStoreHeader(data);
+
     protected override byte[] SerializePayload(object document)
     {
         return CultDocumentMessagePackSerialization.SerializeUntyped(document, document.GetType(), Registry);

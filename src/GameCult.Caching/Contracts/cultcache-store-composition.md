@@ -239,7 +239,9 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
 single-file stores, per key for directory stores.** Both run
 under the same lock, so two writers never interleave bytes, but they compare
 nothing. Only a conditional commit (`Expect` or `ExpectUnchanged`) protects
-against another writer; processes sharing a store must all use it.
+against another writer; processes sharing a store must all use it. A writer
+wins only over a file it can read: a single-file store refuses to replace a file
+whose header it cannot read, and leaves it as it was.
 
 - A single-file store writes this cache's whole view of the file: a record
   another writer added since this cache last pulled is gone.

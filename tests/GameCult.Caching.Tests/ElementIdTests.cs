@@ -785,6 +785,38 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without one, it cannot be seen, so it is marked");
         }
 
+        // A flush replaces the whole file, but never one whose header it cannot read (Rust, TypeScript and Python refuse the same):
+        // it throws and the file is left as it was. An empty file and a legacy envelope array carry no header and are replaced.
+        [TestCase("truncated", false)]
+        [TestCase("v9", false)]
+        [TestCase("empty", true)]
+        [TestCase("legacy", true)]
+        public void AFlushRefusesAFileWhoseHeaderItCannotReadAndLeavesItUntouched(string file, bool replaced)
+        {
+            var path = PathOf($"flush-over-{file}.cc");
+            using var cache = Open(path);
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            var whole = File.ReadAllBytes(path);
+            var bytes = file switch
+            {
+                "truncated" => whole[..^1],
+                "v9" => MessagePackSerializer.Serialize(new object[] { "cultcache.store.v9", Array.Empty<object>(), Array.Empty<object>() }),
+                "empty" => Array.Empty<byte>(),
+                _ => MessagePackSerializer.Serialize(new object[] { new Dictionary<string, object> { ["key"] = "old", ["type"] = "old", ["storedAt"] = "then" } })
+            };
+            File.WriteAllBytes(path, bytes);
+
+            if (replaced)
+            {
+                cache.BackingStores[0].PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the file is this store's view now");
+                return;
+            }
+
+            Assert.Throws<NotSupportedException>(() => cache.BackingStores[0].PushAll());
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "the file was rewritten");
+        }
+
         [Test]
         public void ADirectoryStoreIsMarkedByTheIdsItWritesAndAnEmptyDeckDoesNotMarkIt()
         {

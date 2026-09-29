@@ -3417,6 +3417,15 @@ namespace GameCult.Caching
         protected FileInfo FileInfo { get; }
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
+
+        /// <summary>
+        /// The format header of a non-empty store file this store is about to replace: null for a legacy file that carries none,
+        /// the header otherwise. It throws for bytes that are not exactly one store this runtime reads, so a rewrite never
+        /// overwrites a file it cannot see. The default reads the whole snapshot; a codec that can read the header alone
+        /// overrides it.
+        /// </summary>
+        protected virtual string? ReadStoreHeader(byte[] data) => DeserializeSnapshot(data).FormatVersion;
+
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
 
@@ -3484,7 +3493,8 @@ namespace GameCult.Caching
         }
 
         // A plain flush writes this store's whole view under the lock: two writers never interleave bytes, but the last
-        // one wins. Processes sharing a store must use conditional commit.
+        // one wins over any file this runtime can read. Processes sharing a store must use conditional commit. A file it
+        // cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused and left as it is.
         public override void PushAll()
         {
             ThrowIfReadOnly();
@@ -3492,6 +3502,8 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
+                    if (ReadDisk() is { Length: > 0 } onDisk)
+                        ReadStoreHeader(onDisk);
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()),
@@ -3517,7 +3529,7 @@ namespace GameCult.Caching
             if (fileLock == null)
                 return CultCommitOutcome.Contended;
 
-            var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
+            var disk = ReadSnapshot(rewriting: true) ?? new CultPersistedStoreSnapshot();
             if (!request.ConditionsHold(disk.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
@@ -3586,14 +3598,25 @@ namespace GameCult.Caching
             Judging!(arriving, departing);
         }
 
-        private CultPersistedStoreSnapshot? ReadSnapshot()
+        // A commit rewrites the file it read, so it reads it as a rewrite does: the header proves the bytes are one store first.
+        private CultPersistedStoreSnapshot? ReadSnapshot(bool rewriting = false)
+        {
+            var bytes = ReadDisk();
+            if (bytes == null)
+                return null;
+            if (rewriting && bytes.Length > 0)
+                ReadStoreHeader(bytes);
+            return DeserializeSnapshot(bytes);
+        }
+
+        private byte[]? ReadDisk()
         {
             FileInfo.Refresh();
             if (!FileInfo.Exists)
                 return null;
             try
             {
-                return DeserializeSnapshot(ReadAllBytesShared(FileInfo.FullName));
+                return ReadAllBytesShared(FileInfo.FullName);
             }
             catch (FileNotFoundException)
             {

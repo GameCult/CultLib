@@ -57,7 +57,9 @@ an unconditional commit are last-writer-wins and write the same bytes: a single
 file is replaced by the writer's whole view, a directory manifest takes the
 writer's staged keys over the current manifest. An unconditional commit also
 persists writes staged earlier and leaves the store clean. Processes sharing a
-store must all use conditional commit.
+store must all use conditional commit. The last writer wins only over a file it
+can read: a single-file flush or commit refuses a file whose header it cannot
+read (truncated, or a format it does not read) and leaves the file as it was.
 
 A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
 makes the open throw and is left byte-identical; it is never silently
@@ -434,7 +436,8 @@ The v1 concurrent single-file policy is:
 3. Writers re-read the current snapshot after taking the lock.
 4. Writers using conditional commit evaluate their conditions against the
    latest snapshot and write nothing if one fails. A plain flush and an
-   unconditional commit compare nothing and are last-writer-wins.
+   unconditional commit compare nothing and are last-writer-wins over a file
+   they can read; one whose header they cannot read is refused untouched.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 
