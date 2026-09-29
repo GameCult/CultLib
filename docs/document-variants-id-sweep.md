@@ -1,0 +1,272 @@
+# Element-id sweep list (C2a)
+
+Data for the per-consumer sweep in docs/document-variants-cut.md, C2. Every object type below sits in a list (`List<T>`, `T[]`, `IEnumerable<T>`, and the like) reachable from a registered document type, and needs one string member with `[Key(n)]` and `[CultElementId]` before that consumer can take a CultLib that requires ids. A union base takes the member on the base; its subclasses inherit it, so put the slot above the subclasses' highest key.
+
+Method: a static scan of `F:\Projects\<consumer>` C# files for types marked `[CultDocument(`, walked through keyed members, base classes, dictionary values and `[Union]` subtypes. Read-only; no consumer was edited. Worktree copies (`Aetheria-catalog`, `CultLib-*`, and so on) are excluded. Struct elements are values and need no id. Non-C# consumers carry the id as an ordinary member and are not listed. The scan is text-based: a document registered without a literal `[CultDocument(` attribute, or a type whose members lack an integer `[Key]`, is missed, so the sweep pass should confirm each repo by registering its types once.
+
+Lines: `Type  file:line  (via Owner.Member)`, paths relative to the consumer root.
+
+
+## Aetheria (13 element types)
+
+- BehaviorData  Assets/Scripts/ServerShared/Behaviors/Behaviors.cs:190  (via ConsumableItemData.Behaviors)
+- EntityPack  Assets/Scripts/ServerShared/EntitySerializer.cs:171  (via ZonePack.Entities)
+- ProductRole  Assets/Scripts/ServerShared/FactionProduct.cs:38  (via FactionProductData.Roles)
+- InputLayoutRow  Assets/Scripts/ServerShared/InputLayout.cs:32  (via InputLayout.Rows)
+- InputLayoutColumn  Assets/Scripts/ServerShared/InputLayout.cs:52  (via InputLayoutKeyRow.Columns)
+- ItemRole  Assets/Scripts/ServerShared/ItemData.cs:325  (via CraftedItemData.Roles)
+- AudioStat  Assets/Scripts/ServerShared/ItemData.cs:441  (via EquippableItemData.AudioStats)
+- HardpointData  Assets/Scripts/ServerShared/ItemData.cs:553  (via HullData.Hardpoints)
+- StatTerm  Assets/Scripts/ServerShared/ItemData.cs:630  (via PerformanceStat.Terms)
+- LoadoutSlot  Assets/Scripts/ServerShared/Loadout.cs:23  (via Loadout.Slots)
+- RoleFill  Assets/Scripts/ServerShared/Provenance.cs:84  (via Lot.Roles)
+- SavedActionBarBinding  Assets/Scripts/ServerShared/SavedGame.cs:168  (via SavedGame.ActionBarBindings)
+- Asteroid  Assets/Scripts/ServerShared/ZoneData.cs:133  (via AsteroidBeltData.Asteroids)
+
+## AetheriaEve (115 element types)
+
+- AetheriaCorporationAllegiance  Aetheria.State/Documents/AetheriaCorporation.cs:67  (via AetheriaCorporation.Allegiances)
+- AetheriaShapeCell  Aetheria.State/Documents/AetheriaItemDefinition.cs:178  (via AetheriaItemDefinition.ShapeCells)
+- AetheriaItemHardpoint  Aetheria.State/Documents/AetheriaItemDefinition.cs:188  (via AetheriaItemDefinition.Hardpoints)
+- AetheriaCurveKey  Aetheria.State/Documents/AetheriaItemDefinition.cs:222  (via AetheriaItemDefinition.ThermalPerformanceCurveKeys)
+- AetheriaItemAudioStat  Aetheria.State/Documents/AetheriaItemDefinition.cs:238  (via AetheriaItemDefinition.AudioStats)
+- AetheriaBehaviorPayload  Aetheria.State/Documents/AetheriaItemDefinition.cs:267  (via AetheriaItemDefinition.BehaviorPayloads)
+- AetheriaBehaviorField  Aetheria.State/Documents/AetheriaItemDefinition.cs:286  (via AetheriaBehaviorPayload.Fields)
+- AetheriaBehaviorMapEntry  Aetheria.State/Documents/AetheriaItemDefinition.cs:296  (via AetheriaBehaviorValue.MapEntries)
+- AetheriaBehaviorValue  Aetheria.State/Documents/AetheriaItemDefinition.cs:306  (via AetheriaBehaviorValue.Children)
+- AetheriaLegacyCatalogFile  Aetheria.State/Documents/AetheriaLegacyCatalogQuarantine.cs:41  (via AetheriaLegacyCatalogQuarantine.NameFiles)
+- AetheriaMigrationCount  Aetheria.State/Documents/AetheriaMigrationLedger.cs:35  (via AetheriaMigrationLedger.Counts)
+- AetheriaLegacyCatalogEntrySummary  Aetheria.State/Documents/AetheriaMigrationLedger.cs:45  (via AetheriaMigrationLedger.LegacyCatalogEntries)
+- AetheriaStoryFileHash  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:42  (via AetheriaPlayerSettings.StoryFileHashes)
+- AetheriaInputBindingOverride  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:85  (via AetheriaPlayerInputSettings.BindingOverrides)
+- AetheriaEntityLoadout  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:119  (via AetheriaEntityLoadout.Children)
+- AetheriaLoadoutItemSlot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:186  (via AetheriaEntityLoadout.Equipment)
+- AetheriaCargoBayLoadout  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:199  (via AetheriaEntityLoadout.CargoContents)
+- AetheriaFactionZoneState  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:268  (via AetheriaRunState.HomeZones)
+- AetheriaAgentTaskState  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:275  (via AetheriaRunState.AgentTasks)
+- AetheriaDroppedPickupSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:346  (via AetheriaZoneState.DroppedPickups)
+- AetheriaOrbitSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:362  (via AetheriaZoneState.Orbits)
+- AetheriaBodySnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:384  (via AetheriaZoneState.Bodies)
+- AetheriaBodyResource  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:449  (via AetheriaBodySnapshot.Resources)
+- AetheriaAsteroidSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:459  (via AetheriaBodySnapshot.Asteroids)
+- AetheriaAsteroidMiningAccumulatorSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:484  (via AetheriaAsteroidSnapshot.MiningAccumulators)
+- AetheriaColor  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:545  (via AetheriaGasGiantVisualState.Colors)
+- AetheriaFogFieldEmitterSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:691  (via AetheriaEntitySnapshot.FogFieldEmitters)
+- AetheriaLoadoutGenerationSelection  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:723  (via AetheriaLoadoutGenerationReceipt.Selections)
+- AetheriaEntityContactSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:734  (via AetheriaEntitySnapshot.Contacts)
+- AetheriaEntityItemSlot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:751  (via AetheriaEntitySnapshot.Equipment)
+- AetheriaWeaponGroupSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:782  (via AetheriaEntitySnapshot.WeaponGroups)
+- AetheriaEntityStatGrid  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:789  (via AetheriaEntitySnapshot.StatGrids)
+- AetheriaActiveConsumableSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:805  (via AetheriaEntitySnapshot.ActiveConsumables)
+- AetheriaConsumableBehaviorStateSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:828  (via AetheriaActiveConsumableSnapshot.BehaviorStates)
+- AetheriaBehaviorProgressSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:844  (via AetheriaEntitySnapshot.BehaviorProgress)
+- AetheriaWeaponStateSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:863  (via AetheriaEntitySnapshot.WeaponStates)
+- AetheriaBehaviorStateSnapshot  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:924  (via AetheriaEntitySnapshot.BehaviorStates)
+- AetheriaFactionRelationshipState  Aetheria.State/Documents/AetheriaRuntimeStateDocuments.cs:1093  (via AetheriaRunState.FactionRelationships)
+- AetheriaItemRarityTier  Aetheria.State/Documents/AetheriaTradeValuePolicy.cs:29  (via AetheriaTradeValuePolicy.Tiers)
+- AetheriaRuntimeAgentTaskCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeAgentTasks.cs:35  (via AetheriaRuntimeRunCheckpointCommit.AgentTasks)
+- AetheriaRuntimeAssetManifestEntry  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeAssetDocuments.cs:102  (via AetheriaRuntimeAssetManifestDocument.Assets)
+- AetheriaRuntimeCurveKey  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeCatalogSnapshot.cs:446  (via AetheriaRuntimeShotReceiptCommit.GuidanceCurve)
+- AetheriaRuntimeCorporation  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeCatalogSnapshot.cs:620  (via AetheriaRuntimeCatalogSnapshot.Corporations)
+- AetheriaRuntimeNameFile  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeCatalogSnapshot.cs:669  (via AetheriaRuntimeCatalogSnapshot.NameFiles)
+- AetheriaRuntimeLoadoutTemplateSnapshot  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeCatalogSnapshot.cs:796  (via AetheriaRuntimeLoadoutTemplatesDocument.Templates)
+- AetheriaRuntimeDaemonCommandBoundaryEntry  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonDocuments.cs:462  (via AetheriaRuntimeDaemonCommandBoundaryDocument.Commands)
+- AetheriaRuntimeDaemonSoaIdentityDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonSoaDocuments.cs:143  (via AetheriaRuntimeDaemonSoaViewDocument.Identities)
+- AetheriaRuntimeDaemonRenderGroupDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonSoaDocuments.cs:156  (via AetheriaRuntimeDaemonSoaViewDocument.RenderGroups)
+- AetheriaRuntimeDaemonSoaBufferDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonSoaDocuments.cs:222  (via AetheriaRuntimeDaemonSoaViewDocument.Buffers)
+- AetheriaRuntimeDaemonSoaColumnDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonSoaDocuments.cs:253  (via AetheriaRuntimeDaemonSoaViewDocument.Columns)
+- AetheriaRuntimeDaemonSoaDirtyRangeDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeDaemonSoaDocuments.cs:284  (via AetheriaRuntimeDaemonSoaViewDocument.DirtyRanges)
+- AetheriaRuntimeEveSurfaceAdvertisement  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeEveSurfaceCatalog.cs:11  (via AetheriaRuntimeDaemonProviderAdvertisementDocument.EveSurfaces)
+- AetheriaRuntimeEvePluginRequirement  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeEveSurfaceCatalog.cs:58  (via AetheriaRuntimeEveSurfaceAdvertisement.RequiresPlugins)
+- AetheriaRuntimeZoneTargetRow  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:410  (via AetheriaRuntimeZoneContactsDocument.Targets)
+- AetheriaRuntimeZoneContactRow  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:441  (via AetheriaRuntimeZoneContactsDocument.Contacts)
+- AetheriaRuntimeStationStockItem  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:551  (via AetheriaRuntimeStationRefitEntityOption.CargoItems)
+- AetheriaRuntimeStationRefitEntityOption  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:585  (via AetheriaRuntimeStationRefitDocument.AvailableEntities)
+- AetheriaRuntimeStationDockingBayRow  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:620  (via AetheriaRuntimeStationRefitDocument.DockingBays)
+- AetheriaRuntimeStationLoadoutRestoreOption  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:655  (via AetheriaRuntimeStationRefitDocument.LoadoutRestoreOptions)
+- AetheriaRuntimeStationCargoTargetRow  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:674  (via AetheriaRuntimeStationRefitDocument.CargoTargets)
+- AetheriaRuntimeSectorMapZone  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:765  (via AetheriaRuntimeSectorMapDocument.Zones)
+- AetheriaRuntimeSectorMapLink  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:802  (via AetheriaRuntimeSectorMapDocument.Links)
+- AetheriaRuntimeZoneRenderAdjacentZone  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1197  (via AetheriaRuntimeZoneRenderDocument.AdjacentZones)
+- AetheriaRuntimeZoneRenderWormholeExit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1210  (via AetheriaRuntimeZoneRenderDocument.WormholeExits)
+- AetheriaRuntimeZoneRenderBodyPose  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1229  (via AetheriaRuntimeZoneRenderDocument.BodyPoses)
+- AetheriaRuntimeZoneRenderAsteroidBeltPose  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1260  (via AetheriaRuntimeZoneRenderDocument.AsteroidBeltPoses)
+- AetheriaRuntimeZoneRenderAsteroidInstancePose  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1286  (via AetheriaRuntimeZoneRenderAsteroidBeltPose.InstancePoses)
+- AetheriaRuntimeViewportObject  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1382  (via AetheriaRuntimeGameViewportDocument.Objects)
+- AetheriaRuntimeInventoryItem  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1458  (via AetheriaRuntimeViewportObject.Inventory)
+- AetheriaRuntimeGravityInfluence  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1493  (via AetheriaRuntimeGameViewportDocument.GravityInfluences)
+- AetheriaRuntimeBodyView  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeGameViewportDocuments.cs:1530  (via AetheriaRuntimeGameViewportDocument.Bodies)
+- AetheriaHangarShip  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeHangarDocuments.cs:119  (via AetheriaHangarState.Ships)
+- AetheriaHangarItemStack  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeHangarDocuments.cs:129  (via AetheriaHangarState.Inventory)
+- AetheriaHangarCurrency  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeHangarDocuments.cs:136  (via AetheriaHangarState.Currencies)
+- AetheriaDeploymentReceipt  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeHangarDocuments.cs:155  (via AetheriaHangarState.Deployments)
+- AetheriaProgressionVerseOption  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeProgressionSourceDocuments.cs:45  (via AetheriaProgressionSourceDocument.AvailableVerses)
+- AetheriaRuntimeStoryFileHashDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSettingsDocuments.cs:87  (via AetheriaRuntimePlayerSettingsDocument.StoryFileHashes)
+- AetheriaRuntimeInputBindingOverrideDocument  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSettingsDocuments.cs:108  (via AetheriaRuntimePlayerSettingsDocument.BindingOverrides)
+- AetheriaRuntimeEntityLoadoutCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:78  (via AetheriaRuntimeEntityLoadoutCommit.Children)
+- AetheriaRuntimeLoadoutItemSlotCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:143  (via AetheriaRuntimeEntitySnapshotCommit.Equipment)
+- AetheriaRuntimeCargoBayLoadoutCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:159  (via AetheriaRuntimeEntitySnapshotCommit.CargoContents)
+- AetheriaRuntimeGameEventCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:490  (via AetheriaRuntimeRunCheckpointCommit.GameEvents)
+- AetheriaRuntimeFactionZoneCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:509  (via AetheriaRuntimeRunCheckpointCommit.HomeZones)
+- AetheriaRuntimeShotReceiptCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:539  (via AetheriaRuntimeRunCheckpointCommit.ShotReceipts)
+- AetheriaRuntimePickupContactReceiptCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:591  (via AetheriaRuntimeRunCheckpointCommit.PickupContactReceipts)
+- AetheriaRuntimeDamageCellCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:603  (via AetheriaRuntimeShotReceiptCommit.DamageCells)
+- AetheriaRuntimeCorporationSurveyCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:614  (via AetheriaRuntimeRunCheckpointCommit.CorporationSurveys)
+- AetheriaRuntimeFactionRelationshipCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:623  (via AetheriaRuntimeRunCheckpointCommit.FactionRelationships)
+- AetheriaRuntimeZoneSnapshotCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:636  (via AetheriaRuntimeRunCheckpointCommit.Zones)
+- AetheriaRuntimePhysicalPayloadCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:699  (via AetheriaRuntimeZoneSnapshotCommit.PhysicalPayloads)
+- AetheriaRuntimeDroppedPickupCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:771  (via AetheriaRuntimeZoneSnapshotCommit.DroppedPickups)
+- AetheriaRuntimeOrbitSnapshotCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:805  (via AetheriaRuntimeZoneSnapshotCommit.Orbits)
+- AetheriaRuntimeBodySnapshotCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:830  (via AetheriaRuntimeZoneSnapshotCommit.Bodies)
+- AetheriaRuntimeBodyResourceCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:901  (via AetheriaRuntimeBodySnapshotCommit.Resources)
+- AetheriaRuntimeAsteroidCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:911  (via AetheriaRuntimeBodySnapshotCommit.Asteroids)
+- AetheriaRuntimeAsteroidMiningAccumulatorCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:936  (via AetheriaRuntimeAsteroidCommit.MiningAccumulators)
+- AetheriaRuntimeColorCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1008  (via AetheriaRuntimeGasGiantVisualCommit.Colors)
+- AetheriaRuntimeEntitySnapshotCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1024  (via AetheriaRuntimeZoneSnapshotCommit.Entities)
+- AetheriaRuntimeFogFieldEmitterCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1198  (via AetheriaRuntimeEntitySnapshotCommit.FogFieldEmitters)
+- AetheriaRuntimeEquipmentStateCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1240  (via AetheriaRuntimeEntitySnapshotCommit.EquipmentStates)
+- AetheriaRuntimeLoadoutGenerationSelectionCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1264  (via AetheriaRuntimeLoadoutGenerationReceiptCommit.Selections)
+- AetheriaRuntimeEntityContactCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1275  (via AetheriaRuntimeEntitySnapshotCommit.Contacts)
+- AetheriaRuntimeEntityStatGridCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1291  (via AetheriaRuntimeEntitySnapshotCommit.StatGrids)
+- AetheriaRuntimeActiveConsumableCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1307  (via AetheriaRuntimeEntitySnapshotCommit.ActiveConsumables)
+- AetheriaRuntimeConsumableBehaviorStateCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1330  (via AetheriaRuntimeActiveConsumableCommit.BehaviorStates)
+- AetheriaRuntimeBehaviorProgressCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1355  (via AetheriaRuntimeEntitySnapshotCommit.BehaviorProgress)
+- AetheriaRuntimeWeaponStateCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1374  (via AetheriaRuntimeEntitySnapshotCommit.WeaponStates)
+- AetheriaRuntimeBehaviorStateCommit  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeSnapshotDocuments.cs:1444  (via AetheriaRuntimeEntitySnapshotCommit.BehaviorStates)
+- AetheriaRuntimeStarbridgeStationStockItem  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeStarbridgeDocuments.cs:71  (via AetheriaRuntimeStarbridgeScenarioDocument.StationStock)
+- AetheriaRuntimeStarbridgeWaveDefinition  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeStarbridgeDocuments.cs:83  (via AetheriaRuntimeStarbridgeScenarioDocument.Waves)
+- AetheriaRuntimeStarbridgeWaveForecast  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeStarbridgeDocuments.cs:94  (via AetheriaRuntimeStarbridgeSessionSummaryDocument.WaveForecast)
+- AetheriaRuntimeStarbridgeRuntimeRole  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeStarbridgeDocuments.cs:104  (via AetheriaRuntimeStarbridgeScenarioDocument.RuntimeRoles)
+- AetheriaRuntimeAuthorityRuntimeRole  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeVerseAuthorityPolicy.cs:194  (via AetheriaRuntimeVerseAuthorityPolicyDocument.RuntimeRoles)
+- AetheriaRuntimeAuthorityRule  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeVerseAuthorityPolicy.cs:201  (via AetheriaRuntimeVerseAuthorityPolicyDocument.Rules)
+- AetheriaRuntimeArenaSeat  Packages/org.gamecult.aetheria.state/Runtime/AetheriaRuntimeVerseAuthorityPolicy.cs:255  (via AetheriaRuntimeArenaRosterDocument.Seats)
+
+## AquaSynth (0 element types)
+
+None.
+
+
+## Aquarium (1 element types)
+
+- AquariumFaceVoiceEndpointState  src/Aquarium.Epiphany/State/AquariumLiveState.cs:61  (via AquariumLiveState.FaceVoiceEndpoints)
+
+## Brokkr (4 element types)
+
+- BrokkrGameObjectSnapshot  surfaces/unity/Packages/com.gamecult.brokkr/Runtime/BrokkrHostSnapshot.cs:42  (via BrokkrHostSnapshot.sceneObjects)
+- BrokkrComponentSnapshot  surfaces/unity/Packages/com.gamecult.brokkr/Runtime/BrokkrHostSnapshot.cs:62  (via BrokkrGameObjectSnapshot.components)
+- BrokkrSerializedPropertySnapshot  surfaces/unity/Packages/com.gamecult.brokkr/Runtime/BrokkrHostSnapshot.cs:73  (via BrokkrComponentSnapshot.properties)
+- BrokkrAssetSnapshot  surfaces/unity/Packages/com.gamecult.brokkr/Runtime/BrokkrHostSnapshot.cs:84  (via BrokkrHostSnapshot.assets)
+
+## Delvehold (0 element types)
+
+None.
+
+
+## Eve (17 element types)
+
+- EveAssetCatalogEntry  packages/org.gamecult.eve.surface/Runtime/EveAssetCatalogDocument.cs:52  (via EveAssetCatalogDocument.Assets)
+- EveAssetVariant  packages/org.gamecult.eve.surface/Runtime/EveAssetCatalogDocument.cs:89  (via EveAssetCatalogEntry.Variants)
+- EveEntitySoaBuffer  packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:33  (via EveEntitySoaViewDocument.Buffers)
+- EveEntitySoaColumn  packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:41  (via EveEntitySoaViewDocument.Columns)
+- EveEntitySoaDirtyRange  packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:55  (via EveEntitySoaViewDocument.DirtyRanges)
+- EveEntityIdentity  packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:64  (via EveEntitySoaViewDocument.Identities)
+- EveEntityRenderGroup  packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:77  (via EveEntitySoaViewDocument.RenderGroups)
+- EveInputActionDocument  packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:22  (via EveInputCapabilityDocument.Actions)
+- EveInputProfileDocument  packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:51  (via EveInputCapabilityDocument.DefaultProfiles)
+- EveInputBindingDocument  packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:59  (via EveInputProfileDocument.Bindings)
+- EveProviderWitness  packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:249  (via EveProviderAdvertisementDocument.Witnesses)
+- EveAdvertisedSurface  packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:265  (via EveProviderAdvertisementDocument.Surfaces)
+- EveAdvertisedCommand  packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:333  (via EveProviderAdvertisementDocument.Commands)
+- EveSurfaceComponent  packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:106  (via EveSurfaceComponent.Children)
+- EveEmbeddedDocumentSlot  packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:230  (via EveSurfaceComponent.EmbeddedDocuments)
+- EveStyleToken  packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:277  (via EveSurfaceTree.Styles)
+- EveCommandTemplate  packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:295  (via EveSurfaceDocument.Commands)
+
+## EvePlugins (1 element types)
+
+- EveFieldsSplatLayer  plugins/eve-plugin-fields/unity/org.gamecult.eve.plugin-fields/Runtime/EveFieldsDocuments.cs:38  (via EveFieldsSplatsDocument.Layers)
+
+## Ghostlight (17 element types)
+
+These types are a vendored copy of Eve (`vendor/eve`); they change when Eve does and the pin bumps.
+
+- EveAssetCatalogEntry  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveAssetCatalogDocument.cs:52  (via EveAssetCatalogDocument.Assets)
+- EveAssetVariant  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveAssetCatalogDocument.cs:89  (via EveAssetCatalogEntry.Variants)
+- EveEntitySoaBuffer  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:33  (via EveEntitySoaViewDocument.Buffers)
+- EveEntitySoaColumn  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:41  (via EveEntitySoaViewDocument.Columns)
+- EveEntitySoaDirtyRange  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:55  (via EveEntitySoaViewDocument.DirtyRanges)
+- EveEntityIdentity  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:64  (via EveEntitySoaViewDocument.Identities)
+- EveEntityRenderGroup  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveEntitySoaViewDocument.cs:77  (via EveEntitySoaViewDocument.RenderGroups)
+- EveInputActionDocument  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:22  (via EveInputCapabilityDocument.Actions)
+- EveInputProfileDocument  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:51  (via EveInputCapabilityDocument.DefaultProfiles)
+- EveInputBindingDocument  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveInputCapabilityDocument.cs:59  (via EveInputProfileDocument.Bindings)
+- EveProviderWitness  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:249  (via EveProviderAdvertisementDocument.Witnesses)
+- EveAdvertisedSurface  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:265  (via EveProviderAdvertisementDocument.Surfaces)
+- EveAdvertisedCommand  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveProviderDocuments.cs:333  (via EveProviderAdvertisementDocument.Commands)
+- EveSurfaceComponent  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:106  (via EveSurfaceComponent.Children)
+- EveEmbeddedDocumentSlot  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:230  (via EveSurfaceComponent.EmbeddedDocuments)
+- EveStyleToken  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:277  (via EveSurfaceTree.Styles)
+- EveCommandTemplate  vendor/eve/packages/org.gamecult.eve.surface/Runtime/EveSurfaceDocument.cs:295  (via EveSurfaceDocument.Commands)
+
+## Gjallar (3 element types)
+
+- GjallarAdvertisedSchema  src/Gjallar/VerseState.cs:462  (via GjallarProviderAdvertisementRecord.Schemas)
+- GjallarAdvertisedWitness  src/Gjallar/VerseState.cs:470  (via GjallarProviderAdvertisementRecord.Witnesses)
+- GjallarAdvertisedSurface  src/Gjallar/VerseState.cs:480  (via GjallarProviderAdvertisementRecord.Surfaces)
+
+## Heimdall (12 element types)
+
+These types are a vendored copy of CultLib (`vendor/CultLib`); C2a already adds the ids in CultLib, so they resolve when the pin bumps. The witness bundle types are the fork reported with C2a.
+
+- CultGeometryDomainNode  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:61  (via CultGeometryDomainNode.Children)
+- CultGeometryFeatureClaim  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:106  (via CultGeometryDomainNode.Claims)
+- CultGeometryContributionRow  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:262  (via CultGeometrySelectedCutManifest.Diagnostics)
+- CultMeshBodyDescriptor  vendor/CultLib/src/GameCult.Mesh/CultMeshBodies.cs:35  (via CultMeshBodyPublicationDocument.Representations)
+- CultMeshCdnChunkRef  vendor/CultLib/src/GameCult.Mesh/CultMeshCdn.cs:73  (via CultMeshCdnArtifactManifest.Chunks)
+- CultMeshDiscoveryCandidateDocument  vendor/CultLib/src/GameCult.Mesh/CultMeshDiscoveryService.cs:418  (via CultMeshDiscoveryStateDocument.Candidates)
+- CultMeshEntityPrefabComponent  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:81  (via CultMeshEntityPrefabNode.Components)
+- CultMeshEntityPrefabAssetRef  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:96  (via CultMeshEntityPrefabPackage.Assets)
+- CultMeshEntityPrefabNode  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:127  (via CultMeshEntityPrefabPackage.Nodes)
+- CultWitnessContractPin  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:105  (via CultWitnessArtifactBundle.Contracts)
+- CultWitnessArtifactEntry  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:136  (via CultWitnessArtifactBundle.Artifacts)
+- CultWitnessTimingEntry  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:179  (via CultWitnessArtifactBundle.TimingWitnesses)
+
+## Mimir (0 element types)
+
+None.
+
+
+## StreamPixels (20 element types)
+
+`CultGeometryDomainNode` is the vendored CultLib copy; C2a already adds its id.
+
+- ActivationCondition  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/ActivationCondition.cs:18  (via CharacterConditions.Conditions)
+- BattleEffect  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/BattleEffect.cs:8  (via BattleAction.Effects)
+- GearStatEffect  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/GearStatEffect.cs:7  (via GearData.StatEffects)
+- OverlaySceneIntent  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/ServiceLink/OverlayFrameDocuments.cs:33  (via OverlaySceneIntentWindow.Intents)
+- PlayedIntentRecord  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/ServiceLink/PlayedIntentLedger.cs:25  (via OverlayPlayedIntents.Entries)
+- StatModifier  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/StatModifier.cs:7  (via GearStatEffect.Modifiers)
+- StatusEffect  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/StatusEffect.cs:10  (via StatusData.Effects)
+- WeaponDamageTypeMultiplier  apps/overlay-unity/Assets/Scripts/Assembly-CSharp/WeaponDamageTypeMultiplier.cs:7  (via WeaponData.DamageMultipliers)
+- CultGeometryDomainNode  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:61  (via CultGeometryDomainNode.Children)
+- CultGeometryFeatureClaim  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:106  (via CultGeometryDomainNode.Claims)
+- CultGeometryContributionRow  vendor/CultLib/src/GameCult.Geometry/CultGeometryDocuments.cs:262  (via CultGeometrySelectedCutManifest.Diagnostics)
+- CultMeshBodyDescriptor  vendor/CultLib/src/GameCult.Mesh/CultMeshBodies.cs:35  (via CultMeshBodyPublicationDocument.Representations)
+- CultMeshCdnChunkRef  vendor/CultLib/src/GameCult.Mesh/CultMeshCdn.cs:73  (via CultMeshCdnArtifactManifest.Chunks)
+- CultMeshDiscoveryCandidateDocument  vendor/CultLib/src/GameCult.Mesh/CultMeshDiscoveryService.cs:418  (via CultMeshDiscoveryStateDocument.Candidates)
+- CultMeshEntityPrefabComponent  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:81  (via CultMeshEntityPrefabNode.Components)
+- CultMeshEntityPrefabAssetRef  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:96  (via CultMeshEntityPrefabPackage.Assets)
+- CultMeshEntityPrefabNode  vendor/CultLib/src/GameCult.Mesh/CultMeshEntityPrefabs.cs:127  (via CultMeshEntityPrefabPackage.Nodes)
+- CultWitnessContractPin  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:105  (via CultWitnessArtifactBundle.Contracts)
+- CultWitnessArtifactEntry  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:136  (via CultWitnessArtifactBundle.Artifacts)
+- CultWitnessTimingEntry  vendor/CultLib/src/GameCult.Networking/CultWitnessArtifactBundle.cs:179  (via CultWitnessArtifactBundle.TimingWitnesses)
+
+## Ymir (1 element types)
+
+- YmirTransportLoweringDocument  src/Ymir.Core/YmirServicePublicationDocument.cs:63  (via YmirProviderAdvertisementDocument.CommandLowerings)
+
+## CultLib itself
+
+C2a adds ids to: `CultGeometryDomainNode`, `CultGeometryFeatureClaim`, `CultGeometryContributionRow` (`src/GameCult.Geometry/CultGeometryDocuments.cs`); `CultMeshBodyDescriptor` (`src/GameCult.Mesh/CultMeshBodies.cs:35`); `CultMeshDiscoveryCandidateDocument` (`CultMeshDiscoveryService.cs:418`); `CultMeshEntityPrefabAssetRef`, `CultMeshEntityPrefabComponent`, `CultMeshEntityPrefabNode` (`CultMeshEntityPrefabs.cs`).
+
+Not changed, and forks: `CultMeshCdnChunkRef` (`src/GameCult.Mesh/CultMeshCdn.cs:73`), an element of `CultMeshCdnArtifactManifest`, whose bytes are pinned by the Rust- and C#-written `contracts/cultmesh/content-vectors.*.json`; and `CultWitnessContractPin`, `CultWitnessArtifactEntry`, `CultWitnessTimingEntry` (`src/GameCult.Networking/CultWitnessArtifactBundle.cs:105,136,179`), elements of `CultWitnessArtifactBundle`, whose payload the Python and TypeScript interop peers read.
