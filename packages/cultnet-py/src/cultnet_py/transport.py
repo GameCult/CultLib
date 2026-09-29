@@ -421,8 +421,15 @@ class CultNetRudpSession:
         self._latest_sequenced_by_channel: dict[str, int] = {}
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
         self._queued_reliable: deque[CultNetRudpPacket] = deque()
-        self._ordered_next_sequence_by_channel: dict[str, int] = {}
-        self._ordered_buffers: dict[str, dict[int, tuple[CultNetRudpDeliveredFrame, int]]] = {}
+        # Every reliable sequence up to and including this one has been received
+        # since the peer state was last reset. The first reliable sequence after
+        # a reset seeds it: the peer's Connect or Accept, or, for a session that
+        # never handshook, its first packet.
+        self._received_through: int | None = None
+        # Ordered frames received but not yet deliverable, keyed by first
+        # sequence. A frame is held for exactly one reason: a reliable sequence
+        # below it has not arrived.
+        self._ordered_held: dict[int, CultNetRudpDeliveredFrame] = {}
         self._fragment_buffers: dict[tuple[str, int], dict[str, Any]] = {}
         # Matches cultnet-rs max_pending_fragment_sets. A set that loses one
         # fragment is never completed; without a bound it is kept for the life
@@ -465,8 +472,8 @@ class CultNetRudpSession:
         self._latest_sequenced_by_channel.clear()
         self._pending_reliable.clear()
         self._queued_reliable.clear()
-        self._ordered_next_sequence_by_channel.clear()
-        self._ordered_buffers.clear()
+        self._received_through = None
+        self._ordered_held.clear()
         self._fragment_buffers.clear()
         self._fragment_sets_evicted = 0
 
@@ -592,11 +599,6 @@ class CultNetRudpSession:
         self._apply_acknowledgements(packet)
         ready_to_send = self._promote_queued_reliable(now_ms)
         self._last_received_at_ms = now_ms
-        expected_sequence_if_uninitialized = (
-            packet.sequence
-            if self._highest_received_sequence is None
-            else self._highest_received_sequence + 1
-        )
 
         if packet.packet_type == CultNetRudpPacketType.ACCEPT:
             self._remember_received(packet.sequence)
@@ -639,25 +641,26 @@ class CultNetRudpSession:
         if duplicate:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
+        delivered: list[CultNetRudpDeliveredFrame] = []
         reassembled = self._reassemble(packet)
-        if reassembled is None:
-            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
-        frame, ordered, next_sequence = reassembled
-        if not ordered and packet.sequenced:
-            newest_sequence = next_sequence - 1
-            latest_sequence = self._latest_sequenced_by_channel.get(frame.channel_id)
-            if latest_sequence is not None and newest_sequence <= latest_sequence:
-                return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
-            self._latest_sequenced_by_channel[frame.channel_id] = newest_sequence
-            return CultNetRudpReceiveResult(delivered=(frame,), ready_to_send=ready_to_send)
-        if not ordered:
-            return CultNetRudpReceiveResult(delivered=(frame,), ready_to_send=ready_to_send)
-        return CultNetRudpReceiveResult(
-            delivered=tuple(
-                self._deliver_ordered(frame, next_sequence, expected_sequence_if_uninitialized)
-            ),
-            ready_to_send=ready_to_send,
-        )
+        if reassembled is not None:
+            frame, ordered, next_sequence = reassembled
+            if ordered:
+                self._ordered_held[frame.sequence] = frame
+            elif not packet.sequenced:
+                delivered.append(frame)
+            else:
+                newest_sequence = next_sequence - 1
+                latest_sequence = self._latest_sequenced_by_channel.get(frame.channel_id)
+                if latest_sequence is None or newest_sequence > latest_sequence:
+                    self._latest_sequenced_by_channel[frame.channel_id] = newest_sequence
+                    delivered.append(frame)
+
+        # Any reliable packet may have advanced the watermark, a fragment or an
+        # unordered frame as much as an ordered one, so the drain runs after all
+        # of them.
+        delivered.extend(self._drain_ordered())
+        return CultNetRudpReceiveResult(delivered=tuple(delivered), ready_to_send=ready_to_send)
 
     def create_ack(self) -> CultNetRudpPacket:
         ack, ack_mask = self._ack_state()
@@ -808,6 +811,10 @@ class CultNetRudpSession:
 
     def _remember_received(self, sequence: int) -> None:
         self._received_sequences.add(sequence)
+        through = sequence if self._received_through is None else self._received_through
+        while through + 1 in self._received_sequences:
+            through += 1
+        self._received_through = through
         if self._highest_received_sequence is None or sequence > self._highest_received_sequence:
             self._highest_received_sequence = sequence
         if len(self._received_sequences) > self.RECEIVED_SEQUENCE_WINDOW:
@@ -865,58 +872,15 @@ class CultNetRudpSession:
             max(sequences) + 1,
         )
 
-    def _deliver_ordered(
-        self,
-        frame: CultNetRudpDeliveredFrame,
-        next_after_frame: int,
-        expected_sequence_if_uninitialized: int,
-    ) -> list[CultNetRudpDeliveredFrame]:
-        next_sequence = self._ordered_next_sequence_by_channel.get(frame.channel_id)
-        if next_sequence is None:
-            next_sequence = min(expected_sequence_if_uninitialized, frame.sequence)
-            self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence
-        while (
-            frame.sequence > next_sequence
-            and next_sequence in self._received_sequences
-            and next_sequence not in self._ordered_buffers.get(frame.channel_id, {})
-        ):
-            next_sequence += 1
-            self._ordered_next_sequence_by_channel[frame.channel_id] = next_sequence
-        if frame.sequence < next_sequence:
+    def _drain_ordered(self) -> list[CultNetRudpDeliveredFrame]:
+        """Delivers, in sequence order, every held ordered frame whose first
+        sequence is at most one past the watermark. Ordered delivery has one
+        owner: the watermark. A frame this call does not deliver waits for the
+        sequence below it, and nothing else releases it."""
+        if self._received_through is None:
             return []
-        if frame.sequence > next_sequence:
-            self._ordered_buffers.setdefault(frame.channel_id, {})[frame.sequence] = (frame, next_after_frame)
-            return []
-
-        self._ordered_next_sequence_by_channel[frame.channel_id] = next_after_frame
-        return [frame, *self._drain_ordered(frame.channel_id)]
-
-    def _drain_ordered(self, channel_id: str) -> list[CultNetRudpDeliveredFrame]:
-        delivered: list[CultNetRudpDeliveredFrame] = []
-        buffer = self._ordered_buffers.get(channel_id)
-        if buffer is None:
-            return delivered
-
-        while True:
-            next_sequence = self._ordered_next_sequence_by_channel[channel_id]
-            pending = buffer.pop(next_sequence, None)
-            if pending is None:
-                break
-            frame, next_after_frame = pending
-            delivered.append(frame)
-            self._ordered_next_sequence_by_channel[channel_id] = next_after_frame
-            self._skip_received_non_channel_sequences(channel_id)
-        return delivered
-
-    def _skip_received_non_channel_sequences(self, channel_id: str) -> None:
-        next_sequence = self._ordered_next_sequence_by_channel.get(channel_id)
-        while (
-            next_sequence is not None
-            and next_sequence in self._received_sequences
-            and next_sequence not in self._ordered_buffers.get(channel_id, {})
-        ):
-            next_sequence += 1
-            self._ordered_next_sequence_by_channel[channel_id] = next_sequence
+        releasable = sorted(sequence for sequence in self._ordered_held if sequence <= self._received_through + 1)
+        return [self._ordered_held.pop(sequence) for sequence in releasable]
 
     def _allocate_fragment_id(self) -> int:
         fragment_id = self._next_fragment_id

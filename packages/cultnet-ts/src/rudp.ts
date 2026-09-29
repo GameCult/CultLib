@@ -72,11 +72,6 @@ type PendingReliablePacket = {
   lastSentAtMs: number;
 };
 
-type PendingOrderedFrame = {
-  frame: CultNetRudpDeliveredFrame;
-  nextSequence: number;
-};
-
 type FragmentBuffer = {
   channelId: string;
   reliable: boolean;
@@ -157,8 +152,15 @@ export class CultNetRudpSession {
   readonly #latestSequencedByChannel = new Map<string, number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
   readonly #queuedReliable: CultNetRudpPacket[] = [];
-  readonly #orderedNextSequenceByChannel = new Map<string, number>();
-  readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
+  /// Every reliable sequence up to and including this one has been received
+  /// since the peer state was last reset. The first reliable sequence after a
+  /// reset seeds it: the peer's Connect or Accept, or, for a session that never
+  /// handshook, its first packet.
+  #receivedThrough: number | undefined;
+  /// Ordered frames received but not yet deliverable, keyed by first sequence.
+  /// A frame is held for exactly one reason: a reliable sequence below it has
+  /// not arrived.
+  readonly #orderedHeld = new Map<number, CultNetRudpDeliveredFrame>();
   readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
   /// Matches cultnet-rs's `max_pending_fragment_sets`. A fragment set is only
   /// removed on successful reassembly, so a set that loses one fragment is
@@ -220,8 +222,8 @@ export class CultNetRudpSession {
     this.#latestSequencedByChannel.clear();
     this.#pendingReliable.clear();
     this.#queuedReliable.splice(0);
-    this.#orderedNextSequenceByChannel.clear();
-    this.#orderedBuffers.clear();
+    this.#receivedThrough = undefined;
+    this.#orderedHeld.clear();
     this.#fragmentBuffers.clear();
     this.#fragmentSetsEvicted = 0;
   }
@@ -372,9 +374,6 @@ export class CultNetRudpSession {
     this.#applyAcknowledgements(packet);
     const readyToSend = this.#promoteQueuedReliable(nowMs);
     this.#lastReceivedAtMs = nowMs;
-    const expectedSequenceIfUninitialized = this.#highestReceivedSequence === undefined
-      ? packet.sequence
-      : this.#highestReceivedSequence + 1;
 
     if (packet.packetType === "accept") {
       this.#rememberReceived(packet.sequence);
@@ -427,29 +426,28 @@ export class CultNetRudpSession {
       return { delivered: [], readyToSend };
     }
 
+    const delivered: CultNetRudpDeliveredFrame[] = [];
     const reassembled = this.#reassemble(packet);
-    if (!reassembled) {
-      return { delivered: [], readyToSend };
-    }
-
-    if (!reassembled.ordered && (packet.sequenced ?? false)) {
-      const newestSequence = reassembled.nextSequence - 1;
-      const latestSequence = this.#latestSequencedByChannel.get(reassembled.frame.channelId);
-      if (latestSequence !== undefined && newestSequence <= latestSequence) {
-        return { delivered: [], readyToSend };
+    if (reassembled) {
+      if (reassembled.ordered) {
+        this.#orderedHeld.set(reassembled.frame.sequence, reassembled.frame);
+      } else if (!(packet.sequenced ?? false)) {
+        delivered.push(reassembled.frame);
+      } else {
+        const newestSequence = reassembled.nextSequence - 1;
+        const latestSequence = this.#latestSequencedByChannel.get(reassembled.frame.channelId);
+        if (latestSequence === undefined || newestSequence > latestSequence) {
+          this.#latestSequencedByChannel.set(reassembled.frame.channelId, newestSequence);
+          delivered.push(reassembled.frame);
+        }
       }
-      this.#latestSequencedByChannel.set(reassembled.frame.channelId, newestSequence);
-      return { delivered: [reassembled.frame], readyToSend };
     }
 
-    if (!reassembled.ordered) {
-      return { delivered: [reassembled.frame], readyToSend };
-    }
-
-    return {
-      delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized),
-      readyToSend,
-    };
+    // Any reliable packet may have advanced the watermark, a fragment or an
+    // unordered frame as much as an ordered one, so the drain runs after all of
+    // them.
+    delivered.push(...this.#drainOrdered());
+    return { delivered, readyToSend };
   }
 
   createAck(): CultNetRudpPacket {
@@ -618,6 +616,9 @@ export class CultNetRudpSession {
 
   #rememberReceived(sequence: number): void {
     this.#receivedSequences.add(sequence);
+    let through = this.#receivedThrough ?? sequence;
+    while (this.#receivedSequences.has(through + 1)) through += 1;
+    this.#receivedThrough = through;
     if (this.#highestReceivedSequence === undefined || sequence > this.#highestReceivedSequence) {
       this.#highestReceivedSequence = sequence;
     }
@@ -734,68 +735,20 @@ export class CultNetRudpSession {
     };
   }
 
-  #deliverOrdered(
-    frame: CultNetRudpDeliveredFrame,
-    nextSequence: number,
-    expectedSequenceIfUninitialized: number,
-  ): CultNetRudpDeliveredFrame[] {
-    let next = this.#orderedNextSequenceByChannel.get(frame.channelId);
-    if (next === undefined) {
-      next = Math.min(expectedSequenceIfUninitialized, frame.sequence);
-      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
-    }
-
-    while (frame.sequence > next && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(frame.channelId)?.has(next)) {
-      next += 1;
-      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
-    }
-
-    if (frame.sequence < next) {
-      return [];
-    }
-
-    if (frame.sequence > next) {
-      let buffer = this.#orderedBuffers.get(frame.channelId);
-      if (!buffer) {
-        buffer = new Map();
-        this.#orderedBuffers.set(frame.channelId, buffer);
-      }
-      buffer.set(frame.sequence, { frame, nextSequence });
-      return [];
-    }
-
-    this.#orderedNextSequenceByChannel.set(frame.channelId, nextSequence);
-    return [
-      frame,
-      ...this.#drainOrdered(frame.channelId),
-    ];
-  }
-
-  #drainOrdered(channelId: string): CultNetRudpDeliveredFrame[] {
-    const delivered: CultNetRudpDeliveredFrame[] = [];
-    const buffer = this.#orderedBuffers.get(channelId);
-    if (!buffer) {
-      return delivered;
-    }
-
-    let next = this.#orderedNextSequenceByChannel.get(channelId);
-    while (next !== undefined && buffer.has(next)) {
-      const pending = buffer.get(next)!;
-      buffer.delete(next);
-      delivered.push(pending.frame);
-      next = pending.nextSequence;
-      this.#orderedNextSequenceByChannel.set(channelId, next);
-      this.#skipReceivedNonChannelSequences(channelId);
-    }
-    return delivered;
-  }
-
-  #skipReceivedNonChannelSequences(channelId: string): void {
-    let next = this.#orderedNextSequenceByChannel.get(channelId);
-    while (next !== undefined && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(channelId)?.has(next)) {
-      next += 1;
-      this.#orderedNextSequenceByChannel.set(channelId, next);
-    }
+  /// Delivers, in sequence order, every held ordered frame whose first sequence
+  /// is at most one past the watermark. Ordered delivery has one owner: the
+  /// watermark. A frame this call does not deliver waits for the sequence below
+  /// it, and nothing else releases it.
+  #drainOrdered(): CultNetRudpDeliveredFrame[] {
+    if (this.#receivedThrough === undefined) return [];
+    const releasable = [...this.#orderedHeld.keys()]
+      .filter((sequence) => sequence <= this.#receivedThrough! + 1)
+      .sort((left, right) => left - right);
+    return releasable.map((sequence) => {
+      const frame = this.#orderedHeld.get(sequence)!;
+      this.#orderedHeld.delete(sequence);
+      return frame;
+    });
   }
 
   #allocateFragmentId(): number {

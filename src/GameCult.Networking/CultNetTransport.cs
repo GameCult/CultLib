@@ -888,12 +888,6 @@ namespace GameCult.Networking
             public long LastSentAtMs { get; set; }
         }
 
-        private sealed class PendingOrderedFrame
-        {
-            public CultNetRudpDeliveredFrame Frame { get; set; } = new CultNetRudpDeliveredFrame();
-            public uint NextSequence { get; set; }
-        }
-
         private sealed class FragmentBuffer
         {
             public string ChannelId { get; set; } = string.Empty;
@@ -915,9 +909,14 @@ namespace GameCult.Networking
         private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Queue<CultNetRudpPacket> _queuedReliable = new Queue<CultNetRudpPacket>();
-        private readonly Dictionary<string, uint> _orderedNextSequenceByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
-        private readonly Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>> _orderedBuffers =
-            new Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>>(StringComparer.Ordinal);
+        // Every reliable sequence up to and including this one has been received since the peer state
+        // was last reset. The first reliable sequence after a reset seeds it: the peer's Connect or
+        // Accept, or, for a session that never handshook, its first packet.
+        private uint? _receivedThrough;
+        // Ordered frames received but not yet deliverable, keyed by first sequence. A frame is held for
+        // exactly one reason: a reliable sequence below it has not arrived.
+        private readonly SortedDictionary<uint, CultNetRudpDeliveredFrame> _orderedHeld =
+            new SortedDictionary<uint, CultNetRudpDeliveredFrame>();
         private readonly Dictionary<string, FragmentBuffer> _fragmentBuffers = new Dictionary<string, FragmentBuffer>(StringComparer.Ordinal);
 
         /// <summary>
@@ -1148,9 +1147,6 @@ namespace GameCult.Networking
             ApplyAcknowledgements(packet);
             var readyToSend = PromoteQueuedReliable(nowMs);
             _lastReceivedAtMs = nowMs;
-            var expectedSequenceIfUninitialized = _highestReceivedSequence.HasValue
-                ? _highestReceivedSequence.Value + 1
-                : packet.Sequence;
 
             if (packet.PacketType == CultNetRudpPacketType.Accept)
             {
@@ -1217,30 +1213,34 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
             }
 
+            var delivered = new List<CultNetRudpDeliveredFrame>();
             var reassembled = Reassemble(packet);
-            if (reassembled == null)
+            if (reassembled != null)
             {
-                return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
-            }
-
-            if (!reassembled.Ordered && packet.Sequenced)
-            {
-                var newestSequence = reassembled.NextSequence - 1;
-                if (_latestSequencedByChannel.TryGetValue(reassembled.Frame.ChannelId, out var latestSequence)
-                    && newestSequence <= latestSequence)
+                if (reassembled.Ordered)
                 {
-                    return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
+                    _orderedHeld[reassembled.Frame.Sequence] = reassembled.Frame;
                 }
-                _latestSequencedByChannel[reassembled.Frame.ChannelId] = newestSequence;
+                else if (!packet.Sequenced)
+                {
+                    delivered.Add(reassembled.Frame);
+                }
+                else
+                {
+                    var newestSequence = reassembled.NextSequence - 1;
+                    if (!_latestSequencedByChannel.TryGetValue(reassembled.Frame.ChannelId, out var latestSequence)
+                        || newestSequence > latestSequence)
+                    {
+                        _latestSequencedByChannel[reassembled.Frame.ChannelId] = newestSequence;
+                        delivered.Add(reassembled.Frame);
+                    }
+                }
             }
 
-            return new CultNetRudpReceiveResult
-            {
-                ReadyToSend = readyToSend,
-                Delivered = reassembled.Ordered
-                    ? DeliverOrdered(reassembled.Frame, reassembled.NextSequence, expectedSequenceIfUninitialized)
-                    : new[] { reassembled.Frame }
-            };
+            // Any reliable packet may have advanced the watermark, a fragment or an unordered frame as
+            // much as an ordered one, so the drain runs after all of them.
+            delivered.AddRange(DrainOrdered());
+            return new CultNetRudpReceiveResult { ReadyToSend = readyToSend, Delivered = delivered };
         }
 
         /// <summary>
@@ -1302,8 +1302,8 @@ namespace GameCult.Networking
                 _pendingReliable.Clear();
                 _queuedReliable.Clear();
             }
-            _orderedNextSequenceByChannel.Clear();
-            _orderedBuffers.Clear();
+            _receivedThrough = null;
+            _orderedHeld.Clear();
             _fragmentBuffers.Clear();
         }
 
@@ -1518,6 +1518,12 @@ namespace GameCult.Networking
         private void RememberReceived(uint sequence)
         {
             _receivedSequences.Add(sequence);
+            var through = _receivedThrough ?? sequence;
+            while (through != uint.MaxValue && _receivedSequences.Contains(through + 1))
+            {
+                through++;
+            }
+            _receivedThrough = through;
             if (!_highestReceivedSequence.HasValue || sequence > _highestReceivedSequence.Value)
             {
                 _highestReceivedSequence = sequence;
@@ -1625,78 +1631,33 @@ namespace GameCult.Networking
             };
         }
 
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(
-            CultNetRudpDeliveredFrame frame,
-            uint nextSequenceAfterFrame,
-            uint expectedSequenceIfUninitialized)
-        {
-            if (!_orderedNextSequenceByChannel.TryGetValue(frame.ChannelId, out var next))
-            {
-                next = Math.Min(expectedSequenceIfUninitialized, frame.Sequence);
-                _orderedNextSequenceByChannel[frame.ChannelId] = next;
-            }
-
-            while (frame.Sequence > next
-                   && _receivedSequences.Contains(next)
-                   && (!_orderedBuffers.TryGetValue(frame.ChannelId, out var pendingBuffer) || !pendingBuffer.ContainsKey(next)))
-            {
-                next++;
-                _orderedNextSequenceByChannel[frame.ChannelId] = next;
-            }
-
-            if (frame.Sequence < next)
-            {
-                return Array.Empty<CultNetRudpDeliveredFrame>();
-            }
-
-            if (frame.Sequence > next)
-            {
-                if (!_orderedBuffers.TryGetValue(frame.ChannelId, out var buffer))
-                {
-                    buffer = new SortedDictionary<uint, PendingOrderedFrame>();
-                    _orderedBuffers[frame.ChannelId] = buffer;
-                }
-
-                buffer[frame.Sequence] = new PendingOrderedFrame { Frame = frame, NextSequence = nextSequenceAfterFrame };
-                return Array.Empty<CultNetRudpDeliveredFrame>();
-            }
-
-            _orderedNextSequenceByChannel[frame.ChannelId] = nextSequenceAfterFrame;
-            return new[] { frame }.Concat(DrainOrdered(frame.ChannelId)).ToArray();
-        }
-
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainOrdered(string channelId)
+        /// <summary>
+        /// Delivers, in sequence order, every held ordered frame whose first sequence is at most one past
+        /// the watermark. Ordered delivery has one owner: the watermark. A frame this call does not
+        /// deliver waits for the sequence below it, and nothing else releases it.
+        /// </summary>
+        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainOrdered()
         {
             var delivered = new List<CultNetRudpDeliveredFrame>();
-            if (!_orderedBuffers.TryGetValue(channelId, out var buffer))
+            if (!_receivedThrough.HasValue)
             {
                 return delivered;
             }
 
-            while (_orderedNextSequenceByChannel.TryGetValue(channelId, out var next) && buffer.TryGetValue(next, out var pending))
+            var through = _receivedThrough.Value;
+            foreach (var pair in _orderedHeld)
             {
-                buffer.Remove(next);
-                delivered.Add(pending.Frame);
-                _orderedNextSequenceByChannel[channelId] = pending.NextSequence;
-                SkipReceivedNonChannelSequences(channelId);
+                if (through != uint.MaxValue && pair.Key > through + 1)
+                {
+                    break;
+                }
+                delivered.Add(pair.Value);
             }
-
+            foreach (var frame in delivered)
+            {
+                _orderedHeld.Remove(frame.Sequence);
+            }
             return delivered;
-        }
-
-        private void SkipReceivedNonChannelSequences(string channelId)
-        {
-            if (!_orderedNextSequenceByChannel.TryGetValue(channelId, out var next))
-            {
-                return;
-            }
-
-            while (_receivedSequences.Contains(next)
-                   && (!_orderedBuffers.TryGetValue(channelId, out var buffer) || !buffer.ContainsKey(next)))
-            {
-                next++;
-                _orderedNextSequenceByChannel[channelId] = next;
-            }
         }
 
         private ushort AllocateFragmentId()
