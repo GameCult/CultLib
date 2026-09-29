@@ -810,29 +810,12 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the file holds ids, so it is marked");
         }
 
-        // A conditional commit lands onto the file as it is, and decides its header as every writer does: by the ids the file
-        // will hold. Ids on disk mark it whatever header the file carried; ids only this cache minted are on no disk.
+        // A conditional commit lands onto the file as it is: it sees only its own batch, so ids only this cache minted (they are on no
+        // disk) do not mark the file.
         [Test]
-        public void AConditionalCommitOntoAFileHoldingIdsMarksItAndOneOntoLoadMintedIdsDoesNot()
+        public void AConditionalCommitOntoLoadMintedIdsDoesNotMarkTheFile()
         {
-            var held = PathOf("conditional-held.cc");
             Type[] types = { typeof(IdDeck), typeof(PreCut2FixtureItem) };
-            using (var cache = OpenWith(held, false, types))
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(held));
-            snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV1;
-            File.WriteAllBytes(held, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-            using (var cache = OpenWith(held, false, types))
-            {
-                Assert.That(cache.Commit(batch =>
-                {
-                    batch.Expect(new CultRecordKey("plain"), null);
-                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
-                }), Is.True);
-            }
-
-            Assert.That(HeaderOf(held), Is.EqualTo("cultcache.store.v3"), "the deck on disk holds ids");
-
             var preId = PathOf("conditional-minted.cc");
             WritePreIdStore(preId, null, ("a", "a", 1));
             using (var cache = OpenWith(preId, false, types))
@@ -869,6 +852,87 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(HeaderOf(replaced), Is.EqualTo("cultcache.store.v1"));
+        }
+
+        // Soul's probe: a C1 v2 store whose variant override holds no ids. Loading mints them in memory; the store keeps the delta
+        // it read, so the file holds none and no write of a plain record beside it may mark the file.
+        private static void WriteV2StoreWithAnIdLessVariant(string path)
+        {
+            using (var seed = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                seed.Commit(batch =>
+                {
+                    batch.Upsert(typeof(IdDeck), EmptyDeck("base"), new CultRecordKey("base"));
+                    batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                        new[] { seed.Override<IdDeck>(nameof(IdDeck.Name), "v"), seed.Override<IdDeck>(nameof(IdDeck.Reels), new List<IdReel> { new() }) });
+                });
+            }
+
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var record = snapshot.Records.Single(entry => entry.Key == "v");
+            record.Variant = new CultVariantDelta(record.Variant!.BaseKey, record.Variant.Overrides
+                .Select(entry => entry.Path[0].Slot == 1 ? CultVariantOverride.Set(1, OldShapedReels("old")) : entry).ToArray());
+            snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV2;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        }
+
+        [TestCase("unconditional")]
+        [TestCase("conditional")]
+        [TestCase("flush")]
+        public void AVariantWhoseIdsExistOnlyInMemoryDoesNotMarkTheFileAPlainWriteLandsIn(string write)
+        {
+            var path = PathOf("variant-in-memory-" + write + ".cc");
+            WriteV2StoreWithAnIdLessVariant(path);
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"));
+
+            using (var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
+            {
+                Assert.That(AllIds(cache.Get<IdDeck>(new CultRecordKey("v"))!), Has.All.Not.Empty, "the variant holds minted ids in memory");
+                var key = new CultRecordKey("p");
+                switch (write)
+                {
+                    case "unconditional":
+                        UpsertPlain(cache, "p");
+                        break;
+                    case "conditional":
+                        Assert.That(cache.Commit(batch =>
+                        {
+                            batch.Expect(key, null);
+                            batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "p" }, key);
+                        }), Is.True);
+                        break;
+                    default:
+                        cache.UpsertAsync(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "p" }, key).GetAwaiter().GetResult();
+                        cache.FlushAllBackingStores();
+                        break;
+                }
+            }
+
+            Assert.That(DiskRecord(path, "p"), Is.Not.Null);
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "the file holds no id, whatever this cache minted in memory");
+        }
+
+        // Soul's A/B probe: a conditional commit lands onto the file as it is, so a stale view of what the file once held does not
+        // decide the header. A holds a deck with ids; B removes it; A commits a plain record conditionally.
+        [Test]
+        public void AConditionalCommitIsNotMarkedByIdsItsStaleViewHoldsAndTheFileNoLongerDoes()
+        {
+            var path = PathOf("stale-view.cc");
+            Type[] types = { typeof(IdDeck), typeof(PreCut2FixtureItem) };
+            using var a = OpenWith(path, false, types);
+            a.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("d"), new CultRecordKey("d")));
+            using (var b = OpenWith(path, false, types))
+                b.Commit(batch => batch.Remove(new CultRecordKey("d")));
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "B's whole-store commit left no id");
+            Assert.That(a.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "A has not pulled: its view is stale");
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("plain"), null);
+                batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
+            }), Is.True);
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the merged file holds no id");
         }
 
         // Any override holding an id marks the variant, wherever it sits among the overrides.

@@ -62,8 +62,9 @@ public sealed class CultMeshSingleFileElementIdTests
             .Should().Equal(publication.Representations.Select(entry => entry.Id));
     }
 
+    // A typed write replaces the whole file with a document it can see, so the ids that document holds decide the header.
     [Test]
-    public void TypedWriteOfADocumentHoldingNoIdStaysV1AndAMarkedFileStaysMarked()
+    public void TypedWriteDecidesTheHeaderByTheDocumentItWritesEvenOverAMarkedFile()
     {
         var path = Path_("none.cc");
         CultMesh.WriteSingleFileDocument(path, Key, Publication());
@@ -72,7 +73,24 @@ public sealed class CultMeshSingleFileElementIdTests
         CultMesh.WriteSingleFileDocument(path, Key, Publication(Descriptor()));
         HeaderOf(path).Should().Be("cultcache.store.v3");
         CultMesh.WriteSingleFileDocument(path, Key, Publication());
-        HeaderOf(path).Should().Be("cultcache.store.v3", "a file already marked on disk stays marked");
+        HeaderOf(path).Should().Be("cultcache.store.v1", "the whole file is replaced by a document that holds no id");
+    }
+
+    // A raw payload is opaque: the writer cannot see what it holds, so a marked file stays marked.
+    [Test]
+    public void RawPayloadWriteOverAMarkedFileKeepsItMarkedAndOverAnUnmarkedOneStaysV1()
+    {
+        var path = Path_("raw.cc");
+        var schema = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
+        var payload = new byte[] { 0x90 };
+
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, payload);
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(Descriptor()));
+        HeaderOf(path).Should().Be("cultcache.store.v3");
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, payload);
+        HeaderOf(path).Should().Be("cultcache.store.v3", "the payload's ids are not the writer's to see");
     }
 
     [Test]

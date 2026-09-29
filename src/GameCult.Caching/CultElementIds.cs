@@ -64,9 +64,11 @@ namespace GameCult.Caching
 
             public int Count => _fills.Count;
 
-            // True when some element under the root holds a non-empty id once the plan is applied: one already there, or one this
-            // plan fills. It decides whether the store that writes the root carries the v3 header.
-            public bool HoldsIds { get; internal set; }
+            // True when some element under the root already holds a non-empty id: one a store persisted, or one the caller set.
+            public bool HeldIds { get; internal set; }
+
+            // True when some element holds a non-empty id once the plan is applied: one already there, or one this plan fills.
+            public bool HoldsIds => HeldIds || _fills.Count > 0;
 
             internal void Add(object item, Shape shape, string? before, string id) => _fills.Add((item, shape, before, id));
 
@@ -253,7 +255,7 @@ namespace GameCult.Caching
                     var id = getId(item);
                     if (string.IsNullOrEmpty(id))
                         continue;
-                    plan.HoldsIds = true;
+                    plan.HeldIds = true;
                     if (shape.Derive == null && !IsRandomId(id!))
                         throw new CultElementIdException(
                             $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters.",
@@ -285,7 +287,6 @@ namespace GameCult.Caching
                         else
                             id = Mint(itemPath, deterministic, rootPath, taken);
                         plan.Add(item, itemShape, get(item), id);
-                        plan.HoldsIds = true;
                     }
 
                     Visit(item, itemPath);

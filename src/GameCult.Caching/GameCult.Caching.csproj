@@ -7,7 +7,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="GameCult.Caching.Tests" />
     <InternalsVisibleTo Include="GameCult.Mesh" />
-    <InternalsVisibleTo Include="GameCult.Caching.MessagePack" />
   </ItemGroup>
 
   <ItemGroup>

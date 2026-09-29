@@ -65,20 +65,8 @@ namespace GameCult.Caching
         public const string FormatV1 = "cultcache.store.v1";
         public const string FormatV2 = "cultcache.store.v2";
         public const string FormatV3 = "cultcache.store.v3";
-        // The directory store's manifest formats: v5 when the directory holds an element id, for the reason v3 exists.
-        public const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
-        public const string DirectoryFormatV5 = "cultcache.store.v5.directory-content-addressed-pages";
 
         public string FormatVersion { get; set; } = FormatV1;
-
-        // The one header decision. v3 when the store holds an element id: a reader older than ids refuses the header, because it
-        // would skip the id slots and rewrite the elements without them. Otherwise v2 exactly when it holds a variant, and a store
-        // with neither stays byte-identical v1. A file already marked stays marked; the writer that knows that says so.
-        internal static string FormatFor(bool holdsIds, bool holdsVariants) =>
-            holdsIds ? FormatV3 : holdsVariants ? FormatV2 : FormatV1;
-
-        // The directory store's header decision (it refuses variants): the same owner as FormatFor.
-        internal static string DirectoryFormatFor(bool holdsIds) => holdsIds ? DirectoryFormatV5 : DirectoryFormatV4;
 
         public CultSchemaCatalogEntry[] SchemaCatalog { get; set; } = Array.Empty<CultSchemaCatalogEntry>();
         public CultPersistedRecord[] Records { get; set; } = Array.Empty<CultPersistedRecord>();
@@ -2715,7 +2703,9 @@ namespace GameCult.Caching
                     // decoded copy, and the delta this hold lands carries them.
                     var bytes = entry.Value;
                     var idPlan = CultElementIds.Plan(value, key + "." + slot.ToString(CultureInfo.InvariantCulture), deterministic: source != null);
-                    holdsIds |= idPlan.HoldsIds;
+                    // What the record persists: a write persists the ids it mints, a load keeps the delta as the store held it, so
+                    // the ids a load mints exist only in memory.
+                    holdsIds |= source == null ? idPlan.HoldsIds : idPlan.HeldIds;
                     if (idPlan.Count > 0)
                     {
                         idPlan.Apply();
@@ -3042,6 +3032,23 @@ namespace GameCult.Caching
         private readonly object _detachedGate = new();
         internal CultCache? Cache;
 
+        private const string DirectoryFormatV4 = "cultcache.store.v4.directory-content-addressed-pages";
+        private const string DirectoryFormatV5 = "cultcache.store.v5.directory-content-addressed-pages";
+
+        // The one header decision, for every writer of every store. The marked header (v3, or the directory store's v5) says the
+        // store holds an element id: a reader older than ids refuses it, because it would skip the id slots and rewrite the
+        // elements without them. A writer that rewrites the whole store decides by content, so a store may drop back when nothing
+        // holds an id. A writer that touches only part of the store keeps a header already marked, because it cannot see what
+        // the rest holds. holdsIds is about the records this write knows are on disk. Unmarked, a single-file store is v2 exactly
+        // when it holds a variant, and otherwise v1; the directory store refuses variants and is v4.
+        protected internal static string HeaderFor(bool holdsIds, string? existingHeader, bool wholeStore, bool directoryStore, bool holdsVariants = false)
+        {
+            var marked = directoryStore ? DirectoryFormatV5 : CultPersistedStoreSnapshot.FormatV3;
+            if (holdsIds || (!wholeStore && string.Equals(existingHeader, marked, StringComparison.Ordinal)))
+                return marked;
+            return directoryStore ? DirectoryFormatV4 : holdsVariants ? CultPersistedStoreSnapshot.FormatV2 : CultPersistedStoreSnapshot.FormatV1;
+        }
+
         // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
         // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
         // returns. File locks are always taken inside it.
@@ -3249,7 +3256,9 @@ namespace GameCult.Caching
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()),
-                        Entries.Values.Any(entry => entry.HoldsIds));
+                        Entries.Values.Any(entry => entry.HoldsIds),
+                        existingHeader: null,
+                        wholeStore: true);
                     Cache?.IdsPersisted(Entries.Keys);
                 }
 
@@ -3292,14 +3301,13 @@ namespace GameCult.Caching
             foreach (var entry in request.Upserts)
                 records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
 
-            // One rule for every writer: the file holds ids when a record it will hold does. A record this commit replaces or removes
-            // no longer counts. Onto the file, only ids already persisted count (a load-minted id is on no disk), and a file already
-            // marked stays marked: it may hold records this cache cannot read, and a rewrite must not shed the marker.
+            // Onto the file, only the batch's records are seen: the rest stay as they are, and the header they carry stays. An
+            // unconditional commit writes this store's whole view, so what its records hold decides. A record this commit
+            // replaces or removes no longer counts.
             var replaced = request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
             var holdsIds = request.Upserts.Any(entry => entry.HoldsIds) ||
-                           Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value) && !(ontoDisk && entry.IdsInMemoryOnly)) ||
-                           (ontoDisk && string.Equals(disk.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal));
-            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())), holdsIds);
+                           (!ontoDisk && Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value)));
+            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())), holdsIds, disk.FormatVersion, wholeStore: !ontoDisk);
             if (!ontoDisk)
                 Cache?.IdsPersisted(records.Keys);
             foreach (var entry in request.Deletes)
@@ -3354,13 +3362,13 @@ namespace GameCult.Caching
             }
         }
 
-        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog, bool holdsElementIds)
+        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog, bool holdsElementIds, string? existingHeader, bool wholeStore)
         {
             var ordered = records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
             var used = new HashSet<string>(ordered.Select(record => record.SchemaId), StringComparer.Ordinal);
             var snapshot = new CultPersistedStoreSnapshot
             {
-                FormatVersion = CultPersistedStoreSnapshot.FormatFor(holdsElementIds, ordered.Any(record => record.Variant != null)),
+                FormatVersion = HeaderFor(holdsElementIds, existingHeader, wholeStore, directoryStore: false, holdsVariants: ordered.Any(record => record.Variant != null)),
                 SchemaCatalog = catalog
                     .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .Select(group => group.First())

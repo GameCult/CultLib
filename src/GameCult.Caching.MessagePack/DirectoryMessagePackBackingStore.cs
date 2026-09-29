@@ -15,8 +15,9 @@ namespace GameCult.Caching.MessagePack;
 // A small hot manifest indexes the store; each record lives in one cold content-addressed page.
 public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 {
-    private const string IndexedFormatVersion = CultPersistedStoreSnapshot.DirectoryFormatV4;
-    private const string IndexedFormatVersionWithIds = CultPersistedStoreSnapshot.DirectoryFormatV5;
+    // The two manifest headers; the shared header decision names them.
+    private static readonly string IndexedFormatVersion = HeaderFor(holdsIds: false, existingHeader: null, wholeStore: true, directoryStore: true);
+    private static readonly string IndexedFormatVersionWithIds = HeaderFor(holdsIds: true, existingHeader: null, wholeStore: true, directoryStore: true);
     // An unleased load that has not settled after this many attempts throws.
     private const int UnleasedLoadAttempts = 5;
     private readonly FileInfo _manifestFile;
@@ -284,12 +285,15 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 pagePayload);
         }
 
-        // A manifest already marked stays marked: pages it names may hold ids this cache cannot read.
-        var carriesIds = string.Equals(currentManifest.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal) ||
-                         keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.HoldsIds);
+        // The directory store writes only its dirty pages, so it keeps a manifest already marked.
+        var header = HeaderFor(
+            keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.HoldsIds),
+            currentManifest.FormatVersion,
+            wholeStore: false,
+            directoryStore: true);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
-            .ToArray(), carriesIds);
+            .ToArray(), header);
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
@@ -299,11 +303,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         MarkFlushSucceeded();
     }
 
-    private void WriteManifest(CultSchemaCatalogEntry[] catalog, CultPersistedRecord[] index, bool carriesElementIds)
+    private void WriteManifest(CultSchemaCatalogEntry[] catalog, CultPersistedRecord[] index, string header)
     {
         var manifest = new CultPersistedStoreSnapshot
         {
-            FormatVersion = CultPersistedStoreSnapshot.DirectoryFormatFor(carriesElementIds),
+            FormatVersion = header,
             SchemaCatalog = catalog,
             Records = index
         };

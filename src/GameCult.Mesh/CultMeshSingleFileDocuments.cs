@@ -110,7 +110,8 @@ namespace GameCult.Mesh
                     descriptor.ToCatalogEntry(),
                     storedAt,
                     CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    ids.HoldsIds);
+                    ids.HoldsIds,
+                    contentKnown: true);
             }
             catch
             {
@@ -148,7 +149,7 @@ namespace GameCult.Mesh
             byte[] payload)
         {
             if (schema == null) throw new ArgumentNullException(nameof(schema));
-            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: false);
+            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: false, contentKnown: false);
         }
 
         /// <summary>
@@ -231,7 +232,8 @@ namespace GameCult.Mesh
             CultSchemaCatalogEntry catalogEntry,
             string? storedAt,
             byte[] payload,
-            bool holdsIds)
+            bool holdsIds,
+            bool contentKnown)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
@@ -239,11 +241,11 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
-            // A raw payload is opaque: whether it holds element ids is the typed caller's to say. A file already marked stays
-            // marked, as it does in a cache's own store.
+            // A typed write sees the document it replaces the file with, so its ids decide. A raw payload is opaque: the writer
+            // cannot see whether it holds ids, so a file already marked stays marked.
             var snapshot = new CultPersistedStoreSnapshot
             {
-                FormatVersion = CultPersistedStoreSnapshot.FormatFor(holdsIds || IsMarkedOnDisk(path), holdsVariants: false),
+                FormatVersion = CacheBackingStore.HeaderFor(holdsIds, contentKnown ? null : ExistingHeader(path), wholeStore: contentKnown, directoryStore: false),
                 SchemaCatalog = new[] { catalogEntry },
                 Records = new[]
                 {
@@ -264,17 +266,15 @@ namespace GameCult.Mesh
             WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
-        private static bool IsMarkedOnDisk(string path)
+        private static string? ExistingHeader(string path)
         {
             try
             {
-                var reader = new MessagePackReader(File.ReadAllBytes(path));
-                reader.ReadArrayHeader();
-                return string.Equals(reader.ReadString(), CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal);
+                return CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MessagePackSerializationException or EndOfStreamException or InvalidOperationException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or MessagePackSerializationException or EndOfStreamException or InvalidOperationException or NotSupportedException)
             {
-                return false;
+                return null;
             }
         }
 
