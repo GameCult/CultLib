@@ -135,6 +135,35 @@ public sealed class HlslSourceCompatibilityTests
     }
 
     /// <summary>
+    /// The generic comparison above passes about a hundred inputs through <c>cultmath_phacelle</c>, and
+    /// its prune only changes an output for the rare cell whose weight is nonzero but whose lower
+    /// bound sits just under the 2.25 cut (Soul's F6 lesson for cellular): a mirror whose cut is 2.0
+    /// survives a hundred inputs. A dense sweep of realistic arguments closes that gap.
+    /// </summary>
+    [Fact]
+    public void PhacelleMirrorMatchesCSharpBitForBitAcrossADenseSweep()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float))!;
+
+        var random = new System.Random(0x5EED2);
+        float Next(float extent) => (random.NextSingle() * 2.0f - 1.0f) * extent;
+        for (var i = 0; i < 20000; i++)
+        {
+            var p = new float3(Next(50.0f), Next(50.0f), Next(50.0f));
+            var side = new float3(Next(9.0f), Next(9.0f), Next(9.0f));
+            var offset = random.NextSingle();
+            var normalization = random.NextSingle();
+            var expected = Values(phacelle(p, side, offset, normalization));
+            var actual = Values(mirror.Invoke(shader, new object[] { p, side, offset, normalization })!);
+            Assert.True(BitwiseEqual(expected, actual), $"mirror differs from C# at p = {p}, side = {side}");
+        }
+    }
+
+    /// <summary>
     /// A hand-built pair of structs standing in for a mirror struct return and its C# counterpart
     /// (invariant 8's one struct return shape, e.g. <see cref="CultCellular"/>): same field shape,
     /// different concrete type, exactly like the real mirror comparison. Proves the field-by-field,
