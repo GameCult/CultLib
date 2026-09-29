@@ -233,6 +233,38 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   paths are proven bit-identical (`PrunedSearchIsBitIdenticalToTheUnprunedFiveCubedSearch`,
   which samples `[-50, 50]^3`, is comfortably inside that domain).
 
+- `snoise(float3)` follows webgl-noise `src/noise3D.glsl` as of
+  stegu/webgl-noise `22434e04d7`: kernel radius squared `0.5`, output scale
+  `105`, permutation `mod289((34x+10)x)`. Upstream's `21d9fe23d7` (2020-10-14,
+  "an age-old bug that caused slight discontinuities along simplex
+  boundaries") moved the radius from `0.6` to `0.5`; at `0.6` a lattice vertex
+  outside the four summed corners can lie inside the kernel, leaving a value
+  jump at the cell boundary (3.1e-3 over the committed probe's 400 lines). `ff3b5d34ea` set the scale
+  to `105` and `a3e6d57095` (2021-06-30) the permutation; the 2D `snoise` shares
+  that permutation helper, so its values changed too, while its own kernel
+  (`0.5`) and scale (`130`) already matched upstream.
+  `NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries`
+  pins the continuity.
+- `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
+  following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
+  Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
+  `snoise(float3)`: per corner, `m0 = max(0.5 - dot(x,x), 0)`, so
+  `d(m0^4 * dot(p,x))/dx = -8*m0^3*dot(p,x)*x + m0^4*p`, summed over the four
+  corners and scaled by the same constant as the value, so `.w` is exactly
+  `snoise(float3)`. `fbm_grad` and
+  `ridged_grad` are octave sums of `snoise_grad`: each octave samples at
+  `p * frequency`, so by the chain rule its gradient scales by that same
+  frequency, and both amplitude (`gain`) and frequency (`lacunarity`) compound
+  per octave rather than applying once to the whole sum. `ridged_grad` folds
+  each octave about zero (`Σ aᵢ(1 − |nᵢ|)`, gradient `−Σ aᵢfᵢ sign(nᵢ)∇nᵢ`,
+  Musgrave's ridged multifractal, *Texturing and Modeling* ch. 16); the crease
+  at `nᵢ = 0` is deliberate (the operator's dune term, 2026-09-25), not a bug.
+  Both clamp `octaves` to `[0, 16]`: `HlslSourceCompatibilityTests`'s bit-parity
+  oracle drives every mirrored `int` parameter across the full int32 range,
+  which is the right domain for `pcg3d`/`pcg4d`'s O(1) hash inputs but would
+  turn an unclamped octave count into a multi-billion-iteration loop for these
+  two mirrors.
+
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32
 permutation over one LCG step, and `pcg3d`/`pcg4d` are the paper's (3 → 3) and
