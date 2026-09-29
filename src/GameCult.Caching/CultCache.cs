@@ -1813,8 +1813,11 @@ namespace GameCult.Caching
         private readonly object _observerGate = new();
         private readonly object _gate = new();
         private long _sequence;
-        // The changes admitted by this thread's outermost hold, published by that hold when it exits.
-        [ThreadStatic] private static List<(Change Change, bool Loaded)>? _held;
+        // What this thread's outermost hold admitted, published by that hold when it exits.
+        [ThreadStatic] private static Hold? _held;
+        // Journals run under the gate, in registration order; both fields are read and written only under it.
+        private readonly List<Action<IReadOnlyList<CultCacheDocumentChange<object>>>> _journals = new();
+        private bool _journaling;
         private bool _dirtyInMemory;
 
         // The codec is the store's encoding (CultCacheMessagePack.Create supplies it). A cache without one holds no variants:
@@ -1900,6 +1903,29 @@ namespace GameCult.Caching
                     change.Sequence));
         }
 
+        // Disposing removes the journal. A dispose the cache refuses (from inside a journal, or inside another cache's hold)
+        // throws and leaves the registration live and disposable; it counts as disposed only once the removal succeeded.
+        private sealed class JournalRegistration : IDisposable
+        {
+            private readonly CultCache _cache;
+            private readonly Action<IReadOnlyList<CultCacheDocumentChange<object>>> _journal;
+            private bool _removed;
+
+            public JournalRegistration(CultCache cache, Action<IReadOnlyList<CultCacheDocumentChange<object>>> journal)
+            {
+                _cache = cache;
+                _journal = journal;
+            }
+
+            public void Dispose()
+            {
+                if (_removed)
+                    return;
+                _cache.Held(() => _cache._journals.Remove(_journal));
+                _removed = true;
+            }
+        }
+
         private IDisposable Register(Observer<Change> observer)
         {
             lock (_observerGate)
@@ -1922,6 +1948,23 @@ namespace GameCult.Caching
         public Observable<CultCacheDocumentChange<T>> WatchRecord<T>(CultRecordKey key) where T : class
         {
             return Watch<T>().Where(change => change.Key.Equals(key));
+        }
+
+        // An ordered admission journal: called under the gate, right after an admission is applied, once per admission
+        // that changed something, with that admission's changes in Sequence order. Journals of one cache run in
+        // registration order. A journal sees the new state (reads work) and is the one place cache order is a fact: it
+        // must not write to the cache or wait for anything that needs it, and any hold on this cache while a journal runs
+        // throws. A journal's exception does not undo the admission: it is published, then the exception is rethrown to
+        // the writer, as an observer's is.
+        public IDisposable AddJournal(Action<IReadOnlyList<CultCacheDocumentChange<object>>> journal)
+        {
+            if (journal == null) throw new ArgumentNullException(nameof(journal));
+            Held(() =>
+            {
+                _journals.Add(journal);
+                return true;
+            });
+            return new JournalRegistration(this, journal);
         }
 
         // Attaching reads the store; there is no interval in which it is attached but unread.
@@ -2372,40 +2415,51 @@ namespace GameCult.Caching
             var outcome = land(home, plan.Admitted);
             if (outcome != CultCommitOutcome.Committed)
                 return outcome;
-            foreach (var change in Apply(plan, evicted, source))
-                _held.Add((change, source != null));
+            var applied = Apply(plan, evicted, source);
+            foreach (var change in applied)
+                _held.Changes.Add((change, source != null));
+            RunJournals(applied, _held.Failures);
             return CultCommitOutcome.Committed;
         });
 
         // Every admission runs in a hold. A nested hold on the same cache adds to the outermost one, which publishes
         // exactly its own changes after it leaves the gate, before it returns, on its caller's thread: observers never
         // run under the gate, and a write an observer makes is a new outermost hold. Cross-thread delivery order is not
-        // guaranteed; each change carries the Sequence it was admitted with. Every change reaches every observer even
+        // guaranteed; each change carries the Sequence it was admitted with. Journals run before that, under the gate,
+        // in Sequence order (AddJournal); no hold may be entered on this cache while one runs. Every change reaches every observer even
         // if an observer or an OnUpdate handler throws; then the first exception (an AggregateException for several) is rethrown.
         // If the body threw, its exception wins.
         internal T Held<T>(Func<T> body)
         {
             if (Monitor.IsEntered(_gate))
+            {
+                if (_journaling)
+                    throw new InvalidOperationException("A journal entered the cache it journals; a journal must not write to it.");
                 return body();
+            }
+
             if (_held != null)
                 throw new InvalidOperationException(
                     "A cache hold was entered inside another cache's hold; a thread holds one cache's gate at a time.");
-            var mine = _held = new List<(Change Change, bool Loaded)>();
-            T result;
+            var mine = _held = new Hold();
+            var result = default(T)!;
             try
             {
                 lock (_gate)
                     result = body();
             }
-            catch
+            catch (Exception exception)
             {
                 _held = null;
                 Publish(mine);
-                throw;
+                if (mine.Failures.Count == 0)
+                    throw;
+                throw new AggregateException(mine.Failures.Prepend(exception));
             }
 
             _held = null;
-            var failures = Publish(mine);
+            var failures = mine.Failures;
+            failures.AddRange(Publish(mine));
             if (failures.Count == 1)
                 ExceptionDispatchInfo.Capture(failures[0]).Throw();
             if (failures.Count > 1)
@@ -2413,10 +2467,10 @@ namespace GameCult.Caching
             return result;
         }
 
-        private List<Exception> Publish(List<(Change Change, bool Loaded)> changes)
+        private List<Exception> Publish(Hold hold)
         {
             var failures = new List<Exception>();
-            foreach (var (change, loaded) in changes)
+            foreach (var (change, loaded) in hold.Changes)
             {
                 // R3 routes a throwing subscriber to its unhandled-exception handler, and a fail-fast handler rethrows: every
                 // observer still runs, the exception joins the failures, and the observer stays subscribed.
@@ -2445,6 +2499,36 @@ namespace GameCult.Caching
             }
 
             return failures;
+        }
+
+        // Runs under the gate. A journal that throws joins the hold's failures and the remaining journals still run.
+        private void RunJournals(List<Change> applied, List<Exception> failures)
+        {
+            if (_journals.Count == 0 || applied.Count == 0)
+                return;
+            var changes = applied
+                .Select(change => new CultCacheDocumentChange<object>(
+                    change.Kind, change.Stored.Key, change.Document, change.Previous, change.Sequence))
+                .ToArray();
+            _journaling = true;
+            try
+            {
+                foreach (var journal in _journals)
+                {
+                    try
+                    {
+                        journal(changes);
+                    }
+                    catch (Exception exception)
+                    {
+                        failures.Add(exception);
+                    }
+                }
+            }
+            finally
+            {
+                _journaling = false;
+            }
         }
 
         private CacheBackingStore? Validate(
@@ -2990,6 +3074,13 @@ namespace GameCult.Caching
             }
 
             public CultRecordKey Key { get; }
+        }
+
+        // What one outermost hold admitted, and what its journals threw.
+        private sealed class Hold
+        {
+            public List<(Change Change, bool Loaded)> Changes { get; } = new();
+            public List<Exception> Failures { get; } = new();
         }
 
         private sealed class Change

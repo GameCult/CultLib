@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
@@ -119,6 +120,87 @@ namespace GameCult.Caching.Tests
                 Assert.That(d, Is.EqualTo(new[] { 1L, 2L }), "an observer that did not move still saw everything");
                 Assert.That(b, Does.Not.Contain(2L), "a disposed observer stops receiving");
                 Assert.That(c, Is.EqualTo(new[] { 2L }), "an observer that joined mid-hold receives from the next change");
+            });
+        }
+
+        [Test]
+        public void AnUnsubscribedObserverIsReleasedByTheCache()
+        {
+            using var cache = new CultCache(Registry);
+            var kept = new List<IDisposable>();
+            var live = Subscribe(cache, kept, dispose: false);
+            var gone = Subscribe(cache, kept, dispose: true);
+            Send(cache, "one");
+            CollectGarbage();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(live.IsAlive, Is.True, "a live subscription is held by the cache");
+                Assert.That(gone.IsAlive, Is.False, "an unsubscribed observer is no longer held");
+            });
+            GC.KeepAlive(kept);
+            GC.KeepAlive(cache);
+        }
+
+        // A disposed R3 subscription ignores OnNext, so a stale entry in the cache is invisible to a receiver; it shows as
+        // a leak: the cache keeps the subscriber alive. The test frame must not hold the subscription itself.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static WeakReference Subscribe(CultCache cache, List<IDisposable> kept, bool dispose)
+        {
+            var target = new object();
+            var subscription = cache.Watch<ObservedPing>().Subscribe(_ => GC.KeepAlive(target));
+            if (dispose)
+                subscription.Dispose();
+            else
+                kept.Add(subscription);
+            return new WeakReference(target);
+        }
+
+        private static void CollectGarbage()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        // A store that admits a load and then fails: the hold's body throws after the changes were minted.
+        private sealed class LoadThenFailStore : CacheBackingStore
+        {
+            public bool Armed;
+
+            public override void PullAll() => Held(() =>
+            {
+                if (!Armed)
+                    return;
+                var record = new CultStoredDocument(
+                    KeyOf("loaded"), "2026-01-01T00:00:00.0000000+00:00", Registry.GetRequired(typeof(ObservedPing)), new ObservedPing { Text = "loaded" });
+                Loaded!(new[] { record }, Array.Empty<CultStoredDocument>());
+                throw new InvalidOperationException("store failed after the load");
+            });
+
+            public override void Push(CultStoredDocument entry) { }
+            public override void Delete(CultStoredDocument entry) { }
+            public override void PushAll() { }
+            public override CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait) => CultCommitOutcome.Committed;
+        }
+
+        [Test]
+        public void AHoldWhoseBodyThrowsStillPublishesTheChangesItMinted()
+        {
+            using var cache = new CultCache(Registry);
+            var store = new LoadThenFailStore();
+            cache.AddBackingStore(store);
+            var seen = new List<long>();
+            using var subscription = cache.Watch<ObservedPing>().Subscribe(change => seen.Add(change.Sequence));
+            store.Armed = true;
+
+            var thrown = Assert.Throws<InvalidOperationException>(() => store.PullAll())!;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(thrown.Message, Is.EqualTo("store failed after the load"), "the body's own exception wins");
+                Assert.That(cache.Get<ObservedPing>(KeyOf("loaded")), Is.Not.Null, "the load landed");
+                Assert.That(seen, Is.EqualTo(new[] { 1L }), "and reached its observers");
             });
         }
 
