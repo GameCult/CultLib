@@ -8,7 +8,7 @@ import unittest
 import hashlib
 import hmac
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -695,6 +695,15 @@ class CultNetTests(unittest.TestCase):
         self.assertTrue(client.check_timeout(91, 50))
         self.assertFalse(client.connected)
 
+    def test_a_repeated_connect_acknowledges_what_it_carries(self) -> None:
+        client = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=1))
+        server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=100))
+        connect = client.create_connect(0, b"join")
+        accept = server.accept_connect(connect, 0)
+        reply = server.answer_repeated_connect(replace(connect, ack=accept.sequence), 1)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        self.assertEqual(server.outstanding_reliable_packet_count, 0)
+
     def test_cultnet_rudp_session_bounds_pending_reliable_packets_before_enqueue(self) -> None:
         session = CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=102, initial_sequence=1, max_pending_reliable_packets=2)
@@ -917,6 +926,233 @@ class CultNetTests(unittest.TestCase):
         finally:
             client.close()
             server.close()
+
+    def test_cultnet_rudp_socket_transport_drops_strays_and_keeps_serving_its_peer(self) -> None:
+        server_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        stray_socket = bind_udp_socket()
+        connection_id = 0x10203050
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+            )
+        )
+        foreign = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=0x0BADF10E))
+        strays = [
+            b"not a rudp packet",
+            b"",
+            encode_rudp_packet(foreign.create_connect(0, b"foreign")),
+        ]
+
+        try:
+            # A stray that arrives before the peer must not become the peer.
+            for stray in strays:
+                stray_socket.sendto(stray, server_socket.getsockname())
+            for _ in strays:
+                self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, len(strays))
+
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+
+            # A moved flow answers from the peer's own address with someone else's session.
+            for stray in strays:
+                server_socket.sendto(stray, client_socket.getsockname())
+                client_socket.sendto(stray, server_socket.getsockname())
+            for _ in strays:
+                self.assertIsNone(client.receive_once())
+                self.assertIsNone(server.receive_once())
+            self.assertEqual(client.stats.packets_dropped, len(strays))
+            self.assertEqual(server.stats.packets_dropped, 2 * len(strays))
+
+            client.send("schema", b"still here")
+            self.assertEqual(receive_rudp_frame(server).payload, b"still here")
+            server.send("schema", b"server still here")
+            self.assertEqual(receive_rudp_frame(client).payload, b"server still here")
+        finally:
+            stray_socket.close()
+            client.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_is_claimed_only_by_a_connect(self) -> None:
+        server_socket = bind_udp_socket()
+        orphan_socket = bind_udp_socket()
+        client_socket = bind_udp_socket()
+        connection_id = 0x10203052
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        client = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-client",
+                socket=client_socket,
+                mode=CultNetRudpSocketMode.CLIENT,
+                remote_addr=server_socket.getsockname(),
+                connection_id=connection_id,
+            )
+        )
+        orphan = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+        try:
+            # A right-id packet that is not a Connect must claim nothing.
+            orphan_socket.sendto(encode_rudp_packet(orphan.create_ack()), server_socket.getsockname())
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 1)
+            self.assertIsNone(server.remote_addr)
+
+            client.connect(b"join")
+            pump_rudp_handshake(client, server)
+            self.assertTrue(client.connected)
+            self.assertEqual(server.remote_addr, client_socket.getsockname())
+        finally:
+            orphan_socket.close()
+            client.close()
+            server.close()
+
+    def test_cultnet_rudp_socket_transport_ends_the_session_that_refuses_a_reliable_frame(self) -> None:
+        server_socket = bind_udp_socket()
+        peer_socket = bind_udp_socket()
+        connection_id = 0x10203053
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        peer = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+
+        def to_server(packet) -> None:
+            peer_socket.sendto(encode_rudp_packet(packet), server_socket.getsockname())
+
+        def drain_peer() -> list:
+            packets = []
+            while True:
+                try:
+                    wire, _ = peer_socket.recvfrom(65535)
+                except TimeoutError:
+                    return packets
+                packets.append(decode_rudp_packet(wire))
+
+        try:
+            to_server(peer.create_connect(0, b"join"))
+            server.receive_once()
+            accept = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0]
+            peer.receive(accept, 0)
+
+            (frame,) = peer.send_many("schema", b"poison", CultNetRudpSendOptions(reliable=True, ordered=True))
+            poison = replace(frame, fragment_count=2, fragment_id=0)
+            to_server(poison)
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 1)
+            self.assertFalse(server.connected)
+            self.assertEqual(server.disconnect_reason, b"session refused a packet")
+
+            # The peer is told, and the goodbye does not acknowledge the refused frame.
+            (goodbye,) = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+            self.assertTrue(peer.receive(goodbye, 1).disconnected)
+            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+
+            # A retransmit is dropped, not acknowledged.
+            to_server(poison)
+            self.assertIsNone(server.receive_once())
+            self.assertEqual(server.stats.packets_dropped, 2)
+            self.assertEqual(drain_peer(), [])
+            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+
+            # A Connect claims the endpoint again.
+            again = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+            to_server(again.create_connect(0, b"again"))
+            server.receive_once()
+            self.assertEqual(
+                [p.packet_type for p in drain_peer()], [CultNetRudpPacketType.ACCEPT]
+            )
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def _server_mode_pair(self, connection_id: int):
+        server_socket = bind_udp_socket()
+        peer_socket = bind_udp_socket()
+        server = CultNetRudpSocketTransportConnection(
+            CultNetRudpSocketTransportOptions(
+                runtime_id="python-rudp-server",
+                socket=server_socket,
+                mode=CultNetRudpSocketMode.SERVER,
+                connection_id=connection_id,
+            )
+        )
+        peer = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
+
+        def to_server(packet) -> None:
+            peer_socket.sendto(encode_rudp_packet(packet), server_socket.getsockname())
+
+        def drain_peer() -> list:
+            packets = []
+            while True:
+                try:
+                    wire, _ = peer_socket.recvfrom(65535)
+                except TimeoutError:
+                    return packets
+                packets.append(decode_rudp_packet(wire))
+
+        return server, server_socket, peer_socket, peer, to_server, drain_peer
+
+    def test_cultnet_rudp_flush_fails_for_a_write_the_ended_session_forgot(self) -> None:
+        server, _, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x10203054)
+        try:
+            to_server(peer.create_connect(0, b"join"))
+            server.receive_once()
+            peer.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            server.send("schema", b"never acknowledged")
+            (frame,) = peer.send_many("schema", b"poison", CultNetRudpSendOptions(reliable=True, ordered=True))
+            to_server(replace(frame, fragment_count=2, fragment_id=0))
+            self.assertIsNone(server.receive_once())
+            with self.assertRaises(ConnectionError):
+                server.flush_reliable(0.2)
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_owes_one_reliable_accept_however_many_connects_repeat(self) -> None:
+        server, _, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x10203055)
+        try:
+            connect = peer.create_connect(0, b"join")
+            for _ in range(20):
+                to_server(connect)
+                server.receive_once()
+            accepts = {p.sequence for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT}
+            self.assertEqual(len(accepts), 1)
+            self.assertLessEqual(server.outstanding_reliable_packet_count, 1)
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_session_rejects_limits_that_cannot_admit_a_connect(self) -> None:
+        with self.assertRaises(ValueError):
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1, initial_sequence=0xFFFFFFFF))
+        with self.assertRaises(ValueError):
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1, max_pending_reliable_packets=0))
+        CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=1, initial_sequence=0xFFFFFFFE, max_pending_reliable_packets=1)
+        )
 
     def test_cultnet_rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()

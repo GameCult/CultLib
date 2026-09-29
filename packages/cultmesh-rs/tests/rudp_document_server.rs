@@ -553,3 +553,103 @@ fn session_cap_and_expiry_use_monotonic_time() -> Result<()> {
     assert_eq!(server.session_count(), 0);
     Ok(())
 }
+
+#[test]
+fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
+    use cultnet_rs::{
+        CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
+        encode_rudp_packet,
+    };
+    let clock = Clock::new(60_000);
+    let sink = Sink::default();
+    let options = CultMeshRudpDocumentServerOptions {
+        max_pending_reliable_packets_per_session: 4,
+        ..Default::default()
+    };
+    let mut server = server(options, clock.clone(), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let mut real = client(target, 101)?;
+    connect(&mut server, &mut [&mut real])?;
+    assert_eq!(server.packets_dropped(), 0);
+
+    let raw = UdpSocket::bind("127.0.0.1:0")?;
+    let session = |id| {
+        CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: id,
+            initial_sequence: 1,
+            resend_delay_ms: 10,
+            max_pending_reliable_packets: None,
+        })
+    };
+    let send_raw = |server: &mut Server, packet: &cultnet_rs::CultNetRudpPacket| -> Result<()> {
+        raw.send_to(&encode_rudp_packet(packet)?, target)?;
+        server.poll_once()?;
+        Ok(())
+    };
+
+    // A malformed frame.
+    raw.send_to(b"not a rudp packet", target)?;
+    server.poll_once()?;
+    assert_eq!(server.packets_dropped(), 1);
+
+    // Data for a session no Connect admitted.
+    let mut unadmitted = session(300);
+    unadmitted.assume_connected(0);
+    let reliable = CultNetRudpSendOptions {
+        reliable: true,
+        ..Default::default()
+    };
+    send_raw(&mut server, &unadmitted.send("schema", vec![1], reliable.clone())?)?;
+    assert_eq!(server.packets_dropped(), 2);
+
+    // A moved flow re-sends Connect from a socket that never hears the Accept.
+    // Each repeat re-sends the Accept still awaiting acknowledgement and queues
+    // nothing, so the storm neither errors nor grows the session's queue.
+    let mut stormer = session(102);
+    let connect_packet = stormer.create_connect(0, Vec::new())?;
+    for _ in 0..200 {
+        send_raw(&mut server, &connect_packet)?;
+    }
+    assert_eq!(server.packets_dropped(), 2);
+    assert_eq!(server.session_count(), 2);
+    clock.set(60_000 + 1_000);
+    assert_eq!(
+        server.maintain()?.packets_resent,
+        1,
+        "one Accept awaits acknowledgement, however many Connects repeated"
+    );
+
+    // A packet its own admitted session refuses ends that session, not the loop.
+    stormer.assume_connected(0);
+    let mut poison = stormer.send("schema", vec![1], reliable)?;
+    poison.fragment_count = 2;
+    poison.fragment_id = 0;
+    send_raw(&mut server, &poison)?;
+    assert_eq!(server.packets_dropped(), 3);
+    assert_eq!(server.session_count(), 1);
+    // ...and the refused client is told, after the Accepts its storm drew.
+    raw.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let mut buffer = vec![0_u8; 65_535];
+    let mut told = false;
+    while let Ok(received) = raw.recv(&mut buffer) {
+        told |= cultnet_rs::decode_rudp_packet(&buffer[..received])?.packet_type
+            == cultnet_rs::CultNetRudpPacketType::Disconnect;
+    }
+    assert!(told, "the refused client must be sent a goodbye");
+
+    send(
+        &mut real,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "after-storm".into(),
+            document: document("real", vec![9]),
+        },
+    )?;
+    for _ in 0..20 {
+        server.poll_once()?;
+        if sink.0.lock().unwrap().receipts.len() == 1 {
+            break;
+        }
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+    Ok(())
+}

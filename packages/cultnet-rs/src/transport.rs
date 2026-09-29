@@ -26,6 +26,11 @@ pub struct CultNetTransportStats {
     /// payload that lost a fragment on the wire. Zero for non-fragmenting
     /// transports.
     pub fragment_sets_evicted: u64,
+    /// Datagrams read and discarded because they belong to no session on this
+    /// transport: malformed frames, another session's connection id, an
+    /// unadmitted sender, or a packet the session refused. A steady rate means
+    /// a flow is being moved or scanned, not that this transport is failing.
+    pub packets_dropped: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
