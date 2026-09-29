@@ -412,6 +412,29 @@ public sealed class BoundedLeastSquaresTests
         }
     }
 
+    // Junk in the workspace, including NaN doubles, must not reach any decision: random boxed problems (which release
+    // bounds and use the tolerance) give bit-identical x and the same iteration count.
+    [Fact]
+    public void WorkspaceJunkNeverReachesTheSolveOnRandomProblems()
+    {
+        for (uint seed = 1; seed <= 25; seed++)
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var clean = new float[n];
+            Solve(m, n, a, b, lo, hi, clean, out var cleanIterations);
+            foreach (var junk in new[] { float.NaN, 7f, -1e30f })
+            {
+                var workspace = new float[BoundedLeastSquares.WorkspaceLength(n)];
+                Array.Fill(workspace, junk);
+                var x = new float[n];
+                BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, workspace, out var iterations);
+                Assert.Equal(cleanIterations, iterations);
+                for (var j = 0; j < n; j++)
+                    Assert.Equal(BitConverter.SingleToInt32Bits(clean[j]), BitConverter.SingleToInt32Bits(x[j]));
+            }
+        }
+    }
+
     [Fact]
     public void WarmStartAtAVertexTakesNoIterations()
     {
@@ -826,6 +849,9 @@ public sealed class BoundedLeastSquaresTests
         Assert.True(Cost(2, 2, a, b, y) < 1e-9, $"cost {Cost(2, 2, a, b, y)}");
     }
 
+    // One column, A = [1], with b beyond the box: the first Newton step would cross a bound, so with a cap of 0 the
+    // solver returns the clamped start untouched. That makes the clamp itself the thing under test, for every
+    // combination of a finite, infinite or NaN start with finite and infinite bounds.
     [Fact]
     public void WarmStartClampIsExact()
     {
@@ -836,23 +862,29 @@ public sealed class BoundedLeastSquaresTests
             (-1f, 1f, 5f, 1f),
             (-1f, 1f, -5f, -1f),
             (-1f, 1f, float.NaN, -1f),
-            (-inf, inf, float.NaN, 0f),
-            (-inf, inf, inf, 0f),
-            (-inf, inf, -inf, 0f),
+            (0.5f, 2f, inf, 2f),
+            (0.5f, 2f, -inf, 0.5f),
             (0.2f, inf, inf, 0.2f),
             (0.2f, inf, -inf, 0.2f),
+            (0.2f, inf, float.NaN, 0.2f),
             (-inf, -2f, -inf, -2f),
             (-inf, -2f, 3f, -2f),
             (-inf, 3f, float.NaN, 0f),
+            (-inf, 3f, -inf, 0f),
             (-2f, inf, float.NaN, -2f),
+            (-inf, -2f, float.NaN, -2f),
+            (-inf, 3f, 1f, 1f),
         };
         foreach (var (l, h, start, expected) in cases)
         {
-            var x = new[] { start, start, start };
-            // No rows: every column is dependent and takes a zero step, so x is exactly the clamped start.
-            Solve(0, 3, default, default, Fill(l, 3), Fill(h, 3), x, out var iterations);
+            // b beyond the box on the side the start is not on the bound of, so the step crosses a bound (or the
+            // start already sits on one).
+            var b = new[] { float.IsInfinity(h) ? l - 10f : h + 10f };
+            if (float.IsInfinity(l) && float.IsInfinity(h)) b[0] = 0f;
+            var x = new[] { start };
+            Solve(1, 1, new[] { 1f }, b, new[] { l }, new[] { h }, x, out var iterations, maxIterations: 0);
             Assert.Equal(0, iterations);
-            Assert.Equal(new[] { expected, expected, expected }, x);
+            Assert.True(x[0] == expected, $"box [{l}, {h}] start {start}: {x[0]}, expected {expected}");
         }
     }
 
