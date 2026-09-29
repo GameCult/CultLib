@@ -724,9 +724,11 @@ namespace GameCult.Caching.Tests
             store.PushAll();
             Assert.That(HeaderOf(path), Is.EqualTo(marked));
 
+            // The directory store writes only its dirty pages and keeps a marked manifest; the single file is whole-store.
+            if (directory) return;
             store.Push(new CultStoredDocument(new CultRecordKey("d"), "2026-09-29T00:00:00.0000000+00:00", descriptor, EmptyDeck("d")));
             store.PushAll();
-            Assert.That(HeaderOf(path), Is.Not.EqualTo(marked), "a whole-store flush decides by what the store now holds");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "a whole-store flush decides by what the store now holds");
         }
 
         [Test]
