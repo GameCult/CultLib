@@ -749,6 +749,203 @@ namespace GameCult.Caching.Tests
             Assert.That(reloaded.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
         }
 
+        // ---- the held index is truthful: every holder of a value, so no rule judges a variant against a lossy view ----
+
+        private static VariantGear Named(string name, string code) => new() { Name = name, Power = 1, Code = code };
+
+        private static CultRecordKey[] SharedCodePair(CultCache cache)
+        {
+            var p1 = new CultRecordKey("p1");
+            var p2 = new CultRecordKey("p2");
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(VariantGear), Named("p1", "x"), p1);
+                batch.Upsert(typeof(VariantGear), Named("p2", "x"), p2);
+            });
+            return new[] { p1, p2 };
+        }
+
+        private static void VariantOnCode(CultCache cache, string code) =>
+            cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+            {
+                cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                cache.Override<VariantGear>(nameof(VariantGear.Code), code)
+            }));
+
+        [Test]
+        public void PlainDuplicatesFindTheMostRecentHolderAndRemovingEitherLeavesTheOtherFindable()
+        {
+            var path = PathOf("gear.cc");
+            using (var cache = Open(path))
+            {
+                var pair = SharedCodePair(cache);
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "the last writer");
+
+                cache.Remove(pair[1]);
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"), "removing the winner finds the other holder");
+
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p2", "x"), pair[1]));
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"));
+                cache.Remove(pair[0]);
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p2"), "removing the loser changes nothing");
+                cache.Remove(pair[1]);
+                Assert.That(cache.GetByIndex<VariantGear>("code", "x"), Is.Null);
+                cache.BackingStores[0].PushAll();
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "x"), Is.Null);
+        }
+
+        [Test]
+        public void AVariantOnAValueAPlainRecordStillHoldsAfterItsTwinWasRemovedIsRefusedAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            using (var cache = Open(path))
+            {
+                SeedBase(cache);
+                var pair = SharedCodePair(cache);
+                cache.Remove(pair[1]);
+
+                var refused = Refused(() => VariantOnCode(cache, "x"));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain("p1").And.Contain("code").And.Contain("'x'"));
+                Assert.That(cache.Get(BigKey), Is.Null, "nothing landed");
+                cache.BackingStores[0].PushAll();
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(BigKey), Is.Null);
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
+        }
+
+        [Test]
+        public void AVariantOnAValueAPlainRecordStillHoldsAfterItsTwinChangedItsValueIsRefusedAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            using (var cache = Open(path))
+            {
+                SeedBase(cache);
+                var pair = SharedCodePair(cache);
+                cache.Commit(batch => batch.Upsert(typeof(VariantGear), Named("p2", "y"), pair[1]));
+
+                var refused = Refused(() => VariantOnCode(cache, "x"));
+                Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain("p1").And.Contain("'x'"));
+                Assert.DoesNotThrow(() => VariantOnCode(cache, "z"), "an unshared value is fine");
+                cache.BackingStores[0].PushAll();
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "z")!.Name, Is.EqualTo("laser big"));
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "x")!.Name, Is.EqualTo("p1"));
+        }
+
+        // ---- a merge onto the file is judged on the set the file will hold ----
+
+        [Test]
+        public void AConditionalCommitThatWouldShareAnIndexedValueWithAnotherWritersVariantIsRefusedAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path))
+                SeedBase(seed);
+
+            using (var a = Open(path))
+            using (var b = Open(path))
+            {
+                a.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+                {
+                    a.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                    a.Override<VariantGear>(nameof(VariantGear.Code), "shared")
+                }));
+
+                var refused = Refused(() => b.Commit(batch =>
+                {
+                    batch.Expect(other, null);
+                    batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
+                }));
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"));
+                Assert.That(b.Get(other), Is.Null, "nothing landed in memory");
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(other), Is.Null, "nothing landed on the file");
+            Assert.That(reopened.GetByIndex<VariantGear>("code", "shared")!.Name, Is.EqualTo("laser big"));
+        }
+
+        [Test]
+        public void AConditionalCommitThatRemovesAnotherWritersVariantsBaseIsRefusedAndTheStoreReopens()
+        {
+            var path = PathOf("gear.cc");
+            using (var seed = Open(path))
+                SeedBase(seed);
+
+            using (var a = Open(path))
+            using (var b = Open(path))
+            {
+                var seen = b.Get<VariantGear>(BaseKey)!;
+                SeedBig(a);
+
+                var refused = Refused(() => b.Commit(batch =>
+                {
+                    batch.Expect(BaseKey, seen);
+                    batch.Remove(BaseKey);
+                }));
+                Assert.That(refused.Message, Does.Contain(BaseKey.Value).And.Contain(BigKey.Value));
+                Assert.That(b.Get(BaseKey), Is.Not.Null, "nothing landed in memory");
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get<VariantGear>(BaseKey), Is.Not.Null);
+            Assert.That(reopened.Get<VariantGear>(BigKey)!.Name, Is.EqualTo("laser big"));
+        }
+
+        [Test]
+        public void AConditionalCommitThatIsSoundOnTheMergedSetStillLands()
+        {
+            var path = PathOf("gear.cc");
+            var other = new CultRecordKey("other");
+            using (var seed = Open(path))
+                SeedBase(seed);
+
+            using (var a = Open(path))
+            using (var b = Open(path))
+            {
+                SeedBig(a);
+                Assert.That(b.Commit(batch =>
+                {
+                    batch.Expect(other, null);
+                    batch.Upsert(typeof(VariantGear), Named("other", "fine"), other);
+                }), Is.True);
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get<VariantGear>(other), Is.Not.Null);
+            Assert.That(reopened.Get<VariantGear>(BigKey), Is.Not.Null, "the other writer's variant survives the merge");
+        }
+
+        [Test]
+        public void AVariantLoadedUnderANarrowerTypeHoldsOnlyTheOverridesTheTypeHasAndReportsTheRest()
+        {
+            var path = PathOf("drift.cc");
+            using (var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) })))
+            {
+                writer.Commit(batch =>
+                {
+                    batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
+                    batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
+                    {
+                        writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                        writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                    });
+                });
+            }
+
+            using var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) }));
+            Assert.That(narrow.GetStored(new CultRecordKey("drift-variant"))!.Variant!.Overrides.Select(entry => entry.Path[0].Slot), Is.EqualTo(new[] { 0 }),
+                "the dropped slot's override is shed when the record is loaded, not decided again at flush");
+            Assert.That(narrow.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Does.Contain(2));
+        }
+
         // ---- the directory store refuses a variant page on load as it does on write ----
 
         [Test]

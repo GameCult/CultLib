@@ -339,11 +339,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var record = ReadPersistedRecordPage(metadata, out var pagePayload);
-                recordReports[index] = Registry.ResolvePersistedSchemaReport(record.SchemaId, catalogEntries);
                 storedRecords[index] = ToStoredDocument(
                     record,
                     catalogEntries,
-                    (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry));
+                    (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
+                    out recordReports[index]);
                 if (tracePages)
                 {
                     pageBytes[index] = pagePayload.LongLength;
