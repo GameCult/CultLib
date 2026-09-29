@@ -307,10 +307,10 @@ public sealed class MathTests
 
     [Theory]
     [InlineData(0.0f, 0.0f, 0.0f)]
-    [InlineData(0.25f, -0.5f, -0.425866783f)]
-    [InlineData(12.25f, -4.5f, 0.258312f)]
-    [InlineData(536.5106f, 536.5106f, -0.6901103f)]
-    public void SimplexNoiseMatchesUnityMathematics(float x, float y, float expected)
+    [InlineData(0.25f, -0.5f, 0.225074813f)]
+    [InlineData(12.25f, -4.5f, -0.388599217f)]
+    [InlineData(536.5106f, 536.5106f, 0.538390875f)]
+    public void SimplexNoiseMatchesGoldenValues(float x, float y, float expected)
     {
         Assert.Equal(expected, math.snoise(new float2(x, y)), precision: 6);
     }
