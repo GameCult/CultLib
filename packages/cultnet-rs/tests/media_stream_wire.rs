@@ -383,3 +383,19 @@ fn a_malformed_audio_parity_record_is_refused_with_its_reason() {
         assert!(error.contains(expected), "expected {expected:?} in {error:?}");
     }
 }
+
+/// The shard limit is inclusive: a shard of exactly the largest size is
+/// admitted, one byte more is not.
+#[test]
+fn a_parity_shard_at_the_size_limit_is_admitted() {
+    use cultnet_rs::MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES as MAX;
+    let mut video = video_parity();
+    video.shard_payload_bytes = MAX as u32;
+    video.last_chunk_payload_bytes = MAX as u32;
+    video.payload = vec![0; MAX];
+    assert!(decodes(GameCultMediaWireRecord::VideoParity(video)).is_ok());
+    let mut audio = audio_parity();
+    audio.shard_payload_bytes = MAX as u32;
+    audio.payload = vec![0; MAX];
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok());
+}

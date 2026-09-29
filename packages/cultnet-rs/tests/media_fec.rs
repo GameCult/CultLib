@@ -768,6 +768,12 @@ fn a_custom_policy_sizes_blocks_by_its_own_fields() {
 fn a_policy_that_cannot_form_a_block_is_refused() {
     let zero = MediaFecPolicy { video_min_parity_shards: 0, ..STANDARD };
     assert!(protect_video_frame(&frame(1, 2, 10, 10), &zero).is_err());
+    let no_divisor = MediaFecPolicy { video_parity_divisor: 0, ..STANDARD };
+    assert!(protect_video_frame(&frame(1, 2, 10, 10), &no_divisor).is_err());
+    let no_audio = MediaFecPolicy { audio_data_shards: 0, ..STANDARD };
+    assert!(protect_audio_block(&audio_block(1, 10), &no_audio).is_err());
+    let no_audio_parity = MediaFecPolicy { audio_parity_shards: 0, ..STANDARD };
+    assert!(protect_audio_block(&audio_block(1, 10), &no_audio_parity).is_err());
     let too_wide = MediaFecPolicy { video_max_block_data_shards: 255, ..STANDARD };
     assert!(protect_video_frame(&frame(1, 2, 10, 10), &too_wide).is_err());
     let audio_too_wide = MediaFecPolicy { audio_data_shards: 255, audio_parity_shards: 2, ..STANDARD };

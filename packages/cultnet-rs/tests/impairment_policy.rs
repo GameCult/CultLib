@@ -156,3 +156,64 @@ fn a_malformed_profile_is_refused_with_its_line() {
 delay_ms = x
 ").contains(":3:"));
 }
+
+#[test]
+fn admission_counts_what_it_did_to_each_datagram() {
+    let mut scheduler = Scheduler::new(
+        Profile { duplicate_every: 2, reorder_every: 3, reorder_delay_ms: 10, ..Default::default() },
+        1,
+    );
+    for value in 0..6 {
+        scheduler.admit(0, Direction::ClientToUpstream, &[value], client());
+    }
+    // Datagrams 2, 4 and 6 are duplicated, 3 and 6 are reordered (6 is both).
+    assert_eq!(scheduler.stats.received, 6);
+    assert_eq!(scheduler.stats.duplicated, 3);
+    assert_eq!(scheduler.stats.reordered, 2);
+    assert_eq!(scheduler.queue.len(), 9);
+
+    let mut stalled = Scheduler::new(Profile { stall_at_ms: 0, stall_for_ms: 10, ..Default::default() }, 1);
+    stalled.admit(5, Direction::UpstreamToClient, b"x", client());
+    assert_eq!((stalled.stats.stalled, stalled.stats.dropped, stalled.queue.len()), (1, 1, 0));
+}
+
+#[test]
+fn jitter_is_seeded_uniform_within_its_bound() {
+    let profile = Profile { delay_ms: 7, jitter_ms: 5, ..Default::default() };
+    let mut scheduler = Scheduler::new(profile, 9);
+    let delays: Vec<u64> = (0..300).map(|_| scheduler.decide(0).delay_ms).collect();
+    assert!(delays.iter().all(|delay| (7..=12).contains(delay)), "{delays:?}");
+    for delay in 7..=12 {
+        assert!(delays.contains(&delay), "delay {delay} never drawn");
+    }
+}
+
+#[test]
+fn the_loss_ceiling_is_inclusive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("all.toml");
+    std::fs::write(&path, "loss_basis_points = 10000\n").unwrap();
+    let profile = Profile::load(&path).unwrap();
+    let mut scheduler = Scheduler::new(profile, 1);
+    assert!((0..50).all(|_| scheduler.decide(0).drop), "10000 basis points drops everything");
+}
+
+/// The seeded stream is part of the contract: the same seed must drop the same
+/// datagrams on every run, on every host. 100,000 draws of xorshift64 from seed
+/// 42, taken modulo 10,000 and compared against 100, give 1,008.
+#[test]
+fn seeded_loss_drops_the_exact_datagrams_the_stream_dictates() {
+    let mut scheduler = Scheduler::new(Profile { loss_basis_points: 100, ..Default::default() }, 42);
+    let dropped = (0..100_000).filter(|_| scheduler.decide(0).drop).count();
+    assert_eq!(dropped, 1_008);
+}
+
+#[test]
+fn datagrams_due_together_leave_in_arrival_order() {
+    let mut scheduler = Scheduler::new(Profile { delay_ms: 5, ..Default::default() }, 1);
+    for value in 0..4_u8 {
+        scheduler.admit(0, Direction::ClientToUpstream, &[value], client());
+    }
+    let order: Vec<u8> = std::iter::from_fn(|| scheduler.pop_due(5)).map(|item| item.bytes[0]).collect();
+    assert_eq!(order, vec![0, 1, 2, 3]);
+}
