@@ -164,6 +164,9 @@ fn a_small_packet_does_not_overtake_a_queued_large_one() -> Result<()> {
     let g = send(&mut sender, 1)?.remove(0);
     assert_eq!(send(&mut sender, 3 * MIB)?.len(), 1);
     assert!(send(&mut sender, 2 * MIB)?.is_empty());
+    // A direct send refuses instead of queueing behind it, and takes no sequence.
+    assert!(sender.send("state", vec![7], reliable()).is_err());
+    assert_eq!(sender.queued_reliable_packet_count(), 1);
     // One byte would fit above g, but the 2 MiB packet is ahead of it.
     assert!(send(&mut sender, 1)?.is_empty());
     let promoted = sender.receive(&ack_for(g.sequence), 1)?.ready_to_send;

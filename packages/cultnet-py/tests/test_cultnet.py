@@ -963,6 +963,10 @@ class CultNetTests(unittest.TestCase):
         g = self._flow_send(sender, 1)[0]
         self.assertEqual(len(self._flow_send(sender, 3 * self.MIB)), 1)
         self.assertEqual(len(self._flow_send(sender, 2 * self.MIB)), 0)
+        # A direct send refuses instead of queueing behind it, and takes no sequence.
+        with self.assertRaises(ValueError):
+            sender.send("state", bytes(1), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(sender.queued_reliable_packet_count, 1)
         # One byte would fit above g, but the 2 MiB packet is ahead of it.
         self.assertEqual(len(self._flow_send(sender, 1)), 0)
         promoted = sender.receive(self._flow_ack(g.sequence), 1).ready_to_send

@@ -1268,6 +1268,9 @@ namespace GameCult.Networking.Tests
             var g = FlowSend(sender, 1).Single();
             Assert.That(FlowSend(sender, 3 * Mib), Has.Count.EqualTo(1));
             Assert.That(FlowSend(sender, 2 * Mib), Is.Empty);
+            // A direct send refuses instead of queueing behind it, and takes no sequence.
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
             // One byte would fit above g, but the 2 MiB packet is ahead of it.
             Assert.That(FlowSend(sender, 1), Is.Empty);
             var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;

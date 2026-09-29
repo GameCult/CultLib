@@ -1503,6 +1503,9 @@ test("a small packet does not overtake a queued large one", () => {
   const g = flowSend(sender, 1)[0]!;
   assert.equal(flowSend(sender, 3 * MIB).length, 1);
   assert.equal(flowSend(sender, 2 * MIB).length, 0);
+  // A direct send refuses instead of queueing behind it, and takes no sequence.
+  assert.throws(() => sender.send("state", new Uint8Array(1), { reliable: true }));
+  assert.equal(sender.queuedReliablePacketCount, 1);
   // One byte would fit above g, but the 2 MiB packet is ahead of it.
   assert.equal(flowSend(sender, 1).length, 0);
   assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend), [g.sequence + 2, g.sequence + 3]);
