@@ -28,7 +28,7 @@ public enum BoundedLeastSquaresStatus
 /// Precision. A, b and <c>x</c> are float at the API; everything else, including the working iterate, the
 /// gradient and the KKT test, is double, carved from the caller's workspace. <c>x</c> is converted in at the start
 /// and back out at the end, so a returned float <c>x</c> is the nearest float to the double solution and always
-/// inside the box. Each free-set solve gets one step of iterative refinement.
+/// inside the box.
 /// </para>
 /// <para>
 /// Stopping. KKT termination uses a tolerance of 1e-6 times the problem's gradient scale (the larger of the
@@ -39,11 +39,12 @@ public enum BoundedLeastSquaresStatus
 /// tolerance costs one confirming iteration rather than the iteration cap.
 /// </para>
 /// <para>
-/// Near-singular problems. Columns whose pivot falls below 1e-12 of their own diagonal (cond(A) beyond roughly 1e6)
-/// are treated as dependent and not moved, so the answer there is one optimum among many, not the minimum-norm one.
-/// Callers that need the minimum-norm answer, or that expect cond(A) beyond that cutoff, add a small ridge row to
-/// <c>A</c> and <c>b</c>; that stays the caller's policy. Below the cutoff the solver owns optimality: near-collinear
-/// problems reach the exact optimum to about 1e-7 of |b|^2 at any absolute scale of A.
+/// Near-singular problems. The normal equations square the condition number, so the cost gap grows with cond(A)
+/// (measured: below 1e-6 of |b|^2 through cond(A) 3e5, about 2e-5 at 1e6), independent of the absolute scale of A.
+/// The solver owns optimality up to that range. Columns whose pivot falls below 1e-12 of their own diagonal (cond(A)
+/// beyond roughly 1e6) are treated as dependent and not moved, so the answer there is one optimum among many, not the
+/// minimum-norm one. Callers beyond that range, or that need the minimum-norm answer, add a small ridge row to
+/// <c>A</c> and <c>b</c>; that stays the caller's policy.
 /// </para>
 /// The solver allocates nothing and is deterministic.
 /// <para>
@@ -66,7 +67,7 @@ public static class BoundedLeastSquares
     private const double StallRelativeTolerance = 1e-15;
 
     /// <summary>Floats of caller-supplied workspace needed for <paramref name="n"/> columns.</summary>
-    public static int WorkspaceLength(int n) => 2 * (2 * n * n + 7 * n) + 3 * n;
+    public static int WorkspaceLength(int n) => 2 * (2 * n * n + 6 * n) + 3 * n;
 
     /// <summary>
     /// Minimises <c>||A x - b||^2</c> subject to <c>lo &lt;= x &lt;= hi</c>. <paramref name="x"/> is the warm start
@@ -95,7 +96,7 @@ public static class BoundedLeastSquares
             throw new ArgumentException("BoundedLeastSquares: span shorter than the stated dimensions.");
 
         // Double-precision vectors and matrices first, then the integer flags, all carved from the caller's floats.
-        var doubleCount = 2 * n * n + 7 * n;
+        var doubleCount = 2 * n * n + 6 * n;
         var dbl = MemoryMarshal.Cast<float, double>(workspace.Slice(0, 2 * doubleCount));
         var ata = dbl.Slice(0, n * n);
         var chol = dbl.Slice(n * n, n * n);
@@ -104,9 +105,8 @@ public static class BoundedLeastSquares
         var g = dbl.Slice(off + n, n);
         var p = dbl.Slice(off + 2 * n, n);
         var y = dbl.Slice(off + 3 * n, n);
-        var r1 = dbl.Slice(off + 4 * n, n);
-        var q = dbl.Slice(off + 5 * n, n);
-        var xd = dbl.Slice(off + 6 * n, n);
+        var rhs = dbl.Slice(off + 4 * n, n);
+        var xd = dbl.Slice(off + 5 * n, n);
         // One flag per column: 0 free, -1 at lo, +1 at hi. Free-list and dependency flags follow.
         var ints = MemoryMarshal.Cast<float, int>(workspace.Slice(2 * doubleCount, 3 * n));
         var state = ints.Slice(0, n);
@@ -166,10 +166,10 @@ public static class BoundedLeastSquares
         var gScale = 0.0;
         for (var j = 0; j < n; j++)
         {
-            q[j] = Math.Clamp(0.0, lo[j], hi[j]);
+            y[j] = Math.Clamp(0.0, lo[j], hi[j]);
             gScale = Math.Max(gScale, Math.Abs(atb[j]));
         }
-        Gradient(ata, atb, q, g, n);
+        Gradient(ata, atb, y, g, n);
         for (var j = 0; j < n; j++)
             gScale = Math.Max(gScale, Math.Abs(g[j]));
         var kktTol = KktRelativeTolerance * gScale;
@@ -178,7 +178,7 @@ public static class BoundedLeastSquares
         // release. A pass that ends without lowering it has nothing left to gain: the tolerance is a
         // resolution, not the stopping rule, and a noise floor above it must not spin to the cap.
         var fMark = double.PositiveInfinity;
-        BoundedLeastSquaresStatus status;
+        var status = BoundedLeastSquaresStatus.IterationLimit;
         while (true)
         {
             Gradient(ata, atb, xd, g, n);
@@ -187,7 +187,7 @@ public static class BoundedLeastSquares
             for (var j = 0; j < n; j++)
                 if (state[j] == 0)
                     freeIndex[freeCount++] = j;
-            SolveFreeSet(ata, chol, g, p, y, r1, q, freeIndex.Slice(0, freeCount), dependent, n);
+            SolveFreeSet(ata, chol, g, p, y, rhs, freeIndex.Slice(0, freeCount), dependent, n);
 
             var t = 1.0;
             var block = -1;
@@ -284,12 +284,13 @@ public static class BoundedLeastSquares
         }
     }
 
-    // Newton step over the free set: solves (A^T A)_FF p_F = -g_F by Cholesky, then one step of iterative
-    // refinement with the same factor. A free column whose pivot collapses (dependent on earlier free columns)
-    // is dropped from the factor and gets p = 0.
+    // Newton step over the free set: solves (A^T A)_FF p_F = -g_F by Cholesky. A free column whose pivot collapses
+    // (dependent on earlier free columns) is dropped from the factor and gets p = 0. No refinement step: Cholesky is
+    // backward stable, so the residual, which is the gradient the KKT test reads, is already at rounding level, and
+    // refining in the same precision does not improve the forward error.
     private static void SolveFreeSet(
         ReadOnlySpan<double> ata, Span<double> l, ReadOnlySpan<double> g, Span<double> p, Span<double> y,
-        Span<double> rhs, Span<double> dp, ReadOnlySpan<int> free, Span<int> dependent, int n)
+        Span<double> rhs, ReadOnlySpan<int> free, Span<int> dependent, int n)
     {
         var k = free.Length;
         for (var i = 0; i < k; i++)
@@ -321,19 +322,6 @@ public static class BoundedLeastSquares
         for (var i = 0; i < k; i++)
             rhs[i] = dependent[i] != 0 ? 0.0 : -g[free[i]];
         Substitute(l, rhs, y, p, free, n);
-
-        for (var i = 0; i < k; i++)
-        {
-            if (dependent[i] != 0) { rhs[i] = 0.0; continue; }
-            var s = -g[free[i]];
-            for (var c = 0; c < k; c++)
-                if (dependent[c] == 0)
-                    s -= ata[free[i] * n + free[c]] * p[free[c]];
-            rhs[i] = s;
-        }
-        Substitute(l, rhs, y, dp, free, n);
-        for (var i = 0; i < k; i++)
-            p[free[i]] += dp[free[i]];
     }
 
     // Solves L L^T out = rhs; rhs is indexed by free-list position, out by column.

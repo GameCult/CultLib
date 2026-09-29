@@ -856,8 +856,8 @@ public sealed class BoundedLeastSquaresTests
         }
     }
 
-    // A duplicate column that is free and interior is stepped by neither the factor nor the refinement: the columns
-    // share one gradient, and moving both along it would overshoot.
+    // A duplicate column that is free and interior gets no step: the columns share one gradient, and moving both
+    // along it would overshoot.
     [Fact]
     public void FreeDuplicateColumnGetsNoStep()
     {
