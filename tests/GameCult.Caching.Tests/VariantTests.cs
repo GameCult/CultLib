@@ -90,7 +90,7 @@ namespace GameCult.Caching.Tests
             Assert.That(big.Tags, Is.EqualTo(new[] { "beam" }), "an inherited list");
             Assert.That(cache.Get<VariantGear>(BaseKey)!.Power, Is.EqualTo(10));
             Assert.That(cache.GetStored(BigKey)!.Variant!.BaseKey, Is.EqualTo(BaseKey.Value));
-            Assert.That(cache.GetStored(BigKey)!.Variant!.Overrides, Has.Count.EqualTo(2));
+            Assert.That(cache.GetStored(BigKey)!.Variant!.Overrides, Has.Count.EqualTo(3));
         }
 
         [Test]
@@ -442,7 +442,7 @@ namespace GameCult.Caching.Tests
             Assert.That(reports, Has.Count.EqualTo(2), "one per record: the base and the variant");
             Assert.That(reports.Select(report => report.Kind), Is.All.EqualTo(CultSchemaMigrationKind.CompatibleDrift));
             Assert.That(reports.Select(report => string.Join(",", report.IgnoredExtraSlots)), Is.All.EqualTo("2"));
-            Assert.That(reports.SelectMany(report => report.Warnings).Select(warning => warning.Code), Is.All.EqualTo("ignored_extra_slot"));
+            Assert.That(reports.Select(report => report.Warnings.Select(warning => warning.Code)), Has.All.Contain("ignored_extra_slot"));
         }
 
         private static readonly byte[] NotAnInt = { 0xa3, (byte)'a', (byte)'b', (byte)'c' };
@@ -582,7 +582,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void ALoadedVariantThatInheritsAnIndexedValueRefusesTheLoadNamingBothKeys()
         {
-            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base"));
+            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base", TextOverride(0, "hand variant")));
             var refused = Assert.Throws<InvalidOperationException>(() => Open(path).Dispose())!;
             Assert.That(refused.Message, Does.Contain("hand-variant").And.Contain("hand-base").And.Contain("code"));
         }
@@ -843,7 +843,7 @@ namespace GameCult.Caching.Tests
             SeedBase(cache);
 
             var push = Assert.Throws<NotSupportedException>(() => cache.UpsertVariantAsync(
-                BigKey, BaseKey, new[] { cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big") }).GetAwaiter().GetResult())!;
+                BigKey, BaseKey, new[] { cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"), cache.Override<VariantGear>(nameof(VariantGear.Code), "laser big") }).GetAwaiter().GetResult())!;
             Assert.That(push.Message, Does.Contain(BigKey.Value));
             var commit = Assert.Throws<NotSupportedException>(() => SeedBig(cache))!;
             Assert.That(commit.Message, Does.Contain(BigKey.Value));

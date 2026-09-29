@@ -83,11 +83,11 @@ namespace GameCult.Networking.Tests
                 using (var writer = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry }))
                 {
                     writer.Commit(batch => batch.Upsert(typeof(VariantWireFixture), new VariantWireFixture { Name = "base", Power = 1 }, BaseKey));
-                    writer.UpsertVariantAsync(VariantKey, BaseKey, new[]
+                    writer.Commit(batch => batch.UpsertVariant(VariantKey, BaseKey, new[]
                     {
                         writer.Override<VariantWireFixture>(nameof(VariantWireFixture.Name), "big"),
                         writer.Override<VariantWireFixture>(nameof(VariantWireFixture.Power), 9)
-                    }).GetAwaiter().GetResult();
+                    }));
                 }
 
                 var cache = new CultCache(registry, CultCacheMessagePack.CreateCodec(registry));
@@ -128,13 +128,15 @@ namespace GameCult.Networking.Tests
                     {
                         MessageId = "subscribe-all",
                         SubscriptionId = "all",
+                        RecordKeys = new[] { BaseKey.Value, VariantKey.Value },
                         IncludeSnapshot = true
                     });
                     await WaitUntilAsync(() => snapshot.Task.IsCompleted);
 
                     cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
 
-                    await WaitUntilAsync(() => !errors.IsEmpty || changes.Any(change => change.Document?.RecordKey == VariantKey.Value));
+                    await WaitUntilAsync(() => !errors.IsEmpty || changes.Any(change => change.Document?.RecordKey == VariantKey.Value),
+                        () => $"changes={string.Join(",", changes.Select(c => c.ChangeKind + ":" + c.Document?.RecordKey))} errors={string.Join(",", errors.Select(e => e.Error))} cacheKeys={cache.GetStored(BaseKey) != null}/{cache.GetStored(VariantKey) != null}");
                     await Task.Delay(200); // let anything else already in flight arrive
 
                     Assert.That(changes.Select(change => change.Document?.RecordKey), Does.Not.Contain(VariantKey.Value),
@@ -180,13 +182,13 @@ namespace GameCult.Networking.Tests
             Assert.That(refused.InnerException!.Message, Does.Contain(VariantKey.Value).And.Contain(BaseKey.Value));
         }
 
-        private static async Task WaitUntilAsync(Func<bool> condition)
+        private static async Task WaitUntilAsync(Func<bool> condition, Func<string>? diagnostic = null)
         {
             var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
             while (!condition())
             {
                 if (DateTimeOffset.UtcNow > deadline)
-                    Assert.Fail("Condition was not satisfied before timeout.");
+                    Assert.Fail("Condition was not satisfied before timeout. " + diagnostic?.Invoke());
                 await Task.Delay(5);
             }
         }
