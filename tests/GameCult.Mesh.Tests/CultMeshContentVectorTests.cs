@@ -174,6 +174,19 @@ public sealed class CultMeshContentVectorTests
         AddAnswer("answer_record_key_case", Request("vector-key-case", last.ChunkHash, key.ToUpperInvariant(), last.SizeBytes));
         AddAnswer("answer_blank_record_key", Request("vector-key-blank", last.ChunkHash, "   ", last.SizeBytes));
         AddAnswer("answer_double_prefix", Request("vector-double", "sha256:sha256:" + last.ChunkHash, string.Empty, last.SizeBytes));
+
+        // A caller that leaves a string null writes msgpack nil; the reference reads it back as null and
+        // answers. These are judged by Rust decoding the reference's bytes (Rust never writes nil), so
+        // they stay out of the label-matched mirror set.
+        void AddNilAnswer(string name, CultMeshContentChunkRequestMessage request)
+        {
+            vectors.Add(new Vector(name + ".request", "request", Reencode(request)));
+            vectors.Add(new Vector(name + ".response", "response", Reencode(Answer(content, request))));
+        }
+
+        AddNilAnswer("nil_message_id", Request(null, last.ChunkHash, key, last.SizeBytes));
+        AddNilAnswer("nil_hash", Request("vector-nil-hash", null, string.Empty, 100));
+        AddNilAnswer("nil_record_key", Request("vector-nil-key", new string('0', 64), null, 100));
         AddResponse("response_hash_last_digit", new CultMeshContentChunkResponseMessage
         {
             MessageId = "vector-digit",

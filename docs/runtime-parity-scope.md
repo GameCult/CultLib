@@ -85,6 +85,11 @@ to speak CultNet or participate in CultMesh.
   session the client already holds (see `src/GameCult.Mesh/docs/transport-planes.md`);
   it has no authenticated content connector, so it claims no TCP+TLS or QUIC
   content path.
+  Recorded limits: a caller that passes `max_bytes = u64::MAX` to `fetch_content` gets an unbounded
+  body, because the reference refuses artifacts over `int.MaxValue` bytes and Rust bounds them only by the
+  caller's cap.
+  `normalize_hash` matches the `sha256:` prefix ASCII-case-insensitively while C# `OrdinalIgnoreCase` may
+  also match non-ASCII forms (for example `ſha256:`); unprobed, and it affects hostile input only.
 
 ## Expansion Work Outside The Current Parity Claim
 

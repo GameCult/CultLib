@@ -1073,9 +1073,9 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
             })
         }
         "cultmesh.content_chunk_request.v1" => Ok(CultNetMessage::ContentChunkRequest {
-            message_id: require_legacy_string(get("messageId"), "messageId")?,
-            chunk_hash: require_legacy_string(get("chunkHash"), "chunkHash")?,
-            record_key: require_legacy_string(get("recordKey"), "recordKey")?,
+            message_id: legacy_string_or_nil(get("messageId"), "messageId")?,
+            chunk_hash: legacy_string_or_nil(get("chunkHash"), "chunkHash")?,
+            record_key: legacy_string_or_nil(get("recordKey"), "recordKey")?,
             expected_size_bytes: require_legacy_i32(get("expectedSizeBytes"), "expectedSizeBytes")?,
         }),
         "cultmesh.content_chunk_response.v1" => Ok(CultNetMessage::ContentChunkResponse {
@@ -1719,6 +1719,15 @@ fn require_legacy_bytes(value: Option<&rmpv::Value>, field_name: &str) -> Result
         .and_then(rmpv::Value::as_slice)
         .ok_or_else(|| anyhow!("{field_name} must be binary data in gamecult.networking.v0"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// A string the reference reads back as null when its writer set it to null (msgpack nil), which its
+/// handlers treat as blank. Only content chunk requests use it: they are answered, never dropped.
+fn legacy_string_or_nil(value: Option<&rmpv::Value>, field_name: &str) -> Result<String> {
+    match value {
+        Some(rmpv::Value::Nil) => Ok(String::new()),
+        other => require_legacy_string(other, field_name),
+    }
 }
 
 fn require_legacy_string(value: Option<&rmpv::Value>, field_name: &str) -> Result<String> {

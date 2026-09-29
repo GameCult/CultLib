@@ -277,7 +277,11 @@ fn rust_written_vectors_are_current() {
 #[test]
 fn reference_vectors_encode_byte_identically() {
     let local = local_vectors();
-    let reference = read_vectors("content-vectors.cs-written.json");
+    // The nil-field vectors are bytes only the reference writes; `nil_fields_are_answered_as_blanks` judges them.
+    let reference: Vec<_> = read_vectors("content-vectors.cs-written.json")
+        .into_iter()
+        .filter(|(label, _, _)| !label.starts_with("nil_"))
+        .collect();
     assert_eq!(
         reference.iter().map(|(l, _, _)| l.as_str()).collect::<Vec<_>>(),
         local.iter().map(|v| v.label.as_str()).collect::<Vec<_>>(),
@@ -522,7 +526,7 @@ fn answer_serves_found_false_with_the_reference_error_spelling() {
         }
         judged += 1;
     }
-    assert_eq!(judged, 13);
+    assert_eq!(judged, 16);
 }
 
 #[test]
@@ -612,6 +616,30 @@ fn a_bad_request_is_answered_never_dropped() {
         // And both travel: neither the request nor its answer is stopped at decode or encode.
         assert_eq!(unwire(&wire(&bad)).expect("the request decodes"), bad, "{label}");
         assert_eq!(unwire(&wire(&answer)).expect("the answer encodes and decodes"), answer, "{label}");
+    }
+}
+
+// A caller that leaves a string null writes msgpack nil. The reference reads null, treats it as blank
+// and answers; Rust decodes nil as blank so the same request gets the same answer, byte for byte.
+#[test]
+fn nil_fields_are_answered_as_blanks() {
+    let (_, chunks) = pack(&body());
+    let store = store(&chunks);
+    let reference = read_vectors("content-vectors.cs-written.json");
+    for (name, spelling) in [
+        ("nil_message_id", "InvalidDataException: Content chunk request requires a message identity."),
+        ("nil_hash", "ArgumentException: Hash must be non-empty. (Parameter 'ChunkHash')"),
+        ("nil_record_key", "FileNotFoundException: Content chunk is not available."),
+    ] {
+        let find = |suffix: &str| {
+            let label = format!("{name}.{suffix}");
+            reference.iter().find(|(l, _, _)| *l == label).expect("vector").2.clone()
+        };
+        let request_bytes = find("request");
+        assert!(request_bytes.contains(&0xc0), "{name}: the reference wrote nil");
+        let answer = answer_content_chunk_request(&unwire(&request_bytes).expect("nil decodes"), lookup_in(&store));
+        assert_eq!(wire(&answer), find("response"), "{name}: answer differs from the reference's");
+        assert_eq!(response_of(&answer).4, spelling, "{name}");
     }
 }
 
