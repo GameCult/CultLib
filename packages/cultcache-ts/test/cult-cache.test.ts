@@ -1564,3 +1564,20 @@ test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrit
   const inspection = inspectCultCacheBytes("v3.msgpack", await readFile(join(c2aVectors, "v3-base.msgpack")));
   assert.equal(inspection.format, "cultcache.store.v3");
 });
+
+test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it cannot read and leaves the file untouched", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-pushall-refused-"));
+  const envelopes = await new SingleFileMessagePackBackingStore(
+    await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack"),
+  ).pullAll();
+  for (const vector of [
+    join(variantVectors, "unknown-header.msgpack"),
+    join(variantVectors, "variant-v2.msgpack"),
+    resolve(cultLibRoot, "tests", "vectors", "document-variants-c1", "variant-store.msgpack"),
+  ]) {
+    const file = await copyVector(dir, vector, "store.msgpack");
+    const before = await readFile(file);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll(envelopes), /is not readable/u, vector);
+    assert.deepEqual(await readFile(file), before, `${vector} was rewritten`);
+  }
+});

@@ -887,6 +887,22 @@ class CultCacheTests(unittest.TestCase):
             store.push(envelopes[0])
             self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1")
 
+    def test_single_file_push_all_refuses_a_store_whose_header_it_cannot_read_and_leaves_it_untouched(self) -> None:
+        envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
+        vectors = self._VECTORS.parent
+        for vector in (
+            self._VECTORS / "unknown-header.msgpack",
+            self._VECTORS / "variant-v2.msgpack",
+            vectors / "document-variants-c1" / "variant-store.msgpack",
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                store_path = Path(tmp) / "store.msgpack"
+                store_path.write_bytes(vector.read_bytes())
+                before = store_path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "is not readable"):
+                    SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
+                self.assertEqual(store_path.read_bytes(), before, f"{vector.name} was rewritten")
+
 
 if __name__ == "__main__":
     unittest.main()
