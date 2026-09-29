@@ -903,34 +903,38 @@ class CultCacheTests(unittest.TestCase):
                     SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
                 self.assertEqual(store_path.read_bytes(), before, f"{vector.name} was rewritten")
 
-    def test_single_file_push_all_rewrites_only_a_file_that_is_exactly_one_store(self) -> None:
-        import msgpack
-
+    # A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by
+    # pull_all, push_all, push and delete alike. The bytes and every runtime's verdict:
+    # tests/vectors/document-variants-c2a/readability.
+    def test_single_file_replaces_a_file_exactly_when_it_reads(self) -> None:
+        root = self._C2A_VECTORS / "readability"
+        rows = [
+            line.split()
+            for line in (root / "manifest.txt").read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(len(rows), 14)
         envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
-        whole = (self._C2A_VECTORS / "v3-base.msgpack").read_bytes()
-        refused = {
-            "truncated": whole[:-1],
-            "trailing": whole + bytes([1, 2, 3]),
-            "scalar": bytes([0x01]),
-            "map": bytes([0x80]),
-            "string first": msgpack.packb(["hello", 1]),
-        }
-        for name, content in refused.items():
-            with tempfile.TemporaryDirectory() as tmp:
-                store_path = Path(tmp) / "store.msgpack"
-                store_path.write_bytes(content)
-                with self.assertRaises(ValueError, msg=name):
-                    SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
-                self.assertEqual(store_path.read_bytes(), content, f"{name} was rewritten")
+        for vector, _, _, _, python in rows:
+            content = (root / vector).read_bytes()
+            for operation in ("pull_all", "push_all", "push", "delete"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store_path = Path(tmp) / "store.msgpack"
+                    store_path.write_bytes(content)
+                    store = SingleFileMessagePackBackingStore(store_path)
+                    run = {
+                        "pull_all": store.pull_all,
+                        "push_all": lambda: store.push_all(envelopes),
+                        "push": lambda: store.push(envelopes[0]),
+                        "delete": lambda: store.delete(envelopes[0].type, envelopes[0].key),
+                    }[operation]
+                    if python == "reads":
+                        run()
+                    else:
+                        with self.assertRaises(Exception, msg=f"{vector} {operation}"):
+                            run()
+                        self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
-        # An empty file and a legacy envelope array (empty included) carry no header and are rewritten unmarked.
-        legacy = msgpack.packb([{"key": "old", "type": "old", "payload": b"", "storedAt": "then"}], use_bin_type=True)
-        for name, content in {"empty": b"", "empty array": bytes([0x90]), "legacy": legacy}.items():
-            with tempfile.TemporaryDirectory() as tmp:
-                store_path = Path(tmp) / "store.msgpack"
-                store_path.write_bytes(content)
-                SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
-                self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], "cultcache.store.v1", name)
 
 
 if __name__ == "__main__":

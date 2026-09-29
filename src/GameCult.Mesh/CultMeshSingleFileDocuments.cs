@@ -241,11 +241,15 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
+            // The file being replaced is read first, by the reader every read of it uses: one this runtime cannot read refuses the
+            // write instead of being overwritten.
+            var existing = File.Exists(path) ? ReadSingleFileSnapshot(path) : null;
+
             // A typed write sees the document it replaces the file with, so its ids decide. A raw payload is opaque: the writer
             // cannot see whether it holds ids, so a file already marked stays marked.
             var snapshot = new CultPersistedStoreSnapshot
             {
-                FormatVersion = CacheBackingStore.HeaderFor(holdsIds, contentKnown ? null : ExistingHeader(path), wholeStore: contentKnown, directoryStore: false),
+                FormatVersion = CacheBackingStore.HeaderFor(holdsIds, existing?.FormatVersion, wholeStore: contentKnown, directoryStore: false),
                 SchemaCatalog = new[] { catalogEntry },
                 Records = new[]
                 {
@@ -266,15 +270,11 @@ namespace GameCult.Mesh
             WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
-        private static string? ExistingHeader(string path)
-        {
-            // A file that is gone has no header; one that cannot be read refuses the write rather than being overwritten.
-            return File.Exists(path) ? CultDocumentMessagePackSerialization.ReadStoreHeader(File.ReadAllBytes(path)) : null;
-        }
-
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
+            if (bytes.Length == 0)
+                return new CultPersistedStoreSnapshot();
             CultPersistedStoreSnapshot snapshot;
             try
             {

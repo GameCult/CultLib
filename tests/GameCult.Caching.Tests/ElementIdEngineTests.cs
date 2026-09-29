@@ -83,6 +83,10 @@ namespace GameCult.Caching.Tests
             Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded { Id = id } } } }), Is.True, "a list of lists");
             Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "a list under an unset element");
             Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Id = id } } }), Is.True, "an element");
+            Assert.That(CultElementIds.Holds(new HAll { Dict = { ["a"] = new HHasIds { Items = { new EIded() } }, ["b"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "the second dictionary value");
+            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded() }, new List<EIded> { new EIded { Id = id } } } }), Is.True, "the second list");
+            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest(), new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "the second item of a list of elements");
+            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded(), new EIded { Id = id } } } }), Is.True, "the second element of a list");
         }
 
         [Test]

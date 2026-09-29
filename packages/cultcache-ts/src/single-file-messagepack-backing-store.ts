@@ -143,8 +143,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       }
 
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
-      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. A file that is not exactly one
-      // store this runtime reads is refused and left as it is.
+      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. A file `pullAll` would refuse
+      // (not exactly one store, not a legacy envelope array) is refused and left as it is.
       await this.#readDiskFormat();
       await this.#writeAll(entries);
     });
@@ -153,7 +153,17 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #readDiskFormat(): Promise<void> {
     try {
       const data = await readFile(this.filePath);
-      this.#format = (data.length === 0 ? undefined : storeHeader(decode(data))) ?? STORE_FORMAT_VERSION;
+      let header: StoreFormat | undefined;
+      if (data.length > 0) {
+        const decoded = decode(data);
+        header = storeHeader(decoded);
+        if (header === undefined) {
+          // Not a store header: only a legacy envelope array is replaced, and only one `pullAll` would read.
+          decodeLegacyEnvelopeArray(decoded);
+        }
+      }
+
+      this.#format = header ?? STORE_FORMAT_VERSION;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;

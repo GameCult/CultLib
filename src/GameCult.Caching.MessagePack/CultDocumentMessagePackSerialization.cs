@@ -177,8 +177,14 @@ public static class CultDocumentMessagePackSerialization
         return buffer.WrittenSpan.ToArray();
     }
 
+    /// <summary>
+    /// Reads a store file: exactly one complete MessagePack array. A truncated file, bytes after the array, a value that is not
+    /// an array, or a first slot that is not a header string are refused, so a reader never takes part of a file for the whole.
+    /// The rewriting paths use this same reader as their verdict on whether a file may be replaced.
+    /// </summary>
     public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
     {
+        RequireOneArray(payload);
         var reader = new MessagePackReader(payload);
         var fieldCount = reader.ReadArrayHeader();
         var snapshot = new CultPersistedStoreSnapshot();
@@ -217,6 +223,24 @@ public static class CultDocumentMessagePackSerialization
         return snapshot;
     }
 
+    private static void RequireOneArray(byte[] bytes)
+    {
+        var whole = new MessagePackReader(bytes);
+        try
+        {
+            if (whole.NextMessagePackType != MessagePackType.Array)
+                throw new NotSupportedException($"The store is a MessagePack {whole.NextMessagePackType}, not an array.");
+            whole.Skip();
+        }
+        catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
+        {
+            throw new NotSupportedException("The store is not one complete MessagePack array.", ex);
+        }
+
+        if (!whole.End)
+            throw new NotSupportedException("The store has bytes after its MessagePack array.");
+    }
+
     /// <summary>Refuses a single-file snapshot this runtime cannot read, naming the format or record it found.</summary>
     public static void RequireSingleFileFormat(CultPersistedStoreSnapshot snapshot)
     {
@@ -239,41 +263,6 @@ public static class CultDocumentMessagePackSerialization
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
         }
-    }
-
-    /// <summary>
-    /// The format header of a store file about to be replaced by a writer that does not read the store's records: null for
-    /// an empty file or a legacy envelope array (an array whose first slot is not a string), the header string otherwise.
-    /// A file is a store only when it is exactly one complete MessagePack array: a truncated file, bytes after the array, a
-    /// value that is not an array, or a first slot that is a string but not a header this runtime reads are all refused,
-    /// never taken for a legacy file, so a writer cannot overwrite what it cannot see.
-    /// </summary>
-    public static string? ReadStoreHeader(byte[] bytes)
-    {
-        if (bytes.Length == 0)
-            return null;
-        var whole = new MessagePackReader(bytes);
-        try
-        {
-            if (whole.NextMessagePackType != MessagePackType.Array)
-                throw new NotSupportedException($"The store is a MessagePack {whole.NextMessagePackType}, not an array; it is not rewritten.");
-            whole.Skip();
-        }
-        catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
-        {
-            throw new NotSupportedException("The store is not one complete MessagePack array; it is not rewritten.", ex);
-        }
-
-        if (!whole.End)
-            throw new NotSupportedException("The store has bytes after its MessagePack array; it is not rewritten.");
-
-        var reader = new MessagePackReader(bytes);
-        if (reader.ReadArrayHeader() == 0 || reader.NextMessagePackType != MessagePackType.String)
-            return null;
-        // A first slot that is a string is a header, and one this runtime does not read is refused, whatever the string says.
-        var header = reader.ReadString() ?? string.Empty;
-        RequireSingleFileFormat(new CultPersistedStoreSnapshot { FormatVersion = header });
-        return header;
     }
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
@@ -567,8 +556,6 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
         return snapshot;
     }
-
-    protected override string? ReadStoreHeader(byte[] data) => CultDocumentMessagePackSerialization.ReadStoreHeader(data);
 
     protected override byte[] SerializePayload(object document)
     {

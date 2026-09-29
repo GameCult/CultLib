@@ -1582,35 +1582,39 @@ test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it 
   }
 });
 
-test("SingleFileMessagePackBackingStore pushAll rewrites only a file that is exactly one store and leaves anything else untouched", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "cultcache-pushall-whole-"));
+// A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by pullAll,
+// pushAll, push and delete alike. The bytes and every runtime's verdict: tests/vectors/document-variants-c2a/readability.
+test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", async () => {
+  const root = join(c2aVectors, "readability");
+  const rows = (await readFile(join(root, "manifest.txt"), "utf8"))
+    .split(/\r?\n/u)
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => line.split(/\s+/u));
+  assert.equal(rows.length, 14);
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-readability-"));
   const seed = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack");
-  const whole = await readFile(seed);
   const envelopes = await new SingleFileMessagePackBackingStore(seed).pullAll();
-  const refused: Array<[string, Uint8Array]> = [
-    ["truncated", whole.subarray(0, whole.length - 1)],
-    ["trailing", Buffer.concat([whole, Buffer.from([1, 2, 3])])],
-    ["scalar", Uint8Array.of(0x01)],
-    ["map", Uint8Array.of(0x80)],
-    ["string-first", encode(["hello", 1])],
-  ];
-  for (const [name, bytes] of refused) {
-    const file = join(dir, `${name}.msgpack`);
-    await writeFile(file, bytes);
-    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll(envelopes), Error, name);
-    assert.ok(Buffer.from(bytes).equals(await readFile(file)), `${name} was rewritten`);
-  }
-
-  // An empty file and a legacy envelope array (first slot not a string, empty included) carry no header and are rewritten.
-  const accepted: Array<[string, Uint8Array]> = [
-    ["empty", new Uint8Array()],
-    ["empty-array", Uint8Array.of(0x90)],
-    ["legacy", encode([{ key: "old", type: "old", payload: new Uint8Array(), storedAt: "then" }])],
-  ];
-  for (const [name, bytes] of accepted) {
-    const file = join(dir, `${name}.msgpack`);
-    await writeFile(file, bytes);
-    await new SingleFileMessagePackBackingStore(file).pushAll(envelopes);
-    assert.equal((decode(await readFile(file)) as unknown[])[0], "cultcache.store.v1", name);
+  for (const [vector, , , typescript] of rows) {
+    const reads = typescript === "reads";
+    const bytes = await readFile(join(root, vector));
+    for (const operation of ["pullAll", "pushAll", "push", "delete"] as const) {
+      const file = join(dir, `${vector.replace(/[^a-z0-9.-]/giu, "_")}.${operation}.msgpack`);
+      await writeFile(file, bytes);
+      const store = new SingleFileMessagePackBackingStore(file);
+      const run = () =>
+        operation === "pullAll"
+          ? store.pullAll()
+          : operation === "pushAll"
+            ? store.pushAll(envelopes)
+            : operation === "push"
+              ? store.push(envelopes[0]!)
+              : store.delete(envelopes[0]!);
+      if (reads) {
+        await run();
+      } else {
+        await assert.rejects(run, Error, `${vector} ${operation}`);
+        assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a file it cannot read`);
+      }
+    }
   }
 });

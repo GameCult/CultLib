@@ -219,12 +219,26 @@ A reader refuses any `cultcache.store.*` header it does not know and any record 
 slots than its header allows, naming the version or the record's key and schema id. It
 never skips a slot it does not understand.
 
-The headers are `v1` (no variant, no element ids), `v2` (holds a variant) and `v3` (can
-hold element ids, variants or not). A single-file store declares `v3` when any record it
-holds is of a type that reaches an object list, and a file already declared `v3` stays
-`v3` when a writer merges onto it. A directory store's manifest says
-`cultcache.store.v5.directory-content-addressed-pages` under the same rule, and
-`v4` otherwise.
+The headers are `v1` (no variant, no element ids), `v2` (holds a variant) and `v3` (holds
+an element id, variants or not). A single-file store declares `v3` when any record it
+holds carries an element id: a non-empty `[CultElementId]` value in a record's document,
+or in a variant's override values. A store that cannot read a variant's override values
+(no codec attached) counts the variant as holding one. A whole-store writer decides by
+what the store holds now, so the file drops back to `v1` (or `v2` with a variant) when
+the last id is taken away; a writer that touches only part of the file cannot see the
+rest, so a file already declared `v3` stays `v3` when it merges onto it. A directory
+store's manifest says `cultcache.store.v5.directory-content-addressed-pages` under the
+same rule, and `v4` otherwise.
+
+A single-file store is exactly one MessagePack array. Every runtime refuses a file that is
+truncated, has bytes after the array (a second store appended included), is not an array, or
+whose first slot is not a header it reads; it refuses these on open and on rewrite alike. A
+zero-byte file is an empty store. A flush or a commit replaces a file only when the
+runtime's own reader opens it, so one verdict covers open, flush and commit, and a file the
+runtime cannot read is left as it is. Rust, TypeScript and Python also open the legacy
+envelope array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# has
+no legacy reader and refuses it. The shared byte vectors and each runtime's verdict are
+`tests/vectors/document-variants-c2a/readability/manifest.txt`.
 
 ## Variant Records
 
@@ -245,8 +259,8 @@ fifth slot:
   `elementId` is `""` unless the step enters an object-list element. `value` is the
   member's own MessagePack encoding, inline. A top-level Set has one step and `id` `""`;
   a reader that resolves only that shape refuses the others, naming the variant.
-- A store holding at least one variant declares `cultcache.store.v2` (`v3` when it can
-  hold element ids); a store holding none declares `cultcache.store.v1` (or `v3`) and is
+- A store holding at least one variant declares `cultcache.store.v2` (`v3` when it holds an
+  element id); a store holding none declares `cultcache.store.v1` (or `v3`) and is
   byte-identical to what a runtime without variants writes. A `v1` header over a variant
   record is refused.
 - A variant's resolved document is derived in memory when the cache admits the record
@@ -276,7 +290,7 @@ elements retargets nothing.
   written before ids existed loads, and its ids are minted from SHA-256 of the record
   key and the element's path, so every reader mints the same ids; they reach disk with
   the record's next write, or `CultCache.MintElementIds()`.
-- A store that can hold ids declares the `v3` header (above), so a reader older than ids
+- A store that holds an id declares the `v3` header (above), so a reader older than ids
   refuses it instead of skipping the id slot and rewriting the elements without ids.
   TypeScript, Python and Rust read `v3` and keep a `v3` header they found when they
   rewrite a store; they do not decide when a document carries ids.
