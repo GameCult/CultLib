@@ -295,8 +295,8 @@ public sealed class BoundedLeastSquaresTests
     public void FixedColumnStaysPutEvenWhenItsGradientWantsOut()
     {
         const int m = 5, n = 3;
-        var lo = new[] { -1f, -1f, -1f };
-        var hi = new[] { 1f, -1f, 1f };
+        var lo = new[] { -100f, -1f, -100f };
+        var hi = new[] { 100f, -1f, 100f };
         var x = new float[n];
         var status = Solve(m, n, A54, B5, lo, hi, x, out var iterations);
         Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
