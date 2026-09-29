@@ -65,8 +65,15 @@ in the default chain) and one JSON shape (`CultMathJson`, added to a consumer's
 options with `new JsonSerializerOptions().AddCultMathConverters()`; CultLib owns
 no JSON options of its own). MessagePack decoding skips extra elements, leaves
 missing ones at zero (`Color32` alpha at 255) and refuses nil. JSON reading
-skips unknown properties and leaves missing ones at zero. A consumer resolver or
-converter registered ahead of these wins.
+skips unknown properties, leaves missing ones at zero, honours
+`PropertyNameCaseInsensitive`, and throws `JsonException` for a wrong token or an
+out-of-range number (a float beyond `float.MaxValue` is refused, not read as
+infinity). Numbers follow `JsonSerializerOptions.NumberHandling`: NaN and the
+infinities need `AllowNamedFloatingPointLiterals` (`"NaN"`, `"Infinity"`,
+`"-Infinity"`). Every type is also a dictionary key: its flattened components
+joined by commas, invariant culture (`"1,2"`, `"true,false"`, matrices row by
+row, `rect` as `"minX,minY,maxX,maxY"`). A consumer resolver or converter
+registered ahead of these wins.
 
 | Type | MessagePack | JSON |
 | --- | --- | --- |
