@@ -57,7 +57,7 @@ public static class CultDocumentMessagePackSerialization
     {
         return MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(
-                consumerResolvers.Append(CultDocumentResolver.Instance).Append(StandardResolver.Instance).ToArray()))
+                consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(StandardResolver.Instance).ToArray()))
             .WithSecurity(CultMessagePackSecurity.Instance);
     }
 
