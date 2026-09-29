@@ -2308,5 +2308,36 @@ class CultNetRudpFragmentBoundTests(unittest.TestCase):
         self.assertEqual(receiver.receive(stranded[0]).delivered, ())
 
 
+    def test_a_reliable_fragment_set_is_never_evicted_and_a_full_reliable_bound_refuses(self) -> None:
+        sender, receiver = self._pair()
+        receiver._max_pending_fragment_sets = 4
+        reliable = CultNetRudpSendOptions(reliable=True)
+
+        # Two of three reliable fragments arrive and are acknowledged.
+        held = sender.send_many("media", bytes([7]) * 2500, reliable, max_fragment_bytes=1000)
+        for packet in held[:2]:
+            receiver.receive(packet)
+        # Lossy sets pile up past the bound.
+        for fill in range(1, 9):
+            for packet in sender.send_many("media", bytes([fill]) * 2500, max_fragment_bytes=1000)[:2]:
+                receiver.receive(packet)
+        self.assertGreaterEqual(receiver.fragment_sets_evicted, 5)
+        delivered = receiver.receive(held[2]).delivered
+        self.assertEqual([frame.payload for frame in delivered], [bytes([7]) * 2500])
+
+        # Four pending reliable sets fill the bound; a fifth fragment is refused.
+        sender, receiver = self._pair()
+        receiver._max_pending_fragment_sets = 4
+        for fill in range(1, 5):
+            receiver.receive(sender.send_many("media", bytes([fill]) * 2500, reliable, max_fragment_bytes=1000)[0])
+        fifth = sender.send_many("media", bytes([5]) * 2500, reliable, max_fragment_bytes=1000)
+        with self.assertRaises(ValueError):
+            receiver.receive(fifth[0])
+        unreliable = sender.send_many("media", bytes([6]) * 2500, max_fragment_bytes=1000)
+        with self.assertRaises(ValueError):
+            receiver.receive(unreliable[0])
+        self.assertEqual(receiver.fragment_sets_evicted, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

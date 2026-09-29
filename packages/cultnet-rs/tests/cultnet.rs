@@ -3103,6 +3103,71 @@ fn rudp_evicts_stalest_incomplete_fragment_set_instead_of_dying() -> Result<()> 
 }
 
 #[test]
+fn rudp_never_evicts_a_reliable_fragment_set_whose_fragments_were_acknowledged() -> Result<()> {
+    let (mut client, mut server) = connected_rudp_pair()?;
+    client.set_max_pending_fragment_sets(4)?;
+    let reliable = CultNetRudpSendOptions {
+        reliable: true,
+        ..CultNetRudpSendOptions::default()
+    };
+
+    // A reliable frame in three fragments: two arrive and are acknowledged.
+    let held = server.send_many("media", vec![7u8; 2500], reliable.clone(), Some(1000))?;
+    assert_eq!(held.len(), 3);
+    for packet in &held[..2] {
+        client.receive(packet, 10)?;
+    }
+
+    // Lossy fragment sets pile up far past the bound.
+    for fill in 1..=8u8 {
+        let packets = server.send_many(
+            "media",
+            vec![fill; 2500],
+            CultNetRudpSendOptions::default(),
+            Some(1000),
+        )?;
+        for packet in &packets[..2] {
+            client.receive(packet, 11)?;
+        }
+    }
+    assert!(client.fragment_sets_evicted() >= 5);
+
+    // The sender will never resend the acknowledged fragments, so the last one
+    // must still complete the frame.
+    let delivered = client.receive(&held[2], 12)?.delivered;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload, vec![7u8; 2500]);
+    Ok(())
+}
+
+#[test]
+fn rudp_refuses_a_fragment_when_every_pending_set_holds_reliable_fragments() -> Result<()> {
+    let (mut client, mut server) = connected_rudp_pair()?;
+    client.set_max_pending_fragment_sets(4)?;
+    let reliable = CultNetRudpSendOptions {
+        reliable: true,
+        ..CultNetRudpSendOptions::default()
+    };
+    for fill in 1..=4u8 {
+        let packets = server.send_many("media", vec![fill; 2500], reliable.clone(), Some(1000))?;
+        client.receive(&packets[0], 10)?;
+    }
+    assert_eq!(client.fragment_sets_evicted(), 0);
+
+    let fifth = server.send_many("media", vec![5u8; 2500], reliable.clone(), Some(1000))?;
+    assert!(client.receive(&fifth[0], 11).is_err());
+    let unreliable = server.send_many(
+        "media",
+        vec![6u8; 2500],
+        CultNetRudpSendOptions::default(),
+        Some(1000),
+    )?;
+    assert!(client.receive(&unreliable[0], 12).is_err());
+    assert_eq!(client.fragment_sets_evicted(), 0);
+    Ok(())
+}
+
+#[test]
 fn rudp_fragment_ids_wrap_instead_of_saturating() -> Result<()> {
     let (_client, mut server) = connected_rudp_pair()?;
     let mut ids = Vec::new();

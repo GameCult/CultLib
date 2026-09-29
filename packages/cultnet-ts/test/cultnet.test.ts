@@ -1872,6 +1872,40 @@ test("rudp receiver evicts stranded fragment sets instead of refusing new ones",
   assert.equal(Buffer.from(second.delivered[0]!.payload).toString(), "hello");
 });
 
+test("rudp receiver never evicts a reliable fragment set, and refuses when every pending set is reliable", () => {
+  const fragment = (sequence: number, id: number, index: number, reliable: boolean, count = 3) => ({
+    packetType: "data" as const, connectionId: 9, sequence, ack: 0, ackMask: 0,
+    channelId: "schema", reliable, fragmentId: id, fragmentIndex: index, fragmentCount: count,
+    payload: Buffer.from([id & 0xff, index]),
+  });
+  const open = () => {
+    const receiver = new CultNetRudpSession({ connectionId: 9, initialSequence: 1, resendDelayMs: 50 });
+    receiver.receive({ packetType: "accept", connectionId: 9, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
+    return receiver;
+  };
+
+  // Two of three reliable fragments are acknowledged; then far more lossy sets than the bound.
+  let receiver = open();
+  receiver.receive(fragment(2, 1, 0, true));
+  receiver.receive(fragment(3, 1, 1, true));
+  for (let id = 2; id <= 200; id += 1) {
+    receiver.receive(fragment(2 + id, id, 0, false));
+  }
+  assert.ok(receiver.fragmentSetsEvicted > 0, "nothing was evicted");
+  const delivered = receiver.receive(fragment(500, 1, 2, true)).delivered;
+  assert.equal(delivered.length, 1, "the reliable set was evicted after its fragments were acknowledged");
+
+  // A bound full of reliable sets refuses the next fragment, reliable or not.
+  receiver = open();
+  for (let id = 1; id <= 64; id += 1) {
+    receiver.receive(fragment(1 + id, id, 0, true));
+  }
+  assert.equal(receiver.fragmentSetsEvicted, 0);
+  assert.throws(() => receiver.receive(fragment(100, 65, 0, true)));
+  assert.throws(() => receiver.receive(fragment(101, 66, 0, false)));
+  assert.equal(receiver.fragmentSetsEvicted, 0);
+});
+
 test("rudp socket transport drops strays without an error event and keeps serving its peer", async () => {
   const serverSocket = await bindUdpSocket();
   const clientSocket = await bindUdpSocket();
