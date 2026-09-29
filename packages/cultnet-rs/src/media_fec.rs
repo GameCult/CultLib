@@ -450,9 +450,6 @@ pub fn recover_video_block(
     }
 
     let missing: Vec<usize> = (0..k).filter(|&slot| shards[slot].is_none()).collect();
-    if missing.is_empty() {
-        return Ok(Vec::new());
-    }
     let recovered = recover_data_shards(k, shards)?;
     Ok(missing
         .into_iter()
@@ -617,9 +614,6 @@ pub fn recover_audio_block(
     }
 
     let missing: Vec<usize> = (0..k).filter(|&slot| shards[slot].is_none()).collect();
-    if missing.is_empty() {
-        return Ok(Vec::new());
-    }
     let recovered = recover_data_shards(k, shards)?;
     Ok(missing
         .into_iter()

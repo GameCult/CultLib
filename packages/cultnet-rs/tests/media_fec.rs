@@ -592,7 +592,8 @@ fn an_audio_block_is_four_contiguous_equal_length_packets() {
     assert!(protect_audio_block(&packets, &STANDARD).is_err(), "a gap in presentation time");
     let mut packets = audio_block(1, 20);
     packets[3].payload.push(0);
-    assert!(protect_audio_block(&packets, &STANDARD).is_err(), "unequal payload lengths");
+    let error = protect_audio_block(&packets, &STANDARD).unwrap_err();
+    assert!(error.to_string().contains("payload length"), "unequal payload lengths: {error}");
     let mut packets = audio_block(1, 20);
     packets[0].codec = "pcm".to_string();
     assert!(protect_audio_block(&packets, &STANDARD).is_err(), "mixed codecs");
