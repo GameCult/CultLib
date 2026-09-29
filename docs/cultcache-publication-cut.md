@@ -15,6 +15,18 @@ exactly once. This document owns the means.
 - **Scope.** The C# cache's publication and CultNetDatabase's use of it. There
   is no wire-format change and no other runtime changes (§6).
 
+
+## Rulings (operator, 2026-09-30)
+
+- **Q-P1 A: order as data.** Each change is published exactly once, on its writer's thread, before the write
+  returns, and carries its `Sequence`. The shard log is written in cache order by the gate-held journal. Wire
+  peers drop changes that are stale by `Sequence`. The turnstile (`bcae483`/`4562340`) and the drainer are
+  both rejected.
+- **Q-P2 A:** a throwing observer does not stop the others. Every observer runs, the exception is rethrown to
+  the writer afterwards, and the observer stays subscribed. The commit stands.
+- **Q-P3 A:** a public `CultCache.AddJournal(...)`, with reentry guarded.
+- **Q-P4 A:** Cut 6, which drops stale changes per key on the wire, lands in this campaign.
+
 ## The finding that shapes this map
 
 The direction Imagination was handed was: "ordered delivery belongs in the
