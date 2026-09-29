@@ -4679,6 +4679,16 @@ mod tests {
         );
     }
 
+    // The store the C# runtime wrote through its own variant API (tests/vectors/document-variants-c1).
+    #[test]
+    fn single_file_refuses_the_csharp_written_variant_store_by_version_or_record() {
+        let message = refusal("../document-variants-c1/variant-store.msgpack");
+        assert!(
+            message.contains("cultcache.store.v2") || message.contains("laser-big"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn v1_store_written_at_the_base_commit_still_reads_byte_for_byte() -> Result<()> {
         let envelopes = pull_vector("v1-base.msgpack")?;

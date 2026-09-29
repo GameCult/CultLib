@@ -829,6 +829,12 @@ class CultCacheTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertTrue("cultcache.store.v2" in message or "item:anvil-big" in message, message)
 
+    def test_single_file_refuses_the_csharp_written_variant_store_by_version_or_record(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            self._pull_vector("../document-variants-c1/variant-store.msgpack")
+        message = str(caught.exception)
+        self.assertTrue("cultcache.store.v2" in message or "laser-big" in message, message)
+
     def test_v1_store_written_at_the_base_commit_still_reads_byte_for_byte(self) -> None:
         envelopes = self._pull_vector("v1-base.msgpack")
         self.assertEqual([(e.key, e.type) for e in envelopes], [("alpha", "vectors.item"), ("beta", "vectors.item")])

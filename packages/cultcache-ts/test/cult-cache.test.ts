@@ -1443,6 +1443,13 @@ test("SingleFileMessagePackBackingStore refuses a variant store by version or re
   );
 });
 
+test("SingleFileMessagePackBackingStore refuses the C#-written variant store by version or record", async () => {
+  await assert.rejects(
+    () => pullVector("../document-variants-c1/variant-store.msgpack"),
+    (error: Error) => error.message.includes("cultcache.store.v2") || error.message.includes("laser-big"),
+  );
+});
+
 test("CultCache inspector refuses the same vectors by name", async () => {
   const inspect = async (name: string) => inspectCultCacheBytes(name, await readFile(join(variantVectors, name)));
   await assert.rejects(() => inspect("unknown-header.msgpack"), /cultcache\.store\.v9/u);
