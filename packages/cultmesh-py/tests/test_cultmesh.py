@@ -4536,7 +4536,7 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
                     raise OSError("injected send failure")
                 return original_sendto(sock, data, *args)
 
-            request = msgpack.packb(hello(runtime_id="probe"), use_bin_type=True)
+            request = hello(runtime_id="probe").to_bytes()
             with patch.object(socket.socket, "sendto", sendto):
                 # The server's reply and ack to X both fail to send.
                 x.send("schema", request)
