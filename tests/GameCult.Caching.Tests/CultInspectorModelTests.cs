@@ -594,7 +594,7 @@ namespace GameCult.Caching.Tests
             using var cache = OpenGroups();
             var baseKey = new CultRecordKey("base");
             await PutLeaf(cache, "base", "base", null, GroupHull.Cruiser);
-            await cache.UpsertVariantAsync(new CultRecordKey("over"), baseKey, new[] { cache.Override<GroupLeaf>(nameof(GroupLeaf.Hull), GroupHull.Frigate) });
+            await cache.UpsertVariantAsync(new CultRecordKey("over"), baseKey, new[] { cache.Override<GroupLeaf>(nameof(GroupLeaf.Name), "over-name"), cache.Override<GroupLeaf>(nameof(GroupLeaf.Hull), GroupHull.Frigate) });
             await cache.UpsertVariantAsync(new CultRecordKey("inherit"), baseKey, new[] { cache.Override<GroupLeaf>(nameof(GroupLeaf.Name), "inheritor") });
             var model = GroupModel();
 
