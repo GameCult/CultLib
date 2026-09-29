@@ -553,3 +553,51 @@ fn session_cap_and_expiry_use_monotonic_time() -> Result<()> {
     assert_eq!(server.session_count(), 0);
     Ok(())
 }
+
+#[test]
+fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
+    let clock = Clock::new(60_000);
+    let sink = Sink::default();
+    let options = CultMeshRudpDocumentServerOptions {
+        max_pending_reliable_packets_per_session: 4,
+        ..Default::default()
+    };
+    let mut server = server(options, clock, sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let mut real = client(target, 101)?;
+    connect(&mut server, &mut [&mut real])?;
+
+    // A moved flow re-sends Connect from a socket that never hears the Accept:
+    // each one asks the session to queue one more unacknowledged Accept.
+    let storm = UdpSocket::bind("127.0.0.1:0")?;
+    let mut storm_client = cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
+        connection_id: 102,
+        initial_sequence: 1,
+        resend_delay_ms: 10,
+        max_pending_reliable_packets: None,
+    });
+    let connect_packet = storm_client.create_connect(0, Vec::new())?;
+    for _ in 0..12 {
+        storm.send_to(&cultnet_rs::encode_rudp_packet(&connect_packet)?, target)?;
+        server.poll_once()?;
+    }
+    storm.send_to(b"not a rudp packet", target)?;
+    server.poll_once()?;
+
+    send(
+        &mut real,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "after-storm".into(),
+            document: document("real", vec![9]),
+        },
+    )?;
+    for _ in 0..20 {
+        server.poll_once()?;
+        if sink.0.lock().unwrap().receipts.len() == 1 {
+            break;
+        }
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+    assert!(server.packets_dropped() > 0, "the storm and the stray are counted");
+    Ok(())
+}
