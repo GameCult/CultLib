@@ -628,6 +628,17 @@ fn manifest_metadata_keeps_wire_order_and_refuses_a_duplicate_key() {
     assert!(rmp_serde::from_slice::<CultMeshCdnArtifactManifest>(&duplicated).is_err());
     let unique = manifest_with_metadata(&base, &[("k", "1"), ("other", "2")]);
     assert_eq!(manifest_bytes(&decode_manifest(&unique)), unique);
+
+    // Metadata that is not a map is refused, and says what was expected.
+    let mut value = rmpv::decode::read_value(&mut manifest_bytes(&base).as_slice()).expect("a msgpack value");
+    let rmpv::Value::Array(fields) = &mut value else {
+        panic!("the manifest is a positional array");
+    };
+    fields[9] = rmpv::Value::from(5);
+    let mut not_a_map = Vec::new();
+    rmpv::encode::write_value(&mut not_a_map, &value).expect("writes");
+    let error = rmp_serde::from_slice::<CultMeshCdnArtifactManifest>(&not_a_map).expect_err("not a map");
+    assert!(error.to_string().contains("a map of strings"), "{error}");
 }
 
 // F4: hashes are settled before the first request.
