@@ -106,12 +106,30 @@ public sealed class CultMeshSingleFileElementIdTests
         File.WriteAllBytes(truncated, whole[..^1]);
         var unknown = Path_("v9.cc");
         File.WriteAllBytes(unknown, MessagePackSerializer.Serialize(new object[] { "cultcache.store.v9", Array.Empty<object>(), Array.Empty<object>() }));
+        // A file is a store only when it is exactly one MessagePack array whose first slot, if a string, is a store header.
+        var trailing = Path_("trailing.cc");
+        File.WriteAllBytes(trailing, whole.Concat(new byte[] { 1, 2, 3 }).ToArray());
+        var scalar = Path_("scalar.cc");
+        File.WriteAllBytes(scalar, new byte[] { 0x01 });
+        var map = Path_("map.cc");
+        File.WriteAllBytes(map, new byte[] { 0x80 });
+        var stringFirst = Path_("string-first.cc");
+        File.WriteAllBytes(stringFirst, MessagePackSerializer.Serialize(new object[] { "hello", 1 }));
 
-        foreach (var path in new[] { truncated, unknown })
+        foreach (var path in new[] { truncated, unknown, trailing, scalar, map, stringFirst })
         {
             var before = File.ReadAllBytes(path);
             Assert.Throws<NotSupportedException>(() => CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, new byte[] { 0x90 }), path);
             File.ReadAllBytes(path).Should().Equal(before, path + " was rewritten");
+        }
+
+        // An empty file and a legacy envelope array (first slot not a string, empty included) carry no header and are written.
+        foreach (var (name, bytes) in new[] { ("empty.cc", Array.Empty<byte>()), ("empty-array.cc", new byte[] { 0x90 }), ("legacy.cc", new byte[] { 0x91, 0x80 }) })
+        {
+            var path = Path_(name);
+            File.WriteAllBytes(path, bytes);
+            CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, new byte[] { 0x90 });
+            HeaderOf(path).Should().Be("cultcache.store.v1", name);
         }
 
         CultMesh.WriteSingleFileDocumentPayload(marked, Key, schema, null, new byte[] { 0x90 });

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
-import { STORE_FORMAT_VERSION, type StoreFormat, isStoreSnapshot, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, type StoreFormat, isStoreSnapshot, requireV1RecordSlots, storeHeader } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -143,7 +143,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       }
 
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
-      // stays marked, and one that is not (or is gone) is written unmarked.
+      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. A file that is not exactly one
+      // store this runtime reads is refused and left as it is.
       await this.#readDiskFormat();
       await this.#writeAll(entries);
     });
@@ -152,8 +153,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async #readDiskFormat(): Promise<void> {
     try {
       const data = await readFile(this.filePath);
-      const decoded = data.length === 0 ? undefined : decode(data);
-      this.#format = isStoreSnapshot(decoded) ? decoded[0] : STORE_FORMAT_VERSION;
+      this.#format = (data.length === 0 ? undefined : storeHeader(decode(data))) ?? STORE_FORMAT_VERSION;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;

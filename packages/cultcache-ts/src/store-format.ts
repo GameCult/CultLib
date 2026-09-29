@@ -31,6 +31,28 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
   return true;
 }
 
+/**
+ * The header of a decoded store file about to be rewritten: `undefined` for a legacy envelope array (an array whose first
+ * slot is not a string, empty included), the header otherwise. A value that is not an array, or whose first slot is a string
+ * but not a header this runtime reads, is refused, so a writer never overwrites a file it cannot see. Bytes after the array
+ * are refused by `decode` itself.
+ */
+export function storeHeader(decoded: unknown): StoreFormat | undefined {
+  if (!Array.isArray(decoded)) {
+    throw new Error("CultCache store is not a MessagePack array; it is not rewritten.");
+  }
+
+  if (typeof decoded[0] !== "string") {
+    return undefined;
+  }
+
+  if (!isStoreSnapshot(decoded)) {
+    throw new Error(`CultCache store's first slot is the string "${decoded[0]}", not a store header; it is not rewritten.`);
+  }
+
+  return decoded[0];
+}
+
 /** Refuses a persisted record with more slots than v1 defines, naming its key and schema id. */
 export function requireV1RecordSlots(record: unknown[]): void {
   if (record.length > PERSISTED_RECORD_SLOTS) {

@@ -243,31 +243,37 @@ public static class CultDocumentMessagePackSerialization
 
     /// <summary>
     /// The format header of a store file about to be replaced by a writer that does not read the store's records: null for
-    /// an empty file or a legacy envelope array, the header string otherwise. The header is read from the prefix, but a file
-    /// that is not one complete MessagePack value or whose header this runtime cannot read is refused, never taken for a
-    /// legacy file, so a writer cannot overwrite what it cannot see.
+    /// an empty file or a legacy envelope array (an array whose first slot is not a string), the header string otherwise.
+    /// A file is a store only when it is exactly one complete MessagePack array: a truncated file, bytes after the array, a
+    /// value that is not an array, or a first slot that is a string but not a header this runtime reads are all refused,
+    /// never taken for a legacy file, so a writer cannot overwrite what it cannot see.
     /// </summary>
     public static string? ReadStoreHeader(byte[] bytes)
     {
         if (bytes.Length == 0)
             return null;
+        var whole = new MessagePackReader(bytes);
         try
         {
-            var whole = new MessagePackReader(bytes);
+            if (whole.NextMessagePackType != MessagePackType.Array)
+                throw new NotSupportedException($"The store is a MessagePack {whole.NextMessagePackType}, not an array; it is not rewritten.");
             whole.Skip();
         }
         catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
         {
-            throw new NotSupportedException("The store is not one complete MessagePack value; it is not rewritten.", ex);
+            throw new NotSupportedException("The store is not one complete MessagePack array; it is not rewritten.", ex);
         }
 
+        if (!whole.End)
+            throw new NotSupportedException("The store has bytes after its MessagePack array; it is not rewritten.");
+
         var reader = new MessagePackReader(bytes);
-        if (reader.NextMessagePackType != MessagePackType.Array || reader.ReadArrayHeader() == 0 ||
-            reader.NextMessagePackType != MessagePackType.String)
+        if (reader.ReadArrayHeader() == 0 || reader.NextMessagePackType != MessagePackType.String)
             return null;
-        var header = reader.ReadString();
-        if (header != null && header.StartsWith("cultcache.store.", StringComparison.Ordinal))
-            RequireSingleFileFormat(new CultPersistedStoreSnapshot { FormatVersion = header });
+        var header = reader.ReadString() ?? string.Empty;
+        if (!header.StartsWith("cultcache.store.", StringComparison.Ordinal))
+            throw new NotSupportedException($"The store's first slot is the string '{header}', not a store header; it is not rewritten.");
+        RequireSingleFileFormat(new CultPersistedStoreSnapshot { FormatVersion = header });
         return header;
     }
 

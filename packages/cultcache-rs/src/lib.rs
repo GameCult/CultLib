@@ -321,8 +321,9 @@ const STORE_FORMAT_ELEMENT_IDS: &str = "cultcache.store.v3";
 
 /// The store header string, `None` for the legacy envelope array (its first slot is not a string), and an error for
 /// bytes that are not one complete MessagePack array: a truncated store is refused as the snapshot reader refuses it,
-/// never taken for a legacy file. One pass reads the first slot and walks the rest to prove the file whole.
-fn store_header(bytes: &[u8]) -> Result<Option<String>> {
+/// never taken for a legacy file. One pass reads the first slot and walks the rest to prove the file whole. A rewrite
+/// asks for the file to be `whole`: exactly that one array, so bytes after it are refused too.
+fn store_header(bytes: &[u8], whole: bool) -> Result<Option<String>> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum FirstSlot {
@@ -353,9 +354,12 @@ fn store_header(bytes: &[u8]) -> Result<Option<String>> {
             deserializer.deserialize_seq(HeaderVisitor)
         }
     }
-    rmp_serde::from_slice::<Header>(bytes)
-        .map(|header| header.0)
-        .map_err(|error| anyhow!("the store is not one complete MessagePack array: {error}"))
+    let mut cursor = std::io::Cursor::new(bytes);
+    let header = <Header as serde::Deserialize>::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor))
+        .map_err(|error| anyhow!("the store is not one complete MessagePack array: {error}"))?;
+    let after = bytes.len() - cursor.position() as usize;
+    ensure!(!whole || after == 0, "the store has {after} bytes after its MessagePack array");
+    Ok(header.0)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -737,7 +741,7 @@ impl SingleFileMessagePackBackingStore {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
-        match store_header(&bytes).ok().flatten() {
+        match store_header(&bytes, false).ok().flatten() {
             Some(header) if header.starts_with("cultcache.store.") => decode_store_snapshot(&bytes),
             _ => rmp_serde::from_slice(&bytes).map_err(anyhow::Error::from),
         }
@@ -768,7 +772,7 @@ impl SingleFileMessagePackBackingStore {
         // would drop them.
         let format = match fs::read(&self.path) {
             Ok(bytes) if bytes.is_empty() => STORE_FORMAT_V1,
-            Ok(bytes) => match store_header(&bytes)
+            Ok(bytes) => match store_header(&bytes, true)
                 .map_err(|error| anyhow!("{}: {error:#}; the store is not rewritten", self.path.display()))?
             {
                 Some(header) => readable_store_format(&header)?,
@@ -2624,7 +2628,7 @@ fn readable_store_format(header: &str) -> Result<&'static str> {
 }
 
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
-    if let Ok(Some(header)) = store_header(bytes) {
+    if let Ok(Some(header)) = store_header(bytes, false) {
         readable_store_format(&header)?;
     }
     let snapshot: PersistedStoreSnapshot =
@@ -4751,7 +4755,7 @@ mod tests {
         let keys: Vec<_> = envelopes.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, vec!["alpha", "beta"]);
         store.push(&envelopes[0])?;
-        Ok(store_header(&std::fs::read(&path)?)?.expect("a store header"))
+        Ok(store_header(&std::fs::read(&path)?, true)?.expect("a store header"))
     }
 
     #[test]
@@ -4837,6 +4841,41 @@ mod tests {
         }
         Ok(())
     }
+    // A rewrite replaces only a file that is exactly one store: bytes after the array, a value that is not an array, or a
+    // first slot that is a string but not a header are refused and left be. An empty file and a legacy envelope array
+    // (first slot not a string, empty included) carry no header and are written v1.
+    #[test]
+    fn push_all_rewrites_only_a_file_that_is_exactly_one_store() -> Result<()> {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c2a/v3-base.msgpack");
+        let mut trailing = std::fs::read(source)?;
+        trailing.extend_from_slice(&[1, 2, 3]);
+        let refused: Vec<(&str, Vec<u8>)> = vec![
+            ("trailing", trailing),
+            ("scalar", vec![0x01]),
+            ("map", vec![0x80]),
+            ("string first", rmp_serde::to_vec(&("hello", 1))?),
+        ];
+        for (name, bytes) in refused {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::write(&path, &bytes)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let result = store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default());
+            assert!(result.is_err(), "{name} was accepted");
+            assert_eq!(std::fs::read(&path)?, bytes, "{name} was rewritten");
+        }
+
+        for (name, bytes) in [("empty array", vec![0x90u8]), ("legacy", vec![0x91u8, 0x80])] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::write(&path, &bytes)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default())?;
+            assert_eq!(store_header(&std::fs::read(&path)?, true)?.as_deref(), Some(STORE_FORMAT_V1), "{name}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_rewrite_of_a_v1_store_stays_v1() -> Result<()> {
         assert_eq!(
