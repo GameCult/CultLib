@@ -87,9 +87,5 @@ namespace GameCult.Caching
 
         public string BaseKey { get; }
         public IReadOnlyList<CultVariantOverride> Overrides { get; }
-
-        // Member names by slot from the catalog the delta was loaded under, for warnings about slots the type dropped.
-        // Not persisted.
-        internal IReadOnlyDictionary<int, string>? SlotNames { get; set; }
     }
 }

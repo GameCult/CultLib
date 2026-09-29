@@ -50,12 +50,13 @@ namespace GameCult.Caching.Tests
         private static void SeedBase(CultCache cache) =>
             cache.Commit(batch => batch.Upsert(typeof(VariantGear), Laser(), BaseKey));
 
-        // laser-big: a variant of laser that overrides its name and power and inherits the rest.
+        // laser-big: a variant of laser that overrides its name, power and code (an indexed value must be its own) and inherits the rest.
         private static void SeedBig(CultCache cache, CultRecordKey? key = null, CultRecordKey? baseKey = null, string name = "laser big", int power = 25) =>
             cache.Commit(batch => batch.UpsertVariant(key ?? BigKey, baseKey ?? BaseKey, new[]
             {
                 cache.Override<VariantGear>(nameof(VariantGear.Name), name),
-                cache.Override<VariantGear>(nameof(VariantGear.Power), power)
+                cache.Override<VariantGear>(nameof(VariantGear.Power), power),
+                cache.Override<VariantGear>(nameof(VariantGear.Code), name)
             }));
 
         private static void EditBase(CultCache cache, Action<VariantGear> edit) =>
@@ -85,7 +86,7 @@ namespace GameCult.Caching.Tests
             var big = cache.Get<VariantGear>(BigKey)!;
             Assert.That(big.Name, Is.EqualTo("laser big"));
             Assert.That(big.Power, Is.EqualTo(25));
-            Assert.That(big.Code, Is.EqualTo("l1"), "an inherited member");
+            Assert.That(big.Code, Is.EqualTo("laser big"), "the override the unique index requires");
             Assert.That(big.Tags, Is.EqualTo(new[] { "beam" }), "an inherited list");
             Assert.That(cache.Get<VariantGear>(BaseKey)!.Power, Is.EqualTo(10));
             Assert.That(cache.GetStored(BigKey)!.Variant!.BaseKey, Is.EqualTo(BaseKey.Value));
@@ -133,9 +134,10 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.GetByName<VariantGear>("laser big")!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
             Assert.That(cache.GetByName<VariantGear>("laser big")!.Power, Is.EqualTo(25), "the override survives the base edit");
             Assert.That(cache.GetByIndex<VariantGear>("code", "l9")!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
-            // big inherited the old code; its stale index entry must be gone, not shadowing.
+            // the base's old code entry must be gone, not shadowing, and its new one must find the base itself.
             Assert.That(cache.GetByIndex<VariantGear>("code", "l1"), Is.Null);
-            Assert.That(cache.GetByIndex<VariantGear>("code", "l2")!.Name, Is.Not.Null);
+            Assert.That(cache.GetByIndex<VariantGear>("code", "l2")!.Name, Is.EqualTo("laser"));
+            Assert.That(cache.GetByIndex<VariantGear>("code", "laser big")!.Name, Is.EqualTo("laser big"));
 
             Assert.That(seen.Select(entry => entry.Key), Is.EquivalentTo(new[] { BaseKey.Value, BigKey.Value, "laser-coded" }));
             Assert.That(seen.Select(entry => entry.Sequence), Is.EqualTo(Enumerable.Range((int)seen[0].Sequence, seen.Count).Select(n => (long)n)),
@@ -297,7 +299,7 @@ namespace GameCult.Caching.Tests
                 batch.UpsertVariant(BigKey, spare, cache.GetStored(BigKey)!.Variant!.Overrides);
                 batch.Remove(BaseKey);
             }), Is.True, "rebased in the same batch");
-            Assert.That(cache.Get<VariantGear>(BigKey)!.Code, Is.EqualTo(string.Empty), "now resolved from spare");
+            Assert.That(cache.Get<VariantGear>(BigKey)!.Tags, Is.Empty, "now resolved from spare");
 
             Assert.That(cache.Commit(batch =>
             {
@@ -435,36 +437,204 @@ namespace GameCult.Caching.Tests
             Assert.That(variant.Power, Is.EqualTo(7), "the override the type still has applies");
             Assert.That(variant.Name, Is.EqualTo("drift variant"));
 
-            var report = cache.VariantMigrationReports.Single();
-            Assert.That(report.Kind, Is.EqualTo(CultSchemaMigrationKind.CompatibleDrift));
-            Assert.That(report.IgnoredExtraSlots, Is.EqualTo(new[] { 2 }));
-            var warning = report.Warnings.Single();
-            Assert.That(warning.Code, Is.EqualTo("ignored_extra_slot"), "the code a dropped member gets on a plain record");
-            Assert.That(warning.Message, Does.Contain("drift-variant").And.Contain("Wing"));
+            // The same decision, on the same surface, that the plain base record gets from the store's schema resolution.
+            var reports = cache.BackingStores[0].LastSchemaMigrationReports;
+            Assert.That(reports, Has.Count.EqualTo(2), "one per record: the base and the variant");
+            Assert.That(reports.Select(report => report.Kind), Is.All.EqualTo(CultSchemaMigrationKind.CompatibleDrift));
+            Assert.That(reports.Select(report => string.Join(",", report.IgnoredExtraSlots)), Is.All.EqualTo("2"));
+            Assert.That(reports.SelectMany(report => report.Warnings).Select(warning => warning.Code), Is.All.EqualTo("ignored_extra_slot"));
+        }
+
+        private static readonly byte[] NotAnInt = { 0xa3, (byte)'a', (byte)'b', (byte)'c' };
+
+        private static CultVariantOverride TextOverride(int slot, string value)
+        {
+            var bytes = new byte[value.Length + 1];
+            bytes[0] = (byte)(0xa0 | value.Length);
+            for (var index = 0; index < value.Length; index++)
+                bytes[index + 1] = (byte)value[index];
+            return CultVariantOverride.Set(slot, bytes);
+        }
+
+        private static CultPersistedRecord OverridingRecord(string key, string baseKey, params CultVariantOverride[] overrides) => new()
+        {
+            Key = key,
+            SchemaId = Registry.GetRequired<VariantGear>().SchemaId,
+            StoredAt = "2026-01-01T00:00:00.0000000Z",
+            Payload = Array.Empty<byte>(),
+            Variant = new CultVariantDelta(baseKey, overrides)
+        };
+
+        [Test]
+        public void AnOverrideThatNoLongerDecodesRefusesTheLoadAsAPlainRecordHoldingItDoes()
+        {
+            // VariantGear.Power is [Key(1)] int; a string there is the nested-type-change case with the schema id unchanged.
+            var plainRecord = new CultPersistedRecord
+            {
+                Key = "hand-plain",
+                SchemaId = Registry.GetRequired<VariantGear>().SchemaId,
+                StoredAt = "2026-01-01T00:00:00.0000000Z",
+                Payload = new byte[] { 0x94, 0xa1, (byte)'x', 0xa3, (byte)'a', (byte)'b', (byte)'c', 0xa0, 0x90 }
+            };
+            Assert.That(Assert.Catch(() => Open(WriteStore(plainRecord)).Dispose()), Is.Not.Null, "the plain-record outcome is a refusal");
+
+            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base", CultVariantOverride.Set(1, NotAnInt)));
+            var refused = Assert.Catch(() => Open(path).Dispose())!;
+            Assert.That(refused.Message, Does.Contain("hand-variant").And.Contain("Power"));
         }
 
         [Test]
-        public void AnOverrideThatNoLongerDecodesIsIgnoredWithAWarningAndTheBaseValueApplies()
+        public void AnOverrideOfASlotTheTypeNeverHadIsIgnoredOnLoadAsAPlainRecordIgnoresAnExtraSlot()
+        {
+            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
+                CultVariantOverride.Set(99, new byte[] { 0x01 }),
+                TextOverride(0, "hand variant"),
+                TextOverride(2, "hand-code")));
+            using var cache = Open(path);
+            Assert.That(cache.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+            Assert.That(cache.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Power, Is.EqualTo(10), "inherits the base");
+        }
+
+        // ---- a bad write is refused; drift is for type changes after the fact ----
+
+        [Test]
+        public void AnInvalidOverrideIsRefusedAtWriteNamingVariantSlotAndReasonAndNothingLands()
         {
             var path = PathOf("gear.cc");
-            const int notAnInt = 1; // VariantGear.Power, [Key(1)]
+            using var cache = Open(path);
+            SeedBase(cache);
+
+            var unknown = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+            {
+                CultVariantOverride.Set(99, new byte[] { 0x01 })
+            })));
+            Assert.That(unknown.Message, Does.Contain(BigKey.Value).And.Contain("99").And.Contain("does not have"));
+
+            var wrongType = Refused(() => cache.UpsertVariantAsync(BigKey, BaseKey, new[]
+            {
+                CultVariantOverride.Set(1, NotAnInt)
+            }).GetAwaiter().GetResult());
+            Assert.That(wrongType.Message, Does.Contain(BigKey.Value).And.Contain("Power").And.Contain("slot 1"));
+
+            Assert.That(cache.Get(BigKey), Is.Null);
+            cache.FlushAsync().GetAwaiter().GetResult();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "no variant was persisted");
+        }
+
+        [Test]
+        public void TwoOverridesOfOneSlotAreRefusedAtWriteAndAnUnknownMemberNameIsAnArgumentException()
+        {
+            using var cache = Open(PathOf("gear.cc"));
+            SeedBase(cache);
+
+            var twice = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+            {
+                cache.Override<VariantGear>(nameof(VariantGear.Power), 1),
+                cache.Override<VariantGear>(nameof(VariantGear.Power), 2)
+            })));
+            Assert.That(twice.Message, Does.Contain(BigKey.Value).And.Contain("slot 1").And.Contain("more than once"));
+            Assert.That(cache.Get(BigKey), Is.Null);
+
+            var unknownName = Assert.Throws<ArgumentException>(() => cache.Override<VariantGear>("Nope", 1))!;
+            Assert.That(unknownName.Message, Does.Contain("Nope"));
+        }
+
+        // ---- a variant may not share an indexed value with another record ----
+
+        [Test]
+        public void AVariantThatInheritsAnIndexedValueIsRefusedNamingBothKeysAndTheIndex()
+        {
+            using var cache = Open(PathOf("gear.cc"));
+            SeedBase(cache);
+
+            var inherited = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+            {
+                cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big")
+            })));
+            Assert.That(inherited.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("code").And.Contain("l1"));
+
+            var explicitly = Refused(() => cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+            {
+                cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                cache.Override<VariantGear>(nameof(VariantGear.Code), "l1")
+            })));
+            Assert.That(explicitly.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value));
+            Assert.That(cache.Get(BigKey), Is.Null, "nothing landed");
+            Assert.That(cache.GetByIndex<VariantGear>("code", "l1")!.Name, Is.EqualTo("laser"));
+
+            SeedBig(cache);
+            Assert.That(cache.GetByIndex<VariantGear>("code", "l1")!.Name, Is.EqualTo("laser"));
+            Assert.That(cache.GetByIndex<VariantGear>("code", "laser big")!.Name, Is.EqualTo("laser big"));
+        }
+
+        [Test]
+        public void ABaseEditThatWouldGiveItsVariantsIndexedValueToTheBaseIsRefused()
+        {
+            using var cache = Open(PathOf("gear.cc"));
+            SeedBase(cache);
+            SeedBig(cache);
+
+            var refused = Refused(() => EditBase(cache, gear => gear.Code = "laser big"));
+            Assert.That(refused.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value).And.Contain("code"));
+            Assert.That(cache.Get<VariantGear>(BaseKey)!.Code, Is.EqualTo("l1"), "nothing landed");
+        }
+
+        [Test]
+        public void ALoadedVariantThatInheritsAnIndexedValueRefusesTheLoadNamingBothKeys()
+        {
+            var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base"));
+            var refused = Assert.Throws<InvalidOperationException>(() => Open(path).Dispose())!;
+            Assert.That(refused.Message, Does.Contain("hand-variant").And.Contain("hand-base").And.Contain("code"));
+        }
+
+        // ---- flatten resolves against the same batch ----
+
+        [Test]
+        public void AFlattenAndABaseEditInOneBatchLandTheResolutionOfTheWholeBatch()
+        {
+            var path = PathOf("gear.cc");
             using (var cache = Open(path))
             {
                 SeedBase(cache);
-                cache.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+                SeedBig(cache);
+                cache.Commit(batch =>
                 {
-                    cache.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
-                    CultVariantOverride.Set(notAnInt, new byte[] { 0xa3, (byte)'a', (byte)'b', (byte)'c' })
-                }));
-                var warning = cache.VariantMigrationReports.Single().Warnings.Single();
-                Assert.That(warning.Message, Does.Contain(BigKey.Value).And.Contain("Power"));
-                Assert.That(cache.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(10), "inherits the base value");
-                Assert.That(cache.Get<VariantGear>(BigKey)!.Name, Is.EqualTo("laser big"));
+                    var edited = Laser();
+                    edited.Tags.Add("pierce");
+                    batch.Upsert(typeof(VariantGear), edited, BaseKey);
+                    batch.Flatten(BigKey);
+                });
+
+                Assert.That(cache.GetStored(BigKey)!.Variant, Is.Null);
+                Assert.That(cache.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "beam", "pierce" }), "the edit made in the same batch");
+                Assert.That(cache.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
             }
 
             using var reloaded = Open(path);
-            Assert.That(reloaded.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(10));
-            Assert.That(reloaded.VariantMigrationReports.Single().Warnings.Single().Message, Does.Contain("Power"));
+            Assert.That(reloaded.GetStored(BigKey)!.Variant, Is.Null);
+            Assert.That(reloaded.Get<VariantGear>(BigKey)!.Tags, Is.EqualTo(new[] { "beam", "pierce" }));
+        }
+
+        // ---- the directory store refuses a variant page on load as it does on write ----
+
+        [Test]
+        public void TheDirectoryStoreRefusesToLoadAVariantPage()
+        {
+            var manifest = PathOf("dir-page.cc");
+            var records = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(manifest);
+            Directory.CreateDirectory(records);
+            var page = CultDocumentMessagePackSerialization.SerializePersistedRecord(OverridingRecord("hand-variant", "hand-base", TextOverride(0, "x")));
+            var hash = System.Security.Cryptography.SHA256.HashData(page);
+            File.WriteAllBytes(Path.Combine(records, Convert.ToHexString(hash).ToLowerInvariant() + ".msgpack"), page);
+
+            using var store = new DirectoryMessagePackBackingStore(manifest, records);
+            var read = typeof(DirectoryMessagePackBackingStore).GetMethod(
+                "ReadPersistedRecordPage", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var refused = Assert.Throws<System.Reflection.TargetInvocationException>(
+                () => read.Invoke(store, new object?[] { new CultPersistedRecord { Key = "hand-variant", Payload = hash }, null }))!;
+
+            Assert.That(refused.InnerException, Is.TypeOf<NotSupportedException>());
+            Assert.That(refused.InnerException!.Message, Does.Contain("hand-variant").And.Contain("directory store"));
         }
 
         // ---- persisted format ----
@@ -541,7 +711,7 @@ namespace GameCult.Caching.Tests
 
             using var readOnly = Open(path, readOnly: true);
             Assert.That(readOnly.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
-            Assert.That(readOnly.Get<VariantGear>(BigKey)!.Code, Is.EqualTo("l1"));
+            Assert.That(readOnly.Get<VariantGear>(BigKey)!.Code, Is.EqualTo("laser big"));
 
             // A base edit another writer commits reaches the read-only cache's variant when it pulls: a re-resolution is no write.
             using var writer = Open(path);
@@ -705,7 +875,7 @@ namespace GameCult.Caching.Tests
             using (var cache = Open(path))
             {
                 Assert.That(cache.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
-                Assert.That(cache.Get<VariantGear>(BigKey)!.Code, Is.EqualTo("l1"));
+                Assert.That(cache.Get<VariantGear>(BigKey)!.Code, Is.EqualTo("laser big"));
                 cache.BackingStores[0].PushAll();
             }
 

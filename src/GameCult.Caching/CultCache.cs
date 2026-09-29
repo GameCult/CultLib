@@ -1802,10 +1802,8 @@ namespace GameCult.Caching
         private readonly Dictionary<(Type Type, string Alias), Dictionary<string, string>> _indexes = new();
         private readonly Dictionary<Type, string> _globals = new();
         private readonly CultCodec? _codec;
-        // Keys holding a variant, and the drift report of each variant whose overrides were partly ignored: both derived
-        // from the entries by Apply, never decided anywhere else.
+        // Keys holding a variant: derived from the entries by Apply, never decided anywhere else.
         private readonly HashSet<string> _variantKeys = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, CultSchemaMigrationReport> _variantReports = new(StringComparer.Ordinal);
         private readonly ConditionalWeakTable<object, KeyBox> _handles = new();
         private readonly Subject<Change> _changes = new();
         private readonly object _gate = new();
@@ -1825,17 +1823,6 @@ namespace GameCult.Caching
         public CultDocumentRegistry Registry => _registry;
 
         public CultCodec? Codec => _codec;
-
-        // Overrides a variant carries that no longer resolve (a slot the type dropped, a value that no longer decodes),
-        // reported as compatible drift: the override is ignored and the variant inherits the base value.
-        public IReadOnlyList<CultSchemaMigrationReport> VariantMigrationReports
-        {
-            get
-            {
-                lock (_gate)
-                    return _variantReports.Values.ToArray();
-            }
-        }
 
         // The whole override of one member, encoded with this cache's codec, ready for UpsertVariant.
         public CultVariantOverride Override(Type documentType, string member, object? value)
@@ -2467,9 +2454,6 @@ namespace GameCult.Caching
 
             // Variants this admission did not write whose base chain it changed: re-resolved, same delta, same storedAt.
             public List<CultStoredDocument> Dependents { get; } = new();
-
-            // The drift report of every variant resolved here; null when nothing was ignored.
-            public Dictionary<string, CultSchemaMigrationReport?> Reports { get; } = new(StringComparer.Ordinal);
         }
 
         // Resolves every admitted variant and every variant whose base chain this admission changes, base first, against
@@ -2512,7 +2496,9 @@ namespace GameCult.Caching
             }
 
             var changed = new HashSet<string>(incoming.Keys.Concat(gone), StringComparer.Ordinal);
-            var toResolve = new List<string>(admitted.Where(stored => stored.Variant != null).Select(stored => stored.Key.Value));
+            // A flatten resolves like the variant it replaces, against the post-batch set, so a base edited in the same
+            // batch is in it; it lands as the plain record of that resolution.
+            var toResolve = new List<string>(admitted.Where(stored => stored.Variant != null || stored.Flattens).Select(stored => stored.Key.Value));
             foreach (var variantKey in _variantKeys)
             {
                 if (incoming.ContainsKey(variantKey) || gone.Contains(variantKey))
@@ -2538,16 +2524,14 @@ namespace GameCult.Caching
 
             var pending = new HashSet<string>(toResolve, StringComparer.Ordinal);
             var done = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-            var reports = new Dictionary<string, CultSchemaMigrationReport?>(StringComparer.Ordinal);
             var stack = new List<string>();
+            Dictionary<(Type Type, string Alias), Dictionary<string, string>>? claimed = null;
             foreach (var key in toResolve)
                 ResolveOne(key);
 
-            var plan = new VariantPlan(admitted.Select(stored => stored.Variant != null ? done[stored.Key.Value] : stored).ToList());
+            var plan = new VariantPlan(admitted.Select(stored => done.TryGetValue(stored.Key.Value, out var resolved) ? resolved : stored).ToList());
             foreach (var key in toResolve.Where(key => !incoming.ContainsKey(key)))
                 plan.Dependents.Add(done[key]);
-            foreach (var pair in reports)
-                plan.Reports[pair.Key] = pair.Value;
             return plan;
 
             CultStoredDocument ResolveOne(string key)
@@ -2559,9 +2543,11 @@ namespace GameCult.Caching
                     throw CycleRefusal(stack.SkipWhile(entry => entry != key).Append(key));
                 stack.Add(key);
 
-                var delta = variant.Variant!;
+                // A flatten carries no delta of its own; the variant it replaces does.
+                var isVariant = variant.Variant != null;
+                var delta = variant.Variant ?? _entries[key].Variant!;
                 var baseStored = Lookup(delta.BaseKey) ?? throw MissingBaseRefusal(key, delta.BaseKey, gone.Contains(delta.BaseKey));
-                if (baseStored.Variant != null && pending.Contains(delta.BaseKey))
+                if (pending.Contains(delta.BaseKey))
                     baseStored = ResolveOne(delta.BaseKey);
 
                 var descriptor = variant.Descriptor;
@@ -2575,25 +2561,25 @@ namespace GameCult.Caching
 
                 var type = descriptor.DocumentType;
                 var kept = new List<KeyValuePair<int, byte[]>>();
-                var ignored = new List<int>();
-                var warnings = new List<CultSchemaMigrationWarning>();
+                var seen = new HashSet<int>();
+                // Bad writes are refused; drift is for type changes after the fact. A load, a re-resolution and a flatten
+                // carry what was already stored, so they follow the plain-record outcome instead.
+                var writing = source == null && isVariant && incoming.ContainsKey(key);
                 foreach (var entry in delta.Overrides)
                 {
                     if (entry.Op != CultOverrideOp.Set || entry.Path.Count != 1 || entry.Path[0].ElementId.Length != 0 || entry.Id.Length != 0)
                         throw new InvalidOperationException(
                             $"Variant {key} carries {entry.Op} at {entry.PathText}; this runtime resolves top-level Set overrides only.");
                     var slot = entry.Path[0].Slot;
+                    if (!seen.Add(slot))
+                        throw new InvalidOperationException($"Variant {key} overrides slot {slot} more than once; a variant has one override per slot.");
                     var member = descriptor.RichMembers.FirstOrDefault(candidate => candidate.Slot == slot);
                     if (member == null)
                     {
-                        var name = delta.SlotNames != null && delta.SlotNames.TryGetValue(slot, out var persistedName)
-                            ? $"'{persistedName}'" : "unnamed";
-                        ignored.Add(slot);
-                        warnings.Add(new CultSchemaMigrationWarning
-                        {
-                            Code = "ignored_extra_slot",
-                            Message = $"Variant {key} overrides slot {slot} ({name}), which {type.Name} no longer has; the override is ignored and the variant inherits the base value."
-                        });
+                        if (writing)
+                            throw new InvalidOperationException($"Variant {key} overrides slot {slot}, which {type.Name} does not have.");
+                        // A slot the type dropped soft-drifts exactly as the same member does on a plain record: ignored,
+                        // reported by the store's schema resolution (LastSchemaMigrationReports), the variant inherits the base.
                         continue;
                     }
 
@@ -2603,14 +2589,10 @@ namespace GameCult.Caching
                     }
                     catch (Exception exception)
                     {
-                        ignored.Add(slot);
-                        warnings.Add(new CultSchemaMigrationWarning
-                        {
-                            Code = "ignored_undecodable_override",
-                            Message = $"Variant {key} overrides slot {slot} ('{member.Member.Name}') with a value that no longer decodes as {member.MemberType.Name} " +
-                                      $"({exception.GetBaseException().Message}); the override is ignored and the variant inherits the base value."
-                        });
-                        continue;
+                        // A value that no longer decodes refuses exactly as a plain record holding it does.
+                        throw new InvalidOperationException(
+                            $"Variant {key} overrides '{member.Member.Name}' (slot {slot}) with a value that does not decode as {member.MemberType.Name}: " +
+                            exception.GetBaseException().Message, exception);
                     }
 
                     kept.Add(new KeyValuePair<int, byte[]>(slot, entry.Value));
@@ -2620,32 +2602,73 @@ namespace GameCult.Caching
                 var document = _codec.Deserialize(type, type, kept.Count == 0 ? payload : _codec.Overlay(payload, kept))
                                ?? throw new InvalidOperationException($"Variant {key} resolved to nothing.");
 
-                // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it.
-                if (descriptor.NameAccessor?.Invoke(document) is { Length: > 0 } variantName)
+                if (isVariant)
                 {
-                    for (var ancestor = baseStored; ancestor != null;
-                         ancestor = ancestor.Variant == null ? null : done.TryGetValue(ancestor.Variant.BaseKey, out var above) ? above : Lookup(ancestor.Variant.BaseKey))
+                    // R6: the name index maps one name to one key, so a variant that kept its base's name would shadow it.
+                    if (descriptor.NameAccessor?.Invoke(document) is { Length: > 0 } variantName)
                     {
-                        if (descriptor.NameAccessor(ancestor.Document) == variantName)
+                        for (var ancestor = baseStored; ancestor != null;
+                             ancestor = ancestor.Variant == null ? null : done.TryGetValue(ancestor.Variant.BaseKey, out var above) ? above : Lookup(ancestor.Variant.BaseKey))
+                        {
+                            if (descriptor.NameAccessor(ancestor.Document) == variantName)
+                                throw new InvalidOperationException(
+                                    $"Variant {key} and its base {ancestor.Key.Value} are both named '{variantName}'; a variant must override its name.");
+                        }
+                    }
+
+                    // The same rule for an indexed value: a unique index maps one value to one key, so a variant that
+                    // inherited its base's value (or any other record's) would be found in place of it or lose it.
+                    foreach (var pair in descriptor.IndexAccessors)
+                    {
+                        var value = pair.Value(document);
+                        if (string.IsNullOrWhiteSpace(value))
+                            continue;
+                        claimed ??= ClaimIncomingIndexValues();
+                        var claim = (type, pair.Key);
+                        string? other = null;
+                        if (claimed.TryGetValue(claim, out var claims) && claims.TryGetValue(value, out var claimant) && claimant != key)
+                            other = claimant;
+                        else if (_indexes.TryGetValue(claim, out var held) && held.TryGetValue(value, out var holder) && holder != key &&
+                                 !incoming.ContainsKey(holder) && !gone.Contains(holder) && !pending.Contains(holder))
+                            other = holder;
+                        if (other != null)
                             throw new InvalidOperationException(
-                                $"Variant {key} and its base {ancestor.Key.Value} are both named '{variantName}'; a variant must override its name.");
+                                $"Variant {key} and {other} both hold index {pair.Key} '{value}'; a variant must override its indexed member.");
                     }
                 }
 
-                reports[key] = ignored.Count == 0
-                    ? null
-                    : new CultSchemaMigrationReport
+                if (descriptor.IndexAccessors.Count > 0)
+                {
+                    claimed ??= ClaimIncomingIndexValues();
+                    foreach (var pair in descriptor.IndexAccessors)
                     {
-                        PersistedSchemaId = descriptor.SchemaId,
-                        LocalSchemaId = descriptor.SchemaId,
-                        PersistedSchemaName = descriptor.SchemaName,
-                        LocalSchemaName = descriptor.SchemaName,
-                        Kind = CultSchemaMigrationKind.CompatibleDrift,
-                        IgnoredExtraSlots = ignored.OrderBy(slot => slot).ToArray(),
-                        Warnings = warnings.ToArray()
-                    };
+                        var value = pair.Value(document);
+                        if (!string.IsNullOrWhiteSpace(value))
+                            MapOf(claimed, (type, pair.Key))[value] = key;
+                    }
+                }
+
                 stack.RemoveAt(stack.Count - 1);
-                return done[key] = variant.Resolved(document);
+                return done[key] = isVariant
+                    ? variant.Resolved(document)
+                    : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document) { Flattens = true };
+            }
+
+            // The indexed values the plain records of this admission will hold, by (type, index) then value.
+            Dictionary<(Type Type, string Alias), Dictionary<string, string>> ClaimIncomingIndexValues()
+            {
+                var claims = new Dictionary<(Type Type, string Alias), Dictionary<string, string>>();
+                foreach (var stored in incoming.Values.Where(stored => stored.Variant == null && !stored.Flattens))
+                {
+                    foreach (var pair in stored.Descriptor.IndexAccessors)
+                    {
+                        var value = pair.Value(stored.Document);
+                        if (!string.IsNullOrWhiteSpace(value))
+                            MapOf(claims, (stored.Descriptor.DocumentType, pair.Key))[value] = stored.Key.Value;
+                    }
+                }
+
+                return claims;
             }
         }
 
@@ -2672,7 +2695,6 @@ namespace GameCult.Caching
                 _entries.Remove(stored.Key.Value);
                 _handles.Remove(existing.Document);
                 _variantKeys.Remove(stored.Key.Value);
-                _variantReports.Remove(stored.Key.Value);
                 changes.Add(new Change(CultCacheDocumentChangeKind.Removed, existing, null, existing.Document, ++_sequence));
             }
 
@@ -2692,10 +2714,6 @@ namespace GameCult.Caching
                     _variantKeys.Remove(stored.Key.Value);
                 else
                     _variantKeys.Add(stored.Key.Value);
-                if (plan.Reports.TryGetValue(stored.Key.Value, out var report) && report != null)
-                    _variantReports[stored.Key.Value] = report;
-                else
-                    _variantReports.Remove(stored.Key.Value);
                 changes.Add(new Change(
                     previous == null ? CultCacheDocumentChangeKind.Added : CultCacheDocumentChangeKind.Updated,
                     stored,
@@ -2911,16 +2929,12 @@ namespace GameCult.Caching
             var resolution = Registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog);
             if (record.Variant != null)
             {
-                // The cache resolves it against its base when it admits the load; the catalog names the slots the type may have dropped.
-                var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, record.SchemaId, StringComparison.Ordinal));
+                // The cache resolves it against its base when it admits the load.
                 return new CultStoredDocument(
                     new CultRecordKey(record.Key),
                     record.StoredAt,
                     resolution.Descriptor,
-                    new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides)
-                    {
-                        SlotNames = persisted?.Members.GroupBy(member => member.Slot).ToDictionary(group => group.Key, group => group.First().MemberName)
-                    },
+                    new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides),
                     null);
             }
 

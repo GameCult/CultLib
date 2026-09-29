@@ -502,6 +502,10 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(pagePayload);
         if (!string.Equals(record.Key, metadata.Key, StringComparison.Ordinal))
             throw new InvalidDataException($"Record page '{path}' contains key '{record.Key}', expected '{metadata.Key}'.");
+        // The shared decoder reads a variant page; this store does not hold variants, so a load refuses it as a write does.
+        if (record.Variant != null)
+            throw new NotSupportedException(
+                $"Record '{record.Key}' is a variant of '{record.Variant.BaseKey}'; the directory store does not hold document variants yet.");
         return record;
     }
 
