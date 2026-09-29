@@ -675,11 +675,11 @@ namespace GameCult.Caching
                     return new GroupLevel(identity, label, CreateRecordRef(member.ValueType, identity), rank, 0m, label, identity);
                 case CultInspectorValueKind.Enum:
                     var number = Convert.ToDecimal(Convert.ChangeType(value, Enum.GetUnderlyingType(member.ValueType)), System.Globalization.CultureInfo.InvariantCulture);
-                    return new GroupLevel(identity, Enum.GetName(member.ValueType, value!) ?? identity, value, 1, number, string.Empty, string.Empty);
+                    return new GroupLevel(identity, Enum.GetName(member.ValueType, value!) ?? identity, value, 1, number);
                 case CultInspectorValueKind.Integer:
-                    return new GroupLevel(identity, identity, value, 1, Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture), string.Empty, string.Empty);
+                    return new GroupLevel(identity, identity, value, 1, Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture));
                 case CultInspectorValueKind.Bool:
-                    return new GroupLevel(identity, identity, value, 1, (bool)value! ? 1m : 0m, string.Empty, string.Empty);
+                    return new GroupLevel(identity, identity, value, 1, (bool)value! ? 1m : 0m);
                 default:
                     return new GroupLevel(identity, identity.Length == 0 ? "(empty)" : identity, identity, 1, 0m, identity, identity);
             }
@@ -687,7 +687,7 @@ namespace GameCult.Caching
 
         private sealed class GroupLevel
         {
-            public GroupLevel(string identity, string label, object? value, int rank, decimal number, string text, string tie)
+            public GroupLevel(string identity, string label, object? value, int rank, decimal number, string text = "", string tie = "")
             {
                 Identity = identity;
                 Label = label;

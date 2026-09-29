@@ -519,6 +519,8 @@ namespace GameCult.Caching.Tests
             using var cache = OpenGroups();
             await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "x/Count=1/Flag=True" }, new CultRecordKey("a"));
             await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "x", Count = 1, Flag = true }, new CultRecordKey("b"));
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "aCount0" }, new CultRecordKey("c"));
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "a" }, new CultRecordKey("d"));
 
             var ids = new List<string>();
             void Collect(IEnumerable<CultInspectorRecordGroup> groups)
@@ -532,8 +534,8 @@ namespace GameCult.Caching.Tests
 
             Collect(GroupModel().GroupRecords(typeof(GroupMixed), cache.AllStoredDocuments));
 
-            Assert.That(ids, Has.Count.EqualTo(6));
-            Assert.That(ids.Distinct().Count(), Is.EqualTo(6), "a path never spells another node's id");
+            Assert.That(ids, Has.Count.EqualTo(12));
+            Assert.That(ids.Distinct().Count(), Is.EqualTo(12), "a path never spells another node's id");
         }
 
         [Test]
@@ -593,6 +595,33 @@ namespace GameCult.Caching.Tests
             Assert.That(notice, Does.Contain("parameterless constructor"));
         }
 
+        [Test]
+        public void GroupATypeWithoutADeclarationIsNotGrouped()
+        {
+            var model = GroupModel();
+
+            var grouping = model.GroupingOf(typeof(InspectOther));
+
+            Assert.That(grouping.ListedType, Is.EqualTo(typeof(InspectOther)));
+            Assert.That(grouping.Members, Is.Empty);
+            Assert.That(grouping.Notice, Is.Null);
+            Assert.That(model.GroupRecords(typeof(InspectOther), Array.Empty<CultStoredDocument>()), Is.Empty);
+            Assert.That(() => model.GroupingOf(null!), Throws.ArgumentNullException);
+        }
+
+        [Test]
+        public async Task GroupANullStringSharesTheEmptyStringsNode()
+        {
+            using var cache = OpenGroups();
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = null! }, new CultRecordKey("n"));
+            await cache.UpsertAsync(typeof(GroupMixed), new GroupMixed { Kind = "" }, new CultRecordKey("e"));
+
+            var roots = GroupModel().GroupRecords(typeof(GroupMixed), cache.AllStoredDocuments);
+
+            Assert.That(roots.Select(group => group.Label), Is.EqualTo(new[] { "(empty)" }));
+            Assert.That(roots.Single().Count, Is.EqualTo(2));
+        }
+
         [TestCase(typeof(GroupUnknown), "Nope")]
         [TestCase(typeof(GroupFloat), "Mass")]
         [TestCase(typeof(GroupFlagsEnum), "Traits")]
@@ -601,6 +630,7 @@ namespace GameCult.Caching.Tests
         [TestCase(typeof(GroupDuplicate), "Kind")]
         [TestCase(typeof(GroupValidThenInvalid), "Mass")]
         [TestCase(typeof(GroupGlobal), "global")]
+        [TestCase(typeof(GroupGlobalChild), "global")]
         public void GroupInvalidDeclarationsGiveANoticeAndAFlatList(Type listed, string mentions)
         {
             var model = GroupModel();
@@ -858,10 +888,15 @@ namespace GameCult.Caching.Tests
         [CultGlobal]
         [CultDocument("tests.group_global", "tests.group_global.v1")]
         [MessagePackObject]
-        public sealed class GroupGlobal
+        public class GroupGlobal
         {
             [Key(0)]
             public string Kind = string.Empty;
+        }
+
+        [CultInspectorGroupBy("Kind")]
+        public sealed class GroupGlobalChild : GroupGlobal
+        {
         }
 
         [CultInspectorGroupBy("Kind")]
