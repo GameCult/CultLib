@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::net::UdpSocket;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 use crate::CultNetMessage;
 use crate::CultNetReconnectController;
@@ -126,13 +125,12 @@ pub struct CultNetRudpSendOptions {
 }
 
 /// Identifies every transport packet belonging to one non-expiring reliable
-/// send. Receipts are local to the session that issued them: a peer reset or
-/// a Disconnect received from the peer invalidates them for good. A local
-/// `disconnect()` or a timeout does not; the writes it leaves owed carry into
-/// the next session.
+/// send. A write belongs to the session generation it was issued in, and every
+/// way a generation can end (a Disconnect from the peer, a local `disconnect()`,
+/// a timeout, a refused packet) invalidates the receipts it issued for good.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpReliableSendReceipt {
-    session_scope: Uuid,
+    generation: u64,
     sequences: Vec<u32>,
 }
 
@@ -170,7 +168,12 @@ struct FragmentBuffer {
 }
 
 pub struct CultNetRudpSession {
-    session_scope: Uuid,
+    /// Advances every time a generation ends. Everything issued in a generation
+    /// (writes, receipts, flushes) belongs to it and dies with it.
+    generation: u64,
+    /// True from the end of a generation until the next Connect or Accept begins
+    /// one. A flush started in that interval has no live generation to wait on.
+    ended: bool,
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
@@ -204,7 +207,8 @@ pub struct CultNetRudpSession {
 impl CultNetRudpSession {
     pub fn new(options: CultNetRudpSessionOptions) -> Self {
         Self {
-            session_scope: Uuid::new_v4(),
+            generation: 0,
+            ended: false,
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
@@ -243,6 +247,7 @@ impl CultNetRudpSession {
 
     pub fn assume_connected(&mut self, now_ms: u64) {
         self.connected = true;
+        self.ended = false;
         self.last_received_at_ms = Some(now_ms);
     }
 
@@ -281,15 +286,34 @@ impl CultNetRudpSession {
         Some(pending.packet.clone())
     }
 
-    fn session_scope(&self) -> Uuid {
-        self.session_scope
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// The one way a session generation ends. The session stops being
+    /// connected and what it still owed the peer dies with it: a write not yet
+    /// acknowledged is dropped, so no later session retransmits it or credits an
+    /// ack to it, and its receipt can never become Acknowledged. What was
+    /// learned from the peer is not touched: the peer may not know the session
+    /// ended, and forgetting what it sent would let its retransmits be
+    /// delivered twice.
+    fn end_session(&mut self) {
+        self.connected = false;
+        self.ended = true;
+        self.generation += 1;
+        self.pending_reliable.clear();
+        self.queued_reliable.clear();
     }
 
     fn reliable_send_status(
         &self,
         receipt: &CultNetRudpReliableSendReceipt,
     ) -> CultNetRudpReliableSendStatus {
-        if receipt.session_scope != self.session_scope {
+        if receipt.generation != self.generation {
             return CultNetRudpReliableSendStatus::Invalidated;
         }
         if receipt
@@ -313,7 +337,7 @@ impl CultNetRudpSession {
             ));
         }
         Ok(CultNetRudpReliableSendReceipt {
-            session_scope: self.session_scope,
+            generation: self.generation,
             sequences: packets.iter().map(|packet| packet.sequence).collect(),
         })
     }
@@ -343,15 +367,12 @@ impl CultNetRudpSession {
     /// ids already issued stay issued: a peer that still remembers them must
     /// never see one reused.
     pub fn reset_peer_state(&mut self) {
-        self.session_scope = Uuid::new_v4();
+        self.end_session();
         self.next_sequenced_by_channel.clear();
-        self.connected = false;
         self.last_received_at_ms = None;
         self.highest_received_sequence = None;
         self.received_sequences.clear();
         self.latest_sequenced_by_channel.clear();
-        self.pending_reliable.clear();
-        self.queued_reliable.clear();
         self.received_through = None;
         self.ordered_held.clear();
         self.fragment_buffers.clear();
@@ -377,6 +398,7 @@ impl CultNetRudpSession {
             true,
             false,
         );
+        self.ended = false;
         self.track_reliable(packet.clone(), now_ms, None);
         Ok(packet)
     }
@@ -399,6 +421,7 @@ impl CultNetRudpSession {
         self.remember_received(packet.sequence);
         self.last_received_at_ms = Some(now_ms);
         self.connected = true;
+        self.ended = false;
         let response = self.create_packet(
             CultNetRudpPacketType::Accept,
             "control",
@@ -591,13 +614,7 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type == CultNetRudpPacketType::Disconnect {
-            // The session is over. What it still owed the peer dies with it,
-            // and receipts it issued can never become Acknowledged in a later
-            // session.
-            self.connected = false;
-            self.session_scope = Uuid::new_v4();
-            self.pending_reliable.clear();
-            self.queued_reliable.clear();
+            self.end_session();
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 ready_to_send,
@@ -760,7 +777,7 @@ impl CultNetRudpSession {
     }
 
     pub fn create_disconnect(&mut self, reason: Vec<u8>) -> CultNetRudpPacket {
-        self.connected = false;
+        self.end_session();
         self.create_packet(
             CultNetRudpPacketType::Disconnect,
             "control",
@@ -781,7 +798,7 @@ impl CultNetRudpSession {
         if now_ms.saturating_sub(last_received_at_ms) <= timeout_ms {
             return false;
         }
-        self.connected = false;
+        self.end_session();
         true
     }
 
@@ -1909,18 +1926,19 @@ impl CultNetRudpSocketTransportConnection {
         self.socket.set_read_timeout(Some(poll_timeout))?;
 
         let deadline = Instant::now() + timeout;
-        // A flush belongs to the session it started in: a Connect that
-        // replaces the peer mid-wait forgets the writes being waited on.
-        let scope = self.session.session_scope();
+        // A flush belongs to the generation it started in: whatever ends that
+        // generation, and whatever begins after it, the writes being waited on
+        // are gone.
+        let generation = self.session.generation();
         let mut preserved_frames = VecDeque::new();
         let result = (|| {
             loop {
                 // An ended session forgot its unacknowledged writes; reporting
                 // them flushed would be a lie.
-                if self.session.session_scope() != scope || self.disconnect_reason.is_some() {
+                if self.session.ended() || self.session.generation() != generation {
                     return Err(anyhow!(
                         "RUDP session ended before its reliable writes were acknowledged: {}",
-                        String::from_utf8_lossy(self.disconnect_reason.as_deref().unwrap_or(b"replaced by a new Connect"))
+                        String::from_utf8_lossy(self.disconnect_reason.as_deref().unwrap_or(b"no reason given"))
                     ));
                 }
                 if self.outstanding_reliable_packet_count() == 0 {

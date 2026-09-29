@@ -415,6 +415,13 @@ class CultNetRudpSession:
         self._next_sequenced_by_channel: dict[str, int] = {}
         self._next_fragment_id = 1
         self._connected = False
+        # Advances every time a generation ends. Everything issued in a
+        # generation (writes, flushes) belongs to it and dies with it.
+        self._generation = 0
+        # True from the end of a generation until the next Connect or Accept
+        # begins one. A flush started in that interval has no live generation
+        # to wait on.
+        self._ended = False
         self._last_received_at_ms: int | None = None
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
@@ -462,16 +469,35 @@ class CultNetRudpSession:
     def outstanding_reliable_packet_count(self) -> int:
         return len(self._pending_reliable) + len(self._queued_reliable)
 
-    def reset_peer_state(self) -> None:
-        """Forgets everything learned from the peer; sequence numbers already issued stay issued."""
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def ended(self) -> bool:
+        return self._ended
+
+    def _end_session(self) -> None:
+        """The one way a session generation ends. The session stops being
+        connected and what it still owed the peer dies with it: a write not yet
+        acknowledged is dropped, so no later session retransmits it or credits
+        an ack to it. What was learned from the peer is not touched: the peer
+        may not know the session ended, and forgetting what it sent would let its
+        retransmits be delivered twice."""
         self._connected = False
+        self._ended = True
+        self._generation += 1
+        self._pending_reliable.clear()
+        self._queued_reliable.clear()
+
+    def reset_peer_state(self) -> None:
+        """Ends the current generation and forgets everything learned from the peer; sequence numbers already issued stay issued."""
+        self._end_session()
         self._last_received_at_ms = None
         self._highest_received_sequence = None
         self._received_sequences.clear()
         self._next_sequenced_by_channel.clear()
         self._latest_sequenced_by_channel.clear()
-        self._pending_reliable.clear()
-        self._queued_reliable.clear()
         self._received_through = None
         self._ordered_held.clear()
         self._fragment_buffers.clear()
@@ -479,6 +505,7 @@ class CultNetRudpSession:
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
         self._ensure_reliable_capacity(1)
+        self._ended = False
         packet = self._create_packet(
             CultNetRudpPacketType.CONNECT,
             "control",
@@ -502,6 +529,7 @@ class CultNetRudpSession:
         self._ensure_reliable_capacity(1)
         self._remember_received(packet.sequence)
         self._connected = True
+        self._ended = False
         response = self._create_packet(
             CultNetRudpPacketType.ACCEPT,
             "control",
@@ -619,7 +647,7 @@ class CultNetRudpSession:
             )
 
         if packet.packet_type == CultNetRudpPacketType.DISCONNECT:
-            self._connected = False
+            self._end_session()
             return CultNetRudpReceiveResult(
                 ready_to_send=ready_to_send,
                 disconnected=True,
@@ -696,7 +724,7 @@ class CultNetRudpSession:
         return self._create_packet(CultNetRudpPacketType.PING, "control", payload)
 
     def create_disconnect(self, reason: bytes = b"") -> CultNetRudpPacket:
-        self._connected = False
+        self._end_session()
         return self._create_packet(CultNetRudpPacketType.DISCONNECT, "control", reason)
 
     def check_timeout(self, now_ms: int, timeout_ms: int) -> bool:
@@ -704,7 +732,7 @@ class CultNetRudpSession:
             return False
         if now_ms - self._last_received_at_ms <= timeout_ms:
             return False
-        self._connected = False
+        self._end_session()
         return True
 
     def due_resends(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
@@ -1069,14 +1097,19 @@ class CultNetRudpSocketTransportConnection:
         preserved = deque(self._delivered_frames)
         self._delivered_frames.clear()
         self.socket.settimeout(poll_timeout)
+        # A flush belongs to the generation it started in: whatever ends that
+        # generation, and whatever begins after it, the writes being waited on
+        # are gone.
+        generation = self.session.generation
         try:
             while True:
                 # An ended session forgot its unacknowledged writes; reporting
                 # them flushed would be a lie.
-                if self.disconnect_reason is not None:
+                if self.session.ended or self.session.generation != generation:
+                    reason = self.disconnect_reason
                     raise ConnectionError(
                         "RUDP session ended before its reliable writes were acknowledged: "
-                        + self.disconnect_reason.decode("utf-8", errors="replace")
+                        + ("no reason given" if reason is None else reason.decode("utf-8", errors="replace"))
                     )
                 if self.session.outstanding_reliable_packet_count == 0:
                     return

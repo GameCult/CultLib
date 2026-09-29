@@ -145,6 +145,12 @@ export class CultNetRudpSession {
   readonly #nextSequencedByChannel = new Map<string, number>();
   #nextFragmentId = 1;
   #connected = false;
+  /// Advances every time a generation ends. Everything issued in a generation
+  /// (writes, flushes) belongs to it and dies with it.
+  #generation = 0;
+  /// True from the end of a generation until the next Connect or Accept begins
+  /// one. A flush started in that interval has no live generation to wait on.
+  #ended = false;
   readonly #maxPendingReliablePackets: number | undefined;
   #lastReceivedAtMs: number | undefined;
   #highestReceivedSequence: number | undefined;
@@ -213,15 +219,37 @@ export class CultNetRudpSession {
     return this.#lastReceivedAtMs;
   }
 
-  resetPeerState(): void {
+  get generation(): number {
+    return this.#generation;
+  }
+
+  get ended(): boolean {
+    return this.#ended;
+  }
+
+  /// The one way a session generation ends. The session stops being connected
+  /// and what it still owed the peer dies with it: a write not yet acknowledged
+  /// is dropped, so no later session retransmits it or credits an ack to it.
+  /// What was learned from the peer is not touched: the peer may not know the
+  /// session ended, and forgetting what it sent would let its retransmits be
+  /// delivered twice.
+  #endSession(): void {
     this.#connected = false;
+    this.#ended = true;
+    this.#generation += 1;
+    this.#pendingReliable.clear();
+    this.#queuedReliable.splice(0);
+  }
+
+  /// Ends the current generation and forgets everything learned from the peer;
+  /// sequence numbers already issued stay issued.
+  resetPeerState(): void {
+    this.#endSession();
     this.#lastReceivedAtMs = undefined;
     this.#highestReceivedSequence = undefined;
     this.#receivedSequences.clear();
     this.#nextSequencedByChannel.clear();
     this.#latestSequencedByChannel.clear();
-    this.#pendingReliable.clear();
-    this.#queuedReliable.splice(0);
     this.#receivedThrough = undefined;
     this.#orderedHeld.clear();
     this.#fragmentBuffers.clear();
@@ -230,6 +258,7 @@ export class CultNetRudpSession {
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
     this.#ensureReliableCapacity(1);
+    this.#ended = false;
     const packet = this.#createPacket({
       packetType: "connect",
       channelId: "control",
@@ -255,6 +284,7 @@ export class CultNetRudpSession {
     this.#rememberReceived(packet.sequence);
     this.#lastReceivedAtMs = nowMs;
     this.#connected = true;
+    this.#ended = false;
     const response = this.#createPacket({
       packetType: "accept",
       channelId: "control",
@@ -403,7 +433,7 @@ export class CultNetRudpSession {
     }
 
     if (packet.packetType === "disconnect") {
-      this.#connected = false;
+      this.#endSession();
       return {
         delivered: [],
         readyToSend,
@@ -504,7 +534,7 @@ export class CultNetRudpSession {
   }
 
   createDisconnect(reason = new Uint8Array()): CultNetRudpPacket {
-    this.#connected = false;
+    this.#endSession();
     return this.#createPacket({
       packetType: "disconnect",
       channelId: "control",
@@ -519,7 +549,7 @@ export class CultNetRudpSession {
     if (nowMs - this.#lastReceivedAtMs <= timeoutMs) {
       return false;
     }
-    this.#connected = false;
+    this.#endSession();
     return true;
   }
 
@@ -777,12 +807,8 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
-  // A flush belongs to the session it started in. Each session start advances
-  // the generation; each session end records the generation it ended and why.
-  // A reconnect from a disconnect listener starts a new generation but cannot
-  // un-end the old one.
-  #generation = 0;
-  #endedGeneration = -1;
+  // Why the last generation ended. A report only: the session owns whether it
+  // ended.
   #endedReason: Uint8Array | undefined;
   readonly #stats: CultNetTransportStats = {
     bytesReceived: 0,
@@ -845,7 +871,6 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     if (this.#mode !== "client") {
       throw new Error("Only a client RUDP socket transport can initiate connect.");
     }
-    this.#generation += 1;
     this.#sendPacket(this.#session.createConnect(Date.now(), payload));
   }
 
@@ -863,11 +888,14 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   async flush(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    const generation = this.#generation;
+    // A flush belongs to the generation it started in: whatever ends that
+    // generation, and whatever begins after it (a reconnect from a disconnect
+    // listener included), the writes being waited on are gone.
+    const generation = this.#session.generation;
     for (;;) {
       // An ended session forgot its unacknowledged writes; reporting them
-      // flushed would be a lie, even if a new session has since begun.
-      if (this.#endedGeneration >= generation) {
+      // flushed would be a lie.
+      if (this.#session.ended || this.#session.generation !== generation) {
         throw new Error(
           `RUDP session ended before its reliable writes were acknowledged: ${Buffer.from(this.#endedReason ?? new Uint8Array()).toString("utf8")}`,
         );
@@ -887,11 +915,6 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
   }
 
-  #endGeneration(reason: Uint8Array): void {
-    this.#endedGeneration = this.#generation;
-    this.#endedReason = reason;
-  }
-
   ping(payload = new Uint8Array()): void {
     this.#sendPacket(this.#session.createPing(payload));
   }
@@ -899,7 +922,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   checkTimeout(timeoutMs: number, nowMs = Date.now()): boolean {
     const timedOut = this.#session.checkTimeout(nowMs, timeoutMs);
     if (timedOut) {
-      this.#endGeneration(Buffer.from("session timed out", "utf8"));
+      this.#endedReason = Buffer.from("session timed out", "utf8");
       this.emit("timeout");
       this.emit("close");
     }
@@ -926,7 +949,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     // The goodbye is built after the reset, or its ack field would acknowledge
     // the very frame the session refused.
     this.#session.resetPeerState();
-    this.#endGeneration(reason);
+    this.#endedReason = reason;
     try {
       this.#sendPacket(this.#session.createDisconnect(reason));
     } catch {
@@ -988,15 +1011,14 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       if (!repeated) {
         // A timed-out session already ended its generation; any other
         // predecessor ends here, connected or not.
-        if (this.#endedGeneration < this.#generation) {
-          this.#endGeneration(Buffer.from("replaced by a new Connect", "utf8"));
+        if (!this.#session.ended) {
+          this.#endedReason = Buffer.from("replaced by a new Connect", "utf8");
         }
         this.#session.resetPeerState();
       }
       let accept: CultNetRudpPacket;
       try {
         accept = this.#session.acceptConnect(packet, Date.now());
-        if (!repeated) this.#generation += 1;
       } catch {
         this.#stats.packetsDropped += 1;
         return;
@@ -1034,7 +1056,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         } satisfies CultNetTransportFrame);
       }
       if (result.disconnected) {
-        this.#endGeneration(result.disconnectReason ?? new Uint8Array());
+        this.#endedReason = result.disconnectReason ?? new Uint8Array();
         this.emit("disconnect", { reason: result.disconnectReason ?? new Uint8Array() });
         this.emit("close");
         return;

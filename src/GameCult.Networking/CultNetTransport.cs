@@ -902,6 +902,12 @@ namespace GameCult.Networking
         private ushort _nextFragmentId = 1;
         private readonly int? _maxPendingReliablePackets;
         private volatile bool _connected;
+        // Advances every time a generation ends. Everything issued in a generation (writes, flushes)
+        // belongs to it and dies with it.
+        private long _generation;
+        // True from the end of a generation until the next Connect or Accept begins one. A flush started
+        // in that interval has no live generation to wait on.
+        private bool _ended;
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
@@ -964,6 +970,8 @@ namespace GameCult.Networking
         /// Gets whether the session has completed the connect/accept handshake.
         /// </summary>
         public bool Connected => _connected;
+        internal long Generation => Interlocked.Read(ref _generation);
+        internal bool Ended => _ended;
         /// <summary>
         /// Gets the logical time of the last received packet.
         /// </summary>
@@ -1000,6 +1008,7 @@ namespace GameCult.Networking
         public CultNetRudpPacket CreateConnect(long nowMs = 0, byte[]? payload = null)
         {
             EnsureReliableCapacity(1);
+            _ended = false;
             var packet = CreatePacket(CultNetRudpPacketType.Connect, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
             TrackReliable(packet, nowMs);
             return packet;
@@ -1019,6 +1028,7 @@ namespace GameCult.Networking
             EnsureReliableCapacity(1);
             RememberReceived(packet.Sequence);
             _connected = true;
+            _ended = false;
             var response = CreatePacket(CultNetRudpPacketType.Accept, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
             TrackReliable(response, nowMs);
             return response;
@@ -1185,7 +1195,7 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Disconnect)
             {
-                _connected = false;
+                EndSession();
                 return new CultNetRudpReceiveResult
                 {
                     ReadyToSend = readyToSend,
@@ -1287,21 +1297,36 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Forgets everything learned from the peer; sequence numbers already issued stay issued.
+        /// The one way a session generation ends. The session stops being connected and what it still
+        /// owed the peer dies with it: a write not yet acknowledged is dropped, so no later session
+        /// retransmits it or credits an ack to it. What was learned from the peer is not touched: the
+        /// peer may not know the session ended, and forgetting what it sent would let its retransmits
+        /// be delivered twice.
         /// </summary>
-        public void ResetPeerState()
+        private void EndSession()
         {
             _connected = false;
-            _lastReceivedAtMs = null;
-            _highestReceivedSequence = null;
-            _receivedSequences.Clear();
-            _nextSequencedByChannel.Clear();
-            _latestSequencedByChannel.Clear();
+            _ended = true;
+            Interlocked.Increment(ref _generation);
             lock (_pendingReliableGate)
             {
                 _pendingReliable.Clear();
                 _queuedReliable.Clear();
             }
+        }
+
+        /// <summary>
+        /// Ends the current generation and forgets everything learned from the peer; sequence numbers
+        /// already issued stay issued.
+        /// </summary>
+        public void ResetPeerState()
+        {
+            EndSession();
+            _lastReceivedAtMs = null;
+            _highestReceivedSequence = null;
+            _receivedSequences.Clear();
+            _nextSequencedByChannel.Clear();
+            _latestSequencedByChannel.Clear();
             _receivedThrough = null;
             _orderedHeld.Clear();
             _fragmentBuffers.Clear();
@@ -1323,7 +1348,7 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateDisconnect(byte[]? reason = null)
         {
-            _connected = false;
+            EndSession();
             return CreatePacket(CultNetRudpPacketType.Disconnect, "control", reason ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
         }
 
@@ -1340,7 +1365,7 @@ namespace GameCult.Networking
             {
                 return false;
             }
-            _connected = false;
+            EndSession();
             return true;
         }
 
@@ -1878,18 +1903,23 @@ namespace GameCult.Networking
             var preserved = new List<CultNetTransportFrame>();
             while (_deliveredFrames.Count > 0)
                 preserved.Add(_deliveredFrames.Dequeue());
+            // A flush belongs to the generation it started in: whatever ends that generation, and
+            // whatever begins after it, the writes being waited on are gone.
+            long generation;
+            lock (_sessionGate)
+                generation = _session.Generation;
             try
             {
                 while (true)
                 {
-                    // An ended session forgot its unacknowledged writes; reporting them
-                    // flushed would be a lie.
-                    var ended = DisconnectReason;
-                    if (ended != null)
-                        throw new InvalidOperationException(
-                            "RUDP session ended before its reliable writes were acknowledged: " + Encoding.UTF8.GetString(ended));
                     lock (_sessionGate)
                     {
+                        // An ended session forgot its unacknowledged writes; reporting them flushed
+                        // would be a lie.
+                        if (_session.Ended || _session.Generation != generation)
+                            throw new InvalidOperationException(
+                                "RUDP session ended before its reliable writes were acknowledged: " +
+                                (DisconnectReason == null ? "no reason given" : Encoding.UTF8.GetString(DisconnectReason)));
                         if (_session.OutstandingReliablePacketCount == 0)
                             return;
                     }
