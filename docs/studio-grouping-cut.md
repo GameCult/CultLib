@@ -9,7 +9,9 @@ before editing it; `main` keeps moving.
 2026-09-17). Q2 **A** (occupied values only). Q3 **A** (list only, not the ref picker).
 Q4 **A** (no record search). Q5 **overtaken**: one release from `main`, together with
 document-variants C3 (`docs/document-variants-cut.md`), taking whatever native-plugin drift
-`main` carries. Open: Q6 (variants in the tree) and Q7 (Aetheria's annotations), below.
+`main` carries. Q6 **A** (flat row by resolved value, C3's variant marker; 2026-09-30). Q7 **B** (legacy parity
+minus manufacturer, plus `FactionProductData` by `Manufacturer` then `Design`, plus
+`WeaponItemData` by `WeaponType`; 2026-09-30).
 
 ## Target
 
@@ -157,7 +159,7 @@ New since the map:
 
 Q1-Q5 are ruled (header). Two remain.
 
-### Q6. How does the grouped list show a variant? (blocks nothing in Cuts 1-2; shapes C3's row lowering)
+### Q6. RULED A (2026-09-30). How does the grouped list show a variant? (blocks nothing in Cuts 1-2; shapes C3's row lowering)
 
 Mechanical defaults, not asked: a variant groups by its resolved values (I10), so a variant
 that inherits its base's `HullType` sits in the base's node and moves when the base changes;
@@ -174,7 +176,7 @@ variant inherits its base's group; a variant is a valid drag payload.
   lives in C3's inspector. B makes the tree's shape depend on two relations, and splits
   whenever a variant overrides a grouped value. C duplicates C3's inspector marker.
 
-### Q7. Which Aetheria types group, and by what? (blocks Cut 4 only)
+### Q7. RULED B (2026-09-30). Which Aetheria types group, and by what?
 
 Candidates on `codex/fire-control-12` (enums unless noted; `[Flags]` enums excluded):
 
