@@ -271,7 +271,9 @@ impl CultNetRudpSession {
         self.pending_reliable.len() + self.queued_reliable.len()
     }
 
-    fn pending_accept_for_resend(&mut self, now_ms: u64) -> Option<CultNetRudpPacket> {
+    /// The unacknowledged Accept, stamped as just sent, for a peer that
+    /// repeats its Connect. `None` once the peer has acknowledged it.
+    pub fn pending_accept_for_resend(&mut self, now_ms: u64) -> Option<CultNetRudpPacket> {
         let pending = self
             .pending_reliable
             .values_mut()
@@ -1399,6 +1401,10 @@ pub struct CultNetRudpServerHub {
 
 impl CultNetRudpServerHub {
     pub fn new(options: CultNetRudpServerHubOptions) -> Result<Self> {
+        validate_rudp_session_limits(
+            options.initial_sequence,
+            options.max_pending_reliable_packets,
+        )?;
         let local_addr = options.socket.local_addr()?;
         if options.max_peers == 0 {
             return Err(anyhow!(
@@ -1589,7 +1595,7 @@ impl CultNetRudpServerHub {
                 && peer.context.connect_payload == packet.payload
             {
                 if peer.session.receive(&packet, now_ms()).is_err() {
-                    self.stats.packets_dropped += 1;
+                    self.end_refusing_peer(remote_addr)?;
                     return Ok(true);
                 }
                 let reply = peer
@@ -1650,7 +1656,7 @@ impl CultNetRudpServerHub {
             return Ok(true);
         };
         let Ok(result) = peer.session.receive(&packet, now_ms()) else {
-            self.stats.packets_dropped += 1;
+            self.end_refusing_peer(remote_addr)?;
             return Ok(true);
         };
         let context = peer.context.clone();
@@ -1694,6 +1700,25 @@ impl CultNetRudpServerHub {
             self.peers.remove(&remote_addr);
         }
         Ok(true)
+    }
+
+    /// An admitted peer sent a packet its session refuses. `receive` has
+    /// already recorded the packet's reliable sequence, so the session cannot be
+    /// kept: a retransmit would be acknowledged and the frame silently lost.
+    /// The session ends, the peer is told, and the caller sees `Disconnected`.
+    fn end_refusing_peer(&mut self, remote_addr: SocketAddr) -> Result<()> {
+        self.stats.packets_dropped += 1;
+        let Some(mut peer) = self.peers.remove(&remote_addr) else {
+            return Ok(());
+        };
+        let reason = RUDP_REFUSED_PACKET_REASON.to_vec();
+        let goodbye = peer.session.create_disconnect(reason.clone());
+        self.pending_events
+            .push_back(CultNetRudpServerEvent::Disconnected {
+                session: peer.context,
+                reason,
+            });
+        self.send_packet(remote_addr, &goodbye)
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
@@ -1743,6 +1768,10 @@ impl CultNetRudpServerHub {
 
 impl CultNetRudpSocketTransportConnection {
     pub fn new(options: CultNetRudpSocketTransportOptions) -> Result<Self> {
+        validate_rudp_session_limits(
+            options.initial_sequence,
+            options.max_pending_reliable_packets,
+        )?;
         let local_addr = options.socket.local_addr()?;
         let max_payload_bytes = options
             .max_payload_bytes
@@ -2035,8 +2064,15 @@ impl CultNetRudpSocketTransportConnection {
         }
 
         let Ok(result) = self.session.receive(&packet, now_ms()) else {
+            // `receive` has already recorded the packet's reliable sequence, so
+            // the session cannot be kept: a retransmit would be acknowledged
+            // and the frame silently lost. End it and tell the peer.
             self.stats.packets_dropped += 1;
-            return Ok(true);
+            let reason = RUDP_REFUSED_PACKET_REASON.to_vec();
+            let goodbye = self.session.create_disconnect(reason.clone());
+            self.disconnect_reason = Some(reason);
+            self.send_packet(&goodbye)?;
+            return Ok(false);
         };
         if let Some(reply) = result.reply {
             self.send_packet(&reply)?;
@@ -2179,6 +2215,29 @@ where
             .as_mut()
             .expect("RUDP reconnect loop opened a transport"))
     }
+}
+
+/// Sent to a peer whose session refused one of its packets, and reported to
+/// the local caller as the disconnect reason.
+const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
+
+/// A session cannot admit a Connect when its sequence space starts exhausted or
+/// its reliable queue holds nothing, so neither is a usable configuration.
+fn validate_rudp_session_limits(
+    initial_sequence: u32,
+    max_pending_reliable_packets: Option<u32>,
+) -> Result<()> {
+    if initial_sequence == u32::MAX {
+        return Err(anyhow!(
+            "RUDP initial_sequence must leave room for a reliable packet"
+        ));
+    }
+    if max_pending_reliable_packets == Some(0) {
+        return Err(anyhow!(
+            "RUDP max_pending_reliable_packets must be greater than zero"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]

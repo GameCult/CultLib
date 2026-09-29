@@ -273,46 +273,101 @@ per_stray!(
     server_mode_survives_foreign_connection_ids
 );
 
-#[test]
-fn hub_drops_a_packet_its_admitted_peer_session_refuses() -> Result<()> {
-    let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new(
-        "hub",
-        socket()?,
-        CONNECTION_ID,
-    ))?;
-    let hub_addr = hub.local_addr()?;
-    let peer = socket()?;
-    let mut peer_session = raw_session(CONNECTION_ID);
-    send_to(&peer, hub_addr, &peer_session.create_connect(0, b"peer".to_vec())?)?;
-    assert!(matches!(
-        hub.receive_event_once()?,
-        Some(CultNetRudpServerEvent::Connected { .. })
-    ));
-    let mut buffer = vec![0_u8; 65_535];
-    let (received, _) = peer.recv_from(&mut buffer)?;
-    peer_session.receive(&decode_rudp_packet(&buffer[..received])?, 0)?;
+/// A session that refuses a packet has already recorded its reliable sequence,
+/// so keeping it would acknowledge the sender's retransmit and lose the frame.
+/// The session ends and the sender is told.
+fn refused_frame_options() -> (u32, Vec<u8>) {
+    (64, vec![7_u8; 100])
+}
 
-    send_to(&peer, hub_addr, &poisoned(&mut peer_session)?)?;
-    assert!(hub.receive_event_once()?.is_none());
-    assert_eq!(hub.stats().packets_dropped, 1);
-    assert_eq!(hub.sessions().len(), 1);
+fn client_with_fast_resend(server_addr: SocketAddr) -> Result<CultNetRudpSocketTransportConnection> {
+    let mut options =
+        CultNetRudpSocketTransportOptions::client("client", socket()?, server_addr, CONNECTION_ID);
+    options.resend_delay_ms = 1;
+    CultNetRudpSocketTransportConnection::new(options)
+}
 
-    send_to(
-        &peer,
-        hub_addr,
-        &peer_session.send("schema", b"still here".to_vec(), reliable())?,
-    )?;
-    match hub.receive_event_once()? {
-        Some(CultNetRudpServerEvent::Frame { frame, .. }) => {
-            assert_eq!(frame.payload, b"still here");
-        }
-        other => panic!("the peer must still be served, got {other:?}"),
-    }
+/// The client's view after the server refused its frame: told the session is
+/// over, and never shown the frame as acknowledged, even after it retransmits.
+fn assert_client_sees_refusal(
+    client: &mut CultNetRudpSocketTransportConnection,
+    receipt: &CultNetRudpReliableSendReceipt,
+    mut serve: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    serve()?;
+    let _ = client.receive_once()?;
+    assert!(
+        client.disconnect_reason().is_some(),
+        "the client must be told the session ended"
+    );
+    std::thread::sleep(Duration::from_millis(10));
+    client.poll_resends()?;
+    serve()?;
+    let _ = client.receive_once()?;
+    assert_ne!(
+        client.reliable_send_status(receipt),
+        CultNetRudpReliableSendStatus::Acknowledged,
+        "a refused frame must never be acknowledged"
+    );
     Ok(())
 }
 
 #[test]
-fn client_drops_a_packet_its_session_refuses() -> Result<()> {
+fn hub_ends_the_session_of_a_peer_whose_reliable_frame_it_refuses() -> Result<()> {
+    let (limit, payload) = refused_frame_options();
+    let mut options = CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID);
+    options.max_payload_bytes = Some(limit);
+    let mut hub = CultNetRudpServerHub::new(options)?;
+    let hub_addr = hub.local_addr()?;
+    let mut client = client_with_fast_resend(hub_addr)?;
+    client.connect(b"peer".to_vec())?;
+    assert!(matches!(
+        hub.receive_event_once()?,
+        Some(CultNetRudpServerEvent::Connected { .. })
+    ));
+    let _ = client.receive_once()?;
+    assert!(client.connected());
+
+    let receipt = client.send_reliable("schema", payload)?;
+    let mut ended = false;
+    assert_client_sees_refusal(&mut client, &receipt, || {
+        while let Some(event) = hub.receive_event_once()? {
+            ended |= matches!(event, CultNetRudpServerEvent::Disconnected { .. });
+        }
+        Ok(())
+    })?;
+    assert!(ended, "the hub must report the ended session");
+    assert_eq!(hub.sessions().len(), 0);
+    assert!(hub.stats().packets_dropped >= 1);
+    Ok(())
+}
+
+#[test]
+fn server_mode_ends_the_session_of_a_peer_whose_reliable_frame_it_refuses() -> Result<()> {
+    let (limit, payload) = refused_frame_options();
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut options = CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID);
+    options.max_payload_bytes = Some(limit);
+    let mut server = CultNetRudpSocketTransportConnection::new(options)?;
+    let mut client = client_with_fast_resend(server_addr)?;
+    client.connect(b"peer".to_vec())?;
+    let _ = server.receive_once()?;
+    let _ = client.receive_once()?;
+    assert!(client.connected());
+
+    let receipt = client.send_reliable("schema", payload)?;
+    assert_client_sees_refusal(&mut client, &receipt, || {
+        let _ = server.receive_once()?;
+        Ok(())
+    })?;
+    assert!(server.disconnect_reason().is_some());
+    assert!(server.stats().packets_dropped >= 1);
+    Ok(())
+}
+
+#[test]
+fn client_ends_its_session_when_it_refuses_a_packet() -> Result<()> {
     let server = socket()?;
     let server_addr = server.local_addr()?;
     let mut client = CultNetRudpSocketTransportConnection::new(
@@ -330,17 +385,17 @@ fn client_drops_a_packet_its_session_refuses() -> Result<()> {
     send_to(&server, client_addr, &poisoned(&mut server_session)?)?;
     assert!(client.receive_once()?.is_none());
     assert_eq!(client.stats().packets_dropped, 1);
-    send_to(
-        &server,
-        client_addr,
-        &server_session.send("schema", b"real".to_vec(), reliable())?,
-    )?;
-    assert_eq!(client.receive_once()?.expect("the real frame").payload, b"real");
+    assert!(client.disconnect_reason().is_some());
+
+    // The server is told, not left holding a live session.
+    let (received, _) = server.recv_from(&mut buffer)?;
+    let told = decode_rudp_packet(&buffer[..received])?;
+    assert_eq!(told.packet_type, CultNetRudpPacketType::Disconnect);
     Ok(())
 }
 
 #[test]
-fn server_mode_drops_what_is_not_its_peer_or_what_its_session_refuses() -> Result<()> {
+fn server_mode_ends_the_session_when_the_session_refuses_a_packet() -> Result<()> {
     let server_socket = socket()?;
     let server_addr = server_socket.local_addr()?;
     let mut server = CultNetRudpSocketTransportConnection::new(
@@ -367,16 +422,45 @@ fn server_mode_drops_what_is_not_its_peer_or_what_its_session_refuses() -> Resul
     assert!(server.receive_once()?.is_none());
     assert_eq!(server.stats().packets_dropped, 6);
 
-    // A packet from the peer that the session itself refuses.
+    // A packet from the peer that the session itself refuses ends the session
+    // and the peer is told.
     send_to(&peer, server_addr, &poisoned(&mut peer_session)?)?;
     assert!(server.receive_once()?.is_none());
     assert_eq!(server.stats().packets_dropped, 7);
+    assert!(server.disconnect_reason().is_some());
+    let (received, _) = peer.recv_from(&mut buffer)?;
+    assert_eq!(
+        decode_rudp_packet(&buffer[..received])?.packet_type,
+        CultNetRudpPacketType::Disconnect
+    );
+    Ok(())
+}
 
-    send_to(
-        &peer,
-        server_addr,
-        &peer_session.send("schema", b"real".to_vec(), reliable())?,
-    )?;
-    assert_eq!(server.receive_once()?.expect("the real frame").payload, b"real");
+#[test]
+fn constructors_reject_limits_that_make_a_connect_unadmittable() -> Result<()> {
+    let mut hub = CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID);
+    hub.initial_sequence = u32::MAX;
+    assert!(CultNetRudpServerHub::new(hub).is_err());
+    let mut hub = CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID);
+    hub.max_pending_reliable_packets = Some(0);
+    assert!(CultNetRudpServerHub::new(hub).is_err());
+
+    for build in [
+        (|s, a| CultNetRudpSocketTransportOptions::client("c", s, a, CONNECTION_ID))
+            as fn(UdpSocket, SocketAddr) -> CultNetRudpSocketTransportOptions,
+        |s, _| CultNetRudpSocketTransportOptions::server("s", s, CONNECTION_ID),
+    ] {
+        let addr = "127.0.0.1:9".parse()?;
+        let mut options = build(socket()?, addr);
+        options.initial_sequence = u32::MAX;
+        assert!(CultNetRudpSocketTransportConnection::new(options).is_err());
+        let mut options = build(socket()?, addr);
+        options.max_pending_reliable_packets = Some(0);
+        assert!(CultNetRudpSocketTransportConnection::new(options).is_err());
+        let mut options = build(socket()?, addr);
+        options.initial_sequence = u32::MAX - 1;
+        options.max_pending_reliable_packets = Some(1);
+        assert!(CultNetRudpSocketTransportConnection::new(options).is_ok());
+    }
     Ok(())
 }
