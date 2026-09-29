@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -81,6 +82,73 @@ namespace GameCult.Caching.Tests
             {
                 if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
             }
+        }
+
+        // Shared refusal vectors: tests/vectors/document-variants-c0, read by every runtime's tests.
+        private const string ItemSchemaId = "sha256:88d3fdf0a927acf3b163940d8f8c7fe62b3316542ce771a67ec8bc038f594788";
+
+        private static string VectorPath(string name)
+        {
+            for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
+            {
+                var candidate = Path.Combine(dir.FullName, "tests", "vectors", "document-variants-c0", name);
+                if (File.Exists(candidate)) return candidate;
+            }
+            throw new FileNotFoundException($"Shared vector {name} not found above {TestContext.CurrentContext.TestDirectory}.");
+        }
+
+        private static async Task<string> PullRefusalAsync(string vector)
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-vector-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(root);
+            try
+            {
+                var file = Path.Combine(root, "store.msgpack");
+                File.Copy(VectorPath(vector), file);
+                using var cache = new CultCache();
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(file));
+                var error = Assert.CatchAsync(async () => await cache.PullAllBackingStoresAsync());
+                Assert.That(error, Is.Not.Null);
+                Assert.That(error!.ToString(), Does.Contain(nameof(NotSupportedException)));
+                return error.ToString();
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        [Test]
+        public async Task SingleFileRefusesUnknownHeaderByName()
+        {
+            Assert.That(await PullRefusalAsync("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
+        }
+
+        [Test]
+        public async Task SingleFileRefusesExtraRecordSlotNamingTheRecord()
+        {
+            var message = await PullRefusalAsync("extra-slot-full-payload.msgpack");
+            Assert.That(message, Does.Contain("item:anvil"));
+            Assert.That(message, Does.Contain(ItemSchemaId));
+        }
+
+        [Test]
+        public async Task SingleFileRefusesVariantStoreByVersionOrRecord()
+        {
+            Assert.That(await PullRefusalAsync("variant-v2.msgpack"),
+                Does.Contain("cultcache.store.v2").Or.Contain("item:anvil-big"));
+        }
+
+        [Test]
+        public void V1StoreWrittenAtTheBaseCommitStillDecodesByteForByte()
+        {
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(VectorPath("v1-base.msgpack")));
+            CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
+
+            Assert.That(snapshot.FormatVersion, Is.EqualTo("cultcache.store.v1"));
+            Assert.That(snapshot.Records.Select(record => record.Key), Is.EqualTo(new[] { "alpha", "beta" }));
+            Assert.That(snapshot.Records[0].Payload, Is.EqualTo(new byte[] { 0x92, 0xa5, (byte)'a', (byte)'l', (byte)'p', (byte)'h', (byte)'a', 0x01 }));
+            Assert.That(snapshot.Records[1].Payload, Is.EqualTo(new byte[] { 0x92, 0xa4, (byte)'b', (byte)'e', (byte)'t', (byte)'a', 0x02 }));
         }
 
         // Format strings taken from DirectoryMessagePackBackingStore.cs at 0db1fe5.

@@ -13,6 +13,8 @@ Cross-runtime parity has three layers:
 - Wire parity: shared CultCache file/state contracts, schema-v0 MessagePack
   documents, transport profiles, and RUDP packets must cross runtime boundaries
   without translation folklore.
+  Every store reader refuses, by name, a header or record slot it does not
+  understand (vectors: `tests/vectors/document-variants-c0`).
 - Feature parity: each runtime must expose the CultCache/CultNet/CultMesh
   surfaces needed for its intended role, with unsupported production-server
   ownership called out plainly.

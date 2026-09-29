@@ -212,6 +212,11 @@ Example:
 The payload is the domain object only. It does not repeat the key, schema id,
 or stored timestamp.
 
+Under `cultcache.store.v1` a record has exactly these four slots. A reader refuses any
+other `cultcache.store.*` header and any record with more than four slots, naming the
+version or the record's key and schema id. It never skips a slot it does not
+understand.
+
 ## Canonical Semantic Schema Hash
 
 `schemaId` should be derived from a canonical semantic schema hash.
