@@ -627,6 +627,15 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     send_raw(&mut server, &poison)?;
     assert_eq!(server.packets_dropped(), 3);
     assert_eq!(server.session_count(), 1);
+    // ...and the refused client is told, after the Accepts its storm drew.
+    raw.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let mut buffer = vec![0_u8; 65_535];
+    let mut told = false;
+    while let Ok(received) = raw.recv(&mut buffer) {
+        told |= cultnet_rs::decode_rudp_packet(&buffer[..received])?.packet_type
+            == cultnet_rs::CultNetRudpPacketType::Disconnect;
+    }
+    assert!(told, "the refused client must be sent a goodbye");
 
     send(
         &mut real,

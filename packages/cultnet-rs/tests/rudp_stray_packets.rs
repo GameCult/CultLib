@@ -467,3 +467,118 @@ fn constructors_reject_limits_that_make_a_connect_unadmittable() -> Result<()> {
     }
     Ok(())
 }
+
+/// The distinct reliable Accept sequences a peer has been sent so far.
+fn accept_sequences(peer: &UdpSocket) -> Result<std::collections::BTreeSet<u32>> {
+    let mut buffer = vec![0_u8; 65_535];
+    let mut sequences = std::collections::BTreeSet::new();
+    while let Ok((received, _)) = peer.recv_from(&mut buffer) {
+        let packet = decode_rudp_packet(&buffer[..received])?;
+        if packet.packet_type == CultNetRudpPacketType::Accept && packet.reliable {
+            sequences.insert(packet.sequence);
+        }
+    }
+    Ok(sequences)
+}
+
+/// A Connect that repeats (a moved flow, a retransmit, a storm) is answered
+/// with the Accept already owed, never a fresh reliable Accept per Connect.
+#[test]
+fn hub_owes_one_reliable_accept_however_many_connects_repeat() -> Result<()> {
+    let mut hub =
+        CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID))?;
+    let hub_addr = hub.local_addr()?;
+    let peer = socket()?;
+    let mut peer_session = raw_session(CONNECTION_ID);
+    let connect = peer_session.create_connect(0, b"peer".to_vec())?;
+    for _ in 0..20 {
+        send_to(&peer, hub_addr, &connect)?;
+        while hub.receive_event_once()?.is_some() {}
+    }
+    assert_eq!(accept_sequences(&peer)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn server_mode_owes_one_reliable_accept_however_many_connects_repeat() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID),
+    )?;
+    let peer = socket()?;
+    let mut peer_session = raw_session(CONNECTION_ID);
+    let connect = peer_session.create_connect(0, b"peer".to_vec())?;
+    for _ in 0..20 {
+        send_to(&peer, server_addr, &connect)?;
+        let _ = server.receive_once()?;
+    }
+    assert!(server.outstanding_reliable_packet_count() <= 1);
+    Ok(())
+}
+
+/// A late duplicate Connect resets what the server learned of the peer, never
+/// what it already issued: a reused sequence is dropped by the peer as a
+/// duplicate.
+#[test]
+fn server_mode_never_reuses_a_sequence_after_a_late_duplicate_connect() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::server("server", server_socket, CONNECTION_ID),
+    )?;
+    let peer = socket()?;
+    let mut peer_session = raw_session(CONNECTION_ID);
+    let connect = peer_session.create_connect(0, b"peer".to_vec())?;
+    send_to(&peer, server_addr, &connect)?;
+    let _ = server.receive_once()?;
+    server.send_reliable("schema", b"before".to_vec())?;
+    send_to(&peer, server_addr, &connect)?;
+    let _ = server.receive_once()?;
+    server.send_reliable("schema", b"after".to_vec())?;
+
+    let mut buffer = vec![0_u8; 65_535];
+    let mut delivered = Vec::new();
+    while let Ok((received, _)) = peer.recv_from(&mut buffer) {
+        let result = peer_session.receive(&decode_rudp_packet(&buffer[..received])?, 0)?;
+        delivered.extend(result.delivered.into_iter().map(|frame| frame.payload));
+    }
+    assert!(delivered.contains(&b"before".to_vec()));
+    assert!(
+        delivered.contains(&b"after".to_vec()),
+        "the frame sent after the duplicate Connect was dropped as a reused sequence"
+    );
+    Ok(())
+}
+
+/// A session that ended forgot its unacknowledged writes; a flush that then
+/// reports success would claim writes the peer never acknowledged.
+#[test]
+fn a_write_unacknowledged_when_the_session_is_refused_fails_its_flush() -> Result<()> {
+    let server = socket()?;
+    let server_addr = server.local_addr()?;
+    let mut client = CultNetRudpSocketTransportConnection::new(
+        CultNetRudpSocketTransportOptions::client("client", socket()?, server_addr, CONNECTION_ID),
+    )?;
+    client.connect(b"hello".to_vec())?;
+    let mut buffer = vec![0_u8; 65_535];
+    let (received, client_addr) = server.recv_from(&mut buffer)?;
+    let mut server_session = raw_session(CONNECTION_ID);
+    let accept =
+        server_session.accept_connect(&decode_rudp_packet(&buffer[..received])?, 0, Vec::new())?;
+    send_to(&server, client_addr, &accept)?;
+    let _ = client.receive_once()?;
+
+    let receipt = client.send_reliable("schema", b"never acknowledged".to_vec())?;
+    send_to(&server, client_addr, &poisoned(&mut server_session)?)?;
+    let _ = client.receive_once()?;
+    assert!(client.disconnect_reason().is_some());
+
+    let flushed = client.flush_reliable(Duration::from_millis(200));
+    assert!(flushed.is_err(), "the write was never acknowledged");
+    assert_eq!(
+        client.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Invalidated
+    );
+    Ok(())
+}

@@ -325,7 +325,7 @@ where
         let result = match result {
             Ok(result) => result,
             Err(_) => {
-                self.sessions.remove(&key);
+                self.end_refused_session(key)?;
                 self.packets_dropped += 1;
                 return Ok(CultMeshRudpPollOutcome::Handled);
             }
@@ -418,7 +418,7 @@ where
                 match entry.session.answer_repeated_connect(packet, now) {
                     Ok(reply) => reply,
                     Err(_) => {
-                        self.sessions.remove(&key);
+                        self.end_refused_session(key)?;
                         return Ok(false);
                     }
                 }
@@ -590,6 +590,16 @@ where
             _ => {}
         }
         Ok(None)
+    }
+
+    /// The session refused a packet: it ends, and the client is told so it does
+    /// not wait on a session the server no longer holds.
+    fn end_refused_session(&mut self, key: CultMeshRudpSessionKey) -> Result<()> {
+        let Some(mut entry) = self.sessions.remove(&key) else {
+            return Ok(());
+        };
+        let goodbye = entry.session.end_refused_session();
+        self.send_packet(key.remote_addr, &goodbye)
     }
 
     fn payload_budget_allows(&self, key: CultMeshRudpSessionKey, bytes: usize) -> bool {

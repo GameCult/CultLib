@@ -334,11 +334,12 @@ impl CultNetRudpSession {
         Ok(())
     }
 
+    /// Forgets everything learned from the peer. Sequence numbers and fragment
+    /// ids already issued stay issued: a peer that still remembers them must
+    /// never see one reused.
     pub fn reset_peer_state(&mut self) {
         self.session_scope = Uuid::new_v4();
-        self.next_sequence = self.initial_sequence;
         self.next_sequenced_by_channel.clear();
-        self.next_fragment_id = 1;
         self.connected = false;
         self.last_received_at_ms = None;
         self.highest_received_sequence = None;
@@ -349,6 +350,16 @@ impl CultNetRudpSession {
         self.ordered_next_sequence_by_channel.clear();
         self.ordered_buffers.clear();
         self.fragment_buffers.clear();
+    }
+
+    /// Ends a session that refused a packet. `receive` has already recorded the
+    /// refused packet's reliable sequence, so the session cannot be kept: a
+    /// retransmit would be acknowledged and the frame silently lost. Returns the
+    /// goodbye for the peer, built after the reset or its ack field would
+    /// acknowledge the very frame that was refused.
+    pub fn end_refused_session(&mut self) -> CultNetRudpPacket {
+        self.reset_peer_state();
+        self.create_disconnect(RUDP_REFUSED_PACKET_REASON.to_vec())
     }
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
@@ -1729,15 +1740,11 @@ impl CultNetRudpServerHub {
         let Some(mut peer) = self.peers.remove(&remote_addr) else {
             return Ok(());
         };
-        let reason = RUDP_REFUSED_PACKET_REASON.to_vec();
-        // Forget the peer's sequences first: the goodbye's ack field would
-        // otherwise acknowledge the very frame the session refused.
-        peer.session.reset_peer_state();
-        let goodbye = peer.session.create_disconnect(reason.clone());
+        let goodbye = peer.session.end_refused_session();
         self.pending_events
             .push_back(CultNetRudpServerEvent::Disconnected {
                 session: peer.context,
-                reason,
+                reason: goodbye.payload.clone(),
             });
         self.send_packet(remote_addr, &goodbye)
     }
@@ -1861,6 +1868,7 @@ impl CultNetRudpSocketTransportConnection {
             ));
         }
         let packet = self.session.create_connect(now_ms(), payload)?;
+        self.disconnect_reason = None;
         self.send_packet(&packet)
     }
 
@@ -1914,7 +1922,12 @@ impl CultNetRudpSocketTransportConnection {
         &self,
         receipt: &CultNetRudpReliableSendReceipt,
     ) -> CultNetRudpReliableSendStatus {
-        self.session.reliable_send_status(receipt)
+        let status = self.session.reliable_send_status(receipt);
+        // A write still unacknowledged when the session ended never will be.
+        if status == CultNetRudpReliableSendStatus::Pending && self.disconnect_reason.is_some() {
+            return CultNetRudpReliableSendStatus::Invalidated;
+        }
+        status
     }
 
     fn send_data_packets(&mut self, packets: &[CultNetRudpPacket]) -> Result<()> {
@@ -1981,7 +1994,18 @@ impl CultNetRudpSocketTransportConnection {
         let deadline = Instant::now() + timeout;
         let mut preserved_frames = VecDeque::new();
         let result = (|| {
-            while self.outstanding_reliable_packet_count() > 0 {
+            loop {
+                // An ended session forgot its unacknowledged writes; reporting
+                // them flushed would be a lie.
+                if let Some(reason) = &self.disconnect_reason {
+                    return Err(anyhow!(
+                        "RUDP session ended before its reliable writes were acknowledged: {}",
+                        String::from_utf8_lossy(reason)
+                    ));
+                }
+                if self.outstanding_reliable_packet_count() == 0 {
+                    return Ok(());
+                }
                 if Instant::now() >= deadline {
                     return Err(anyhow!(
                         "RUDP reliable flush timed out with {} packets outstanding",
@@ -1993,7 +2017,6 @@ impl CultNetRudpSocketTransportConnection {
                 }
                 self.poll_resends()?;
             }
-            Ok(())
         })();
 
         preserved_frames.append(&mut self.delivered_frames);
@@ -2076,6 +2099,7 @@ impl CultNetRudpSocketTransportConnection {
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
             self.session.reset_peer_state();
+            self.disconnect_reason = None;
             let Ok(accept) = self.session.accept_connect(&packet, now_ms(), Vec::new()) else {
                 self.stats.packets_dropped += 1;
                 return Ok(true);
@@ -2085,17 +2109,11 @@ impl CultNetRudpSocketTransportConnection {
         }
 
         let Ok(result) = self.session.receive(&packet, now_ms()) else {
-            // `receive` has already recorded the packet's reliable sequence, so
-            // the session cannot be kept: a retransmit would be acknowledged
-            // and the frame silently lost. End it and tell the peer.
+            // End the session and tell the peer. A server-mode transport also
+            // forgets its peer: only a Connect can claim it again.
             self.stats.packets_dropped += 1;
-            // The goodbye is built after the reset, or its ack field would
-            // acknowledge the very frame the session refused. A server-mode
-            // transport also forgets its peer: only a Connect can claim it again.
-            let reason = RUDP_REFUSED_PACKET_REASON.to_vec();
-            self.session.reset_peer_state();
-            let goodbye = self.session.create_disconnect(reason.clone());
-            self.disconnect_reason = Some(reason);
+            let goodbye = self.session.end_refused_session();
+            self.disconnect_reason = Some(goodbye.payload.clone());
             let sent = self.send_packet(&goodbye);
             if self.mode == CultNetRudpSocketMode::Server {
                 self.remote_addr = None;
