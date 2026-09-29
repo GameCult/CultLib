@@ -1,5 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import dgram from "node:dgram";
 import fs from "node:fs";
 import path from "node:path";
@@ -362,4 +363,27 @@ test("the loaded authority is frozen: the bind, contract, Expected, Activation a
   for (const [name, mutate] of mutations) assert.throws(mutate, TypeError, name);
   const signer = createIdunnRuntimeSigner({ authority, capabilities: loaded.capabilities });
   assert.equal(presenceSlot(signer.answerRouteObservation(CHALLENGE), RUNTIME_PRESENCE_SLOT.boundEndpoint), loaded.candidate);
+});
+
+// A web app must be able to import the signer without pulling the Odin publisher and dgram.
+function loadUnderDgramStub(modulePath: string): string {
+  const script = [
+    'const Module = require("node:module");',
+    "const load = Module._load;",
+    'Module._load = function (request, ...rest) { if (request === "dgram" || request === "node:dgram") throw new Error("dgram was loaded"); return load.call(this, request, ...rest); };',
+    "try { require(process.argv[1]); process.stdout.write(\"loaded\"); } catch (error) { process.stdout.write(\"failed: \" + error.message); }",
+  ].join("\n");
+  const run = spawnSync(process.execPath, ["-e", script, modulePath], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  return run.stdout;
+}
+
+test("the idunn-runtime subpath loads the signer and loader without loading dgram; the package root does load it", () => {
+  const subpath = require.resolve("cultnet-ts/idunn-runtime");
+  assert.equal(loadUnderDgramStub(subpath), "loaded");
+  assert.equal(loadUnderDgramStub(require.resolve("cultnet-ts")), "failed: dgram was loaded");
+  const exported = require(subpath) as Record<string, unknown>;
+  assert.equal(typeof exported.createIdunnRuntimeSigner, "function");
+  assert.equal(typeof exported.loadIdunnRuntimeAuthorityFromEnvironment, "function");
+  assert.equal(exported.createIdunnRuntimePresencePublisher, undefined);
 });

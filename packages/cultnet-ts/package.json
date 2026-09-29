@@ -15,6 +15,11 @@
       "require": "./dist/contracts.js",
       "default": "./dist/contracts.js"
     },
+    "./idunn-runtime": {
+      "types": "./dist/idunn-runtime-authority.d.ts",
+      "require": "./dist/idunn-runtime-authority.js",
+      "default": "./dist/idunn-runtime-authority.js"
+    },
     "./authority": {
       "types": "./dist/cultmesh-authority.d.ts",
       "require": "./dist/cultmesh-authority.js",
