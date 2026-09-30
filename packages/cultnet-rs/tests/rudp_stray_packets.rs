@@ -36,7 +36,7 @@ fn raw_session(connection_id: u32) -> CultNetRudpSession {
 fn raw_session_from(connection_id: u32, initial_sequence: u32) -> CultNetRudpSession {
     CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id,
-        initial_sequence,
+        initial_sequence: Some(initial_sequence),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     })
@@ -446,7 +446,7 @@ fn server_mode_ends_the_session_when_the_session_refuses_a_packet() -> Result<()
 #[test]
 fn constructors_reject_limits_that_make_a_connect_unadmittable() -> Result<()> {
     let mut hub = CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID);
-    hub.initial_sequence = u32::MAX;
+    hub.initial_sequence = Some(u32::MAX);
     assert!(CultNetRudpServerHub::new(hub).is_err());
     let mut hub = CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID);
     hub.max_pending_reliable_packets = Some(0);
@@ -459,13 +459,13 @@ fn constructors_reject_limits_that_make_a_connect_unadmittable() -> Result<()> {
     ] {
         let addr = "127.0.0.1:9".parse()?;
         let mut options = build(socket()?, addr);
-        options.initial_sequence = u32::MAX;
+        options.initial_sequence = Some(u32::MAX);
         assert!(CultNetRudpSocketTransportConnection::new(options).is_err());
         let mut options = build(socket()?, addr);
         options.max_pending_reliable_packets = Some(0);
         assert!(CultNetRudpSocketTransportConnection::new(options).is_err());
         let mut options = build(socket()?, addr);
-        options.initial_sequence = u32::MAX - 1;
+        options.initial_sequence = Some(u32::MAX - 1);
         options.max_pending_reliable_packets = Some(1);
         assert!(CultNetRudpSocketTransportConnection::new(options).is_ok());
     }

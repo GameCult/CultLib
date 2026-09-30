@@ -247,7 +247,7 @@ fn identical_connect_retransmit_reuses_pending_accept_after_loss() -> Result<()>
     let client_socket = socket()?;
     let mut client_session = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -286,13 +286,13 @@ fn identical_connect_retransmit_reuses_pending_accept_after_loss() -> Result<()>
 fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -346,7 +346,7 @@ fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<(
 fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -354,7 +354,7 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     receiver.set_max_pending_fragment_sets(1)?;
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -422,13 +422,13 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
 fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });

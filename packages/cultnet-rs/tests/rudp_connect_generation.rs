@@ -20,7 +20,7 @@ fn socket() -> Result<UdpSocket> {
 fn session(initial_sequence: u32) -> CultNetRudpSession {
     CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence,
+        initial_sequence: Some(initial_sequence),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     })
@@ -222,7 +222,7 @@ fn a_full_queue_owed_to_a_vanished_peer_does_not_refuse_a_new_generation() -> Re
     let bounded = |initial_sequence: u32| {
         CultNetRudpSession::new(CultNetRudpSessionOptions {
             connection_id: CONNECTION_ID,
-            initial_sequence,
+            initial_sequence: Some(initial_sequence),
             resend_delay_ms: 250,
             max_pending_reliable_packets: Some(1),
         })
@@ -298,10 +298,12 @@ fn ordered_frames_after_the_accept_are_delivered_in_order_whatever_arrives_first
     Ok(())
 }
 
+/// The options say nothing about the initial sequence; each session draws its
+/// own, so one options object serves many sessions without giving them one
+/// sequence.
 #[test]
-fn default_initial_sequences_are_drawn_at_random_from_one_to_two_to_the_thirty_first() -> Result<()> {
-    fn assert_random(label: &str, draw: &dyn Fn() -> u32) {
-        let draws: BTreeSet<u32> = (0..64).map(|_| draw()).collect();
+fn sessions_from_one_options_object_each_draw_their_own_initial_sequence() -> Result<()> {
+    fn assert_random(label: &str, draws: &BTreeSet<u32>) {
         assert!(draws.len() > 32, "{label} does not draw at random: {draws:?}");
         assert!(
             draws.iter().all(|value| (1..(1_u32 << 31)).contains(value)),
@@ -309,25 +311,69 @@ fn default_initial_sequences_are_drawn_at_random_from_one_to_two_to_the_thirty_f
         );
     }
     let address: SocketAddr = "127.0.0.1:9".parse()?;
-    assert_random("random_initial_sequence", &random_initial_sequence);
-    assert_random("session options", &|| {
-        CultNetRudpSessionOptions::default().initial_sequence
-    });
-    assert_random("client options", &|| {
-        CultNetRudpSocketTransportOptions::client("c", UdpSocket::bind("127.0.0.1:0").unwrap(), address, 1)
-            .initial_sequence
-    });
-    assert_random("server options", &|| {
-        CultNetRudpSocketTransportOptions::server("s", UdpSocket::bind("127.0.0.1:0").unwrap(), 1)
-            .initial_sequence
-    });
-    assert_random("hub options", &|| {
-        CultNetRudpServerHubOptions::new("h", UdpSocket::bind("127.0.0.1:0").unwrap(), 1)
-            .initial_sequence
-    });
-    assert_random("cultmesh options", &|| {
-        CultMeshRudpSocketOptions::default().initial_sequence
-    });
+    assert_eq!(CultNetRudpSessionOptions::default().initial_sequence, None);
+    assert_eq!(
+        CultNetRudpSocketTransportOptions::client("c", socket()?, address, 1).initial_sequence,
+        None
+    );
+    assert_eq!(
+        CultNetRudpSocketTransportOptions::server("s", socket()?, 1).initial_sequence,
+        None
+    );
+    assert_eq!(
+        CultNetRudpServerHubOptions::new("h", socket()?, 1).initial_sequence,
+        None
+    );
+    assert_eq!(CultMeshRudpSocketOptions::default().initial_sequence, None);
+
+    let options = CultNetRudpSessionOptions {
+        connection_id: CONNECTION_ID,
+        ..Default::default()
+    };
+    let connects: BTreeSet<u32> = (0..64)
+        .map(|_| Ok(CultNetRudpSession::new(options.clone()).create_connect(0, Vec::new())?.sequence))
+        .collect::<Result<_>>()?;
+    assert_random("sessions from one options object", &connects);
+    Ok(())
+}
+
+/// A transport built from the same options each time (a reconnect loop's
+/// factory) opens each connection with its own Connect sequence.
+#[test]
+fn a_reused_options_object_yields_a_different_connect_sequence_for_each_transport() -> Result<()> {
+    let listener = socket()?;
+    let endpoint = CultNetRudpEndpoint { host: "127.0.0.1".into(), port: listener.local_addr()?.port() };
+    let options = CultMeshRudpSocketOptions::default();
+    let mut sequences = BTreeSet::new();
+    for _ in 0..8 {
+        let mut client =
+            CultMesh::create_rudp_client("client", CONNECTION_ID, &endpoint, options.clone())?;
+        client.connect(Vec::new())?;
+        let mut buffer = vec![0_u8; 65_535];
+        let (received, _) = listener.recv_from(&mut buffer)?;
+        sequences.insert(decode_rudp_packet(&buffer[..received])?.sequence);
+    }
+    assert_eq!(sequences.len(), 8, "two connections opened with one Connect sequence: {sequences:?}");
+    Ok(())
+}
+
+/// A hub builds a session for every client it admits; each draws its own
+/// sequence, so no two clients are accepted with the same one.
+#[test]
+fn a_hub_accepts_each_client_with_its_own_sequence() -> Result<()> {
+    let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID))?;
+    let hub_addr = hub.local_addr()?;
+    let mut accepts = BTreeSet::new();
+    for _ in 0..8 {
+        let peer = socket()?;
+        let connect = session(1).create_connect(0, Vec::new())?;
+        peer.send_to(&encode_rudp_packet(&connect)?, hub_addr)?;
+        hub_event_matching(&mut hub, |event| matches!(event, CultNetRudpServerEvent::Connected { .. }))?;
+        let mut buffer = vec![0_u8; 65_535];
+        let (received, _) = peer.recv_from(&mut buffer)?;
+        accepts.insert(decode_rudp_packet(&buffer[..received])?.sequence);
+    }
+    assert_eq!(accepts.len(), 8, "two clients were accepted with one sequence: {accepts:?}");
     Ok(())
 }
 
@@ -353,7 +399,7 @@ fn client_on(
     initial_sequence: u32,
 ) -> Result<CultNetRudpSocketTransportConnection> {
     let mut options = CultNetRudpSocketTransportOptions::client("client", socket, remote, CONNECTION_ID);
-    options.initial_sequence = initial_sequence;
+    options.initial_sequence = Some(initial_sequence);
     CultNetRudpSocketTransportConnection::new(options)
 }
 
@@ -366,7 +412,7 @@ fn the_hub_admits_a_restarted_client_with_the_same_address_id_and_payload() -> R
     let hub_addr = hub.local_addr()?;
     let shared = socket()?;
     let twin = shared.try_clone()?;
-    let mut first = client_on(shared, hub_addr, 50)?;
+    let mut first = client_on(shared, hub_addr, 50_000)?;
     first.connect(b"same".to_vec())?;
     let CultNetRudpServerEvent::Connected { session: original } =
         hub_event_matching(&mut hub, |event| matches!(event, CultNetRudpServerEvent::Connected { .. }))?
@@ -418,7 +464,7 @@ fn server_mode_admits_a_restarted_client_and_delivers_its_frames() -> Result<()>
     ))?;
     let shared = socket()?;
     let twin = shared.try_clone()?;
-    let mut first = client_on(shared, server_addr, 50)?;
+    let mut first = client_on(shared, server_addr, 50_000)?;
     first.connect(b"same".to_vec())?;
     assert!(server.receive_once()?.is_none());
     first.receive_once()?;
@@ -570,5 +616,257 @@ fn the_hold_buffer_takes_exactly_64_channels_and_refuses_the_next() -> Result<()
     assert_eq!(held_behind_a_gap(64, |index| format!("channel-{index}"))??, 64);
     let error = held_behind_a_gap(65, |index| format!("channel-{index}"))?.expect_err("65 held channels");
     assert!(error.to_string().contains("too many ordered channels"), "{error}");
+    Ok(())
+}
+
+// Ack Cut 1d: a frame from an earlier generation is a duplicate, a delayed
+// Connect from an earlier attempt is stale, a Connect from a new endpoint is a
+// new client.
+
+/// Whether an acknowledgement names `sequence` by its ack field or its mask.
+fn names_sequence(ack: &CultNetRudpPacket, sequence: u32) -> bool {
+    ack.ack == sequence
+        || (0..32).any(|bit| {
+            ack.ack_mask & (1_u32 << bit) != 0 && ack.ack > bit && ack.ack - bit - 1 == sequence
+        })
+}
+
+/// A frame the client's old generation already delivered, retransmitted after
+/// the client reconnected, is acknowledged and not delivered into the new
+/// generation. Every sequence the old generation issued is below the new
+/// Connect.
+#[test]
+fn a_frame_from_the_clients_earlier_generation_is_acknowledged_not_delivered_again() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    handshake(&mut client, &mut server)?;
+    let old = send(&mut client, "old")?;
+    assert_eq!(names(&server.receive(&old, 1)?.delivered), ["old"]);
+
+    let connect = client.create_connect(2, Vec::new())?;
+    let accept = server.accept_connect(&connect, 2, Vec::new())?;
+    client.receive(&accept, 2)?;
+    assert!(old.sequence < connect.sequence);
+    let late = server.receive(&old, 3)?;
+    assert!(late.delivered.is_empty(), "an earlier generation's frame was delivered again");
+    let ack = server.create_ack_for_received(old.sequence);
+    assert!(names_sequence(&ack, old.sequence), "the duplicate was not acknowledged: {ack:?}");
+
+    let fresh = send(&mut client, "fresh")?;
+    assert_eq!(names(&server.receive(&fresh, 4)?.delivered), ["fresh"]);
+    Ok(())
+}
+
+/// The other direction: the server's frame delivered before the client
+/// reconnected is not delivered to the client's new generation.
+#[test]
+fn a_frame_from_the_servers_earlier_generation_is_acknowledged_not_delivered_again() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    handshake(&mut client, &mut server)?;
+    let old = send(&mut server, "old")?;
+    assert_eq!(names(&client.receive(&old, 1)?.delivered), ["old"]);
+
+    let connect = client.create_connect(2, Vec::new())?;
+    let accept = server.accept_connect(&connect, 2, Vec::new())?;
+    client.receive(&accept, 2)?;
+    let late = client.receive(&old, 3)?;
+    assert!(late.delivered.is_empty(), "an earlier generation's frame was delivered again");
+    assert!(names_sequence(&client.create_ack_for_received(old.sequence), old.sequence));
+
+    let fresh = send(&mut server, "fresh")?;
+    assert_eq!(names(&client.receive(&fresh, 4)?.delivered), ["fresh"]);
+    Ok(())
+}
+
+/// A frame far below the receiver's highest sequence is a duplicate that is
+/// acknowledged by name; without the acknowledgement its sender retransmits it
+/// for ever.
+#[test]
+fn a_duplicate_below_the_receive_window_is_acknowledged_by_name() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    handshake(&mut client, &mut server)?;
+    let first = send(&mut client, "first")?;
+    assert_eq!(names(&server.receive(&first, 1)?.delivered), ["first"]);
+    for _ in 0..4_200 {
+        let packet = send(&mut client, "x")?;
+        server.receive(&packet, 1)?;
+        client.receive(&server.create_ack(), 1)?;
+    }
+    let again = server.receive(&first, 2)?;
+    assert!(again.delivered.is_empty());
+    let ack = server.create_ack_for_received(first.sequence);
+    assert_eq!(ack.ack, first.sequence, "a duplicate below the window was not acknowledged by name");
+    Ok(())
+}
+
+/// A Connect delayed from an earlier attempt of the client that is now
+/// connected does not restart the session: the server answers with an Ack and
+/// the client's ordered frames keep flowing.
+#[test]
+fn a_delayed_connect_from_an_earlier_attempt_does_not_strand_the_client() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    let earlier = client.create_connect(0, Vec::new())?;
+    let retried = client.create_connect(300, Vec::new())?;
+    let accept = server.accept_connect(&retried, 301, Vec::new())?;
+    client.receive(&accept, 302)?;
+    server.receive(&client.create_ack_for_received(accept.sequence), 302)?;
+    assert!(client.connected());
+    let a = send(&mut client, "a")?;
+    assert_eq!(names(&server.receive(&a, 303)?.delivered), ["a"]);
+    client.receive(&server.create_ack_for_received(a.sequence), 303)?;
+
+    assert!(server.connect_repeats(&earlier), "the delayed Connect starts nothing");
+    let reply = server.accept_connect(&earlier, 304, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    client.receive(&reply, 305)?;
+    assert!(client.connected());
+
+    let b = send(&mut client, "b")?;
+    assert_eq!(names(&server.receive(&b, 306)?.delivered), ["b"], "the delayed Connect reset the server");
+    client.receive(&server.create_ack_for_received(b.sequence), 307)?;
+    assert!(!client.pending_reliable_sequences().contains(&b.sequence));
+    Ok(())
+}
+
+/// A stale Connect is the peer's echo from the past, not evidence it is alive;
+/// a retransmit of the accepted Connect is.
+#[test]
+fn a_repeated_connect_refreshes_liveness_and_a_stale_one_does_not() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    let earlier = client.create_connect(0, Vec::new())?;
+    let current = client.create_connect(1, Vec::new())?;
+    server.accept_connect(&current, 0, Vec::new())?;
+
+    server.accept_connect(&current, 900, Vec::new())?;
+    assert!(!server.check_timeout(1_000, 500), "a repeated Connect did not refresh liveness");
+
+    server.accept_connect(&earlier, 1_400, Vec::new())?;
+    assert!(server.check_timeout(1_600, 500), "a stale Connect refreshed liveness");
+    Ok(())
+}
+
+/// The window is serial: a sequence just before the current Connect's is stale
+/// across the wrap of the 32-bit space, one just after is a new client.
+#[test]
+fn stale_connects_are_recognised_by_serial_arithmetic() -> Result<()> {
+    let mut server = session(500);
+    let current = session(3).create_connect(0, Vec::new())?;
+    server.accept_connect(&current, 0, Vec::new())?;
+    let before_the_wrap = session(u32::MAX - 1).create_connect(0, Vec::new())?;
+    assert!(server.connect_repeats(&before_the_wrap));
+    let after = session(4).create_connect(0, Vec::new())?;
+    assert!(!server.connect_repeats(&after));
+    let beyond_the_window = session(3 + 4_096).create_connect(0, Vec::new())?;
+    assert!(!server.connect_repeats(&beyond_the_window));
+    let just_inside = session(3_u32.wrapping_sub(4_095)).create_connect(0, Vec::new())?;
+    assert!(server.connect_repeats(&just_inside));
+    let just_outside = session(3_u32.wrapping_sub(4_096)).create_connect(0, Vec::new())?;
+    assert!(!server.connect_repeats(&just_outside));
+    Ok(())
+}
+
+/// A restarted client whose random first sequence lands just before the
+/// server's current Connect is answered with an Ack, never an Accept. It does
+/// not retransmit that Connect for ever: once the attempt times out it starts
+/// a fresh one with a newly drawn sequence, and is admitted.
+#[test]
+fn a_restarted_client_whose_first_sequence_is_stale_connects_after_redrawing() -> Result<()> {
+    let mut server = session(500);
+    let mut old = session(1_000);
+    let connect = old.create_connect(0, Vec::new())?;
+    let old_accept = server.accept_connect(&connect, 0, Vec::new())?;
+    old.receive(&old_accept, 0)?;
+
+    let mut restarted = session(900);
+    let first = restarted.create_connect(0, b"join".to_vec())?;
+    // The old client has not acknowledged its Accept yet, so that is the reply:
+    // it names the old Connect, not this one.
+    let reply = server.accept_connect(&first, 1, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Accept);
+    restarted.receive(&reply, 1)?;
+    assert!(!restarted.connected(), "an Accept for another Connect connected the client");
+    server.receive(&old.create_ack_for_received(old_accept.sequence), 1)?;
+    let reply = server.accept_connect(&first, 2, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    restarted.receive(&reply, 2)?;
+    assert!(!restarted.connected());
+
+    let retransmitted = restarted.due_resends(1_000);
+    assert_eq!(retransmitted.len(), 1);
+    assert_eq!(retransmitted[0].sequence, first.sequence, "the attempt is still young");
+
+    let fresh = restarted.due_resends(3_500);
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].packet_type, CultNetRudpPacketType::Connect);
+    assert_ne!(fresh[0].sequence, first.sequence, "the same Connect was retransmitted for ever");
+    assert_eq!(fresh[0].payload, b"join", "the fresh attempt lost the Connect payload");
+
+    let accept = server.accept_connect(&fresh[0], 3_500, Vec::new())?;
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    restarted.receive(&accept, 3_500)?;
+    assert!(restarted.connected());
+    let frame = send(&mut restarted, "hello")?;
+    assert_eq!(names(&server.receive(&frame, 3_501)?.delivered), ["hello"]);
+    Ok(())
+}
+
+/// A client whose Connect was answered is not given a new Connect by the
+/// clock: the attempt timeout belongs to an unanswered Connect.
+#[test]
+fn an_answered_connect_is_never_replaced_by_the_attempt_timeout() -> Result<()> {
+    let mut client = session(10);
+    let mut server = session(500);
+    let (connect, _) = handshake(&mut client, &mut server)?;
+    let resent = client.due_resends(60_000);
+    assert!(
+        resent.iter().all(|packet| packet.packet_type != CultNetRudpPacketType::Connect
+            || packet.sequence == connect.sequence),
+        "a connected client started a new attempt"
+    );
+    assert!(client.connected());
+    Ok(())
+}
+
+/// A pinned client that restarts on a new port against a server-mode transport
+/// is a new client: the Connect starts a new generation and the client is
+/// admitted, though its sequence is the one the old client's Connect carried.
+#[test]
+fn server_mode_admits_a_pinned_client_that_restarts_on_a_new_port() -> Result<()> {
+    let server_socket = socket()?;
+    let server_addr = server_socket.local_addr()?;
+    let mut server = CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions::server(
+        "server",
+        server_socket,
+        CONNECTION_ID,
+    ))?;
+    let mut first = client_on(socket()?, server_addr, 1)?;
+    first.connect(b"join".to_vec())?;
+    assert!(server.receive_once()?.is_none());
+    first.receive_once()?;
+    first.send("schema", b"hello".to_vec())?;
+    assert_eq!(server.receive_once()?.expect("first client frame").payload, b"hello");
+    drop(first);
+
+    let mut second = client_on(socket()?, server_addr, 1)?;
+    second.connect(b"join".to_vec())?;
+    assert!(server.receive_once()?.is_none());
+    second.receive_once()?;
+    assert!(second.connected(), "the restarted client on a new port was not admitted");
+    second.send("schema", b"after".to_vec())?;
+    assert_eq!(server.receive_once()?.expect("restarted client frame").payload, b"after");
+    Ok(())
+}
+
+/// An accepted peer that never speaks again times out: accepting a Connect is
+/// the first thing heard from it.
+#[test]
+fn an_accepted_peer_that_goes_silent_times_out() -> Result<()> {
+    let mut server = session(500);
+    server.accept_connect(&session(10).create_connect(0, Vec::new())?, 0, Vec::new())?;
+    assert!(server.check_timeout(100_000, 1_000));
     Ok(())
 }

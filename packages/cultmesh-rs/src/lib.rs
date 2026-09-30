@@ -12,7 +12,6 @@ use cultnet_rs::CultNetRudpSocketTransportOptions;
 use cultnet_rs::CultNetWireContract;
 use cultnet_rs::decode_cultnet_message_from_slice;
 use cultnet_rs::encode_cultnet_message_to_vec;
-use cultnet_rs::random_initial_sequence;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
@@ -962,7 +961,7 @@ fn connect_rudp_client(
             mode: cultnet_rs::CultNetRudpSocketMode::Client,
             remote_addr: Some(target),
             connection_id: fresh_rudp_connection_epoch(),
-            initial_sequence: random_initial_sequence(),
+            initial_sequence: None,
             resend_delay_ms,
             transport_id: Some(transport_id.to_string()),
             max_payload_bytes: None,
@@ -1407,7 +1406,7 @@ mod tests {
             let mut session =
                 cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
                     connection_id: connect.connection_id,
-                    initial_sequence: 1,
+                    initial_sequence: Some(1),
                     resend_delay_ms: 5,
                     max_pending_reliable_packets: Some(64),
                 });

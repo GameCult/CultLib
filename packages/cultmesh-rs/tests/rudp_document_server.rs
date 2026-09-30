@@ -177,7 +177,7 @@ fn client_on(
         mode: CultNetRudpSocketMode::Client,
         remote_addr: Some(target),
         connection_id: id,
-        initial_sequence,
+        initial_sequence: Some(initial_sequence),
         resend_delay_ms: 10,
         transport_id: None,
         max_payload_bytes: None,
@@ -343,7 +343,7 @@ fn a_restarted_client_on_the_same_address_and_connection_id_is_admitted() -> Res
     let target = server.local_addr()?;
     let shared = UdpSocket::bind("127.0.0.1:0")?;
     let twin = shared.try_clone()?;
-    let mut first = client_on(shared, target, 93, 50)?;
+    let mut first = client_on(shared, target, 93, 50_000)?;
     connect(&mut server, &mut [&mut first])?;
     for index in 0..3 {
         send(
@@ -402,7 +402,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
     let target = server.local_addr()?;
     let shared = UdpSocket::bind("127.0.0.1:0")?;
     let twin = shared.try_clone()?;
-    let mut first = client_on(shared, target, 94, 50)?;
+    let mut first = client_on(shared, target, 94, 50_000)?;
     connect(&mut server, &mut [&mut first])?;
     send(&mut first, &put("put-a"))?;
     for _ in 0..20 {
@@ -675,7 +675,7 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     let session = |id| {
         CultNetRudpSession::new(CultNetRudpSessionOptions {
             connection_id: id,
-            initial_sequence: 1,
+            initial_sequence: Some(1),
             resend_delay_ms: 10,
             max_pending_reliable_packets: None,
         })

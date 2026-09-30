@@ -43,6 +43,12 @@ const RUDP_MAX_TRACKED_CHANNELS: usize = 64;
 /// ahead of the current highest would otherwise advance the receive state past
 /// every legitimate sequence still in flight and starve the session.
 const RUDP_RECEIVE_AHEAD_WINDOW: u32 = 1_024;
+/// How long a client keeps retransmitting a Connect nobody answered before it
+/// abandons that attempt for a fresh one. A Connect the server answers with an
+/// Ack, never an Accept, is one the server judged stale (see
+/// `accept_connect`); retransmitting the same sequence would never change its
+/// mind.
+const RUDP_CONNECT_ATTEMPT_MS: u64 = 3_000;
 const RUDP_MAX_ORDERED_BUFFERED_FRAMES: usize = 1_024;
 const RUDP_MAX_ORDERED_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 
@@ -95,7 +101,10 @@ pub struct CultNetRudpReceiveResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpSessionOptions {
     pub connection_id: u32,
-    pub initial_sequence: u32,
+    /// The first sequence this session issues. Unset, the session draws its
+    /// own at random: every session is a new identity to its peer, and an
+    /// options object reused for several must not give them one sequence.
+    pub initial_sequence: Option<u32>,
     pub resend_delay_ms: u64,
     pub max_pending_reliable_packets: Option<usize>,
 }
@@ -104,20 +113,32 @@ impl Default for CultNetRudpSessionOptions {
     fn default() -> Self {
         Self {
             connection_id: 0,
-            initial_sequence: random_initial_sequence(),
+            initial_sequence: None,
             resend_delay_ms: 250,
             max_pending_reliable_packets: None,
         }
     }
 }
 
-/// A fresh default initial sequence, drawn from a secure source in [1, 2^31).
-/// The Connect's sequence is what tells a peer whether a Connect repeats one it
-/// already accepted or starts a new session, so two sessions must not share
-/// one by default. At least 2^31 sequences remain before the space is
-/// exhausted.
-pub fn random_initial_sequence() -> u32 {
-    rand::random_range(1..(1_u32 << 31))
+/// A sequence drawn at random from [`floor`, 2^31). The Connect's sequence is
+/// what tells a peer whether a Connect repeats one it already accepted or
+/// starts a new session, so two sessions must not share one by default. At
+/// least 2^31 sequences remain before the space is exhausted. A floor above
+/// the range draws nothing new: the caller keeps its own sequence.
+fn draw_sequence(floor: u32) -> u32 {
+    let floor = floor.max(1);
+    if floor >= 1_u32 << 31 {
+        return floor;
+    }
+    rand::random_range(floor..(1_u32 << 31))
+}
+
+/// Whether `sequence` is at or before `mark` in serial order, within the
+/// receive window. The compare is modular, so it holds across the wrap of the
+/// 32-bit space; a sequence further back than the window is the duplicate
+/// test's below-window clause, and one ahead of the mark is never before it.
+fn at_or_before(sequence: u32, mark: u32) -> bool {
+    mark.wrapping_sub(sequence) < RUDP_RECEIVED_SEQUENCE_WINDOW as u32
 }
 
 /// Whether the packet's ack field, or its mask, names `sequence`.
@@ -206,6 +227,9 @@ pub struct CultNetRudpSession {
     connect_sequence: Option<u32>,
     /// A Connect this side sent is unanswered. Only then is an Accept honoured.
     awaiting_accept: bool,
+    /// When the unanswered Connect first went out; `due_resends` abandons it
+    /// for a fresh attempt once `RUDP_CONNECT_ATTEMPT_MS` has passed.
+    connect_started_at_ms: u64,
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
@@ -244,12 +268,13 @@ impl CultNetRudpSession {
             ended: false,
             connect_sequence: None,
             awaiting_accept: false,
+            connect_started_at_ms: 0,
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             max_payload_bytes: None,
             max_pending_fragment_sets: 64,
-            next_sequence: options.initial_sequence,
+            next_sequence: options.initial_sequence.unwrap_or_else(|| draw_sequence(1)),
             next_sequenced_by_channel: BTreeMap::new(),
             next_fragment_id: 1,
             connected: false,
@@ -444,26 +469,45 @@ impl CultNetRudpSession {
         self.ended = false;
         self.connect_sequence = Some(packet.sequence);
         self.awaiting_accept = true;
+        self.connect_started_at_ms = now_ms;
         self.track_reliable(packet.clone(), now_ms, None);
         Ok(packet)
     }
 
-    /// Whether `packet` is a retransmit of the Connect that started this
-    /// session's current generation: the session is connected and the Connect
-    /// carries that Connect's sequence. Servers that keep one session per peer
-    /// ask this to tell a repeat from a new session; anything else that
-    /// reaches `accept_connect` starts a new generation.
+    /// Whether `packet` is a Connect this session's current generation already
+    /// owns: a retransmit of the Connect that started it (the session is
+    /// connected and the sequence is that Connect's), or a stale copy of an
+    /// earlier attempt by the same client (a sequence before it, within the
+    /// receive window). Servers that keep one session per peer ask this to tell
+    /// a Connect that starts a new session from one that does not; anything
+    /// else that reaches `accept_connect` starts a new generation.
     pub fn connect_repeats(&self, packet: &CultNetRudpPacket) -> bool {
         packet.packet_type == CultNetRudpPacketType::Connect
             && self.connected
-            && self.connect_sequence == Some(packet.sequence)
+            && self.connect_sequence.is_some_and(|connect| {
+                connect == packet.sequence || self.connect_is_stale(packet.sequence, connect)
+            })
+    }
+
+    /// A Connect that precedes the current generation's within the receive
+    /// window is the client's earlier attempt, delayed in the network: a
+    /// client that retried never sends a lower sequence again. Restarting on
+    /// it would strand the client, which honours only the Accept for its
+    /// newest Connect. The rule is TCP's answer to a delayed SYN (RFC 5961's
+    /// challenge ACK): keep the connection and answer with an Ack. A restarted
+    /// client whose random initial sequence lands in this window is answered
+    /// the same way and abandons the attempt for a fresh draw
+    /// (`RUDP_CONNECT_ATTEMPT_MS`).
+    fn connect_is_stale(&self, sequence: u32, current: u32) -> bool {
+        sequence != current && at_or_before(sequence, current)
     }
 
     /// Answers a Connect. A repeat of the accepted one queues nothing, so a
     /// Connect storm cannot grow the reliable queue: the reply is the Accept
-    /// still awaiting acknowledgement, or an Ack once it was acknowledged.
-    /// Any other Connect ends the current generation, forgets the peer and
-    /// accepts a new one.
+    /// still awaiting acknowledgement, or an Ack once it was acknowledged. A
+    /// stale copy of an earlier attempt gets the same reply and changes
+    /// nothing else: it is not evidence the peer is alive. Any other Connect
+    /// ends the current generation, forgets the peer and accepts a new one.
     pub fn accept_connect(
         &mut self,
         packet: &CultNetRudpPacket,
@@ -479,9 +523,11 @@ impl CultNetRudpSession {
         }
 
         if self.connect_repeats(packet) {
-            self.apply_acknowledgements(packet);
-            self.remember_received(packet.sequence);
-            self.last_received_at_ms = Some(now_ms);
+            if self.connect_sequence == Some(packet.sequence) {
+                self.apply_acknowledgements(packet);
+                self.remember_received(packet.sequence);
+                self.last_received_at_ms = Some(now_ms);
+            }
             return Ok(self
                 .pending_accept_for_resend(now_ms)
                 .unwrap_or_else(|| self.create_ack()));
@@ -740,12 +786,7 @@ impl CultNetRudpSession {
             });
         }
 
-        let duplicate = packet.reliable
-            && (self.received_sequences.contains(&packet.sequence)
-                || self.highest_received_sequence.is_some_and(|highest| {
-                    packet.sequence < highest
-                        && highest - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW as u32
-                }));
+        let duplicate = packet.reliable && self.was_received(packet.sequence);
         if packet.reliable {
             self.remember_received(packet.sequence);
         }
@@ -891,6 +932,9 @@ impl CultNetRudpSession {
     }
 
     pub fn due_resends(&mut self, now_ms: u64) -> Vec<CultNetRudpPacket> {
+        if let Some(fresh) = self.abandon_unanswered_connect(now_ms) {
+            return vec![fresh];
+        }
         let mut due = Vec::new();
         for pending in self.pending_reliable.values_mut() {
             if now_ms.saturating_sub(pending.last_sent_at_ms) >= self.resend_delay_ms {
@@ -900,6 +944,26 @@ impl CultNetRudpSession {
         }
         due.sort_by_key(|packet| packet.sequence);
         due
+    }
+
+    /// A Connect unanswered for `RUDP_CONNECT_ATTEMPT_MS` is replaced, not
+    /// retransmitted further, by a Connect with a newly drawn sequence and the
+    /// same payload. Nothing was ever sent in an unanswered generation, so no
+    /// sequence issued so far is owed; the draw stays above them, so a frame
+    /// the peer still remembers from an earlier generation of this session
+    /// stays at or before the new Connect.
+    fn abandon_unanswered_connect(&mut self, now_ms: u64) -> Option<CultNetRudpPacket> {
+        if !self.awaiting_accept
+            || now_ms.saturating_sub(self.connect_started_at_ms) < RUDP_CONNECT_ATTEMPT_MS
+        {
+            return None;
+        }
+        let payload = self
+            .connect_sequence
+            .and_then(|sequence| self.pending_reliable.get(&sequence))
+            .map(|pending| pending.packet.payload.clone())?;
+        self.next_sequence = draw_sequence(self.next_sequence);
+        self.create_connect(now_ms, payload).ok()
     }
 
     fn create_packet(
@@ -1099,13 +1163,20 @@ impl CultNetRudpSession {
         }
     }
 
-    /// True for a sequence in the window that was received, and for one below
-    /// the window, which `receive` treats as a duplicate of something received.
+    /// The one duplicate test: true for a sequence in the window that was
+    /// received, for one below the window, and for one at or before the
+    /// watermark. The watermark starts at the handshake's seed, so a frame the
+    /// peer sent in an earlier generation (every sequence it issued is below
+    /// the Connect that began this one) is a duplicate of something already
+    /// delivered and is acknowledged, never delivered again.
     fn was_received(&self, sequence: u32) -> bool {
         self.received_sequences.contains(&sequence)
             || self.highest_received_sequence.is_some_and(|highest| {
                 sequence < highest && highest - sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW as u32
             })
+            || self
+                .received_through
+                .is_some_and(|through| at_or_before(sequence, through))
     }
 
     fn ack_state(&self) -> (u32, u32) {
@@ -1314,7 +1385,7 @@ pub struct CultNetRudpSocketTransportOptions {
     pub mode: CultNetRudpSocketMode,
     pub remote_addr: Option<SocketAddr>,
     pub connection_id: u32,
-    pub initial_sequence: u32,
+    pub initial_sequence: Option<u32>,
     pub resend_delay_ms: u64,
     pub transport_id: Option<String>,
     pub max_payload_bytes: Option<u32>,
@@ -1341,7 +1412,7 @@ impl CultNetRudpSocketTransportOptions {
             mode: CultNetRudpSocketMode::Client,
             remote_addr: Some(remote_addr),
             connection_id,
-            initial_sequence: random_initial_sequence(),
+            initial_sequence: None,
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1360,7 +1431,7 @@ impl CultNetRudpSocketTransportOptions {
             mode: CultNetRudpSocketMode::Server,
             remote_addr: None,
             connection_id,
-            initial_sequence: random_initial_sequence(),
+            initial_sequence: None,
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1388,7 +1459,7 @@ pub struct CultNetRudpServerHubOptions {
     pub runtime_id: String,
     pub socket: UdpSocket,
     pub connection_id: u32,
-    pub initial_sequence: u32,
+    pub initial_sequence: Option<u32>,
     pub resend_delay_ms: u64,
     pub transport_id: Option<String>,
     pub max_payload_bytes: Option<u32>,
@@ -1408,7 +1479,7 @@ impl CultNetRudpServerHubOptions {
             runtime_id: runtime_id.into(),
             socket,
             connection_id,
-            initial_sequence: random_initial_sequence(),
+            initial_sequence: None,
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1463,7 +1534,7 @@ struct CultNetRudpServerPeer {
 pub struct CultNetRudpServerHub {
     socket: UdpSocket,
     connection_id: u32,
-    initial_sequence: u32,
+    initial_sequence: Option<u32>,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
     max_payload_bytes: usize,
@@ -2122,12 +2193,17 @@ impl CultNetRudpSocketTransportConnection {
             self.stats.packets_dropped += 1;
             return Ok(true);
         }
+        // A Connect from another endpoint is a new client, whatever sequence it
+        // carries: the endpoint moves and the Connect starts a new generation.
+        // Only a Connect from the peer's own endpoint can be its repeat.
+        let mut connect_from_new_endpoint = false;
         if let Some(expected) = self.remote_addr {
             if expected != remote_addr {
                 if self.mode == CultNetRudpSocketMode::Server
                     && packet.packet_type == CultNetRudpPacketType::Connect
                 {
                     self.remote_addr = Some(remote_addr);
+                    connect_from_new_endpoint = true;
                 } else {
                     self.stats.packets_dropped += 1;
                     return Ok(true);
@@ -2146,6 +2222,9 @@ impl CultNetRudpSocketTransportConnection {
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
             self.disconnect_reason = None;
+            if connect_from_new_endpoint {
+                self.session.reset_peer_state();
+            }
             let Ok(accept) = self.session.accept_connect(&packet, now_ms(), Vec::new()) else {
                 self.stats.packets_dropped += 1;
                 return Ok(true);
@@ -2318,10 +2397,10 @@ const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
 /// A session cannot admit a Connect when its sequence space starts exhausted or
 /// its reliable queue holds nothing, so neither is a usable configuration.
 fn validate_rudp_session_limits(
-    initial_sequence: u32,
+    initial_sequence: Option<u32>,
     max_pending_reliable_packets: Option<u32>,
 ) -> Result<()> {
-    if initial_sequence == u32::MAX {
+    if initial_sequence == Some(u32::MAX) {
         return Err(anyhow!(
             "RUDP initial_sequence must leave room for a reliable packet"
         ));

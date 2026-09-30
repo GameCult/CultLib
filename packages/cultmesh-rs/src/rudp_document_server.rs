@@ -3,7 +3,7 @@ use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, random_initial_sequence,
+    encode_rudp_packet,
 };
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -437,7 +437,7 @@ where
                 }
                 let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
                     connection_id: key.connection_id,
-                    initial_sequence: random_initial_sequence(),
+                    initial_sequence: None,
                     resend_delay_ms: duration_millis(self.options.resend_delay),
                     max_pending_reliable_packets: Some(
                         self.options.max_pending_reliable_packets_per_session,
