@@ -211,6 +211,19 @@ fn connect(
     anyhow::bail!("client connection timed out")
 }
 
+/// The encoded size of the snapshot response that carries `document` alone
+/// under an empty message id: the smallest response that could ever serve it.
+fn served_alone_bytes(document: &CultNetRawDocumentRecord) -> Result<usize> {
+    Ok(encode_cultnet_message_to_vec(
+        &CultNetMessage::SnapshotResponseRaw {
+            message_id: String::new(),
+            documents: vec![document.clone()],
+        },
+        CultNetWireContract::CultNetSchemaV0,
+    )?
+    .len())
+}
+
 fn send(client: &mut CultNetRudpSocketTransportConnection, message: &CultNetMessage) -> Result<()> {
     client.send(
         "schema",
@@ -651,6 +664,126 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
     assert_eq!(
         snapshot_client.reliable_send_status(&receipt),
         CultNetRudpReliableSendStatus::Pending
+    );
+    Ok(())
+}
+
+/// A put is admitted only if some snapshot request could return it. One byte
+/// over the served bound is refused before the sink sees it; exactly at the
+/// bound is admitted, and a snapshot then serves it at exactly that size.
+#[test]
+fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served() -> Result<()> {
+    let at_bound = document("fit", vec![7; 100]);
+    let over_bound = document("fit", vec![7; 101]);
+    let limit = served_alone_bytes(&at_bound)?;
+    assert_eq!(
+        served_alone_bytes(&over_bound)?,
+        limit + 1,
+        "fixture: the two documents must straddle the bound by one byte"
+    );
+    let options = CultMeshRudpDocumentServerOptions {
+        max_snapshot_response_bytes: limit,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let source = Source::default();
+    let mut server = server(options, Clock::new(60_000), sink.clone(), source.clone())?;
+    let target = server.local_addr()?;
+
+    let mut refused = client(target, 121)?;
+    let mut writer = client(target, 122)?;
+    connect(&mut server, &mut [&mut refused, &mut writer])?;
+    let refused_receipt = send_reliable(
+        &mut refused,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-over".into(),
+            document: over_bound,
+        },
+    )?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("an unservable put must be refused as an application rejection");
+    };
+    assert_eq!(rejection.session.connection_id, 121);
+    assert_eq!(
+        rejection.operation,
+        CultMeshRudpApplicationOperation::DocumentPutRaw
+    );
+    assert_eq!(rejection.message_id, "put-over");
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::DocumentUnservable {
+            response_bytes: limit + 1,
+            max_snapshot_response_bytes: limit,
+        }
+    );
+    let sentence = rejection.reason.to_string();
+    assert!(sentence.contains(&(limit + 1).to_string()) && sentence.contains(&limit.to_string()));
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
+    assert_eq!(server.session_count(), 1);
+    refused.receive_once()?;
+    assert_eq!(
+        refused.reliable_send_status(&refused_receipt),
+        CultNetRudpReliableSendStatus::Pending
+    );
+
+    send(
+        &mut writer,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-at".into(),
+            document: at_bound.clone(),
+        },
+    )?;
+    for _ in 0..500 {
+        let outcome = server.poll_once()?;
+        assert!(
+            !matches!(outcome, CultMeshRudpPollOutcome::ApplicationRejected(_)),
+            "{outcome:?}"
+        );
+        if !sink.0.lock().unwrap().receipts.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let stored: Vec<_> = sink
+        .0
+        .lock()
+        .unwrap()
+        .receipts
+        .iter()
+        .map(|receipt| receipt.document.clone())
+        .collect();
+    assert_eq!(stored, vec![at_bound.clone()]);
+    source.0.lock().unwrap().documents = stored;
+
+    send(
+        &mut writer,
+        &CultNetMessage::SnapshotRequest {
+            message_id: String::new(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    let mut served = None;
+    for _ in 0..500 {
+        let outcome = server.poll_once()?;
+        assert!(
+            !matches!(outcome, CultMeshRudpPollOutcome::ApplicationRejected(_)),
+            "{outcome:?}"
+        );
+        if let Some(frame) = writer.receive_once()? {
+            served = Some(frame.payload);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let served = served.expect("the admitted document must be served");
+    assert_eq!(served.len(), limit);
+    assert_eq!(
+        decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
+        CultNetMessage::SnapshotResponseRaw {
+            message_id: String::new(),
+            documents: vec![at_bound],
+        }
     );
     Ok(())
 }

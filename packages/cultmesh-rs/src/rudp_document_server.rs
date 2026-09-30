@@ -138,6 +138,9 @@ pub struct CultMeshRudpDocumentServerOptions {
     /// finite without duplicating its fragment/ordering machinery here.
     pub max_admitted_payload_bytes: usize,
     pub max_admitted_payload_bytes_per_session: usize,
+    /// The largest encoded snapshot response the server sends. It also bounds
+    /// puts: a document whose snapshot response alone would exceed it is
+    /// refused with `DocumentUnservable`, since no request could return it.
     pub max_snapshot_response_bytes: usize,
     pub max_snapshot_documents: usize,
     pub resend_delay: Duration,
@@ -182,6 +185,13 @@ pub enum CultMeshRudpApplicationOperation {
 pub enum CultMeshRudpRejectionReason {
     /// The caller's sink refused the document. Carries the sink's error text.
     SinkRefused(String),
+    /// The document could never be served: a snapshot response carrying it
+    /// alone, with an empty message id, would exceed
+    /// `max_snapshot_response_bytes`. It was not offered to the sink.
+    DocumentUnservable {
+        response_bytes: usize,
+        max_snapshot_response_bytes: usize,
+    },
     /// The caller's snapshot source failed. Carries its error text.
     SnapshotSourceFailed(String),
     SnapshotTooManyDocuments {
@@ -204,6 +214,13 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SinkRefused(error) | Self::SnapshotSourceFailed(error) => f.write_str(error),
+            Self::DocumentUnservable {
+                response_bytes,
+                max_snapshot_response_bytes,
+            } => write!(
+                f,
+                "document can never be served: its snapshot response is {response_bytes} bytes; limit is {max_snapshot_response_bytes}"
+            ),
             Self::SnapshotTooManyDocuments {
                 documents,
                 max_snapshot_documents,
@@ -536,12 +553,34 @@ where
                         reason,
                     }))
                 };
+                // Admit only what some snapshot request can return: the smallest
+                // response that could carry this document is the document alone
+                // under an empty message id, sized by the snapshot path's encoder.
+                let alone = CultNetMessage::SnapshotResponseRaw {
+                    message_id: String::new(),
+                    documents: vec![document],
+                };
+                let response_bytes = match encode_snapshot_response(&alone) {
+                    Ok(payload) => payload.len(),
+                    Err(error) => {
+                        return reject(CultMeshRudpRejectionReason::ResponseEncodingFailed(error));
+                    }
+                };
+                if response_bytes > self.options.max_snapshot_response_bytes {
+                    return reject(CultMeshRudpRejectionReason::DocumentUnservable {
+                        response_bytes,
+                        max_snapshot_response_bytes: self.options.max_snapshot_response_bytes,
+                    });
+                }
+                let CultNetMessage::SnapshotResponseRaw { mut documents, .. } = alone else {
+                    unreachable!("constructed as a snapshot response above");
+                };
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
                     message_id: message_id.clone(),
                     transport_sequence,
                     received_at_unix_millis: now_unix,
-                    document,
+                    document: documents.remove(0),
                 };
                 if let Err(error) = self.sink.accept_raw_document(receipt) {
                     return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
