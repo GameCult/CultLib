@@ -181,24 +181,33 @@ def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultC
     envelope the caller supplied is registered, one read back from the file is arrived."""
     entries: list[tuple[CultCacheSchemaCatalogEntry, bool]] = []
     by_id: dict[str, list[CultCacheEnvelope]] = {}
-    tiers: dict[str, list[tuple[CultCacheEnvelope, bool]]] = {}
+    tiers: dict[str, list[tuple[CultCacheEnvelope, bool, CultCacheSchemaCatalogEntry]]] = {}
     for envelope, registered in records:
         schema_id = _schema_id_for(envelope)
         supplied = envelope.catalog_entry
         publishes = supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
-        entries.append((supplied if publishes else _default_catalog_entry(envelope), registered))
+        entry = supplied if publishes else _default_catalog_entry(envelope)
+        entries.append((entry, registered))
         by_id.setdefault(schema_id, []).append(envelope)
-        tiers.setdefault(schema_id, []).append((envelope, registered))
+        tiers.setdefault(schema_id, []).append((envelope, registered, entry))
 
     chosen: dict[str, tuple[CultCacheSchemaCatalogEntry, bool]] = {}
     for schema_id in sorted(by_id):
         carrying = by_id[schema_id]
         record_key = min(envelope.key for envelope in carrying)
-        # Records of one tier under one id are one type. A read-back record's type is its schema's name, so tiers are not compared.
+        # Records of one tier under one id are one type. Across tiers the id keeps the type its records resolve to, so a write may
+        # not retype records that are already there: unless the entries of both tiers own the id, which is a rename of the schema
+        # under a stable id, and the registered descriptor wins. A read-back record's type is its schema's name, so tiers compare
+        # the names of the entries that publish the id.
         for tier in (True, False):
-            types = sorted({envelope.type for envelope, registered in tiers[schema_id] if registered == tier})
+            types = sorted({envelope.type for envelope, registered, _ in tiers[schema_id] if registered == tier})
             if len(types) > 1:
                 raise SchemaConflictError(schema_id, types, record_key)
+        registered_names = sorted({entry.schema_name for _, registered, entry in tiers[schema_id] if registered})
+        arrived_names = sorted({entry.schema_name for _, registered, entry in tiers[schema_id] if not registered})
+        owned_by = lambda tier: any(entry.schema_id == schema_id for _, registered, entry in tiers[schema_id] if registered == tier)
+        if registered_names and arrived_names and registered_names[0] != arrived_names[0] and not (owned_by(True) and owned_by(False)):
+            raise SchemaConflictError(schema_id, sorted([registered_names[0], arrived_names[0]]), record_key)
         own_registered = next(iter(canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)), None)
         own_arrived = canonical(entry for entry, registered in entries if not registered and entry.schema_id == schema_id)
         own_registered_all = canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)

@@ -592,6 +592,17 @@ class CultCache:
             raise CultCacheError(f"Document type is not global: {document.type}")
 
     def _resolve_document_for_envelope(self, envelope: CultCacheEnvelope) -> DocumentDefinition[Any] | None:
+        """A record resolves by its schema id: the document that owns the id, else one that lists it as compatible. The name
+        its catalog carries is metadata; it names a document only when the id names none (a store from a runtime whose
+        schema ids this one cannot know)."""
+        if envelope.schema_id:
+            catalogs = [(document, document.catalog_entry()) for document in self._state.documents.values()]
+            for document, entry in catalogs:
+                if entry.schema_id == envelope.schema_id:
+                    return document
+            for document, entry in catalogs:
+                if envelope.schema_id in entry.compatible_schema_ids:
+                    return document
         document = self._state.documents.get(envelope.type)
         if document is not None:
             return document
