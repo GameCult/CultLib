@@ -1575,3 +1575,12 @@ profiles.
 - **Recorded divergence (not this campaign's to fix yet).** Only Rust has a receiver receive-ahead window (1,024). TS,
   C# and Python acknowledge a far-ahead reliable frame by name and hold it behind an ordered gap indefinitely, so a
   stranded ordered channel is silent loss there and "still owed" in Rust. Map a receive window for the three runtimes.
+- **Residuals after the final Cut 1c Soul pass (recorded 2026-09-30, low, not fixed):**
+  - A late copy of a Connect from two or more attempts back (reordered > ~3 s) still restarts the server; the +window−1
+    rule keeps only the immediately previous attempt stale. Rust then times out and reconnects; TS/C#/Python hit the
+    receive-window divergence above (silent loss behind the gap).
+  - A client pinning `initial_sequence` that restarts while its old data is still in flight after the restarted Connect
+    can be matched to the old session's resent Accept (byte-identical; the client cannot tell). Pinning forfeits restart
+    detection; the random default closes it. Document on the option.
+  - Repeated failed attempts walk the sequence up 4095 per 3 s and clamp at `u32::MAX−1` after ~18-27 days on one session;
+    make exhaustion a hard error the caller sees (the clamp removal mutant survives).
