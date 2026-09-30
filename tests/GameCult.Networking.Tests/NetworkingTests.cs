@@ -1307,6 +1307,30 @@ namespace GameCult.Networking.Tests
             Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 6 }));
         }
 
+        // A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of
+        // the new generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost
+        // packet belong to no receiver's hold any more and must not count.
+        [Test]
+        public void RudpSession_ANewGenerationOnTheServerDoesNotInheritAcknowledgedBytes()
+        {
+            var server = FlowSession(500);
+            var accept = server.AcceptConnect(FlowSession(1).CreateConnect(0), 0);
+            server.Receive(FlowAck(accept.Sequence), 0);
+            var g = FlowSend(server, 1).Single();
+            for (uint offset = 1; offset <= 4; offset++)
+            {
+                Assert.That(FlowSend(server, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                server.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            Assert.That(FlowSend(server, Mib), Is.Empty);
+
+            var nextAccept = server.AcceptConnect(FlowSession(200_000).CreateConnect(2), 2);
+            Assert.That(nextAccept.PacketType, Is.EqualTo(CultNetRudpPacketType.Accept));
+            // The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+            var sent = server.Send("state", new byte[Mib], new CultNetRudpSendOptions { Reliable = true });
+            Assert.That(sent.Sequence, Is.EqualTo(nextAccept.Sequence + 1));
+        }
+
         [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {

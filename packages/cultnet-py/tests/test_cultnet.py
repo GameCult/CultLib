@@ -1017,6 +1017,25 @@ class CultNetTests(unittest.TestCase):
         promoted = sender.receive(self._flow_ack(h.sequence), 2).ready_to_send
         self.assertEqual([p.sequence for p in promoted], [g.sequence + 6])
 
+    def test_cultnet_rudp_a_new_generation_on_the_server_does_not_inherit_acknowledged_bytes(self) -> None:
+        # A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of
+        # the new generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost
+        # packet belong to no receiver's hold any more and must not count.
+        server = self._flow_session(500)
+        accept = server.accept_connect(self._flow_session(1).create_connect(0), 0)
+        server.receive(self._flow_ack(accept.sequence), 0)
+        g = self._flow_send(server, 1)[0]
+        for offset in range(1, 5):
+            self.assertEqual([p.sequence for p in self._flow_send(server, self.MIB)], [g.sequence + offset])
+            server.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual(len(self._flow_send(server, self.MIB)), 0)
+
+        next_accept = server.accept_connect(self._flow_session(200_000).create_connect(2), 2)
+        self.assertEqual(next_accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        # The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+        sent = server.send("state", bytes(self.MIB), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(sent.sequence, next_accept.sequence + 1)
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()

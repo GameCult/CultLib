@@ -1558,6 +1558,26 @@ test("acknowledged bytes count against the lowest unacked sequence as it advance
   assert.deepEqual(sequencesOf(sender.receive(flowAck(h.sequence), 2).readyToSend ?? []), [g.sequence + 6]);
 });
 
+// A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of the new
+// generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost packet belong to
+// no receiver's hold any more and must not count.
+test("a new generation on the server does not inherit acknowledged bytes", () => {
+  const server = flowSession(500);
+  const accept = server.acceptConnect(flowSession(1).createConnect(0), 0);
+  server.receive(flowAck(accept.sequence), 0);
+  const g = flowSend(server, 1)[0]!;
+  for (let offset = 1; offset <= 4; offset++) {
+    assert.deepEqual(sequencesOf(flowSend(server, MIB)), [g.sequence + offset]);
+    server.receive(flowAck(g.sequence + offset), 1);
+  }
+  assert.equal(flowSend(server, MIB).length, 0);
+
+  const nextAccept = server.acceptConnect(flowSession(200_000).createConnect(2), 2);
+  assert.equal(nextAccept.packetType, "accept");
+  // The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+  assert.equal(server.send("state", new Uint8Array(MIB), { reliable: true }).sequence, nextAccept.sequence + 1);
+});
+
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {
   const originalBuffer = globalThis.Buffer;
   try {

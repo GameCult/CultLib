@@ -280,3 +280,31 @@ fn a_direct_send_is_not_refused_for_bytes_whose_lowest_packet_has_expired() -> R
     assert_eq!(sender.outstanding_reliable_packet_count(), 1);
     Ok(())
 }
+
+/// A server that accepts a fresh Connect may send before its Accept is
+/// acknowledged, so no acknowledgement of the new generation has moved the
+/// floor yet. Bytes the ended generation had acknowledged above its own lost
+/// packet belong to no receiver's hold any more and must not count.
+#[test]
+fn a_new_generation_on_the_server_does_not_inherit_acknowledged_bytes() -> Result<()> {
+    let mut server = session(500);
+    let mut first_client = session(1);
+    let connect = first_client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 0, Vec::new())?;
+    server.receive(&ack_for(accept.sequence), 0)?;
+    let g = send(&mut server, 1)?.remove(0);
+    for offset in 1..=4u32 {
+        assert_eq!(sequences(&send(&mut server, MIB)?), vec![g.sequence + offset]);
+        server.receive(&ack_for(g.sequence + offset), 1)?;
+    }
+    assert!(send(&mut server, MIB)?.is_empty());
+
+    let mut second_client = session(200_000);
+    let connect = second_client.create_connect(2, Vec::new())?;
+    let accept = server.accept_connect(&connect, 2, Vec::new())?;
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    // The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+    let sent = server.send("state", vec![7; MIB], reliable())?;
+    assert_eq!(sent.sequence, accept.sequence + 1);
+    Ok(())
+}
