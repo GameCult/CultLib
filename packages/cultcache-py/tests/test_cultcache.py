@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
@@ -840,6 +841,44 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([(e.key, e.type) for e in envelopes], [("alpha", "vectors.item"), ("beta", "vectors.item")])
         self.assertEqual(envelopes[0].payload, b"\x92\xa5alpha\x01")
         self.assertEqual(envelopes[1].payload, b"\x92\xa4beta\x02")
+
+    def test_single_file_refusals_say_what_was_found_without_blaming_variants(self) -> None:
+        with self.assertRaises(ValueError) as unsupported:
+            self._pull_vector("unknown-header.msgpack")
+        self.assertIn("not one this runtime reads", str(unsupported.exception))
+        self.assertNotIn("variant", str(unsupported.exception))
+        with self.assertRaises(ValueError) as invalid:
+            self._pull_vector("extra-slot-full-payload.msgpack")
+        self.assertIn("not a valid store", str(invalid.exception))
+        self.assertNotIn("variant", str(invalid.exception))
+
+    def test_single_file_only_a_missing_store_reads_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(SingleFileMessagePackBackingStore(Path(tmp) / "store.cc").pull_all(), [])
+
+            # An existing empty file is not a store: no CultCache writer leaves one.
+            empty = Path(tmp) / "empty.cc"
+            empty.write_bytes(b"")
+            with self.assertRaises(ValueError):
+                SingleFileMessagePackBackingStore(empty).pull_all()
+            self.assertEqual(empty.read_bytes(), b"")
+
+            # An empty array is the legacy envelope array with no envelopes: no header, no format claimed.
+            legacy_empty = Path(tmp) / "legacy-empty.cc"
+            legacy_empty.write_bytes(b"\x90")
+            self.assertEqual(SingleFileMessagePackBackingStore(legacy_empty).pull_all(), [])
+
+    @unittest.skipIf(os.name != "posix", "symlink loops and file-as-parent errors are POSIX errno cases")
+    def test_single_file_store_that_cannot_be_reached_is_an_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp) / "loop.cc"
+            loop.symlink_to(loop)
+            parent = Path(tmp) / "body"
+            parent.write_bytes(b"not a directory")
+            for path in (loop, parent / "store.cc"):
+                with self.assertRaises(OSError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertNotIsInstance(caught.exception, FileNotFoundError)
 
 
 if __name__ == "__main__":

@@ -88,10 +88,11 @@ class SingleFileMessagePackBackingStore:
     def pull_all(self) -> list[CultCacheEnvelope]:
         msgpack = self._msgpack()
         with self._lock:
-            if not self.path.exists():
-                return []
-            data = self.path.read_bytes()
-            if not data:
+            # Only a store that is not there is empty. An empty file is not a store (no
+            # writer leaves one), and any other failure to reach the file stays an OSError.
+            try:
+                data = self.path.read_bytes()
+            except FileNotFoundError:
                 return []
             decoded = msgpack.unpackb(data, raw=False)
             snapshot = _decode_v1_snapshot(decoded)
@@ -159,8 +160,7 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
         return None
     if isinstance(decoded[0], str) and decoded[0].startswith(_STORE_FORMAT_PREFIX) and decoded[0] != STORE_FORMAT_VERSION:
         raise ValueError(
-            f"CultCache store format {decoded[0]!r} is not readable; this runtime reads {STORE_FORMAT_VERSION!r} only. "
-            "The store needs a runtime that resolves document variants."
+            f"CultCache store format {decoded[0]!r} is not one this runtime reads; it reads {STORE_FORMAT_VERSION!r} only"
         )
     if decoded[0] != STORE_FORMAT_VERSION:
         return None
@@ -180,8 +180,8 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
             raise ValueError("CultCache persisted records must be MessagePack arrays")
         if len(raw_record) > _PERSISTED_RECORD_SLOTS:
             raise ValueError(
-                f"CultCache record {raw_record[0]!r} (schema {raw_record[1]!r}) has {len(raw_record)} slots; "
-                f"this runtime reads {_PERSISTED_RECORD_SLOTS}. The store needs a runtime that resolves document variants."
+                f"CultCache record {raw_record[0]!r} (schema {raw_record[1]!r}) has {len(raw_record)} slots, more than "
+                f"the {_PERSISTED_RECORD_SLOTS} of a {STORE_FORMAT_VERSION} record, so this is not a valid store"
             )
         key, schema_id, stored_at, payload = raw_record
         if not isinstance(key, str) or not key:
