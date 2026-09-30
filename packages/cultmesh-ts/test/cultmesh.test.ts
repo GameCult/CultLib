@@ -1,3 +1,4 @@
+import { createSocket } from "node:dgram";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,9 +10,13 @@ import { defineDocumentType } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
+  CultNetRudpSession,
   cultNetBuiltinSchemaRegistry,
+  decodeRudpPacket,
   defineCultNetDocumentBinding,
+  encodeRudpPacket,
   type CultNetDocumentPutRawMessage,
+  type CultNetRudpPacket,
   type CultNetMessage,
   type CultNetSnapshotResponseRawMessage,
 } from "cultnet-ts";
@@ -3509,6 +3514,125 @@ test("CultMesh TS RUDP document server answers a snapshot its reliable queue can
     await waitForPeerErrors(rig, 1);
     assert.equal(rig.errors.length, 1);
     assert.ok(!rig.messages.some((message) => message.schemaVersion === "cultnet.snapshot_response_raw.v0"));
+  });
+});
+
+/**
+ * A document server over a node that already holds `stored`, and a peer driven packet by packet
+ * that acknowledges nothing, so a test fills the server's reliable queue at will.
+ */
+async function withRawPeerRig(
+  connectionId: number,
+  serverLimits: { maxFragmentBytes?: number; maxPendingReliablePackets?: number },
+  stored: CultNetDocumentPutRawMessage[],
+  getCache: ((cache: unknown) => unknown) | undefined,
+  body: (rig: {
+    errors: Error[];
+    inbox: CultNetRudpPacket[];
+    request: (messageId: string, recordKeys: string[]) => number[];
+  }) => Promise<void>,
+): Promise<void> {
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-raw-peer-")), "node.ccmp"),
+    { documents: [noteDocument] },
+  );
+  const registry = servedBoundRegistry();
+  for (const put of stored) await registry.applyRawDocumentPutMessage(node.cache, put);
+  const errors: Error[] = [];
+  const server = CultMesh.createRudpDocumentServer(SERVED_BOUND_SERVER, connectionId, {
+    documents: registry,
+    getCache: () => (getCache ? getCache(node.cache) : node.cache) as typeof node.cache,
+    bindHost: "127.0.0.1",
+    bindPort: 0,
+    resendDelayMs: 100_000,
+    resendPollMs: 5,
+    ...serverLimits,
+    onError: (error) => errors.push(error),
+  });
+  await server.start();
+  const socket = createSocket("udp4");
+  try {
+    await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", () => resolve()));
+    const inbox: CultNetRudpPacket[] = [];
+    socket.on("message", (wire) => inbox.push(decodeRudpPacket(wire)));
+    const session = new CultNetRudpSession({ connectionId, initialSequence: 100, resendDelayMs: 100_000, maxPendingReliablePackets: 64 });
+    const send = (packet: CultNetRudpPacket) => socket.send(encodeRudpPacket(packet), server.bind.port, "127.0.0.1");
+    send(session.createConnect(0));
+    const startedAt = Date.now();
+    while (!inbox.some((packet) => packet.packetType === "accept") && Date.now() - startedAt < 2_000) await delay(5);
+    const accept = inbox.find((packet) => packet.packetType === "accept");
+    assert.ok(accept, "the server accepts the connect");
+    session.receive(accept, 1);
+    inbox.length = 0;
+    const request = (messageId: string, recordKeys: string[]): number[] => {
+      const packets = session.sendMany(
+        "schema",
+        encode({ schemaVersion: "cultnet.snapshot_request.v0", messageId, recordKeys }),
+        { reliable: true, ordered: true, nowMs: 2, maxFragmentBytes: 1200 },
+      );
+      packets.forEach(send);
+      return packets.map((packet) => packet.sequence);
+    };
+    await body({ errors, inbox, request });
+  } finally {
+    socket.close();
+    server.close();
+  }
+}
+
+/** The refusal among `packets`: its unreliable fragments, reassembled, and the fragments. */
+function refusalIn(packets: CultNetRudpPacket[]): { message: Record<string, unknown>; parts: CultNetRudpPacket[] } | undefined {
+  const parts = packets
+    .filter((packet) => packet.packetType === "data" && packet.channelId === "schema" && !packet.reliable)
+    .sort((a, b) => (a.fragmentIndex ?? 0) - (b.fragmentIndex ?? 0));
+  if (parts.length === 0) return undefined;
+  const message = decode(Buffer.concat(parts.map((part) => Buffer.from(part.payload ?? new Uint8Array())))) as Record<string, unknown>;
+  return { message, parts };
+}
+
+function acknowledges(packet: CultNetRudpPacket, sequence: number): boolean {
+  if (packet.ack === sequence) return true;
+  for (let bit = 0; bit < 32; bit += 1) {
+    if ((packet.ackMask & (1 << bit)) !== 0 && packet.ack - bit - 1 === sequence) return true;
+  }
+  return false;
+}
+
+test("CultMesh TS RUDP document server answers a peer whose reliable queue is full to the brim", async () => {
+  // An 8-fragment reply the peer never acknowledges fills a queue of 8 exactly. The next reply
+  // cannot be queued; the peer is still answered, with fixed text that takes no room in that
+  // queue and acknowledges nothing the peer sent.
+  const body = bodyLengthForReplyBytes("q1", 800);
+  await withRawPeerRig(0x10203069, { maxFragmentBytes: 100, maxPendingReliablePackets: 8 }, [notePut("s", "q1", body)], undefined, async (rig) => {
+    rig.request("0", ["q1"]);
+    await delay(300);
+    const first = new Set(rig.inbox.filter((packet) => packet.packetType === "data" && packet.reliable).map((packet) => packet.sequence));
+    assert.equal(first.size, 8, "fixture: the first reply fills the queue exactly");
+    rig.inbox.length = 0;
+    const refused = rig.request("b", ["none"]);
+    const startedAt = Date.now();
+    while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
+    const refusal = refusalIn(rig.inbox);
+    assert.ok(refusal, "the refusal reaches the peer");
+    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot response could not be queued" });
+    for (const part of refusal.parts) {
+      assert.ok(refused.every((sequence) => !acknowledges(part, sequence)), `ack ${part.ack} mask ${part.ackMask}`);
+    }
+    assert.equal(rig.errors.length, 1);
+  });
+});
+
+test("CultMesh TS RUDP document server refuses a snapshot with fixed text, never an error's message", async () => {
+  // The cache the snapshot needs fails with a message a peer must not see: the peer is told
+  // only that the snapshot source failed; onError keeps the detail.
+  await withRawPeerRig(0x1020306a, {}, [], () => { throw new Error("no such tenant CANARY-7f3a"); }, async (rig) => {
+    rig.request("0", ["q1"]);
+    const startedAt = Date.now();
+    while (!refusalIn(rig.inbox) && Date.now() - startedAt < 3_000) await delay(5);
+    const refusal = refusalIn(rig.inbox);
+    assert.ok(refusal, "the refusal reaches the peer");
+    assert.deepEqual(refusal.message, { schemaVersion: "cultnet.error.v0", error: "the snapshot source failed" });
+    assert.match(rig.errors[0]?.message ?? "", /CANARY-7f3a/);
   });
 });
 

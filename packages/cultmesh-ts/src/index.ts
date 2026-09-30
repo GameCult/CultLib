@@ -5965,17 +5965,25 @@ export class CultMesh {
             });
             return;
           }
+          let reply: CultNetMessage;
           try {
             const cache = await options.getCache();
-            sendSchemaMessage(record, options.documents.createRawSnapshotResponse(cache, message.messageId, message));
+            reply = options.documents.createRawSnapshotResponse(cache, message.messageId, message);
           } catch (error) {
             reportError(error);
-            // Unreliable and unordered: when the reply could not be queued, the answer must not
-            // need room in the queue that just refused it.
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: error instanceof Error ? error.message : String(error),
-            }, { reliable: false });
+            refuse(record, "the snapshot source failed");
+            return;
+          }
+          try {
+            sendSchemaMessage(record, reply);
+          } catch (error) {
+            reportError(error);
+            refuse(
+              record,
+              maxPayloadBytes !== undefined && encodeSchemaMessage(reply).byteLength > maxPayloadBytes
+                ? "the snapshot response is too large"
+                : "the snapshot response could not be queued",
+            );
           }
           return;
         }
@@ -6088,7 +6096,6 @@ export class CultMesh {
     function sendSchemaMessage(
       record: SessionRecord,
       message: CultNetMessage,
-      { reliable = true }: { reliable?: boolean } = {},
     ): void {
       if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
       const payload = encodeSchemaMessage(message);
@@ -6099,12 +6106,31 @@ export class CultMesh {
         );
       }
       for (const packet of record.session.sendMany("schema", payload, {
-        reliable,
-        ordered: reliable,
+        reliable: true,
+        ordered: true,
         nowMs: Date.now(),
         maxFragmentBytes,
       })) {
         sendPacket(record, packet);
+      }
+    }
+
+    /**
+     * Answers a request the server cannot serve with fixed text, never an error's message,
+     * which can quote what a peer or the application supplied. The answer is unreliable and
+     * unordered, so it needs no room in a reliable queue that may just have refused the reply,
+     * and its acknowledgement fields acknowledge nothing, as every runtime's refusal does.
+     */
+    function refuse(record: SessionRecord, text: string): void {
+      if (record.closed) return;
+      const payload = encodeSchemaMessage({ schemaVersion: "cultnet.error.v0", error: text });
+      for (const packet of record.session.sendMany("schema", payload, {
+        reliable: false,
+        ordered: false,
+        nowMs: Date.now(),
+        maxFragmentBytes,
+      })) {
+        sendPacket(record, { ...packet, ack: 0, ackMask: 0 });
       }
     }
 
