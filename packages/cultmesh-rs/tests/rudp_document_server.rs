@@ -212,11 +212,12 @@ fn connect(
 }
 
 /// The encoded size of the snapshot response that carries `document` alone
-/// under an empty message id: the smallest response that could ever serve it.
+/// under a one-character message id, the shortest CultNet encodes: the
+/// smallest response that could ever serve it.
 fn served_alone_bytes(document: &CultNetRawDocumentRecord) -> Result<usize> {
     Ok(encode_cultnet_message_to_vec(
         &CultNetMessage::SnapshotResponseRaw {
-            message_id: String::new(),
+            message_id: "r".into(),
             documents: vec![document.clone()],
         },
         CultNetWireContract::CultNetSchemaV0,
@@ -758,7 +759,7 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
     send(
         &mut writer,
         &CultNetMessage::SnapshotRequest {
-            message_id: String::new(),
+            message_id: "r".into(),
             schema_ids: None,
             record_keys: None,
         },
@@ -781,7 +782,7 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
     assert_eq!(
         decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
         CultNetMessage::SnapshotResponseRaw {
-            message_id: String::new(),
+            message_id: "r".into(),
             documents: vec![at_bound],
         }
     );

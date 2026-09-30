@@ -11,6 +11,9 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
+/// The shortest message id CultNet encodes: one character. A snapshot request
+/// can carry no shorter id, so no response to it can be smaller.
+const SHORTEST_MESSAGE_ID: &str = "0";
 
 /// The transport identity of one remote CultNet RUDP session.
 ///
@@ -186,7 +189,7 @@ pub enum CultMeshRudpRejectionReason {
     /// The caller's sink refused the document. Carries the sink's error text.
     SinkRefused(String),
     /// The document could never be served: a snapshot response carrying it
-    /// alone, with an empty message id, would exceed
+    /// alone, under the shortest message id CultNet allows, would exceed
     /// `max_snapshot_response_bytes`. It was not offered to the sink.
     DocumentUnservable {
         response_bytes: usize,
@@ -555,9 +558,9 @@ where
                 };
                 // Admit only what some snapshot request can return: the smallest
                 // response that could carry this document is the document alone
-                // under an empty message id, sized by the snapshot path's encoder.
+                // under the shortest message id CultNet encodes, sized by the snapshot path's encoder.
                 let alone = CultNetMessage::SnapshotResponseRaw {
-                    message_id: String::new(),
+                    message_id: SHORTEST_MESSAGE_ID.into(),
                     documents: vec![document],
                 };
                 let response_bytes = match encode_snapshot_response(&alone) {
