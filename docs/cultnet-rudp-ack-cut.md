@@ -1549,3 +1549,8 @@ Each question stands alone.
   `packetsDropped` until K1. Record the stats shape in the parity doc once both land.
 - **The P4 probe at the old pins** predates its fix; rerun `09318d13`'s P4 against a pinned sender if
   old-sender evidence is needed.
+
+**Follow-up (media FEC Cut 3 Hands, 2026-09-30):** `channel_send_options` in `rudp.rs` has no test for the
+`"schema"` and `"latest"` channel arms. Deleting either falls to the default and every test stays green. Pin their send
+flags on the wire the way the media arm is now pinned (raw peer socket), in whichever cut next touches channel
+profiles.
