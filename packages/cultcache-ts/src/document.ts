@@ -69,6 +69,27 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
   return Object.freeze({ ...definition });
 }
 
+// The identity a definition's records carry: the schema id they are stamped with, the schema name and version, and every id
+// the definition answers to (its own first). Every CultCache runtime surface and every CultNet or CultMesh layer over it
+// derives a definition's identity here and nowhere else, so a record's id means the same type wherever it is read.
+export interface CultCacheSchemaIdentity {
+  readonly schemaId: string;
+  readonly schemaName: string;
+  readonly schemaVersion: string;
+  readonly compatibleSchemaIds: readonly string[];
+}
+
+export function schemaIdentityOf(definition: AnyCultCacheDocumentDefinition): CultCacheSchemaIdentity {
+  const schemaName = definition.schemaName ?? definition.type;
+  const schemaId = definition.schemaId ?? schemaName;
+  return {
+    schemaId,
+    schemaName,
+    schemaVersion: definition.schemaVersion ?? `${schemaName}.v1`,
+    compatibleSchemaIds: [...new Set([schemaId, ...(definition.compatibleSchemaIds ?? [])])],
+  };
+}
+
 export function defineDocumentRegistry<
   TDefinitions extends readonly AnyCultCacheDocumentDefinition[],
 >(...definitions: TDefinitions): CultCacheDocumentRegistry<TDefinitions> {

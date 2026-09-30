@@ -1,5 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 
+import { schemaIdentityOf } from "./document";
 import { SchemaConflictError } from "./store-format";
 import type {
   AnyCultCacheDocumentDefinition,
@@ -706,8 +707,7 @@ export class CultCache {
   }
 
   #createCatalogEntry(definition: AnyCultCacheDocumentDefinition): CultCacheSchemaCatalogEntry {
-    const schemaName = definition.schemaName ?? definition.type;
-    const schemaVersion = definition.schemaVersion ?? `${schemaName}.v1`;
+    const { schemaId, schemaName, schemaVersion, compatibleSchemaIds } = schemaIdentityOf(definition);
     const canonicalSchemaJson = definition.canonicalSchemaJson ?? JSON.stringify({
       schemaName,
       schemaVersion,
@@ -724,10 +724,6 @@ export class CultCache {
           isName: member.isName === true,
         })),
     });
-    const schemaId = definition.schemaId ?? schemaName;
-    const compatibleSchemaIds = [
-      ...new Set([schemaId, ...(definition.compatibleSchemaIds ?? [])]),
-    ];
 
     return {
       schemaId,
@@ -735,7 +731,7 @@ export class CultCache {
       schemaVersion,
       contentHash: definition.contentHash ?? schemaId,
       canonicalSchemaJson,
-      compatibleSchemaIds,
+      compatibleSchemaIds: [...compatibleSchemaIds],
       members: [...(definition.members ?? [])]
         .sort((left, right) => left.slot - right.slot)
         .map((member) => ({

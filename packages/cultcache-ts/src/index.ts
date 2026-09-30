@@ -1,6 +1,6 @@
 export { CultCache, CultCacheBuilder } from "./cult-cache";
 export { inspectCultCacheBytes } from "./cult-cache-inspector";
-export { defineDocumentRegistry, defineDocumentType } from "./document";
+export { defineDocumentRegistry, defineDocumentType, schemaIdentityOf, type CultCacheSchemaIdentity } from "./document";
 export { SingleFileMessagePackBackingStore } from "./single-file-messagepack-backing-store";
 export { SchemaConflictError, StoreUnreadableError } from "./store-format";
 export type {
