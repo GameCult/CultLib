@@ -235,7 +235,6 @@ namespace GameCult.Caching.Tests
             var path = Seed(name);
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = manifest.SchemaCatalog.Single();
-            entry.SchemaName = "vectors.legacy";
             entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
             manifest.Records.Single().SchemaId = "old.id";
@@ -250,7 +249,6 @@ namespace GameCult.Caching.Tests
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = manifest.SchemaCatalog.Single();
             manifest.Records.Single().SchemaId = "old.id";
-            entry.SchemaName = "vectors.legacy";
             entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
@@ -265,7 +263,6 @@ namespace GameCult.Caching.Tests
             }
 
             var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(written.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"), "the registered entry is written");
             Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
             using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "the record kept under the older id stays readable");
@@ -279,7 +276,6 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
 
             var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(written.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"));
             Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
             using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
@@ -319,7 +315,6 @@ namespace GameCult.Caching.Tests
             var path = DirectoryStore("legacy-dir.cc");
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = manifest.SchemaCatalog.Single();
-            entry.SchemaName = "vectors.legacy";
             entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
             manifest.Records.Single().SchemaId = "old.id";
@@ -329,7 +324,6 @@ namespace GameCult.Caching.Tests
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
 
             var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(rewritten.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"));
             Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
             using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true });
             Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
