@@ -1584,3 +1584,12 @@ profiles.
     detection; the random default closes it. Document on the option.
   - Repeated failed attempts walk the sequence up 4095 per 3 s and clamp at `u32::MAX−1` after ~18-27 days on one session;
     make exhaustion a hard error the caller sees (the clamp removal mutant survives).
+- **Cuts 3 and D Soul pass (Self, 2026-09-30).** Cut 3: the 4 MiB bound counts every byte sent above the lowest
+  unacknowledged sequence, acked or not (the spec's wording; the first implementation counted only pending packets).
+  Cut D: a send failure is either permanent (the datagram can never be sent as built, e.g. `EMSGSIZE`) or transient;
+  a permanent failure is returned from a caller-directed send and, inside a poll, ends only that peer's session with a
+  typed reason; transient failures stay counted losses. Windows `ConnectionResetError` on receive is idle, never fatal,
+  in every server. Cut D's negative grep `send_packet(...)?;` is obsolete: the `?` now propagates encode errors only.
+- **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
+  while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
+  limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.

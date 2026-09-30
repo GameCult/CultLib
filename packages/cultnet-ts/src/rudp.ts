@@ -1,8 +1,22 @@
 import { randomInt } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { type RemoteInfo, type Socket } from "node:dgram";
+import { lookup } from "node:dns/promises";
 
 import type { CultNetTransportProfile } from "./contracts";
+
+/**
+ * The address an RUDP client binds when its caller names none: loopback for a
+ * loopback endpoint, otherwise the unspecified address of the endpoint's family.
+ * A socket bound to loopback cannot send off the host on Windows.
+ */
+export async function rudpClientBindHost(endpointHost: string): Promise<string> {
+  const { address, family } = await lookup(endpointHost.replace(/^\[(.*)\]$/, "$1"));
+  if (family === 6) {
+    return address === "::1" ? "::1" : "::";
+  }
+  return address.startsWith("127.") ? "127.0.0.1" : "0.0.0.0";
+}
 import {
   CultNetReconnectController,
   createCultNetReconnectPolicy,
