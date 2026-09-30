@@ -1173,6 +1173,41 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
   }
 });
 
+test("a store TS rewrote under a type that is not its schema name holds one record every runtime reads", async () => {
+  await buildInteropPeers();
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-interop-")), "relabelled.cc");
+  const relabelled = defineDocumentType({ ...interopNoteDocument, type: "interop-note-ts-label" });
+  const open = () => CultCache.builder()
+    .withDocumentType(relabelled)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  const note: InteropNote = {
+    schemaVersion: "cultcache.interop_note.v1",
+    documentId: "note:ts-relabelled",
+    authorRuntimeId: "ts-relabelled",
+    title: "ts rewrote a CultCache note",
+    body: "first write",
+    tags: ["ts", "interop"],
+  };
+  await open().put(relabelled, note.documentId, note);
+  const reopened = open();
+  await reopened.pullAllBackingStores();
+  await reopened.put(relabelled, note.documentId, { ...note, body: "rewrite after read-back" });
+
+  const records = (decode(await readFile(file)) as unknown[])[2] as unknown[][];
+  assert.deepEqual(records.map((record) => [record[0], record[1]]), [[note.documentId, "cultcache.interop-note"]]);
+  const readers: Array<[string, () => Promise<any>]> = [
+    ["rust", () => runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot)],
+    ["csharp", () => runJsonCommand("csharp-read", dotnetCommand, [csharpInteropDll, "read", "--file", file], cultLibRoot)],
+    ["python", () => runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, { PYTHONPATH: cultcachePySrc })],
+  ];
+  for (const [name, read] of readers) {
+    const result = await read();
+    assert.equal(result.documentId, note.documentId, `${name} failed to read the rewritten store`);
+    assert.equal(result.body, "rewrite after read-back", `${name} read a stale record`);
+  }
+});
+
 test("CultCache interop reader accepts missing compatible trailing slots and rejects mismatched slots", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
   const compatible = join(tempDir, "compatible.msgpack");
@@ -1587,4 +1622,135 @@ test("a v1 store written at the base commit still reads byte for byte", async ()
   assert.deepEqual(envelopes.map((entry) => [entry.key, entry.type]), [["alpha", "vectors.item"], ["beta", "vectors.item"]]);
   assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
   assert.deepEqual([...envelopes[1]!.payload], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
+});
+
+// A record is its schema and its key, whatever label its envelope carries. These definitions name
+// their schema, so a record read back carries the schema name while a fresh write carries the type.
+const labelledSnapshotDocument = defineDocumentType({
+  type: "market-snapshot",
+  schemaName: "tests.market_snapshot",
+  global: true,
+  schema: z.object({ price: z.number() }),
+});
+const labelledQuoteDocument = defineDocumentType({
+  type: "quote",
+  schemaName: "tests.quote",
+  schema: z.object({ price: z.number() }),
+});
+
+async function labelledStore(): Promise<{ file: string; open: () => CultCache }> {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const open = () => CultCache.builder()
+    .withDocumentType(labelledSnapshotDocument)
+    .withDocumentType(labelledQuoteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  return { file, open };
+}
+
+async function recordsOnDisk(file: string): Promise<Array<[string, string]>> {
+  const snapshot = decode(await readFile(file)) as unknown[];
+  return (snapshot[2] as unknown[][]).map((record) => [record[0] as string, record[1] as string]);
+}
+
+function identityEnvelope(
+  key: string,
+  type: string,
+  schemaId: string,
+  schemaName: string,
+  compatibleSchemaIds: string[] = [schemaId],
+  payload: Uint8Array = Uint8Array.of(0x01),
+): CultCacheEnvelope {
+  return {
+    key,
+    type,
+    schemaId,
+    payload,
+    storedAt: "2026-09-30T00:00:00Z",
+    catalogEntry: {
+      schemaId,
+      schemaName,
+      schemaVersion: `${schemaName}.v1`,
+      contentHash: schemaId,
+      canonicalSchemaJson: "",
+      compatibleSchemaIds,
+      members: [],
+    },
+  };
+}
+
+test("a record read back and rewritten, whose type is not its schema name, stays one record and reloads", async () => {
+  const { file, open } = await labelledStore();
+  const first = open();
+  await first.putGlobal(labelledSnapshotDocument, { price: 1 });
+  await first.put(labelledQuoteDocument, "ACME", { price: 1 });
+
+  const second = open();
+  await second.pullAllBackingStores();
+  await second.putGlobal(labelledSnapshotDocument, { price: 2 });
+  await second.put(labelledQuoteDocument, "ACME", { price: 2 });
+  await second.put(labelledQuoteDocument, "ACME", { price: 3 });
+
+  assert.deepEqual(await recordsOnDisk(file), [["ACME", "tests.quote"], [CultCache.GLOBAL_KEY, "tests.market_snapshot"]]);
+  const third = open();
+  await third.pullAllBackingStores();
+  assert.deepEqual(third.getGlobal(labelledSnapshotDocument), { price: 2 });
+  assert.deepEqual(third.getRequired(labelledQuoteDocument, "ACME"), { price: 3 });
+});
+
+test("a record read back and deleted, whose type is not its schema name, stays deleted", async () => {
+  const { file, open } = await labelledStore();
+  await open().put(labelledQuoteDocument, "ACME", { price: 1 });
+
+  const second = open();
+  await second.pullAllBackingStores();
+  assert.equal(await second.delete(labelledQuoteDocument, "ACME"), true);
+
+  assert.deepEqual(await recordsOnDisk(file), []);
+  const third = open();
+  await third.pullAllBackingStores();
+  assert.equal(third.get(labelledQuoteDocument, "ACME"), undefined);
+});
+
+test("a store replaces a record whose schema id the write names, under any schema name or label", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "old-label", "id-a", "old-name"));
+  await store.push(identityEnvelope("k", "new-label", "id-a", "new-name", [], Uint8Array.of(0x02)));
+  const records = await store.pullAll();
+  assert.deepEqual(records.map((record) => [record.key, record.schemaId, [...record.payload]]), [["k", "id-a", [0x02]]]);
+});
+
+test("a store replaces a record stored under a schema id the write declares compatible", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "old-label", "id-old", "old-name"));
+  await store.push(identityEnvelope("k", "new-label", "id-new", "new-name", ["id-new", "id-old"], Uint8Array.of(0x02)));
+  assert.deepEqual(await recordsOnDisk(file), [["k", "id-new"]]);
+});
+
+test("a store replaces a record whose schema id the write does not declare but whose schema name it shares", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "old-label", "sha256:other-runtime", "tests.shared"));
+  await store.push(identityEnvelope("k", "new-label", "id-new", "tests.shared", ["id-new"], Uint8Array.of(0x02)));
+  assert.deepEqual(await recordsOnDisk(file), [["k", "id-new"]]);
+});
+
+test("a store replaces a legacy envelope whose type label is the written envelope's type", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  await writeFile(file, encode([{ key: "k", type: "quote", payload: Uint8Array.of(0x01), storedAt: "2026-09-30T00:00:00Z" }]));
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "quote", "id-new", "tests.quote", ["id-new"], Uint8Array.of(0x02)));
+  assert.deepEqual(await recordsOnDisk(file), [["k", "id-new"]]);
+});
+
+test("a store keeps a record of another schema at the same key, and the same schema at another key", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "label-b", "id-b", "name-b"));
+  await store.push(identityEnvelope("j", "label-a", "id-a", "name-a"));
+  await store.push(identityEnvelope("k", "label-a", "id-a", "name-a"));
+  await store.delete(identityEnvelope("j", "label-c", "id-c", "name-c"));
+  assert.deepEqual(await recordsOnDisk(file), [["j", "id-a"], ["k", "id-b"], ["k", "id-a"]]);
 });
