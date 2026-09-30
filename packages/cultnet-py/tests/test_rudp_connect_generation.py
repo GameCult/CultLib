@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from cultnet_py import random_initial_sequence
 from cultnet_py.transport import (
     CultNetRudpPacketType,
     CultNetRudpSendOptions,
@@ -192,24 +191,164 @@ class CultNetRudpConnectGenerationTests(unittest.TestCase):
         self.assertEqual(names(server.receive(s1, 3)), ["s1", "s2"], "the Disconnect forgot the held frame")
         self.assertEqual(names(server.receive(s2, 4)), [], "the Disconnect forgot what was received")
 
-    def test_default_initial_sequences_are_drawn_at_random_from_one_to_two_to_the_thirty_first(self) -> None:
-        def assert_random(label: str, draw) -> None:
-            draws = {draw() for _ in range(64)}
-            self.assertGreater(len(draws), 32, f"{label} does not draw at random")
-            self.assertTrue(all(1 <= value < 2**31 for value in draws), f"{label} left [1, 2^31)")
-
-        assert_random("random_initial_sequence", random_initial_sequence)
-        assert_random("session options", lambda: CultNetRudpSessionOptions(connection_id=1).initial_sequence)
-        assert_random(
-            "transport options",
-            lambda: CultNetRudpSocketTransportOptions(
+    def test_sessions_from_one_options_object_each_draw_their_own_initial_sequence(self) -> None:
+        self.assertIsNone(CultNetRudpSessionOptions(connection_id=1).initial_sequence)
+        self.assertIsNone(
+            CultNetRudpSocketTransportOptions(
                 runtime_id="r", socket=None, mode=CultNetRudpSocketMode.CLIENT, connection_id=1
-            ).initial_sequence,
+            ).initial_sequence
         )
-        assert_random(
-            "a default session's first Connect",
-            lambda: CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1)).create_connect(0).sequence,
+        options = CultNetRudpSessionOptions(connection_id=1)
+        firsts = {CultNetRudpSession(options).create_connect(0).sequence for _ in range(64)}
+        self.assertGreater(len(firsts), 32, "a default session does not draw its own sequence")
+        self.assertTrue(all(1 <= value < 2**31 for value in firsts), "a draw left [1, 2^31)")
+
+    # Ack Cut 1d: a frame from an earlier generation is a duplicate, a delayed
+    # Connect from an earlier attempt is stale, a Connect from a new endpoint is
+    # a new client.
+
+    @staticmethod
+    def names_sequence(ack, sequence: int) -> bool:
+        return ack.ack == sequence or any(
+            ack.ack_mask & (1 << bit) and ack.ack > bit and ack.ack - bit - 1 == sequence for bit in range(32)
         )
+
+    def test_a_frame_from_the_clients_earlier_generation_is_acknowledged_not_delivered_again(self) -> None:
+        client, server = session(10), session(500)
+        handshake(client, server)
+        old = send(client, "old")
+        self.assertEqual(names(server.receive(old, 1)), ["old"])
+
+        connect = client.create_connect(2)
+        client.receive(server.accept_connect(connect, 2), 2)
+        self.assertLess(old.sequence, connect.sequence)
+        self.assertEqual(names(server.receive(old, 3)), [], "an earlier generation's frame was delivered again")
+        self.assertTrue(self.names_sequence(server.create_ack_for_received(old.sequence), old.sequence))
+        self.assertEqual(names(server.receive(send(client, "fresh"), 4)), ["fresh"])
+
+    def test_a_frame_from_the_servers_earlier_generation_is_acknowledged_not_delivered_again(self) -> None:
+        client, server = session(10), session(500)
+        handshake(client, server)
+        old = send(server, "old")
+        self.assertEqual(names(client.receive(old, 1)), ["old"])
+
+        client.receive(server.accept_connect(client.create_connect(2), 2), 2)
+        self.assertEqual(names(client.receive(old, 3)), [], "an earlier generation's frame was delivered again")
+        self.assertTrue(self.names_sequence(client.create_ack_for_received(old.sequence), old.sequence))
+        self.assertEqual(names(client.receive(send(server, "fresh"), 4)), ["fresh"])
+
+    def test_a_duplicate_below_the_receive_window_is_acknowledged_by_name(self) -> None:
+        client, server = session(10), session(500)
+        handshake(client, server)
+        first = send(client, "first")
+        self.assertEqual(names(server.receive(first, 1)), ["first"])
+        for _ in range(4_200):
+            server.receive(send(client, "x"), 1)
+            client.receive(server.create_ack(), 1)
+        self.assertEqual(names(server.receive(first, 2)), [])
+        self.assertEqual(
+            server.create_ack_for_received(first.sequence).ack,
+            first.sequence,
+            "a duplicate below the window was not acknowledged by name",
+        )
+
+    def test_a_delayed_connect_from_an_earlier_attempt_does_not_strand_the_client(self) -> None:
+        client, server = session(10), session(500)
+        earlier = client.create_connect(0)
+        retried = client.create_connect(300)
+        accept = server.accept_connect(retried, 301)
+        client.receive(accept, 302)
+        server.receive(client.create_ack_for_received(accept.sequence), 302)
+        self.assertTrue(client.connected)
+        a = send(client, "a")
+        self.assertEqual(names(server.receive(a, 303)), ["a"])
+        client.receive(server.create_ack_for_received(a.sequence), 303)
+
+        self.assertTrue(server.connect_repeats(earlier), "the delayed Connect starts nothing")
+        reply = server.accept_connect(earlier, 304)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        client.receive(reply, 305)
+        self.assertTrue(client.connected)
+
+        b = send(client, "b")
+        self.assertEqual(names(server.receive(b, 306)), ["b"], "the delayed Connect reset the server")
+        client.receive(server.create_ack_for_received(b.sequence), 307)
+        self.assertNotIn(b.sequence, client.pending_reliable_sequences)
+
+    def test_a_repeated_connect_refreshes_liveness_and_a_stale_one_does_not(self) -> None:
+        client, server = session(10), session(500)
+        earlier = client.create_connect(0)
+        current = client.create_connect(1)
+        server.accept_connect(current, 0)
+
+        server.accept_connect(current, 900)
+        self.assertFalse(server.check_timeout(1_000, 500), "a repeated Connect did not refresh liveness")
+
+        server.accept_connect(earlier, 1_400)
+        self.assertTrue(server.check_timeout(1_600, 500), "a stale Connect refreshed liveness")
+
+    def test_stale_connects_are_recognised_by_serial_arithmetic(self) -> None:
+        server = session(500)
+        server.accept_connect(session(3).create_connect(0), 0)
+
+        def connect(sequence: int):
+            return session(sequence).create_connect(0)
+
+        self.assertTrue(server.connect_repeats(connect(2**32 - 2)), "just before the wrap")
+        self.assertFalse(server.connect_repeats(connect(4)), "just after")
+        self.assertFalse(server.connect_repeats(connect(3 + 4_096)), "far after")
+        self.assertTrue(server.connect_repeats(connect(2**32 - 4_092)), "the window's edge")
+        self.assertFalse(server.connect_repeats(connect(2**32 - 4_093)), "past the window")
+
+    def test_a_restarted_client_whose_first_sequence_is_stale_connects_after_redrawing(self) -> None:
+        server, old = session(500), session(1_000)
+        old_accept = server.accept_connect(old.create_connect(0), 0)
+        old.receive(old_accept, 0)
+
+        restarted = session(900)
+        first = restarted.create_connect(0, b"join")
+        # The old client has not acknowledged its Accept yet, so that is the
+        # reply: it names the old Connect, not this one.
+        early = server.accept_connect(first, 1)
+        self.assertEqual(early.packet_type, CultNetRudpPacketType.ACCEPT)
+        restarted.receive(early, 1)
+        self.assertFalse(restarted.connected, "an Accept for another Connect connected the client")
+        server.receive(old.create_ack_for_received(old_accept.sequence), 1)
+        reply = server.accept_connect(first, 2)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        restarted.receive(reply, 2)
+        self.assertFalse(restarted.connected)
+
+        retransmitted = restarted.due_resends(1_000)
+        self.assertEqual(len(retransmitted), 1)
+        self.assertEqual(retransmitted[0].sequence, first.sequence, "the attempt is still young")
+
+        fresh = restarted.due_resends(3_500)
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(fresh[0].packet_type, CultNetRudpPacketType.CONNECT)
+        self.assertNotEqual(fresh[0].sequence, first.sequence, "the same Connect was retransmitted for ever")
+        self.assertEqual(fresh[0].payload, b"join", "the fresh attempt lost the Connect payload")
+
+        accept = server.accept_connect(fresh[0], 3_500)
+        self.assertEqual(accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        restarted.receive(accept, 3_500)
+        self.assertTrue(restarted.connected)
+        self.assertEqual(names(server.receive(send(restarted, "hello"), 3_501)), ["hello"])
+
+    def test_an_answered_connect_is_never_replaced_by_the_attempt_timeout(self) -> None:
+        client, server = session(10), session(500)
+        connect, _ = handshake(client, server)
+        resent = client.due_resends(60_000)
+        self.assertTrue(
+            all(p.packet_type != CultNetRudpPacketType.CONNECT or p.sequence == connect.sequence for p in resent),
+            "a connected client started a new attempt",
+        )
+        self.assertTrue(client.connected)
+
+    def test_an_accepted_peer_that_goes_silent_times_out(self) -> None:
+        server = session(500)
+        server.accept_connect(session(10).create_connect(0), 0)
+        self.assertTrue(server.check_timeout(100_000, 1_000))
 
 
 if __name__ == "__main__":

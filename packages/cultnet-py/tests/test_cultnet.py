@@ -1147,7 +1147,7 @@ class CultNetTests(unittest.TestCase):
         connection_id = 0x10203058
         reliable = CultNetRudpSendOptions(reliable=True, ordered=True)
         try:
-            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=50))
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=50_000))
             connect = first.create_connect(0, b"same")
             to_server(connect)
             server.receive_once()
@@ -1174,6 +1174,33 @@ class CultNetTests(unittest.TestCase):
             to_server(second.send("schema", b"after restart", reliable))
             self.assertEqual(server.receive_once().payload, b"after restart")
         finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_pinned_client_that_restarts_on_a_new_port(self) -> None:
+        server, server_socket, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x1020305B)
+        connection_id = 0x1020305B
+        reliable = CultNetRudpSendOptions(reliable=True, ordered=True)
+        other_socket = bind_udp_socket()
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(first.create_connect(0, b"join"))
+            server.receive_once()
+            first.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            to_server(first.send("schema", b"hello", reliable))
+            self.assertEqual(server.receive_once().payload, b"hello")
+
+            # The process restarted on a new port with the same pinned sequence.
+            second = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            other_socket.sendto(encode_rudp_packet(second.create_connect(0, b"join")), server_socket.getsockname())
+            server.receive_once()
+            wire, _ = other_socket.recvfrom(65535)
+            second.receive(decode_rudp_packet(wire), 0)
+            self.assertTrue(second.connected, "the restarted client on a new port was not admitted")
+            other_socket.sendto(encode_rudp_packet(second.send("schema", b"after", reliable)), server_socket.getsockname())
+            self.assertEqual(server.receive_once().payload, b"after")
+        finally:
+            other_socket.close()
             peer_socket.close()
             server.close()
 

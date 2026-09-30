@@ -89,7 +89,7 @@ class RudpServerGenerationTests(unittest.TestCase):
         return CultNetRudpSession(CultNetRudpSessionOptions(connection_id=CONNECTION_ID, initial_sequence=initial_sequence))
 
     def test_a_retransmitted_connect_keeps_the_peer_and_a_restarted_client_is_a_new_one(self) -> None:
-        first = self.new_session(50)
+        first = self.new_session(50_000)
         connect = first.create_connect(0, b"same")
         self.to_server(connect)
         self.assertTrue(self.pump(first, lambda: first.connected), "the first Accept")

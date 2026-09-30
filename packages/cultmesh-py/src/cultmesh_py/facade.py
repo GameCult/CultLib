@@ -18,7 +18,6 @@ from cultnet_py import (
     CultNetShardCatalog,
     CultNetSimulationObservationHub,
     create_rudp_schema_transport,
-    random_initial_sequence,
     wire_message_schema_catalog,
 )
 
@@ -173,7 +172,7 @@ class CultMesh:
                 socket=transport_socket,
                 mode=CultNetRudpSocketMode.SERVER,
                 connection_id=connection_id,
-                initial_sequence=random_initial_sequence() if initial_sequence is None else initial_sequence,
+                initial_sequence=initial_sequence,
                 resend_delay_ms=resend_delay_ms,
                 transport_id=transport_id,
                 max_payload_bytes=max_payload_bytes,
@@ -213,7 +212,7 @@ class CultMesh:
                 mode=CultNetRudpSocketMode.CLIENT,
                 remote_addr=(parsed_endpoint.host, parsed_endpoint.port),
                 connection_id=connection_id,
-                initial_sequence=random_initial_sequence() if initial_sequence is None else initial_sequence,
+                initial_sequence=initial_sequence,
                 resend_delay_ms=resend_delay_ms,
                 transport_id=transport_id,
                 max_payload_bytes=max_payload_bytes,
