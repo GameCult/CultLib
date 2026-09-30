@@ -158,6 +158,9 @@ fn stripping_server(
 struct Clock {
     unix: Arc<AtomicU64>,
     monotonic: Arc<AtomicU64>,
+    /// A reply accepted at the next wall-clock read: an answer that arrives
+    /// from another thread while a poll runs.
+    accept_on_read: Arc<Mutex<Option<CultMeshRudpPutReply>>>,
 }
 
 impl Clock {
@@ -165,6 +168,7 @@ impl Clock {
         Self {
             unix: Arc::new(AtomicU64::new(now)),
             monotonic: Arc::new(AtomicU64::new(now)),
+            accept_on_read: Arc::default(),
         }
     }
 
@@ -184,6 +188,9 @@ impl Clock {
 
 impl CultMeshRudpServerClock for Clock {
     fn now_unix_millis(&self) -> u64 {
+        if let Some(reply) = self.accept_on_read.lock().unwrap().take() {
+            reply.accept();
+        }
         self.unix.load(Ordering::SeqCst)
     }
 
@@ -1487,21 +1494,22 @@ impl RawPeer {
 
     /// Sends `message` reliably and in order; returns its sequences.
     fn send(&mut self, message: &CultNetMessage) -> Result<Vec<u32>> {
-        self.send_with(message, true)
+        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+        self.send_on("schema", payload)
     }
 
-    fn send_with(&mut self, message: &CultNetMessage, reliable: bool) -> Result<Vec<u32>> {
-        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+    /// Sends `payload` reliably and in order on `channel`; returns its sequences.
+    fn send_on(&mut self, channel: &str, payload: Vec<u8>) -> Result<Vec<u32>> {
         let options = cultnet_rs::CultNetRudpSendOptions {
-            reliable,
-            ordered: reliable,
+            reliable: true,
+            ordered: true,
             sequenced: false,
             now_ms: 2,
             reliable_expire_after_ms: None,
         };
         let packets = self
             .session
-            .send_many("schema", payload, options, Some(1200))?;
+            .send_many(channel, payload, options, Some(1200))?;
         for packet in &packets {
             self.send_packet(packet)?;
         }
@@ -2377,58 +2385,133 @@ fn an_unservable_put_is_never_offered_to_the_sink() -> Result<()> {
     Ok(())
 }
 
-/// A sink that holds each put's reply until it is offered the put `last`,
-/// then accepts every held reply and that one, inside the same poll.
-#[derive(Default)]
-struct AnswersOnLast(Vec<CultMeshRudpPutReply>);
-
-impl CultMeshRudpRawDocumentSink for AnswersOnLast {
-    fn accept_raw_document(
-        &mut self,
-        receipt: CultMeshRudpRawDocumentReceipt,
-        reply: CultMeshRudpPutReply,
-    ) {
-        self.0.push(reply);
-        if receipt.message_id == "last" {
-            self.0.drain(..).for_each(CultMeshRudpPutReply::accept);
-        }
-    }
-}
-
-/// A poll whose packet releases a withheld session sends exactly one
-/// acknowledgement. A reliable packet's own acknowledgement is that one; an
-/// unreliable packet has none, so the release sends it.
+/// A poll whose packet finds its session released, by an answer that arrived
+/// while the poll ran, sends exactly one acknowledgement. A reliable packet's
+/// own acknowledgement is that one. An unreliable packet (a Ping) has none,
+/// so the release sends it.
 #[test]
 fn a_release_inside_a_poll_sends_exactly_one_acknowledgement() -> Result<()> {
     for reliable in [false, true] {
-        let mut server = CultMeshRudpDocumentServer::new(
-            UdpSocket::bind("127.0.0.1:0")?,
-            AnswersOnLast::default(),
-            Source::default(),
-            Clock::new(89_000),
-            Default::default(),
-        )?;
+        let clock = Clock::new(89_000);
+        let sink = HeldSink::default();
+        let mut server = held_server(&sink, &clock)?;
         let mut peer = RawPeer::connect(&mut server, 102)?;
-        let first = peer.send(&put("first"))?;
+        let held = peer.send(&put("held"))?;
         poll_until_idle(&mut server)?;
-        assert_eq!(peer.drain(), Vec::new(), "fixture: the first put is held");
+        assert_eq!(peer.drain(), Vec::new(), "fixture: the put is held");
 
-        let last = peer.send_with(&put("last"), reliable)?;
+        *clock.accept_on_read.lock().unwrap() = Some(sink.reply("held"));
+        let own = if reliable {
+            // Reliable data on a channel the server does not read.
+            peer.send_on("other", vec![1])?
+        } else {
+            let ping = peer.session.create_ping(Vec::new());
+            peer.send_packet(&ping)?;
+            Vec::new()
+        };
         assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
         let sent = peer.drain();
-        assert_eq!(sent.len(), 1, "reliable {reliable}: {sent:?}");
-        assert_eq!(sent[0].packet_type, cultnet_rs::CultNetRudpPacketType::Ack);
-        assert!(
-            first
-                .iter()
-                .all(|sequence| acknowledges(&sent[0], *sequence))
+        let kinds: Vec<_> = sent.iter().map(|packet| packet.packet_type).collect();
+        // No Pong: the session was withheld when the Ping arrived.
+        assert_eq!(
+            kinds,
+            vec![cultnet_rs::CultNetRudpPacketType::Ack],
+            "reliable {reliable}"
         );
-        if reliable {
-            assert!(
-                last.iter()
-                    .all(|sequence| acknowledges(&sent[0], *sequence))
-            );
+        for sequence in held.iter().chain(&own) {
+            assert!(acknowledges(&sent[0], *sequence));
         }
+    }
+    Ok(())
+}
+
+/// Answers are handled per session: one session's answer never releases or
+/// ends another. One session's put is accepted and another's refused in the
+/// same poll; each session gets only its own answer.
+#[test]
+fn one_sessions_answer_never_releases_or_ends_another() -> Result<()> {
+    let clock = Clock::new(90_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut accepted = RawPeer::connect(&mut server, 103)?;
+    let mut refused = RawPeer::connect(&mut server, 104)?;
+    let accepted_put = accepted.send(&put("accepted"))?;
+    let refused_put = refused.send(&put("refused"))?;
+    poll_until_idle(&mut server)?;
+
+    sink.reply("accepted").accept();
+    sink.reply("refused").refuse("no CANARY-7f3a");
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the refusal is the poll's outcome");
+    };
+    assert_eq!(
+        (
+            rejection.session.connection_id,
+            rejection.message_id.as_str()
+        ),
+        (104, "refused")
+    );
+    let to_accepted = accepted.drain();
+    assert_eq!(
+        to_accepted
+            .iter()
+            .map(|packet| packet.packet_type)
+            .collect::<Vec<_>>(),
+        vec![cultnet_rs::CultNetRudpPacketType::Ack]
+    );
+    assert!(
+        accepted_put
+            .iter()
+            .all(|sequence| acknowledges(&to_accepted[0], *sequence))
+    );
+    let to_refused = refused.drain();
+    assert_acknowledges_none(&to_refused, &refused_put);
+    assert_eq!(
+        to_refused
+            .iter()
+            .map(|packet| packet.packet_type)
+            .collect::<Vec<_>>(),
+        vec![
+            cultnet_rs::CultNetRudpPacketType::Data,
+            cultnet_rs::CultNetRudpPacketType::Disconnect
+        ]
+    );
+    assert_eq!(server.session_count(), 1);
+    Ok(())
+}
+
+/// A session is kept while its idle time and its age are at their limits, and
+/// expires once either is past it.
+#[test]
+fn a_session_is_kept_at_its_limits_and_expires_past_them() -> Result<()> {
+    for (idle, lifetime) in [(1_000, 60_000), (60_000, 1_000)] {
+        let clock = Clock::new(91_000);
+        let mut server = CultMeshRudpDocumentServer::new(
+            UdpSocket::bind("127.0.0.1:0")?,
+            HeldSink::default(),
+            Source::default(),
+            clock.clone(),
+            CultMeshRudpDocumentServerOptions {
+                session_idle_timeout: Duration::from_millis(idle),
+                session_max_lifetime: Duration::from_millis(lifetime),
+                ..Default::default()
+            },
+        )?;
+        RawPeer::connect(&mut server, 105)?;
+        clock.set(92_000);
+        assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+        assert_eq!(
+            server.session_count(),
+            1,
+            "kept at the limit ({idle}, {lifetime})"
+        );
+        clock.set(92_001);
+        assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+        assert_eq!(
+            server.session_count(),
+            0,
+            "expired past it ({idle}, {lifetime})"
+        );
     }
     Ok(())
 }
