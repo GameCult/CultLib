@@ -549,6 +549,18 @@ dependency-level for most, read in detail for Aetheria and AetheriaEve).
 
 ## Schema identity across runtimes (Imagination, 2026-09-30)
 
+**RULINGS (operator, 2026-09-30).**
+- **C1: agreed** ("Agreed on schema identity"). C# puts the declared version string on the wire as the schema id.
+  F-ID.1 follows Self's recommendation: the id is `<name>.v<N>`, not the bare schemaName.
+- **F-ID.2: AetheriaEve is not a consumer.** Operator: "AetheriaEve is purely archaeological, I would recommend
+  archiving it purely as evidence of what happens when you try to build a game with hyperfocused agents and with
+  CultLib under construction. We might try again at some point, but it won't look anything like AetheriaEve." C1
+  deletes the fallbacks that exist only for AetheriaEve's readers. It does not migrate those readers.
+- **F-ID.3: stored C# hash ids.** Operator: "I have no idea". Self's default is to defer C2. C1 changes nothing on
+  disk. C# keeps reading its own `sha256` ids. F2 already makes other runtimes keep C# records byte-for-byte. C2
+  gets mapped only when a cross-runtime store read of a C# store is actually needed.
+- Next: Imagination maps C1 as a cut.
+
 Probed at CultLib `hands/variants-c2a` 92d9e138. The probe ran on Yggdrasil in `ack1d-interop:2` from a scratch branch, which has since been deleted. Sources: `scratchpad/schema-identity-probe/`. Full output: `scratchpad/probe2.log` (store round trip, section 1), plus a wire rerun shown inline below. Every probe used one declared schema: the interop note, name `cultcache.interop-note`, version `cultcache.interop_note.v1`, with six members.
 
 ### 1. How each runtime derives a schema id (probed)
