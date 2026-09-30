@@ -25,6 +25,7 @@ const noteDocument = defineDocumentType({
 });
 
 type Note = z.infer<typeof noteDocument.schema>;
+type CultMeshDocumentSchemaDescriptorLike = { type?: string; schemaId?: string; schemaName?: string; schemaVersion?: string };
 
 // Another type claiming noteDocument's schema. It is never registered beside noteDocument: one type owns a schema.
 const otherTypeForNoteSchema = defineDocumentType({
@@ -183,6 +184,49 @@ test("CultMesh TS catalogs infer a lookup's value type from its document definit
     void documents.authoritativeWriter(noteDocument).write({ noteId: 1, body: "x" });
   };
   void typeOnly;
+});
+
+test("CultMesh TS catalogs hold one type per schema and refuse a second, typed", () => {
+  const sameNameVersion = { type: "cultmesh.note.named", schemaId: "sha256:note-named", schemaName: "cultmesh.note", schemaVersion: "cultmesh.note.v0" };
+  const sameTypeOtherSchema = { type: "cultmesh.note", schemaId: "cultmesh.note.v9" };
+  const note = { noteId: "note:held", body: "held" };
+  const kinds = [
+    {
+      catalog: (...schemas: CultMeshDocumentSchemaDescriptorLike[]) =>
+        CultMesh.documents(...schemas.map((schema, index) => CultMesh.document(`doc:${index}`, schema, async () => note))),
+      handle: (schema: CultMeshDocumentSchemaDescriptorLike, id: string) => CultMesh.document(id, schema, async () => note),
+      find: (catalog: any, schema: CultMeshDocumentSchemaDescriptorLike) => catalog.document(schema).documentId,
+    },
+    {
+      catalog: (...schemas: CultMeshDocumentSchemaDescriptorLike[]) =>
+        CultMesh.collections(...schemas.map((schema, index) => CultMesh.collection(`doc:${index}`, schema, async () => [note]))),
+      handle: (schema: CultMeshDocumentSchemaDescriptorLike, id: string) => CultMesh.collection(id, schema, async () => [note]),
+      find: (catalog: any, schema: CultMeshDocumentSchemaDescriptorLike) => catalog.collection(schema).collectionId,
+    },
+  ];
+  for (const kind of kinds) {
+    for (const claimant of [otherTypeForNoteSchema, sameNameVersion, sameTypeOtherSchema]) {
+      for (const [first, second] of [[noteDocument, claimant], [claimant, noteDocument]] as const) {
+        const catalog = kind.catalog(first);
+        assert.throws(() => catalog.add(kind.handle(second, "doc:second") as any), (error: unknown) => {
+          assert.ok(error instanceof SchemaConflictError, String(error));
+          assert.equal(error.schemaId, second.schemaId);
+          assert.equal(error.recordKey, "");
+          return true;
+        });
+        assert.throws(() => kind.catalog(first, second), SchemaConflictError);
+        // The refused handle left nothing behind: the first type still answers.
+        assert.equal(kind.find(catalog, first), "doc:0");
+        assert.equal(kind.find(catalog, { schemaId: first.schemaId }), "doc:0");
+      }
+    }
+    // Handles of one type for one schema may repeat, the same handle may be added again, and an untyped handle claims no type.
+    const held = kind.handle(noteDocument, "doc:held");
+    const catalog = kind.catalog(noteDocument);
+    catalog.add(held as any).add(held as any);
+    catalog.add(kind.handle({ schemaId: "cultmesh.note.v0" }, "doc:untyped") as any);
+    assert.equal(kind.find(catalog, noteDocument), "doc:held");
+  }
 });
 
 test("CultMesh TS document handles submit predictions through configured authority hooks", async () => {

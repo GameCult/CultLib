@@ -3,6 +3,7 @@ import { decode, encode } from "@msgpack/msgpack";
 
 import {
   CultCache,
+  SchemaConflictError,
   SingleFileMessagePackBackingStore,
   type AnyCultCacheDocumentDefinition,
   type CacheBackingStore,
@@ -1473,6 +1474,7 @@ export class CultMeshDocumentCatalog {
   }
 
   public add<TDocument>(document: CultMeshDocumentHandle<TDocument>): this {
+    cultMeshRefuseSecondCatalogType(document.schema, this.#byType, this.#bySchemaId, this.#bySchemaNameVersion);
     this.#byDocumentId.set(document.documentId, document as CultMeshDocumentHandle<any>);
     if (document.schema.type) {
       this.#byType.set(document.schema.type, document as CultMeshDocumentHandle<any>);
@@ -1684,6 +1686,7 @@ export class CultMeshCollectionCatalog {
   }
 
   public add<TDocument>(collection: CultMeshCollectionHandle<TDocument>): this {
+    cultMeshRefuseSecondCatalogType(collection.schema, this.#byType, this.#bySchemaId, this.#bySchemaNameVersion);
     this.#byCollectionId.set(collection.collectionId, collection as CultMeshCollectionHandle<any>);
     if (collection.schema.type) {
       this.#byType.set(collection.schema.type, collection as CultMeshCollectionHandle<any>);
@@ -6191,6 +6194,32 @@ function normalizeCultMeshDocumentSchema(
   }
 
   return normalized;
+}
+
+// One type owns a schema in a catalog, as in a registry. A handle whose type differs from the one already holding its
+// schema id or schema name and version, or whose type already holds another schema, is refused. Handles of one type
+// for one schema may repeat (one per record), and a handle without a type claims no type.
+function cultMeshRefuseSecondCatalogType(
+  schema: CultMeshDocumentSchemaDescriptor,
+  byType: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+  bySchemaId: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+  bySchemaNameVersion: ReadonlyMap<string, { readonly schema: CultMeshDocumentSchemaDescriptor }>,
+): void {
+  if (!schema.type) {
+    return;
+  }
+  const key = cultMeshSchemaNameVersionKey(schema);
+  const sameType = byType.get(schema.type)?.schema;
+  const holder =
+    (sameType?.schemaId && schema.schemaId && sameType.schemaId !== schema.schemaId ? sameType : undefined) ??
+    [schema.schemaId ? bySchemaId.get(schema.schemaId) : undefined, key ? bySchemaNameVersion.get(key) : undefined]
+      .map(held => held?.schema)
+      .find(held => held?.type !== undefined && held.type !== schema.type);
+  if (holder) {
+    const name = (held: CultMeshDocumentSchemaDescriptor) => held.schemaName ?? held.type ?? held.schemaId ?? "";
+    throw new SchemaConflictError(schema.schemaId ?? schema.type, [name(holder), name(schema)], "",
+      `CultMesh catalog schema ${cultMeshSchemaLabel(schema)} is held by type "${holder.type}" and cannot also be held by type "${schema.type}".`);
+  }
 }
 
 function cultMeshSchemaNameVersionKey(
