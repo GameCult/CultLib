@@ -1180,10 +1180,22 @@ namespace GameCult.Networking
             }
 
             _disposed = true;
+            // The journal first: disposing it waits for a journal in flight, so nothing is stashed after this line. What a
+            // writer has logged and not yet published is then published here, so a change the log holds is never dropped.
             _cacheJournal.Dispose();
             _cacheChanges.Dispose();
+            Publication[] unpublished;
             lock (_logGate)
+            {
+                unpublished = _stash.OrderBy(entry => entry.Key).Select(entry => entry.Value).ToArray();
                 _stash.Clear();
+            }
+
+            foreach (var publication in unpublished)
+            {
+                Publish(publication);
+            }
+
             _changes.Dispose();
         }
 
@@ -1288,6 +1300,10 @@ namespace GameCult.Networking
                 }
             }
 
+            Publish(publication);
+        }
+
+        private void Publish(Publication publication) =>
             PublishUntyped(
                 publication.DocumentType,
                 publication.Kind,
@@ -1296,7 +1312,6 @@ namespace GameCult.Networking
                 publication.Shard,
                 publication.Document,
                 publication.PreviousDocument);
-        }
 
         private void RecordReplicatedEntry(
             CultNetShardDescriptor shard,

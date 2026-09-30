@@ -1022,8 +1022,8 @@ namespace GameCult.Networking.Tests
             Assert.That(logger.Errors, Is.Empty);
         }
 
-        // The journal is disposed before the observer: an admission the journal logs while the database is being disposed is
-        // still published, never logged and then dropped.
+        // A change the log holds is published, however Dispose interleaves with the write: Dispose waits for a journal in
+        // flight (disposing the journal first) and publishes whatever the writer had logged and not yet published.
         [Test]
         public async Task ADatabaseDisposedWhileAWriteIsInItsLogAppendStillPublishesWhatItLogged()
         {
