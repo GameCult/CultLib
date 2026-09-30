@@ -866,7 +866,8 @@ fn unix_millis() -> u128 {
 /// Publish one raw CultNet schema message to a RUDP catalog.
 ///
 /// Each call owns a fresh connection epoch and returns only after the catalog
-/// acknowledges reliable application admission.
+/// acknowledges reliable application admission. A catalog that refuses the
+/// message answers with a `cultnet.error.v0`, returned as an error naming it.
 pub fn publish_cultnet_message_to_rudp_catalog(
     message: &cultnet_rs::CultNetMessage,
     options: CultMeshRudpDocumentPublishOptions,
@@ -887,7 +888,22 @@ pub fn publish_cultnet_message_to_rudp_catalog(
     let receipt = client.send_reliable("schema", payload)?;
     let flush_deadline = Instant::now() + options.flush_timeout;
     while Instant::now() < flush_deadline {
-        let _ = client.receive_once()?;
+        if let Some(frame) = client.receive_once()? {
+            if frame.channel_id == "schema" {
+                if let Ok(cultnet_rs::CultNetMessage::Error { error, .. }) =
+                    decode_cultnet_message_from_slice(
+                        &frame.payload,
+                        CultNetWireContract::CultNetSchemaV0,
+                    )
+                {
+                    let _ = client.disconnect(b"document-refused".to_vec());
+                    anyhow::bail!(
+                        "CultMesh RUDP catalog {} refused the message: {error}",
+                        options.target
+                    );
+                }
+            }
+        }
         match client.reliable_send_status(&receipt) {
             cultnet_rs::CultNetRudpReliableSendStatus::Acknowledged => {
                 let _ = client.disconnect(b"document-acknowledged".to_vec());
@@ -1280,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn document_publish_requires_application_acknowledgement() -> Result<()> {
+    fn a_refused_publish_fails_with_the_catalogs_reason_not_a_timeout() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let node = CultMesh::create_node(
             temp.path().join("cultmesh.cc"),
@@ -1308,6 +1324,7 @@ mod tests {
             Ok(())
         });
 
+        let started = Instant::now();
         let error = node
             .publish_document_to_rudp_catalog(
                 "note",
@@ -1317,16 +1334,23 @@ mod tests {
                 CultMeshRudpDocumentPublishOptions {
                     target,
                     connect_timeout: Duration::from_millis(100),
-                    flush_timeout: Duration::from_millis(50),
+                    flush_timeout: Duration::from_secs(10),
                     poll_interval: Duration::from_millis(2),
                     resend_delay_ms: 5,
                     ..CultMeshRudpDocumentPublishOptions::default()
                 },
             )
-            .expect_err("unacknowledged document must fail closed");
+            .expect_err("a refused document must fail closed");
+        let waited = started.elapsed();
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         server.join().expect("server thread should not panic")?;
-        assert!(error.to_string().contains("reliable acknowledgement"));
+        // The publisher hears the refusal and its reason, long before its flush
+        // deadline: a refusal is not mistaken for loss.
+        assert!(
+            error.to_string().contains("refused the message: injected durable sink failure"),
+            "{error:#}"
+        );
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
         Ok(())
     }
 

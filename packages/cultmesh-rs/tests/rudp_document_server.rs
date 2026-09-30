@@ -335,6 +335,53 @@ fn poll_until_rejected_or_stored<Q: CultMeshRudpSnapshotSource>(
     anyhow::bail!("the put was neither refused nor stored")
 }
 
+/// What a refused peer is sent: a `cultnet.error.v0`, then the goodbye. The
+/// refused message is never acknowledged, so its receipt stays pending until the
+/// goodbye invalidates it. Returns the refusal's text.
+fn refusal_seen_by(
+    client: &mut CultNetRudpSocketTransportConnection,
+    receipt: &CultNetRudpReliableSendReceipt,
+) -> Result<String> {
+    let mut refusal = None;
+    for _ in 0..2_000 {
+        if let Some(frame) = client.receive_once()? {
+            refusal = Some(decode_cultnet_message_from_slice(
+                &frame.payload,
+                CultNetWireContract::CultNetSchemaV0,
+            )?);
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let Some(CultNetMessage::Error {
+        error,
+        code,
+        details,
+    }) = refusal
+    else {
+        panic!("the refused peer was sent no refusal: {refusal:?}");
+    };
+    assert_eq!((code, details), (None, None));
+    assert_eq!(
+        client.reliable_send_status(receipt),
+        CultNetRudpReliableSendStatus::Pending,
+        "a refusal must not acknowledge the refused message"
+    );
+    for _ in 0..2_000 {
+        client.receive_once()?;
+        if !client.connected() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!client.connected(), "the refusal is followed by a goodbye");
+    assert_eq!(
+        client.reliable_send_status(receipt),
+        CultNetRudpReliableSendStatus::Invalidated
+    );
+    Ok(error)
+}
+
 fn send(client: &mut CultNetRudpSocketTransportConnection, message: &CultNetMessage) -> Result<()> {
     client.send(
         "schema",
@@ -562,7 +609,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
 }
 
 #[test]
-fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<()> {
+fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unacknowledged() -> Result<()> {
     let clock = Clock::new(48_000);
     let sink = Sink::fail_once();
     let source = Source::fail_once(vec![document("snapshot", vec![4, 5, 6])]);
@@ -602,10 +649,9 @@ fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<
         CultMeshRudpRejectionReason::SinkRefused("injected sink failure".into())
     );
     assert_eq!(server.session_count(), 2);
-    publisher.receive_once()?;
     assert_eq!(
-        publisher.reliable_send_status(&publish_receipt),
-        CultNetRudpReliableSendStatus::Pending
+        refusal_seen_by(&mut publisher, &publish_receipt)?,
+        "injected sink failure"
     );
 
     let snapshot_receipt = send_reliable(
@@ -630,10 +676,9 @@ fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<
         CultMeshRudpRejectionReason::SnapshotSourceFailed("injected source failure".into())
     );
     assert_eq!(server.session_count(), 1);
-    snapshot_client.receive_once()?;
     assert_eq!(
-        snapshot_client.reliable_send_status(&snapshot_receipt),
-        CultNetRudpReliableSendStatus::Pending
+        refusal_seen_by(&mut snapshot_client, &snapshot_receipt)?,
+        "injected source failure"
     );
 
     let survivor_receipt = send_reliable(
@@ -777,10 +822,9 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
         } if response_bytes > 128
     ));
     assert_eq!(snapshot_server.session_count(), 0);
-    snapshot_client.receive_once()?;
     assert_eq!(
-        snapshot_client.reliable_send_status(&receipt),
-        CultNetRudpReliableSendStatus::Pending
+        refusal_seen_by(&mut snapshot_client, &receipt)?,
+        rejection.reason.to_string()
     );
     Ok(())
 }
@@ -840,11 +884,9 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
     assert!(sentence.contains(&(limit + 1).to_string()) && sentence.contains(&limit.to_string()));
     assert!(sink.0.lock().unwrap().receipts.is_empty());
     assert_eq!(server.session_count(), 1);
-    refused.receive_once()?;
-    assert_eq!(
-        refused.reliable_send_status(&refused_receipt),
-        CultNetRudpReliableSendStatus::Pending
-    );
+    // The peer hears the refusal and why, rather than waiting on a put that
+    // will never be acknowledged.
+    assert_eq!(refusal_seen_by(&mut refused, &refused_receipt)?, sentence);
 
     send(
         &mut writer,

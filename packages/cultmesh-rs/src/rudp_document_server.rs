@@ -358,8 +358,10 @@ where
     /// Poll transport maintenance and receive at most one UDP datagram.
     ///
     /// Application rejection invalidates only the responsible peer session and
-    /// is returned as data so a daemon can log it and keep serving. Local
-    /// socket and server-state failures remain errors.
+    /// is returned as data so a daemon can log it and keep serving. The peer is
+    /// sent the refusal as a `cultnet.error.v0` carrying the reason's text, then
+    /// a goodbye; neither acknowledges the refused message. Local socket and
+    /// server-state failures remain errors.
     pub fn poll_once(&mut self) -> Result<CultMeshRudpPollOutcome> {
         self.maintain()?;
         let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
@@ -458,7 +460,7 @@ where
                 now_unix,
                 now_monotonic,
             )? {
-                self.sessions.remove(&key);
+                self.end_rejected_session(key, rejection.reason.to_string())?;
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
             }
         }
@@ -746,6 +748,46 @@ where
             return Ok(());
         };
         let goodbye = entry.session.end_refused_session();
+        self.send_packet(key.remote_addr, &goodbye)
+    }
+
+    /// The server refused a peer's message: the session ends, and the peer is
+    /// sent the refusal before the goodbye, so it can tell a refusal from loss.
+    /// The refusal carries the goodbye's acknowledgement fields, which the reset
+    /// has emptied: it must not acknowledge the refused message, because a
+    /// publisher reads that acknowledgement as admission. A refusal that cannot
+    /// be encoded or queued is not sent; the goodbye still is.
+    fn end_rejected_session(&mut self, key: CultMeshRudpSessionKey, reason: String) -> Result<()> {
+        let Some(mut entry) = self.sessions.remove(&key) else {
+            return Ok(());
+        };
+        let refusal = CultNetMessage::Error {
+            error: reason,
+            code: None,
+            details: None,
+        };
+        let packets = encode_cultnet_message_to_vec(&refusal, CultNetWireContract::CultNetSchemaV0)
+            .and_then(|payload| {
+                entry.session.send_many(
+                    "schema",
+                    payload,
+                    CultNetRudpSendOptions {
+                        reliable: true,
+                        ordered: true,
+                        sequenced: false,
+                        now_ms: self.clock.now_monotonic_millis(),
+                        reliable_expire_after_ms: None,
+                    },
+                    Some(self.options.max_fragment_bytes),
+                )
+            })
+            .unwrap_or_default();
+        let goodbye = entry.session.end_refused_session();
+        for mut packet in packets {
+            packet.ack = goodbye.ack;
+            packet.ack_mask = goodbye.ack_mask;
+            self.send_packet(key.remote_addr, &packet)?;
+        }
         self.send_packet(key.remote_addr, &goodbye)
     }
 
