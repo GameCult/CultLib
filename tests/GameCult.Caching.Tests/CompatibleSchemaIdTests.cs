@@ -171,11 +171,14 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void ARecordUnderAnOldIdNoTypeDeclaresIsNotOpenedByThatSchemaName()
+        public void ARecordUnderAnOldIdNoTypeDeclaresIsCarriedAsForeignNotOpenedByThatSchemaName()
         {
             var path = OldStore("undeclared.cc");
 
-            Assert.That(() => Open(path, Bare), Throws.InstanceOf<Exception>(), "the entry's name is metadata; only a declared id resolves it");
+            using var cache = Open(path, Bare);
+            Assert.That(cache.Get(D), Is.Null, "the entry's name is metadata; only a declared id resolves it");
+            Assert.That(cache.BackingStores.Single().ForeignRecords.Select(record => (record.Key, record.SchemaId, record.SchemaName)),
+                Is.EqualTo(new[] { (D.Value, OldId, "tests.legacy_deck") }));
         }
 
         // An unconditional commit writes the cache's whole view: the record the batch does not name is stamped with the registered

@@ -142,6 +142,14 @@ names a local type only when no local type has the id, for a store written by a 
 schema ids this one cannot know (a Rust type's schema id is its entry type). A schema renamed under
 a stable id therefore opens in every runtime that holds the id.
 
+A record that resolves to no local type is a foreign record, for example one of a type this build does not
+have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
+byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
+in C#), and the cache never holds it. Writes of other records proceed and lay it back as the file holds it, a
+whole-view write included. A write that would replace or remove it is refused with the typed schema conflict
+naming its key and id, and nothing is written. A marked header stays marked while a store carries one, because
+the writer cannot see whether it holds element ids. Declaring its id on a type claims it at the next load.
+
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
 in catalog order).

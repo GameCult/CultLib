@@ -63,10 +63,12 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+        var foreign = new List<CultForeignRecord>();
         for (var attempt = 1; ; attempt++)
         {
             loaded.Clear();
             reports.Clear();
+            foreign.Clear();
             // Only pages named by the manifest read under the lease are loaded; orphaned pages are never loaded. With no
             // lock to lease (none created yet, or a store copied without it) a writer may commit mid-load, so an unleased
             // load stands only if its manifest is still current; if the manifest moved it reloads, under the lease the
@@ -83,7 +85,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     manifest.Records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray(),
                     manifest.SchemaCatalog,
                     loaded,
-                    reports);
+                    reports,
+                    foreign);
                 if (lease != null || !ManifestMoved(manifestBytes))
                 {
                     Trace($"indexed-pages loaded={loaded.Count}");
@@ -129,6 +132,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             _hydratedKeys.Add(key);
 
         SetLastSchemaMigrationReports(reports);
+        SetForeignRecords(foreign);
         IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
         Trace("publish");
     }
@@ -147,6 +151,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         RefuseVariant(entry);
         Held(() =>
         {
+            RefuseOverwrite(entry.Key.Value);
             Entries[entry.Key.Value] = entry;
             _dirtyKeys[entry.Key.Value] = true;
             _deletedKeys.TryRemove(entry.Key.Value, out _);
@@ -239,6 +244,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         Directory.CreateDirectory(_recordDirectory.FullName);
         var currentIndex = currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal);
+        // The manifest's other records stay as they are, foreign ones included; a write that would replace or remove a foreign
+        // record is refused before any page is written.
+        foreach (var key in _deletedKeys.Keys.Concat(_dirtyKeys.Keys))
+        {
+            if (currentIndex.TryGetValue(key, out var held) && Foreign(held, currentManifest.SchemaCatalog) is { } carried)
+                throw Overwrites(carried);
+        }
+
         foreach (var key in _deletedKeys.Keys)
             currentIndex.Remove(key);
         foreach (var key in _dirtyKeys.Keys)
@@ -310,8 +323,20 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         CultPersistedRecord[] records,
         IReadOnlyCollection<CultSchemaCatalogEntry> catalogEntries,
         Dictionary<string, CultStoredDocument> loaded,
-        List<CultSchemaMigrationReport> reports)
+        List<CultSchemaMigrationReport> reports,
+        List<CultForeignRecord> foreign)
     {
+        // A record no registered type claims stays as the manifest names it: its page is never read, and a commit keeps it.
+        var claimed = new List<CultPersistedRecord>(records.Length);
+        foreach (var metadata in records)
+        {
+            if (Foreign(metadata, catalogEntries) is { } carried)
+                foreign.Add(carried);
+            else
+                claimed.Add(metadata);
+        }
+
+        records = claimed.ToArray();
         var tracePages = string.Equals(
             Environment.GetEnvironmentVariable("CULTCACHE_TRACE_STARTUP_PHASES"),
             "1",

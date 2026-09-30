@@ -136,6 +136,32 @@ namespace GameCult.Caching
         public CultVariantDelta? Variant { get; set; }
     }
 
+    /// <summary>
+    /// A record a store carries untouched because no registered type owns its schema id or lists it as compatible, for example a
+    /// record of a type this build does not have, or one renamed without declaring its old id. The store keeps its bytes as the
+    /// file holds them, a write of another record keeps it, and a write that would replace or remove it is refused with a
+    /// <see cref="CultSchemaConflictException"/>. The cache never holds it. Declaring its schema id on a type claims it at the next load.
+    /// </summary>
+    public sealed class CultForeignRecord
+    {
+        internal CultForeignRecord(string key, string schemaId, string schemaName, string storedAt)
+        {
+            Key = key;
+            SchemaId = schemaId;
+            SchemaName = schemaName;
+            StoredAt = storedAt;
+        }
+
+        public string Key { get; }
+
+        public string SchemaId { get; }
+
+        // The name the store's catalog gives the schema.
+        public string SchemaName { get; }
+
+        public string StoredAt { get; }
+    }
+
     public sealed class CultPersistedStoreSnapshot
     {
         public const string FormatV1 = "cultcache.store.v1";
@@ -605,24 +631,44 @@ namespace GameCult.Caching
 
         internal CultSchemaResolutionResult ResolvePersistedSchemaDetailed(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
-            var indexes = _indexes;
-            if (indexes.BySchemaId.TryGetValue(schemaId, out var exact))
+            var local = Claimant(schemaId, catalog, out var persisted);
+            if (local == null)
+                throw new InvalidOperationException(
+                    $"No local CultCache schema matches persisted schema '{persisted!.SchemaName}' ({schemaId}).");
+            if (persisted == null)
             {
                 return new CultSchemaResolutionResult(
-                    exact,
+                    local,
                     new CultSchemaMigrationReport
                     {
                         PersistedSchemaId = schemaId,
-                        LocalSchemaId = exact.SchemaId,
-                        PersistedSchemaName = exact.SchemaName,
-                        LocalSchemaName = exact.SchemaName,
+                        LocalSchemaId = local.SchemaId,
+                        PersistedSchemaName = local.SchemaName,
+                        LocalSchemaName = local.SchemaName,
                         Kind = CultSchemaMigrationKind.Exact
                     });
             }
 
+            return BuildCompatibleResolutionResult(persisted, local);
+        }
+
+        // The registered type a record under this schema id belongs to, or null when no registered type claims it: a foreign record,
+        // which a store carries untouched. Deciding this never decodes the record or compares shapes, so a store can classify what a
+        // file holds without reading a payload. persisted is the catalog entry the record resolves through, and null when a
+        // registered type owns the id. Claimants that cannot be told apart refuse.
+        internal CultDocumentDescriptor? Claimant(
+            string schemaId,
+            IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
+            out CultSchemaCatalogEntry? persisted)
+        {
+            var indexes = _indexes;
+            persisted = null;
+            if (indexes.BySchemaId.TryGetValue(schemaId, out var exact))
+                return exact;
+
             // A schema is published by its id or as a compatible id.
-            var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
-                            ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
+            persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
+                        ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
             if (persisted == null)
             {
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
@@ -639,23 +685,19 @@ namespace GameCult.Caching
                         schemaId,
                         listers.Select(lister => lister.SchemaName).ToArray(),
                         string.Empty);
-                return BuildCompatibleResolutionResult(persisted, listers[0]);
+                return listers[0];
             }
 
             foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
             {
                 if (indexes.BySchemaId.TryGetValue(compatibleSchemaId, out var compatibleLocal))
-                {
-                    return BuildCompatibleResolutionResult(persisted, compatibleLocal);
-                }
+                    return compatibleLocal;
             }
 
             if (indexes.BySchemaName.TryGetValue(persisted.SchemaName, out var localVersions))
             {
                 if (localVersions.Length == 1)
-                {
-                    return BuildCompatibleResolutionResult(persisted, localVersions[0]);
-                }
+                    return localVersions[0];
 
                 throw new InvalidOperationException(
                     $"CultCache schema name '{persisted.SchemaName}' is ambiguous across local versions " +
@@ -663,8 +705,7 @@ namespace GameCult.Caching
                     "Persisted schema compatibility must identify an explicit schema id.");
             }
 
-            throw new InvalidOperationException(
-                $"No local CultCache schema matches persisted schema '{persisted.SchemaName}' ({schemaId}).");
+            return null;
         }
 
         private CultDocumentDescriptor RegisterDescriptor(CultDocumentDescriptor descriptor)
@@ -3349,6 +3390,14 @@ namespace GameCult.Caching
 
         public IReadOnlyList<CultSchemaMigrationReport> LastSchemaMigrationReports => _lastSchemaMigrationReports;
 
+        /// <summary>
+        /// The records this store's last load found and carries untouched, ordered by key: no registered type owns their schema id or
+        /// lists it as compatible. See <see cref="CultForeignRecord"/>.
+        /// </summary>
+        public IReadOnlyList<CultForeignRecord> ForeignRecords => _foreignRecords;
+
+        private CultForeignRecord[] _foreignRecords = Array.Empty<CultForeignRecord>();
+
         // Set by the cache at attach. A pull hands over everything it loaded and dropped in one call before it adopts
         // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
@@ -3505,6 +3554,34 @@ namespace GameCult.Caching
             _lastSchemaMigrationReports = reports?.ToArray() ?? Array.Empty<CultSchemaMigrationReport>();
         }
 
+        // The one test of whether a stored record is foreign: no registered type claims its schema id through the catalog it was
+        // stored with. It reads the record's header only, never its payload. Null for a record the registry resolves.
+        protected CultForeignRecord? Foreign(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+            Registry.Claimant(record.SchemaId, catalog, out var persisted) == null
+                ? new CultForeignRecord(record.Key, record.SchemaId, persisted!.SchemaName, record.StoredAt)
+                : null;
+
+        protected void SetForeignRecords(IEnumerable<CultForeignRecord> foreign)
+        {
+            _foreignRecords = foreign.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
+        }
+
+        // A write never replaces or removes a record this store carries for a schema it does not know.
+        protected void RefuseOverwrite(string key)
+        {
+            var foreign = _foreignRecords.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
+            if (foreign != null)
+                throw Overwrites(foreign);
+        }
+
+        protected CultSchemaConflictException Overwrites(CultForeignRecord foreign) => new(
+            $"Record '{foreign.Key}' in {this} is stored under schema id '{foreign.SchemaId}' ('{foreign.SchemaName}'), which " +
+            "no registered type owns or lists as compatible. The store carries it untouched and refuses a write that would replace or remove it; " +
+            "declare the id on a type to claim it.",
+            foreign.SchemaId,
+            new[] { foreign.SchemaName },
+            foreign.Key);
+
         protected void MarkFlushSucceeded()
         {
             IsDirty = false;
@@ -3548,13 +3625,21 @@ namespace GameCult.Caching
             if (snapshot == null)
             {
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
+                SetForeignRecords(Array.Empty<CultForeignRecord>());
                 return;
             }
 
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
             var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+            var foreign = new List<CultForeignRecord>();
             foreach (var record in snapshot.Records)
             {
+                if (Foreign(record, snapshot.SchemaCatalog) is { } carried)
+                {
+                    foreign.Add(carried);
+                    continue;
+                }
+
                 var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload, out var report);
                 reports.Add(report);
                 persisted[stored.Key.Value] = stored;
@@ -3574,6 +3659,7 @@ namespace GameCult.Caching
             foreach (var stored in loaded)
                 Entries[stored.Key.Value] = stored;
             SetLastSchemaMigrationReports(reports);
+            SetForeignRecords(foreign);
         }
 
         public override void Push(CultStoredDocument entry)
@@ -3581,6 +3667,7 @@ namespace GameCult.Caching
             ThrowIfReadOnly();
             Held(() =>
             {
+                RefuseOverwrite(entry.Key.Value);
                 Entries[entry.Key.Value] = entry;
                 IsDirty = true;
             });
@@ -3606,14 +3693,16 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
-                    var records = WholeView(Entries.Values, ReadSnapshot());
+                    var disk = ReadSnapshot();
+                    var foreign = ForeignOnDisk(disk);
+                    var records = WholeView(Entries.Values, disk, foreign);
                     WriteSnapshot(
                         records,
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
-                        Array.Empty<CultSchemaCatalogEntry>(),
+                        disk?.SchemaCatalog ?? Array.Empty<CultSchemaCatalogEntry>(),
                         Entries.Values.Any(entry => entry.HoldsIds),
-                        existingHeader: null,
-                        wholeStore: true);
+                        disk?.FormatVersion,
+                        wholeStore: foreign.Count == 0);
                     WroteWholeView(records);
                 }
 
@@ -3640,7 +3729,14 @@ namespace GameCult.Caching
             // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
             // and staged single writes land with it. A conditional commit (store clean) lands the batch onto the file as it is.
             var ontoDisk = request.HasConditions && !IsDirty;
-            var records = (ontoDisk ? disk.Records : WholeView(Entries.Values, disk)).ToDictionary(record => record.Key, StringComparer.Ordinal);
+            var foreign = ForeignOnDisk(disk);
+            foreach (var entry in request.Upserts.Concat(request.Deletes))
+            {
+                if (foreign.TryGetValue(entry.Key.Value, out var carried))
+                    throw Overwrites(carried.Foreign);
+            }
+
+            var records = (ontoDisk ? disk.Records : WholeView(Entries.Values, disk, foreign)).ToDictionary(record => record.Key, StringComparer.Ordinal);
             // The committer judged the batch against its own view; the file may have moved since. A merge is judged on the
             // set the file will hold, exactly as that set would be judged loading: what other processes wrote (arriving),
             // what they removed (departing), and this batch.
@@ -3660,7 +3756,7 @@ namespace GameCult.Caching
             var registered = Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())
                 .Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry()))
                 .ToArray();
-            WriteSnapshot(records.Values, registered, ontoDisk ? disk.SchemaCatalog : Array.Empty<CultSchemaCatalogEntry>(), holdsIds, disk.FormatVersion, wholeStore: !ontoDisk);
+            WriteSnapshot(records.Values, registered, disk.SchemaCatalog, holdsIds, disk.FormatVersion, wholeStore: !ontoDisk && foreign.Count == 0);
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
@@ -3675,8 +3771,20 @@ namespace GameCult.Caching
         // that stores a record differently is a new store of it and mints it a later storedAt: under another id than it was loaded
         // under (a type re-encoding a record it read through an older or foreign schema, shedding what it lacks), or with other
         // bytes than the file holds at that storedAt. A record written exactly as it is stored keeps its storedAt.
-        private CultPersistedRecord[] WholeView(IEnumerable<CultStoredDocument> entries, CultPersistedStoreSnapshot? disk)
+        // The whole view also lays back every foreign record the file holds now, as the file holds it, and refuses an entry whose key
+        // the file holds as a foreign record.
+        private CultPersistedRecord[] WholeView(
+            IEnumerable<CultStoredDocument> view,
+            CultPersistedStoreSnapshot? disk,
+            IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign)
         {
+            var entries = view.ToArray();
+            foreach (var entry in entries)
+            {
+                if (foreign.TryGetValue(entry.Key.Value, out var carried))
+                    throw Overwrites(carried.Foreign);
+            }
+
             var onDisk = (disk?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, StringComparer.Ordinal);
             return entries.Select(entry =>
             {
@@ -3687,7 +3795,20 @@ namespace GameCult.Caching
                 if (!unchanged)
                     record.StoredAt = CultCache.MintStoredAt(record.StoredAt);
                 return record;
-            }).ToArray();
+            }).Concat(foreign.Values.Select(carried => carried.Record)).ToArray();
+        }
+
+        // The records the file holds that no registered type claims, by key.
+        private Dictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> ForeignOnDisk(CultPersistedStoreSnapshot? disk)
+        {
+            var foreign = new Dictionary<string, (CultForeignRecord, CultPersistedRecord)>(StringComparer.Ordinal);
+            foreach (var record in disk?.Records ?? Array.Empty<CultPersistedRecord>())
+            {
+                if (Foreign(record, disk!.SchemaCatalog) is { } carried)
+                    foreign[record.Key] = (carried, record);
+            }
+
+            return foreign;
         }
 
         private static bool SameStoredBytes(CultPersistedRecord stored, CultPersistedRecord written) =>
@@ -3732,16 +3853,24 @@ namespace GameCult.Caching
             var removing = request.Deletes.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
             var onDisk = disk.Records.Select(record => record.Key).ToHashSet(StringComparer.Ordinal);
             var arriving = new List<CultStoredDocument>(request.Upserts);
+            var departing = new List<CultStoredDocument>(request.Deletes);
             foreach (var record in disk.Records)
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
                     continue;
+                // A foreign record is not part of what the cache judges; one that replaced a record this store holds takes it away.
+                if (Foreign(record, disk.SchemaCatalog) != null)
+                {
+                    if (Entries.TryGetValue(record.Key, out var replaced))
+                        departing.Add(replaced);
+                    continue;
+                }
+
                 if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.StoredSchemaId == record.SchemaId)
                     continue;
                 arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
             }
 
-            var departing = new List<CultStoredDocument>(request.Deletes);
             departing.AddRange(Entries.Values.Where(known =>
                 !onDisk.Contains(known.Key.Value) && !landing.Contains(known.Key.Value) && !removing.Contains(known.Key.Value)));
             Judging!(arriving, departing);

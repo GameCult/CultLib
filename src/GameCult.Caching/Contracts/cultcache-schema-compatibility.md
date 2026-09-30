@@ -102,9 +102,14 @@ lie about the payload:
 - target schema change
 - name/index lookup semantics change
 - missing embedded catalog entry
-- no compatible local schema candidate
 
 This is not negotiable. Better a loud refusal than quiet bit-rot.
+
+## Foreign records
+
+A record with no local schema candidate is not rejected: the store carries it untouched as a
+foreign record and refuses any write that would replace or remove it. See "foreign record" in
+`cultcache-persistence-format.md`.
 
 ## Variant overrides
 
