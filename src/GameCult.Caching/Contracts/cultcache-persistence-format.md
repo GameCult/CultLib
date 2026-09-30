@@ -129,6 +129,13 @@ record and when it puts one. The cache is the only owner of that stamp: a store 
 changes the identity of a record it did not receive from its caller, so a record another writer
 changed since this cache read it is written back as that writer left it.
 
+A schema type declares the older ids its records may sit under: `CultDocumentAttribute.CompatibleSchemaIds`
+(C#), `compatibleSchemaIds` (TypeScript, Python). The registered catalog entry lists them after its own id, and
+the cache restamps a record loaded under one to the type's own id, so the next write of that record carries the
+registered id. A record another writer left under a declared id, and that a commit does not rewrite, stays under it
+and the registered entry publishes it. Without the declaration, a C# commit onto a file that holds a record under an
+id only the file's entry lists is refused, typed, and the file is left as it was. Rust has no such declaration.
+
 A cache resolves a record to a local type by the record's schema id: the registered type that owns
 the id, else one that lists it as compatible. The name the catalog entry carries is metadata. It
 names a local type only when no local type has the id, for a store written by a runtime whose
@@ -151,9 +158,8 @@ an own id and disagree on the schema name, when records of different types share
 write would change which type an existing record resolves to (the schema names of the records already
 in the store and of the records written differ), or when a record's id is published by no chosen entry.
 The retyping refusal has one exception, a rename: when the entries of both the existing records and
-the written ones own the id, the registered descriptor wins. (A C# cache stamps a record with its
-descriptor's own id, so it cannot write a record under an id its descriptor only lists, and the
-retyping refusal cannot arise there.) Each runtime refuses with one typed error naming the id, the
+the written ones own the id, the registered descriptor wins. (A C# cache stamps every record it
+writes with its descriptor's own id, so the retyping refusal cannot arise there.) Each runtime refuses with one typed error naming the id, the
 schema names and a record key: `CultSchemaConflictException` (C#), `SchemaConflictError`
 (Rust, TypeScript, Python).
 

@@ -241,6 +241,7 @@ namespace GameCult.Caching
             string schemaName,
             string schemaVersion,
             string schemaId,
+            IReadOnlyList<string> compatibleSchemaIds,
             string contentHash,
             string canonicalSchemaJson,
             bool isGlobal,
@@ -254,6 +255,7 @@ namespace GameCult.Caching
             SchemaName = schemaName;
             SchemaVersion = schemaVersion;
             SchemaId = schemaId;
+            CompatibleSchemaIds = compatibleSchemaIds;
             ContentHash = contentHash;
             CanonicalSchemaJson = canonicalSchemaJson;
             IsGlobal = isGlobal;
@@ -279,6 +281,9 @@ namespace GameCult.Caching
         public string SchemaName { get; }
         public string SchemaVersion { get; }
         public string SchemaId { get; }
+
+        /// <summary>The ids besides <see cref="SchemaId"/> this type declared through <see cref="CultDocumentAttribute.CompatibleSchemaIds"/>.</summary>
+        public IReadOnlyList<string> CompatibleSchemaIds { get; }
         public string ContentHash { get; }
         public string CanonicalSchemaJson { get; }
         public bool IsGlobal { get; }
@@ -370,7 +375,7 @@ namespace GameCult.Caching
                 SchemaVersion = SchemaVersion,
                 ContentHash = ContentHash,
                 CanonicalSchemaJson = CanonicalSchemaJson,
-                CompatibleSchemaIds = [SchemaId],
+                CompatibleSchemaIds = [SchemaId, .. CompatibleSchemaIds],
                 Members = Members
                     .OrderBy(member => member.Slot)
                     .Select(member => new CultSchemaMemberCatalogEntry
@@ -578,6 +583,16 @@ namespace GameCult.Caching
             throw new InvalidOperationException($"Unknown CultCache schema id '{schemaId}'.");
         }
 
+        // The id a record under schemaId is stamped with: the own id of the type that owns it, else of the first registered
+        // type that declares it compatible; an id no registered type claims is its own.
+        internal string CanonicalSchemaId(string schemaId)
+        {
+            var indexes = _indexes;
+            return indexes.BySchemaId.TryGetValue(schemaId, out var owner) || indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out owner)
+                ? owner.SchemaId
+                : schemaId;
+        }
+
         public CultDocumentDescriptor ResolvePersistedSchema(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
         {
             return ResolvePersistedSchemaDetailed(schemaId, catalog).Descriptor;
@@ -611,6 +626,11 @@ namespace GameCult.Caching
             if (persisted == null)
             {
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
+            }
+
+            if (indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out var declared))
+            {
+                return BuildCompatibleResolutionResult(persisted, declared);
             }
 
             foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
@@ -687,6 +707,8 @@ namespace GameCult.Caching
 
             indexes.ByType[descriptor.DocumentType] = descriptor;
             indexes.BySchemaId[descriptor.SchemaId] = descriptor;
+            foreach (var compatibleSchemaId in descriptor.CompatibleSchemaIds)
+                indexes.ByCompatibleSchemaId.TryAdd(compatibleSchemaId, descriptor);
             indexes.BySchemaName[descriptor.SchemaName] = schemaNameVersions == null
                 ? [descriptor]
                 : [.. schemaNameVersions, descriptor];
@@ -717,6 +739,7 @@ namespace GameCult.Caching
             {
                 ByType = new Dictionary<Type, CultDocumentDescriptor>();
                 BySchemaId = new Dictionary<string, CultDocumentDescriptor>(StringComparer.Ordinal);
+                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor>(StringComparer.Ordinal);
                 BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(StringComparer.Ordinal);
             }
 
@@ -724,11 +747,13 @@ namespace GameCult.Caching
             {
                 ByType = new Dictionary<Type, CultDocumentDescriptor>(source.ByType);
                 BySchemaId = new Dictionary<string, CultDocumentDescriptor>(source.BySchemaId, StringComparer.Ordinal);
+                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor>(source.ByCompatibleSchemaId, StringComparer.Ordinal);
                 BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(source.BySchemaName, StringComparer.Ordinal);
             }
 
             public Dictionary<Type, CultDocumentDescriptor> ByType { get; }
             public Dictionary<string, CultDocumentDescriptor> BySchemaId { get; }
+            public Dictionary<string, CultDocumentDescriptor> ByCompatibleSchemaId { get; }
             public Dictionary<string, CultDocumentDescriptor[]> BySchemaName { get; }
         }
 
@@ -765,12 +790,19 @@ namespace GameCult.Caching
             var contentHash = Sha256(schemaJson);
             var semanticFingerprint = BuildSemanticFingerprint(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
             var schemaId = Sha256(semanticFingerprint);
+            if (attribute.CompatibleSchemaIds.Any(string.IsNullOrWhiteSpace))
+                throw new InvalidOperationException($"Type {type.FullName} declares an empty compatible schema id.");
+            var compatibleSchemaIds = attribute.CompatibleSchemaIds
+                .Where(id => !string.Equals(id, schemaId, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
 
             return new CultDocumentDescriptor(
                 type,
                 attribute.SchemaName,
                 attribute.SchemaVersion,
                 schemaId,
+                compatibleSchemaIds,
                 contentHash,
                 schemaJson,
                 type.GetCustomAttribute<CultGlobalAttribute>() != null,
@@ -1783,7 +1815,7 @@ namespace GameCult.Caching
 
         // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
         // Identity is (schemaId, storedAt), sound because every write to a key mints a later storedAt.
-        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
+        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed, Func<string, string> canonicalSchemaId)
         {
             var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
             foreach (var (key, schemaId, storedAt) in Expected)
@@ -1791,13 +1823,13 @@ namespace GameCult.Caching
                 byKey.TryGetValue(key.Value, out var record);
                 var holds = schemaId == null
                     ? record == null
-                    : record != null && record.SchemaId == schemaId && record.StoredAt == storedAt;
+                    : record != null && canonicalSchemaId(record.SchemaId) == schemaId && record.StoredAt == storedAt;
                 if (!holds)
                     return false;
             }
 
             return !ExpectUnchanged ||
-                   durable.Select(record => Identity(record.Key, record.SchemaId, record.StoredAt))
+                   durable.Select(record => Identity(record.Key, canonicalSchemaId(record.SchemaId), record.StoredAt))
                        .OrderBy(identity => identity, StringComparer.Ordinal)
                        .SequenceEqual(observed
                            .Select(stored => Identity(stored.Key.Value, stored.Descriptor.SchemaId, stored.StoredAt))
@@ -2542,7 +2574,7 @@ namespace GameCult.Caching
                     var inMemory = _entries.Values
                         .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
                         .ToArray();
-                    return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
+                    return request.ConditionsHold(inMemory, _entries.Values, Registry.CanonicalSchemaId) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
             });
         }
@@ -3607,7 +3639,7 @@ namespace GameCult.Caching
                 return CultCommitOutcome.Contended;
 
             var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
-            if (!request.ConditionsHold(disk.Records, Entries.Values))
+            if (!request.ConditionsHold(disk.Records, Entries.Values, Registry.CanonicalSchemaId))
                 return CultCommitOutcome.Mismatch;
 
             // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
@@ -3664,7 +3696,7 @@ namespace GameCult.Caching
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
                     continue;
-                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == record.SchemaId)
+                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == Registry.CanonicalSchemaId(record.SchemaId))
                     continue;
                 arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
             }

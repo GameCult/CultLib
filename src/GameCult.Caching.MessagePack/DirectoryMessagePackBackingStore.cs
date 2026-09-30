@@ -178,7 +178,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
             var manifest = ReadManifest();
-            if (!request.ConditionsHold(manifest.Records, Entries.Values))
+            if (!request.ConditionsHold(manifest.Records, Entries.Values, Registry.CanonicalSchemaId))
                 return CultCommitOutcome.Mismatch;
 
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);

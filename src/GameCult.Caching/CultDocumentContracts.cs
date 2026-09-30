@@ -18,6 +18,14 @@ namespace GameCult.Caching
         public string SchemaName { get; }
 
         public string SchemaVersion { get; }
+
+        /// <summary>
+        /// Schema ids other than this type's own that a store may hold its records under, typically the ids an earlier
+        /// version of the schema had. The registered catalog entry lists them, and a cache resolves a record stored under
+        /// one of them to this type (its own id is tried first) and restamps it to the type's own id on load. TypeScript
+        /// and Python name the same declaration <c>compatibleSchemaIds</c>.
+        /// </summary>
+        public string[] CompatibleSchemaIds { get; set; } = Array.Empty<string>();
     }
 
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]
