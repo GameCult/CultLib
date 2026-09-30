@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
@@ -1448,6 +1448,129 @@ test("SingleFileMessagePackBackingStore refuses the C#-written variant store by 
     () => pullVector("../document-variants-c1/variant-store.msgpack"),
     (error: Error) => error.message.includes("cultcache.store.v2") || error.message.includes("laser-big"),
   );
+});
+
+test("SingleFileMessagePackBackingStore refusals say what was found without blaming variants", async () => {
+  await assert.rejects(
+    () => pullVector("unknown-header.msgpack"),
+    (error: Error) => error.message.includes("not one this runtime reads") && !error.message.includes("variant"),
+  );
+  await assert.rejects(
+    () => pullVector("extra-slot-full-payload.msgpack"),
+    (error: Error) => error.message.includes("not a valid store") && !error.message.includes("variant"),
+  );
+});
+
+test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-absent-"));
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(join(dir, "store.cc")).pullAll(), []);
+
+  // An existing empty file is not a store: no CultCache writer leaves one.
+  const empty = join(dir, "empty.cc");
+  await writeFile(empty, new Uint8Array());
+  await assert.rejects(() => new SingleFileMessagePackBackingStore(empty).pullAll());
+  assert.equal((await readFile(empty)).length, 0);
+
+  // An empty array is the legacy envelope array with no envelopes: no header, no format claimed.
+  const legacyEmpty = join(dir, "legacy-empty.cc");
+  await writeFile(legacyEmpty, Uint8Array.of(0x90));
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(legacyEmpty).pullAll(), []);
+});
+
+test("SingleFileMessagePackBackingStore reports a store it cannot reach as an I/O error", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-unreachable-"));
+  const loop = join(dir, "loop.cc");
+  await symlink(loop, loop);
+  const parent = join(dir, "body");
+  await writeFile(parent, "not a directory");
+  for (const [path, code] of [[loop, "ELOOP"], [join(parent, "store.cc"), "ENOTDIR"]] as const) {
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(path).pullAll(),
+      (error: NodeJS.ErrnoException) => error.code === code,
+    );
+  }
+});
+
+test("SingleFileMessagePackBackingStore refusals never echo a value from the store", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-canary-"));
+  const file = join(dir, "store.cc");
+  const cases: Array<[unknown[], boolean | undefined]> = [
+    [["cultcache.store.v12", [], []], true],
+    [["cultcache.store.SECRET-HEADER", [], []], false],
+    [["cultcache.store.v12SECRET", [], []], false],
+    [["cultcache.store.v", [], []], false],
+    [["cultcache.store.v1", ["SECRET-CATALOG-TEXT"], []], undefined],
+  ];
+  for (const [value, echoed] of cases) {
+    await writeFile(file, encode(value));
+    const header = value[0] as string;
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => {
+        if (echoed) {
+          return error.message.includes(`"${header}"`);
+        }
+        return !error.message.includes("SECRET")
+          && (echoed === undefined || (!error.message.includes(`"${header}"`) && error.message.includes(`of ${header.length} bytes`)));
+      },
+    );
+  }
+});
+
+test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path and writes nothing", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-dangling-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const file = join(dir, "store.cc");
+  await symlink(join(volume, "store.cc"), file);
+  const store = new SingleFileMessagePackBackingStore(file);
+  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  await assert.rejects(() => store.pullAll(), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(() => store.push(envelope), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  assert.ok((await lstat(file)).isSymbolicLink());
+  assert.deepEqual(await readdir(volume), []);
+});
+
+test("SingleFileMessagePackBackingStore record refusal names only a string key", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-record-key-"));
+  const file = join(dir, "store.cc");
+  const secret = new TextEncoder().encode("SECRET-BYTES");
+  for (const [key, schema] of [[["SECRET-IN-ARRAY"], "s"], [secret, "s"], ["k", { SECRET: 1 }]] as const) {
+    await writeFile(file, encode(["cultcache.store.v1", [], [[key, schema, "t", Uint8Array.of(0x90), "extra"]]]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => !error.message.includes("SECRET") && !error.message.includes("83,69,67") && error.message.includes("not a valid store"),
+    );
+  }
+});
+
+// What a write does through a symbolic link today. R3 decides whether a write resolves the link
+// or refuses it; these pin the current behaviour so that change is deliberate.
+test("R3 decides resolve-or-refuse: a push through a live link replaces the link", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-live-link-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const target = join(volume, "store.cc");
+  const envelope = { key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  await new SingleFileMessagePackBackingStore(target).push(envelope);
+  const before = await readFile(target);
+  const link = join(dir, "store.cc");
+  await symlink(target, link);
+  await new SingleFileMessagePackBackingStore(link).push({ ...envelope, key: "b" });
+  assert.ok((await lstat(link)).isFile());
+  assert.deepEqual(await readFile(target), before);
+});
+
+test("R3 decides resolve-or-refuse: a pushAll through a dangling link replaces the link", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-dangling-push-all-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const link = join(dir, "store.cc");
+  await symlink(join(volume, "store.cc"), link);
+  await new SingleFileMessagePackBackingStore(link).pushAll([{ key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" }]);
+  assert.ok((await lstat(link)).isFile());
+  assert.deepEqual(await readdir(volume), []);
 });
 
 test("CultCache inspector refuses the same vectors by name", async () => {

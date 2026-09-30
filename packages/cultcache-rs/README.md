@@ -293,6 +293,61 @@ writes. That protects ordinary multi-process access to the same file. It is
 still not a multi-master replication protocol, and it is not a substitute for a
 coordinator when higher-level write ordering matters.
 
+A write that fails part way, for example on a full disk, removes its staging
+file and leaves the store as it was. A read that fails tells you why through
+the error chain:
+
+```rust
+use cultcache_rs::{CacheBackingStore, CultCacheStoreUnreadable, CultCacheStoreUnreadableKind, SingleFileMessagePackBackingStore};
+
+let store = SingleFileMessagePackBackingStore::new("cache.cc");
+if let Err(error) = store.pull_all() {
+    match error.downcast_ref::<CultCacheStoreUnreadable>().map(|unreadable| unreadable.kind) {
+        // The bytes were read and are not a store: truncated, garbled, or invalid.
+        Some(CultCacheStoreUnreadableKind::Undecodable) => {}
+        // The header names a format this runtime does not read, such as a newer one.
+        Some(CultCacheStoreUnreadableKind::UnsupportedFormat) => {}
+        // The bytes could not be read at all: a std::io::Error is in the chain.
+        _ => {}
+    }
+}
+```
+
+An I/O failure never carries `CultCacheStoreUnreadable`, and the chain under
+`CultCacheStoreUnreadable` never holds a `std::io::Error`.
+
+Only a store file that does not exist (`std::io::ErrorKind::NotFound`) reads as
+an empty store. Any other failure to reach it, such as a symlink loop, a file
+where a parent directory should be, or a missing permission, is an I/O error.
+A store file that exists and holds zero bytes is `Undecodable`: no CultCache
+writer leaves one. A symbolic link whose target is gone is not a missing store:
+reading it is an I/O error, so a read-then-write (`push`, `delete`, the exchanges)
+fails before writing. Writes do not yet follow links: a write through a live link,
+and a `push_all` through a dangling one, replace the link with a regular file and
+leave its target alone. A refusal names no
+value read from the file; it names a record only by its key and schema id, and
+a header only when it has the shape `cultcache.store.v<digits>`.
+
+A write that fails says what it left on disk:
+
+```rust
+use cultcache_rs::{CultCacheStoreWriteFailed, CultCacheStoreWriteFailedKind};
+
+fn outcome(error: &anyhow::Error) {
+    match error.downcast_ref::<CultCacheStoreWriteFailed>().map(|failed| failed.kind) {
+        // The entries cannot be stored; retrying them fails the same way.
+        Some(CultCacheStoreWriteFailedKind::Rejected) => {}
+        // Staging, fsync or rename failed: the store file holds what it held before,
+        // and a retry may succeed once the fault (a full disk, say) clears.
+        Some(CultCacheStoreWriteFailedKind::NotReplaced) => {}
+        // The rename landed and the directory sync failed: the new snapshot is in
+        // place but may not survive a crash.
+        Some(CultCacheStoreWriteFailedKind::ReplacedNotDurable) => {}
+        _ => {}
+    }
+}
+```
+
 ## Near-Term Ergonomic Improvements
 
 1. **Derive macro**

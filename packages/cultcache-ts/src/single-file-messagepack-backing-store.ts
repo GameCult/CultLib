@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
@@ -41,64 +41,57 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
-    try {
-      const data = await readFile(this.filePath);
-      if (data.length === 0) {
-        return [];
-      }
+    // An empty file is not a store, since no CultCache writer leaves one, so it is
+    // decoded and refused. Only a read that finds nothing at the path is an empty store.
+    const data = await readStore(this.filePath);
+    if (data === undefined) {
+      return [];
+    }
 
-      const decoded = decode(data);
-      const snapshot = decodeSnapshot(decoded);
-      if (snapshot) {
-        return snapshot.records.map((record) => {
-          const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
-          if (!catalogEntry) {
-            throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
-          }
-
-          return {
-            key: record.key,
-            type: catalogEntry.schemaName,
-            schemaId: record.schemaId,
-            catalogEntry,
-            payload: record.payload,
-            storedAt: record.storedAt,
-          };
-        });
-      }
-
-      const legacy = decodeLegacyEnvelopeArray(decoded);
-      if (legacy) {
-        let repairedLegacyPayload = false;
-        const normalized = legacy.map((entry) => {
-          const payload = normalizePayload(entry.payload);
-          if (payload !== entry.payload) {
-            repairedLegacyPayload = true;
-          }
-
-          return {
-            ...entry,
-            payload,
-          };
-        });
-        const parsed = envelopeArraySchema.parse(normalized) as CultCacheEnvelope[];
-
-        if (repairedLegacyPayload) {
-          await this.#writeAll(parsed);
+    const decoded = decode(data);
+    const snapshot = decodeSnapshot(decoded);
+    if (snapshot) {
+      return snapshot.records.map((record) => {
+        const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
+        if (!catalogEntry) {
+          throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
         }
 
-        return parsed;
-      }
-
-      throw new Error(`CultCache file ${this.filePath} is not a recognized CultCache MessagePack store.`);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        return [];
-      }
-
-      throw error;
+        return {
+          key: record.key,
+          type: catalogEntry.schemaName,
+          schemaId: record.schemaId,
+          catalogEntry,
+          payload: record.payload,
+          storedAt: record.storedAt,
+        };
+      });
     }
+
+    const legacy = decodeLegacyEnvelopeArray(decoded);
+    if (legacy) {
+      let repairedLegacyPayload = false;
+      const normalized = legacy.map((entry) => {
+        const payload = normalizePayload(entry.payload);
+        if (payload !== entry.payload) {
+          repairedLegacyPayload = true;
+        }
+
+        return {
+          ...entry,
+          payload,
+        };
+      });
+      const parsed = envelopeArraySchema.parse(normalized) as CultCacheEnvelope[];
+
+      if (repairedLegacyPayload) {
+        await this.#writeAll(parsed);
+      }
+
+      return parsed;
+    }
+
+    throw new Error(`CultCache file ${this.filePath} is not a recognized CultCache MessagePack store.`);
   }
 
   async push(entry: CultCacheEnvelope): Promise<void> {
@@ -124,16 +117,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      if (options.soft) {
-        try {
-          await readFile(this.filePath);
-          return;
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (code !== "ENOENT") {
-            throw error;
-          }
-        }
+      if (options.soft && (await readStore(this.filePath)) !== undefined) {
+        return;
       }
 
       await this.#writeAll(entries);
@@ -171,6 +156,33 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       throw error;
     }
   }
+}
+
+/**
+ * Reads a store file, or returns undefined when nothing is at its path. A dangling symbolic
+ * link is something: reading it as empty would let the writer rename a file over the link
+ * and move the store off its volume. Any other failure to reach the file is thrown.
+ */
+async function readStore(path: string): Promise<Uint8Array | undefined> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+
+    throw error;
+  }
+
+  throw Object.assign(new Error(`CultCache store ${path} is a symbolic link whose target does not exist.`), { code: "ENOENT" });
 }
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {
