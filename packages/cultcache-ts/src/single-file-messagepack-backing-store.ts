@@ -42,11 +42,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
     try {
+      // Only a store that is not there is empty (ENOENT below). An empty file is not a
+      // store, since no CultCache writer leaves one, so it is decoded and refused.
       const data = await readFile(this.filePath);
-      if (data.length === 0) {
-        return [];
-      }
-
       const decoded = decode(data);
       const snapshot = decodeSnapshot(decoded);
       if (snapshot) {

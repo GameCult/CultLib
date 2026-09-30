@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
@@ -1448,6 +1448,47 @@ test("SingleFileMessagePackBackingStore refuses the C#-written variant store by 
     () => pullVector("../document-variants-c1/variant-store.msgpack"),
     (error: Error) => error.message.includes("cultcache.store.v2") || error.message.includes("laser-big"),
   );
+});
+
+test("SingleFileMessagePackBackingStore refusals say what was found without blaming variants", async () => {
+  await assert.rejects(
+    () => pullVector("unknown-header.msgpack"),
+    (error: Error) => error.message.includes("not one this runtime reads") && !error.message.includes("variant"),
+  );
+  await assert.rejects(
+    () => pullVector("extra-slot-full-payload.msgpack"),
+    (error: Error) => error.message.includes("not a valid store") && !error.message.includes("variant"),
+  );
+});
+
+test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-absent-"));
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(join(dir, "store.cc")).pullAll(), []);
+
+  // An existing empty file is not a store: no CultCache writer leaves one.
+  const empty = join(dir, "empty.cc");
+  await writeFile(empty, new Uint8Array());
+  await assert.rejects(() => new SingleFileMessagePackBackingStore(empty).pullAll());
+  assert.equal((await readFile(empty)).length, 0);
+
+  // An empty array is the legacy envelope array with no envelopes: no header, no format claimed.
+  const legacyEmpty = join(dir, "legacy-empty.cc");
+  await writeFile(legacyEmpty, Uint8Array.of(0x90));
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(legacyEmpty).pullAll(), []);
+});
+
+test("SingleFileMessagePackBackingStore reports a store it cannot reach as an I/O error", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-unreachable-"));
+  const loop = join(dir, "loop.cc");
+  await symlink(loop, loop);
+  const parent = join(dir, "body");
+  await writeFile(parent, "not a directory");
+  for (const [path, code] of [[loop, "ELOOP"], [join(parent, "store.cc"), "ENOTDIR"]] as const) {
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(path).pullAll(),
+      (error: NodeJS.ErrnoException) => error.code === code,
+    );
+  }
 });
 
 test("CultCache inspector refuses the same vectors by name", async () => {

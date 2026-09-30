@@ -14,8 +14,7 @@ export function isV1Snapshot(decoded: unknown): decoded is unknown[] {
 
   if (decoded[0] !== STORE_FORMAT_VERSION) {
     throw new Error(
-      `CultCache store format "${decoded[0]}" is not readable; this runtime reads "${STORE_FORMAT_VERSION}" only. ` +
-        "The store needs a runtime that resolves document variants.",
+      `CultCache store format "${decoded[0]}" is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" only.`,
     );
   }
 
@@ -26,8 +25,8 @@ export function isV1Snapshot(decoded: unknown): decoded is unknown[] {
 export function requireV1RecordSlots(record: unknown[]): void {
   if (record.length > PERSISTED_RECORD_SLOTS) {
     throw new Error(
-      `CultCache record "${String(record[0])}" (schema "${String(record[1])}") has ${record.length} slots; ` +
-        `this runtime reads ${PERSISTED_RECORD_SLOTS}. The store needs a runtime that resolves document variants.`,
+      `CultCache record "${String(record[0])}" (schema "${String(record[1])}") has ${record.length} slots, more than ` +
+        `the ${PERSISTED_RECORD_SLOTS} of a ${STORE_FORMAT_VERSION} record, so this is not a valid store.`,
     );
   }
 }
