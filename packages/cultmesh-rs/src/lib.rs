@@ -867,7 +867,8 @@ fn unix_millis() -> u128 {
 ///
 /// Each call owns a fresh connection epoch and returns only after the catalog
 /// acknowledges reliable application admission. A catalog that refuses the
-/// message answers with a `cultnet.error.v0`, returned as an error naming it.
+/// message answers with a `cultnet.error.v0`, returned as an error that names
+/// the refusal when it is one of the fixed texts a CultMesh catalog sends.
 pub fn publish_cultnet_message_to_rudp_catalog(
     message: &cultnet_rs::CultNetMessage,
     options: CultMeshRudpDocumentPublishOptions,
@@ -897,10 +898,15 @@ pub fn publish_cultnet_message_to_rudp_catalog(
                     )
                 {
                     let _ = client.disconnect(b"document-refused".to_vec());
-                    anyhow::bail!(
-                        "CultMesh RUDP catalog {} refused the message: {error}",
-                        options.target
-                    );
+                    // The catalog's text is quoted only when it is one of the
+                    // fixed refusals: any other text could carry anything.
+                    if REFUSAL_TEXTS.contains(&error.as_str()) {
+                        anyhow::bail!(
+                            "CultMesh RUDP catalog {} refused the put: {error}",
+                            options.target
+                        );
+                    }
+                    anyhow::bail!("CultMesh RUDP catalog {} refused the put", options.target);
                 }
             }
         }
@@ -1311,7 +1317,7 @@ mod tests {
             let mut server = CultMeshRudpDocumentServer::new(
                 socket,
                 |_receipt: CultMeshRudpRawDocumentReceipt| {
-                    anyhow::bail!("injected durable sink failure")
+                    anyhow::bail!("injected durable sink failure CANARY-7f3a")
                 },
                 |_query: &CultMeshRudpSnapshotQuery| Ok(Vec::new()),
                 CultMeshSystemClock::default(),
@@ -1349,10 +1355,109 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("refused the message: injected durable sink failure"),
+                .ends_with("refused the put: the catalog refused the document"),
             "{error:#}"
         );
+        assert!(!error.to_string().contains("CANARY"), "{error:#}");
         assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+        Ok(())
+    }
+
+    /// A catalog's refusal text is quoted only when it is one of the fixed
+    /// refusals a CultMesh catalog sends. Any other text, which could carry
+    /// anything, stays out of the publisher's error.
+    #[test]
+    fn a_publisher_never_quotes_a_refusal_it_does_not_recognise() -> Result<()> {
+        use cultnet_rs::{
+            CultNetRudpPacketType, CultNetRudpSendOptions, CultNetRudpSession,
+            CultNetRudpSessionOptions, decode_rudp_packet, encode_rudp_packet,
+        };
+        let temp = tempfile::tempdir()?;
+        let node = CultMesh::create_node(
+            temp.path().join("cultmesh.cc"),
+            TestDocuments,
+            Default::default(),
+        )?;
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(5)))?;
+        let target = socket.local_addr()?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let catalog_stop = stop.clone();
+        // A catalog that answers any put with a refusal of its own wording.
+        let catalog = thread::spawn(move || -> Result<()> {
+            let mut session: Option<CultNetRudpSession> = None;
+            let mut wire = vec![0_u8; 65_535];
+            while !catalog_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let Ok((bytes, peer)) = socket.recv_from(&mut wire) else {
+                    continue;
+                };
+                let Ok(packet) = decode_rudp_packet(&wire[..bytes]) else {
+                    continue;
+                };
+                if packet.packet_type == CultNetRudpPacketType::Connect {
+                    let mut accepted = CultNetRudpSession::new(CultNetRudpSessionOptions {
+                        connection_id: packet.connection_id,
+                        initial_sequence: None,
+                        resend_delay_ms: 10_000,
+                        max_pending_reliable_packets: Some(64),
+                    });
+                    let accept = accepted.accept_connect(&packet, 0, Vec::new())?;
+                    socket.send_to(&encode_rudp_packet(&accept)?, peer)?;
+                    session = Some(accepted);
+                    continue;
+                }
+                let Some(session) = session.as_mut() else {
+                    continue;
+                };
+                let Ok(received) = session.receive(&packet, 1) else {
+                    continue;
+                };
+                for _put in received.delivered {
+                    let refusal = encode_cultnet_message_to_vec(
+                        &cultnet_rs::CultNetMessage::Error {
+                            error: "no such tenant: CANARY-7f3a".into(),
+                            code: None,
+                            details: None,
+                        },
+                        CultNetWireContract::CultNetSchemaV0,
+                    )?;
+                    let options = CultNetRudpSendOptions {
+                        reliable: false,
+                        ordered: false,
+                        sequenced: false,
+                        now_ms: 2,
+                        reliable_expire_after_ms: None,
+                    };
+                    for packet in session.send_many("schema", refusal, options, Some(1200))? {
+                        socket.send_to(&encode_rudp_packet(&packet)?, peer)?;
+                    }
+                }
+            }
+            Ok(())
+        });
+
+        let error = node
+            .publish_document_to_rudp_catalog(
+                "note",
+                &Note {
+                    body: "refused by a stranger".into(),
+                },
+                CultMeshRudpDocumentPublishOptions {
+                    target,
+                    connect_timeout: Duration::from_secs(2),
+                    flush_timeout: Duration::from_secs(10),
+                    poll_interval: Duration::from_millis(2),
+                    resend_delay_ms: 5,
+                    ..CultMeshRudpDocumentPublishOptions::default()
+                },
+            )
+            .expect_err("a refused document must fail closed");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        catalog.join().expect("catalog thread should not panic")?;
+        assert_eq!(
+            error.to_string(),
+            format!("CultMesh RUDP catalog {target} refused the put")
+        );
         Ok(())
     }
 

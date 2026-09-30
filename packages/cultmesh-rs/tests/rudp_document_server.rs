@@ -41,7 +41,7 @@ impl CultMeshRudpRawDocumentSink for Sink {
         let mut state = self.0.lock().unwrap();
         if state.failures_remaining > 0 {
             state.failures_remaining -= 1;
-            anyhow::bail!("injected sink failure");
+            anyhow::bail!("injected sink failure CANARY-7f3a");
         }
         state.receipts.push(receipt);
         Ok(())
@@ -95,7 +95,7 @@ impl CultMeshRudpSnapshotSource for Source {
         state.calls += 1;
         if state.failures_remaining > 0 {
             state.failures_remaining -= 1;
-            anyhow::bail!("injected source failure");
+            anyhow::bail!("injected source failure CANARY-7f3a");
         }
         Ok(state.documents.clone())
     }
@@ -335,7 +335,8 @@ fn poll_until_rejected_or_stored<Q: CultMeshRudpSnapshotSource>(
     anyhow::bail!("the put was neither refused nor stored")
 }
 
-/// What a refused peer is sent: a `cultnet.error.v0`, then the goodbye. The
+/// What a refused peer is sent: a `cultnet.error.v0` carrying fixed text, never
+/// a sink's or source's error (the fixtures' errors carry a canary), then the goodbye. The
 /// refused message is never acknowledged, so its receipt stays pending until the
 /// goodbye invalidates it. Returns the refusal's text.
 fn refusal_seen_by(
@@ -362,6 +363,7 @@ fn refusal_seen_by(
         panic!("the refused peer was sent no refusal: {refusal:?}");
     };
     assert_eq!((code, details), (None, None));
+    assert!(!error.contains("CANARY"), "a sink's or source's text reached the peer: {error}");
     assert_eq!(
         client.reliable_send_status(receipt),
         CultNetRudpReliableSendStatus::Pending,
@@ -662,12 +664,13 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     assert_eq!(rejection.message_id, "rejected-put");
     assert_eq!(
         rejection.reason,
-        CultMeshRudpRejectionReason::SinkRefused("injected sink failure".into())
+        CultMeshRudpRejectionReason::SinkRefused("injected sink failure CANARY-7f3a".into())
     );
     assert_eq!(server.session_count(), 2);
+    // The caller keeps the sink's text; the peer is sent fixed text, never it.
     assert_eq!(
         refusal_seen_by(&mut publisher, &publish_receipt)?,
-        "injected sink failure"
+        "the catalog refused the document"
     );
     drain_until_idle(&mut server)?;
 
@@ -690,12 +693,12 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     assert_eq!(rejection.message_id, "rejected-snapshot");
     assert_eq!(
         rejection.reason,
-        CultMeshRudpRejectionReason::SnapshotSourceFailed("injected source failure".into())
+        CultMeshRudpRejectionReason::SnapshotSourceFailed("injected source failure CANARY-7f3a".into())
     );
     assert_eq!(server.session_count(), 1);
     assert_eq!(
         refusal_seen_by(&mut snapshot_client, &snapshot_receipt)?,
-        "injected source failure"
+        "the snapshot source failed"
     );
     drain_until_idle(&mut server)?;
 
@@ -842,7 +845,7 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
     assert_eq!(snapshot_server.session_count(), 0);
     assert_eq!(
         refusal_seen_by(&mut snapshot_client, &receipt)?,
-        rejection.reason.to_string()
+        "the snapshot response is too large"
     );
     Ok(())
 }
@@ -904,7 +907,10 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
     assert_eq!(server.session_count(), 1);
     // The peer hears the refusal and why, rather than waiting on a put that
     // will never be acknowledged.
-    assert_eq!(refusal_seen_by(&mut refused, &refused_receipt)?, sentence);
+    assert_eq!(
+        refusal_seen_by(&mut refused, &refused_receipt)?,
+        "the document can never be served"
+    );
 
     send(
         &mut writer,

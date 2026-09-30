@@ -274,6 +274,36 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
     }
 }
 
+/// The texts a refused peer is sent, one per rejection variant. They are fixed:
+/// a sink's or source's error text can quote what a peer sent, so it stays with
+/// the caller that receives the rejection and never reaches the wire.
+pub(crate) const REFUSAL_TEXTS: [&str; 8] = [
+    "the catalog refused the document",
+    "the document can never be served",
+    "the snapshot source failed",
+    "the snapshot has too many documents",
+    "the snapshot response is too large",
+    "the snapshot response could not be encoded",
+    "the retained payload budget is full",
+    "the snapshot response could not be queued",
+];
+
+impl CultMeshRudpRejectionReason {
+    /// The fixed text the refused peer is sent for this variant.
+    fn refusal_text(&self) -> &'static str {
+        REFUSAL_TEXTS[match self {
+            Self::SinkRefused(_) => 0,
+            Self::DocumentUnservable { .. } => 1,
+            Self::SnapshotSourceFailed(_) => 2,
+            Self::SnapshotTooManyDocuments { .. } => 3,
+            Self::SnapshotResponseTooLarge { .. } => 4,
+            Self::ResponseEncodingFailed(_) => 5,
+            Self::PayloadBudgetFull => 6,
+            Self::ResponseQueueFailed(_) => 7,
+        }]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultMeshRudpApplicationRejection {
     pub session: CultMeshRudpSessionKey,
@@ -359,9 +389,11 @@ where
     ///
     /// Application rejection invalidates only the responsible peer session and
     /// is returned as data so a daemon can log it and keep serving. The peer is
-    /// sent the refusal as a `cultnet.error.v0` carrying the reason's text, then
-    /// a goodbye; neither acknowledges the refused message. Local socket and
-    /// server-state failures remain errors.
+    /// sent the refusal as a `cultnet.error.v0` carrying fixed text for the
+    /// rejection's variant, then a goodbye; neither acknowledges the refused
+    /// message. The rejection's own detail, which can quote a sink's or
+    /// source's error, stays with the caller. Local socket and server-state
+    /// failures remain errors.
     pub fn poll_once(&mut self) -> Result<CultMeshRudpPollOutcome> {
         self.maintain()?;
         let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
@@ -460,7 +492,7 @@ where
                 now_unix,
                 now_monotonic,
             )? {
-                self.end_rejected_session(key, rejection.reason.to_string())?;
+                self.end_rejected_session(key, rejection.reason.refusal_text())?;
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
             }
         }
@@ -757,12 +789,12 @@ where
     /// has emptied: it must not acknowledge the refused message, because a
     /// publisher reads that acknowledgement as admission. A refusal that cannot
     /// be encoded or queued is not sent; the goodbye still is.
-    fn end_rejected_session(&mut self, key: CultMeshRudpSessionKey, reason: String) -> Result<()> {
+    fn end_rejected_session(&mut self, key: CultMeshRudpSessionKey, reason: &str) -> Result<()> {
         let Some(mut entry) = self.sessions.remove(&key) else {
             return Ok(());
         };
         let refusal = CultNetMessage::Error {
-            error: reason,
+            error: reason.into(),
             code: None,
             details: None,
         };
