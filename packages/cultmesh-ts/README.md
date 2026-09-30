@@ -87,16 +87,16 @@ await input.submitPrediction("pilot-a", predictedInput);
 const stop = input.watch("pilot-a", latest => reconcileInput(latest));
 ```
 
-Durable nodes resolve same-schema aliases at the boundary. Register the
-canonical document that owns storage and replication, then ask the node for the
-typed view the current runtime wants:
+Durable nodes hand out typed handles for the documents they register. One type
+owns each schema: a node refuses a definition it did not register, and refuses
+to register a second type for a schema it already holds.
 
 ```ts
 const station = await CultMesh.startNode(statePath, {
-  documents: [stationStockDocument],
+  documents: [stationStockDocument, daemonHealthDocument],
 });
 
-const stock = station.document(stationStockUiDocument, "station:starbridge:stock");
+const stock = station.document(stationStockDocument, "station:starbridge:stock");
 const current = await stock.latest();
 
 await stock.authoritativeWriter().write(updatedStockFromUi);
@@ -386,14 +386,14 @@ const latestHealth = await health.latest();
 
 const syncedHealth = await station.syncDocumentFromPeerSnapshot(
   () => client,
-  daemonHealthUiDocument,
+  daemonHealthDocument,
   "daemon:aetheria.health.v1",
   {
     timeoutMs: 5_000,
   },
 );
 const localHealth = await station
-  .document(daemonHealthUiDocument, "daemon:aetheria.health.v1")
+  .document(daemonHealthDocument, "daemon:aetheria.health.v1")
   .latest();
 ```
 
@@ -409,9 +409,9 @@ before using the peer-card endpoint as a dial target.
 snapshots. It hides the snapshot request message id, response listener, raw
 payload binary normalization, and MessagePack decode behind the same
 `CultMeshDocumentHandle` shape as local documents. The helper prefers an exact
-schema id match and falls back to the requested record key, so runtimes that
-alias the same logical document through different generated schema names can
-still read the publication with one CultMesh call. Pass a CultCache document
+schema id match and falls back to the requested record key, so a publication
+stored under another runtime's generated schema id can still be read with one
+CultMesh call. Pass a CultCache document
 definition instead of a raw schema id when you want a typed handle whose
 `latest()` result is parsed through that definition.
 
@@ -419,8 +419,8 @@ Use `node.syncDocumentFromPeerSnapshot(...)` or
 `CultMesh.syncDocumentFromPeerSnapshot(...)` when a runtime should hydrate its
 local node from the remote snapshot. The helper requests the raw snapshot,
 applies it through the node's document registry, and returns the requested
-typed definition. Same-schema aliases stay local after the call: the caller can
-keep using `node.document(aliasDefinition, key)` and explicitly select
+typed definition. The record then lives in the node: the caller can keep using
+`node.document(definition, key)` and explicitly select
 `authoritativeWriter()`, `predictionWriter()`, or `observe()`
 without re-threading the RUDP peer.
 
