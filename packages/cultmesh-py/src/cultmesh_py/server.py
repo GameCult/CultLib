@@ -646,7 +646,19 @@ class CultMeshLocalServer:
         """The refusal for a put this server could never serve, or None. The document alone,
         as a snapshot would serve it under the shortest message id, must fit max_snapshot_bytes;
         a put arriving over RUDP must also fit, as fragments of rudp_max_fragment_bytes, in one
-        message and the peer's reliable queue."""
+        message and the peer's reliable queue. A put whose document has no string recordKey or
+        binary payload could never be stored or served, and is refused as malformed."""
+        document_record = message.get("document")
+        if not (
+            isinstance(document_record, dict)
+            and isinstance(document_record.get("recordKey"), str)
+            and isinstance(document_record.get("payload"), (bytes, bytearray))
+        ):
+            return self._error_response(
+                "Raw put documents must carry a string recordKey and a binary payload.",
+                message_id=str(message.get("messageId") or ""),
+                code="malformed_document_put",
+            )
         if self.max_snapshot_bytes is None and not over_rudp:
             return None
         alone = self.node.database.raw_put_served_alone(message, message_id=_SHORTEST_SERVED_MESSAGE_ID)

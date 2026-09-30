@@ -4585,6 +4585,41 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(hello_reply["schemaVersion"], "cultnet.hello.v0")
         self.assertTrue(alive)
 
+    def test_cultmesh_local_server_refuses_a_malformed_put_over_rudp_and_serves_on(self) -> None:
+        # A put whose document has no string recordKey or no binary payload could never be stored
+        # or served: it is refused as malformed before any sizing reads it, and the RUDP thread
+        # serves the next peer.
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-malformed")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node)
+        try:
+            refusals = []
+            for field_name, value in (
+                ("recordKey", None),
+                ("recordKey", 5),
+                ("payload", None),
+                ("payload", "not binary"),
+            ):
+                put = self._rudp_note_put(document, f"bad-{field_name}-{value}", "note:bad", 10)
+                if value is None:
+                    del put["document"][field_name]
+                else:
+                    put["document"][field_name] = value
+                refusal, _ = self._rudp_exchange(server, put)
+                refusals.append((put["messageId"], refusal))
+            after, _ = self._rudp_exchange(server, snapshot_request(message_id="after").to_wire())
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            server.stop()
+        for message_id, refusal in refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+        self.assertEqual(after["messageId"], "after")
+        self.assertEqual(after["documents"], [])
+        self.assertTrue(alive)
+
     def test_cultmesh_local_server_refuses_options_that_could_answer_nothing(self) -> None:
         # The Rust document server's option rules: every limit is greater than zero, and the limits
         # leave room for an empty snapshot, the smallest response the server sends. One-byte
