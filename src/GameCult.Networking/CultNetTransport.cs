@@ -2966,14 +2966,20 @@ namespace GameCult.Networking
                 _peers.TryGetValue(peerKey, out var admitted);
                 // The admitted peer's session decides whether this Connect repeats the one it accepted:
                 // answer a repeat with the Accept already owed and queue nothing. Any other Connect is
-                // a new generation.
+                // a new generation, and the admitted peer's session ends here, under the gate every
+                // Send takes: a caller still holding the replaced peer can send nothing more into the
+                // endpoint the new session now owns.
                 if (admitted != null)
                 {
                     var repeats = false;
                     SocketException? unsendableReply = null;
                     lock (admitted.SessionGate)
                     {
-                        if (admitted.Session.ConnectRepeats(packet))
+                        if (!admitted.Session.ConnectRepeats(packet))
+                        {
+                            admitted.Session.ResetPeerState();
+                        }
+                        else
                         {
                             repeats = true;
                             CultNetRudpPacket reply;
@@ -3012,11 +3018,15 @@ namespace GameCult.Networking
                     unsendableAccept = SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
                 if (unsendableAccept != null)
                 {
-                    // The peer cannot be answered, so no session starts.
+                    // The peer cannot be answered, so no session starts, and the one it replaced has
+                    // already ended.
+                    _peers.Remove(peerKey);
                     _stats.PacketsDropped++;
-                    return true;
                 }
-                _peers[peerKey] = peer;
+                else
+                {
+                    _peers[peerKey] = peer;
+                }
                 if (admitted != null)
                 {
                     admitted.DisconnectReason = ReplacedPeerReason;

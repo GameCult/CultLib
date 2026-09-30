@@ -60,7 +60,7 @@ namespace GameCult.Networking.Tests
             return peer;
         }
 
-        private static (CultNetRudpSocketTransportServer Server, EndPoint ServerEndPoint, Peer X, Peer Y) TwoPeers(int? maxFragmentBytes = null)
+        private static (CultNetRudpSocketTransportServer Server, EndPoint ServerEndPoint, Peer X, Peer Y) TwoPeers(int? maxFragmentBytes = null, uint? initialSequence = null)
         {
             var serverSocket = Bind();
             var server = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
@@ -69,7 +69,8 @@ namespace GameCult.Networking.Tests
                 Socket = serverSocket,
                 ConnectionId = ConnectionId,
                 ResendDelayMs = 5,
-                MaxFragmentBytes = maxFragmentBytes
+                MaxFragmentBytes = maxFragmentBytes,
+                InitialSequence = initialSequence
             });
             var x = Connect(server, serverSocket.LocalEndPoint!);
             var y = Connect(server, serverSocket.LocalEndPoint!);
@@ -244,30 +245,71 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // A client that connects again from the same endpoint replaces the peer the listener held. A
+        // caller still holding the replaced peer (a handler still running for it, say) reaches nothing
+        // of the session that replaced it: no data and no goodbye.
+
+        /// <summary>X connects again as a new session, and the handshake completes.</summary>
+        private static (CultNetRudpSocketServerPeer Stale, CultNetRudpSocketServerPeer Replacing) Reconnect(
+            CultNetRudpSocketTransportServer server, EndPoint listenerEndPoint, Peer x)
+        {
+            var stale = x.Server;
+            Drain(x.Socket);
+            x.Session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+            x.Socket.SendTo(CultNetRudpPacketCodec.Encode(x.Session.CreateConnect(0)), listenerEndPoint);
+            server.ReceiveOnce();
+            x.Session.Receive(Drain(x.Socket).Single(p => p.PacketType == CultNetRudpPacketType.Accept), 0);
+            x.Server = server.Peers.Single(p => p.RemoteEndPoint.Equals(x.EndPoint));
+            Assert.That(x.Server, Is.Not.SameAs(stale));
+            Assert.That(x.Session.Connected, Is.True);
+            return (stale, x.Server);
+        }
+
         [Test]
-        public void ASendOnAPeerAlreadyReplacedLeavesThePeerThatReplacedIt()
+        public void ASendOnAReplacedPeerThrowsAndNoGoodbyeReachesTheSessionThatReplacedIt()
         {
             var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
             using (server)
             {
-                var stale = x.Server;
-                // X connects again as a new session: the listener replaces the peer it held.
-                var fresh = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
-                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(fresh.CreateConnect(0)), listenerEndPoint);
-                server.ReceiveOnce();
-                var replacing = server.Peers.Single(p => p.RemoteEndPoint.Equals(x.EndPoint));
-                Assert.That(replacing, Is.Not.SameAs(stale));
+                var (stale, replacing) = Reconnect(server, listenerEndPoint, x);
                 var ended = RecordDisconnects(server);
+                Assert.That(stale.Connected, Is.False, "the replaced peer's session ended with the replacement");
 
-                // A caller still holding the old peer sends through it, and that send fails after a
-                // fragment left.
+                // Had the stale send gone out, a failure after its first fragment would end the
+                // session that sent it and say goodbye to the endpoint.
                 server.UnsendableAfter[x.EndPoint] = 1;
-                Assert.Throws<SocketException>(() => server.SendSchema(stale, new byte[3000]));
+                Assert.Throws<InvalidOperationException>(() => server.SendSchema(stale, new byte[3000]));
                 server.ReceiveOnce();
 
+                Assert.That(Drain(x.Socket), Is.Empty, "nothing of the stale send reached the client");
+                Assert.That(x.Session.Connected, Is.True);
+                Assert.That(replacing.Connected, Is.True);
                 Assert.That(server.Peers, Has.Member(replacing));
                 Assert.That(server.Peers, Has.Count.EqualTo(2));
                 Assert.That(ended, Is.Empty);
+            }
+        }
+
+        // With a fixed initial sequence the stale frame would take the sequence the real one gets, and
+        // the real one would be dropped as a duplicate. With a drawn one it would land far ahead of
+        // the new session's window, and nothing after it would be delivered.
+        [TestCase(1000u)]
+        [TestCase(null)]
+        public void ASendOnAReplacedPeerDeliversNothingAndTheReplacingPeersFrameArrives(uint? initialSequence)
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(initialSequence: initialSequence);
+            using (server)
+            {
+                var (stale, replacing) = Reconnect(server, listenerEndPoint, x);
+
+                Assert.Throws<InvalidOperationException>(() => server.SendSchema(stale, "STALE"));
+                server.SendSchema(replacing, "REAL");
+
+                var delivered = Drain(x.Socket)
+                    .SelectMany(packet => x.Session.Receive(packet, 1).Delivered)
+                    .Select(frame => Encoding.UTF8.GetString(frame.Payload))
+                    .ToList();
+                Assert.That(delivered, Is.EqualTo(new[] { "REAL" }));
             }
         }
 
