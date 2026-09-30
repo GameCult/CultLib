@@ -29,6 +29,7 @@ import {
   type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
+  type CultNetRudpPacket,
   type CultNetSchemaCatalogOptions,
   type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
@@ -4280,6 +4281,17 @@ export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDoc
   tags?: string[];
 }
 
+/**
+ * Options for `CultMesh.createRudpDocumentServer`.
+ *
+ * The server fragments its replies by `maxFragmentBytes` (default
+ * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES`) and refuses any
+ * inbound frame or reply larger than `maxPayloadBytes`. A put whose snapshot
+ * reply could never be sent within those limits, 65535 fragments and
+ * `maxPendingReliablePackets`, is refused before `onDocumentPutRaw` sees it:
+ * `onError` receives a `CultMeshRudpUnservableDocumentError` and the peer a
+ * `cultnet.error.v0`. Every failed send reaches `onError`.
+ */
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
   getCache?: () => Promise<CultCache> | CultCache;
@@ -4295,6 +4307,36 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   onSessionClosed?: (session: CultMeshRudpServerSession) => void | Promise<void>;
   wireContract?: CultNetWireContract;
   sessionTimeoutMs?: number;
+}
+
+/** Replies larger than one fragment are split into fragments of at most this many bytes. */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
+
+const RUDP_MAX_FRAGMENTS_PER_MESSAGE = 0xffff;
+
+/** CultNet parses no message id shorter than one character, so no reply is smaller. */
+const SHORTEST_MESSAGE_ID = "0";
+
+/**
+ * A put the document server refused because it could never serve the document:
+ * the snapshot reply carrying it alone would exceed the server's reply limits.
+ */
+export class CultMeshRudpUnservableDocumentError extends Error {
+  constructor(
+    readonly messageId: string,
+    readonly recordKey: string,
+    readonly responseBytes: number,
+    readonly maxPayloadBytes: number | undefined,
+    readonly fragmentCount: number,
+    readonly maxFragmentCount: number,
+  ) {
+    super(
+      `Document ${recordKey} can never be served: its snapshot reply is ${responseBytes} bytes in `
+      + `${fragmentCount} fragments; limits are ${maxPayloadBytes ?? "unbounded"} bytes and `
+      + `${maxFragmentCount} fragments.`,
+    );
+    this.name = "CultMeshRudpUnservableDocumentError";
+  }
 }
 
 export interface CultMeshRudpServerSession {
@@ -5773,6 +5815,17 @@ export class CultMesh {
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
+    const maxFragmentBytes = options.maxFragmentBytes ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES;
+    if (!(maxFragmentBytes > 0)) {
+      throw new Error("CultMesh RUDP document server maxFragmentBytes must be greater than zero.");
+    }
+    const maxPayloadBytes = options.maxPayloadBytes;
+    // The most fragments one reply can take: the wire's fragment count, and the
+    // reliable queue a reply must fit into whole.
+    const maxReplyFragments = Math.min(
+      RUDP_MAX_FRAGMENTS_PER_MESSAGE,
+      options.maxPendingReliablePackets ?? RUDP_MAX_FRAGMENTS_PER_MESSAGE,
+    );
     let resendTimer: NodeJS.Timeout | undefined;
 
     function reportError(error: unknown): void {
@@ -5794,11 +5847,7 @@ export class CultMesh {
         if (packet.packetType === "connect") {
           const connectPayload = Uint8Array.from(packet.payload ?? []);
           if (record?.session.connectRepeats(packet)) {
-            socket.send(
-              encodeRudpPacket(record.session.acceptConnect(packet, nowMs)),
-              remote.port,
-              remote.address,
-            );
+            sendPacket(record.session.acceptConnect(packet, nowMs), remote);
             return;
           }
           if (record) closeSession(record);
@@ -5816,7 +5865,7 @@ export class CultMesh {
             work: Promise.resolve(),
           };
           sessions.set(key, record);
-          socket.send(encodeRudpPacket(record.session.acceptConnect(packet, nowMs)), remote.port, remote.address);
+          sendPacket(record.session.acceptConnect(packet, nowMs), remote);
           return;
         }
 
@@ -5826,13 +5875,20 @@ export class CultMesh {
 
         const result = record.session.receive(packet, nowMs);
         if (result.reply) {
-          socket.send(encodeRudpPacket(result.reply), record.remote.port, record.remote.address);
+          sendPacket(result.reply, record.remote);
         }
         for (const ready of result.readyToSend ?? []) {
-          socket.send(encodeRudpPacket(ready), record.remote.port, record.remote.address);
+          sendPacket(ready, record.remote);
         }
         for (const frame of result.delivered) {
           if (frame.channelId !== "schema") {
+            continue;
+          }
+          if (maxPayloadBytes !== undefined && frame.payload.byteLength > maxPayloadBytes) {
+            reportError(new Error(
+              `CultMesh RUDP document server refused a ${frame.payload.byteLength}-byte frame from `
+              + `${record.sessionId}; maxPayloadBytes is ${maxPayloadBytes}.`,
+            ));
             continue;
           }
           record.work = record.work
@@ -5845,11 +5901,7 @@ export class CultMesh {
           return;
         }
         if (packet.reliable) {
-          socket.send(
-            encodeRudpPacket(record.session.createAckForReceived(packet.sequence)),
-            record.remote.port,
-            record.remote.address,
-          );
+          sendPacket(record.session.createAckForReceived(packet.sequence), record.remote);
         }
       } catch (error) {
         reportError(error);
@@ -5876,6 +5928,7 @@ export class CultMesh {
             const cache = await options.getCache();
             sendSchemaMessage(record, options.documents.createRawSnapshotResponse(cache, message.messageId, message));
           } catch (error) {
+            reportError(error);
             sendSchemaMessage(record, {
               schemaVersion: "cultnet.error.v0",
               error: error instanceof Error ? error.message : String(error),
@@ -5888,6 +5941,12 @@ export class CultMesh {
           return;
         case "cultnet.document_put_raw.v0":
           if (options.onDocumentPutRaw) {
+            const unservable = unservablePut(message);
+            if (unservable) {
+              reportError(unservable);
+              sendSchemaMessage(record, { schemaVersion: "cultnet.error.v0", error: unservable.message });
+              return;
+            }
             const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
             if (receipt) {
               sendSchemaMessage(record, options.documents.createRawDocumentPutMessage(
@@ -5966,14 +6025,68 @@ export class CultMesh {
       message: CultNetMessage,
     ): void {
       if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
-      const payload = encode(encodeCultNetMessageForWire(message, wireContract));
+      const payload = encodeSchemaMessage(message);
+      if (maxPayloadBytes !== undefined && payload.byteLength > maxPayloadBytes) {
+        throw new Error(
+          `CultMesh RUDP reply ${message.schemaVersion} is ${payload.byteLength} bytes; `
+          + `maxPayloadBytes is ${maxPayloadBytes}.`,
+        );
+      }
       for (const packet of record.session.sendMany("schema", payload, {
         reliable: true,
         ordered: true,
         nowMs: Date.now(),
+        maxFragmentBytes,
       })) {
-        socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+        sendPacket(packet, record.remote);
       }
+    }
+
+    /** The one reply encoder, shared by sends and by put admission. */
+    function encodeSchemaMessage(message: CultNetMessage): Uint8Array {
+      return encode(encodeCultNetMessageForWire(message, wireContract));
+    }
+
+    /** A datagram that fails to leave reaches onError; nothing vanishes. */
+    function sendPacket(packet: CultNetRudpPacket, remote: { address: string; port: number }): void {
+      socket.send(encodeRudpPacket(packet), remote.port, remote.address, (error) => {
+        if (error) reportError(error);
+      });
+    }
+
+    /**
+     * Refuse a put whose document could never be served: the snapshot reply
+     * carrying it alone, under the shortest message id CultNet parses, sized
+     * as `sendSchemaMessage` would send it. The document is sized as the
+     * registry would store and serve it; a document the registry has no
+     * binding for is sized as received.
+     */
+    function unservablePut(message: CultNetMessage): CultMeshRudpUnservableDocumentError | undefined {
+      if (message.schemaVersion !== "cultnet.document_put_raw.v0") return undefined;
+      let reply: CultNetSnapshotResponseRawMessage;
+      try {
+        reply = options.documents.createRawSnapshotResponseForPut(message, SHORTEST_MESSAGE_ID);
+      } catch {
+        reply = {
+          schemaVersion: "cultnet.snapshot_response_raw.v0",
+          messageId: SHORTEST_MESSAGE_ID,
+          documents: [message.document],
+        };
+      }
+      const responseBytes = encodeSchemaMessage(reply).byteLength;
+      const fragmentCount = Math.max(1, Math.ceil(responseBytes / maxFragmentBytes));
+      if ((maxPayloadBytes === undefined || responseBytes <= maxPayloadBytes)
+        && fragmentCount <= maxReplyFragments) {
+        return undefined;
+      }
+      return new CultMeshRudpUnservableDocumentError(
+        message.messageId,
+        message.document.recordKey,
+        responseBytes,
+        maxPayloadBytes,
+        fragmentCount,
+        maxReplyFragments,
+      );
     }
 
     return {
@@ -5999,7 +6112,7 @@ export class CultMesh {
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
-              socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+              sendPacket(packet, record.remote);
             }
           }
         }, resendPollMs);

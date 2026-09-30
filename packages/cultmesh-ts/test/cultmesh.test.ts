@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { encode } from "@msgpack/msgpack";
+import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 import { defineDocumentType } from "@gamecult/cultcache-ts";
 import {
@@ -11,8 +11,11 @@ import {
   CultNetPeer,
   cultNetBuiltinSchemaRegistry,
   defineCultNetDocumentBinding,
+  type CultNetDocumentPutRawMessage,
+  type CultNetMessage,
+  type CultNetSnapshotResponseRawMessage,
 } from "cultnet-ts";
-import { CultMesh } from "../src/index";
+import { CultMesh, CultMeshRudpUnservableDocumentError } from "../src/index";
 
 const noteDocument = defineDocumentType({
   type: "cultmesh.note",
@@ -3221,6 +3224,212 @@ test("CultMesh TS negotiates streaming frame body transports explicitly", () => 
   streams.publishFrame({ ...frame, sequence: 43n });
   assert.deepEqual(streamUpdates, ["mimir:kiyo-pro"]);
   assert.deepEqual(frameUpdates, [42n]);
+});
+
+// A put the RUDP document server admits must be one it can serve. The server
+// fragments its replies as its puts are reassembled, and refuses a put whose
+// snapshot reply, carrying the document alone under the shortest message id,
+// could never be sent within its limits.
+type ServedBoundRig = {
+  server: ReturnType<typeof CultMesh.createRudpDocumentServer>;
+  peer: CultNetPeer;
+  admitted: string[];
+  errors: Error[];
+  messages: CultNetMessage[];
+};
+
+const servedBoundRegistry = () =>
+  new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: noteDocument })]);
+
+function notePut(messageId: string, recordKey: string, bodyLength: number): CultNetDocumentPutRawMessage {
+  return {
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId,
+    document: {
+      schemaId: "cultmesh.note.v0",
+      recordKey,
+      storedAt: "2026-09-30T00:00:00.000Z",
+      payloadEncoding: "messagepack",
+      payload: encode({ noteId: recordKey, body: "x".repeat(bodyLength) }),
+    },
+  };
+}
+
+/** The encoded size of the reply that would serve this put's document alone. */
+function servedAloneBytes(put: CultNetDocumentPutRawMessage): number {
+  return encode(servedBoundRegistry().createRawSnapshotResponseForPut(put, "0")).byteLength;
+}
+
+/** The body length whose served-alone reply is exactly `bytes`, with a guard. */
+function bodyLengthForReplyBytes(recordKey: string, bytes: number): number {
+  const probe = 8_000;
+  const length = probe + bytes - servedAloneBytes(notePut("p", recordKey, probe));
+  assert.equal(servedAloneBytes(notePut("p", recordKey, length)), bytes, "fixture: reply size is linear in the body");
+  return length;
+}
+
+async function withServedBoundRig(
+  connectionId: number,
+  serverLimits: { maxFragmentBytes?: number; maxPendingReliablePackets?: number; maxPayloadBytes?: number },
+  body: (rig: ServedBoundRig) => Promise<void>,
+): Promise<void> {
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-served-bound-")), "node.ccmp"),
+    { documents: [noteDocument] },
+  );
+  const registry = servedBoundRegistry();
+  const admitted: string[] = [];
+  const errors: Error[] = [];
+  const messages: CultNetMessage[] = [];
+  const server = CultMesh.createRudpDocumentServer("cultmesh-ts-served-bound-server", connectionId, {
+    documents: registry,
+    getCache: () => node.cache,
+    bindHost: "127.0.0.1",
+    bindPort: 0,
+    resendDelayMs: 25,
+    resendPollMs: 5,
+    ...serverLimits,
+    // Stored as the registry stores a raw put, so the served record is the one it sizes.
+    onDocumentPutRaw: async (document) => {
+      admitted.push(document.recordKey);
+      await registry.applyRawDocumentPutMessage(node.cache, {
+        schemaVersion: "cultnet.document_put_raw.v0",
+        messageId: `store:${document.recordKey}`,
+        document: {
+          schemaId: document.schemaId,
+          recordKey: document.recordKey,
+          storedAt: document.storedAt,
+          payloadEncoding: "messagepack",
+          payload: encode(document.payload),
+        },
+      });
+    },
+    onError: (error) => errors.push(error),
+  });
+  let peer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    peer = await CultMesh.createRudpPeer(
+      "cultmesh-ts-served-bound-client",
+      connectionId,
+      `rudp://127.0.0.1:${server.bind.port}`,
+      { resendDelayMs: 25, resendPollMs: 5, maxFragmentBytes: 1024, maxPendingReliablePackets: 512, connectTimeoutMs: 1_000 },
+    );
+    peer.on("message", (message: CultNetMessage) => messages.push(message));
+    await body({ server, peer, admitted, errors, messages });
+  } finally {
+    peer?.close();
+    server.close();
+  }
+}
+
+/** Requests `recordKey` under the shortest message id and waits for the reply. */
+async function snapshotUnderShortestId(rig: ServedBoundRig, recordKey: string): Promise<CultNetMessage> {
+  const before = rig.messages.length;
+  rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "0", recordKeys: [recordKey] });
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 3_000) {
+    const reply = rig.messages.slice(before).find((message) =>
+      message.schemaVersion === "cultnet.snapshot_response_raw.v0" && message.messageId === "0");
+    if (reply) return reply;
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for the snapshot of ${recordKey}; server errors: ${rig.errors.map(e => e.message).join("; ")}`);
+}
+
+function servedBodies(reply: CultNetMessage): Array<[string, number]> {
+  assert.equal(reply.schemaVersion, "cultnet.snapshot_response_raw.v0");
+  return (reply as CultNetSnapshotResponseRawMessage).documents.map((document) => [
+    document.recordKey,
+    (decode(document.payload) as { body: string }).body.length,
+  ]);
+}
+
+async function waitForAdmission(rig: ServedBoundRig, recordKey: string): Promise<void> {
+  const startedAt = Date.now();
+  while (!rig.admitted.includes(recordKey) && Date.now() - startedAt < 3_000) await delay(5);
+  assert.ok(rig.admitted.includes(recordKey), `${recordKey} was not admitted; server errors: ${rig.errors.map(e => e.message).join("; ")}`);
+}
+
+async function waitForError(rig: ServedBoundRig, description: string): Promise<Error> {
+  const startedAt = Date.now();
+  while (rig.errors.length === 0 && Date.now() - startedAt < 3_000) await delay(5);
+  assert.ok(rig.errors.length > 0, `no server error for ${description}`);
+  return rig.errors[0]!;
+}
+
+test("CultMesh TS RUDP document server serves an 80 KB note put in 1 KiB fragments", async () => {
+  await withServedBoundRig(0x10203060, { maxFragmentBytes: 1024, maxPendingReliablePackets: 512 }, async (rig) => {
+    rig.peer.send(notePut("put-large", "note:large", 80_000));
+    await waitForAdmission(rig, "note:large");
+    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:large")), [["note:large", 80_000]]);
+    assert.deepEqual(rig.errors, []);
+  });
+});
+
+test("CultMesh TS RUDP document server refuses a put whose reply would overflow its reliable queue", async () => {
+  // Eight 1 KiB fragments fit the queue, nine do not.
+  const atBound = bodyLengthForReplyBytes("note:at", 8 * 1024);
+  const overBound = bodyLengthForReplyBytes("note:ov", 8 * 1024 + 1);
+  await withServedBoundRig(0x10203061, { maxFragmentBytes: 1024, maxPendingReliablePackets: 8 }, async (rig) => {
+    rig.peer.send(notePut("put-over", "note:ov", overBound));
+    const refusal = await waitForError(rig, "the over-bound put");
+    assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal.message);
+    assert.equal(refusal.messageId, "put-over");
+    assert.equal(refusal.recordKey, "note:ov");
+    assert.equal(refusal.responseBytes, 8 * 1024 + 1);
+    assert.equal(refusal.fragmentCount, 9);
+    assert.equal(refusal.maxFragmentCount, 8);
+    assert.equal(refusal.maxPayloadBytes, undefined);
+    assert.match(refusal.message, /8193 bytes in 9 fragments/);
+    assert.deepEqual(rig.admitted, []);
+
+    rig.peer.send(notePut("put-at", "note:at", atBound));
+    await waitForAdmission(rig, "note:at");
+    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
+    assert.equal(rig.errors.length, 1);
+  });
+});
+
+test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts and inbound frames", async () => {
+  const limit = 4_000;
+  const atBound = bodyLengthForReplyBytes("note:at", limit);
+  const overBound = bodyLengthForReplyBytes("note:ov", limit + 1);
+  await withServedBoundRig(0x10203062, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
+    rig.peer.send(notePut("put-over", "note:ov", overBound));
+    const refusal = await waitForError(rig, "the over-bound put");
+    assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal.message);
+    assert.equal(refusal.responseBytes, limit + 1);
+    assert.equal(refusal.maxPayloadBytes, limit);
+    assert.equal(refusal.fragmentCount, 4);
+    assert.deepEqual(rig.admitted, []);
+
+    rig.peer.send(notePut("put-at", "note:at", atBound));
+    await waitForAdmission(rig, "note:at");
+    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
+    assert.equal(rig.errors.length, 1);
+
+    // A frame over the limit is refused on arrival and never offered as a put.
+    rig.peer.send(notePut("put-huge", "note:huge", 2 * limit));
+    await delay(50);
+    const startedAt = Date.now();
+    while (rig.errors.length < 2 && Date.now() - startedAt < 3_000) await delay(5);
+    assert.equal(rig.errors.length, 2);
+    assert.ok(!(rig.errors[1] instanceof CultMeshRudpUnservableDocumentError));
+    assert.match(rig.errors[1]!.message, /maxPayloadBytes is 4000/);
+    assert.deepEqual(rig.admitted, ["note:at"]);
+  });
+});
+
+test("CultMesh TS RUDP document server reports a datagram that fails to leave", async () => {
+  // Fragments larger than any UDP datagram: the reply's one packet cannot be sent.
+  await withServedBoundRig(0x10203063, { maxFragmentBytes: 100_000, maxPendingReliablePackets: 512 }, async (rig) => {
+    rig.peer.send(notePut("put-large", "note:large", 80_000));
+    await waitForAdmission(rig, "note:large");
+    rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "0", recordKeys: ["note:large"] });
+    const failure = await waitForError(rig, "the oversized datagram");
+    assert.match(failure.message, /EMSGSIZE|message too long/i);
+  });
 });
 
 function delay(milliseconds: number): Promise<void> {
