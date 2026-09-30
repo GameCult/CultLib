@@ -13,6 +13,18 @@ Depends on: `hands/cultmesh-put-serve-bound` merging first. It introduces `docum
 cultmesh-rs (`c9cdad12`, `85288a5a`). The cuts below convert those sites. Their anchors are by commit, not by
 line, because the branch is not on main.
 
+Found by the put-serve Hands (batch 3, `38000efa`, 2026-09-30); they belong to this map's cuts:
+- **Python codes outside the closed code list.** Python refuses with `document_unservable`,
+  `malformed_document_put` and `snapshot_*_exceeded`. None of these are in the closed `cultnet.error.v0` code
+  list, and Rust and TS peers refuse to decode an unknown code.
+- **Two error-map shapes.** TS sends a two-key error map that its own peers cannot parse. Rust sends the five-key
+  contract shape. The two agree only at the message level.
+- **The session after a refusal.** TS and Python keep the session open after a refusal; Rust sends a goodbye and
+  ends it.
+- **New Rust refusal frame.** The put-serve branch adds a Rust refusal frame, `cultnet.error.v0` carrying the
+  reason text with no code and no details, sent before the goodbye and acknowledging nothing. Cut 1 gives it a
+  code.
+
 Map branch: `main`.
 
 ---
