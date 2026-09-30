@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using GameCult.Caching.MessagePack;
+using MessagePack;
 using NUnit.Framework;
 using static GameCult.Caching.Tests.ElementIdTests;
 
@@ -115,6 +116,15 @@ namespace GameCult.Caching.Tests
 
             Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.Exception);
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
+        }
+
+        // The record type of the shared valid store (v3-base.msgpack: alpha and beta), so a cache can open it.
+        [CultDocument("vectors.item", "vectors.item.v1")]
+        [MessagePackObject]
+        public sealed class VectorItem
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public int Count { get; set; }
         }
     }
 }
