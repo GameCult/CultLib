@@ -1566,3 +1566,12 @@ profiles.
   (Hands' deviation 5 was rejected: pinned clients restarting on a new port were locked out.)
 - **The random default belongs to the session.** A session draws its own initial sequence when none is set, so one
   options object reused across sessions or reconnects never repeats a sequence.
+- **Connect attempts (Self, 2026-09-30, after the Cut 1c fix-batch Soul pass).** While a Connect awaits its Accept, only an
+  Accept the client honours retires it; an Ack never does (an Ack naming the pending Connect had wedged the client for
+  good). A fresh attempt after the connect-attempt timeout uses exactly the abandoned sequence + (receive window − 1),
+  not a random draw: that keeps a late copy of the abandoned Connect inside the new one's stale window while escaping the
+  server's stale window (unless the server sits exactly there, in which case the next attempt escapes). Only a client's
+  first Connect draws randomly.
+- **Recorded divergence (not this campaign's to fix yet).** Only Rust has a receiver receive-ahead window (1,024). TS,
+  C# and Python acknowledge a far-ahead reliable frame by name and hold it behind an ordered gap indefinitely, so a
+  stranded ordered channel is silent loss there and "still owed" in Rust. Map a receive window for the three runtimes.
