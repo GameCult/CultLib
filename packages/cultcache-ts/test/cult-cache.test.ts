@@ -1754,3 +1754,14 @@ test("a store keeps a record of another schema at the same key, and the same sch
   await store.delete(identityEnvelope("j", "label-c", "id-c", "name-c"));
   assert.deepEqual(await recordsOnDisk(file), [["j", "id-a"], ["k", "id-b"], ["k", "id-a"]]);
 });
+
+test("a store replaces and deletes a record written by an envelope that carries no catalog entry", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  const raw = (payload: number): CultCacheEnvelope => ({ key: "k", type: "t", payload: Uint8Array.of(payload), storedAt: "2026-09-30T00:00:00Z" });
+  await store.push(raw(0x01));
+  await store.push(raw(0x02));
+  assert.deepEqual((await store.pullAll()).map((record) => [record.key, [...record.payload]]), [["k", [0x02]]]);
+  await store.delete(raw(0x02));
+  assert.deepEqual(await recordsOnDisk(file), []);
+});
