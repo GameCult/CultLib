@@ -659,9 +659,11 @@ namespace GameCult.Caching.Tests
                 writer.FlushAllBackingStores();
             }
 
+            // A record of a schema this cache does not register is not corruption: the store opens and carries it (ForeignRecordTests).
             var bytes = File.ReadAllBytes(unknown);
             using var narrow = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Counter) }));
-            Assert.That(() => narrow.AddBackingStore(new SingleFileMessagePackBackingStore(unknown)), Throws.Exception, "a store with an unknown schema opened");
+            narrow.AddBackingStore(new SingleFileMessagePackBackingStore(unknown));
+            Assert.That(narrow.BackingStores.Single().ForeignRecords, Has.Count.EqualTo(1));
             Assert.That(File.ReadAllBytes(unknown), Is.EqualTo(bytes), "opening rewrote a store with an unknown schema");
         }
 
