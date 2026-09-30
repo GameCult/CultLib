@@ -4289,22 +4289,21 @@ export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDoc
  * reply larger than `maxPayloadBytes`. A put is judged by what serving it
  * would send, not by the size of its own frame: a put whose snapshot reply
  * could never be sent within those limits, 65535 fragments and
- * `maxPendingReliablePackets`, or whose receipt could not be, is refused
- * before `onDocumentPutRaw` sees it: `onError` receives a
- * `CultMeshRudpUnservableDocumentError` and the peer a `cultnet.error.v0`.
+ * `maxPendingReliablePackets`, is refused before `onDocumentPutRaw` sees it:
+ * `onError` receives a `CultMeshRudpUnservableDocumentError` and the peer a
+ * `cultnet.error.v0`.
  *
- * Both replies are sized from the record `documents` would store for the put:
- * the snapshot reply serving it alone, and the receipt echoing its value back
- * under the put's message id with the server's default provenance. The
- * judgement is exact only for an application whose `onDocumentPutRaw` stores
- * the put through that registry (`applyRawDocumentPutMessage`), whose
- * `getCache` serves that store, and whose receipt, if any, echoes the stored
- * value; a handler that stores or acknowledges another record is judged by
- * the registry's record, not its own.
+ * The snapshot reply is sized from the record `documents` would store for the
+ * put, serving it alone. The judgement is exact only for an application whose
+ * `onDocumentPutRaw` stores the put through that registry
+ * (`applyRawDocumentPutMessage`) and whose `getCache` serves that store; a
+ * handler that stores another record is judged by the registry's record, not
+ * its own. A receipt is not part of the judgement: whether one is sent is the
+ * handler's to decide after it stores the put.
  *
- * A reply that cannot be sent all the same, such as a larger receipt from such
- * a handler, reaches `onError`, and the peer receives a `cultnet.error.v0` in
- * its place. Every failed datagram send reaches `onError`.
+ * A reply that cannot be sent all the same, such as a receipt larger than
+ * `maxPayloadBytes`, reaches `onError`, and the peer receives a
+ * `cultnet.error.v0` in its place. Every failed datagram send reaches `onError`.
  */
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
@@ -4333,8 +4332,8 @@ const SHORTEST_MESSAGE_ID = "0";
 
 /**
  * A put the document server refused because it could never serve the document:
- * the larger of the snapshot reply carrying it alone and the receipt
- * acknowledging it (`responseBytes`) would exceed the server's reply limits.
+ * the snapshot reply carrying it alone (`responseBytes`) would exceed the
+ * server's reply limits.
  */
 export class CultMeshRudpUnservableDocumentError extends Error {
   constructor(
@@ -6065,7 +6064,7 @@ export class CultMesh {
       });
     }
 
-    /** The one receipt builder, shared by the receipt send and by put admission. */
+    /** Builds the receipt `onDocumentPutRaw` returned, under the put's message id by default. */
     function receiptMessage(receipt: CultMeshRudpDocumentReceipt, putMessageId: string): CultNetMessage {
       return options.documents.createRawDocumentPutMessage(
         receipt.binding, receipt.messageId ?? putMessageId, receipt.recordKey, receipt.value,
@@ -6079,34 +6078,26 @@ export class CultMesh {
     }
 
     /**
-     * Refuse a put whose document could never be served or acknowledged: the
-     * snapshot reply carrying it alone, under the shortest message id CultNet
-     * parses, and the receipt echoing it, each sized as `sendSchemaMessage`
-     * would send it. Both are built from the record the registry would store,
-     * which is exact only when the application stores through the registry and
-     * echoes that value; a document the registry has no binding for is sized
-     * as received, with no receipt.
+     * Refuse a put whose document could never be served: the snapshot reply
+     * carrying it alone, under the shortest message id CultNet parses, sized as
+     * `sendSchemaMessage` would send it. It is built from the record the
+     * registry would store, which is exact only when the application stores
+     * through the registry; a document the registry has no binding for is
+     * sized as received.
      */
     function unservablePut(message: CultNetMessage): CultMeshRudpUnservableDocumentError | undefined {
       if (message.schemaVersion !== "cultnet.document_put_raw.v0") return undefined;
-      let replies: CultNetMessage[];
+      let reply: CultNetMessage;
       try {
-        const { binding, value } = options.documents.decodeRawDocumentPut(message);
-        replies = [
-          options.documents.createRawSnapshotResponseForPut(message, SHORTEST_MESSAGE_ID),
-          receiptMessage(
-            { binding, recordKey: message.document.recordKey, value } as CultMeshRudpDocumentReceipt,
-            message.messageId,
-          ),
-        ];
+        reply = options.documents.createRawSnapshotResponseForPut(message, SHORTEST_MESSAGE_ID);
       } catch {
-        replies = [{
+        reply = {
           schemaVersion: "cultnet.snapshot_response_raw.v0",
           messageId: SHORTEST_MESSAGE_ID,
           documents: [message.document],
-        }];
+        };
       }
-      const responseBytes = Math.max(...replies.map((reply) => encodeSchemaMessage(reply).byteLength));
+      const responseBytes = encodeSchemaMessage(reply).byteLength;
       const fragmentCount = Math.max(1, Math.ceil(responseBytes / maxFragmentBytes));
       if ((maxPayloadBytes === undefined || responseBytes <= maxPayloadBytes)
         && fragmentCount <= maxReplyFragments) {

@@ -3246,7 +3246,7 @@ const servedBoundRegistry = () =>
 /**
  * A put's own storedAt, kept by the served record and replaced in the receipt by the server's
  * 24-character clock. It is long enough that the snapshot reply is always the larger reply, so
- * fixtures built with it pin the served bound; `RECEIPT_STORED_AT` puts pin the receipt bound.
+ * fixtures built with it pin the served bound; `RECEIPT_STORED_AT` puts make the receipt the larger reply.
  */
 const SERVED_STORED_AT = `2026-09-30T00:00:00.000Z${"~".repeat(200)}`;
 const RECEIPT_STORED_AT = "2026-09-30T00:00:00.000Z";
@@ -3317,16 +3317,6 @@ function bodyLengthForReplyBytes(recordKey: string, bytes: number): number {
   const put = notePut("p", recordKey, length);
   assert.equal(servedAloneBytes(put), bytes, "fixture: reply size is linear in the body");
   assert.ok(echoReceiptBytes(put) < bytes, "fixture: the snapshot reply is the larger reply");
-  return length;
-}
-
-/** The body length whose echoed receipt, under `messageId`, is exactly `bytes`, and the larger reply. */
-function bodyLengthForReceiptBytes(messageId: string, recordKey: string, bytes: number): number {
-  const put = (body: number) => notePut(messageId, recordKey, body, undefined, RECEIPT_STORED_AT);
-  const probe = 2_000;
-  const length = probe + bytes - echoReceiptBytes(put(probe));
-  assert.equal(echoReceiptBytes(put(length)), bytes, "fixture: receipt size is linear in the body");
-  assert.ok(servedAloneBytes(put(length)) < bytes, "fixture: the receipt is the larger reply");
   return length;
 }
 
@@ -3510,29 +3500,46 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
   });
 });
 
-test("CultMesh TS RUDP document server refuses a put whose receipt could not be sent", async () => {
-  // The receipt is the larger reply here: a put whose receipt is one byte over the limit is
-  // refused before it is stored; one whose receipt is exactly at the limit is stored and gets it.
+test("CultMesh TS RUDP document server admits a put served at the bound, whatever receipt its handler returns", async () => {
+  // These puts keep a short storedAt, so the receipt echoing one is larger than its served reply,
+  // and over the limit. Admission sizes only the served reply: exactly at the limit is admitted
+  // with or without a receipt, one byte over is refused. An echoed receipt that cannot be sent
+  // goes the way of any unsendable receipt: the put is stored and the peer is told.
   const limit = 4_000;
-  const overBound = bodyLengthForReceiptBytes("put-ov", "note:ro", limit + 1);
-  const atBound = bodyLengthForReceiptBytes("put-at", "note:ra", limit);
-  await withServedBoundRig(0x10203065, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
-    rig.peer.send(notePut("put-ov", "note:ro", overBound, undefined, RECEIPT_STORED_AT));
-    const refusal = await waitForError(rig, "the put whose receipt is over the limit");
-    assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal.message);
-    assert.equal(refusal.responseBytes, limit + 1);
-    assert.equal(refusal.maxPayloadBytes, limit);
-    assert.deepEqual(rig.admitted, []);
-    await waitForPeerErrors(rig, 1);
+  const put = (messageId: string, recordKey: string, body: number) =>
+    notePut(messageId, recordKey, body, undefined, RECEIPT_STORED_AT);
+  const bodyServedAt = (messageId: string, recordKey: string, bytes: number): number => {
+    const probe = 2_000;
+    const length = probe + bytes - servedAloneBytes(put(messageId, recordKey, probe));
+    assert.equal(servedAloneBytes(put(messageId, recordKey, length)), bytes, "fixture: reply size is linear in the body");
+    assert.ok(echoReceiptBytes(put(messageId, recordKey, length)) > limit, "fixture: the echoed receipt is over the limit");
+    return length;
+  };
+  const atBound = bodyServedAt("put-at", "note:at", limit);
+  const overBound = bodyServedAt("put-ov", "note:ov", limit + 1);
+  for (const [connectionId, receipt] of [[0x10203066, undefined], [0x10203067, "echo"]] as const) {
+    await withServedBoundRig(connectionId, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
+      rig.peer.send(put("put-at", "note:at", atBound));
+      await waitForAdmission(rig, "note:at");
+      if (receipt === "echo") {
+        const failure = await waitForError(rig, "the echoed receipt");
+        assert.match(failure.message, /reply cultnet\.document_put_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
+        await waitForPeerErrors(rig, 1);
+        assert.ok(!rig.messages.some(isDocumentPut));
+      }
+      assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
+      const errorsBefore = rig.errors.length;
+      assert.equal(errorsBefore, receipt === "echo" ? 1 : 0, rig.errors.map((error) => error.message).join("; "));
 
-    rig.peer.send(notePut("put-at", "note:ra", atBound, undefined, RECEIPT_STORED_AT));
-    await waitForAdmission(rig, "note:ra");
-    const startedAt = Date.now();
-    while (!rig.messages.some(isDocumentPut) && Date.now() - startedAt < 3_000) await delay(5);
-    const receipt = rig.messages.find(isDocumentPut) as CultNetDocumentPutRawMessage | undefined;
-    assert.equal(receipt?.messageId, "put-at", "the stored put gets its receipt");
-    assert.equal(rig.errors.length, 1);
-  }, { receipt: "echo" });
+      rig.peer.send(put("put-ov", "note:ov", overBound));
+      const startedAt = Date.now();
+      while (rig.errors.length === errorsBefore && Date.now() - startedAt < 3_000) await delay(5);
+      const refusal = rig.errors[errorsBefore];
+      assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal?.message);
+      assert.equal(refusal.responseBytes, limit + 1);
+      assert.deepEqual(rig.admitted, ["note:at"]);
+    }, receipt ? { receipt } : {});
+  }
 });
 
 test("CultMesh TS RUDP document server tells the peer when a stored put's receipt cannot be sent", async () => {
