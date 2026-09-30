@@ -1141,3 +1141,98 @@ fn a_budget_at_the_media_record_ceiling_admits_large_shards_end_to_end() {
     .unwrap();
     decode_media_wire_record(&wire).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Known-answer generator: reed-solomon-erasure 6.0.0 is the reference that
+// produced `fixtures/media_fec_rs_gf256_v1.kat`. It runs once, before the
+// crate is replaced by the owned construction, and is deleted with the crate.
+// ---------------------------------------------------------------------------
+
+/// The data of a fixture case, as the fixture's header defines it.
+fn kat_data(k: usize, m: usize, shard_bytes: usize, fill: &str) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|i| match fill {
+            "lcg" => bytes((k * 65_536 + m * 256 + i) as u32, shard_bytes),
+            "zero" => vec![0; shard_bytes],
+            "ff" => vec![0xff; shard_bytes],
+            other => panic!("unknown fill {other}"),
+        })
+        .collect()
+}
+
+/// Erasure patterns of exactly `min(m, k)`-ish shards, each leaving at least
+/// one parity shard present and at least one data shard missing.
+fn kat_erasures(k: usize, m: usize) -> Vec<Vec<usize>> {
+    let mut patterns = Vec::new();
+    let d = m.min(k);
+    patterns.push((0..d).collect()); // data from the front
+    patterns.push((k - d..k).collect()); // data from the back
+    let spread = m.div_ceil(2).min(k);
+    let mut mixed: Vec<usize> = (0..spread).map(|s| s * k / spread).collect();
+    mixed.extend(k..k + (m - spread));
+    patterns.push(mixed); // data spread across the block, parity from the front
+    let mut one: Vec<usize> = vec![k / 2];
+    one.extend(k..k + (m - 1));
+    patterns.push(one); // one data shard, every parity shard but the last
+    patterns.sort();
+    patterns.dedup();
+    patterns
+}
+
+#[test]
+#[ignore = "run once to write the rs-gf256-v1 fixture from the reference crate"]
+fn generate_rs_gf256_v1_known_answers() {
+    use reed_solomon_erasure::galois_8::ReedSolomon;
+    let mut cases: Vec<(usize, usize, usize, &str)> = Vec::new();
+    // Every standard video block geometry, k = 1..=16, m = max(2, ceil(k / 4)).
+    for k in 1..=16_u16 {
+        cases.push((usize::from(k), usize::from(STANDARD.video_parity_shards(k)), 37, "lcg"));
+    }
+    // Standard audio, 4 + 2, at 1 byte, an odd length and a full datagram.
+    cases.extend([(4, 2, 1, "lcg"), (4, 2, 37, "lcg"), (4, 2, 1300, "lcg")]);
+    // The widest standard video block at a full datagram, and a long shard.
+    cases.extend([(16, 4, 1300, "lcg"), (3, 2, 4000, "lcg")]);
+    // Degenerate data.
+    cases.extend([(4, 2, 16, "zero"), (16, 4, 16, "ff")]);
+    // The policy's edges: one shard each side, and 256 shards split every way.
+    cases.extend([
+        (1, 1, 1, "lcg"),
+        (1, 1, 9, "lcg"),
+        (2, 1, 5, "lcg"),
+        (255, 1, 1, "lcg"),
+        (255, 1, 3, "lcg"),
+        (1, 255, 1, "lcg"),
+        (1, 255, 4, "lcg"),
+        (2, 254, 2, "lcg"),
+        (128, 128, 1, "lcg"),
+        (128, 128, 4, "lcg"),
+        (200, 56, 2, "lcg"),
+        (250, 6, 5, "lcg"),
+    ]);
+
+    let mut out = String::new();
+    for (k, m, shard_bytes, fill) in cases {
+        let data = kat_data(k, m, shard_bytes, fill);
+        let code = ReedSolomon::new(k, m).unwrap();
+        let mut parity = vec![vec![0_u8; shard_bytes]; m];
+        code.encode_sep(&data, &mut parity).unwrap();
+        out.push_str(&format!("case {k} {m} {shard_bytes} {fill}\n"));
+        for (p, shard) in parity.iter().enumerate() {
+            out.push_str(&format!("parity {p} {}\n", hex(shard)));
+        }
+        for pattern in kat_erasures(k, m) {
+            let mut shards: Vec<Option<Vec<u8>>> =
+                data.iter().chain(parity.iter()).cloned().map(Some).collect();
+            for &slot in &pattern {
+                shards[slot] = None;
+            }
+            code.reconstruct_data(&mut shards).unwrap();
+            for (i, shard) in shards.iter().take(k).enumerate() {
+                assert_eq!(shard.as_ref().unwrap(), &data[i], "k={k} m={m} {pattern:?}");
+            }
+            let list: Vec<String> = pattern.iter().map(usize::to_string).collect();
+            out.push_str(&format!("erase {}\n", list.join(",")));
+        }
+    }
+    println!("BEGIN-KAT\n{out}END-KAT");
+}
