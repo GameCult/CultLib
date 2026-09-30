@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
@@ -4555,6 +4556,98 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
             self.assertEqual(msgpack.unpackb(response.payload, raw=False)["runtimeId"], "mesh-server")
             self.assertTrue(server._rudp_thread.is_alive())
             self.assertGreater(server.rudp_send_failures, 0)
+        finally:
+            server.stop()
+
+    def _served(self, y: CultNetRudpSocketTransportConnection) -> Any:
+        import msgpack  # type: ignore
+
+        y.send("schema", hello(runtime_id="probe").to_bytes())
+        for _ in range(200):
+            response = y.receive_once()
+            if response is not None:
+                return msgpack.unpackb(response.payload, raw=False)
+            time.sleep(0.005)
+        return None
+
+    def test_a_vanished_peer_does_not_kill_the_rudp_thread(self) -> None:
+        # On Windows the closed port of a peer that went away is reported as
+        # ConnectionResetError (WinError 10054) by the next receive. It can only fail there.
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        try:
+            x, _ = self._client(server, "peer-x")
+            y, _ = self._client(server, "peer-y")
+            x.send("schema", hello(runtime_id="probe").to_bytes())
+            x.socket.close()
+            time.sleep(1.0)  # the server's reply and resends to X draw ICMP port-unreachable
+
+            self.assertTrue(server._rudp_thread.is_alive())
+            served = self._served(y)
+            self.assertIsNotNone(served, "Y is still served after X vanished")
+            self.assertEqual(served["runtimeId"], "mesh-server")
+        finally:
+            server.stop()
+
+    def test_a_reset_reported_by_a_receive_is_idle_not_the_end_of_the_thread(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_recvfrom = socket.socket.recvfrom
+        resets = [3]
+        try:
+            y, _ = self._client(server, "peer-y")
+
+            def recvfrom(sock: socket.socket, *args: Any) -> Any:
+                if sock is server._rudp_socket and resets[0] > 0:
+                    resets[0] -= 1
+                    raise ConnectionResetError(errno.ECONNRESET, "injected reset")
+                return original_recvfrom(sock, *args)
+
+            with patch.object(socket.socket, "recvfrom", recvfrom):
+                self._wait_for(lambda: resets[0] == 0)
+                self.assertTrue(server._rudp_thread.is_alive())
+                self.assertIsNotNone(self._served(y))
+        finally:
+            server.stop()
+
+    def test_a_permanent_send_failure_ends_only_that_peers_session_and_the_goodbye_names_it(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            x, x_addr = self._client(server, "peer-x")
+            y, _ = self._client(server, "peer-y")
+            failures = [1]
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(x_addr) and failures[0] > 0:
+                    failures[0] -= 1
+                    raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                # The server's response to X can never be sent as built.
+                x.send("schema", hello(runtime_id="probe").to_bytes())
+                for _ in range(200):
+                    x.receive_once()
+                    if x.disconnect_reason is not None:
+                        break
+                    time.sleep(0.005)
+                self.assertIsNotNone(x.disconnect_reason, "X is told its session ended")
+                self.assertTrue(x.disconnect_reason.startswith(b"packet could not be sent: "))
+                self.assertGreater(len(x.disconnect_reason), len(b"packet could not be sent: "))
+                self.assertTrue(server._rudp_thread.is_alive())
+
+                # Y is unaffected.
+                self.assertFalse(x.connected)
+                self.assertIsNotNone(self._served(y))
+            self.assertEqual(server.rudp_send_failures, 0)
+        finally:
+            server.stop()
+
+    def test_healthy_sends_are_not_failures(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        try:
+            x, _ = self._client(server, "peer-x")
+            self.assertIsNotNone(self._served(x))
+            self.assertEqual(server.rudp_send_failures, 0)
         finally:
             server.stop()
 

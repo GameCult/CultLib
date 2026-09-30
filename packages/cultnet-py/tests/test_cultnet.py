@@ -877,6 +877,28 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(old_ack.ack, oldest_sequence)
         self.assertEqual(old_ack.ack_mask, 0)
 
+    def test_cultnet_rudp_only_a_datagram_that_can_never_be_sent_is_a_permanent_failure(self) -> None:
+        import errno
+
+        from cultnet_py import is_permanent_send_error
+
+        for code in (errno.EMSGSIZE, errno.EINVAL, errno.EAFNOSUPPORT):
+            self.assertTrue(is_permanent_send_error(OSError(code, "permanent")), errno.errorcode[code])
+        for code in (
+            errno.EPERM,
+            errno.EINTR,
+            errno.EAGAIN,
+            errno.EACCES,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EADDRNOTAVAIL,
+            errno.ENOBUFS,
+            errno.ECONNREFUSED,
+            errno.EHOSTUNREACH,
+        ):
+            self.assertFalse(is_permanent_send_error(OSError(code, "transient")), errno.errorcode[code])
+        self.assertFalse(is_permanent_send_error(OSError("no errno")))
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()
