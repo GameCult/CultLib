@@ -824,8 +824,8 @@ impl SingleFileMessagePackBackingStore {
         // payloads this store passes through may hold ids), one that is gone, empty or legacy is written v1. The file is read
         // by the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
         // and never overwritten.
-        let (format, _) = self.read_store_unlocked()?;
-        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, format)?)
+        let (format, disk) = self.read_store_unlocked()?;
+        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, &disk, format)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
         let mut staged = OpenOptions::new()
@@ -2172,6 +2172,7 @@ impl CultCache {
                 let Some(canonical_type) = resolve_registered_type(
                     &known_types,
                     &schema_name_definitions,
+                    entry.schema_id.as_deref(),
                     &entry.r#type,
                 ) else {
                     return Err(anyhow!(
@@ -2605,14 +2606,19 @@ fn now_utc_second() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn encode_store_snapshot(entries: &[CultCacheEnvelope], format: &str) -> Result<PersistedStoreSnapshot> {
-    let mut schema_types = BTreeMap::<String, String>::new();
+/// The catalog names each schema id once. An entry the file already holds is arrived, and its type is its schema's name;
+/// one the caller supplies is registered. Records of one tier under one id are one type; across tiers the registered type
+/// names the id, which is how a schema is renamed under a stable id.
+fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelope], format: &str) -> Result<PersistedStoreSnapshot> {
+    let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.iter().map(|entry| (entry_id(entry), entry)).collect();
+    let mut schema_types = BTreeMap::<(String, bool), String>::new();
     for entry in entries {
         let schema_id = entry
             .schema_id
             .clone()
             .unwrap_or_else(|| entry.r#type.clone());
-        if let Some(existing_type) = schema_types.insert(schema_id.clone(), entry.r#type.clone()) {
+        let registered = arrived.get(&entry_id(entry)) != Some(&entry);
+        if let Some(existing_type) = schema_types.insert((schema_id.clone(), registered), entry.r#type.clone()) {
             if existing_type != entry.r#type {
                 return Err(anyhow::Error::new(SchemaConflictError {
                     schema_id,
@@ -2623,7 +2629,13 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], format: &str) -> Result<
         }
     }
 
-    let catalog = schema_types
+    let mut named = BTreeMap::<String, String>::new();
+    for ((schema_id, registered), document_type) in schema_types {
+        if registered || !named.contains_key(&schema_id) {
+            named.insert(schema_id, document_type);
+        }
+    }
+    let catalog = named
         .into_iter()
         .map(|(schema_id, document_type)| {
             PersistedSchemaCatalogEntry(
@@ -2725,13 +2737,21 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
         .collect()
 }
 
-/// A record's catalog carries a schema name, while the registry is keyed by
-/// entry type. Accept either.
+/// A record resolves by its schema id: a registered type's id is its entry type. The name its catalog carries is metadata,
+/// and names a type only when the id names none: the registry is keyed by entry type, and a store from a runtime with other
+/// schema ids can be read by the type or schema name it carries.
 fn resolve_registered_type(
     known_types: &BTreeSet<String>,
     schema_name_definitions: &BTreeMap<String, String>,
+    schema_id: Option<&str>,
     persisted_type: &str,
 ) -> Option<String> {
+    if let Some(schema_id) = schema_id
+        && known_types.contains(schema_id)
+    {
+        return Some(schema_id.to_string());
+    }
+
     if known_types.contains(persisted_type) {
         return Some(persisted_type.to_string());
     }
@@ -4889,6 +4909,104 @@ mod tests {
             assert!(conflict.record_key == "a" || conflict.record_key == "b");
             assert!(!path.exists(), "nothing is written");
         }
+        Ok(())
+    }
+
+    fn store_file(path: &std::path::Path, catalog: &[(&str, &str)], records: &[(&str, &str, Vec<u8>)]) -> Result<()> {
+        let snapshot = PersistedStoreSnapshot(
+            "cultcache.store.v1".to_string(),
+            catalog
+                .iter()
+                .map(|(id, name)| {
+                    PersistedSchemaCatalogEntry(
+                        id.to_string(),
+                        name.to_string(),
+                        format!("{name}.v1"),
+                        id.to_string(),
+                        String::new(),
+                        vec![id.to_string()],
+                        Vec::new(),
+                    )
+                })
+                .collect(),
+            records
+                .iter()
+                .map(|(key, id, payload)| {
+                    PersistedRecord(key.to_string(), id.to_string(), "2026-09-30T00:00:00Z".to_string(), payload.clone())
+                })
+                .collect(),
+        );
+        std::fs::write(path, rmp_serde::to_vec(&snapshot)?)?;
+        Ok(())
+    }
+
+    // A schema renamed under a stable id: the registered type names the id, so a write onto a file whose entry carries the old name is
+    // not a conflict. Every record under the id, the file's and the write's, is then described by the new name.
+    #[test]
+    fn a_schema_renamed_under_a_stable_id_is_written_under_the_registered_name() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        store.push(&CultCacheEnvelope {
+            key: "b".into(),
+            r#type: "t.new".into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("t.s".into()),
+        })?;
+
+        let mut envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+        envelopes.sort_by(|left, right| left.key.cmp(&right.key));
+        assert_eq!(
+            envelopes.iter().map(|entry| (entry.key.as_str(), entry.r#type.as_str())).collect::<Vec<_>>(),
+            vec![("a", "t.new"), ("b", "t.new")]
+        );
+        Ok(())
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "tests.stable", schema = "tests.old_name")]
+    struct StableId {
+        #[cultcache(key = 0)]
+        name: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "tests.other", schema = "tests.other_name")]
+    struct OtherId {
+        #[cultcache(key = 0)]
+        name: String,
+    }
+
+    // A record resolves to a registered type by its schema id, never by the name its catalog entry carries: a schema renamed under a
+    // stable id opens, and an id that names one type is not overruled by a name that names another.
+    #[test]
+    fn a_schema_renamed_under_a_stable_id_opens_by_its_id() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        store_file(&path, &[("tests.stable", "tests.renamed")], &[("a", "tests.stable", rmp_serde::to_vec(&StableId { name: "a".into() })?)])?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<StableId>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        assert_eq!(cache.get_required::<StableId>("a")?.name, "a");
+        Ok(())
+    }
+
+    #[test]
+    fn a_schema_id_that_names_one_type_is_not_overruled_by_a_name_that_names_another() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        // The entry that publishes the id carries the other type's name.
+        store_file(&path, &[("tests.other", "tests.stable")], &[("k", "tests.other", rmp_serde::to_vec(&OtherId { name: "k".into() })?)])?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<StableId>()?;
+        cache.register_entry_type::<OtherId>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+        assert_eq!(cache.get_required::<OtherId>("k")?.name, "k");
+        assert!(cache.get::<StableId>("k")?.is_none());
         Ok(())
     }
 
