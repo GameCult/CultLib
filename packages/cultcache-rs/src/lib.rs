@@ -2680,29 +2680,11 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
         .map(|record| {
             let r#type = match catalog.get(&record.1) {
                 Some(schema_name) => schema_name.clone(),
-                None => {
-                    // A record can outlive its catalog entry when another runtime
-                    // wrote it, or when the record is older than the catalog it
-                    // was stamped against. The payload is a MessagePack array
-                    // whose first field is the schema version, so the type can be
-                    // recovered from the record itself rather than failing the
-                    // whole snapshot.
-                    let schema_version =
-                        infer_schema_version_from_payload(&record.3).ok_or_else(|| {
-                            anyhow!(
-                                "CultCache record {:?} references missing schema {:?}",
-                                record.0,
-                                record.1
-                            )
-                        })?;
-                    infer_schema_name(&schema_version).ok_or_else(|| {
-                        anyhow!(
-                            "CultCache record {:?} references missing schema {:?}",
-                            record.0,
-                            record.1
-                        )
-                    })?
-                }
+                None => bail!(
+                    "CultCache record {:?} references schema {:?}, which the store's catalog does not publish",
+                    record.0,
+                    record.1
+                ),
             };
             Ok(CultCacheEnvelope {
                 key: record.0,
@@ -2715,9 +2697,8 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
         .collect()
 }
 
-/// A record recovered from its payload carries a schema name, while the
-/// registry is keyed by entry type. Accept either, so a snapshot whose catalog
-/// entry is gone still resolves to the registered definition.
+/// A record's catalog carries a schema name, while the registry is keyed by
+/// entry type. Accept either.
 fn resolve_registered_type(
     known_types: &BTreeSet<String>,
     schema_name_definitions: &BTreeMap<String, String>,
@@ -2728,68 +2709,6 @@ fn resolve_registered_type(
     }
 
     schema_name_definitions.get(persisted_type).cloned()
-}
-
-fn infer_schema_version_from_payload(payload: &[u8]) -> Option<String> {
-    let mut offset = 0usize;
-    read_array_header(payload, &mut offset)?;
-    read_string(payload, &mut offset)
-}
-
-fn read_array_header(payload: &[u8], offset: &mut usize) -> Option<u32> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    match marker {
-        0x90..=0x9f => Some((marker & 0x0f) as u32),
-        0xdc => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            Some(u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
-        }
-        0xdd => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-        _ => None,
-    }
-}
-
-fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    let length = match marker {
-        0xa0..=0xbf => (marker & 0x1f) as usize,
-        0xd9 => {
-            let length = *payload.get(*offset)? as usize;
-            *offset += 1;
-            length
-        }
-        0xda => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            u16::from_be_bytes([bytes[0], bytes[1]]) as usize
-        }
-        0xdb => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
-        }
-        _ => return None,
-    };
-
-    let bytes = payload.get(*offset..(*offset + length))?;
-    std::str::from_utf8(bytes).ok().map(str::to_string)
-}
-
-fn infer_schema_name(schema_version: &str) -> Option<String> {
-    let marker = schema_version.rfind(".v")?;
-    let version = schema_version.get((marker + 2)..)?;
-    if marker == 0 || version.is_empty() || !version.bytes().all(|value| value.is_ascii_digit()) {
-        return None;
-    }
-
-    Some(schema_version[..marker].to_string())
 }
 
 fn escape_json_string(value: &str) -> String {

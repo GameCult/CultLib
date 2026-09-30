@@ -118,6 +118,10 @@ These are store-level bookkeeping fields, not per-record domain metadata.
 The store must embed a catalog entry for every schema referenced by the records
 it contains.
 
+A reader never recovers a schema from a record's payload: a record whose schema id the
+catalog does not publish (by id or as a compatible id) makes the store unreadable, whatever
+the payload's first field says. The catalog is the store's own description of itself.
+
 This is not decorative paperwork. It is what allows another CultCache
 implementation to inspect an old store, resolve the schema for each record, and
 decide whether it can:
