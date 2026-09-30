@@ -5793,7 +5793,7 @@ export class CultMesh {
 
         if (packet.packetType === "connect") {
           const connectPayload = Uint8Array.from(packet.payload ?? []);
-          if (record && byteArraysEqual(record.connectPayload, connectPayload)) {
+          if (record?.session.connectRepeats(packet)) {
             socket.send(
               encodeRudpPacket(record.session.acceptConnect(packet, nowMs)),
               remote.port,
@@ -6669,14 +6669,6 @@ function copyBudgetFor(
 
 function nonBlankOr(value?: string, fallback = ""): string {
   return value && value.trim() ? value : fallback;
-}
-
-function byteArraysEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left.byteLength !== right.byteLength) return false;
-  for (let index = 0; index < left.byteLength; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
 }
 
 function parseCultMeshLocalityKind(
