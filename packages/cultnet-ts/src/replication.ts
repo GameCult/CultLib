@@ -268,20 +268,6 @@ export class CultNetDocumentRegistry {
     };
   }
 
-  /**
-   * The binding and value `applyRawDocumentPutMessage` would store for this raw
-   * put, decoded as that binding reads it. A server uses it to build the reply
-   * that would acknowledge the put before storing it. Throws, as the put would,
-   * when no binding accepts the document.
-   */
-  decodeRawDocumentPut(message: CultNetDocumentPutRawMessage): {
-    binding: CultNetDocumentBinding;
-    value: unknown;
-  } {
-    const { binding, envelope } = this.#rawPutEnvelope(message);
-    return { binding, value: decodeDocumentValue(binding.definition, envelope.payload) };
-  }
-
   #rawPutEnvelope(message: CultNetDocumentPutRawMessage): {
     binding: CultNetDocumentBinding;
     envelope: CultCacheEnvelope;
