@@ -4883,7 +4883,8 @@ mod tests {
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
                 if !reads {
                     let error = outcome.unwrap_err();
-                    assert!(error.downcast_ref::<StoreUnreadableError>().is_some(), "{what}: {error:#}");
+                    let typed = error.downcast_ref::<StoreUnreadableError>().unwrap_or_else(|| panic!("{what}: {error:#}"));
+                    assert!(std::error::Error::source(typed).is_some(), "{what}: the cause is the source");
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
                 } else if operation != "open" {
                     assert_eq!(store_header(&std::fs::read(&path)?)?.as_deref(), Some(header), "{what}");
