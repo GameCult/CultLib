@@ -2360,7 +2360,7 @@ test("a repeated Connect acknowledges what it carries", () => {
   const server = new CultNetRudpSession({ connectionId });
   const connect = client.createConnect(0);
   const accept = server.acceptConnect(connect, 0);
-  const reply = server.answerRepeatedConnect({ ...connect, ack: accept.sequence }, 1);
+  const reply = server.acceptConnect({ ...connect, ack: accept.sequence }, 1);
   assert.equal(reply.packetType, "ack");
   assert.equal(server.outstandingReliablePacketCount, 0);
 });
