@@ -8,6 +8,7 @@ import {
   decodeRudpPacket,
   encodeRudpPacket,
   type CultNetOperationRequestMessage,
+  type CultNetRudpPacket,
 } from "cultnet-ts";
 
 import {
@@ -316,6 +317,45 @@ test("a replaced RUDP generation drops operations queued behind an active handle
     await Promise.allSettled([first, second]);
   } finally {
     connection.close();
+    server.close();
+  }
+});
+
+test("a client restarted on the same address with the same Connect payload replaces its RUDP session, and a retransmitted Connect does not", async () => {
+  const connectionId = 0x43554c54;
+  let closedSessions = 0;
+  const server = CultMesh.createRudpDocumentServer("odin-restart-test", connectionId, {
+    bindPort: 0,
+    documents: new CultNetDocumentRegistry(),
+    onSessionClosed: () => { closedSessions += 1; },
+    onError: () => undefined,
+  });
+  await server.start();
+  const socket = createSocket("udp4");
+  const received: CultNetRudpPacket[] = [];
+  socket.on("message", wire => received.push(decodeRudpPacket(wire)));
+  const toServer = (packet: CultNetRudpPacket) =>
+    socket.send(encodeRudpPacket(packet), server.bind.port, "127.0.0.1");
+  const evidence = Buffer.from("same connect payload");
+  try {
+    const first = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+    const connect = first.createConnect(Date.now(), evidence);
+    toServer(connect);
+    await waitFor(() => received.some(packet => packet.packetType === "accept"), "the first Accept");
+
+    // A retransmitted Connect repeats: the session stays.
+    toServer(connect);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(closedSessions, 0, "a retransmitted Connect closed the session");
+
+    // The same client restarted: another sequence, the same payload.
+    received.length = 0;
+    const second = new CultNetRudpSession({ connectionId, initialSequence: 7 });
+    toServer(second.createConnect(Date.now(), evidence));
+    await waitFor(() => closedSessions === 1, "the old RUDP session to close");
+    await waitFor(() => received.some(packet => packet.packetType === "accept"), "the restarted client's Accept");
+  } finally {
+    socket.close();
     server.close();
   }
 });
