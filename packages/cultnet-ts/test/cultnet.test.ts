@@ -2825,6 +2825,89 @@ test("server-mode transport admits a restarted client and keeps its session when
   }
 });
 
+// A request belongs to the session generation it arrived on. A client that connects again
+// from the same endpoint while a handler runs owns that endpoint now: nothing the handler
+// returns or throws for the old generation may reach it.
+async function restartDuringHandler(settle: (release: { resolve: () => void; reject: (error: Error) => void }) => void) {
+  let release: { resolve: () => void; reject: (error: Error) => void } | undefined;
+  const server = await startCultNetOperationServer({
+    runtimeId: "sai-sidecar",
+    handler: async (request) => {
+      if (request.messageId === "held") {
+        await new Promise<void>((resolve, reject) => { release = { resolve, reject: (error) => reject(error) }; });
+      }
+      return {
+        schemaVersion: "cultnet.operation_response.v0",
+        messageId: request.messageId,
+        serviceId: request.serviceId,
+        operation: request.operation,
+        status: "ok",
+        payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+        payloadEncoding: "messagepack-base64",
+        payload: request.payload,
+        diagnostics: [],
+        sourceRuntimeId: "sai-sidecar",
+      };
+    },
+  });
+  const connectionId = 0x43554c54;
+  const port = Number(new URL(server.endpoint).port);
+  const socket = await bindUdpSocket();
+  let session = new CultNetRudpSession({ connectionId, initialSequence: 50_000 });
+  const answered: string[] = [];
+  const goodbyes: string[] = [];
+  socket.on("message", (wire) => {
+    const packet = decodeRudpPacket(wire);
+    if (packet.packetType === "disconnect") goodbyes.push(Buffer.from(packet.payload ?? []).toString("utf8"));
+    const result = session.receive(packet, Date.now());
+    if (packet.packetType === "accept" || packet.reliable) {
+      socket.send(encodeRudpPacket(session.createAckForReceived(packet.sequence)), port, "127.0.0.1");
+    }
+    for (const frame of result.delivered) {
+      answered.push((decodeMsgpack(frame.payload) as { messageId: string }).messageId);
+    }
+  });
+  const toServer = (packet: CultNetRudpPacket) => socket.send(encodeRudpPacket(packet), port, "127.0.0.1");
+  const request = (messageId: string) => Buffer.from(encode(encodeCultNetMessageForWire({
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId,
+    serviceId: "sai.vn",
+    operation: "describe",
+    payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzY2hlbWE=",
+  } satisfies CultNetOperationRequestMessage)));
+  try {
+    toServer(session.createConnect(Date.now()));
+    await waitFor(() => session.connected, "the first Accept");
+    toServer(session.send("schema", request("held"), { reliable: true, ordered: true }));
+    await waitFor(() => release !== undefined, "the held handler");
+
+    session = new CultNetRudpSession({ connectionId, initialSequence: 7 });
+    toServer(session.createConnect(Date.now()));
+    await waitFor(() => session.connected, "the restarted client's Accept");
+    settle(release!);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    toServer(session.send("schema", request("after-restart"), { reliable: true, ordered: true }));
+    await waitFor(() => answered.includes("after-restart"), "the restarted client's answer");
+
+    assert.deepEqual(answered, ["after-restart"], "the old generation's response reached the new session");
+    assert.deepEqual(goodbyes, [], "a goodbye for the old generation reached the new session");
+    assert.equal(session.connected, true);
+  } finally {
+    socket.close();
+    await server.close();
+  }
+}
+
+test("an operation response for a generation a new Connect replaced is not sent into the new session", async () => {
+  await restartDuringHandler((release) => release.resolve());
+});
+
+test("an operation handler that fails after a new Connect replaced its generation says no goodbye to the new session", async () => {
+  await restartDuringHandler((release) => release.reject(new Error("handler failed")));
+});
+
 test("RUDP operation service admits a restarted client on the same address", async () => {
   const server = await startCultNetOperationServer({
     runtimeId: "sai-sidecar",

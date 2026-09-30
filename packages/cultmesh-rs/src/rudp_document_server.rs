@@ -3,9 +3,11 @@ use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet,
+    encode_rudp_packet, is_permanent_send_error,
 };
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -208,6 +210,14 @@ pub struct CultMeshRudpDocumentServer<S, Q, C> {
     clock: C,
     options: CultMeshRudpDocumentServerOptions,
     packets_dropped: u64,
+    send_failures: u64,
+    /// Peers whose every datagram fails to send, standing in for an unroutable
+    /// or full path that a loopback peer cannot be made to have.
+    #[cfg(test)]
+    failing_peers: BTreeSet<SocketAddr>,
+    /// Peers whose next datagram after this many fails permanently, once.
+    #[cfg(test)]
+    unsendable_after: BTreeMap<SocketAddr, usize>,
 }
 
 impl<S, Q, C> CultMeshRudpDocumentServer<S, Q, C>
@@ -236,6 +246,11 @@ where
             clock,
             options,
             packets_dropped: 0,
+            send_failures: 0,
+            #[cfg(test)]
+            failing_peers: BTreeSet::new(),
+            #[cfg(test)]
+            unsendable_after: BTreeMap::new(),
         })
     }
 
@@ -245,6 +260,18 @@ where
     /// error: a moved flow or a scanner must not end the daemon loop.
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped
+    }
+
+    /// Datagrams that could not be sent to a peer and may yet be: no route, full
+    /// buffers, a refused path. Each is that peer's lost datagram: a reliable
+    /// packet stays pending and is resent, and the peer's session ends by idle
+    /// timeout, lifetime, refusal or Disconnect, never by the failure. Never an
+    /// error: one unreachable peer must not stop the poll that serves the
+    /// others. A datagram that can never be sent as built
+    /// (`is_permanent_send_error`) is not counted here: it ends that peer's
+    /// session, and the peer's goodbye names the error.
+    pub fn send_failures(&self) -> u64 {
+        self.send_failures
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -265,7 +292,14 @@ where
         let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
             Ok(value) => value,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            // Windows reports an earlier ICMP port-unreachable on the next
+            // receive; it names no datagram of this poll.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::ConnectionReset
+                ) =>
+            {
                 return Ok(CultMeshRudpPollOutcome::Idle);
             }
             Err(error) => return Err(error.into()),
@@ -331,9 +365,10 @@ where
             }
         };
 
-        if let Some(reply) = result.reply {
-            self.send_packet(key.remote_addr, &reply)?;
-        }
+        let mut unsendable = match result.reply {
+            Some(reply) => self.send_packet(key.remote_addr, &reply)?,
+            None => None,
+        };
 
         if result.disconnected {
             self.sessions.remove(&key);
@@ -363,14 +398,17 @@ where
             }
         }
 
-        if packet.reliable {
+        if packet.reliable && unsendable.is_none() {
             let ack = self
                 .sessions
                 .get_mut(&key)
                 .ok_or_else(|| anyhow!("CultMesh RUDP session disappeared before ACK"))?
                 .session
                 .create_ack();
-            self.send_packet(key.remote_addr, &ack)?;
+            unsendable = self.send_packet(key.remote_addr, &ack)?;
+        }
+        if let Some(error) = unsendable {
+            self.end_unsendable_session(key, &error)?;
         }
         Ok(CultMeshRudpPollOutcome::Handled)
     }
@@ -390,11 +428,17 @@ where
         let mut resends = Vec::new();
         for (key, entry) in &mut self.sessions {
             for packet in entry.session.due_resends(now) {
-                resends.push((key.remote_addr, packet));
+                resends.push((*key, packet));
             }
         }
-        for (remote_addr, packet) in &resends {
-            self.send_packet(*remote_addr, packet)?;
+        for (key, packet) in &resends {
+            // A session ended earlier in this loop has nothing left to resend.
+            if !self.sessions.contains_key(key) {
+                continue;
+            }
+            if let Some(error) = self.send_packet(key.remote_addr, packet)? {
+                self.end_unsendable_session(*key, &error)?;
+            }
         }
         Ok(CultMeshRudpMaintenance {
             sessions_expired: expired,
@@ -456,7 +500,10 @@ where
                 accept
             }
         };
-        self.send_packet(key.remote_addr, &reply)?;
+        if let Some(error) = self.send_packet(key.remote_addr, &reply)? {
+            self.end_unsendable_session(key, &error)?;
+            return Ok(false);
+        }
         Ok(true)
     }
 
@@ -592,7 +639,14 @@ where
                 entry.admitted_payload_bytes =
                     entry.admitted_payload_bytes.saturating_add(payload_bytes);
                 for packet in &packets {
-                    self.send_packet(key.remote_addr, packet)?;
+                    if let Some(error) = self.send_packet(key.remote_addr, packet)? {
+                        return Ok(Some(CultMeshRudpApplicationRejection {
+                            session: key,
+                            operation: CultMeshRudpApplicationOperation::SnapshotRequest,
+                            message_id,
+                            reason: format!("snapshot response could not be sent: {error}"),
+                        }));
+                    }
                 }
             }
             _ => {}
@@ -607,7 +661,23 @@ where
             return Ok(());
         };
         let goodbye = entry.session.end_refused_session();
-        self.send_packet(key.remote_addr, &goodbye)
+        self.send_packet(key.remote_addr, &goodbye)?;
+        Ok(())
+    }
+
+    /// The session owes its peer a packet that can never be sent as built. The
+    /// session ends, never the poll, and the goodbye names the error.
+    fn end_unsendable_session(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        error: &std::io::Error,
+    ) -> Result<()> {
+        let Some(mut entry) = self.sessions.remove(&key) else {
+            return Ok(());
+        };
+        let goodbye = entry.session.end_unsendable_session(error);
+        self.send_packet(key.remote_addr, &goodbye)?;
+        Ok(())
     }
 
     fn payload_budget_allows(&self, key: CultMeshRudpSessionKey, bytes: usize) -> bool {
@@ -633,12 +703,47 @@ where
             .is_some_and(|total| total <= self.options.max_admitted_payload_bytes)
     }
 
-    fn send_packet(&mut self, remote_addr: SocketAddr, packet: &CultNetRudpPacket) -> Result<()> {
+    /// A transient send failure is that peer's lost datagram: counted, never an
+    /// error. A permanent one (`is_permanent_send_error`) is returned as `Some`
+    /// for the caller to end the session over. Only an encode failure, the
+    /// server's own bug, is an error.
+    fn send_packet(
+        &mut self,
+        remote_addr: SocketAddr,
+        packet: &CultNetRudpPacket,
+    ) -> Result<Option<std::io::Error>> {
         let wire = encode_rudp_packet(packet)?;
-        self.socket.send_to(&wire, remote_addr)?;
-        Ok(())
+        match self.send_datagram(&wire, remote_addr) {
+            Ok(_) => {}
+            Err(error) if is_permanent_send_error(&error) => return Ok(Some(error)),
+            Err(_) => self.send_failures += 1,
+        }
+        Ok(None)
+    }
+
+    fn send_datagram(&mut self, wire: &[u8], remote_addr: SocketAddr) -> std::io::Result<usize> {
+        #[cfg(test)]
+        {
+            match self.unsendable_after.get(&remote_addr).copied() {
+                Some(0) => {
+                    self.unsendable_after.remove(&remote_addr);
+                    return Err(std::io::Error::from(ErrorKind::InvalidInput));
+                }
+                Some(remaining) => {
+                    self.unsendable_after.insert(remote_addr, remaining - 1);
+                }
+                None => {}
+            }
+            if self.failing_peers.contains(&remote_addr) {
+                return Err(std::io::Error::other("injected send failure"));
+            }
+        }
+        self.socket.send_to(wire, remote_addr)
     }
 }
+
+#[cfg(test)]
+mod send_failure_tests;
 
 fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     if options.max_sessions == 0 {

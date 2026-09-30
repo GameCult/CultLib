@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -20,6 +21,7 @@ from cultnet_py import (
     create_tcp_framed_transport_profile,
     decode_rudp_packet,
     encode_rudp_packet,
+    is_permanent_send_error,
     wire_message_schema_descriptors,
 )
 
@@ -30,6 +32,8 @@ from cultnet_py.cultmesh_contracts import (
     CultMeshPeerCatalog,
     CultMeshVerseCatalog,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,16 @@ class CultMeshLocalServer:
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _rudp_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _rudp_send_failures: int = field(default=0, init=False, repr=False)
+
+    @property
+    def rudp_send_failures(self) -> int:
+        """Datagrams that could not be sent to a peer. Each is that peer's lost
+        datagram: a reliable packet stays pending and is resent, and no other
+        peer is affected. A datagram that can never be sent as built
+        (`is_permanent_send_error`) is not counted here: it ends that peer's
+        session, and the peer's goodbye names the error."""
+        return self._rudp_send_failures
 
     def __post_init__(self) -> None:
         if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
@@ -208,7 +222,10 @@ class CultMeshLocalServer:
         while not self._stop.is_set():
             try:
                 wire, remote_addr = rudp_socket.recvfrom(65535)
-            except TimeoutError:
+            except (TimeoutError, ConnectionResetError):
+                # Windows reports an earlier ICMP port-unreachable, from a peer that
+                # has gone away, as an error on the next receive. It names no datagram
+                # of this read, so it is idle, not the end of the thread.
                 self._poll_rudp_resends(rudp_socket, peers)
                 continue
             except OSError:
@@ -237,46 +254,74 @@ class CultMeshLocalServer:
                         )
                     )
                     peers[remote_addr] = peer
-                self._send_rudp_packet(
+                unsendable = self._send_rudp_packet(
                     rudp_socket,
                     remote_addr,
                     peer.session.accept_connect(packet, now_ms, b"cultmesh-local-rudp"),
                 )
+                if unsendable is not None:
+                    self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
                 continue
             if peer is None:
                 continue
 
-            result = peer.session.receive(packet, now_ms)
-            if result.reply is not None:
-                self._send_rudp_packet(rudp_socket, remote_addr, result.reply)
-            for ready in result.ready_to_send:
-                self._send_rudp_packet(rudp_socket, remote_addr, ready)
+            try:
+                result = peer.session.receive(packet, now_ms)
+            except ValueError:
+                # receive() has already recorded the packet's reliable sequence, so the
+                # session cannot be kept: a retransmit would be acknowledged and the
+                # frame silently lost. It ends, never the thread, and the peer is told.
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+                continue
+            unsendable: OSError | None = None
+            for outgoing in (*([result.reply] if result.reply is not None else []), *result.ready_to_send):
+                unsendable = self._send_rudp_packet(rudp_socket, remote_addr, outgoing)
+                if unsendable is not None:
+                    break
             if result.disconnected:
                 peers.pop(remote_addr, None)
                 continue
-            for delivered in result.delivered:
-                if delivered.channel_id != "schema":
-                    continue
-                try:
-                    message = msgpack.unpackb(delivered.payload, raw=False)
-                except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
-                    continue
-                if not isinstance(message, dict):
-                    continue
-                responses = self._handle_connection_message(message, peer.subscriptions)
-                for response in responses:
-                    self._send_rudp_schema_frame(
-                        rudp_socket,
-                        remote_addr,
-                        peer.session,
-                        msgpack.packb(response, use_bin_type=True),
-                    )
-            if packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered:
-                self._send_rudp_packet(
+            try:
+                for delivered in result.delivered:
+                    if delivered.channel_id != "schema":
+                        continue
+                    try:
+                        message = msgpack.unpackb(delivered.payload, raw=False)
+                    except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    responses = self._handle_connection_message(message, peer.subscriptions)
+                    for response in responses:
+                        if unsendable is None:
+                            unsendable = self._send_rudp_schema_frame(
+                                rudp_socket,
+                                remote_addr,
+                                peer.session,
+                                msgpack.packb(response, use_bin_type=True),
+                            )
+            except Exception as error:  # noqa: BLE001 - one peer's message never ends the thread
+                # Whatever a peer's message makes the handling raise is that peer's failure.
+                # The session recorded the frame's sequence, so it cannot be kept: a retransmit
+                # would be acknowledged and never handled. The session ends, never the thread,
+                # and the peer is told. The log names the error type only, because the error's
+                # own message can quote what the peer sent.
+                _LOGGER.warning(
+                    "CultMesh RUDP server could not handle a peer's message (%s); that peer's session ended.",
+                    type(error).__name__,
+                )
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+                continue
+            if unsendable is None and (
+                packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered
+            ):
+                unsendable = self._send_rudp_packet(
                     rudp_socket,
                     remote_addr,
                     peer.session.create_ack_for_received(packet.sequence),
                 )
+            if unsendable is not None:
+                self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
 
     def _poll_rudp_resends(
         self,
@@ -286,7 +331,10 @@ class CultMeshLocalServer:
         now_ms = _now_ms()
         for remote_addr, peer in list(peers.items()):
             for packet in peer.session.due_resends(now_ms):
-                self._send_rudp_packet(rudp_socket, remote_addr, packet)
+                unsendable = self._send_rudp_packet(rudp_socket, remote_addr, packet)
+                if unsendable is not None:
+                    self._end_unsendable_peer(rudp_socket, peers, remote_addr, unsendable)
+                    break
 
     def _send_rudp_schema_frame(
         self,
@@ -294,21 +342,62 @@ class CultMeshLocalServer:
         remote_addr: tuple[str, int],
         session: CultNetRudpSession,
         payload: bytes,
-    ) -> None:
+    ) -> OSError | None:
         for packet in session.send_many(
             "schema",
             payload,
             CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=_now_ms()),
         ):
-            self._send_rudp_packet(rudp_socket, remote_addr, packet)
+            unsendable = self._send_rudp_packet(rudp_socket, remote_addr, packet)
+            if unsendable is not None:
+                return unsendable
+        return None
 
-    @staticmethod
     def _send_rudp_packet(
+        self,
         rudp_socket: socket.socket,
         remote_addr: tuple[str, int],
         packet: CultNetRudpPacket,
+    ) -> OSError | None:
+        # A transient send failure is that peer's lost datagram: counted, never
+        # raised (raising here ended the RUDP thread for every peer). A permanent
+        # one (`is_permanent_send_error`) is returned: the datagram can never be
+        # sent as built, and the caller ends that peer's session.
+        wire = encode_rudp_packet(packet)
+        try:
+            rudp_socket.sendto(wire, remote_addr)
+        except OSError as error:
+            if is_permanent_send_error(error):
+                return error
+            self._rudp_send_failures += 1
+        return None
+
+    def _end_refused_peer(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+        remote_addr: tuple[str, int],
     ) -> None:
-        rudp_socket.sendto(encode_rudp_packet(packet), remote_addr)
+        peer = peers.pop(remote_addr)
+        # The goodbye is built after the reset, or its ack field would acknowledge the
+        # very frame the session refused.
+        peer.session.reset_peer_state()
+        goodbye = peer.session.create_disconnect(b"session refused a packet")
+        self._send_rudp_packet(rudp_socket, remote_addr, goodbye)
+
+    def _end_unsendable_peer(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+        remote_addr: tuple[str, int],
+        error: OSError,
+    ) -> None:
+        """The session owes its peer a packet that can never be sent as built. It ends,
+        never the thread, and the peer's goodbye names the error."""
+        peer = peers.pop(remote_addr, None)
+        if peer is None:
+            return
+        self._send_rudp_packet(rudp_socket, remote_addr, peer.session.end_unsendable_session(error))
 
     def _handle_connection_message(
         self,

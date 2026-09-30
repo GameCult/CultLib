@@ -879,6 +879,28 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(old_ack.ack, oldest_sequence)
         self.assertEqual(old_ack.ack_mask, 0)
 
+    def test_cultnet_rudp_only_a_datagram_that_can_never_be_sent_is_a_permanent_failure(self) -> None:
+        import errno
+
+        from cultnet_py import is_permanent_send_error
+
+        for code in (errno.EMSGSIZE, errno.EINVAL, errno.EAFNOSUPPORT):
+            self.assertTrue(is_permanent_send_error(OSError(code, "permanent")), errno.errorcode[code])
+        for code in (
+            errno.EPERM,
+            errno.EINTR,
+            errno.EAGAIN,
+            errno.EACCES,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EADDRNOTAVAIL,
+            errno.ENOBUFS,
+            errno.ECONNREFUSED,
+            errno.EHOSTUNREACH,
+        ):
+            self.assertFalse(is_permanent_send_error(OSError(code, "transient")), errno.errorcode[code])
+        self.assertFalse(is_permanent_send_error(OSError("no errno")))
+
     # The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023 above
     # the lowest unacked one and the payload above that sequence stays within 4 MiB.
     FLOW_CONNECTION_ID = 0x464C4F57

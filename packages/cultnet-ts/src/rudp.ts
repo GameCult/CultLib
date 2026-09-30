@@ -30,6 +30,10 @@ import {
 const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
 const RUDP_FIXED_HEADER_BYTES = 36;
+/// The largest UDP payload a datagram can carry: 65,535 less the UDP header and,
+/// over IPv4, the minimal IP header. IPv6's header is outside its payload length.
+const MAX_UDP4_DATAGRAM_BYTES = 65_507;
+const MAX_UDP6_DATAGRAM_BYTES = 65_527;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
@@ -668,6 +672,18 @@ export class CultNetRudpSession {
     });
   }
 
+  /// Ends a session that owes its peer a packet that can never be sent as
+  /// built (see `isPermanentSendError`). Resending it would fail forever, and
+  /// dropping it would leave a reliable sequence the peer waits on for good, so
+  /// the session cannot be kept. Returns the goodbye for the peer; its reason
+  /// names the error's code, never its message, which can quote the address.
+  endUnsendableSession(error: Error): CultNetRudpPacket {
+    this.resetPeerState();
+    return this.createDisconnect(
+      Buffer.from(`${RUDP_UNSENDABLE_PACKET_REASON}: ${sendErrorCode(error)}`, "utf8"),
+    );
+  }
+
   checkTimeout(nowMs: number, timeoutMs: number): boolean {
     if (!this.#connected || this.#lastReceivedAtMs === undefined) {
       return false;
@@ -1025,6 +1041,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   readonly #mode: "client" | "server";
   readonly #resendTimer: NodeJS.Timeout;
   readonly #maxFragmentBytes: number | undefined;
+  readonly #maxDatagramBytes: number;
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
@@ -1037,6 +1054,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     framesReceived: 0,
     framesSent: 0,
     packetsDropped: 0,
+    sendFailures: 0,
   };
 
   constructor(options: CultNetRudpSocketTransportOptions) {
@@ -1055,6 +1073,8 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     const address = this.#socket.address();
     const localPort = typeof address === "string" ? undefined : address.port;
     const localHost = typeof address === "string" ? undefined : address.address;
+    this.#maxDatagramBytes =
+      typeof address !== "string" && String(address.family).endsWith("6") ? MAX_UDP6_DATAGRAM_BYTES : MAX_UDP4_DATAGRAM_BYTES;
     this.profile = createRudpTransportProfile(options.runtimeId, {
       transportId: options.transportId,
       host: localHost,
@@ -1096,6 +1116,15 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   }
 
   send(channelId: string, payload: Uint8Array): void {
+    // A datagram larger than UDP can carry can never be sent, and Node reports that
+    // only later, to the send's callback. Checked here it is the caller's error, as
+    // in the other runtimes: the send throws, and nothing of it is queued or takes a
+    // sequence. Every datagram of a send is at most one fragment of its payload.
+    const largestPayload =
+      this.#maxFragmentBytes === undefined ? payload.byteLength : Math.min(payload.byteLength, this.#maxFragmentBytes);
+    if (RUDP_FIXED_HEADER_BYTES + Buffer.byteLength(channelId, "utf8") + largestPayload > this.#maxDatagramBytes) {
+      throw Object.assign(new Error("RUDP datagram is larger than UDP can carry."), { code: "EMSGSIZE" });
+    }
     const packets = this.#session.sendMany(channelId, payload, {
       ...channelOptions(channelId),
       nowMs: Date.now(),
@@ -1170,11 +1199,22 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     // The goodbye is built after the reset, or its ack field would acknowledge
     // the very frame the session refused.
     this.#session.resetPeerState();
+    this.#endWithGoodbye(this.#session.createDisconnect(reason));
+  }
+
+  /** The session owes its peer a packet that can never be sent as built. */
+  #endUnsendableSession(error: Error): void {
+    this.#endWithGoodbye(this.#session.endUnsendableSession(error));
+  }
+
+  #endWithGoodbye(goodbye: CultNetRudpPacket): void {
+    const reason = goodbye.payload;
     this.#endedReason = reason;
-    try {
-      this.#sendPacket(this.#session.createDisconnect(reason));
-    } catch {
+    if (this.#remoteHost && this.#remotePort !== undefined) {
       // Best-effort: the session ends whether or not the peer hears it.
+      const wire = encodeRudpPacket(goodbye);
+      this.#stats.bytesSent += wire.length;
+      sendRudpDatagram(this.#socket, wire, this.#remotePort, this.#remoteHost, () => {});
     }
     if (this.#mode === "server") {
       // Only a Connect can claim the endpoint again.
@@ -1245,7 +1285,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         this.#stats.packetsDropped += 1;
         return;
       }
-      this.#sendPacket(accept);
+      this.#sendInPoll(accept);
       return;
     }
 
@@ -1262,10 +1302,10 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
     try {
       if (result.reply) {
-        this.#sendPacket(result.reply);
+        this.#sendInPoll(result.reply);
       }
       for (const ready of result.readyToSend ?? []) {
-        this.#sendPacket(ready);
+        this.#sendInPoll(ready);
       }
       if (result.pong) {
         this.emit("pong", { payload: result.pongPayload ?? new Uint8Array() });
@@ -1284,7 +1324,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         return;
       }
       if (packet.packetType === "accept" || packet.packetType === "data" || result.delivered.length > 0) {
-        this.#sendPacket(this.#session.createAckForReceived(packet.sequence));
+        this.#sendInPoll(this.#session.createAckForReceived(packet.sequence));
       }
     } catch (error) {
       this.emit("error", error instanceof Error ? error : new Error(String(error)));
@@ -1292,18 +1332,63 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   }
 
   #sendDueResends(): void {
+    const generation = this.#session.generation;
     for (const packet of this.#session.dueResends(Date.now())) {
-      this.#sendPacket(packet);
+      this.#sendInPoll(packet);
+      // A resend that can never be sent ended the session and what it owed.
+      if (this.#session.generation !== generation) return;
     }
   }
 
+  /** A caller-directed send: a failure the send throws is the caller's error. */
   #sendPacket(packet: CultNetRudpPacket): void {
+    const thrown = this.#transmit(packet);
+    if (thrown) throw thrown;
+  }
+
+  /**
+   * A send with no caller to hand a failure to (a receive or a resend): the failure
+   * is handled as every later one is, and never escapes the timer or the socket's
+   * "message" handler.
+   */
+  #sendInPoll(packet: CultNetRudpPacket): void {
+    const thrown = this.#transmit(packet);
+    if (thrown) this.#sendFailed(thrown);
+  }
+
+  /** Sends one packet and returns the failure the send threw, if any. */
+  #transmit(packet: CultNetRudpPacket): Error | undefined {
     if (!this.#remoteHost || this.#remotePort === undefined) {
       throw new Error("RUDP socket transport does not have a remote endpoint.");
     }
     const wire = encodeRudpPacket(packet);
     this.#stats.bytesSent += wire.length;
-    this.#socket.send(wire, this.#remotePort, this.#remoteHost);
+    let thrown: Error | undefined;
+    let sending = true;
+    const generation = this.#session.generation;
+    sendRudpDatagram(this.#socket, wire, this.#remotePort, this.#remoteHost, (error) => {
+      if (sending) {
+        thrown = error;
+      } else if (this.#session.generation === generation) {
+        // A later failure belongs to the session generation that sent it.
+        this.#sendFailed(error);
+      }
+    });
+    sending = false;
+    return thrown;
+  }
+
+  /**
+   * A datagram that can never be sent ends the session; any other failure is a lost
+   * datagram, counted and never emitted. Node reports a failed send only to its callback,
+   * not on the socket's "error" event, and an "error" with no listener ends the process.
+   */
+  #sendFailed(error: Error): void {
+    if (isPermanentSendError(error)) {
+      this.#endUnsendableSession(error);
+      return;
+    }
+    this.#stats.sendFailures += 1;
   }
 }
 
@@ -1394,6 +1479,61 @@ export class CultNetRudpReconnectLoop extends EventEmitter {
       this.emit("reconnecting", decision);
       this.#openTransport();
     }, decision.delayMs);
+  }
+}
+
+/** Prefix of the goodbye reason for a session that owed a packet which can never be sent. */
+const RUDP_UNSENDABLE_PACKET_REASON = "packet could not be sent";
+
+/**
+ * Failures that can never pass for the datagram as built: too large for a datagram
+ * (`EMSGSIZE`), an address malformed for the socket (`EINVAL`, and Node's own
+ * `ERR_SOCKET_BAD_PORT`, which it throws for port 0 before the system would say
+ * `EINVAL`), or an address of another family (`EAFNOSUPPORT`). libuv names these the
+ * same on every platform.
+ */
+const PERMANENT_SEND_ERROR_CODES: ReadonlySet<string> = new Set([
+  "EMSGSIZE",
+  "EINVAL",
+  "EAFNOSUPPORT",
+  "ERR_SOCKET_BAD_PORT",
+]);
+
+function sendErrorCode(error: Error): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  return typeof code === "string" && code.length > 0 ? code : "UNKNOWN";
+}
+
+/**
+ * Whether a failed UDP send can never succeed for the datagram as built, so resending it is
+ * pointless and the session that owes it cannot be kept. Everything else (no route, full
+ * buffers, a closed socket, an interrupted call) is a property of the path or the moment: a
+ * lost datagram, not a reason to end a session.
+ */
+export function isPermanentSendError(error: Error): boolean {
+  return PERMANENT_SEND_ERROR_CODES.has(sendErrorCode(error));
+}
+
+/**
+ * Sends one datagram. Node reports a failed send two ways: it throws for an argument it
+ * refuses (port 0 among them) and passes a system failure to the callback later. Both
+ * reach `onFailure` and nothing else, so a datagram that cannot be sent to one peer never
+ * escapes a timer or a receive handler, and never reaches the socket's "error" event. A
+ * failure the send throws reaches `onFailure` before this returns.
+ */
+export function sendRudpDatagram(
+  socket: Socket,
+  wire: Uint8Array,
+  port: number,
+  address: string,
+  onFailure: (error: Error) => void,
+): void {
+  try {
+    socket.send(wire, port, address, (error) => {
+      if (error) onFailure(error);
+    });
+  } catch (error) {
+    onFailure(error instanceof Error ? error : new Error(String(error)));
   }
 }
 

@@ -16,6 +16,13 @@ export interface CultNetTransportStats {
   framesSent: number;
   /** Datagrams read and discarded because they belong to no session on this transport. */
   packetsDropped: number;
+  /**
+   * Datagrams this transport could not send and treats as lost (no route, full buffers):
+   * a reliable packet stays pending and is resent. A send a caller made throws its failure
+   * to the caller instead, and a datagram that can never be sent as built ends the session.
+   * Zero for stream transports.
+   */
+  sendFailures: number;
 }
 
 export interface CultNetReconnectPolicy {
@@ -195,6 +202,7 @@ export class TcpFramedTransportConnection extends EventEmitter implements CultNe
     framesReceived: 0,
     framesSent: 0,
     packetsDropped: 0,
+    sendFailures: 0,
   };
 
   constructor(stream: Duplex, profile: CultNetTransportProfile) {

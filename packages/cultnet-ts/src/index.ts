@@ -106,6 +106,8 @@ export {
   createRudpTransportProfile,
   decodeRudpPacket,
   encodeRudpPacket,
+  isPermanentSendError,
+  sendRudpDatagram,
   rudpClientBindHost,
   CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS,
   CultNetRudpReconnectLoop,

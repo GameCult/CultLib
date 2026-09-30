@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import secrets
 import socket
 import threading
@@ -435,6 +436,32 @@ def create_rudp_transport_profile(
     }
 
 
+UNSENDABLE_PACKET_REASON = "packet could not be sent"
+
+_PERMANENT_SEND_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.EMSGSIZE,
+        errno.EINVAL,
+        errno.EAFNOSUPPORT,
+        getattr(errno, "WSAEMSGSIZE", None),
+        getattr(errno, "WSAEINVAL", None),
+        getattr(errno, "WSAEAFNOSUPPORT", None),
+    )
+    if code is not None
+)
+
+
+def is_permanent_send_error(error: OSError) -> bool:
+    """Whether a failed `sendto` can never succeed for the datagram as built, so resending
+    it is pointless: it is too large for a datagram (EMSGSIZE), its address is malformed for
+    the socket (EINVAL), or belongs to another address family (EAFNOSUPPORT), with their
+    Winsock equivalents. Everything else (no route, full buffers, firewall drops, a refusal
+    reported for an earlier datagram, an interrupted call) is a property of the path or the
+    moment and may pass, so it is a lost datagram, not a reason to end a session."""
+    return error.errno in _PERMANENT_SEND_ERRNOS
+
+
 class CultNetRudpSession:
     RELIABLE_SEND_WINDOW_PACKETS = 32
     RECEIVED_SEQUENCE_WINDOW = 4_096
@@ -840,6 +867,14 @@ class CultNetRudpSession:
 
     def create_ping(self, payload: bytes = b"") -> CultNetRudpPacket:
         return self._create_packet(CultNetRudpPacketType.PING, "control", payload)
+
+    def end_unsendable_session(self, error: OSError) -> CultNetRudpPacket:
+        """Ends a session that owes its peer a packet that can never be sent as built
+        (see `is_permanent_send_error`). Resending it would fail forever, and dropping it
+        would leave a reliable sequence the peer waits on for good, so the session cannot
+        be kept. Returns the goodbye for the peer; its reason names the error."""
+        self.reset_peer_state()
+        return self.create_disconnect(f"{UNSENDABLE_PACKET_REASON}: {error}".encode("utf-8"))
 
     def create_disconnect(self, reason: bytes = b"") -> CultNetRudpPacket:
         self._end_session()
