@@ -7,10 +7,6 @@ using GameCult.Caching;
 using MessagePack;
 using static GameCult.Geometry.CultGeometryDocuments;
 
-// The generator emits a resolver for these [MessagePackObject] documents; without this it would try to
-// generate a formatter for the CultRecordRef<T> reference members instead of using the cache's.
-[assembly: MessagePackKnownFormatter(typeof(CultRecordRefFormatter<>))]
-
 namespace GameCult.Geometry
 {
     /// <summary>
@@ -157,6 +153,7 @@ namespace GameCult.Geometry
         public string RequestId { get; set; } = string.Empty;
 
         [Key(1)]
+        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometryDomainDocument>))]
         public CultRecordRef<CultGeometryDomainDocument> DomainKey { get; set; }
 
         [Key(2)]
@@ -231,6 +228,7 @@ namespace GameCult.Geometry
         public string CutId { get; set; } = string.Empty;
 
         [Key(1)]
+        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometryBuildRequest>))]
         public CultRecordRef<CultGeometryBuildRequest> RequestKey { get; set; }
 
         [Key(2)]
@@ -315,6 +313,7 @@ namespace GameCult.Geometry
         public string ChunkId { get; set; } = string.Empty;
 
         [Key(1)]
+        [MessagePackFormatter(typeof(CultRecordRefFormatter<CultGeometrySelectedCutManifest>))]
         public CultRecordRef<CultGeometrySelectedCutManifest> CutKey { get; set; }
 
         [Key(2)]
