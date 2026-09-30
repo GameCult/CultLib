@@ -301,7 +301,7 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
                     seq.next_element()?.ok_or_else(|| A::Error::invalid_length(3, &self))?;
                 if seq.next_element::<IgnoredAny>()?.is_some() {
                     return Err(A::Error::custom(format!(
-                        "CultCache record {key:?} (schema {schema_id:?}) has more than the 4 slots of a {STORE_FORMAT_V1} record, so this is not a valid store"
+                        "{RECORD_REFUSAL}{key:?} (schema {schema_id:?}) has more than the 4 slots of a {STORE_FORMAT_V1} record, so this is not a valid store"
                     )));
                 }
                 Ok(PersistedRecord(key, schema_id, stored_at, payload.into_vec()))
@@ -313,6 +313,55 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
 }
 
 const STORE_FORMAT_V1: &str = "cultcache.store.v1";
+
+/// Opens every refusal CultCache raises about one persisted record. The decoder's own
+/// messages can quote the bytes; these name only the record's key and schema id.
+const RECORD_REFUSAL: &str = "CultCache record ";
+
+/// A store header as a refusal may show it: echoed when it has the shape
+/// `cultcache.store.v<digits>`, and otherwise described only by its length, since the
+/// bytes are the store's and an error text must not carry them.
+fn describe_header(header: &str) -> String {
+    let known_shape = header
+        .strip_prefix("cultcache.store.v")
+        .is_some_and(|version| !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit()));
+    if known_shape {
+        format!("{header:?}")
+    } else {
+        format!("an unrecognised cultcache.store.* header of {} bytes", header.len())
+    }
+}
+
+/// What a failed decode tells the operator: CultCache's own context and record
+/// refusals, and for a decoder failure only its kind, never a value from the bytes.
+fn describe_undecodable(error: &anyhow::Error) -> String {
+    let mut parts = Vec::new();
+    for cause in error.chain() {
+        if let Some(decode) = cause.downcast_ref::<rmp_serde::decode::Error>() {
+            parts.push(describe_decode_error(decode));
+            break;
+        }
+        parts.push(cause.to_string());
+    }
+    parts.join(": ")
+}
+
+fn describe_decode_error(error: &rmp_serde::decode::Error) -> String {
+    use rmp_serde::decode::Error;
+    match error {
+        Error::InvalidMarkerRead(_) | Error::InvalidDataRead(_) => "the bytes end before the store does",
+        Error::TypeMismatch(_) => "a value has a MessagePack type the store format does not allow",
+        Error::OutOfRange => "a number is out of range for its slot",
+        Error::LengthMismatch(_) => "an array has a length the store format does not allow",
+        Error::Utf8Error(_) => "a string is not valid UTF-8",
+        Error::DepthLimitExceeded => "values are nested deeper than the decoder allows",
+        Error::Syntax(message) | Error::Uncategorized(message) if message.starts_with(RECORD_REFUSAL) => {
+            return message.clone();
+        }
+        Error::Syntax(_) | Error::Uncategorized(_) => "a value does not fit the store format",
+    }
+    .to_string()
+}
 
 /// The store header string, or `None` when the bytes do not open with an array whose
 /// first slot is a string (the legacy envelope array starts with a map). Only the
@@ -741,18 +790,24 @@ impl SingleFileMessagePackBackingStore {
         // such as a symlink loop, a file where a directory should be, or no permission,
         // stays an io::Error: reading it as empty would let a writer replace a store it
         // never saw.
+        // A dangling symbolic link is something at the path, not nothing: reading it as
+        // empty would let the writer rename a file over the link and move the store off
+        // the volume the link pointed to.
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_absent(&self.path)? => {
+                return Ok(Vec::new());
+            }
             Err(error) => {
                 return Err(anyhow::Error::new(error)
                     .context(format!("failed to read {}", self.path.display())));
             }
         };
         let unreadable = |kind, detail: anyhow::Error| {
-            // The decoder reports a short read as an io::Error, so its chain is kept as
-            // text: an io::Error in the chain means the file itself could not be read.
-            anyhow!("{detail:#}").context(CultCacheStoreUnreadable {
+            // The detail is rebuilt as text that names no value read from the bytes. The
+            // decoder reports a short read as an io::Error, and dropping it keeps an
+            // io::Error in the chain meaning only that the file itself could not be read.
+            anyhow!(describe_undecodable(&detail)).context(CultCacheStoreUnreadable {
                 path: self.path.clone(),
                 kind,
             })
@@ -762,7 +817,7 @@ impl SingleFileMessagePackBackingStore {
                 .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
             Some(header) if header.starts_with("cultcache.store.") => Err(unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
-                anyhow!("its header is {header:?}; this runtime reads {STORE_FORMAT_V1:?} only"),
+                anyhow!("its header is {}; this runtime reads {STORE_FORMAT_V1:?} only", describe_header(&header)),
             )),
             _ => rmp_serde::from_slice(&bytes)
                 .context("failed to decode legacy CultCache envelope array")
@@ -2775,10 +2830,11 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
     replace_file_atomically(staged_path, destination)
 }
 
-/// True only when nothing is at `path`. A path that cannot be inspected (a symlink loop,
-/// a file where a directory should be, no permission) is an error, never absent.
+/// True only when nothing is at `path`; a symbolic link, dangling or not, is something.
+/// A path that cannot be inspected (a file where a directory should be, no permission)
+/// is an error, never absent.
 fn is_absent(path: &Path) -> Result<bool> {
-    match fs::metadata(path) {
+    match fs::symlink_metadata(path) {
         Ok(_) => Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(anyhow::Error::new(error).context(format!("failed to inspect {}", path.display()))),
@@ -4820,6 +4876,7 @@ mod tests {
             &[0x92, 0xa3, b'a', b'b'][..],
             &[0xc1][..],
             &[0x92, 0xa2, b'a', b'b', 0x90][..],
+            &[0x93, 0xb0, b'c', b'u', b'l', b't', b'c', b'a', b'c', b'h', b'e', b'.', b's', b't', b'o', b'r', b'e', b'X', 0x90, 0x90][..],
         ] {
             fs::write(&path, bytes)?;
             let error = store.pull_all().unwrap_err();
@@ -5067,6 +5124,94 @@ mod tests {
             .collect();
         assert_eq!(staging, Vec::<String>::new());
         assert_eq!(fs::read(path.join("kept"))?, b"kept");
+        Ok(())
+    }
+
+    /// MessagePack bytes of a fixstr, for store fixtures built by hand.
+    fn fixstr(text: &str) -> Vec<u8> {
+        assert!(text.len() < 32);
+        let mut bytes = vec![0xa0 | text.len() as u8];
+        bytes.extend_from_slice(text.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_refusal_never_echoes_a_value_from_the_store() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+
+        // A v1 store whose catalog holds a string where an entry goes, and a legacy
+        // envelope array holding a string where an envelope goes: the decoder's own
+        // message would quote both strings.
+        let mut v1 = vec![0x93];
+        v1.extend(fixstr(STORE_FORMAT_V1));
+        v1.push(0x91);
+        v1.extend(fixstr("SECRET-CATALOG-TEXT"));
+        v1.push(0x90);
+        let mut legacy = vec![0x91];
+        legacy.extend(fixstr("SECRET-LEGACY-TEXT"));
+        for bytes in [v1, legacy] {
+            fs::write(&path, &bytes)?;
+            for result in every_read(&store) {
+                let error = result.unwrap_err();
+                assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{error:#}");
+                assert!(!format!("{error:#}").contains("SECRET"), "{error:#}");
+                assert!(!format!("{error:?}").contains("SECRET"), "{error:?}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_header_is_echoed_only_in_the_known_shape() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for (header, echoed) in [
+            ("cultcache.store.v12", true),
+            ("cultcache.store.SECRET-HEADER", false),
+            ("cultcache.store.v12SECRET", false),
+            ("cultcache.store.v", false),
+        ] {
+            let mut bytes = vec![0x93];
+            bytes.extend(fixstr(header));
+            bytes.extend([0x90, 0x90]);
+            fs::write(&path, &bytes)?;
+            let error = store.pull_all().unwrap_err();
+            let text = format!("{error:#}");
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{text}");
+            if echoed {
+                assert!(text.contains(&format!("\"{header}\"")), "{text}");
+            } else {
+                assert!(!text.contains(header), "{text}");
+                assert!(!text.contains("SECRET"), "{text}");
+                assert!(text.contains(&format!("of {} bytes", header.len())), "{text}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Nothing at the store path is an empty store; a symbolic link whose target is
+    /// gone is something, and a writer must not rename a file over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_at_the_store_path_is_an_error_and_nothing_is_written() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let target = volume.join("store.cc");
+        let path = temp.path().join("store.cc");
+        std::os::unix::fs::symlink(&target, &path)?;
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for result in every_read(&store) {
+            let error = result.expect_err("a dangling link must not read as an empty store");
+            assert!(io_error_in(&error).is_some(), "{error:#}");
+            assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
+        assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(&volume)?.count(), 0);
         Ok(())
     }
 }
