@@ -312,33 +312,58 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
     }
 }
 
-/// The store header string, or `None` when the bytes are not a snapshot-shaped array
-/// (the legacy envelope array starts with a map).
+/// The store header string, or `None` when the bytes do not open with an array whose
+/// first slot is a string (the legacy envelope array starts with a map). Only the
+/// leading bytes are read, so a store cut short after its header still names its format.
+const STORE_FORMAT_V1: &str = "cultcache.store.v1";
+
 fn store_header(bytes: &[u8]) -> Option<String> {
-    struct Header(String);
-    impl<'de> serde::Deserialize<'de> for Header {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-            struct HeaderVisitor;
-            impl<'de> serde::de::Visitor<'de> for HeaderVisitor {
-                type Value = Header;
+    let mut offset = 0usize;
+    if read_array_header(bytes, &mut offset)? == 0 {
+        return None;
+    }
+    read_string(bytes, &mut offset)
+}
 
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("an array whose first slot is the store header")
-                }
+/// A single-file store whose bytes were read and not accepted. It sits in the error
+/// chain of every such read, so a consumer tells it apart with
+/// `error.downcast_ref::<CultCacheStoreUnreadable>()`. A failure to read the bytes
+/// at all stays a [`std::io::Error`] in the chain and never carries this type; the
+/// chain under this type never holds an `io::Error`, so the two never overlap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CultCacheStoreUnreadable {
+    pub path: PathBuf,
+    pub kind: CultCacheStoreUnreadableKind,
+}
 
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Header, A::Error> {
-                    let header: String = seq
-                        .next_element()?
-                        .ok_or_else(|| <A::Error as serde::de::Error>::invalid_length(0, &self))?;
-                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-                    Ok(Header(header))
-                }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CultCacheStoreUnreadableKind {
+    /// The bytes are not a store this runtime's format accepts: truncated, garbled,
+    /// or a record the format does not allow.
+    Undecodable,
+    /// The header names a store format this runtime does not read, such as one
+    /// written by a newer runtime. The rest of the file was not judged.
+    UnsupportedFormat,
+}
+
+impl std::fmt::Display for CultCacheStoreUnreadable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.kind {
+            CultCacheStoreUnreadableKind::Undecodable => {
+                write!(formatter, "CultCache store {} is not decodable", self.path.display())
             }
-            deserializer.deserialize_seq(HeaderVisitor)
+            CultCacheStoreUnreadableKind::UnsupportedFormat => write!(
+                formatter,
+                "CultCache store {} is in a format this runtime does not read",
+                self.path.display()
+            ),
         }
     }
-    rmp_serde::from_slice::<Header>(bytes).ok().map(|header| header.0)
 }
+
+impl std::error::Error for CultCacheStoreUnreadable {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
@@ -719,11 +744,27 @@ impl SingleFileMessagePackBackingStore {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
+        let unreadable = |kind, detail: anyhow::Error| {
+            // The decoder reports a short read as an io::Error, so its chain is kept as
+            // text: an io::Error in the chain means the file itself could not be read.
+            anyhow!("{detail:#}").context(CultCacheStoreUnreadable {
+                path: self.path.clone(),
+                kind,
+            })
+        };
         match store_header(&bytes) {
-            Some(header) if header.starts_with("cultcache.store.") => decode_store_snapshot(&bytes),
-            _ => rmp_serde::from_slice(&bytes).map_err(anyhow::Error::from),
+            Some(header) if header == STORE_FORMAT_V1 => decode_store_snapshot(&bytes)
+                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
+            Some(header) if header.starts_with("cultcache.store.") => Err(unreadable(
+                CultCacheStoreUnreadableKind::UnsupportedFormat,
+                anyhow!(
+                    "CultCache store format {header:?} is not readable; this runtime reads {STORE_FORMAT_V1:?} only. The store needs a runtime that resolves document variants."
+                ),
+            )),
+            _ => rmp_serde::from_slice(&bytes)
+                .context("failed to decode legacy CultCache envelope array")
+                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
         }
-        .map_err(|error| anyhow!("failed to decode MessagePack {}: {error:#}", self.path.display()))
     }
 
     /// Reads one filesystem snapshot without creating or opening the sibling
@@ -2574,20 +2615,14 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
         .collect();
 
     Ok(PersistedStoreSnapshot(
-        "cultcache.store.v1".to_string(),
+        STORE_FORMAT_V1.to_string(),
         catalog,
         records,
     ))
 }
 
+/// Decodes a store whose header the caller has already read as [`STORE_FORMAT_V1`].
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
-    if let Some(header) = store_header(bytes) {
-        if header != "cultcache.store.v1" {
-            return Err(anyhow!(
-                "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" only. The store needs a runtime that resolves document variants."
-            ));
-        }
-    }
     let snapshot: PersistedStoreSnapshot =
         rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
 
@@ -4696,6 +4731,115 @@ mod tests {
         assert_eq!(rows, vec![("alpha", "vectors.item"), ("beta", "vectors.item")]);
         assert_eq!(envelopes[0].payload, b"\x92\xa5alpha\x01");
         assert_eq!(envelopes[1].payload, b"\x92\xa4beta\x02");
+        Ok(())
+    }
+
+    // Store read and write faults: what a consumer can tell apart, and what a failed
+    // write leaves on disk.
+
+    fn unreadable_kind(error: &anyhow::Error) -> Option<CultCacheStoreUnreadableKind> {
+        error
+            .downcast_ref::<CultCacheStoreUnreadable>()
+            .map(|unreadable| unreadable.kind)
+    }
+
+    fn io_error_in(error: &anyhow::Error) -> Option<&std::io::Error> {
+        error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    }
+
+    /// A store of three records written by this runtime, returned with its bytes.
+    fn written_store(path: &Path) -> Result<(SingleFileMessagePackBackingStore, Vec<u8>)> {
+        let store = SingleFileMessagePackBackingStore::new(path);
+        let records = vec![
+            snapshot_envelope("alpha", &[1; 64]),
+            snapshot_envelope("beta", &[2; 64]),
+            snapshot_envelope("gamma", &[3; 64]),
+        ];
+        assert!(store.compare_exchange_snapshot(&[], &records)?);
+        let bytes = fs::read(path)?;
+        Ok((store, bytes))
+    }
+
+    #[test]
+    fn a_truncated_store_is_undecodable_on_every_read_and_is_left_as_it_was() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (store, bytes) = written_store(&path)?;
+        let truncated = &bytes[..bytes.len() / 2];
+        fs::write(&path, truncated)?;
+
+        let failures = [
+            store.pull_all().unwrap_err(),
+            store.pull_all_read_only_snapshot().unwrap_err(),
+            store
+                .compare_exchange_snapshot(&[], &[snapshot_envelope("delta", b"4")])
+                .unwrap_err(),
+        ];
+        for error in &failures {
+            assert_eq!(unreadable_kind(error), Some(CultCacheStoreUnreadableKind::Undecodable), "{error:#}");
+            assert_eq!(error.downcast_ref::<CultCacheStoreUnreadable>().unwrap().path, path);
+            assert!(error.to_string().contains(&path.display().to_string()), "{error}");
+            assert!(io_error_in(error).is_none(), "{error:#}");
+        }
+        assert_eq!(fs::read(&path)?, truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_store_are_undecodable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for bytes in [&b"not a store at all"[..], &[0x92, 0xa3, b'a', b'b'][..], &[0xc1][..]] {
+            fs::write(&path, bytes)?;
+            let error = store.pull_all().unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{bytes:?}: {error:#}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_v1_store_holding_a_record_v1_does_not_allow_is_undecodable() {
+        let error = pull_vector("extra-slot-full-payload.msgpack").unwrap_err();
+        assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{error:#}");
+    }
+
+    #[test]
+    fn a_store_in_a_format_this_runtime_does_not_read_is_unsupported_even_when_cut_short() -> Result<()> {
+        for name in ["unknown-header.msgpack", "variant-v2.msgpack", "../document-variants-c1/variant-store.msgpack"] {
+            let error = pull_vector(name).unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{name}: {error:#}");
+        }
+
+        // The header is all this runtime judges: a newer store cut short is still a
+        // newer store, not a damaged one this runtime could replace.
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        let vector = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c0/unknown-header.msgpack"),
+        )?;
+        let truncated = &vector[..vector.len() / 2];
+        fs::write(&path, truncated)?;
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for error in [store.pull_all().unwrap_err(), store.pull_all_read_only_snapshot().unwrap_err()] {
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{error:#}");
+            assert!(format!("{error:#}").contains("cultcache.store.v9"), "{error:#}");
+            assert!(io_error_in(&error).is_none(), "{error:#}");
+        }
+        assert_eq!(fs::read(&path)?, truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_read_is_an_io_error_and_never_unreadable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        fs::create_dir(&path)?;
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for error in [store.pull_all().unwrap_err(), store.pull_all_read_only_snapshot().unwrap_err()] {
+            assert!(io_error_in(&error).is_some(), "{error:#}");
+            assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
         Ok(())
     }
 }
