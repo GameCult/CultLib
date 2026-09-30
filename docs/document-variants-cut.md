@@ -1365,3 +1365,20 @@ Verdict: **hold, not merged.** Recorded under drain mode; no fix dispatched.
 - **F4:** mutant MA (legacy global labelled by schema name) survives; the rule needs a committed test.
 - **F5 (PLAUSIBLE, high after c2a):** c2a's compatible-owned ids plus clause 1 let a non-owner's write delete the owner's record. c2a's `encodeSnapshot` `${type}::${key}` is a second identity authority.
 - Probes survive as unreachable commit `1c7744e2` (ts, rs, py); recover them before gc.
+
+## Soul: C2a F2 keep unknown records (`hands/variants-c2a` `92d9e138..a771e71b`, 2026-10-01)
+
+Verdict: **hold, not merged.** Recorded under drain mode; no fix dispatched. The core promise holds: a C# write neither destroys nor relabels a record it doesn't claim. Checked on the real `Aetheria.cc` (206 records): 0 record or entry differences after a commit and a flush.
+
+- **F1 (CONFIRMED, medium):** C# decodes and re-encodes laid-back catalog entries (`CultDocumentMessagePackSerialization.cs:501,567`, `CultCache.cs:3847-3851`). Unknown entry and member fields are dropped, and nil and int widths are normalized. Fix: carry the raw entry bytes.
+- **F2 (CONFIRMED, medium):** laying back a loaded foreign record reverts a newer write by its owner and moves storedAt backwards (`CultCache.cs:3831-3836`, breaks F6). Fix: lay back only while the file still holds the loaded `(id, storedAt)`.
+- **F3 (CONFIRMED, medium):** one refused flush blocks every later write to other records. The directory store stays stuck until restart (`CultCache.cs:3827-3831`, `DirectoryMessagePackBackingStore.cs:249-253`). Breaks "writes to other records proceed".
+- **F4 (low):** a laid-back record marks the v3 header without holding ids (`CultCache.cs:3731`).
+- **F5 (plausible, low):** an in-place change to a laid-back document is dropped silently.
+- **F6:** mutants H2 (`CultCache.cs:3850`) and R2 (`lib.rs:2663`) survive.
+- **The main merge is its own Hands cut.**
+  - 8 files conflict, including about 74 KB in `lib.rs`.
+  - Main refuses a zero-byte store; c2a reads it as an empty v1 store.
+  - Main's `CultMeshStreamingTests.cs:919` uses `MeshNoteAliasDocument`, which c2a deleted.
+  - The rough merge fails in Caching, Mesh (compile), TS and Python.
+- `ADeterministicIdIsTheSameUnderEveryCulture…` fails at the base too: the image is globalization-invariant.
