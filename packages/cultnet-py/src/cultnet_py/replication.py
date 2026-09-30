@@ -167,6 +167,7 @@ def resolve_document_for_raw_record(
     return resolve_document_and_schema_id_for_raw_record(documents_by_schema_id, schema_id, record)[0]
 
 
+# routes a replicated raw record to a local binding; the store always persists the local schema id; this is not store-reader recovery.
 def resolve_document_and_schema_id_for_raw_record(
     documents_by_schema_id: dict[str, DocumentDefinition[Any]],
     schema_id: str,

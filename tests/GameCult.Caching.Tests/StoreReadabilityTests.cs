@@ -114,6 +114,47 @@ namespace GameCult.Caching.Tests
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
         }
 
+        private string DirectoryStore(string name)
+        {
+            var path = Path.Combine(_directory, name);
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true });
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "d" }, new CultRecordKey("d")));
+            return path;
+        }
+
+        // The directory store's refusal names the manifest it refused, as the single-file store names its file.
+        [Test]
+        public void AnUnreadableDirectoryManifestIsRefusedNamingIt()
+        {
+            var path = DirectoryStore("manifest.cc");
+            File.WriteAllBytes(path, new byte[] { 0x01 });
+
+            Assert.That(
+                () => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }),
+                Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
+        }
+
+        // A record kept under an id its catalog entry lists only as a compatible id keeps that entry through a rewrite: the manifest
+        // the rewrite leaves is one this runtime reads.
+        [Test]
+        public void ADirectoryRewriteKeepsTheCatalogEntryThatPublishesAKeptRecordAsACompatibleId()
+        {
+            var path = DirectoryStore("compatible.cc");
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            manifest.Records.Single().SchemaId = "vectors.old.id";
+            entry.SchemaId = "vectors.old.next";
+            entry.CompatibleSchemaIds = new[] { "vectors.old.id" };
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+
+            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(rewritten.SchemaCatalog.Select(catalogEntry => catalogEntry.SchemaId), Does.Contain("vectors.old.next"));
+            Assert.That(rewritten.Records.Select(record => record.SchemaId), Does.Contain("vectors.old.id"));
+        }
+
         // A commit that lands onto the file as it is keeps the header the file carries: a store already v3 stays v3.
         [TestCase("../v3-base.msgpack", "cultcache.store.v3")]
         [TestCase("compatible-id-only-v3.bin", "cultcache.store.v3")]

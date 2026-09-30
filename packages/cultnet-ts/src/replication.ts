@@ -300,6 +300,7 @@ export class CultNetDocumentRegistry {
     return binding;
   }
 
+  // routes a replicated raw record to a local binding; the store always persists the local schema id; this is not store-reader recovery.
   #resolveRawDocumentBinding(document: CultNetRawDocumentRecord): CultNetDocumentBinding {
     const exact = this.getBySchemaId(document.schemaId);
     if (exact) {
