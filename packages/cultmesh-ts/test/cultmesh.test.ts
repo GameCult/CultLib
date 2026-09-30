@@ -3243,11 +3243,21 @@ type ServedBoundRig = {
 const servedBoundRegistry = () =>
   new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: noteDocument })]);
 
+/**
+ * A put's own storedAt, kept by the served record and replaced in the receipt by the server's
+ * 24-character clock. It is long enough that the snapshot reply is always the larger reply, so
+ * fixtures built with it pin the served bound; `RECEIPT_STORED_AT` puts pin the receipt bound.
+ */
+const SERVED_STORED_AT = `2026-09-30T00:00:00.000Z${"~".repeat(200)}`;
+const RECEIPT_STORED_AT = "2026-09-30T00:00:00.000Z";
+const SERVED_BOUND_SERVER = "cultmesh-ts-served-bound-server";
+
 function notePut(
   messageId: string,
   recordKey: string,
   bodyLength: number,
   sourceRuntimeId?: string,
+  storedAt = SERVED_STORED_AT,
 ): CultNetDocumentPutRawMessage {
   return {
     schemaVersion: "cultnet.document_put_raw.v0",
@@ -3255,7 +3265,7 @@ function notePut(
     document: {
       schemaId: "cultmesh.note.v0",
       recordKey,
-      storedAt: "2026-09-30T00:00:00.000Z",
+      storedAt,
       payloadEncoding: "messagepack",
       payload: encode({ noteId: recordKey, body: "x".repeat(bodyLength) }),
       ...(sourceRuntimeId ? { sourceRuntimeId } : {}),
@@ -3277,11 +3287,46 @@ function servedAloneBytes(put: CultNetDocumentPutRawMessage): number {
   }).byteLength;
 }
 
-/** The body length whose served-alone reply is exactly `bytes`, with a guard. */
+/**
+ * The encoded size of the receipt that would acknowledge this put by echoing its value: the
+ * put's message id, the server's clock and its default provenance. Spelled out here rather than
+ * asked of the server, so a server that sized another receipt is caught.
+ */
+function echoReceiptBytes(put: CultNetDocumentPutRawMessage): number {
+  return encode({
+    schemaVersion: "cultnet.document_put_raw.v0",
+    messageId: put.messageId,
+    document: {
+      schemaId: "cultmesh.note.v0",
+      recordKey: put.document.recordKey,
+      storedAt: new Date().toISOString(),
+      payloadEncoding: "messagepack",
+      payload: encode(decode(put.document.payload)),
+      sourceRuntimeId: SERVED_BOUND_SERVER,
+      sourceAgentId: undefined,
+      sourceRole: "provider",
+      tags: ["receipt"],
+    },
+  }).byteLength;
+}
+
+/** The body length whose served-alone reply is exactly `bytes`, and the larger reply. */
 function bodyLengthForReplyBytes(recordKey: string, bytes: number): number {
   const probe = 8_000;
   const length = probe + bytes - servedAloneBytes(notePut("p", recordKey, probe));
-  assert.equal(servedAloneBytes(notePut("p", recordKey, length)), bytes, "fixture: reply size is linear in the body");
+  const put = notePut("p", recordKey, length);
+  assert.equal(servedAloneBytes(put), bytes, "fixture: reply size is linear in the body");
+  assert.ok(echoReceiptBytes(put) < bytes, "fixture: the snapshot reply is the larger reply");
+  return length;
+}
+
+/** The body length whose echoed receipt, under `messageId`, is exactly `bytes`, and the larger reply. */
+function bodyLengthForReceiptBytes(messageId: string, recordKey: string, bytes: number): number {
+  const put = (body: number) => notePut(messageId, recordKey, body, undefined, RECEIPT_STORED_AT);
+  const probe = 2_000;
+  const length = probe + bytes - echoReceiptBytes(put(probe));
+  assert.equal(echoReceiptBytes(put(length)), bytes, "fixture: receipt size is linear in the body");
+  assert.ok(servedAloneBytes(put(length)) < bytes, "fixture: the receipt is the larger reply");
   return length;
 }
 
@@ -3289,7 +3334,7 @@ async function withServedBoundRig(
   connectionId: number,
   serverLimits: { maxFragmentBytes?: number; maxPendingReliablePackets?: number; maxPayloadBytes?: number },
   body: (rig: ServedBoundRig) => Promise<void>,
-  handler: { echoReceipt?: boolean } = {},
+  handler: { receipt?: "echo" | "oversized" } = {},
 ): Promise<void> {
   const node = await CultMesh.startNode(
     join(await mkdtemp(join(tmpdir(), "cultmesh-ts-served-bound-")), "node.ccmp"),
@@ -3300,7 +3345,7 @@ async function withServedBoundRig(
   const errors: Error[] = [];
   const messages: CultNetMessage[] = [];
   const unparsed: Error[] = [];
-  const server = CultMesh.createRudpDocumentServer("cultmesh-ts-served-bound-server", connectionId, {
+  const server = CultMesh.createRudpDocumentServer(SERVED_BOUND_SERVER, connectionId, {
     documents: registry,
     getCache: () => node.cache,
     bindHost: "127.0.0.1",
@@ -3322,9 +3367,15 @@ async function withServedBoundRig(
           payload: encode(document.payload),
         },
       });
-      return handler.echoReceipt
-        ? { binding: defineCultNetDocumentBinding({ definition: noteDocument }), recordKey: document.recordKey, value: document.payload as { noteId: string; body: string } }
-        : undefined;
+      if (!handler.receipt) return undefined;
+      // An echo acknowledges the stored value, as admission sizes it; an oversized receipt
+      // carries more than admission could know of.
+      return {
+        binding: defineCultNetDocumentBinding({ definition: noteDocument }),
+        recordKey: document.recordKey,
+        value: document.payload as { noteId: string; body: string },
+        ...(handler.receipt === "oversized" ? { tags: ["x".repeat(8_000)] } : {}),
+      };
     },
     onError: (error) => errors.push(error),
   });
@@ -3431,9 +3482,9 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
     await waitForPeerErrors(rig, 1);
     assert.ok(!refusal.message.includes("note:ov"), refusal.message);
 
-    // A put whose own frame is over the limit only by the provenance and message id it carries
-    // is served at the bound, so it is admitted and served.
-    const carried = notePut(`put-at-${"m".repeat(200)}`, "note:at", atBound, `runtime-${"r".repeat(200)}`);
+    // A put whose own frame is over the limit only by the provenance it carries is served at the
+    // bound, so it is admitted and served.
+    const carried = notePut("put-at", "note:at", atBound, `runtime-${"r".repeat(200)}`);
     assert.ok(encode(carried).byteLength > limit, "fixture: the put's frame is over the limit");
     rig.peer.send(carried);
     await waitForAdmission(rig, "note:at");
@@ -3459,26 +3510,45 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
   });
 });
 
+test("CultMesh TS RUDP document server refuses a put whose receipt could not be sent", async () => {
+  // The receipt is the larger reply here: a put whose receipt is one byte over the limit is
+  // refused before it is stored; one whose receipt is exactly at the limit is stored and gets it.
+  const limit = 4_000;
+  const overBound = bodyLengthForReceiptBytes("put-ov", "note:ro", limit + 1);
+  const atBound = bodyLengthForReceiptBytes("put-at", "note:ra", limit);
+  await withServedBoundRig(0x10203065, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
+    rig.peer.send(notePut("put-ov", "note:ro", overBound, undefined, RECEIPT_STORED_AT));
+    const refusal = await waitForError(rig, "the put whose receipt is over the limit");
+    assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal.message);
+    assert.equal(refusal.responseBytes, limit + 1);
+    assert.equal(refusal.maxPayloadBytes, limit);
+    assert.deepEqual(rig.admitted, []);
+    await waitForPeerErrors(rig, 1);
+
+    rig.peer.send(notePut("put-at", "note:ra", atBound, undefined, RECEIPT_STORED_AT));
+    await waitForAdmission(rig, "note:ra");
+    const startedAt = Date.now();
+    while (!rig.messages.some(isDocumentPut) && Date.now() - startedAt < 3_000) await delay(5);
+    const receipt = rig.messages.find(isDocumentPut) as CultNetDocumentPutRawMessage | undefined;
+    assert.equal(receipt?.messageId, "put-at", "the stored put gets its receipt");
+    assert.equal(rig.errors.length, 1);
+  }, { receipt: "echo" });
+});
+
 test("CultMesh TS RUDP document server tells the peer when a stored put's receipt cannot be sent", async () => {
+  // A handler whose receipt is larger than the echo admission sized: the put is stored, the
+  // receipt cannot be sent, and the peer hears that it is not coming.
   const limit = 4_000;
   const small = bodyLengthForReplyBytes("note:small", 1_000);
-  const atBound = bodyLengthForReplyBytes("note:at", limit);
   await withServedBoundRig(0x10203064, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
     rig.peer.send(notePut("put-small", "note:small", small));
     await waitForAdmission(rig, "note:small");
-    const startedAt = Date.now();
-    while (!rig.messages.some(isDocumentPut) && Date.now() - startedAt < 3_000) await delay(5);
-    assert.ok(rig.messages.some(isDocumentPut), "a receipt that fits is sent");
-
-    // Served at the bound, the put is admitted and stored; its echoed receipt carries the
-    // server's provenance and so is over the limit. The peer hears that it is not coming.
-    rig.peer.send(notePut("put-at", "note:at", atBound));
-    await waitForAdmission(rig, "note:at");
     await waitForPeerErrors(rig, 1);
     assert.equal(rig.errors.length, 1);
     assert.match(rig.errors[0]!.message, /reply cultnet\.document_put_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
-    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
-  }, { echoReceipt: true });
+    assert.ok(!rig.messages.some(isDocumentPut));
+    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:small")), [["note:small", small]]);
+  }, { receipt: "oversized" });
 });
 
 function isDocumentPut(message: CultNetMessage): boolean {
