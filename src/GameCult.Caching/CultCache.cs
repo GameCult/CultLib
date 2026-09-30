@@ -3640,7 +3640,8 @@ namespace GameCult.Caching
                 SchemaCatalog = catalog
                     .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .Select(group => group.First())
-                    .Where(entry => used.Contains(entry.SchemaId))
+                    // An entry stays while it publishes a schema id some record carries, as its own id or a compatible one.
+                    .Where(entry => used.Contains(entry.SchemaId) || entry.CompatibleSchemaIds.Any(used.Contains))
                     .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
                     .ToArray(),
                 Records = ordered

@@ -259,7 +259,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             .ToArray();
         var usedSchemaIds = currentIndex.Values.Select(record => record.SchemaId).ToHashSet(StringComparer.Ordinal);
         var targetCatalog = catalogCandidates
-            .Where(entry => usedSchemaIds.Contains(entry.SchemaId))
+            .Where(entry => usedSchemaIds.Contains(entry.SchemaId) || entry.CompatibleSchemaIds.Any(usedSchemaIds.Contains))
             .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
             .ToArray();
         var keysToWrite = _dirtyKeys.Keys
