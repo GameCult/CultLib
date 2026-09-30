@@ -544,7 +544,7 @@ namespace GameCult.Mesh
         /// <summary>Gets or sets a caller-owned bound socket.</summary>
         public Socket? Socket { get; set; }
         /// <summary>Gets or sets the first local packet sequence.</summary>
-        public uint InitialSequence { get; set; } = 1;
+        public uint InitialSequence { get; set; } = CultNetRudpSession.RandomInitialSequence();
         /// <summary>Gets or sets the reliable resend delay in milliseconds.</summary>
         public long ResendDelayMs { get; set; } = 250;
         /// <summary>Gets or sets the advertised transport id.</summary>

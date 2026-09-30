@@ -909,7 +909,7 @@ namespace GameCult.Networking.Tests
             var accept = server.AcceptConnect(connect, 0);
             var repeat = CultNetRudpPacketCodec.Decode(CultNetRudpPacketCodec.Encode(connect));
             repeat.Ack = accept.Sequence;
-            var reply = server.AnswerRepeatedConnect(repeat, 1);
+            var reply = server.AcceptConnect(repeat, 1);
             Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
             Assert.That(server.OutstandingReliablePacketCount, Is.EqualTo(0));
         }
