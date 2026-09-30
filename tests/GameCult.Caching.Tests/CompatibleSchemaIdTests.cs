@@ -354,7 +354,7 @@ namespace GameCult.Caching.Tests
             using (var cache = Open(path, Declaring))
             {
                 cache.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "b" }, b));
-                cache.Commit(batch => batch.UpsertVariant(v, b));
+                cache.Commit(batch => batch.UpsertVariant(v, b, new[] { cache.Override(typeof(DeclaringDeck), nameof(DeclaringDeck.Name), "v") }));
             }
 
             Rewrite(path, snapshot =>

@@ -339,11 +339,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var started = tracePages ? Stopwatch.GetTimestamp() : 0L;
                 var metadata = records[index];
                 var record = ReadPersistedRecordPage(metadata, out var pagePayload);
-                storedRecords[index] = ToStoredDocument(
+                var stored = ToStoredDocument(
                     record,
                     catalogEntries,
                     (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
                     out recordReports[index]);
+                // The manifest is this store's record of what is on disk, and what a commit condition compares with.
+                stored.StoredSchemaId = metadata.SchemaId;
+                storedRecords[index] = stored;
                 if (tracePages)
                 {
                     pageBytes[index] = pagePayload.LongLength;
