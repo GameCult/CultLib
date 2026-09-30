@@ -651,6 +651,38 @@ class CultMeshDatabase:
         return message
 
     def apply_raw_put_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
+        prepared = self._raw_put_envelope(message)
+        if prepared is None:
+            return None
+        document, envelope = prepared
+        record_key = envelope.key
+        previous = self.cache.get(document, record_key)
+        value = self.cache.put_envelope(document, envelope)
+        change_kind = "added" if previous is None else "updated"
+        change = self._publish_local_change(document, record_key, change_kind, value, previous)
+        self._append_shard_log_put(CultNetMessage(
+            "cultnet.document_put_raw.v0",
+            {key: value for key, value in message.items() if key != "schemaVersion"},
+        ), change_kind)
+        return change
+
+    def raw_put_served_alone(self, message: dict[str, Any], *, message_id: str) -> dict[str, Any] | None:
+        """The snapshot response that would serve this put's document alone, as a wire map.
+
+        It is built from the envelope the put would store, exactly as a snapshot builds it, so a
+        server can judge a put by the size it would be served at. None when the put would not apply.
+        """
+        prepared = self._raw_put_envelope(message)
+        if prepared is None:
+            return None
+        return CultNetRawSnapshotResponse(
+            message_id=message_id,
+            documents=(self._served_record(prepared[1]),),
+        ).to_wire()
+
+    def _raw_put_envelope(
+        self, message: dict[str, Any]
+    ) -> tuple[DocumentDefinition[Any], CultCacheEnvelope] | None:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
             return None
@@ -664,24 +696,24 @@ class CultMeshDatabase:
             )
         except KeyError:
             return None
-        record_key = str(document_record["recordKey"])
-        previous = self.cache.get(document, record_key)
-        envelope = CultCacheEnvelope(
-            key=record_key,
+        return document, CultCacheEnvelope(
+            key=str(document_record["recordKey"]),
             type=document.type,
             schema_id=resolved_schema_id,
             payload=bytes(document_record["payload"]),
             stored_at=str(document_record.get("storedAt") or ""),
             catalog_entry=document.catalog_entry(),
         )
-        value = self.cache.put_envelope(document, envelope)
-        change_kind = "added" if previous is None else "updated"
-        change = self._publish_local_change(document, record_key, change_kind, value, previous)
-        self._append_shard_log_put(CultNetMessage(
-            "cultnet.document_put_raw.v0",
-            {key: value for key, value in message.items() if key != "schemaVersion"},
-        ), change_kind)
-        return change
+
+    @staticmethod
+    def _served_record(envelope: CultCacheEnvelope) -> CultNetRawDocumentRecord:
+        return CultNetRawDocumentRecord(
+            schema_id=envelope.schema_id or envelope.type,
+            record_key=envelope.key,
+            stored_at=envelope.stored_at,
+            payload_encoding="messagepack",
+            payload=envelope.payload,
+        )
 
     def apply_raw_delete_message(self, message: dict[str, Any]) -> CultMeshDatabaseChange | None:
         schema_id = str(message.get("schemaId") or "")
@@ -774,13 +806,7 @@ class CultMeshDatabase:
                 continue
             if shard_record_keys is not None and (schema_id, envelope.key) not in shard_record_keys:
                 continue
-            documents.append(CultNetRawDocumentRecord(
-                schema_id=schema_id,
-                record_key=envelope.key,
-                stored_at=envelope.stored_at,
-                payload_encoding="messagepack",
-                payload=envelope.payload,
-            ))
+            documents.append(self._served_record(envelope))
 
         return CultNetRawSnapshotResponse(
             message_id=message_id,

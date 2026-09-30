@@ -24,6 +24,10 @@ from cultnet_py import (
 )
 
 from .node import CultMeshNode
+
+# The shortest message id this server answers a snapshot request under. It takes a
+# request's messageId as given, an empty one included, so no response it sends is smaller.
+_SHORTEST_SERVED_MESSAGE_ID = ""
 from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     VERSE_CATALOG_REQUEST,
@@ -357,6 +361,19 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
+        if self.max_snapshot_bytes is not None:
+            alone = self.node.database.raw_put_served_alone(
+                message, message_id=_SHORTEST_SERVED_MESSAGE_ID
+            )
+            response_bytes = None if alone is None else _snapshot_response_bytes(alone)
+            if response_bytes is not None and response_bytes > self.max_snapshot_bytes:
+                return [self._error_response(
+                    f"Document can never be served: its snapshot response is {response_bytes} bytes; "
+                    f"limit is {self.max_snapshot_bytes}.",
+                    message_id=str(message.get("messageId") or ""),
+                    code="document_unservable",
+                    details={"responseBytes": response_bytes, "maxSnapshotBytes": self.max_snapshot_bytes},
+                )]
         change = self.node.database.apply_raw_put_message(message)
         if change is None:
             return [self._error_response(
@@ -559,7 +576,7 @@ class CultMeshLocalServer:
                 details={"documentCount": document_count, "maxSnapshotDocuments": self.max_snapshot_documents},
             )
         if self.max_snapshot_bytes is not None:
-            response_bytes = len(msgpack.packb(response, use_bin_type=True))
+            response_bytes = _snapshot_response_bytes(response)
             if response_bytes > self.max_snapshot_bytes:
                 return self._error_response(
                     f"Snapshot byte limit exceeded: {response_bytes} > {self.max_snapshot_bytes}.",
@@ -723,3 +740,8 @@ def _infer_schema_name(schema_id: str) -> str | None:
         return None
     version = schema_id[marker + 2:]
     return schema_id[:marker] if version.isdigit() else None
+
+
+def _snapshot_response_bytes(response: dict[str, Any]) -> int:
+    """The one measure of a snapshot response, shared by the snapshot path and put admission."""
+    return len(msgpack.packb(response, use_bin_type=True))

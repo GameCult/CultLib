@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+import msgpack
 from cultcache_py import (
     CultCache,
     SingleFileMessagePackBackingStore,
@@ -4292,6 +4294,80 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(error["code"], "snapshot_document_limit_exceeded")
         self.assertEqual(error["details"]["documentCount"], 2)
         self.assertEqual(error["details"]["maxSnapshotDocuments"], 1)
+
+    def test_cultmesh_local_server_refuses_a_put_it_could_never_serve(self) -> None:
+        # A put is admitted only if some snapshot request could return it. The put arrives under a
+        # long foreign schema alias and is stored and served under the shorter local schema id, so
+        # the size that decides is the served one, not the put's own.
+        document = define_database_entry_type(
+            "mesh.served_bound_note",
+            [("schema_version", 0), ("body", 1)],
+            schema_id="sha256:mesh-served-bound",
+            schema_name="mesh.served_bound_note",
+            schema_version="mesh.served_bound_note.v1",
+        )
+
+        def put(message_id: str, key: str, body_length: int) -> dict[str, Any]:
+            return document_put_raw(
+                message_id=message_id,
+                key=key,
+                schema_id="runtime.generated.mesh.served_bound_note.ui.99",
+                stored_at="2026-09-30T00:00:00Z",
+                payload=document.encode_payload({
+                    "schema_version": "mesh.served_bound_note.v1",
+                    "body": "x" * body_length,
+                }),
+            ).to_wire()
+
+        def exchange(server: Any, *messages: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+            client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with client.open_transport() as transport:
+                for message in messages:
+                    transport.send("schema", msgpack.packb(message, use_bin_type=True))
+                payload = transport.receive().payload
+            return msgpack.unpackb(payload, raw=False), payload
+
+        empty_id_snapshot = snapshot_request(message_id="").to_wire()
+
+        # The bound is what the server actually serves for the at-bound document alone, under the
+        # shortest message id it answers (an empty one), measured on an unbounded server.
+        def served_alone_bytes(key: str, body_length: int) -> int:
+            node = CultMesh.create_node(runtime_id="mesh-served-bound-probe")
+            node.database.register_document(document)
+            server = CultMesh.serve_node(node, enable_rudp=False)
+            try:
+                response, payload = exchange(server, put("probe", key, body_length), empty_id_snapshot)
+            finally:
+                server.stop()
+            self.assertEqual(response["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+            self.assertEqual(len(response["documents"]), 1)
+            return len(payload)
+
+        limit = served_alone_bytes("note:fits", 100)
+        self.assertEqual(served_alone_bytes("note:over", 101), limit + 1, "fixture: the documents must straddle the bound by one byte")
+
+        node = CultMesh.create_node(runtime_id="mesh-served-bound")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, max_snapshot_bytes=limit, enable_rudp=False)
+        try:
+            refused, _ = exchange(server, put("put-over", "note:over", 101))
+            stored_after_refusal = node.database.get(document, "note:over")
+            served, served_payload = exchange(server, put("put-at", "note:fits", 100), empty_id_snapshot)
+        finally:
+            server.stop()
+
+        self.assertEqual(refused["schemaVersion"], "cultnet.error.v0")
+        self.assertEqual(refused["messageId"], "put-over")
+        self.assertEqual(refused["code"], "document_unservable")
+        self.assertEqual(refused["details"], {"responseBytes": limit + 1, "maxSnapshotBytes": limit})
+        self.assertIn(str(limit + 1), refused["error"])
+        self.assertIn(str(limit), refused["error"])
+        self.assertIsNone(stored_after_refusal)
+
+        self.assertEqual(served["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([record["recordKey"] for record in served["documents"]], ["note:fits"])
+        self.assertEqual(served["documents"][0]["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(len(served_payload), limit)
 
     def test_cultmesh_local_server_returns_errors_for_bad_requests(self) -> None:
         document = define_database_entry_type(
