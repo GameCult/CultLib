@@ -426,12 +426,13 @@ impl CultNetRudpSession {
     }
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
-        self.ensure_reliable_capacity(1)?;
         // A session that has had a peer starts a new generation: nothing it
-        // learned from that peer describes the one this Connect reaches.
+        // learned from that peer describes the one this Connect reaches, and
+        // what it still owed that peer no longer takes room in the queue.
         if self.connect_sequence.is_some() {
             self.reset_peer_state();
         }
+        self.ensure_reliable_capacity(1)?;
         let packet = self.create_packet(
             CultNetRudpPacketType::Connect,
             "control",
@@ -486,8 +487,8 @@ impl CultNetRudpSession {
                 .unwrap_or_else(|| self.create_ack()));
         }
 
-        self.ensure_reliable_capacity(1)?;
         self.reset_peer_state();
+        self.ensure_reliable_capacity(1)?;
         self.seed_received(packet.sequence);
         self.last_received_at_ms = Some(now_ms);
         self.connect_sequence = Some(packet.sequence);

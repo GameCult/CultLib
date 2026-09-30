@@ -1026,11 +1026,12 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateConnect(long nowMs = 0, byte[]? payload = null)
         {
-            EnsureReliableCapacity(1);
             // A session that has had a peer starts a new generation: nothing it learned from that
-            // peer describes the one this Connect reaches.
+            // peer describes the one this Connect reaches, and what it still owed that peer no
+            // longer takes room in the queue.
             if (_connectSequence.HasValue)
                 ResetPeerState();
+            EnsureReliableCapacity(1);
             _ended = false;
             var packet = CreatePacket(CultNetRudpPacketType.Connect, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
             _connectSequence = packet.Sequence;
@@ -1069,8 +1070,8 @@ namespace GameCult.Networking
 
             if (ConnectRepeats(packet))
                 return AnswerRepeatedConnect(packet, nowMs);
-            EnsureReliableCapacity(1);
             ResetPeerState();
+            EnsureReliableCapacity(1);
             SeedReceived(packet.Sequence);
             _connectSequence = packet.Sequence;
             _connected = true;

@@ -531,11 +531,12 @@ class CultNetRudpSession:
         self._fragment_sets_evicted = 0
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
-        self._ensure_reliable_capacity(1)
         # A session that has had a peer starts a new generation: nothing it
-        # learned from that peer describes the one this Connect reaches.
+        # learned from that peer describes the one this Connect reaches, and
+        # what it still owed that peer no longer takes room in the queue.
         if self._connect_sequence is not None:
             self.reset_peer_state()
+        self._ensure_reliable_capacity(1)
         self._ended = False
         packet = self._create_packet(
             CultNetRudpPacketType.CONNECT,
@@ -576,8 +577,8 @@ class CultNetRudpSession:
         # generation, forgets the peer and accepts a new one.
         if self.connect_repeats(packet):
             return self._answer_repeated_connect(packet, now_ms)
-        self._ensure_reliable_capacity(1)
         self.reset_peer_state()
+        self._ensure_reliable_capacity(1)
         self._seed_received(packet.sequence)
         self._last_received_at_ms = now_ms
         self._connect_sequence = packet.sequence

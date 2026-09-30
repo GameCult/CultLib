@@ -117,6 +117,21 @@ test("an Accept for an abandoned Connect does not connect the session", () => {
   assert.equal(client.connected, false, "an Accept revived an abandoned Connect");
 });
 
+test("a full queue owed to a vanished peer does not refuse a new generation", () => {
+  const bounded = (initialSequence: number) => new CultNetRudpSession({ connectionId, initialSequence, maxPendingReliablePackets: 1 });
+  const server = bounded(500);
+  server.acceptConnect(session(1).createConnect(0), 0);
+  assert.equal(server.outstandingReliablePacketCount, 1, "the Accept is owed and never acknowledged");
+  const next = session(9).createConnect(1);
+  server.acceptConnect(next, 1);
+  assert.equal(server.connectRepeats(next), true);
+
+  const client = bounded(1);
+  client.createConnect(0);
+  client.createConnect(1);
+  assert.equal(client.outstandingReliablePacketCount, 1, "only the new Connect is owed");
+});
+
 test("a duplicate Accept does not reseed the watermark", () => {
   const client = session(1);
   const server = session(500);

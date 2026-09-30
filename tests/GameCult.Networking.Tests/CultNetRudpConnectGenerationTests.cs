@@ -179,6 +179,29 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void AFullQueueOwedToAVanishedPeerDoesNotRefuseANewGeneration()
+        {
+            static CultNetRudpSession Bounded(uint initialSequence) => new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = ConnectionId,
+                InitialSequence = initialSequence,
+                MaxPendingReliablePackets = 1
+            });
+
+            var server = Bounded(500);
+            server.AcceptConnect(Session(1).CreateConnect(0), 0);
+            Assert.That(server.OutstandingReliablePacketCount, Is.EqualTo(1), "the Accept is owed and never acknowledged");
+            var next = Session(9).CreateConnect(1);
+            server.AcceptConnect(next, 1);
+            Assert.That(server.ConnectRepeats(next), Is.True);
+
+            var client = Bounded(1);
+            client.CreateConnect(0);
+            client.CreateConnect(1);
+            Assert.That(client.OutstandingReliablePacketCount, Is.EqualTo(1), "only the new Connect is owed");
+        }
+
+        [Test]
         public void ADuplicateAcceptDoesNotReseedTheWatermark()
         {
             var client = Session(1);

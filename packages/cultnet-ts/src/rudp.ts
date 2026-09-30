@@ -281,12 +281,13 @@ export class CultNetRudpSession {
   }
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
-    this.#ensureReliableCapacity(1);
     // A session that has had a peer starts a new generation: nothing it learned
-    // from that peer describes the one this Connect reaches.
+    // from that peer describes the one this Connect reaches, and what it still
+    // owed that peer no longer takes room in the queue.
     if (this.#connectSequence !== undefined) {
       this.resetPeerState();
     }
+    this.#ensureReliableCapacity(1);
     this.#ended = false;
     const packet = this.#createPacket({
       packetType: "connect",
@@ -324,8 +325,8 @@ export class CultNetRudpSession {
     if (this.connectRepeats(packet)) {
       return this.#answerRepeatedConnect(packet, nowMs);
     }
-    this.#ensureReliableCapacity(1);
     this.resetPeerState();
+    this.#ensureReliableCapacity(1);
     this.#seedReceived(packet.sequence);
     this.#lastReceivedAtMs = nowMs;
     this.#connectSequence = packet.sequence;

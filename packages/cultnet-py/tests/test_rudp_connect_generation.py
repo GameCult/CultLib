@@ -122,6 +122,26 @@ class CultNetRudpConnectGenerationTests(unittest.TestCase):
         client.receive(accept, 1)
         self.assertFalse(client.connected, "an Accept revived an abandoned Connect")
 
+    def test_a_full_queue_owed_to_a_vanished_peer_does_not_refuse_a_new_generation(self) -> None:
+        def bounded(initial_sequence: int) -> CultNetRudpSession:
+            return CultNetRudpSession(
+                CultNetRudpSessionOptions(
+                    connection_id=CONNECTION_ID, initial_sequence=initial_sequence, max_pending_reliable_packets=1
+                )
+            )
+
+        server = bounded(500)
+        server.accept_connect(session(1).create_connect(0), 0)
+        self.assertEqual(server.outstanding_reliable_packet_count, 1, "the Accept is owed and never acknowledged")
+        following = session(9).create_connect(1)
+        server.accept_connect(following, 1)
+        self.assertTrue(server.connect_repeats(following))
+
+        client = bounded(1)
+        client.create_connect(0)
+        client.create_connect(1)
+        self.assertEqual(client.outstanding_reliable_packet_count, 1, "only the new Connect is owed")
+
     def test_a_duplicate_accept_does_not_reseed_the_watermark(self) -> None:
         client, server = session(1), session(500)
         _, accept = handshake(client, server)

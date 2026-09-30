@@ -215,6 +215,32 @@ fn an_accept_for_an_abandoned_connect_does_not_connect_the_session() -> Result<(
     Ok(())
 }
 
+/// What a session still owed a vanished peer does not keep the next peer out:
+/// a new generation drops it before the queue is asked for room.
+#[test]
+fn a_full_queue_owed_to_a_vanished_peer_does_not_refuse_a_new_generation() -> Result<()> {
+    let bounded = |initial_sequence: u32| {
+        CultNetRudpSession::new(CultNetRudpSessionOptions {
+            connection_id: CONNECTION_ID,
+            initial_sequence,
+            resend_delay_ms: 250,
+            max_pending_reliable_packets: Some(1),
+        })
+    };
+    let mut server = bounded(500);
+    server.accept_connect(&session(1).create_connect(0, Vec::new())?, 0, Vec::new())?;
+    assert_eq!(server.outstanding_reliable_packet_count(), 1, "the Accept is owed and never acknowledged");
+    let next = session(9).create_connect(1, Vec::new())?;
+    server.accept_connect(&next, 1, Vec::new())?;
+    assert!(server.connect_repeats(&next));
+
+    let mut client = bounded(1);
+    client.create_connect(0, Vec::new())?;
+    client.create_connect(1, Vec::new())?;
+    assert_eq!(client.outstanding_reliable_packet_count(), 1, "only the new Connect is owed");
+    Ok(())
+}
+
 /// An Accept counts once: a duplicate of the one honoured does not seed the
 /// watermark again.
 #[test]
