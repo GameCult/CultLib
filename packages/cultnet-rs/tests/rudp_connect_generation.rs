@@ -870,3 +870,132 @@ fn an_accepted_peer_that_goes_silent_times_out() -> Result<()> {
     assert!(server.check_timeout(100_000, 1_000));
     Ok(())
 }
+
+// Ack Cut 1d, batch 2: the connect-attempt timeout.
+
+/// A server that keeps a session answers a client's repeated or stale Connect
+/// with an Ack that may name the client's pending Connect. That Ack says no
+/// session started: only an Accept the client honours retires its Connect, so
+/// the attempt still times out and is replaced.
+#[test]
+fn an_ack_naming_the_pending_connect_does_not_retire_it() -> Result<()> {
+    let mut server = session(500);
+    let mut old = session(1);
+    let old_accept = server.accept_connect(&old.create_connect(0, Vec::new())?, 0, Vec::new())?;
+    old.receive(&old_accept, 0)?;
+    server.receive(&old.create_ack_for_received(old_accept.sequence), 0)?;
+
+    let mut restarted = session(1);
+    let first = restarted.create_connect(0, b"join".to_vec())?;
+    let reply = server.accept_connect(&first, 1, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    assert!(names_sequence(&reply, first.sequence), "the Ack must name the pending Connect for this test to bite");
+    restarted.receive(&reply, 1)?;
+    assert!(!restarted.connected());
+    assert_eq!(restarted.pending_reliable_sequences(), vec![first.sequence], "an Ack retired the Connect");
+
+    let fresh = restarted.due_resends(3_000);
+    assert_eq!(fresh.len(), 1, "the client waits for ever with nothing to resend");
+    assert_eq!(fresh[0].payload, b"join");
+    let accept = server.accept_connect(&fresh[0], 3_000, Vec::new())?;
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    restarted.receive(&accept, 3_000)?;
+    assert!(restarted.connected());
+    Ok(())
+}
+
+/// The fresh attempt is the abandoned sequence plus the receive window less
+/// one, so a late copy of the abandoned Connect is stale for the server that
+/// took the fresh one: answered with an Ack, no restart, no stranding.
+#[test]
+fn a_late_copy_of_an_abandoned_connect_is_stale_once_its_replacement_is_accepted() -> Result<()> {
+    let mut server = session(500);
+    let mut client = session(10);
+    let abandoned = client.create_connect(0, Vec::new())?;
+    let fresh = client.due_resends(3_000);
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].sequence, abandoned.sequence + 4_095);
+    let accept = server.accept_connect(&fresh[0], 3_001, Vec::new())?;
+    client.receive(&accept, 3_002)?;
+    server.receive(&client.create_ack_for_received(accept.sequence), 3_002)?;
+    assert!(client.connected());
+    let a = send(&mut client, "a")?;
+    assert_eq!(names(&server.receive(&a, 3_003)?.delivered), ["a"]);
+    client.receive(&server.create_ack_for_received(a.sequence), 3_003)?;
+
+    assert!(server.connect_repeats(&abandoned), "the late copy would restart the server");
+    let reply = server.accept_connect(&abandoned, 3_004, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    client.receive(&reply, 3_005)?;
+    assert!(client.connected());
+    let b = send(&mut client, "b")?;
+    assert_eq!(names(&server.receive(&b, 3_006)?.delivered), ["b"]);
+    Ok(())
+}
+
+/// A server whose generation sits exactly where the fresh attempt lands takes
+/// it for a repeat; the attempt after that leaves the window and is admitted.
+#[test]
+fn a_server_sitting_at_the_jump_is_left_by_the_next_attempt() -> Result<()> {
+    let mut server = session(500);
+    let mut old = session(5_095);
+    let old_accept = server.accept_connect(&old.create_connect(0, Vec::new())?, 0, Vec::new())?;
+    old.receive(&old_accept, 0)?;
+    server.receive(&old.create_ack_for_received(old_accept.sequence), 0)?;
+
+    let mut restarted = session(1_000);
+    let first = restarted.create_connect(0, b"join".to_vec())?;
+    restarted.receive(&server.accept_connect(&first, 1, Vec::new())?, 1)?;
+    assert!(!restarted.connected());
+
+    let second = restarted.due_resends(3_000).remove(0);
+    assert_eq!(second.sequence, 5_095, "the jump lands on the server's generation");
+    let reply = server.accept_connect(&second, 3_001, Vec::new())?;
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
+    restarted.receive(&reply, 3_001)?;
+    assert!(!restarted.connected());
+
+    let third = restarted.due_resends(6_000).remove(0);
+    assert_eq!(third.sequence, 5_095 + 4_095);
+    let accept = server.accept_connect(&third, 6_001, Vec::new())?;
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    restarted.receive(&accept, 6_001)?;
+    assert!(restarted.connected());
+    Ok(())
+}
+
+fn receive_packet(socket: &UdpSocket) -> Result<CultNetRudpPacket> {
+    let mut buffer = vec![0_u8; 65_535];
+    let (received, _) = socket.recv_from(&mut buffer)?;
+    decode_rudp_packet(&buffer[..received])
+}
+
+/// A pinned client that restarts on the same address is a repeat by sequence,
+/// so the hub answers with an Ack; the client's attempt times out, and the
+/// fresh Connect (another sequence) starts a new generation the hub admits.
+#[test]
+fn the_hub_admits_a_pinned_client_that_restarts_on_the_same_address() -> Result<()> {
+    let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new("hub", socket()?, CONNECTION_ID))?;
+    let hub_addr = hub.local_addr()?;
+    let peer = socket()?;
+    let mut first = session(1);
+    peer.send_to(&encode_rudp_packet(&first.create_connect(0, b"join".to_vec())?)?, hub_addr)?;
+    hub_event_matching(&mut hub, |event| matches!(event, CultNetRudpServerEvent::Connected { .. }))?;
+    let accept = receive_packet(&peer)?;
+    first.receive(&accept, 0)?;
+    peer.send_to(&encode_rudp_packet(&first.create_ack_for_received(accept.sequence))?, hub_addr)?;
+    hub.receive_event_once()?;
+
+    let mut restarted = session(1);
+    peer.send_to(&encode_rudp_packet(&restarted.create_connect(0, b"join".to_vec())?)?, hub_addr)?;
+    hub.receive_event_once()?;
+    restarted.receive(&receive_packet(&peer)?, 1)?;
+    assert!(!restarted.connected());
+
+    let fresh = restarted.due_resends(3_000).remove(0);
+    peer.send_to(&encode_rudp_packet(&fresh)?, hub_addr)?;
+    hub_event_matching(&mut hub, |event| matches!(event, CultNetRudpServerEvent::Connected { .. }))?;
+    restarted.receive(&receive_packet(&peer)?, 3_001)?;
+    assert!(restarted.connected(), "the restarted pinned client was never admitted");
+    Ok(())
+}

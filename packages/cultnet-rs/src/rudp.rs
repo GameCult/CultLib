@@ -120,17 +120,12 @@ impl Default for CultNetRudpSessionOptions {
     }
 }
 
-/// A sequence drawn at random from [`floor`, 2^31). The Connect's sequence is
-/// what tells a peer whether a Connect repeats one it already accepted or
-/// starts a new session, so two sessions must not share one by default. At
-/// least 2^31 sequences remain before the space is exhausted. A floor above
-/// the range draws nothing new: the caller keeps its own sequence.
-fn draw_sequence(floor: u32) -> u32 {
-    let floor = floor.max(1);
-    if floor >= 1_u32 << 31 {
-        return floor;
-    }
-    rand::random_range(floor..(1_u32 << 31))
+/// A sequence drawn at random from [1, 2^31). The Connect's sequence is what
+/// tells a peer whether a Connect repeats one it already accepted or starts a
+/// new session, so two sessions must not share one by default. At least 2^31
+/// sequences remain before the space is exhausted.
+fn draw_sequence() -> u32 {
+    rand::random_range(1..(1_u32 << 31))
 }
 
 /// Whether `sequence` is at or before `mark` in serial order, within the
@@ -227,6 +222,9 @@ pub struct CultNetRudpSession {
     connect_sequence: Option<u32>,
     /// A Connect this side sent is unanswered. Only then is an Accept honoured.
     awaiting_accept: bool,
+    /// The payload of the Connect this side sent, kept so a fresh attempt can
+    /// always be built whatever became of the pending packet.
+    connect_payload: Vec<u8>,
     /// When the unanswered Connect first went out; `due_resends` abandons it
     /// for a fresh attempt once `RUDP_CONNECT_ATTEMPT_MS` has passed.
     connect_started_at_ms: u64,
@@ -268,13 +266,14 @@ impl CultNetRudpSession {
             ended: false,
             connect_sequence: None,
             awaiting_accept: false,
+            connect_payload: Vec::new(),
             connect_started_at_ms: 0,
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
             max_payload_bytes: None,
             max_pending_fragment_sets: 64,
-            next_sequence: options.initial_sequence.unwrap_or_else(|| draw_sequence(1)),
+            next_sequence: options.initial_sequence.unwrap_or_else(draw_sequence),
             next_sequenced_by_channel: BTreeMap::new(),
             next_fragment_id: 1,
             connected: false,
@@ -470,6 +469,7 @@ impl CultNetRudpSession {
         self.connect_sequence = Some(packet.sequence);
         self.awaiting_accept = true;
         self.connect_started_at_ms = now_ms;
+        self.connect_payload = packet.payload.clone();
         self.track_reliable(packet.clone(), now_ms, None);
         Ok(packet)
     }
@@ -670,7 +670,12 @@ impl CultNetRudpSession {
                 disconnect_reason: Vec::new(),
             });
         }
-        self.apply_acknowledgements(packet);
+        // While this side's Connect awaits its Accept, only the Accept it
+        // honours retires it: an Ack that names the Connect (a server's reply
+        // to a repeat or a stale copy) says the server did not start a session.
+        if honours_accept || !self.awaiting_accept {
+            self.apply_acknowledgements(packet);
+        }
         self.purge_expired_reliable(now_ms);
         let ready_to_send = self.promote_queued_reliable(now_ms);
         self.last_received_at_ms = Some(now_ms);
@@ -947,22 +952,26 @@ impl CultNetRudpSession {
     }
 
     /// A Connect unanswered for `RUDP_CONNECT_ATTEMPT_MS` is replaced, not
-    /// retransmitted further, by a Connect with a newly drawn sequence and the
-    /// same payload. Nothing was ever sent in an unanswered generation, so no
-    /// sequence issued so far is owed; the draw stays above them, so a frame
-    /// the peer still remembers from an earlier generation of this session
-    /// stays at or before the new Connect.
+    /// retransmitted further, by a Connect with the same payload and the
+    /// abandoned sequence plus the receive window less one. Nothing was ever
+    /// sent in an unanswered generation, so no sequence issued so far is owed.
+    /// The jump keeps a late copy of the abandoned Connect inside the new one's
+    /// stale window, so a server that took the new Connect answers the copy
+    /// with an Ack instead of restarting; and it leaves the stale window of
+    /// whatever generation the server holds, unless that generation sits
+    /// exactly at the jump, and then the next attempt leaves it. The first
+    /// Connect of a session is the only one drawn at random.
     fn abandon_unanswered_connect(&mut self, now_ms: u64) -> Option<CultNetRudpPacket> {
         if !self.awaiting_accept
             || now_ms.saturating_sub(self.connect_started_at_ms) < RUDP_CONNECT_ATTEMPT_MS
         {
             return None;
         }
-        let payload = self
-            .connect_sequence
-            .and_then(|sequence| self.pending_reliable.get(&sequence))
-            .map(|pending| pending.packet.payload.clone())?;
-        self.next_sequence = draw_sequence(self.next_sequence);
+        let abandoned = self.connect_sequence?;
+        self.next_sequence = abandoned
+            .saturating_add(RUDP_RECEIVED_SEQUENCE_WINDOW as u32 - 1)
+            .min(u32::MAX - 1);
+        let payload = self.connect_payload.clone();
         self.create_connect(now_ms, payload).ok()
     }
 
