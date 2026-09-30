@@ -392,7 +392,7 @@ test("CultMesh TS store document handles read only records under an id their def
     compatibleSchemaIds: ["cultmesh.note.v0"],
     schema: noteDocument.schema,
   });
-  assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), "cultmesh.note.v0").latest()).body, "own id");
+  assert.equal(((await CultMesh.documentFromStore(storeOf(foreign, own), "cultmesh.note.v0").latest()) as Note).body, "own id");
   assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), renamed).latest()).body, "own id");
   await assert.rejects(CultMesh.documentFromStore(storeOf(foreign), renamed).latest(), /did not contain schema/);
   // A record under the definition's own id wins over one under an id it lists, wherever each sits in the store.
