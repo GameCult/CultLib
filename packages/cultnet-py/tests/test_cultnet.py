@@ -30,6 +30,8 @@ from cultnet_py.interop_peer import (
 )
 from cultnet_py import (
     compute_simulation_claim_hash,
+    create_rudp_schema_transport,
+    rudp_client_bind_host,
     CultNetDatabaseChange,
     CultNetRawClient,
     CultNetRawDocumentRecord,
@@ -2397,6 +2399,73 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(typed_candidates[0].claim_hash, claim_hash)
         self.assertEqual(typed_candidates[0].to_wire(), candidates[0])
         self.assertEqual(CultNetSimulationConsensusCandidate.from_wire(candidates[0]), typed_candidates[0])
+
+
+def _non_loopback_ipv4_address() -> str | None:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))
+        address = probe.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        probe.close()
+    return None if address.startswith("127.") or address == "0.0.0.0" else address
+
+
+class CultNetRudpClientBindTests(unittest.TestCase):
+    def test_an_rudp_client_binds_loopback_only_for_a_loopback_endpoint(self) -> None:
+        self.assertEqual(rudp_client_bind_host("10.77.0.1"), "0.0.0.0")
+        self.assertEqual(rudp_client_bind_host("2001:db8::1"), "::")
+        self.assertEqual(rudp_client_bind_host("[2001:db8::1]"), "::")
+        self.assertEqual(rudp_client_bind_host("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(rudp_client_bind_host("127.0.0.2"), "127.0.0.1")
+        self.assertEqual(rudp_client_bind_host("::1"), "::1")
+        self.assertEqual(rudp_client_bind_host("[::1]"), "::1")
+
+    # A socket bound to loopback cannot send off the host on Windows. On Linux
+    # it reaches a local non-loopback address, but from 127.0.0.1, so the
+    # source address shows which one the client bound.
+    def test_a_schema_transport_for_a_non_loopback_endpoint_does_not_send_from_loopback(self) -> None:
+        address = _non_loopback_ipv4_address()
+        if address is None:
+            self.skipTest("no non-loopback IPv4 address on this host")
+        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listener.bind(("0.0.0.0", 0))
+        listener.settimeout(2.0)
+        try:
+            with self.assertRaises(TimeoutError):
+                create_rudp_schema_transport(
+                    host=address,
+                    port=listener.getsockname()[1],
+                    connection_id=0x43554C54,
+                    timeout_seconds=0.2,
+                )
+            _, source = listener.recvfrom(65535)
+            self.assertEqual(source[0], address)
+        finally:
+            listener.close()
+
+    def test_a_schema_transport_binds_an_explicit_bind_host(self) -> None:
+        address = _non_loopback_ipv4_address()
+        if address is None:
+            self.skipTest("no non-loopback IPv4 address on this host")
+        listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listener.bind(("0.0.0.0", 0))
+        listener.settimeout(2.0)
+        try:
+            with self.assertRaises(TimeoutError):
+                create_rudp_schema_transport(
+                    host=address,
+                    port=listener.getsockname()[1],
+                    connection_id=0x43554C54,
+                    timeout_seconds=0.2,
+                    bind_host="127.0.0.1",
+                )
+            _, source = listener.recvfrom(65535)
+            self.assertEqual(source[0], "127.0.0.1")
+        finally:
+            listener.close()
 
 
 class CultNetRudpFragmentBoundTests(unittest.TestCase):

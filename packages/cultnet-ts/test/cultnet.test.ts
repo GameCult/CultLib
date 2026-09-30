@@ -5,7 +5,7 @@ import { Duplex } from "node:stream";
 import dgram, { type Socket } from "node:dgram";
 import { rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 
 import { z } from "zod";
 import { decode as decodeMsgpack, encode } from "@msgpack/msgpack";
@@ -47,6 +47,7 @@ import {
   ghostlightAgentStateGeneratedContract,
   parseCultNetMessage,
   invokeCultNetOperation,
+  rudpClientBindHost,
   startCultNetOperationServer,
   validateGhostlightAgentStateGenerated,
   validateGhostlightAgentState,
@@ -2221,6 +2222,47 @@ test("operation service frees the slots of abandoned sessions once they idle out
   } finally {
     for (const socket of sockets) socket.close();
     await server.close();
+  }
+});
+
+test("an RUDP client binds loopback only for a loopback endpoint", async () => {
+  assert.equal(await rudpClientBindHost("10.77.0.1"), "0.0.0.0");
+  assert.equal(await rudpClientBindHost("2001:db8::1"), "::");
+  assert.equal(await rudpClientBindHost("[2001:db8::1]"), "::");
+  assert.equal(await rudpClientBindHost("127.0.0.1"), "127.0.0.1");
+  assert.equal(await rudpClientBindHost("127.0.0.2"), "127.0.0.1");
+  assert.equal(await rudpClientBindHost("::1"), "::1");
+  assert.equal(await rudpClientBindHost("[::1]"), "::1");
+});
+
+// A socket bound to loopback cannot send off the host on Windows. On Linux it
+// reaches a local non-loopback address, but from 127.0.0.1, so the source
+// address shows which one the client bound.
+test("an operation client for a non-loopback endpoint does not send from loopback", async (t) => {
+  const address = Object.values(networkInterfaces())
+    .flat()
+    .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
+  if (!address) {
+    t.skip("no non-loopback IPv4 interface on this host");
+    return;
+  }
+  const listener = dgram.createSocket("udp4");
+  await new Promise<void>((resolve) => listener.bind(0, "0.0.0.0", resolve));
+  const source = new Promise<string>((resolve) => listener.once("message", (_wire, remote) => resolve(remote.address)));
+  const request: CultNetOperationRequestMessage = {
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId: "bind-host",
+    serviceId: "sai.vn",
+    operation: "describe",
+    payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzY2hlbWE=",
+  };
+  try {
+    await assert.rejects(invokeCultNetOperation(`rudp://${address}:${udpPort(listener)}`, request, { runtimeId: "bind-test", timeoutMs: 300 }));
+    assert.equal(await source, address);
+  } finally {
+    listener.close();
   }
 });
 

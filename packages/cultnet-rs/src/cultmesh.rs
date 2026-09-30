@@ -3,6 +3,9 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Utc;
 use std::collections::BTreeMap;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
@@ -240,7 +243,10 @@ impl CultNetRudpEndpoint {
 
 #[derive(Clone, Debug)]
 pub struct CultMeshRudpSocketOptions {
-    pub bind_host: String,
+    /// Local address to bind. Unset, a server binds loopback, and a client binds
+    /// loopback for a loopback endpoint and the unspecified address of the
+    /// endpoint's family otherwise, so it can reach a remote host.
+    pub bind_host: Option<String>,
     pub bind_port: u16,
     pub read_timeout: Option<Duration>,
     pub initial_sequence: Option<u32>,
@@ -253,7 +259,7 @@ pub struct CultMeshRudpSocketOptions {
 impl Default for CultMeshRudpSocketOptions {
     fn default() -> Self {
         Self {
-            bind_host: "127.0.0.1".to_string(),
+            bind_host: None,
             bind_port: 0,
             read_timeout: Some(Duration::from_millis(20)),
             initial_sequence: None,
@@ -316,7 +322,8 @@ impl CultMesh {
         connection_id: u32,
         options: CultMeshRudpSocketOptions,
     ) -> Result<CultNetRudpSocketTransportConnection> {
-        let socket = bind_rudp_socket(&options)?;
+        let bind_host = options.bind_host.as_deref().unwrap_or("127.0.0.1");
+        let socket = bind_rudp_socket(bind_host, &options)?;
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
             media_reliable_expire_after_ms: None,
             media_delivery: None,
@@ -341,14 +348,19 @@ impl CultMesh {
         endpoint: &CultNetRudpEndpoint,
         options: CultMeshRudpSocketOptions,
     ) -> Result<CultNetRudpSocketTransportConnection> {
-        let socket = bind_rudp_socket(&options)?;
+        let remote_addr = endpoint.socket_addr()?;
+        let bind_host = match options.bind_host.as_deref() {
+            Some(host) => host.to_string(),
+            None => client_bind_ip(remote_addr).to_string(),
+        };
+        let socket = bind_rudp_socket(&bind_host, &options)?;
         CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
             media_reliable_expire_after_ms: None,
             media_delivery: None,
             runtime_id: runtime_id.into(),
             socket,
             mode: CultNetRudpSocketMode::Client,
-            remote_addr: Some(endpoint.socket_addr()?),
+            remote_addr: Some(remote_addr),
             connection_id,
             initial_sequence: options.initial_sequence,
             resend_delay_ms: options.resend_delay_ms,
@@ -503,10 +515,21 @@ pub fn cultnet_rudp_endpoint(endpoint: &str) -> Result<CultNetRudpEndpoint> {
     Ok(CultNetRudpEndpoint { host, port })
 }
 
-fn bind_rudp_socket(options: &CultMeshRudpSocketOptions) -> Result<UdpSocket> {
+/// A socket bound to loopback cannot send off the host on Windows, so a client
+/// keeps loopback only when its peer is on loopback.
+fn client_bind_ip(remote_addr: SocketAddr) -> IpAddr {
+    match (remote_addr.ip().is_loopback(), remote_addr) {
+        (true, SocketAddr::V4(_)) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        (true, SocketAddr::V6(_)) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        (false, SocketAddr::V4(_)) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        (false, SocketAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+fn bind_rudp_socket(bind_host: &str, options: &CultMeshRudpSocketOptions) -> Result<UdpSocket> {
     let socket = UdpSocket::bind(format!(
         "{}:{}",
-        socket_host(&options.bind_host),
+        socket_host(bind_host),
         options.bind_port
     ))?;
     socket.set_read_timeout(options.read_timeout)?;

@@ -2547,6 +2547,44 @@ test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
   );
 });
 
+async function rudpClientBoundHost(endpoint: string, bindHost?: string): Promise<string | undefined> {
+  const client = await CultMesh.createRudpClient("cultmesh-ts-bind-client", 0x10203060, endpoint, { bindHost });
+  try {
+    return client.profile.transports[0]?.host;
+  } finally {
+    client.close();
+  }
+}
+
+// A client bound to loopback cannot send to another host on Windows, so a
+// client for a remote endpoint binds the unspecified address of its family.
+test("CultMesh TS RUDP client for a remote endpoint binds the unspecified address", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://10.77.0.1:17872"), "0.0.0.0");
+  assert.equal(await rudpClientBoundHost("rudp://[2001:db8::1]:17872"), "::");
+});
+
+test("CultMesh TS RUDP client for a loopback endpoint binds loopback", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://127.0.0.1:17872"), "127.0.0.1");
+  assert.equal(await rudpClientBoundHost("rudp://[::1]:17872"), "::1");
+});
+
+test("CultMesh TS RUDP client binds an explicit bindHost whatever the endpoint", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1"), "127.0.0.1");
+  assert.equal(await rudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0"), "0.0.0.0");
+});
+
+test("CultMesh TS RUDP server binds loopback unless told otherwise", async () => {
+  const loopback = await CultMesh.createRudpServer("cultmesh-ts-bind-server", 0x10203061);
+  const any = await CultMesh.createRudpServer("cultmesh-ts-bind-server", 0x10203062, { bindHost: "0.0.0.0" });
+  try {
+    assert.equal(loopback.profile.transports[0]?.host, "127.0.0.1");
+    assert.equal(any.profile.transports[0]?.host, "0.0.0.0");
+  } finally {
+    loopback.close();
+    any.close();
+  }
+});
+
 test("CultMesh TS branded facade creates RUDP clients from peer endpoints", async () => {
   const connectionId = 0x10203044;
   const server = await CultMesh.createRudpServer(

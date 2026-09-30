@@ -6,6 +6,7 @@ from .client import (
     CultNetSchemaTransportFactory,
     create_rudp_schema_transport,
     create_tcp_framed_schema_transport,
+    rudp_client_bind_host,
 )
 from .cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
@@ -228,6 +229,7 @@ __all__ = [
     "compute_reconnect_delay_ms",
     "create_reconnect_policy",
     "create_rudp_schema_transport",
+    "rudp_client_bind_host",
     "create_tcp_framed_schema_transport",
     "create_rudp_transport_profile",
     "create_tcp_framed_transport_profile",

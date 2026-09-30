@@ -1334,6 +1334,71 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
     Ok(())
 }
 
+fn rudp_client_bound_host(endpoint: &str, bind_host: Option<&str>) -> Result<String> {
+    let client = CultMesh::create_rudp_client_for_endpoint(
+        "rust-cultmesh-bind-client",
+        0x2030_4060,
+        endpoint,
+        CultMeshRudpSocketOptions {
+            bind_host: bind_host.map(str::to_string),
+            ..CultMeshRudpSocketOptions::default()
+        },
+    )?;
+    Ok(client.profile.transports[0]
+        .host
+        .clone()
+        .expect("RUDP client profile advertises its bound host"))
+}
+
+/// A client bound to loopback cannot send to another host on Windows, so a
+/// client for a remote endpoint binds the unspecified address of its family.
+#[test]
+fn cultmesh_rudp_client_for_a_remote_endpoint_binds_the_unspecified_address() -> Result<()> {
+    assert_eq!(rudp_client_bound_host("rudp://10.77.0.1:17872", None)?, "0.0.0.0");
+    assert_eq!(rudp_client_bound_host("rudp://[2001:db8::1]:17872", None)?, "::");
+    Ok(())
+}
+
+#[test]
+fn cultmesh_rudp_client_for_a_loopback_endpoint_binds_loopback() -> Result<()> {
+    assert_eq!(rudp_client_bound_host("rudp://127.0.0.1:17872", None)?, "127.0.0.1");
+    assert_eq!(rudp_client_bound_host("rudp://[::1]:17872", None)?, "::1");
+    Ok(())
+}
+
+#[test]
+fn cultmesh_rudp_client_binds_an_explicit_bind_host_whatever_the_endpoint() -> Result<()> {
+    assert_eq!(
+        rudp_client_bound_host("rudp://10.77.0.1:17872", Some("127.0.0.1"))?,
+        "127.0.0.1"
+    );
+    assert_eq!(
+        rudp_client_bound_host("rudp://127.0.0.1:17872", Some("0.0.0.0"))?,
+        "0.0.0.0"
+    );
+    Ok(())
+}
+
+#[test]
+fn cultmesh_rudp_server_binds_loopback_unless_told_otherwise() -> Result<()> {
+    let server = CultMesh::create_rudp_server(
+        "rust-cultmesh-bind-server",
+        0x2030_4061,
+        CultMeshRudpSocketOptions::default(),
+    )?;
+    assert_eq!(server.profile.transports[0].host.as_deref(), Some("127.0.0.1"));
+    let server = CultMesh::create_rudp_server(
+        "rust-cultmesh-bind-server",
+        0x2030_4062,
+        CultMeshRudpSocketOptions {
+            bind_host: Some("0.0.0.0".to_string()),
+            ..CultMeshRudpSocketOptions::default()
+        },
+    )?;
+    assert_eq!(server.profile.transports[0].host.as_deref(), Some("0.0.0.0"));
+    Ok(())
+}
+
 #[test]
 fn cultmesh_facade_creates_rudp_client_from_peer_endpoint() -> Result<()> {
     let connection_id = 0x2030_4050;
