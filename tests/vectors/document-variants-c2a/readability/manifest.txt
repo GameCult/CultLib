@@ -22,3 +22,4 @@ header-only-v3.bin  refuses  refuses  refuses  refuses
 extra-top-slot.bin  refuses  refuses  refuses  refuses
 missing-schema-v3.bin refuses refuses  refuses  refuses
 variant-slot-v3.bin reads    refuses  refuses  refuses
+missing-schema-versioned-v3.bin refuses refuses refuses refuses
