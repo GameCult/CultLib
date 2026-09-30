@@ -868,6 +868,60 @@ class CultCacheTests(unittest.TestCase):
             legacy_empty.write_bytes(b"\x90")
             self.assertEqual(SingleFileMessagePackBackingStore(legacy_empty).pull_all(), [])
 
+    def test_single_file_refusals_never_echo_a_value_from_the_store(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            cases = [
+                (["cultcache.store.v12", [], []], True),
+                (["cultcache.store.SECRET-HEADER", [], []], False),
+                (["cultcache.store.v12SECRET", [], []], False),
+                (["cultcache.store.v", [], []], False),
+                (["cultcache.store.v1", ["SECRET-CATALOG-TEXT"], []], None),
+            ]
+            for value, echoed in cases:
+                path.write_bytes(msgpack.packb(value, use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                message = str(caught.exception)
+                if echoed:
+                    self.assertIn(repr(value[0]), message)
+                else:
+                    self.assertNotIn("SECRET", message)
+                    if echoed is False:
+                        self.assertNotIn(repr(value[0]), message)
+                        self.assertIn(f"of {len(value[0])} bytes", message)
+
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_a_dangling_symlink_at_a_store_path_is_an_os_error_and_nothing_is_written(self) -> None:
+        for store_type in (SingleFileMessagePackBackingStore, JsonLinesBackingStore):
+            with tempfile.TemporaryDirectory() as tmp:
+                volume = Path(tmp) / "volume"
+                volume.mkdir()
+                path = Path(tmp) / "store.cc"
+                path.symlink_to(volume / "store.cc")
+                store = store_type(path)
+                with self.assertRaises(FileNotFoundError):
+                    store.pull_all()
+                with self.assertRaises(FileNotFoundError):
+                    store.push(CultCacheEnvelope(key="k", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(list(volume.iterdir()), [])
+
+    @unittest.skipIf(os.name != "posix", "symlink loops and file-as-parent errors are POSIX errno cases")
+    def test_json_lines_store_that_cannot_be_reached_is_an_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(JsonLinesBackingStore(Path(tmp) / "missing.jsonl").pull_all(), [])
+            loop = Path(tmp) / "loop.jsonl"
+            loop.symlink_to(loop)
+            parent = Path(tmp) / "body"
+            parent.write_bytes(b"not a directory")
+            for path in (loop, parent / "store.jsonl"):
+                with self.assertRaises(OSError) as caught:
+                    JsonLinesBackingStore(path).pull_all()
+                self.assertNotIsInstance(caught.exception, FileNotFoundError)
+
     @unittest.skipIf(os.name != "posix", "symlink loops and file-as-parent errors are POSIX errno cases")
     def test_single_file_store_that_cannot_be_reached_is_an_os_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

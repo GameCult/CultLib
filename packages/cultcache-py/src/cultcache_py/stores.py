@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from .backing_store import (
     CultCacheEnvelope,
@@ -16,6 +16,7 @@ from .backing_store import (
 STORE_FORMAT_VERSION = "cultcache.store.v1"
 _STORE_FORMAT_PREFIX = "cultcache.store."
 _PERSISTED_RECORD_SLOTS = 4
+_Contents = TypeVar("_Contents")
 
 
 class JsonLinesBackingStore:
@@ -25,10 +26,11 @@ class JsonLinesBackingStore:
 
     def pull_all(self) -> list[CultCacheEnvelope]:
         with self._lock:
-            if not self.path.exists():
+            text = _read_store(self.path, lambda path: path.read_text(encoding="utf-8"))
+            if text is None:
                 return []
             envelopes: list[CultCacheEnvelope] = []
-            for line_number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
+            for line_number, line in enumerate(text.splitlines(), start=1):
                 if not line.strip():
                     continue
                 raw = json.loads(line)
@@ -88,11 +90,9 @@ class SingleFileMessagePackBackingStore:
     def pull_all(self) -> list[CultCacheEnvelope]:
         msgpack = self._msgpack()
         with self._lock:
-            # Only a store that is not there is empty. An empty file is not a store (no
-            # writer leaves one), and any other failure to reach the file stays an OSError.
-            try:
-                data = self.path.read_bytes()
-            except FileNotFoundError:
+            # An empty file is not a store (no writer leaves one), so it is decoded and refused.
+            data = _read_store(self.path, Path.read_bytes)
+            if data is None:
                 return []
             decoded = msgpack.unpackb(data, raw=False)
             snapshot = _decode_v1_snapshot(decoded)
@@ -155,12 +155,36 @@ def _encode_v1_snapshot(envelopes: list[CultCacheEnvelope]) -> list[Any]:
     return [STORE_FORMAT_VERSION, catalog, records]
 
 
+def _read_store(path: Path, read: Callable[[Path], _Contents]) -> _Contents | None:
+    """Reads a store file, or returns None when nothing is at its path.
+
+    Only nothing is absent. A dangling symbolic link is something: reading it as
+    empty would let the writer replace the link and move the store off its volume.
+    Any other failure to reach the file stays an OSError.
+    """
+    try:
+        return read(path)
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise
+        return None
+
+
+def _describe_header(header: str) -> str:
+    """Echoes a header only in the shape cultcache.store.v<digits>; the bytes are the store's."""
+    version = header[len(_STORE_FORMAT_PREFIX) + 1:] if header.startswith(_STORE_FORMAT_PREFIX + "v") else ""
+    if version.isascii() and version.isdigit():
+        return repr(header)
+    return f"an unrecognised {_STORE_FORMAT_PREFIX}* header of {len(header.encode('utf-8'))} bytes"
+
+
 def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
     if not isinstance(decoded, list) or not decoded:
         return None
     if isinstance(decoded[0], str) and decoded[0].startswith(_STORE_FORMAT_PREFIX) and decoded[0] != STORE_FORMAT_VERSION:
         raise ValueError(
-            f"CultCache store format {decoded[0]!r} is not one this runtime reads; it reads {STORE_FORMAT_VERSION!r} only"
+            f"CultCache store format {_describe_header(decoded[0])} is not one this runtime reads; "
+            f"it reads {STORE_FORMAT_VERSION!r} only"
         )
     if decoded[0] != STORE_FORMAT_VERSION:
         return None
