@@ -280,6 +280,7 @@ class CultCache:
                     if envelope.key != GLOBAL_KEY:
                         loaded_legacy_global_keys[envelope.type] = envelope.key
                         envelope = replace(envelope, key=GLOBAL_KEY)
+                envelope = self._stamped(document, envelope)
                 value = document.decode_payload(envelope.payload)
                 loaded_values.setdefault(envelope.type, {})[envelope.key] = value
                 loaded_envelopes.setdefault(envelope.type, {})[envelope.key] = envelope
@@ -372,6 +373,7 @@ class CultCache:
     def put_envelope(self, document: DocumentDefinition[T], envelope: CultCacheEnvelope) -> T:
         self._assert_registered(document)
         self._check_envelope(document, envelope)
+        envelope = self._stamped(document, envelope)
         value = document.decode_payload(envelope.payload)
         self._write(document, [(envelope, value)], batch=False)
         return value
@@ -380,11 +382,20 @@ class CultCache:
     def put_envelopes(self, document: DocumentDefinition[T], envelopes: list[CultCacheEnvelope]) -> list[T]:
         self._assert_registered(document)
         values: list[T] = []
+        stamped: list[CultCacheEnvelope] = []
         for envelope in envelopes:
             self._check_envelope(document, envelope)
+            stamped.append(self._stamped(document, envelope))
             values.append(document.decode_payload(envelope.payload))
-        self._write(document, list(zip(envelopes, values)), batch=True)
+        self._write(document, list(zip(stamped, values)), batch=True)
         return values
+
+    @staticmethod
+    def _stamped(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> CultCacheEnvelope:
+        """The record under its registered schema's id, whatever id the envelope arrived under, so the catalog entry a store
+        writes is the one its schema id names."""
+        entry = document.catalog_entry()
+        return replace(envelope, schema_id=entry.schema_id, catalog_entry=entry)
 
     @staticmethod
     def _check_envelope(document: DocumentDefinition[Any], envelope: CultCacheEnvelope) -> None:

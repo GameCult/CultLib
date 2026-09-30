@@ -1682,7 +1682,12 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual([change.change_kind for change in typed_applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
 
-    def test_cultnet_replication_helpers_recover_schema_stamped_raw_records(self) -> None:
+    def test_cultnet_replication_refuses_an_unknown_schema_id_and_stamps_a_compatible_one(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from cultcache_py import SingleFileMessagePackBackingStore
+
         document = define_database_entry_type(
             "replica.runtime-policy",
             [
@@ -1693,69 +1698,70 @@ class CultNetTests(unittest.TestCase):
             schema_id="replica.runtime-policy.current",
             schema_name="replica.runtime_policy",
             schema_version="replica.runtime_policy.v1",
+            compatible_schema_ids=["replica.runtime-policy.current", "replica.runtime-policy.older"],
         )
-        cache = CultCache()
-        cache.register_document_type(document)
-        stale_schema_id = "sha256:stale-replica-runtime-policy"
         payload = document.encode_payload({
             "schema_version": "replica.runtime_policy.v1",
             "name": "policy",
-            "value": "still synced",
+            "value": "synced",
         })
-        record = {
-            "schemaId": stale_schema_id,
-            "recordKey": "policy:1",
-            "storedAt": "2026-06-25T00:00:00Z",
-            "payloadEncoding": "messagepack",
-            "payload": payload,
-        }
-        snapshot = {
-            "schemaVersion": "cultnet.snapshot_response_raw.v0",
-            "messageId": "snapshot-stale",
-            "documents": [record],
-        }
 
-        applied_snapshot = apply_raw_snapshot(cache, [document], snapshot)
-        local_schema_id = document.catalog_entry().schema_id
-        self.assertEqual(applied_snapshot[0].schema_id, local_schema_id)
-        self.assertEqual(cache.get_required(document, "policy:1")["value"], "still synced")
-        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
-        direct_applied = apply_raw_document_record(cache, schema_document_map([document]), record)
-        self.assertEqual(direct_applied.schema_id, local_schema_id)
-        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
+        def raw(schema_id: str, key: str) -> dict:
+            return {
+                "schemaId": schema_id,
+                "recordKey": key,
+                "storedAt": "2026-06-25T00:00:00Z",
+                "payloadEncoding": "messagepack",
+                "payload": payload,
+            }
 
+        documents = schema_document_map([document])
+        # A schema id no binding lists is refused whatever the payload opens with; the payload does not name a schema.
+        stale = raw("sha256:stale-replica-runtime-policy", "policy:stale")
+        with self.assertRaises(KeyError):
+            apply_raw_document_record(CultCache(), documents, stale)
         shard_log = {
             "schemaVersion": "cultnet.shard_log_response.v0",
             "messageId": "log-stale",
             "shardId": "interop",
             "shardEpoch": 1,
             "resyncRequired": False,
-            "entries": [
-                {
-                    "sequence": 0,
-                    "changeKind": "updated",
-                    "put": {
-                        "schemaVersion": "cultnet.document_put_raw.v0",
-                        "messageId": "put-stale",
-                        "document": {
-                            **record,
-                            "payload": document.encode_payload({
-                                "schema_version": "replica.runtime_policy.v1",
-                                "name": "policy",
-                                "value": "updated through log",
-                            }),
-                        },
-                        "shardId": "interop",
-                        "shardEpoch": 1,
-                    },
-                }
-            ],
+            "entries": [{
+                "sequence": 0,
+                "changeKind": "updated",
+                "put": {
+                    "schemaVersion": "cultnet.document_put_raw.v0",
+                    "messageId": "put-stale",
+                    "document": stale,
+                    "shardId": "interop",
+                    "shardEpoch": 1,
+                },
+            }],
         }
+        stale_cache = CultCache()
+        stale_cache.register_document_type(document)
+        self.assertEqual(apply_shard_log_response(stale_cache, [document], shard_log), [])
 
-        applied_log = apply_shard_log_response(cache, [document], shard_log)
-        self.assertEqual(applied_log[0].schema_id, local_schema_id)
-        self.assertEqual(cache.get_required(document, "policy:1")["value"], "updated through log")
-        self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
+        # A compatible id applies, the record is stamped with the registered id, and the store it leaves reopens.
+        local_schema_id = document.catalog_entry().schema_id
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+
+            def open_cache() -> CultCache:
+                cache = CultCache.builder().register_document_type(document).add_generic_store(
+                    SingleFileMessagePackBackingStore(path)
+                ).build()
+                cache.pull_all_backing_stores()
+                return cache
+
+            cache = open_cache()
+            applied = apply_raw_document_record(cache, documents, raw("replica.runtime-policy.older", "policy:1"))
+            self.assertEqual(applied.record_key, "policy:1")
+            self.assertEqual(cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
+            reopened = open_cache()
+            self.assertEqual(reopened.get_required(document, "policy:1")["value"], "synced")
+            reopened.put(document, "policy:2", {"schema_version": "replica.runtime_policy.v1", "name": "n", "value": "next"})
+            self.assertEqual(open_cache().get_required(document, "policy:2")["value"], "next")
 
         delete_log = {
             "schemaVersion": "cultnet.shard_log_response.v0",
@@ -1763,25 +1769,26 @@ class CultNetTests(unittest.TestCase):
             "shardId": "interop",
             "shardEpoch": 1,
             "resyncRequired": False,
-            "entries": [
-                {
-                    "sequence": 1,
-                    "changeKind": "removed",
-                    "delete": {
-                        "schemaVersion": "cultnet.document_delete.v0",
-                        "messageId": "delete-version-alias",
-                        "schemaId": "replica.runtime_policy.v1",
-                        "recordKey": "policy:1",
-                        "shardId": "interop",
-                        "shardEpoch": 1,
-                    },
-                }
-            ],
+            "entries": [{
+                "sequence": 1,
+                "changeKind": "removed",
+                "delete": {
+                    "schemaVersion": "cultnet.document_delete.v0",
+                    "messageId": "delete-version-alias",
+                    "schemaId": "replica.runtime_policy.v1",
+                    "recordKey": "policy:1",
+                    "shardId": "interop",
+                    "shardEpoch": 1,
+                },
+            }],
         }
-        applied_delete = apply_shard_log_response(cache, [document], delete_log)
+        live = CultCache()
+        live.register_document_type(document)
+        live.put(document, "policy:1", {"schema_version": "replica.runtime_policy.v1", "name": "n", "value": "v"})
+        applied_delete = apply_shard_log_response(live, [document], delete_log)
         self.assertEqual(applied_delete[0].schema_id, local_schema_id)
         self.assertEqual(applied_delete[0].change_kind, "removed")
-        self.assertIsNone(cache.get(document, "policy:1"))
+        self.assertIsNone(live.get(document, "policy:1"))
 
     def test_cultnet_document_delete_helper_matches_schema_v0_shape(self) -> None:
         message = document_delete(

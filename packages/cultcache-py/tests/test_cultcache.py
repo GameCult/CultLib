@@ -231,6 +231,80 @@ class CultCacheTests(unittest.TestCase):
             with self.assertRaises(StoreUnreadableError):
                 cache.pull_all_backing_stores()
 
+    def _foreign_id_document(self):
+        return define_database_entry_type(
+            "tests.foreign-id",
+            [("name", 0)],
+            schema_id="tests.foreign-id.current",
+            schema_name="tests.foreign-id",
+            schema_version="tests.foreign_id.v1",
+            compatible_schema_ids=["tests.foreign-id.current", "tests.foreign-id.older"],
+        )
+
+    def _open_foreign_id_store(self, document, path: Path) -> CultCache:
+        cache = CultCache.builder().register_document_type(document).add_generic_store(
+            SingleFileMessagePackBackingStore(path)
+        ).build()
+        cache.pull_all_backing_stores()
+        return cache
+
+    # A record put under an id its schema only lists as compatible is stamped with the registered id, and the store the write
+    # leaves opens and takes the next write.
+    def test_put_envelope_under_a_compatible_schema_id_writes_a_store_that_reopens(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+
+        document = self._foreign_id_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            cache = self._open_foreign_id_store(document, path)
+            payload = document.encode_payload({"name": "foreign"})
+            foreign_entry = CultCacheSchemaCatalogEntry(
+                schema_id="tests.foreign-id.older",
+                schema_name="tests.foreign-id",
+                schema_version="tests.foreign_id.v1",
+                content_hash="tests.foreign-id.older",
+                canonical_schema_json="",
+                compatible_schema_ids=("tests.foreign-id.older",),
+                members=(),
+            )
+            cache.put_envelope(
+                document,
+                CultCacheEnvelope(
+                    key="foreign",
+                    type="tests.foreign-id",
+                    payload=payload,
+                    stored_at="2026-09-30T00:00:00Z",
+                    schema_id="tests.foreign-id.older",
+                    catalog_entry=foreign_entry,
+                ),
+            )
+            stored = msgpack.unpackb(path.read_bytes(), raw=False)
+            self.assertEqual([entry[0] for entry in stored[1]], ["tests.foreign-id.current"])
+            self.assertEqual(stored[2][0][1], "tests.foreign-id.current")
+            reopened = self._open_foreign_id_store(document, path)
+            self.assertEqual(reopened.get_required(document, "foreign")["name"], "foreign")
+            reopened.put(document, "next", {"name": "next"})
+            self.assertEqual(self._open_foreign_id_store(document, path).get_required(document, "next")["name"], "next")
+
+    def test_a_record_loaded_under_a_compatible_schema_id_is_written_back_under_the_id_its_catalog_entry_carries(self) -> None:
+        import msgpack  # type: ignore
+
+        document = self._foreign_id_document()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1",
+                [["tests.foreign-id.current", "tests.foreign-id", "tests.foreign_id.v1", "tests.foreign-id.current", "",
+                  ["tests.foreign-id.current", "tests.foreign-id.older"], []]],
+                [["old", "tests.foreign-id.older", "2026-09-30T00:00:00Z", document.encode_payload({"name": "old"})]],
+            ], use_bin_type=True))
+            cache = self._open_foreign_id_store(document, path)
+            cache.put(document, "next", {"name": "next"})
+            reopened = self._open_foreign_id_store(document, path)
+            self.assertEqual(reopened.get_required(document, "old")["name"], "old")
+            self.assertEqual(reopened.get_required(document, "next")["name"], "next")
+
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store_path = str(Path(tmp) / "cache.msgpack")
@@ -939,7 +1013,7 @@ class CultCacheTests(unittest.TestCase):
                             continue
                         # The replaced file is a store: it carries the header its old content decides (a v3 store keeps its
                         # marker, all else is v1), and it holds what the operation wrote.
-                        expected = "cultcache.store.v3" if vector.endswith("v3-base.msgpack") else "cultcache.store.v1"
+                        expected = "cultcache.store.v3" if "v3" in vector else "cultcache.store.v1"
                         self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], expected, f"{vector} {operation}")
                         keys = [envelope.key for envelope in SingleFileMessagePackBackingStore(store_path).pull_all()]
                         if operation == "push_all":

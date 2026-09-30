@@ -160,11 +160,19 @@ class SingleFileMessagePackBackingStore:
 
 
 def _encode_snapshot(envelopes: list[CultCacheEnvelope], format_version: str) -> list[Any]:
+    # Every record's schema id is published by a catalog entry: the entry the envelope carries when it publishes that id (as its
+    # own id or a compatible one), else a default entry under the record's id. The catalog is keyed by the entry's own id, so a
+    # record read under a compatible id is written back beside the entry that lists it.
     catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}
     for envelope in envelopes:
         schema_id = _schema_id_for(envelope)
-        if schema_id not in catalog_by_schema_id:
-            catalog_by_schema_id[schema_id] = envelope.catalog_entry or _default_catalog_entry(envelope)
+        supplied = envelope.catalog_entry
+        published = (
+            supplied
+            if supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
+            else _default_catalog_entry(envelope)
+        )
+        catalog_by_schema_id.setdefault(published.schema_id, published)
 
     catalog = [
         _encode_catalog_entry(entry)
