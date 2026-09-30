@@ -14,6 +14,7 @@ import {
   encodeRudpPacket,
   isPermanentSendError,
   sendRudpDatagram,
+  rudpClientBindHost,
   type CultNetRudpPacket,
 } from "./rudp";
 import { CultNetPeer } from "./peer";
@@ -137,8 +138,9 @@ export async function invokeCultNetOperation(
   options: CultNetOperationClientOptions,
 ): Promise<CultNetOperationResponseMessage> {
   const target = parseRudpEndpoint(endpoint);
-  const socket = createSocket("udp4");
-  await bindSocket(socket, 0, "127.0.0.1");
+  const bindHost = await rudpClientBindHost(target.host);
+  const socket = createSocket(bindHost.includes(":") ? "udp6" : "udp4");
+  await bindSocket(socket, 0, bindHost);
   const transport = new CultNetRudpSocketTransportConnection({
     mode: "client",
     runtimeId: options.runtimeId,

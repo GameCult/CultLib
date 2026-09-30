@@ -1141,6 +1141,196 @@ namespace GameCult.Networking.Tests
             Assert.That(delivered[0].Payload, Is.EqualTo(payload));
         }
 
+        // The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023
+        // above the lowest unacked one and the payload above that sequence stays within 4 MiB.
+        private const int Mib = 1024 * 1024;
+
+        private static CultNetRudpSession FlowSession(uint initialSequence) =>
+            new CultNetRudpSession(new CultNetRudpSessionOptions
+            {
+                ConnectionId = 0x464c4f57,
+                InitialSequence = initialSequence,
+                ResendDelayMs = 25
+            });
+
+        // A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's
+        // Connect, and the sender's Connect is acknowledged, so nothing is pending on the sender.
+        private static (CultNetRudpSession Sender, CultNetRudpSession Receiver) ConnectedFlowPair(uint senderInitialSequence, uint receiverInitialSequence)
+        {
+            var sender = FlowSession(senderInitialSequence);
+            var receiver = FlowSession(receiverInitialSequence);
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
+            return (sender, receiver);
+        }
+
+        private static CultNetRudpSession ConnectedFlowSession(uint initialSequence) => ConnectedFlowPair(initialSequence, 900).Sender;
+
+        private static IReadOnlyList<CultNetRudpPacket> FlowSend(CultNetRudpSession session, int payloadBytes) =>
+            session.SendMany("state", new byte[payloadBytes], new CultNetRudpSendOptions { Reliable = true });
+
+        private static CultNetRudpPacket FlowAck(uint sequence) =>
+            new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Ack, ConnectionId = 0x464c4f57, Ack = sequence, ChannelId = "control" };
+
+        private static CultNetRudpPacket LoseGAndFillTheSpan(CultNetRudpSession session)
+        {
+            var g = FlowSend(session, 1).Single();
+            for (uint offset = 1; offset <= 1023; offset++)
+            {
+                Assert.That(FlowSend(session, 1).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                session.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            return g;
+        }
+
+        [Test]
+        public void RudpSession_ALostPacketHoldsTheSender1023SequencesAheadAndIsStillDelivered()
+        {
+            var (sender, receiver) = ConnectedFlowPair(1, 100);
+            var g = FlowSend(sender, 1).Single();
+            var admittedAfterG = 0;
+            for (var index = 0; index < 4200; index++)
+            {
+                foreach (var packet in FlowSend(sender, 1))
+                {
+                    admittedAfterG++;
+                    receiver.Receive(packet, 1);
+                    sender.Receive(receiver.CreateAck(), 1);
+                }
+            }
+            Assert.That(admittedAfterG, Is.EqualTo(1023));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(4200 - 1023));
+
+            var retransmit = sender.DueResends(1000).Single(packet => packet.Sequence == g.Sequence);
+            var delivered = receiver.Receive(retransmit, 1000).Delivered;
+            Assert.That(delivered.Select(frame => frame.Sequence), Is.EqualTo(new[] { g.Sequence }));
+
+            var promoted = sender.Receive(receiver.CreateAckForReceived(g.Sequence), 1001).ReadyToSend;
+            Assert.That(promoted.First().Sequence, Is.EqualTo(g.Sequence + 1024));
+        }
+
+        [Test]
+        public void RudpSession_ADirectSendPastTheSpanIsRefusedWithoutConsumingASequence()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = LoseGAndFillTheSpan(sender);
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.Zero);
+            sender.Receive(FlowAck(g.Sequence), 2);
+            var next = sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true });
+            Assert.That(next.Sequence, Is.EqualTo(g.Sequence + 1024));
+        }
+
+        [Test]
+        public void RudpSession_PayloadAboveTheLowestUnackedSequenceIsBoundedBy4MiB()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, Mib).Single();
+            // The lowest unacked packet's own bytes do not count: four more MiB fit above it.
+            for (var index = 0; index < 4; index++)
+                Assert.That(FlowSend(sender, Mib), Has.Count.EqualTo(1));
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(2));
+
+            // Acking g moves the floor up one packet: exactly one MiB more fits.
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void RudpSession_APacketLargerThanTheWindowGoesOutAloneAndWaitsBehindAnythingUnacked()
+        {
+            Assert.That(FlowSend(ConnectedFlowSession(1), 5 * Mib), Has.Count.EqualTo(1));
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            Assert.That(FlowSend(sender, 5 * Mib), Is.Empty);
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 1 }));
+        }
+
+        [Test]
+        public void RudpSession_ASmallPacketDoesNotOvertakeAQueuedLargeOne()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            Assert.That(FlowSend(sender, 3 * Mib), Has.Count.EqualTo(1));
+            Assert.That(FlowSend(sender, 2 * Mib), Is.Empty);
+            // A direct send refuses instead of queueing behind it, and takes no sequence.
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[1], new CultNetRudpSendOptions { Reliable = true }));
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
+            // One byte would fit above g, but the 2 MiB packet is ahead of it.
+            Assert.That(FlowSend(sender, 1), Is.Empty);
+            var promoted = sender.Receive(FlowAck(g.Sequence), 1).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 2, g.Sequence + 3 }));
+        }
+
+        [Test]
+        public void RudpSession_AcknowledgedBytesAboveALostPacketStillCountAgainst4MiB()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            // g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it
+            // behind the gap, so it keeps counting.
+            for (uint offset = 1; offset <= 4; offset++)
+            {
+                Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                sender.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[Mib], new CultNetRudpSendOptions { Reliable = true }));
+
+            // g arrives: nothing is held behind a gap any more, and the queue drains.
+            var promoted = sender.Receive(FlowAck(g.Sequence), 2).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            // The bytes above the old gap no longer count: another MiB fits.
+            Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 6 }));
+        }
+
+        [Test]
+        public void RudpSession_AcknowledgedBytesCountAgainstTheLowestUnackedSequenceAsItAdvances()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            var h = FlowSend(sender, 1).Single();
+            for (var index = 0; index < 3; index++)
+                FlowSend(sender, Mib);
+            // g and the 3 MiB above h are acknowledged; h is lost.
+            foreach (uint offset in new uint[] { 2, 3, 4, 0 })
+                sender.Receive(FlowAck(g.Sequence + offset), 1);
+            Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            // 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+            Assert.That(FlowSend(sender, 1), Is.Empty);
+            // h arrives, the floor moves to g + 5, and the byte fits.
+            var promoted = sender.Receive(FlowAck(h.Sequence), 2).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 6 }));
+        }
+
+        // A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of
+        // the new generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost
+        // packet belong to no receiver's hold any more and must not count.
+        [Test]
+        public void RudpSession_ANewGenerationOnTheServerDoesNotInheritAcknowledgedBytes()
+        {
+            var server = FlowSession(500);
+            var accept = server.AcceptConnect(FlowSession(1).CreateConnect(0), 0);
+            server.Receive(FlowAck(accept.Sequence), 0);
+            var g = FlowSend(server, 1).Single();
+            for (uint offset = 1; offset <= 4; offset++)
+            {
+                Assert.That(FlowSend(server, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                server.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            Assert.That(FlowSend(server, Mib), Is.Empty);
+
+            var nextAccept = server.AcceptConnect(FlowSession(200_000).CreateConnect(2), 2);
+            Assert.That(nextAccept.PacketType, Is.EqualTo(CultNetRudpPacketType.Accept));
+            // The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+            var sent = server.Send("state", new byte[Mib], new CultNetRudpSendOptions { Reliable = true });
+            Assert.That(sent.Sequence, Is.EqualTo(nextAccept.Sequence + 1));
+        }
+
         [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {
@@ -5262,10 +5452,49 @@ namespace GameCult.Networking.Tests
 #pragma warning restore CS0618
         }
 
-        [Test]
-        public void CultMeshRudpClient_DefaultBindAllowsRemoteRoutes()
+        private static string? RudpClientBoundHost(string endpoint, string? bindHost = null)
         {
-            Assert.That(new CultMeshRudpSocketOptions().BindHost, Is.EqualTo("0.0.0.0"));
+            using var client = CultMesh.CreateRudpClient(
+                "csharp-cultmesh-bind-client",
+                0x10203060u,
+                endpoint,
+                new CultMeshRudpSocketOptions { BindHost = bindHost });
+            return client.Profile.Transports[0].Host;
+        }
+
+        // A client bound to loopback cannot send to another host on Windows, so a client for a
+        // remote endpoint binds the unspecified address of its family.
+        [Test]
+        public void CultMeshRudpClient_ForARemoteEndpoint_BindsTheUnspecifiedAddress()
+        {
+            Assert.That(RudpClientBoundHost("rudp://10.77.0.1:17872"), Is.EqualTo("0.0.0.0"));
+            Assert.That(RudpClientBoundHost("rudp://[2001:db8::1]:17872"), Is.EqualTo("::"));
+        }
+
+        [Test]
+        public void CultMeshRudpClient_ForALoopbackEndpoint_BindsLoopback()
+        {
+            Assert.That(RudpClientBoundHost("rudp://127.0.0.1:17872"), Is.EqualTo("127.0.0.1"));
+            Assert.That(RudpClientBoundHost("rudp://[::1]:17872"), Is.EqualTo("::1"));
+        }
+
+        [Test]
+        public void CultMeshRudpClient_BindsAnExplicitBindHostWhateverTheEndpoint()
+        {
+            Assert.That(RudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1"), Is.EqualTo("127.0.0.1"));
+            Assert.That(RudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0"), Is.EqualTo("0.0.0.0"));
+        }
+
+        [Test]
+        public void CultMeshRudpServer_BindsEveryIPv4InterfaceUnlessToldOtherwise()
+        {
+            using var anywhere = CultMesh.CreateRudpServer("csharp-cultmesh-bind-server", 0x10203061u);
+            using var loopback = CultMesh.CreateRudpServer(
+                "csharp-cultmesh-bind-server",
+                0x10203062u,
+                new CultMeshRudpSocketOptions { BindHost = "127.0.0.1" });
+            Assert.That(anywhere.Profile.Transports[0].Host, Is.EqualTo("0.0.0.0"));
+            Assert.That(loopback.Profile.Transports[0].Host, Is.EqualTo("127.0.0.1"));
         }
 
         [Test]

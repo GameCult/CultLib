@@ -1584,3 +1584,31 @@ profiles.
     detection; the random default closes it. Document on the option.
   - Repeated failed attempts walk the sequence up 4095 per 3 s and clamp at `u32::MAX−1` after ~18-27 days on one session;
     make exhaustion a hard error the caller sees (the clamp removal mutant survives).
+- **Cuts 3 and D Soul pass (Self, 2026-09-30).** Cut 3: the 4 MiB bound counts every byte sent above the lowest
+  unacknowledged sequence, acked or not (the spec's wording; the first implementation counted only pending packets).
+  Cut D: a send failure is either permanent (the datagram can never be sent as built, e.g. `EMSGSIZE`) or transient;
+  a permanent failure is returned from a caller-directed send and, inside a poll, ends only that peer's session with a
+  typed reason; transient failures stay counted losses. Windows `ConnectionResetError` on receive is idle, never fatal,
+  in every server. Cut D's negative grep `send_packet(...)?;` is obsolete: the `?` now propagates encode errors only.
+- **Cut 3 merged at `1210fdc7` (2026-09-30).**
+  - Batch 2 fixed Rust `send`, which checked the window before purging expired packets. It also added a
+    new-generation test in all four runtimes.
+  - Soul pass on batch 2: nothing found. 18 mutants were killed. Interop was 27/27, run in `ack1d-interop:2`,
+    whose Linux wrappers let the Windows-only Kotlin build run.
+  - Residual: `packages/cultmesh-rs/Cargo.lock` is stale.
+  - Also recorded: `packages/cultmesh-kotlin/build.ps1` is Windows-only, so Kotlin interop runs off Windows only
+    through an image with wrappers.
+  - P2 (the expiry hole) stays with Cut F.
+- **Cut D batch 2, Soul pass 2: fix first.**
+  - cultnet-ts emits transient send failures as `"error"`, which crashes processes with no listener. Section 10's
+    claim that "Node reports send failures on the socket's error event" is false on Node 24 without a callback:
+    they are dropped silently.
+  - C# stale peer objects write into the replacing session.
+  - cultmesh-py dies on a non-ValueError per-peer failure.
+  - Six guards are unpinned.
+  - Batch 3 is in Hands.
+  - **K1 gains:** Kotlin's idle resend loop (`CultMesh.kt:4033-4036`) is one `try`, so one peer's permanent failure
+    stops resends for every later peer. That is in addition to a refused packet not ending that peer's session.
+- **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
+  while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
+  limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.

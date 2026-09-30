@@ -465,6 +465,10 @@ def is_permanent_send_error(error: OSError) -> bool:
 class CultNetRudpSession:
     RELIABLE_SEND_WINDOW_PACKETS = 32
     RECEIVED_SEQUENCE_WINDOW = 4_096
+    # Flow window: a reliable packet is admitted only while its sequence is at most FLOW_WINDOW_SEQUENCES above the
+    # lowest unacked one and the payload above that sequence stays within FLOW_WINDOW_BYTES.
+    FLOW_WINDOW_SEQUENCES = 1_023
+    FLOW_WINDOW_BYTES = 4 * 1024 * 1024
 
     def __init__(self, options: CultNetRudpSessionOptions) -> None:
         self.connection_id = _uint32(options.connection_id, "connection_id")
@@ -505,6 +509,9 @@ class CultNetRudpSession:
         self._received_sequences: set[int] = set()
         self._latest_sequenced_by_channel: dict[str, int] = {}
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
+        # Payload sizes of acknowledged reliable sequences above the lowest unacknowledged one. The receiver still
+        # holds those bytes behind the gap, so the flow window keeps counting them until the lowest sequence passes them.
+        self._acked_above_lowest: dict[int, int] = {}
         self._queued_reliable: deque[CultNetRudpPacket] = deque()
         # Every reliable sequence up to and including this one has been received
         # since the peer state was last reset. Only the handshake seeds it: the
@@ -567,6 +574,7 @@ class CultNetRudpSession:
         self._awaiting_accept = False
         self._generation += 1
         self._pending_reliable.clear()
+        self._acked_above_lowest.clear()
         self._queued_reliable.clear()
 
     def reset_peer_state(self) -> None:
@@ -683,7 +691,7 @@ class CultNetRudpSession:
         options: CultNetRudpSendOptions | None = None,
     ) -> CultNetRudpPacket:
         resolved = options or CultNetRudpSendOptions()
-        if resolved.reliable and len(self._pending_reliable) >= self.RELIABLE_SEND_WINDOW_PACKETS:
+        if resolved.reliable and (self._queued_reliable or not self._window_admits(self._next_sequence, len(payload))):
             raise ValueError("RUDP reliable send window is full; receive acknowledgements before sending")
         return self.send_many(channel_id, payload, resolved)[0]
 
@@ -970,22 +978,39 @@ class CultNetRudpSession:
             last_sent_at_ms=now_ms,
         )
 
+    def _window_admits(self, sequence: int, payload_length: int) -> bool:
+        """Whether a reliable packet may go on the wire now: the window has a slot, and its sequence and the
+        payload above the lowest unacked sequence stay inside the flow window. With nothing pending, any packet
+        is admissible."""
+        if len(self._pending_reliable) >= self.RELIABLE_SEND_WINDOW_PACKETS:
+            return False
+        if not self._pending_reliable:
+            return True
+        lowest = min(self._pending_reliable)
+        bytes_above = sum(
+            len(pending.packet.payload) for pending_sequence, pending in self._pending_reliable.items() if pending_sequence > lowest
+        ) + sum(self._acked_above_lowest.values())
+        return sequence - lowest <= self.FLOW_WINDOW_SEQUENCES and bytes_above + payload_length <= self.FLOW_WINDOW_BYTES
+
     def _admit_reliable_packets(
         self,
         packets: tuple[CultNetRudpPacket, ...],
         now_ms: int,
     ) -> tuple[CultNetRudpPacket, ...]:
-        available = max(0, self.RELIABLE_SEND_WINDOW_PACKETS - len(self._pending_reliable))
-        ready = packets[:available]
-        for packet in ready:
-            self._track_reliable(packet, now_ms)
-        self._queued_reliable.extend(packets[available:])
-        return ready
+        ready: list[CultNetRudpPacket] = []
+        for packet in packets:
+            if not self._queued_reliable and self._window_admits(packet.sequence, len(packet.payload)):
+                self._track_reliable(packet, now_ms)
+                ready.append(packet)
+            else:
+                self._queued_reliable.append(packet)
+        return tuple(ready)
 
     def _promote_queued_reliable(self, now_ms: int) -> tuple[CultNetRudpPacket, ...]:
-        available = max(0, self.RELIABLE_SEND_WINDOW_PACKETS - len(self._pending_reliable))
         ready: list[CultNetRudpPacket] = []
-        while len(ready) < available and self._queued_reliable:
+        while self._queued_reliable and self._window_admits(
+            self._queued_reliable[0].sequence, len(self._queued_reliable[0].payload)
+        ):
             packet = self._queued_reliable.popleft()
             self._track_reliable(packet, now_ms)
             ready.append(packet)
@@ -998,10 +1023,21 @@ class CultNetRudpSession:
             raise ValueError("RUDP reliable send queue is full")
 
     def _apply_acknowledgements(self, packet: CultNetRudpPacket) -> None:
-        self._pending_reliable.pop(packet.ack, None)
+        self._acknowledge(packet.ack)
         for bit in range(32):
             if packet.ack_mask & (1 << bit):
-                self._pending_reliable.pop(packet.ack - bit - 1, None)
+                self._acknowledge(packet.ack - bit - 1)
+        # Acknowledged sizes stop counting once the lowest unacknowledged sequence passes them, and all of them stop
+        # when nothing is unacknowledged.
+        lowest = min(self._pending_reliable, default=None)
+        self._acked_above_lowest = (
+            {} if lowest is None else {sequence: length for sequence, length in self._acked_above_lowest.items() if sequence > lowest}
+        )
+
+    def _acknowledge(self, sequence: int) -> None:
+        pending = self._pending_reliable.pop(sequence, None)
+        if pending is not None:
+            self._acked_above_lowest[sequence] = len(pending.packet.payload)
 
     def _seed_received(self, sequence: int) -> None:
         """The handshake's one act on the watermark: the peer's Connect or Accept

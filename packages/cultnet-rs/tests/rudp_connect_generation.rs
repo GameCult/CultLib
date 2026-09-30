@@ -575,9 +575,30 @@ fn a_flush_that_a_timeout_ended_names_the_timeout() -> Result<()> {
 // Hold-buffer boundaries: 1,024 frames and 64 channels are held; one more is
 // refused.
 
+/// An acknowledgement that names only `sequence`.
+fn ack_naming(sequence: u32) -> CultNetRudpPacket {
+    CultNetRudpPacket {
+        packet_type: CultNetRudpPacketType::Ack,
+        connection_id: CONNECTION_ID,
+        sequence: 0,
+        ack: sequence,
+        ack_mask: 0,
+        channel_id: "control".into(),
+        reliable: false,
+        ordered: false,
+        sequenced: false,
+        fragment_id: 0,
+        fragment_index: 0,
+        fragment_count: 0,
+        payload: Vec::new(),
+    }
+}
+
 /// A connected pair with one sequence the receiver will never see, so every
-/// later ordered frame waits behind it. The sender's window is kept open by
-/// acknowledging what the receiver has.
+/// later ordered frame waits behind it. The sender's flow window would stop it
+/// 1,023 sequences above its lowest unacked packet, so the missing one is
+/// acknowledged by hand (the receiver never saw it) and the rest by what the
+/// receiver has: the receiver's hold buffer is what this probes, not the sender.
 fn held_behind_a_gap(
     frames: usize,
     channel_of: impl Fn(usize) -> String,
@@ -585,7 +606,8 @@ fn held_behind_a_gap(
     let mut sender = session(1);
     let mut receiver = session(500);
     handshake(&mut sender, &mut receiver)?;
-    let _missing = sender.send("gap", b"lost".to_vec(), ordered())?;
+    let missing = sender.send("gap", b"lost".to_vec(), ordered())?;
+    sender.receive(&ack_naming(missing.sequence), 1)?;
     let mut held = 0;
     for index in 0..frames {
         let packet = sender.send(&channel_of(index), vec![0], ordered())?;
