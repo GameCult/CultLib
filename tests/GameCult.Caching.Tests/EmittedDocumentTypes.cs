@@ -7,9 +7,9 @@ using MessagePack;
 
 namespace GameCult.Caching.Tests
 {
-    // Document types built at run time, each in its own dynamic assembly. CultDocumentRegistry.Shared discovers every
-    // [CultDocument] type in the loaded non-dynamic assemblies and refuses two that claim one schema id, so a fixture that
-    // needs such a pair (a type and its alias, two versions that share an id) emits them here instead of declaring them.
+    // Document types built at run time, each in its own dynamic assembly, which CultDocumentRegistry.Shared never scans. A
+    // fixture emits a type here when declaring it would change what Shared holds: a pair Shared refuses (one schema declared
+    // two ways), an alias whose resolved type would depend on scan order, or a type a test needs to itself.
     internal static class EmittedDocumentTypes
     {
         internal readonly record struct Field(string Name, Type Type, int Key, bool IsName = false);

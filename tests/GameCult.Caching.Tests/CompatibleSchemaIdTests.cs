@@ -559,6 +559,27 @@ namespace GameCult.Caching.Tests
             Assert.That(Derive(held, current, unchangedOnly: false), Is.EqualTo(CultCommitOutcome.Committed));
         }
 
+        // The migration CompatibleSchemaIds exists for: v2 declares v1's id and v1's class stays registered beside it, in either
+        // order. A record under v1's id is v1's, its owner; one under v2's id is v2's.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AVersionKeptBesideTheVersionDeclaringItsIdReadsItsOwnRecords(bool reversed)
+        {
+            using (var older = OpenRoll(RollV1))
+                older.Commit(batch => batch.Upsert(RollV1, New(RollV1, ("Name", "k")), RollK));
+            using (var newer = OpenRoll(RollV2))
+                newer.Commit(batch =>
+                {
+                    batch.Expect(RollY, null);
+                    batch.Upsert(RollV2, New(RollV2, ("Name", "y"), ("Extra", "e")), RollY);
+                });
+            Assert.That(Read(RollPath).Records.Select(record => record.SchemaId), Is.EquivalentTo(new[] { RollV1Id, CultDocumentRegistry.ForTypes(new[] { RollV2 }).GetRequired(RollV2).SchemaId }));
+
+            using var both = Open(RollPath, CultDocumentRegistry.ForTypes(reversed ? new[] { RollV2, RollV1 } : new[] { RollV1, RollV2 }));
+            Assert.That(both.Get(RollK)!.GetType(), Is.EqualTo(RollV1));
+            Assert.That(both.Get(RollY)!.GetType(), Is.EqualTo(RollV2));
+        }
+
         [Test]
         public void ADeclarationIsRegisteredWithoutItsOwnIdAndItsEntryListsTheOwnIdFirst()
         {

@@ -628,9 +628,18 @@ namespace GameCult.Caching
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
             }
 
-            if (indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out var declared))
+            // No type owns the id, so the one type that lists it is the record's type. Two listers and no owner cannot say which.
+            if (indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out var listers))
             {
-                return BuildCompatibleResolutionResult(persisted, declared);
+                if (listers.Length > 1)
+                    throw new CultSchemaConflictException(
+                        $"CultCache schema id '{schemaId}' is owned by no registered type and declared compatible by several " +
+                        $"({string.Join(", ", listers.Select(lister => lister.DocumentType.FullName))}), so a record under it resolves to none. " +
+                        "Register the type that owns the id, or declare it on one type.",
+                        schemaId,
+                        listers.Select(lister => lister.SchemaName).ToArray(),
+                        string.Empty);
+                return BuildCompatibleResolutionResult(persisted, listers[0]);
             }
 
             foreach (var compatibleSchemaId in persisted.CompatibleSchemaIds.Where(candidate => !string.IsNullOrWhiteSpace(candidate)))
@@ -699,18 +708,16 @@ namespace GameCult.Caching
                     descriptor.DocumentType);
             }
 
-            // One type carries each schema id, its own or declared compatible, so which type a record resolves to never
-            // depends on the order types were registered in.
-            foreach (var carried in descriptor.CompatibleSchemaIds.Prepend(descriptor.SchemaId))
-            {
-                if (indexes.BySchemaId.TryGetValue(carried, out var claimant) || indexes.ByCompatibleSchemaId.TryGetValue(carried, out claimant))
-                    throw SchemaIdClaimedTwice(carried, claimant, descriptor);
-            }
-
+            // A schema id hashes the schema's name and version, so the one other type that could own this id is the one refused or
+            // aliased above. Other types may list the id as compatible beside its owner, as a v2 class does that keeps v1's class
+            // registered: a record under the id resolves to its owner, and to a lister only when nothing owns it. Neither depends on
+            // the order types were registered in.
             indexes.ByType[descriptor.DocumentType] = descriptor;
             indexes.BySchemaId[descriptor.SchemaId] = descriptor;
             foreach (var compatibleSchemaId in descriptor.CompatibleSchemaIds)
-                indexes.ByCompatibleSchemaId[compatibleSchemaId] = descriptor;
+                indexes.ByCompatibleSchemaId[compatibleSchemaId] = indexes.ByCompatibleSchemaId.TryGetValue(compatibleSchemaId, out var listers)
+                    ? [.. listers, descriptor]
+                    : [descriptor];
             indexes.BySchemaName[descriptor.SchemaName] = schemaNameVersions == null
                 ? [descriptor]
                 : [.. schemaNameVersions, descriptor];
@@ -736,7 +743,7 @@ namespace GameCult.Caching
             new(
                 $"CultCache schema id '{schemaId}' is already carried by CLR type '{existing.DocumentType.FullName}' " +
                 $"(schema '{existing.SchemaName}') and cannot also be claimed by '{claimed.DocumentType.FullName}' " +
-                $"(schema '{claimed.SchemaName}'). A schema id, owned or declared compatible, belongs to one registered type.",
+                $"(schema '{claimed.SchemaName}'). A schema id is owned by one registered type; others may only declare it compatible.",
                 schemaId,
                 new[] { existing.SchemaName, claimed.SchemaName },
                 string.Empty);
@@ -756,7 +763,7 @@ namespace GameCult.Caching
             {
                 ByType = new Dictionary<Type, CultDocumentDescriptor>();
                 BySchemaId = new Dictionary<string, CultDocumentDescriptor>(StringComparer.Ordinal);
-                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor>(StringComparer.Ordinal);
+                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor[]>(StringComparer.Ordinal);
                 BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(StringComparer.Ordinal);
             }
 
@@ -764,13 +771,14 @@ namespace GameCult.Caching
             {
                 ByType = new Dictionary<Type, CultDocumentDescriptor>(source.ByType);
                 BySchemaId = new Dictionary<string, CultDocumentDescriptor>(source.BySchemaId, StringComparer.Ordinal);
-                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor>(source.ByCompatibleSchemaId, StringComparer.Ordinal);
+                ByCompatibleSchemaId = new Dictionary<string, CultDocumentDescriptor[]>(source.ByCompatibleSchemaId, StringComparer.Ordinal);
                 BySchemaName = new Dictionary<string, CultDocumentDescriptor[]>(source.BySchemaName, StringComparer.Ordinal);
             }
 
             public Dictionary<Type, CultDocumentDescriptor> ByType { get; }
             public Dictionary<string, CultDocumentDescriptor> BySchemaId { get; }
-            public Dictionary<string, CultDocumentDescriptor> ByCompatibleSchemaId { get; }
+            // Every type declaring the id compatible, in registration order; resolution never depends on that order.
+            public Dictionary<string, CultDocumentDescriptor[]> ByCompatibleSchemaId { get; }
             public Dictionary<string, CultDocumentDescriptor[]> BySchemaName { get; }
         }
 

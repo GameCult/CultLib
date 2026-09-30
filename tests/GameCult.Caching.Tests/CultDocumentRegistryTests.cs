@@ -122,8 +122,8 @@ public sealed class CultDocumentRegistryTests
         });
     }
 
-    // One type carries each schema id, owned or declared compatible, whichever order the types register in: a second claimant
-    // is refused, typed, naming both, and the registry keeps what it had.
+    // A second type owning a schema id is refused, typed, naming both, whichever order the two register in, and the registry
+    // keeps what it had.
     private static void AssertSecondClaimRefused(Type first, Type second, string schemaId)
     {
         var refusal = Assert.Throws<CultSchemaConflictException>(() => CultDocumentRegistry.ForTypes(new[] { first, second }))!;
@@ -138,25 +138,57 @@ public sealed class CultDocumentRegistryTests
         Assert.That(registry.AllDescriptors.Select(descriptor => descriptor.DocumentType), Is.EqualTo(new[] { first }));
     }
 
+    private static CultSchemaCatalogEntry[] CatalogOf(params Type[] types) =>
+        types.Select(type => CultDocumentRegistry.ForTypes(new[] { type }).GetRequired(type).ToCatalogEntry()).ToArray();
+
+    // Owner beats lister: a type that owns an id and one that lists it register together in either order (the v1 class kept
+    // beside a v2 class declaring v1's id). A record under the id resolves to its owner; one under the lister's own id to the
+    // lister; without the owner registered, the id resolves to the lister.
     [TestCase(false)]
     [TestCase(true)]
-    public void TwoTypesDeclaringOneCompatibleIdAreRefused(bool reversed)
-    {
-        var a = Emit("declares_a", "tests.registry.declares_a", "v1", compatibleSchemaIds: new[] { "tests.registry.shared" });
-        var b = Emit("declares_b", "tests.registry.declares_b", "v1", compatibleSchemaIds: new[] { "tests.registry.shared" });
-
-        AssertSecondClaimRefused(reversed ? b : a, reversed ? a : b, "tests.registry.shared");
-    }
-
-    [TestCase(false)]
-    [TestCase(true)]
-    public void ATypeDeclaringAnIdAnotherTypeOwnsIsRefused(bool reversed)
+    public void AnOwnerAndATypeListingItsIdRegisterTogetherAndTheOwnerWins(bool reversed)
     {
         var owner = Emit("owns", "tests.registry.owns", "v1");
         var ownerId = CultDocumentRegistry.ForTypes(new[] { owner }).GetRequired(owner).SchemaId;
-        var lister = Emit("lists", "tests.registry.lists", "v1", compatibleSchemaIds: new[] { ownerId });
+        var lister = Emit("lists", "tests.registry.owns", "v2", new[] { new Field("Extra", typeof(string), 0) }, new[] { ownerId });
+        var listerId = CultDocumentRegistry.ForTypes(new[] { lister }).GetRequired(lister).SchemaId;
+        var catalog = CatalogOf(owner, lister);
 
-        AssertSecondClaimRefused(reversed ? lister : owner, reversed ? owner : lister, ownerId);
+        var registry = CultDocumentRegistry.ForTypes(reversed ? new[] { lister, owner } : new[] { owner, lister });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(registry.AllDescriptors.Select(descriptor => descriptor.DocumentType), Is.EquivalentTo(new[] { owner, lister }));
+            Assert.That(registry.ResolvePersistedSchema(ownerId, catalog).DocumentType, Is.EqualTo(owner));
+            Assert.That(registry.ResolvePersistedSchema(listerId, catalog).DocumentType, Is.EqualTo(lister));
+            Assert.That(CultDocumentRegistry.ForTypes(new[] { lister }).ResolvePersistedSchema(ownerId, catalog).DocumentType, Is.EqualTo(lister));
+        });
+    }
+
+    // Two types listing one id register together in either order. With an owner registered, a record under the id is the
+    // owner's; with none, the id names no single type, and a record under it is refused, typed, naming the listers.
+    [TestCase(false)]
+    [TestCase(true)]
+    public void TwoTypesListingOneIdRegisterAndARecordUnderItNeedsAnOwner(bool reversed)
+    {
+        var owner = Emit("shared_owner", "tests.registry.shared", "v1");
+        var sharedId = CultDocumentRegistry.ForTypes(new[] { owner }).GetRequired(owner).SchemaId;
+        var a = Emit("declares_a", "tests.registry.declares_a", "v1", compatibleSchemaIds: new[] { sharedId });
+        var b = Emit("declares_b", "tests.registry.declares_b", "v1", compatibleSchemaIds: new[] { sharedId });
+        var listers = reversed ? new[] { b, a } : new[] { a, b };
+        var catalog = CatalogOf(owner);
+
+        var ambiguous = CultDocumentRegistry.ForTypes(listers);
+        var refusal = Assert.Throws<CultSchemaConflictException>(() => ambiguous.ResolvePersistedSchema(sharedId, catalog))!;
+        Assert.Multiple(() =>
+        {
+            Assert.That(refusal.SchemaId, Is.EqualTo(sharedId));
+            Assert.That(refusal.SchemaNames, Is.EquivalentTo(new[] { "tests.registry.declares_a", "tests.registry.declares_b" }));
+            Assert.That(refusal.Message, Does.Contain(a.FullName).And.Contain(b.FullName));
+        });
+
+        Assert.That(CultDocumentRegistry.ForTypes(listers.Append(owner)).ResolvePersistedSchema(sharedId, catalog).DocumentType, Is.EqualTo(owner));
+        Assert.That(CultDocumentRegistry.ForTypes(listers.Prepend(owner)).ResolvePersistedSchema(sharedId, catalog).DocumentType, Is.EqualTo(owner));
     }
 
     // The same schema declaring different compatible ids is not an alias: whichever registered second would lose its declaration.
