@@ -453,7 +453,10 @@ namespace GameCult.Caching
         private readonly CultCodec? _codec;
 
         public CultRecordKey Key { get; }
-        public string StoredAt { get; }
+
+        // When the record was stored. With StoredSchemaId it names the record's stored bytes: a write that stores the record
+        // differently mints it again, including a whole-view write that re-encodes it.
+        public string StoredAt { get; internal set; }
         public CultDocumentDescriptor Descriptor { get; }
 
         // The schema id the record carries in its store: the id it was loaded under, which may be an older or foreign id that
@@ -1821,9 +1824,8 @@ namespace GameCult.Caching
         public bool HasConditions => Expected.Count > 0 || ExpectUnchanged;
 
         // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
-        // Identity is (stored schema id, storedAt), compared exactly. A write of a key mints a later storedAt, but a whole-view
-        // write rewrites every record it holds under its own type's id with the storedAt it loaded, and may shed members its
-        // type lacks: only the id says the bytes changed.
+        // Identity is (stored schema id, storedAt), compared exactly. It names the stored bytes: every write that stores a record
+        // differently mints it a later storedAt, including a whole-view write that re-encodes a record it loaded.
         public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
         {
             var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
@@ -1983,16 +1985,17 @@ namespace GameCult.Caching
         // Read under the gate, by a store judging a merge.
         internal bool HoldsVariants => _variantKeys.Count > 0;
 
-        // A store wrote its whole view: every record it wrote is stored under its type's own id, and a plain record carries the
-        // ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the store wrote the delta it was
-        // handed, and only a write of the variant changes that.
-        internal void WroteWholeView(IEnumerable<string> keys) => Held(() =>
+        // A store wrote its whole view: every record it wrote is stored under its type's own id at the storedAt the write gave it,
+        // and a plain record carries the ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the
+        // store wrote the delta it was handed, and only a write of the variant changes that.
+        internal void WroteWholeView(IEnumerable<CultPersistedRecord> written) => Held(() =>
         {
-            foreach (var key in keys)
+            foreach (var record in written)
             {
-                if (!_entries.TryGetValue(key, out var entry))
+                if (!_entries.TryGetValue(record.Key, out var entry))
                     continue;
-                entry.StoredSchemaId = entry.Descriptor.SchemaId;
+                entry.StoredSchemaId = record.SchemaId;
+                entry.StoredAt = record.StoredAt;
                 if (entry.Variant == null)
                     entry.IdsInMemoryOnly = false;
             }
@@ -2523,7 +2526,7 @@ namespace GameCult.Caching
             throw new ArgumentException($"Expect({key.Value}) was given an instance this cache does not hold at that key.", nameof(current));
         }
 
-        private static string MintStoredAt(string? previous)
+        internal static string MintStoredAt(string? previous)
         {
             var now = DateTimeOffset.UtcNow;
             if (previous != null &&
@@ -3630,15 +3633,15 @@ namespace GameCult.Caching
             {
                 using (AcquireLock(wait: true))
                 {
-                    ReadSnapshot();
+                    var records = WholeView(Entries.Values, ReadSnapshot());
                     WriteSnapshot(
-                        Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
+                        records,
                         Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
                         Array.Empty<CultSchemaCatalogEntry>(),
                         Entries.Values.Any(entry => entry.HoldsIds),
                         existingHeader: null,
                         wholeStore: true);
-                    WroteWholeView(Entries.Keys);
+                    WroteWholeView(records);
                 }
 
                 MarkFlushSucceeded();
@@ -3664,9 +3667,7 @@ namespace GameCult.Caching
             // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
             // and staged single writes land with it. A conditional commit (store clean) lands the batch onto the file as it is.
             var ontoDisk = request.HasConditions && !IsDirty;
-            var records = ontoDisk
-                ? disk.Records.ToDictionary(record => record.Key, StringComparer.Ordinal)
-                : Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)).ToDictionary(record => record.Key, StringComparer.Ordinal);
+            var records = (ontoDisk ? disk.Records : WholeView(Entries.Values, disk)).ToDictionary(record => record.Key, StringComparer.Ordinal);
             // The committer judged the batch against its own view; the file may have moved since. A merge is judged on the
             // set the file will hold, exactly as that set would be judged loading: what other processes wrote (arriving),
             // what they removed (departing), and this batch.
@@ -3692,17 +3693,56 @@ namespace GameCult.Caching
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
             if (!ontoDisk)
-                WroteWholeView(records.Keys);
+                WroteWholeView(records.Values);
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
         }
 
-        // The file now holds every record of this store's view under its type's own id: the store's entries and the cache's say so.
-        private void WroteWholeView(IEnumerable<string> keys)
+        // A record's (schema id, storedAt) names its stored bytes, and a commit condition trusts that name. So a whole-view write
+        // that stores a record differently is a new store of it and mints it a later storedAt: under another id than it was loaded
+        // under (a type re-encoding a record it read through an older or foreign schema, shedding what it lacks), or with other
+        // bytes than the file holds at that storedAt. A record written exactly as it is stored keeps its storedAt.
+        private CultPersistedRecord[] WholeView(IEnumerable<CultStoredDocument> entries, CultPersistedStoreSnapshot? disk)
         {
-            foreach (var entry in Entries.Values)
-                entry.StoredSchemaId = entry.Descriptor.SchemaId;
-            Cache?.WroteWholeView(keys);
+            var onDisk = (disk?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, StringComparer.Ordinal);
+            return entries.Select(entry =>
+            {
+                var record = ToPersistedRecord(entry, SerializePayload);
+                var unchanged = onDisk.TryGetValue(record.Key, out var stored) && stored.StoredAt == record.StoredAt
+                    ? SameStoredBytes(stored, record)
+                    : entry.StoredSchemaId == record.SchemaId;
+                if (!unchanged)
+                    record.StoredAt = CultCache.MintStoredAt(record.StoredAt);
+                return record;
+            }).ToArray();
+        }
+
+        private static bool SameStoredBytes(CultPersistedRecord stored, CultPersistedRecord written) =>
+            stored.SchemaId == written.SchemaId &&
+            stored.Payload.AsSpan().SequenceEqual(written.Payload) &&
+            (stored.Variant == null
+                ? written.Variant == null
+                : written.Variant != null &&
+                  stored.Variant.BaseKey == written.Variant.BaseKey &&
+                  stored.Variant.Overrides.Count == written.Variant.Overrides.Count &&
+                  stored.Variant.Overrides.Zip(written.Variant.Overrides, (a, b) =>
+                          a.Op == b.Op && a.Id == b.Id && a.Value.AsSpan().SequenceEqual(b.Value) &&
+                          a.Path.Select(step => (step.Slot, step.ElementId)).SequenceEqual(b.Path.Select(step => (step.Slot, step.ElementId))))
+                      .All(same => same));
+
+        // The file now holds every record written, under its type's own id at the storedAt the write gave it: the store's entries
+        // and the cache's say so.
+        private void WroteWholeView(IReadOnlyCollection<CultPersistedRecord> written)
+        {
+            foreach (var record in written)
+            {
+                if (!Entries.TryGetValue(record.Key, out var entry))
+                    continue;
+                entry.StoredSchemaId = record.SchemaId;
+                entry.StoredAt = record.StoredAt;
+            }
+
+            Cache?.WroteWholeView(written);
         }
 
         // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote

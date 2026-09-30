@@ -212,6 +212,33 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.MintElementIds(), Is.EqualTo(0));
         }
 
+        // A whole-view write that persists the ids a record minted at load stores other bytes under the same id: a new store of
+        // the record, so it takes a later storedAt, and the cache that wrote it holds that storedAt. A record it stores exactly as
+        // the file holds it keeps its own.
+        [Test]
+        public void AWholeViewWriteThatPersistsLoadMintedIdsGivesTheRecordALaterStoredAt()
+        {
+            var path = PathOf("restamp.cc");
+            WritePreIdStore(path, "kept", ("old", "o", 1));
+            var old = DiskRecord(path, "old");
+            var kept = DiskRecord(path, "kept");
+
+            using var cache = Open(path);
+            var current = cache.Get<IdDeck>(new CultRecordKey("old"))!;
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var written = DiskRecord(path, "old");
+            Assert.That(written.SchemaId, Is.EqualTo(old.SchemaId), "the same id");
+            Assert.That(written.Payload, Is.Not.EqualTo(old.Payload), "other bytes: the ids are on disk now");
+            Assert.That(string.CompareOrdinal(written.StoredAt, old.StoredAt), Is.GreaterThan(0), "so a later storedAt");
+            Assert.That(DiskRecord(path, "kept").StoredAt, Is.EqualTo(kept.StoredAt), "a record stored unchanged keeps its storedAt");
+            Assert.That(cache.TryCommit(batch =>
+            {
+                batch.Expect(new CultRecordKey("old"), current);
+                batch.Upsert(typeof(IdDeck), Deck("after"), new CultRecordKey("after"));
+            }), Is.EqualTo(CultCommitOutcome.Committed), "the cache holds the storedAt it wrote");
+        }
+
         [Test]
         public void TheByteCostOfAnIdIsMeasured()
         {
