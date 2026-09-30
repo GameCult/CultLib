@@ -16,7 +16,7 @@ static async Task<int> ProgramMainAsync(string[] args)
     {
         if (args.Length == 0)
         {
-            throw new InvalidOperationException("Expected mode: write | read | write-routed <catalog.cc> <run.cc>");
+            throw new InvalidOperationException("Expected mode: write | read | rewrite | write-routed <catalog.cc> <run.cc>");
         }
 
         var mode = args[0];
@@ -37,6 +37,9 @@ static async Task<int> ProgramMainAsync(string[] args)
                 return 0;
             case "read":
                 await ReadAsync(file);
+                return 0;
+            case "rewrite":
+                await RewriteAsync(file);
                 return 0;
             case "write-deck":
                 await WriteDeckAsync(file);
@@ -80,6 +83,17 @@ static async Task ReadAsync(string file)
         .OfType<CultCacheInteropNote>()
         .FirstOrDefault()
         ?? throw new InvalidOperationException("No cultcache.interop-note records found.");
+    WriteJsonLine(note);
+}
+
+// Puts the stored note back: the cache stamps it with the registered schema id, whatever id it was stored under.
+static async Task RewriteAsync(string file)
+{
+    var cache = BuildCache(file);
+    await cache.PullAllBackingStoresAsync();
+    var note = cache.AllEntries.OfType<CultCacheInteropNote>().Single();
+    await cache.UpsertAsync(note, new CultRecordHandle<CultCacheInteropNote>(new CultRecordKey(note.DocumentId)));
+    cache.FlushAllBackingStores();
     WriteJsonLine(note);
 }
 
@@ -186,7 +200,7 @@ static void WriteJsonLine(CultCacheInteropNote note)
     }));
 }
 
-[CultDocument("cultcache.interop-note", "cultcache.interop_note.v1")]
+[CultDocument("cultcache.interop-note", "cultcache.interop_note.v1", CompatibleSchemaIds = new[] { "cultcache.interop-note.legacy-id" })]
 [MessagePackObject]
 public sealed class CultCacheInteropNote
 {

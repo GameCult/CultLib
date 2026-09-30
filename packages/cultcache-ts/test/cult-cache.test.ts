@@ -1219,6 +1219,66 @@ test("CultCache v1 stores stay readable across TS, Rust and Python when a schema
   }
 });
 
+// A record TS wrote under an older schema id and another schema name. The C# note type declares that id compatible, so C# opens the
+// record, stamps it with its own id when it writes it back, and every runtime opens the result.
+test("A C# type that declares a compatible schema id opens a TypeScript record under it and rewrites it under its own id", async () => {
+  await buildInteropPeers();
+  const legacyId = "cultcache.interop-note.legacy-id";
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-compat-interop-")), "legacy.msgpack");
+  await new SingleFileMessagePackBackingStore(file).push({
+    key: "note:ts-legacy",
+    type: "cultcache.interop-note.legacy",
+    schemaId: legacyId,
+    catalogEntry: {
+      schemaId: legacyId,
+      schemaName: "cultcache.interop-note.legacy",
+      schemaVersion: interopNoteDocument.schemaVersion!,
+      contentHash: "legacy",
+      canonicalSchemaJson: interopNoteDocument.canonicalSchemaJson!,
+      compatibleSchemaIds: [legacyId],
+      members: interopNoteDocument.members,
+    },
+    storedAt: new Date().toISOString(),
+    payload: encode([
+      "cultcache.interop_note.v1",
+      "note:ts-legacy",
+      "ts-legacy",
+      "ts wrote a note under an older schema id",
+      "The v1 store format is the contract.",
+      ["interop"],
+    ]),
+  });
+  const before = decode(await readFile(file)) as unknown[][];
+  assert.equal((before[2] as unknown[][])[0]![1], legacyId);
+
+  const rewritten = await runJsonCommand("csharp-rewrite", dotnetCommand, [csharpInteropDll, "rewrite", "--file", file], cultLibRoot);
+  assert.equal(rewritten.documentId, "note:ts-legacy");
+  const after = decode(await readFile(file)) as unknown[][];
+  const stampedId = (after[2] as unknown[][])[0]![1] as string;
+  assert.notEqual(stampedId, legacyId, "the rewrite stamped the record with the registered id");
+  const entry = (after[1] as unknown[][]).find((candidate) => candidate[0] === stampedId) as unknown[];
+  assert.ok(entry, "the catalog publishes the id the record now carries");
+  assert.ok((entry[5] as string[]).includes(legacyId), "the registered entry still lists the older id");
+
+  const readers = [
+    { name: "csharp", read: async () => runJsonCommand("csharp-read", dotnetCommand, [csharpInteropDll, "read", "--file", file], cultLibRoot) },
+    { name: "ts", read: async () => readTsInteropStore(file) },
+    { name: "rust", read: async () => runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot) },
+    {
+      name: "python",
+      read: async () =>
+        runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, {
+          PYTHONPATH: cultcachePySrc,
+        }),
+    },
+  ];
+  for (const reader of readers) {
+    const read = await reader.read();
+    assert.equal(read.documentId, "note:ts-legacy", `${reader.name} opened the rewritten store`);
+    assert.equal(read.body, "The v1 store format is the contract.");
+  }
+});
+
 test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary members", async () => {
   await buildInteropPeers();
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-deck-"));
