@@ -624,7 +624,8 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
 }
 
 #[test]
-fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unacknowledged() -> Result<()> {
+fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unacknowledged()
+-> Result<()> {
     let clock = Clock::new(48_000);
     let sink = Sink::fail_once();
     let source = Source::fail_once(vec![document("snapshot", vec![4, 5, 6])]);

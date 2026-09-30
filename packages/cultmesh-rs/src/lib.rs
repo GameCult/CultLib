@@ -1347,7 +1347,9 @@ mod tests {
         // The publisher hears the refusal and its reason, long before its flush
         // deadline: a refusal is not mistaken for loss.
         assert!(
-            error.to_string().contains("refused the message: injected durable sink failure"),
+            error
+                .to_string()
+                .contains("refused the message: injected durable sink failure"),
             "{error:#}"
         );
         assert!(waited < Duration::from_secs(5), "waited {waited:?}");
