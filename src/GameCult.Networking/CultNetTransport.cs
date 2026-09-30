@@ -3188,6 +3188,35 @@ namespace GameCult.Networking
             _unsendablePeers.Enqueue(peer);
         }
 
+        // Polling thread only. Ends the session of a peer whose delivered frame the application could not
+        // decode or handle. The frame is already acknowledged, so the session cannot be kept: a
+        // retransmit would never be handled. The peer is told, the drop is counted, and the peer's
+        // frames still queued are not delivered. A session that already ended (a new Connect replaced
+        // it, or a send failure ended it) owes no goodbye; the endpoint may belong to a new session.
+        internal void EndRefusedPeer(CultNetRudpSocketServerPeer peer)
+        {
+            if (peer == null) throw new ArgumentNullException(nameof(peer));
+            _stats.PacketsDropped++;
+            lock (peer.SessionGate)
+            {
+                if (peer.Session.Ended)
+                    return;
+                SendPacket(peer.RemoteEndPoint, peer.Session.EndRefused());
+            }
+
+            var kept = _deliveredFrames.Where(frame => !ReferenceEquals(frame.Peer, peer)).ToArray();
+            _deliveredFrames.Clear();
+            foreach (var frame in kept)
+                _deliveredFrames.Enqueue(frame);
+
+            var key = RemoteKey(peer.RemoteEndPoint);
+            if (!_peers.TryGetValue(key, out var current) || !ReferenceEquals(current, peer))
+                return;
+            _peers.Remove(key);
+            peer.DisconnectReason = CultNetRudpSession.RefusedPacketReason;
+            PeerDisconnected?.Invoke(peer);
+        }
+
         // Polling thread only. A peer a new Connect already replaced was reported then, and its key now
         // names the peer that replaced it.
         private void RetireUnsendablePeers()

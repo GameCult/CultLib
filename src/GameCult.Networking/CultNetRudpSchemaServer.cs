@@ -288,23 +288,22 @@ namespace GameCult.Networking
             if (!string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
                 return false;
 
-            var message = CultNetSchemaMessageSerialization.Deserialize(delivered.Frame.Payload);
-            if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)
-            {
-                return false;
-            }
-
-            // R-AG: a handler is expected to catch its own typed refusals (HandleSnapshotRequestV1Async
-            // catches the three selection exceptions and answers cursor_invalid/selection_invalid/
-            // reference_outside_target on the wire, R-AM) - this catch is the backstop for whatever a
-            // handler does not, so an untyped exception from a malformed/hostile message can never
-            // reach the poll loop and stall the server for every other peer. It still answers nothing
-            // on the wire (an exception this generic carries no typed refusal to report) and drops the
-            // one malformed dispatch, exactly as an unregistered handler already does just above -
-            // R-AM: but it always logs. A backstop that swallows silently is a compensator, and an
-            // untested, unlogged one hid the SM-6 ArgumentNullException regression for a whole batch.
+            // A peer's message that cannot be decoded (malformed bytes, an unknown schemaVersion) or
+            // handled is that peer's failure, never the poll's: the drain goes on serving every other
+            // peer. The transport already acknowledged the frame, so the peer's session cannot be kept
+            // (a retransmit would never be handled). It ends, the peer is told, and the drop is counted
+            // and logged, as cultmesh-py's server does. A handler is still expected to answer its own
+            // typed refusals on the wire (HandleSnapshotRequestV1Async does, R-AM); this is the backstop
+            // for whatever it does not. The log names the fault's type only: its message can quote
+            // what the peer sent.
             try
             {
+                var message = CultNetSchemaMessageSerialization.Deserialize(delivered.Frame.Payload);
+                if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)
+                {
+                    return false;
+                }
+
                 var result = handler.DynamicInvoke(message, new RudpCultNetSchemaServerPeer(this, delivered.Peer));
                 if (result is Task task)
                 {
@@ -313,11 +312,11 @@ namespace GameCult.Networking
             }
             catch (Exception ex)
             {
-                // DynamicInvoke wraps a synchronously-thrown handler fault in TargetInvocationException,
-                // whose own .Message is the generic "Exception has been thrown by the target of an
-                // invocation." - log the real fault, not that wrapper.
+                // DynamicInvoke wraps a synchronously-thrown handler fault in TargetInvocationException;
+                // name the real fault, not that wrapper.
                 var reported = ex is System.Reflection.TargetInvocationException { InnerException: { } inner } ? inner : ex;
-                Logger.LogError($"CultNet RUDP schema dispatch failed for {message.GetType().Name}: {reported.Message}");
+                Logger.LogError($"CultNet RUDP schema server could not decode or handle a peer's message ({reported.GetType().Name}); that peer's session ended.");
+                _transport.EndRefusedPeer(delivered.Peer);
                 return false;
             }
             return true;
