@@ -2603,24 +2603,31 @@ class CultNetRudpClientBindTests(unittest.TestCase):
         finally:
             listener.close()
 
+    # The endpoint alone would bind 127.0.0.1; the explicit host must win, and the
+    # source address shows which one was bound. It stays on loopback, because a
+    # loopback-bound socket cannot send off the host on Windows.
     def test_a_schema_transport_binds_an_explicit_bind_host(self) -> None:
-        address = _non_loopback_ipv4_address()
-        if address is None:
-            self.skipTest("no non-loopback IPv4 address on this host")
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.bind(("127.0.0.2", 0))
+        except OSError:
+            self.skipTest("127.0.0.2 is not a local address on this host")
+        finally:
+            probe.close()
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        listener.bind(("0.0.0.0", 0))
+        listener.bind(("127.0.0.1", 0))
         listener.settimeout(2.0)
         try:
             with self.assertRaises(TimeoutError):
                 create_rudp_schema_transport(
-                    host=address,
+                    host="127.0.0.1",
                     port=listener.getsockname()[1],
                     connection_id=0x43554C54,
                     timeout_seconds=0.2,
-                    bind_host="127.0.0.1",
+                    bind_host="127.0.0.2",
                 )
             _, source = listener.recvfrom(65535)
-            self.assertEqual(source[0], "127.0.0.1")
+            self.assertEqual(source[0], "127.0.0.2")
         finally:
             listener.close()
 
