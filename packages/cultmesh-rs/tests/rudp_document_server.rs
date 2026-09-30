@@ -363,7 +363,10 @@ fn refusal_seen_by(
         panic!("the refused peer was sent no refusal: {refusal:?}");
     };
     assert_eq!((code, details), (None, None));
-    assert!(!error.contains("CANARY"), "a sink's or source's text reached the peer: {error}");
+    assert!(
+        !error.contains("CANARY"),
+        "a sink's or source's text reached the peer: {error}"
+    );
     assert_eq!(
         client.reliable_send_status(receipt),
         CultNetRudpReliableSendStatus::Pending,
@@ -693,7 +696,9 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
     assert_eq!(rejection.message_id, "rejected-snapshot");
     assert_eq!(
         rejection.reason,
-        CultMeshRudpRejectionReason::SnapshotSourceFailed("injected source failure CANARY-7f3a".into())
+        CultMeshRudpRejectionReason::SnapshotSourceFailed(
+            "injected source failure CANARY-7f3a".into()
+        )
     );
     assert_eq!(server.session_count(), 1);
     assert_eq!(
