@@ -283,7 +283,6 @@ test("an operation call the network refuses rejects with a timeout and does not 
           payloadSchema: "payload",
           payloadEncoding: "messagepack-base64",
           payload: "gaZzY2hlbWE=",
-          diagnostics: [],
           sourceRuntimeId: "caller",
         },
         { runtimeId: "caller", timeoutMs: 400 },
@@ -404,7 +403,6 @@ test("an operation server ignores a send failure reported after the generation t
     payloadSchema: "payload",
     payloadEncoding: "messagepack-base64",
     payload: "gaZzY2hlbWE=",
-    diagnostics: [],
     sourceRuntimeId: "caller",
   } satisfies CultNetOperationRequestMessage, "cultnet.schema.v0")), { reliable: true, ordered: true, nowMs: Date.now() });
   try {
