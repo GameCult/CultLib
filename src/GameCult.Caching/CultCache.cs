@@ -2124,7 +2124,15 @@ namespace GameCult.Caching
             Remove(handle.Key);
         }
 
-        // false: a condition failed; nothing was written, changed in memory, or published.
+        /// <summary>
+        /// Commits the staged batch. Returns false when a condition failed: nothing was written, changed in memory, or published.
+        /// </summary>
+        /// <remarks>
+        /// A commit that succeeds and then fails in a journal or observer still stands and is published, and the writer
+        /// receives the failure. One failure arrives as itself, several as an <see cref="AggregateException"/>. A writer that
+        /// wants a particular failure (a CultNetShardLogException, when a database's log refused the commit) catches that type,
+        /// or unwraps <see cref="AggregateException.InnerExceptions"/> and looks for it.
+        /// </remarks>
         public bool Commit(Action<CultCacheBatch> stage)
         {
             return Land(stage, wait: true) == CultCommitOutcome.Committed;
@@ -2427,7 +2435,8 @@ namespace GameCult.Caching
         // run under the gate, and a write an observer makes is a new outermost hold. Cross-thread delivery order is not
         // guaranteed; each change carries the Sequence it was admitted with. Journals run before that, under the gate,
         // in Sequence order (AddJournal); no hold may be entered on this cache while one runs. Every change reaches every observer even
-        // if an observer or an OnUpdate handler throws; then the first exception (an AggregateException for several) is rethrown.
+        // if an observer or an OnUpdate handler throws; then the exception (an AggregateException for several, whatever their
+        // origin: a journal, an observer, a second database) is rethrown. A writer looking for one type unwraps InnerExceptions.
         // If the body threw, its exception wins.
         internal T Held<T>(Func<T> body)
         {

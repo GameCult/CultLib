@@ -432,12 +432,6 @@ fn rudp_transport_profile_advertises_state_and_realtime_channels() {
                 CultNetTransportOrdering::Unordered,
                 Some(64)
             ),
-            (
-                "audio",
-                CultNetTransportDelivery::Reliable,
-                CultNetTransportOrdering::Unordered,
-                Some(64)
-            ),
         ]
     );
 }
@@ -558,13 +552,13 @@ fn rudp_reconnect_loop_consumes_shared_controller() -> Result<()> {
 fn rudp_session_handshake_acks_reliable_connect_and_accept_packets() -> Result<()> {
     let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 0x0a0b0c0d,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 50,
         ..CultNetRudpSessionOptions::default()
     });
     let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 0x0a0b0c0d,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         resend_delay_ms: 50,
         ..CultNetRudpSessionOptions::default()
     });
@@ -595,52 +589,19 @@ fn rudp_session_handshake_acks_reliable_connect_and_accept_packets() -> Result<(
 fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 7,
-        initial_sequence: 10,
+        initial_sequence: Some(10),
         resend_delay_ms: 100,
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 7,
-        initial_sequence: 200,
+        initial_sequence: Some(200),
         resend_delay_ms: 100,
         ..CultNetRudpSessionOptions::default()
     });
-    sender.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 7,
-            sequence: 1,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    receiver.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 7,
-            sequence: 2,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let options = CultNetRudpSendOptions {
         reliable: true,
@@ -650,20 +611,20 @@ fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Resu
     let first = sender.send("schema", b"first".to_vec(), options.clone())?;
     let second = sender.send("schema", b"second".to_vec(), options.clone())?;
     let third = sender.send("schema", b"third".to_vec(), options)?;
-    assert_eq!(sender.pending_reliable_sequences(), vec![10, 11, 12]);
+    assert_eq!(sender.pending_reliable_sequences(), vec![11, 12, 13]);
 
     receiver.receive(&first, 0)?;
     receiver.receive(&third, 0)?;
     let ack_with_gap = receiver.create_ack();
-    assert_eq!(ack_with_gap.ack, 12);
-    assert_eq!(ack_with_gap.ack_mask, 0b10 | (1 << 9));
+    assert_eq!(ack_with_gap.ack, 13);
+    assert_eq!(ack_with_gap.ack_mask, 0b110);
     sender.receive(&ack_with_gap, 0)?;
-    assert_eq!(sender.pending_reliable_sequences(), vec![11]);
+    assert_eq!(sender.pending_reliable_sequences(), vec![12]);
 
     receiver.receive(&second, 0)?;
     let full_ack = receiver.create_ack();
-    assert_eq!(full_ack.ack, 12);
-    assert_eq!(full_ack.ack_mask, 0b11 | (1 << 9));
+    assert_eq!(full_ack.ack, 13);
+    assert_eq!(full_ack.ack_mask, 0b111);
     sender.receive(&full_ack, 0)?;
     assert!(sender.pending_reliable_sequences().is_empty());
     Ok(())
@@ -673,28 +634,11 @@ fn rudp_session_computes_ack_masks_and_clears_pending_reliable_packets() -> Resu
 fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
     let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 99,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 100,
         ..CultNetRudpSessionOptions::default()
     });
-    session.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 99,
-            sequence: 50,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    session.assume_connected(0);
     let sent = session.send(
         "schema",
         b"payload".to_vec(),
@@ -743,12 +687,12 @@ fn rudp_session_schedules_reliable_resends_until_acked() -> Result<()> {
 fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
     let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 101,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 101,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = client.create_connect(0, b"join".to_vec())?;
@@ -774,12 +718,12 @@ fn rudp_session_pings_and_detects_receive_timeout() -> Result<()> {
 fn rudp_lossy_packets_cannot_create_reliable_ordered_gaps() -> Result<()> {
     let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 198,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 198,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = client.create_connect(0, Vec::new())?;
@@ -830,12 +774,12 @@ fn rudp_lossy_packets_cannot_create_reliable_ordered_gaps() -> Result<()> {
 fn rudp_unreliable_sequenced_delivery_is_scoped_to_its_channel() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 197,
-        initial_sequence: 50,
+        initial_sequence: Some(50),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 197,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
@@ -861,24 +805,7 @@ fn rudp_rejects_unreliable_ordered_delivery() -> Result<()> {
         connection_id: 196,
         ..CultNetRudpSessionOptions::default()
     });
-    session.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 196,
-            sequence: 50,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    session.assume_connected(0);
     let error = session
         .send(
             "schema",
@@ -901,28 +828,11 @@ fn rudp_rejects_unreliable_ordered_delivery() -> Result<()> {
 fn rudp_session_bounds_pending_reliable_packets_before_enqueue() -> Result<()> {
     let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 102,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         max_pending_reliable_packets: Some(2),
         ..CultNetRudpSessionOptions::default()
     });
-    session.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 102,
-            sequence: 50,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    session.assume_connected(0);
     session.send(
         "schema",
         b"first".to_vec(),
@@ -957,28 +867,11 @@ fn rudp_session_bounds_pending_reliable_packets_before_enqueue() -> Result<()> {
 
     let mut fragmented = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 103,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         max_pending_reliable_packets: Some(3),
         ..CultNetRudpSessionOptions::default()
     });
-    fragmented.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 103,
-            sequence: 50,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    fragmented.assume_connected(0);
     let error = fragmented
         .send_many(
             "schema",
@@ -1001,50 +894,17 @@ fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_
 -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 123,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 123,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
-    sender.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 123,
-            sequence: 90,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    receiver.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 123,
-            sequence: 91,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let options = CultNetRudpSendOptions {
         reliable: true,
@@ -1082,50 +942,17 @@ fn rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads_in_
 fn rudp_session_skips_control_packets_while_ordering_schema_payloads() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 124,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 124,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
-    sender.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 124,
-            sequence: 90,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    receiver.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 124,
-            sequence: 91,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let options = CultNetRudpSendOptions {
         reliable: true,
@@ -1164,50 +991,17 @@ fn rudp_session_skips_control_packets_while_ordering_schema_payloads() -> Result
 fn rudp_session_fragments_and_reassembles_reliable_ordered_payloads() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 456,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 456,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
-    sender.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 456,
-            sequence: 90,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    receiver.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: 456,
-            sequence: 91,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".to_string(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let packets = sender.send_many(
         "schema",
@@ -1265,7 +1059,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             mode: CultNetRudpSocketMode::Server,
             remote_addr: None,
             connection_id,
-            initial_sequence: 100,
+            initial_sequence: Some(100),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -1282,7 +1076,7 @@ fn rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames()
             mode: CultNetRudpSocketMode::Client,
             remote_addr: Some(server_addr),
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: Some(1),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -1359,7 +1153,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             mode: CultNetRudpSocketMode::Server,
             remote_addr: None,
             connection_id,
-            initial_sequence: 100,
+            initial_sequence: Some(100),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -1376,7 +1170,7 @@ fn rudp_socket_transport_carries_fragmented_reliable_ordered_schema_frames() -> 
             mode: CultNetRudpSocketMode::Client,
             remote_addr: Some(server_addr),
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: Some(1),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -1404,36 +1198,19 @@ fn rudp_session_advances_large_fragment_sets_through_a_bounded_reliable_window()
     let connection_id = 0x1020_3042;
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 25,
         max_pending_reliable_packets: None,
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         resend_delay_ms: 25,
         max_pending_reliable_packets: None,
     });
-    for session in [&mut sender, &mut receiver] {
-        session.receive(
-            &CultNetRudpPacket {
-                packet_type: CultNetRudpPacketType::Accept,
-                connection_id,
-                sequence: 0,
-                ack: 0,
-                ack_mask: 0,
-                channel_id: "control".into(),
-                reliable: false,
-                ordered: false,
-                sequenced: false,
-                fragment_id: 0,
-                fragment_index: 0,
-                fragment_count: 0,
-                payload: Vec::new(),
-            },
-            0,
-        )?;
-    }
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
 
     let fragment_count = CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17;
     let payload = (0..fragment_count * 8)
@@ -1491,7 +1268,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
             mode: CultNetRudpSocketMode::Server,
             remote_addr: None,
             connection_id,
-            initial_sequence: 100,
+            initial_sequence: Some(100),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -1508,7 +1285,7 @@ fn rudp_socket_flush_waits_for_large_fragment_delivery() -> Result<()> {
             mode: CultNetRudpSocketMode::Client,
             remote_addr: Some(server_addr),
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: Some(1),
             resend_delay_ms: 25,
             transport_id: None,
             max_payload_bytes: None,
@@ -2615,12 +2392,12 @@ fn schema_discovery_round_trips_over_legacy_gamecult_contract_when_inline_schema
 fn rudp_sequenced_channel_tracking_is_bounded() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 401,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 401,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
@@ -2655,18 +2432,30 @@ fn rudp_sequenced_channel_tracking_is_bounded() -> Result<()> {
 fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 402,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 402,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
     let accept = receiver.accept_connect(&connect, 1, Vec::new())?;
     sender.receive(&accept, 2)?;
 
+    // Channels are tracked only while they hold a frame, so the bound is on
+    // channels held behind one missing sequence.
+    let gap = sender.send(
+        "gap",
+        b"lost".to_vec(),
+        CultNetRudpSendOptions {
+            reliable: true,
+            ordered: false,
+            ..CultNetRudpSendOptions::default()
+        },
+    )?;
+    sender.receive(&receiver.create_ack_for(gap.sequence), 3)?;
     let mut error = None;
     for channel in 0..256u32 {
         let packet = sender.send(
@@ -2679,7 +2468,8 @@ fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
             },
         )?;
         match receiver.receive(&packet, 3) {
-            Ok(_) => {
+            Ok(result) => {
+                assert!(result.delivered.is_empty(), "the gap holds every frame");
                 sender.receive(&receiver.create_ack_for(packet.sequence), 3)?;
             }
             Err(refused) => {
@@ -2700,12 +2490,12 @@ fn rudp_ordered_channel_tracking_is_bounded() -> Result<()> {
 fn rudp_ordered_hold_buffer_is_bounded() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 403,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 403,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
@@ -2743,16 +2533,196 @@ fn rudp_ordered_hold_buffer_is_bounded() -> Result<()> {
     Ok(())
 }
 
+fn rudp_ordered_pair() -> Result<(CultNetRudpSession, CultNetRudpSession)> {
+    let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: Some(1),
+        ..CultNetRudpSessionOptions::default()
+    });
+    let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: Some(500),
+        ..CultNetRudpSessionOptions::default()
+    });
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 0, Vec::new())?;
+    client.receive(&accept, 0)?;
+    Ok((client, server))
+}
+
+fn rudp_send_options(ordered: bool) -> CultNetRudpSendOptions {
+    CultNetRudpSendOptions {
+        reliable: true,
+        ordered,
+        ..CultNetRudpSendOptions::default()
+    }
+}
+
+fn rudp_delivered_names(delivered: &[cultnet_rs::CultNetRudpDeliveredFrame]) -> Vec<String> {
+    delivered
+        .iter()
+        .map(|frame| String::from_utf8(frame.payload.clone()).unwrap())
+        .collect()
+}
+
+#[test]
+fn rudp_ordered_frame_waits_for_a_gap_filled_by_another_channel() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let o1 = sender.send("schema", b"o1".to_vec(), rudp_send_options(true))?;
+    let u = sender.send("media", b"u".to_vec(), rudp_send_options(false))?;
+    let o2 = sender.send("schema", b"o2".to_vec(), rudp_send_options(true))?;
+    let o3 = sender.send("schema", b"o3".to_vec(), rudp_send_options(true))?;
+    let o4 = sender.send("schema", b"o4".to_vec(), rudp_send_options(true))?;
+
+    assert_eq!(rudp_delivered_names(&receiver.receive(&o1, 1)?.delivered), ["o1"]);
+    // `u` is lost, so nothing behind it may be delivered.
+    assert!(receiver.receive(&o2, 2)?.delivered.is_empty());
+    assert!(receiver.receive(&o3, 3)?.delivered.is_empty());
+    assert!(receiver.receive(&o4, 4)?.delivered.is_empty());
+    // The other channel's packet fills the gap and releases every ordered
+    // frame behind it in the same call.
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&u, 5)?.delivered),
+        ["u", "o2", "o3", "o4"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_two_ordered_channels_release_each_other_in_sequence_order() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let a1 = sender.send("schema", b"A1".to_vec(), rudp_send_options(true))?;
+    let b1 = sender.send("other", b"B1".to_vec(), rudp_send_options(true))?;
+    let a2 = sender.send("schema", b"A2".to_vec(), rudp_send_options(true))?;
+    let a3 = sender.send("schema", b"A3".to_vec(), rudp_send_options(true))?;
+
+    let mut delivered = rudp_delivered_names(&receiver.receive(&a1, 1)?.delivered);
+    delivered.extend(rudp_delivered_names(&receiver.receive(&a2, 2)?.delivered));
+    delivered.extend(rudp_delivered_names(&receiver.receive(&a3, 3)?.delivered));
+    assert_eq!(delivered, ["A1"], "B1 is missing, so A2 and A3 wait");
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&b1, 4)?.delivered),
+        ["B1", "A2", "A3"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_channel_first_used_after_other_traffic_loses_nothing() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let c1 = sender.send("late", b"C1".to_vec(), rudp_send_options(true))?;
+    let c2 = sender.send("late", b"C2".to_vec(), rudp_send_options(true))?;
+    let x = sender.send("schema", b"X".to_vec(), rudp_send_options(true))?;
+
+    // X, then C2, arrive while C1 is still in flight.
+    let mut delivered = rudp_delivered_names(&receiver.receive(&x, 1)?.delivered);
+    delivered.extend(rudp_delivered_names(&receiver.receive(&c2, 2)?.delivered));
+    assert!(delivered.is_empty(), "C1 is missing, so nothing is delivered");
+    assert_eq!(
+        rudp_delivered_names(&receiver.receive(&c1, 3)?.delivered),
+        ["C1", "C2", "X"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_accept_seeds_the_watermark_of_the_connecting_side() -> Result<()> {
+    let (mut client, mut server) = rudp_ordered_pair()?;
+    let s1 = server.send("schema", b"s1".to_vec(), rudp_send_options(true))?;
+    let s2 = server.send("schema", b"s2".to_vec(), rudp_send_options(true))?;
+    assert!(client.receive(&s2, 1)?.delivered.is_empty());
+    assert_eq!(
+        rudp_delivered_names(&client.receive(&s1, 2)?.delivered),
+        ["s1", "s2"]
+    );
+    Ok(())
+}
+
+#[test]
+fn rudp_reset_forgets_held_frames_and_reseeds_the_watermark_from_the_next_handshake() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    sender.send("schema", b"s1".to_vec(), rudp_send_options(true))?;
+    let s2 = sender.send("schema", b"s2".to_vec(), rudp_send_options(true))?;
+    assert!(receiver.receive(&s2, 1)?.delivered.is_empty());
+
+    receiver.reset_peer_state();
+    let mut next = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 410,
+        initial_sequence: Some(100),
+        ..CultNetRudpSessionOptions::default()
+    });
+    let accept = receiver.accept_connect(&next.create_connect(0, Vec::new())?, 2, Vec::new())?;
+    next.receive(&accept, 2)?;
+    let d1 = next.send("schema", b"d1".to_vec(), rudp_send_options(true))?;
+    let d2 = next.send("schema", b"d2".to_vec(), rudp_send_options(true))?;
+
+    // The held s2 died with the reset, and the watermark follows the new peer.
+    assert!(receiver.receive(&d2, 3)?.delivered.is_empty());
+    assert_eq!(rudp_delivered_names(&receiver.receive(&d1, 4)?.delivered), ["d1", "d2"]);
+    Ok(())
+}
+
+#[test]
+fn rudp_large_ordered_frame_without_a_gap_is_never_held_or_refused() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let packets = sender.send_many(
+        "schema",
+        vec![7u8; 5 * 1024 * 1024],
+        rudp_send_options(true),
+        Some(60_000),
+    )?;
+    let mut queue = packets;
+    let mut delivered = Vec::new();
+    while !queue.is_empty() {
+        let mut next = Vec::new();
+        for packet in &queue {
+            delivered.extend(receiver.receive(packet, 1)?.delivered);
+            let ack = receiver.create_ack_for_received(packet.sequence);
+            next.extend(sender.receive(&ack, 1)?.ready_to_send);
+        }
+        queue = next;
+    }
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].payload.len(), 5 * 1024 * 1024);
+    Ok(())
+}
+
+#[test]
+fn rudp_ordered_hold_buffer_is_bounded_in_bytes() -> Result<()> {
+    let (mut sender, mut receiver) = rudp_ordered_pair()?;
+    let withheld = sender.send("schema", b"first".to_vec(), rudp_send_options(true))?;
+    sender.receive(&receiver.create_ack_for(withheld.sequence), 1)?;
+
+    // Four 1 MiB frames fit the 4 MiB hold; the fifth does not.
+    let mut refused_at = None;
+    for step in 0..8u32 {
+        let packet = sender.send("schema", vec![7u8; 1024 * 1024], rudp_send_options(true))?;
+        match receiver.receive(&packet, 2) {
+            Ok(result) => {
+                assert!(result.delivered.is_empty(), "the gap holds every frame");
+                sender.receive(&receiver.create_ack_for(packet.sequence), 2)?;
+            }
+            Err(refusal) => {
+                assert!(refusal.to_string().contains("ordered hold buffer is full"), "{refusal}");
+                refused_at = Some(step);
+                break;
+            }
+        }
+    }
+    assert_eq!(refused_at, Some(4));
+    Ok(())
+}
+
 #[test]
 fn rudp_far_ahead_sequence_cannot_starve_the_session() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 404,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 404,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
@@ -2801,12 +2771,12 @@ fn rudp_reliable_sequence_exhaustion_is_reported_not_fatal() -> Result<()> {
         connection_id: 405,
         // One sequence left: the handshake takes it, so the next send is the
         // first allocation with nowhere to go.
-        initial_sequence: u32::MAX - 1,
+        initial_sequence: Some(u32::MAX - 1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 405,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = sender.create_connect(0, Vec::new())?;
@@ -2870,7 +2840,7 @@ fn tcp_framed_receive_refuses_a_length_beyond_the_advertised_maximum() -> Result
 fn rudp_reliable_expiry_drops_late_packets_and_leaves_durable_sends_alone() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 7,
-        initial_sequence: 10,
+        initial_sequence: Some(10),
         resend_delay_ms: 100,
         ..CultNetRudpSessionOptions::default()
     });
@@ -2934,7 +2904,7 @@ fn rudp_reliable_expiry_drops_late_packets_and_leaves_durable_sends_alone() -> R
 fn rudp_reliable_expiry_also_reclaims_the_send_backlog() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 9,
-        initial_sequence: 10,
+        initial_sequence: Some(10),
         resend_delay_ms: 100,
         ..CultNetRudpSessionOptions::default()
     });
@@ -2983,30 +2953,13 @@ fn rudp_reliable_expiry_also_reclaims_the_send_backlog() -> Result<()> {
     Ok(())
 }
 
-fn accept_rudp_session(session: &mut CultNetRudpSession, connection_id: u32) -> Result<()> {
-    session.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id,
-            sequence: 0,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".into(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
+fn accept_rudp_session(session: &mut CultNetRudpSession, _connection_id: u32) -> Result<()> {
+    session.assume_connected(0);
     Ok(())
 }
 
 #[test]
-fn rudp_profile_expires_only_the_media_channels() -> Result<()> {
+fn rudp_profile_expires_only_the_media_channel() -> Result<()> {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
     let peer = socket.local_addr()?;
     let options = CultNetRudpSocketTransportOptions::client("expiry-profile", socket, peer, 11);
@@ -3020,14 +2973,12 @@ fn rudp_profile_expires_only_the_media_channels() -> Result<()> {
         .map(|channel| (channel.channel_id.as_str(), channel.reliable_expire_after_ms))
         .collect::<Vec<_>>();
 
-    for media_channel in ["media", "audio"] {
-        assert!(
-            channels.contains(&(media_channel, Some(75))),
-            "the {media_channel} channel advertises its expiry so a peer can see it: {channels:?}"
-        );
-    }
+    assert!(
+        channels.contains(&("media", Some(75))),
+        "the media channel advertises its expiry so a peer can see it: {channels:?}"
+    );
     for (channel_id, expiry) in &channels {
-        if !matches!(*channel_id, "media" | "audio") {
+        if *channel_id != "media" {
             assert_eq!(
                 *expiry, None,
                 "state channel {channel_id} must never expire a reliable send"
@@ -3040,12 +2991,12 @@ fn rudp_profile_expires_only_the_media_channels() -> Result<()> {
 fn connected_rudp_pair() -> Result<(CultNetRudpSession, CultNetRudpSession)> {
     let mut client = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 311,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         ..CultNetRudpSessionOptions::default()
     });
     let mut server = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: 311,
-        initial_sequence: 100,
+        initial_sequence: Some(100),
         ..CultNetRudpSessionOptions::default()
     });
     let connect = client.create_connect(0, Vec::new())?;

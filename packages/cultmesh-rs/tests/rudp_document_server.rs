@@ -160,7 +160,15 @@ fn server(
 }
 
 fn client(target: SocketAddr, id: u32) -> Result<CultNetRudpSocketTransportConnection> {
-    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    client_on(UdpSocket::bind("127.0.0.1:0")?, target, id, 1)
+}
+
+fn client_on(
+    socket: UdpSocket,
+    target: SocketAddr,
+    id: u32,
+    initial_sequence: u32,
+) -> Result<CultNetRudpSocketTransportConnection> {
     socket.set_nonblocking(true)?;
     CultNetRudpSocketTransportConnection::new(CultNetRudpSocketTransportOptions {
         media_delivery: None,
@@ -169,7 +177,7 @@ fn client(target: SocketAddr, id: u32) -> Result<CultNetRudpSocketTransportConne
         mode: CultNetRudpSocketMode::Client,
         remote_addr: Some(target),
         connection_id: id,
-        initial_sequence: 1,
+        initial_sequence: Some(initial_sequence),
         resend_delay_ms: 10,
         transport_id: None,
         max_payload_bytes: None,
@@ -291,7 +299,7 @@ fn same_connection_id_is_peer_scoped_and_raw_bytes_are_untouched() -> Result<()>
 }
 
 #[test]
-fn duplicate_connect_preserves_epoch_and_fresh_epoch_is_separate() -> Result<()> {
+fn a_second_connect_from_a_client_replaces_its_session_and_a_fresh_epoch_is_separate() -> Result<()> {
     let clock = Clock::new(45_000);
     let sink = Sink::default();
     let mut server = server(Default::default(), clock, sink.clone(), Source::default())?;
@@ -322,6 +330,97 @@ fn duplicate_connect_preserves_epoch_and_fresh_epoch_is_separate() -> Result<()>
     let mut fresh_epoch = client(target, 92)?;
     connect(&mut server, &mut [&mut fresh_epoch])?;
     assert_eq!(server.session_count(), 2);
+    Ok(())
+}
+
+/// A client that restarts on the same address and connection id starts a new
+/// session: its Connect carries a sequence the accepted one did not, so the
+/// server does not mistake it for a retransmit, and what it sends is delivered.
+#[test]
+fn a_restarted_client_on_the_same_address_and_connection_id_is_admitted() -> Result<()> {
+    let sink = Sink::default();
+    let mut server = server(Default::default(), Clock::new(46_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let shared = UdpSocket::bind("127.0.0.1:0")?;
+    let twin = shared.try_clone()?;
+    let mut first = client_on(shared, target, 93, 50_000)?;
+    connect(&mut server, &mut [&mut first])?;
+    for index in 0..3 {
+        send(
+            &mut first,
+            &CultNetMessage::DocumentPutRaw {
+                message_id: format!("before-{index}"),
+                document: document("before", vec![index]),
+            },
+        )?;
+    }
+    for _ in 0..40 {
+        server.poll_once()?;
+        first.receive_once()?;
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 3);
+
+    let mut restarted = client_on(twin, target, 93, 7)?;
+    connect(&mut server, &mut [&mut restarted])?;
+    assert_eq!(server.session_count(), 1);
+    send(
+        &mut restarted,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "after-restart".into(),
+            document: document("after", vec![9]),
+        },
+    )?;
+    for _ in 0..40 {
+        server.poll_once()?;
+        restarted.receive_once()?;
+    }
+    let receipts = sink.0.lock().unwrap();
+    assert!(
+        receipts.receipts.iter().any(|r| r.message_id == "after-restart"),
+        "the restarted client's frame was not delivered"
+    );
+    Ok(())
+}
+
+/// A restarted client is a new session, and starts with a new payload budget:
+/// what the old one spent is not charged to it.
+#[test]
+fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
+    let put = |id: &str| CultNetMessage::DocumentPutRaw {
+        message_id: id.into(),
+        document: document("budget", vec![7; 64]),
+    };
+    let encoded = encode_cultnet_message_to_vec(&put("put-a"), CultNetWireContract::CultNetSchemaV0)?;
+    let options = CultMeshRudpDocumentServerOptions {
+        max_admitted_payload_bytes: encoded.len() * 2,
+        max_admitted_payload_bytes_per_session: encoded.len(),
+        max_snapshot_response_bytes: encoded.len(),
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(47_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let shared = UdpSocket::bind("127.0.0.1:0")?;
+    let twin = shared.try_clone()?;
+    let mut first = client_on(shared, target, 94, 50_000)?;
+    connect(&mut server, &mut [&mut first])?;
+    send(&mut first, &put("put-a"))?;
+    for _ in 0..20 {
+        server.poll_once()?;
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+
+    let mut restarted = client_on(twin, target, 94, 7)?;
+    connect(&mut server, &mut [&mut restarted])?;
+    send(&mut restarted, &put("put-b"))?;
+    for _ in 0..20 {
+        server.poll_once()?;
+    }
+    assert_eq!(
+        sink.0.lock().unwrap().receipts.len(),
+        2,
+        "the restarted client was charged what the old session spent"
+    );
     Ok(())
 }
 
@@ -576,7 +675,7 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     let session = |id| {
         CultNetRudpSession::new(CultNetRudpSessionOptions {
             connection_id: id,
-            initial_sequence: 1,
+            initial_sequence: Some(1),
             resend_delay_ms: 10,
             max_pending_reliable_packets: None,
         })

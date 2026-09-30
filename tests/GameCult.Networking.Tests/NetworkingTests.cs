@@ -730,26 +730,25 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 200,
                 ResendDelayMs = 100
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 7, Sequence = 1, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 7, Sequence = 2, ChannelId = "control" });
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
 
             var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var third = sender.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
-            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 10, 11, 12 }));
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 11, 12, 13 }));
 
             receiver.Receive(first);
             receiver.Receive(third);
             var ackWithGap = receiver.CreateAck();
-            Assert.That(ackWithGap.Ack, Is.EqualTo(12));
-            Assert.That(ackWithGap.AckMask, Is.EqualTo(0b10u | (1u << 9)));
+            Assert.That(ackWithGap.Ack, Is.EqualTo(13));
+            Assert.That(ackWithGap.AckMask, Is.EqualTo(0b110u));
             sender.Receive(ackWithGap);
-            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 11 }));
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 12 }));
 
             receiver.Receive(second);
             var fullAck = receiver.CreateAck();
-            Assert.That(fullAck.Ack, Is.EqualTo(12));
-            Assert.That(fullAck.AckMask, Is.EqualTo(0b11u | (1u << 9)));
+            Assert.That(fullAck.Ack, Is.EqualTo(13));
+            Assert.That(fullAck.AckMask, Is.EqualTo(0b111u));
             sender.Receive(fullAck);
             Assert.That(sender.PendingReliableSequences, Is.Empty);
         }
@@ -763,7 +762,7 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 1,
                 ResendDelayMs = 100
             });
-            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 99, Sequence = 50, ChannelId = "control" });
+            session.Receive(new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 99, InitialSequence = 900 }).AcceptConnect(session.CreateConnect(0), 0), 0);
             var sent = session.Send("schema", Encoding.UTF8.GetBytes("payload"), new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 10 });
 
             Assert.That(session.DueResends(90), Is.Empty);
@@ -788,17 +787,14 @@ namespace GameCult.Networking.Tests
                 ConnectionId = 991,
                 InitialSequence = 500
             });
-            sender.Receive(new CultNetRudpPacket
-                { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 991, Sequence = 400, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket
-                { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 991, Sequence = 0, ChannelId = "control" });
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
 
             var oldPacket = sender.Send(
                 "snapshot",
                 new byte[] { 1 },
                 new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 });
             receiver.Receive(oldPacket);
-            foreach (var sequence in Enumerable.Range(2, 40).Select(value => (uint)value))
+            foreach (var sequence in Enumerable.Range(3, 40).Select(value => (uint)value))
             {
                 receiver.Receive(new CultNetRudpPacket
                 {
@@ -813,16 +809,16 @@ namespace GameCult.Networking.Tests
             }
 
             sender.Receive(receiver.CreateAck());
-            Assert.That(sender.PendingReliableSequences.First(), Is.EqualTo(1u));
+            Assert.That(sender.PendingReliableSequences.First(), Is.EqualTo(2u));
 
-            var oldRetransmit = sender.DueResends(10).Single(packet => packet.Sequence == 1);
+            var oldRetransmit = sender.DueResends(10).Single(packet => packet.Sequence == 2);
             receiver.Receive(oldRetransmit);
             var exactAck = receiver.CreateAckForReceived(oldRetransmit.Sequence);
             Assert.That(exactAck.Ack, Is.EqualTo(oldRetransmit.Sequence));
             Assert.That(exactAck.AckMask, Is.Zero);
             sender.Receive(exactAck);
 
-            Assert.That(sender.PendingReliableSequences, Does.Not.Contain(1u));
+            Assert.That(sender.PendingReliableSequences, Does.Not.Contain(2u));
         }
 
         [Test]
@@ -834,13 +830,7 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 1,
                 ResendDelayMs = 1
             });
-            session.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Accept,
-                ConnectionId = 100,
-                Sequence = 5000,
-                ChannelId = "control"
-            });
+            session.Receive(new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 100, InitialSequence = 900 }).AcceptConnect(session.CreateConnect(0), 0), 0);
             var packets = Enumerable.Range(0, CultNetRudpSession.ReliableSendWindowPackets)
                 .Select(index => session.Send("schema", Encoding.UTF8.GetBytes(index.ToString()),
                     new CultNetRudpSendOptions { Reliable = true, Ordered = true, NowMs = 0 }))
@@ -909,7 +899,7 @@ namespace GameCult.Networking.Tests
             var accept = server.AcceptConnect(connect, 0);
             var repeat = CultNetRudpPacketCodec.Decode(CultNetRudpPacketCodec.Encode(connect));
             repeat.Ack = accept.Sequence;
-            var reply = server.AnswerRepeatedConnect(repeat, 1);
+            var reply = server.AcceptConnect(repeat, 1);
             Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
             Assert.That(server.OutstandingReliablePacketCount, Is.EqualTo(0));
         }
@@ -968,13 +958,7 @@ namespace GameCult.Networking.Tests
         public void RudpSession_RejectsUnreliableOrderedDelivery()
         {
             var session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 196 });
-            session.Receive(new CultNetRudpPacket
-            {
-                PacketType = CultNetRudpPacketType.Accept,
-                ConnectionId = 196,
-                Sequence = 50,
-                ChannelId = "control"
-            });
+            session.Receive(new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 196, InitialSequence = 900 }).AcceptConnect(session.CreateConnect(0), 0), 0);
             var error = Assert.Throws<InvalidOperationException>(() =>
                 session.Send(
                     "schema",
@@ -992,14 +976,14 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 1,
                 MaxPendingReliablePackets = 2
             });
-            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 102, Sequence = 50, ChannelId = "control" });
+            session.Receive(new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 102, InitialSequence = 900 }).AcceptConnect(session.CreateConnect(0), 0), 0);
             session.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             session.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
 
             var error = Assert.Throws<InvalidOperationException>(() =>
                 session.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true }));
             Assert.That(error!.Message, Does.Contain("reliable send queue is full"));
-            Assert.That(session.PendingReliableSequences, Is.EqualTo(new uint[] { 1, 2 }));
+            Assert.That(session.PendingReliableSequences, Is.EqualTo(new uint[] { 2, 3 }));
 
             var fragmented = new CultNetRudpSession(new CultNetRudpSessionOptions
             {
@@ -1007,7 +991,7 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 1,
                 MaxPendingReliablePackets = 3
             });
-            fragmented.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 103, Sequence = 50, ChannelId = "control" });
+            fragmented.Receive(new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 103, InitialSequence = 900 }).AcceptConnect(fragmented.CreateConnect(0), 0), 0);
 
             error = Assert.Throws<InvalidOperationException>(() =>
                 fragmented.SendMany(
@@ -1032,8 +1016,8 @@ namespace GameCult.Networking.Tests
                 ConnectionId = 123,
                 InitialSequence = 100
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 90, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 123, Sequence = 91, ChannelId = "control" });
+            var accept = receiver.AcceptConnect(sender.CreateConnect(0), 0);
+            sender.Receive(accept);
 
             var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
@@ -1062,8 +1046,7 @@ namespace GameCult.Networking.Tests
                 ConnectionId = 124,
                 InitialSequence = 100
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 124, Sequence = 90, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 124, Sequence = 91, ChannelId = "control" });
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
 
             var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var control = sender.CreateAck();
@@ -1091,8 +1074,7 @@ namespace GameCult.Networking.Tests
                 ConnectionId = 456,
                 InitialSequence = 100
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 456, Sequence = 90, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 456, Sequence = 91, ChannelId = "control" });
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
 
             var packets = sender.SendMany(
                 "schema",
@@ -1130,8 +1112,7 @@ namespace GameCult.Networking.Tests
                 InitialSequence = 100,
                 ResendDelayMs = 25
             });
-            sender.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = connectionId, Sequence = 0, ChannelId = "control" });
-            receiver.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = connectionId, Sequence = 0, ChannelId = "control" });
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
 
             var fragmentCount = CultNetRudpSession.ReliableSendWindowPackets + 17;
             var payload = Enumerable.Range(0, fragmentCount * 8).Select(index => (byte)(index % 251)).ToArray();
@@ -1269,6 +1250,16 @@ namespace GameCult.Networking.Tests
             Assert.That(Encoding.UTF8.GetString(ReceiveRudpFrame(client).Payload), Is.EqualTo("server still here"));
         }
 
+        /// <summary>Whether the packet's ack field and mask cover the sequence.</summary>
+        private static bool Acknowledges(CultNetRudpPacket packet, uint sequence)
+        {
+            if (packet.Ack == sequence)
+                return true;
+            return packet.Ack > sequence
+                && packet.Ack - sequence <= 32
+                && (packet.AckMask & (1u << (int)(packet.Ack - sequence - 1))) != 0;
+        }
+
         private static List<CultNetRudpPacket> DrainPackets(Socket socket)
         {
             var packets = new List<CultNetRudpPacket>();
@@ -1397,7 +1388,7 @@ namespace GameCult.Networking.Tests
             var goodbye = DrainPackets(peerSocket).Single();
             Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
-            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+            Assert.That(Acknowledges(goodbye, poison.Sequence), Is.False, "the goodbye acknowledged the refused frame");
 
             // A retransmit is dropped, not acknowledged.
             peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
@@ -1444,7 +1435,7 @@ namespace GameCult.Networking.Tests
             var goodbye = DrainPackets(peerSocket).Single();
             Assert.That(goodbye.PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(peer.Receive(goodbye, 1).Disconnected, Is.True);
-            Assert.That(peer.PendingReliableSequences, Does.Contain(poison.Sequence));
+            Assert.That(Acknowledges(goodbye, poison.Sequence), Is.False, "the goodbye acknowledged the refused frame");
 
             peerSocket.SendTo(CultNetRudpPacketCodec.Encode(poison), serverEndPoint);
             Assert.That(server.ReceiveOnce(), Is.Null);
@@ -1898,7 +1889,7 @@ namespace GameCult.Networking.Tests
                     Assert.That(cache.Get(batched), Is.Null);
                 }), Is.True);
 
-                Assert.That(published, Is.EqualTo(new[] { put }));
+                Assert.That(published, Is.EqualTo(new[] { put, batched }), "the batch publishes when the store commits it");
                 Assert.That(cache.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
                 var reopened = new CultCache();
                 reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
@@ -2627,7 +2618,8 @@ namespace GameCult.Networking.Tests
 
             var cache = new CultCache();
             var delivering = new ManualResetEventSlim();
-            cache.OnUpdate += (_, _) => delivering.Set();
+            // Subscribed before the database, so it runs before the database's own observer of the same change.
+            using var loadDelivering = cache.Watch<object>().Subscribe(_ => delivering.Set());
             var database = new CultNetDatabase(cache);
             var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
             {
@@ -4211,13 +4203,13 @@ namespace GameCult.Networking.Tests
                 Schema = "tests.networking_note.v1",
                 Text = "two"
             });
-            // Outside the shard's key prefix: must reach the non-shard snapshot but never the
+            // Outside the shard's key prefix (written to the cache directly: the database refuses a write no shard owns): must reach the non-shard snapshot but never the
             // shard-scoped one, so an unfiltered request still proves shard membership is enforced.
-            await database.PutAsync(new CultRecordKey("other-note:outside-shard"), new NetworkSchemaNote
+            await cache.UpsertAsync(new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "outside"
-            });
+            }, new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("other-note:outside-shard")));
 
             var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-unfiltered", filter: null);
             var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-unfiltered", filter: null);

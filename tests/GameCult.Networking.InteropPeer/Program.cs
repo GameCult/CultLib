@@ -873,6 +873,7 @@ static void RudpServeOnce(Dictionary<string, string> options)
             }
             if (disconnectReason != null)
             {
+                transport.FlushReliable(TimeSpan.FromSeconds(2));
                 transport.Disconnect(disconnectReason);
             }
             PollRudpAfterSend(transport, TimeSpan.FromMilliseconds(250));

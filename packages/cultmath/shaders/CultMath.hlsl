@@ -503,6 +503,8 @@ CultCellular cultmath_cellular(float3 p)
     return result;
 }
 
+#include "CultMath.Phacelle.hlsl"
+
 float cultmath_value_noise(float2 position)
 {
     float2 cell = floor(position);
