@@ -26,7 +26,7 @@
       }
     },
     "code": {
-      "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it.",
+      "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it. The set is a closed enum: Rust and TypeScript refuse a message whose code is not listed, so adding a code is one coordinated change across every runtime (this schema, the C# factory, the Rust CultNetErrorCode, and a captured-bytes case for each).",
       "type": ["string", "null"],
       "enum": [null, "selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target", "variant_unsupported", "unowned_schema"]
     },

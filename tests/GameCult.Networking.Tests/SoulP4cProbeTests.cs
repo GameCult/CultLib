@@ -11,7 +11,9 @@ using static GameCult.Networking.Tests.NetworkingTests;
 
 namespace GameCult.Networking.Tests
 {
-    // Soul pass 4c scratch probes (not for merge).
+    // Soul pass 4c probes. They guard: a committed put whose shard log failed is not answered as a refusal (Q1); reads and watch agree
+    // on what a database serves (Q2); a replica log apply leaves out a row its shard does not own (Q3); the unowned refusal is not a
+    // shard-authority exception (Q4); two databases over one cache aggregate their log failures (Q5).
     public sealed class SoulP4cProbeTests
     {
         private const string ShardId = "soulc-shard";

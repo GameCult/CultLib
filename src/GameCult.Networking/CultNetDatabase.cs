@@ -437,6 +437,10 @@ namespace GameCult.Networking
         /// Gets the previous document, when present.
         /// </summary>
         public object? PreviousDocument { get; }
+
+        // The primary's own wire entry, kept for an entry this replica changed nothing for (a row its shard does not own, an
+        // absent key): it is relayed downstream exactly as the primary sent it, in memory and on disk alike.
+        internal CultNetShardLogEntryMessage? Relayed { get; set; }
     }
 
     /// <summary>
@@ -1819,13 +1823,18 @@ namespace GameCult.Networking
             {
                 RecordMutationLogEntry(new CultNetShardMutationLogEntry(
                     shard.ShardId, shard.Epoch, entry.Sequence, entry.CommittedAt, kind,
-                    schemaId, key, document: null, previousDocument: null), entry);
+                    schemaId, key, document: null, previousDocument: null) { Relayed = entry }, entry);
                 _lastWriteSequence[(schemaId, key.Value)] = entry.Sequence;
             }
         }
 
         private CultNetShardLogEntryMessage ToLogEntryMessage(CultNetShardMutationLogEntry entry)
         {
+            if (entry.Relayed != null)
+            {
+                return NormalizeWireLogEntry(entry, entry.Relayed);
+            }
+
             if (entry.Kind == CultNetDatabaseChangeKind.Removed || entry.Document == null)
             {
                 return new CultNetShardLogEntryMessage
