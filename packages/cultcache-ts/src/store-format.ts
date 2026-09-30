@@ -31,11 +31,30 @@ function describeHeader(header: string): string {
     : `an unrecognised ${STORE_FORMAT_PREFIX}* header of ${new TextEncoder().encode(header).length} bytes`;
 }
 
+/**
+ * A record key or schema id as a refusal may show it: a string is an identity and is named;
+ * anything else is described by its type, since the value is the store's.
+ */
+function describeIdentity(value: unknown): string {
+  if (typeof value === "string") {
+    return `"${value}"`;
+  }
+
+  const kind = Array.isArray(value)
+    ? "array"
+    : value instanceof Uint8Array
+      ? "bytes"
+      : value === null
+        ? "nil"
+        : typeof value;
+  return `<${kind}>`;
+}
+
 /** Refuses a persisted record with more slots than v1 defines, naming its key and schema id. */
 export function requireV1RecordSlots(record: unknown[]): void {
   if (record.length > PERSISTED_RECORD_SLOTS) {
     throw new Error(
-      `CultCache record "${String(record[0])}" (schema "${String(record[1])}") has ${record.length} slots, more than ` +
+      `CultCache record ${describeIdentity(record[0])} (schema ${describeIdentity(record[1])}) has ${record.length} slots, more than ` +
         `the ${PERSISTED_RECORD_SLOTS} of a ${STORE_FORMAT_VERSION} record, so this is not a valid store.`,
     );
   }

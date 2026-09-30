@@ -1532,6 +1532,47 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   assert.deepEqual(await readdir(volume), []);
 });
 
+test("SingleFileMessagePackBackingStore record refusal names only a string key", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-record-key-"));
+  const file = join(dir, "store.cc");
+  const secret = new TextEncoder().encode("SECRET-BYTES");
+  for (const [key, schema] of [[["SECRET-IN-ARRAY"], "s"], [secret, "s"], ["k", { SECRET: 1 }]] as const) {
+    await writeFile(file, encode(["cultcache.store.v1", [], [[key, schema, "t", Uint8Array.of(0x90), "extra"]]]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => !error.message.includes("SECRET") && !error.message.includes("83,69,67") && error.message.includes("not a valid store"),
+    );
+  }
+});
+
+// What a write does through a symbolic link today. R3 decides whether a write resolves the link
+// or refuses it; these pin the current behaviour so that change is deliberate.
+test("R3 decides resolve-or-refuse: a push through a live link replaces the link", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-live-link-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const target = join(volume, "store.cc");
+  const envelope = { key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  await new SingleFileMessagePackBackingStore(target).push(envelope);
+  const before = await readFile(target);
+  const link = join(dir, "store.cc");
+  await symlink(target, link);
+  await new SingleFileMessagePackBackingStore(link).push({ ...envelope, key: "b" });
+  assert.ok((await lstat(link)).isFile());
+  assert.deepEqual(await readFile(target), before);
+});
+
+test("R3 decides resolve-or-refuse: a pushAll through a dangling link replaces the link", { skip: process.platform === "win32" }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-dangling-push-all-"));
+  const volume = join(dir, "volume");
+  await mkdir(volume);
+  const link = join(dir, "store.cc");
+  await symlink(join(volume, "store.cc"), link);
+  await new SingleFileMessagePackBackingStore(link).pushAll([{ key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" }]);
+  assert.ok((await lstat(link)).isFile());
+  assert.deepEqual(await readdir(volume), []);
+});
+
 test("CultCache inspector refuses the same vectors by name", async () => {
   const inspect = async (name: string) => inspectCultCacheBytes(name, await readFile(join(variantVectors, name)));
   await assert.rejects(() => inspect("unknown-header.msgpack"), /cultcache\.store\.v9/u);
