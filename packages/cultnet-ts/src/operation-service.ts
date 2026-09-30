@@ -226,6 +226,11 @@ async function handleServerDatagram(
     sessions.delete(key);
     return true;
   }
+  // A request belongs to the session generation it arrived on. If that generation ends while a
+  // handler runs (a goodbye, a refusal, a timeout, a new Connect from the same endpoint), what
+  // the handler returns or throws belongs to no live session, and nothing of it may reach the
+  // endpoint: a client that connected again there owns it now.
+  const generation = peer.session.generation;
   for (const frame of result.delivered) {
     if (frame.channelId !== "schema") continue;
     try {
@@ -239,6 +244,7 @@ async function handleServerDatagram(
         peer.handling -= 1;
         peer.lastHandledAtMs = Date.now();
       }
+      if (peer.session.generation !== generation) return true;
       const payload = encode(encodeCultNetMessageForWire(response, "cultnet.schema.v0"));
       for (const responsePacket of peer.session.sendMany("schema", payload, {
         reliable: true,
@@ -247,6 +253,7 @@ async function handleServerDatagram(
         maxFragmentBytes: options.maxFragmentBytes ?? 2048,
       })) sendPacket(key, peer, responsePacket);
     } catch {
+      if (peer.session.generation !== generation) return true;
       // The session recorded this request's sequence, so keeping it would
       // acknowledge the retransmit of a request that was never handled.
       endSession(sessions, key, peer, sendPacket);
