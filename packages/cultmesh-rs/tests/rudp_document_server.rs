@@ -1391,90 +1391,128 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     Ok(())
 }
 
+/// A peer driven packet by packet, so a test decides what it receives and what
+/// it acknowledges.
+struct RawPeer {
+    socket: UdpSocket,
+    target: SocketAddr,
+    session: cultnet_rs::CultNetRudpSession,
+}
+
+impl RawPeer {
+    fn connect<S: CultMeshRudpRawDocumentSink, Q: CultMeshRudpSnapshotSource>(
+        server: &mut CultMeshRudpDocumentServer<S, Q, Clock>,
+        connection_id: u32,
+    ) -> Result<Self> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let mut peer = Self {
+            socket,
+            target: server.local_addr()?,
+            session: cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
+                connection_id,
+                initial_sequence: Some(100),
+                resend_delay_ms: 10_000,
+                max_pending_reliable_packets: Some(64),
+            }),
+        };
+        let connect = peer.session.create_connect(0, Vec::new())?;
+        peer.send_packet(&connect)?;
+        server.poll_once()?;
+        let accept = peer.receive().expect("the server accepts the connect");
+        assert_eq!(
+            accept.packet_type,
+            cultnet_rs::CultNetRudpPacketType::Accept
+        );
+        peer.session.receive(&accept, 1)?;
+        Ok(peer)
+    }
+
+    fn send_packet(&self, packet: &cultnet_rs::CultNetRudpPacket) -> Result<()> {
+        self.socket
+            .send_to(&cultnet_rs::encode_rudp_packet(packet)?, self.target)?;
+        Ok(())
+    }
+
+    /// Sends `message` reliably and in order; returns its sequences.
+    fn send(&mut self, message: &CultNetMessage) -> Result<Vec<u32>> {
+        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+        let options = cultnet_rs::CultNetRudpSendOptions {
+            reliable: true,
+            ordered: true,
+            sequenced: false,
+            now_ms: 2,
+            reliable_expire_after_ms: None,
+        };
+        let packets = self
+            .session
+            .send_many("schema", payload, options, Some(1200))?;
+        for packet in &packets {
+            self.send_packet(packet)?;
+        }
+        Ok(packets.iter().map(|packet| packet.sequence).collect())
+    }
+
+    fn receive(&self) -> Option<cultnet_rs::CultNetRudpPacket> {
+        let mut wire = vec![0_u8; 65_535];
+        let (bytes, _) = self.socket.recv_from(&mut wire).ok()?;
+        cultnet_rs::decode_rudp_packet(&wire[..bytes]).ok()
+    }
+
+    /// Every packet waiting, none of them processed or acknowledged.
+    fn drain(&self) -> Vec<cultnet_rs::CultNetRudpPacket> {
+        std::iter::from_fn(|| self.receive()).collect()
+    }
+}
+
+/// Whether `packet`'s acknowledgement fields cover `sequence`.
+fn acknowledges(packet: &cultnet_rs::CultNetRudpPacket, sequence: u32) -> bool {
+    packet.ack == sequence
+        || (0..32).any(|bit| {
+            packet.ack_mask & (1 << bit) != 0
+                && packet.ack > bit
+                && packet.ack - bit - 1 == sequence
+        })
+}
+
 /// The refusal is unreliable and unordered: a peer missing an earlier reliable
 /// packet from the server still receives it. An ordered refusal would wait
 /// behind the gap for a resend that never comes, because the session ends with it.
 #[test]
 fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
-    use cultnet_rs::{
-        CultNetRudpPacket, CultNetRudpPacketType, CultNetRudpSendOptions, CultNetRudpSession,
-        CultNetRudpSessionOptions, decode_rudp_packet, encode_rudp_packet,
-    };
     let mut server = server(
         Default::default(),
         Clock::new(71_000),
         Sink::fail_once(),
         Source::documents(vec![document("held", vec![1, 2, 3])]),
     )?;
-    let target = server.local_addr()?;
-    let peer = UdpSocket::bind("127.0.0.1:0")?;
-    peer.set_read_timeout(Some(Duration::from_millis(50)))?;
-    let received = || -> Option<CultNetRudpPacket> {
-        let mut wire = vec![0_u8; 65_535];
-        let (bytes, _) = peer.recv_from(&mut wire).ok()?;
-        decode_rudp_packet(&wire[..bytes]).ok()
-    };
-    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
-        connection_id: 78,
-        initial_sequence: Some(100),
-        resend_delay_ms: 10_000,
-        max_pending_reliable_packets: Some(64),
-    });
-    peer.send_to(
-        &encode_rudp_packet(&session.create_connect(0, Vec::new())?)?,
-        target,
-    )?;
-    server.poll_once()?;
-    let accept = received().expect("the server accepts the connect");
-    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
-    session.receive(&accept, 1)?;
-    let reliable = CultNetRudpSendOptions {
-        reliable: true,
-        ordered: true,
-        sequenced: false,
-        now_ms: 2,
-        reliable_expire_after_ms: None,
-    };
-    let send = |session: &mut CultNetRudpSession, message: &CultNetMessage| -> Result<()> {
-        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
-        for packet in session.send_many("schema", payload, reliable.clone(), Some(1200))? {
-            peer.send_to(&encode_rudp_packet(&packet)?, target)?;
-        }
-        Ok(())
-    };
+    let mut peer = RawPeer::connect(&mut server, 78)?;
 
     // The snapshot reply is lost: the peer never sees it, so its ordered
     // stream from the server has a gap.
-    send(
-        &mut session,
-        &CultNetMessage::SnapshotRequest {
-            message_id: "lost".into(),
-            schema_ids: None,
-            record_keys: None,
-        },
-    )?;
+    peer.send(&CultNetMessage::SnapshotRequest {
+        message_id: "lost".into(),
+        schema_ids: None,
+        record_keys: None,
+    })?;
     assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
-    let mut lost = 0;
-    while received().is_some() {
-        lost += 1;
-    }
-    assert!(lost > 0, "fixture: the server sent the reply that is lost");
+    assert!(
+        !peer.drain().is_empty(),
+        "fixture: the server sent the reply that is lost"
+    );
 
-    send(
-        &mut session,
-        &CultNetMessage::DocumentPutRaw {
-            message_id: "refused".into(),
-            document: document("refused", vec![4, 5, 6]),
-        },
-    )?;
+    peer.send(&CultNetMessage::DocumentPutRaw {
+        message_id: "refused".into(),
+        document: document("refused", vec![4, 5, 6]),
+    })?;
     assert!(matches!(
         server.poll_once()?,
         CultMeshRudpPollOutcome::ApplicationRejected(_)
     ));
     let mut delivered = Vec::new();
     let mut disconnected = false;
-    while let Some(packet) = received() {
-        let result = session.receive(&packet, 3)?;
+    for packet in peer.drain() {
+        let result = peer.session.receive(&packet, 3)?;
         delivered.extend(result.delivered);
         disconnected |= result.disconnected;
     }
@@ -1493,6 +1531,92 @@ fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
         }]
     );
     assert!(disconnected, "the refusal is followed by a goodbye");
+    Ok(())
+}
+
+/// The peer's reliable queue is full to the brim: an 8-fragment reply the peer
+/// never acknowledges fills a queue of 8 exactly. The next reply cannot be
+/// queued, and its refusal still reaches the peer, because it takes no room in
+/// that queue; it acknowledges nothing the peer sent.
+#[test]
+fn a_refusal_reaches_a_peer_whose_queue_is_full_to_the_brim() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 100,
+        max_pending_reliable_packets_per_session: 8,
+        max_snapshot_response_bytes: 8192,
+        ..Default::default()
+    };
+    let source = Source::documents(vec![document_served_at("q1", 800)?]);
+    let mut server = server(options, Clock::new(74_000), Sink::default(), source)?;
+    let mut peer = RawPeer::connect(&mut server, 79)?;
+    peer.send(&CultNetMessage::SnapshotRequest {
+        message_id: "a".into(),
+        schema_ids: None,
+        record_keys: None,
+    })?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    let unacknowledged = peer
+        .drain()
+        .into_iter()
+        .filter(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data)
+        .count();
+    assert_eq!(
+        unacknowledged, 8,
+        "fixture: the first reply fills the queue exactly"
+    );
+
+    let refused = peer.send(&CultNetMessage::SnapshotRequest {
+        message_id: "b".into(),
+        schema_ids: None,
+        record_keys: None,
+    })?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the second reply cannot be queued");
+    };
+    assert!(
+        matches!(
+            rejection.reason,
+            CultMeshRudpRejectionReason::ResponseQueueFailed(_)
+        ),
+        "{:?}",
+        rejection.reason
+    );
+    let arrived = peer.drain();
+    let mut parts: Vec<_> = arrived
+        .iter()
+        .filter(|packet| {
+            packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data
+                && packet.channel_id == "schema"
+                && !packet.reliable
+        })
+        .collect();
+    assert!(!parts.is_empty(), "the refusal reaches the peer");
+    for part in &parts {
+        assert!(
+            refused
+                .iter()
+                .all(|sequence| !acknowledges(part, *sequence)),
+            "the refusal acknowledges the refused request: ack {} mask {:#x}",
+            part.ack,
+            part.ack_mask
+        );
+    }
+    parts.sort_by_key(|part| part.fragment_index);
+    let payload: Vec<u8> = parts.iter().flat_map(|part| part.payload.clone()).collect();
+    assert_eq!(
+        decode_cultnet_message_from_slice(&payload, CultNetWireContract::CultNetSchemaV0)?,
+        CultNetMessage::Error {
+            error: "the snapshot response could not be queued".into(),
+            code: None,
+            details: None,
+        }
+    );
+    assert!(
+        arrived
+            .iter()
+            .any(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Disconnect),
+        "the refusal is followed by a goodbye"
+    );
     Ok(())
 }
 
@@ -1542,6 +1666,56 @@ fn a_snapshot_the_queue_cannot_take_is_answered() -> Result<()> {
     assert_eq!(
         refusal_seen_by(&mut client, &receipt)?,
         "the snapshot response could not be queued"
+    );
+    Ok(())
+}
+
+/// A response too large for any datagram fails with the kernel's EMSGSIZE. The
+/// caller's rejection and the peer's goodbye both carry its fixed name, never
+/// the platform's text, and the peer is sent no refusal.
+#[test]
+fn a_response_that_is_too_large_to_send_is_named_emsgsize() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 70_000,
+        ..Default::default()
+    };
+    let source = Source::documents(vec![document("big", vec![7; 66_000])]);
+    let mut server = server(options, Clock::new(73_000), Sink::default(), source)?;
+    let mut client = client(server.local_addr()?, 152)?;
+    connect(&mut server, &mut [&mut client])?;
+    send_reliable(
+        &mut client,
+        &CultNetMessage::SnapshotRequest {
+            message_id: "big".into(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    let mut rejection = None;
+    for _ in 0..100 {
+        if let CultMeshRudpPollOutcome::ApplicationRejected(found) = server.poll_once()? {
+            rejection = Some(found);
+            break;
+        }
+    }
+    assert_eq!(
+        rejection.expect("the response can never be sent").reason,
+        CultMeshRudpRejectionReason::ResponseSendFailed("EMSGSIZE")
+    );
+    let mut frames = 0;
+    for _ in 0..500 {
+        if client.receive_once()?.is_some() {
+            frames += 1;
+        }
+        if !client.connected() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(frames, 0, "no refusal is sent to an unreachable peer");
+    assert_eq!(
+        client.disconnect_reason(),
+        Some(&b"packet could not be sent: EMSGSIZE"[..])
     );
     Ok(())
 }
