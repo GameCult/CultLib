@@ -174,12 +174,67 @@ pub enum CultMeshRudpApplicationOperation {
     SnapshotRequest,
 }
 
+/// Why the server refused an application message.
+///
+/// `Display` gives the operator-facing sentence; match on the variant to act on
+/// the cause.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CultMeshRudpRejectionReason {
+    /// The caller's sink refused the document. Carries the sink's error text.
+    SinkRefused(String),
+    /// The caller's snapshot source failed. Carries its error text.
+    SnapshotSourceFailed(String),
+    SnapshotTooManyDocuments {
+        documents: usize,
+        max_snapshot_documents: usize,
+    },
+    SnapshotResponseTooLarge {
+        response_bytes: usize,
+        max_snapshot_response_bytes: usize,
+    },
+    /// A snapshot response could not be encoded. Carries the encoder's error text.
+    ResponseEncodingFailed(String),
+    /// The server's retained payload budget cannot hold the response.
+    PayloadBudgetFull,
+    /// The session could not queue the response. Carries the session's error text.
+    ResponseQueueFailed(String),
+}
+
+impl std::fmt::Display for CultMeshRudpRejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SinkRefused(error) | Self::SnapshotSourceFailed(error) => f.write_str(error),
+            Self::SnapshotTooManyDocuments {
+                documents,
+                max_snapshot_documents,
+            } => write!(
+                f,
+                "snapshot returned {documents} documents; limit is {max_snapshot_documents}"
+            ),
+            Self::SnapshotResponseTooLarge {
+                response_bytes,
+                max_snapshot_response_bytes,
+            } => write!(
+                f,
+                "snapshot response is {response_bytes} bytes; limit is {max_snapshot_response_bytes}"
+            ),
+            Self::ResponseEncodingFailed(error) => {
+                write!(f, "snapshot response could not be encoded: {error}")
+            }
+            Self::PayloadBudgetFull => f.write_str("retained payload budget is full"),
+            Self::ResponseQueueFailed(error) => {
+                write!(f, "snapshot response could not be queued: {error}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultMeshRudpApplicationRejection {
     pub session: CultMeshRudpSessionKey,
     pub operation: CultMeshRudpApplicationOperation,
     pub message_id: String,
-    pub reason: String,
+    pub reason: CultMeshRudpRejectionReason,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +528,14 @@ where
                 message_id,
                 document,
             } => {
+                let reject = |reason| {
+                    Ok(Some(CultMeshRudpApplicationRejection {
+                        session: key,
+                        operation: CultMeshRudpApplicationOperation::DocumentPutRaw,
+                        message_id: message_id.clone(),
+                        reason,
+                    }))
+                };
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
                     message_id: message_id.clone(),
@@ -481,12 +544,9 @@ where
                     document,
                 };
                 if let Err(error) = self.sink.accept_raw_document(receipt) {
-                    return Ok(Some(CultMeshRudpApplicationRejection {
-                        session: key,
-                        operation: CultMeshRudpApplicationOperation::DocumentPutRaw,
-                        message_id,
-                        reason: format!("{error:#}"),
-                    }));
+                    return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
+                        "{error:#}"
+                    )));
                 }
             }
             CultNetMessage::SnapshotRequest {
@@ -508,7 +568,9 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
-                            reason: format!("{error:#}"),
+                            reason: CultMeshRudpRejectionReason::SnapshotSourceFailed(format!(
+                                "{error:#}"
+                            )),
                         }));
                     }
                 };
@@ -517,28 +579,24 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
-                        reason: format!(
-                            "snapshot returned {} documents; limit is {}",
-                            documents.len(),
-                            self.options.max_snapshot_documents
-                        ),
+                        reason: CultMeshRudpRejectionReason::SnapshotTooManyDocuments {
+                            documents: documents.len(),
+                            max_snapshot_documents: self.options.max_snapshot_documents,
+                        },
                     }));
                 }
                 let response = CultNetMessage::SnapshotResponseRaw {
                     message_id: message_id.clone(),
                     documents,
                 };
-                let payload = match encode_cultnet_message_to_vec(
-                    &response,
-                    CultNetWireContract::CultNetSchemaV0,
-                ) {
+                let payload = match encode_snapshot_response(&response) {
                     Ok(payload) => payload,
                     Err(error) => {
                         return Ok(Some(CultMeshRudpApplicationRejection {
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
-                            reason: format!("snapshot response could not be encoded: {error:#}"),
+                            reason: CultMeshRudpRejectionReason::ResponseEncodingFailed(error),
                         }));
                     }
                 };
@@ -547,11 +605,10 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
-                        reason: format!(
-                            "snapshot response is {} bytes; limit is {}",
-                            payload.len(),
-                            self.options.max_snapshot_response_bytes
-                        ),
+                        reason: CultMeshRudpRejectionReason::SnapshotResponseTooLarge {
+                            response_bytes: payload.len(),
+                            max_snapshot_response_bytes: self.options.max_snapshot_response_bytes,
+                        },
                     }));
                 }
                 if !self.payload_budget_allows(key, payload.len()) {
@@ -559,7 +616,7 @@ where
                         session: key,
                         operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                         message_id,
-                        reason: "retained payload budget is full".into(),
+                        reason: CultMeshRudpRejectionReason::PayloadBudgetFull,
                     }));
                 }
                 let payload_bytes = payload.len();
@@ -585,7 +642,9 @@ where
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
-                            reason: format!("snapshot response could not be queued: {error:#}"),
+                            reason: CultMeshRudpRejectionReason::ResponseQueueFailed(format!(
+                                "{error:#}"
+                            )),
                         }));
                     }
                 };
@@ -684,6 +743,13 @@ fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
         return Err(anyhow!("max_fragment_bytes must be greater than zero"));
     }
     Ok(())
+}
+
+/// The one encoder for a snapshot response, shared by the snapshot path and by
+/// put admission so the size a put is judged by is the size it would be served at.
+fn encode_snapshot_response(response: &CultNetMessage) -> std::result::Result<Vec<u8>, String> {
+    encode_cultnet_message_to_vec(response, CultNetWireContract::CultNetSchemaV0)
+        .map_err(|error| format!("{error:#}"))
 }
 
 fn duration_millis(duration: Duration) -> u64 {

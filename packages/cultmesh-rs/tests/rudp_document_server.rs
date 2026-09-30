@@ -2,8 +2,8 @@ use anyhow::Result;
 use cultmesh_rs::{
     CultMeshRudpApplicationOperation, CultMeshRudpDocumentServer,
     CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome, CultMeshRudpRawDocumentReceipt,
-    CultMeshRudpRawDocumentSink, CultMeshRudpServerClock, CultMeshRudpSnapshotQuery,
-    CultMeshRudpSnapshotSource,
+    CultMeshRudpRawDocumentSink, CultMeshRudpRejectionReason, CultMeshRudpServerClock,
+    CultMeshRudpSnapshotQuery, CultMeshRudpSnapshotSource,
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
@@ -299,7 +299,8 @@ fn same_connection_id_is_peer_scoped_and_raw_bytes_are_untouched() -> Result<()>
 }
 
 #[test]
-fn a_second_connect_from_a_client_replaces_its_session_and_a_fresh_epoch_is_separate() -> Result<()> {
+fn a_second_connect_from_a_client_replaces_its_session_and_a_fresh_epoch_is_separate() -> Result<()>
+{
     let clock = Clock::new(45_000);
     let sink = Sink::default();
     let mut server = server(Default::default(), clock, sink.clone(), Source::default())?;
@@ -339,7 +340,12 @@ fn a_second_connect_from_a_client_replaces_its_session_and_a_fresh_epoch_is_sepa
 #[test]
 fn a_restarted_client_on_the_same_address_and_connection_id_is_admitted() -> Result<()> {
     let sink = Sink::default();
-    let mut server = server(Default::default(), Clock::new(46_000), sink.clone(), Source::default())?;
+    let mut server = server(
+        Default::default(),
+        Clock::new(46_000),
+        sink.clone(),
+        Source::default(),
+    )?;
     let target = server.local_addr()?;
     let shared = UdpSocket::bind("127.0.0.1:0")?;
     let twin = shared.try_clone()?;
@@ -376,7 +382,10 @@ fn a_restarted_client_on_the_same_address_and_connection_id_is_admitted() -> Res
     }
     let receipts = sink.0.lock().unwrap();
     assert!(
-        receipts.receipts.iter().any(|r| r.message_id == "after-restart"),
+        receipts
+            .receipts
+            .iter()
+            .any(|r| r.message_id == "after-restart"),
         "the restarted client's frame was not delivered"
     );
     Ok(())
@@ -390,11 +399,15 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
         message_id: id.into(),
         document: document("budget", vec![7; 64]),
     };
-    let encoded = encode_cultnet_message_to_vec(&put("put-a"), CultNetWireContract::CultNetSchemaV0)?;
+    let encoded =
+        encode_cultnet_message_to_vec(&put("put-a"), CultNetWireContract::CultNetSchemaV0)?;
+    let budget = encoded
+        .len()
+        .max(served_alone_bytes(&document("budget", vec![7; 64]))?);
     let options = CultMeshRudpDocumentServerOptions {
-        max_admitted_payload_bytes: encoded.len() * 2,
-        max_admitted_payload_bytes_per_session: encoded.len(),
-        max_snapshot_response_bytes: encoded.len(),
+        max_admitted_payload_bytes: budget * 2,
+        max_admitted_payload_bytes_per_session: budget,
+        max_snapshot_response_bytes: budget,
         ..Default::default()
     };
     let sink = Sink::default();
@@ -460,7 +473,10 @@ fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<
         CultMeshRudpApplicationOperation::DocumentPutRaw
     );
     assert_eq!(rejection.message_id, "rejected-put");
-    assert!(rejection.reason.contains("injected sink failure"));
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::SinkRefused("injected sink failure".into())
+    );
     assert_eq!(server.session_count(), 2);
     publisher.receive_once()?;
     assert_eq!(
@@ -485,7 +501,10 @@ fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<
         CultMeshRudpApplicationOperation::SnapshotRequest
     );
     assert_eq!(rejection.message_id, "rejected-snapshot");
-    assert!(rejection.reason.contains("injected source failure"));
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::SnapshotSourceFailed("injected source failure".into())
+    );
     assert_eq!(server.session_count(), 1);
     snapshot_client.receive_once()?;
     assert_eq!(
@@ -575,10 +594,13 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
         document: document("budget", vec![7; 64]),
     };
     let encoded = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
+    let budget = encoded
+        .len()
+        .max(served_alone_bytes(&document("budget", vec![7; 64]))?);
     let options = CultMeshRudpDocumentServerOptions {
-        max_admitted_payload_bytes: encoded.len(),
-        max_admitted_payload_bytes_per_session: encoded.len(),
-        max_snapshot_response_bytes: encoded.len(),
+        max_admitted_payload_bytes: budget,
+        max_admitted_payload_bytes_per_session: budget,
+        max_snapshot_response_bytes: budget,
         ..Default::default()
     };
     let mut budget_server = server(options, clock, sink.clone(), Source::default())?;
@@ -617,7 +639,13 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
         CultMeshRudpApplicationOperation::SnapshotRequest
     );
     assert_eq!(rejection.message_id, "too-large");
-    assert!(rejection.reason.contains("snapshot response is"));
+    assert!(matches!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::SnapshotResponseTooLarge {
+            response_bytes,
+            max_snapshot_response_bytes: 128,
+        } if response_bytes > 128
+    ));
     assert_eq!(snapshot_server.session_count(), 0);
     snapshot_client.receive_once()?;
     assert_eq!(
@@ -656,8 +684,7 @@ fn session_cap_and_expiry_use_monotonic_time() -> Result<()> {
 #[test]
 fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     use cultnet_rs::{
-        CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
-        encode_rudp_packet,
+        CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, encode_rudp_packet,
     };
     let clock = Clock::new(60_000);
     let sink = Sink::default();
@@ -698,7 +725,10 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
         reliable: true,
         ..Default::default()
     };
-    send_raw(&mut server, &unadmitted.send("schema", vec![1], reliable.clone())?)?;
+    send_raw(
+        &mut server,
+        &unadmitted.send("schema", vec![1], reliable.clone())?,
+    )?;
     assert_eq!(server.packets_dropped(), 2);
 
     // A moved flow re-sends Connect from a socket that never hears the Accept.
