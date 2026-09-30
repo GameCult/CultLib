@@ -546,11 +546,14 @@ where
                 now_unix,
                 now_monotonic,
             )? {
-                let end = match rejection.reason {
-                    CultMeshRudpRejectionReason::ResponseSendFailed(kind) => {
-                        SessionEnd::Unsendable(std::io::Error::from(kind))
+                // A reply that already failed permanently this poll is not dropped:
+                // the session ends over it.
+                let end = match (unsendable.take(), &rejection.reason) {
+                    (Some(error), _) => SessionEnd::Unsendable(error),
+                    (None, CultMeshRudpRejectionReason::ResponseSendFailed(kind)) => {
+                        SessionEnd::Unsendable(std::io::Error::from(*kind))
                     }
-                    ref reason => SessionEnd::Rejected(reason.refusal_text()),
+                    (None, reason) => SessionEnd::Rejected(reason.refusal_text()),
                 };
                 self.end_session(key, end)?;
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
