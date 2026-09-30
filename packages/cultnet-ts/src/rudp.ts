@@ -25,14 +25,11 @@ const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
 /// retransmitting the same sequence would never change its mind.
 const RUDP_CONNECT_ATTEMPT_MS = 3_000;
 
-/// A sequence drawn from a secure source in [floor, 2^31). The Connect's
-/// sequence is what tells a peer whether a Connect repeats one it already
-/// accepted or starts a new session, so two sessions must not share one by
-/// default. A floor above the range draws nothing new: the caller keeps its own
-/// sequence.
-function drawSequence(floor: number): number {
-  const low = Math.max(1, floor);
-  return low >= 2 ** 31 ? low : randomInt(low, 2 ** 31);
+/// A sequence drawn from a secure source in [1, 2^31). The Connect's sequence
+/// is what tells a peer whether a Connect repeats one it already accepted or
+/// starts a new session, so two sessions must not share one by default.
+function drawSequence(): number {
+  return randomInt(1, 2 ** 31);
 }
 
 /// Whether `sequence` is at or before `mark` in serial order, within the
@@ -189,6 +186,9 @@ export class CultNetRudpSession {
   #connectSequence: number | undefined;
   /// A Connect this side sent is unanswered. Only then is an Accept honoured.
   #awaitingAccept = false;
+  /// The payload of the Connect this side sent, kept so a fresh attempt can
+  /// always be built whatever became of the pending packet.
+  #connectPayload = new Uint8Array();
   /// When the unanswered Connect first went out; `dueResends` abandons it for a
   /// fresh attempt once `RUDP_CONNECT_ATTEMPT_MS` has passed.
   #connectStartedAtMs = 0;
@@ -218,7 +218,7 @@ export class CultNetRudpSession {
 
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
-    this.#nextSequence = toUint32(options.initialSequence ?? drawSequence(1), "initialSequence");
+    this.#nextSequence = toUint32(options.initialSequence ?? drawSequence(), "initialSequence");
     if (this.#nextSequence === 0xffff_ffff) {
       throw new Error("RUDP initialSequence must leave room for a reliable packet.");
     }
@@ -317,6 +317,7 @@ export class CultNetRudpSession {
     this.#connectSequence = packet.sequence;
     this.#awaitingAccept = true;
     this.#connectStartedAtMs = nowMs;
+    this.#connectPayload = new Uint8Array(payload);
     this.#trackReliable(packet, nowMs);
     return packet;
   }
@@ -489,7 +490,12 @@ export class CultNetRudpSession {
     if (packet.packetType === "accept" && !honoursAccept) {
       return { delivered: [], readyToSend: [] };
     }
-    this.#applyAcknowledgements(packet);
+    // While this side's Connect awaits its Accept, only the Accept it honours
+    // retires it: an Ack that names the Connect (a server's reply to a repeat or
+    // a stale copy) says the server did not start a session.
+    if (honoursAccept || !this.#awaitingAccept) {
+      this.#applyAcknowledgements(packet);
+    }
     const readyToSend = this.#promoteQueuedReliable(nowMs);
     this.#lastReceivedAtMs = nowMs;
 
@@ -666,24 +672,24 @@ export class CultNetRudpSession {
   }
 
   /// A Connect unanswered for `RUDP_CONNECT_ATTEMPT_MS` is replaced, not
-  /// retransmitted further, by a Connect with a newly drawn sequence and the
-  /// same payload. Nothing was ever sent in an unanswered generation, so no
-  /// sequence issued so far is owed; the draw stays above them, so a frame the
-  /// peer still remembers from an earlier generation of this session stays at or
-  /// before the new Connect.
+  /// retransmitted further, by a Connect with the same payload and the
+  /// abandoned sequence plus the receive window less one. Nothing was ever sent
+  /// in an unanswered generation, so no sequence issued so far is owed. The jump
+  /// keeps a late copy of the abandoned Connect inside the new one's stale
+  /// window, so a server that took the new Connect answers the copy with an Ack
+  /// instead of restarting; and it leaves the stale window of whatever
+  /// generation the server holds, unless that generation sits exactly at the
+  /// jump, and then the next attempt leaves it. The first Connect of a session
+  /// is the only one drawn at random.
   #abandonUnansweredConnect(nowMs: number): CultNetRudpPacket | undefined {
     if (!this.#awaitingAccept || nowMs - this.#connectStartedAtMs < RUDP_CONNECT_ATTEMPT_MS) {
       return undefined;
     }
-    const pending = this.#connectSequence === undefined
-      ? undefined
-      : this.#pendingReliable.get(this.#connectSequence);
-    if (!pending) {
+    if (this.#connectSequence === undefined) {
       return undefined;
     }
-    const payload = new Uint8Array(pending.packet.payload ?? []);
-    this.#nextSequence = drawSequence(this.#nextSequence);
-    return this.createConnect(nowMs, payload);
+    this.#nextSequence = Math.min(this.#connectSequence + RUDP_RECEIVED_SEQUENCE_WINDOW - 1, 0xffff_fffe);
+    return this.createConnect(nowMs, this.#connectPayload);
   }
 
   #createPacket(packet: {

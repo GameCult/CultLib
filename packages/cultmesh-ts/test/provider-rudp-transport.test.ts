@@ -360,6 +360,41 @@ test("a client restarted on the same address with the same Connect payload repla
   }
 });
 
+test("the RUDP document server does not acknowledge by name a reliable packet its session did not receive", async () => {
+  const connectionId = 0x43554c55;
+  const server = CultMesh.createRudpDocumentServer("odin-ack-test", connectionId, {
+    bindPort: 0,
+    documents: new CultNetDocumentRegistry(),
+    onError: () => undefined,
+  });
+  await server.start();
+  const socket = createSocket("udp4");
+  const received: CultNetRudpPacket[] = [];
+  socket.on("message", wire => received.push(decodeRudpPacket(wire)));
+  const toServer = (packet: CultNetRudpPacket) =>
+    socket.send(encodeRudpPacket(packet), server.bind.port, "127.0.0.1");
+  try {
+    const client = new CultNetRudpSession({ connectionId, initialSequence: 50_000 });
+    const connect = client.createConnect(Date.now());
+    toServer(connect);
+    await waitFor(() => received.some(packet => packet.packetType === "accept"), "the Accept");
+    received.length = 0;
+
+    // A reliable packet the session ignores (a client does not send an Accept).
+    // The session never received it, so the Ack must not name it.
+    const ignored: CultNetRudpPacket = { ...client.createAck(), packetType: "accept", reliable: true, sequence: connect.sequence + 5 };
+    toServer(ignored);
+    await waitFor(() => received.some(packet => packet.packetType === "ack"), "the acknowledgement");
+    const ack = received.find(packet => packet.packetType === "ack")!;
+    const names = ack.ack === ignored.sequence
+      || Array.from({ length: 32 }, (_, bit) => bit).some(bit => (ack.ackMask & (1 << bit)) !== 0 && ack.ack - bit - 1 === ignored.sequence);
+    assert.equal(names, false, "the server acknowledged by name a packet its session refused");
+  } finally {
+    socket.close();
+    server.close();
+  }
+});
+
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolve!: (value: T) => void;
   return { promise: new Promise<T>(done => resolve = done), resolve };

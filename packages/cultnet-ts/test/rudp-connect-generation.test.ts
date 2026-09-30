@@ -416,3 +416,120 @@ test("an accepted peer that goes silent times out", () => {
   server.acceptConnect(session(10).createConnect(0), 0);
   assert.equal(server.checkTimeout(100_000, 1_000), true);
 });
+
+// Ack Cut 1d, batch 2: the connect-attempt timeout.
+
+test("an Ack naming the pending Connect does not retire it", () => {
+  const server = session(500);
+  const old = session(1);
+  const oldAccept = server.acceptConnect(old.createConnect(0), 0);
+  old.receive(oldAccept, 0);
+  server.receive(old.createAckForReceived(oldAccept.sequence), 0);
+
+  const restarted = session(1);
+  const first = restarted.createConnect(0, enc("join"));
+  const reply = server.acceptConnect(first, 1);
+  assert.equal(reply.packetType, "ack");
+  assert.ok(namesSequence(reply, first.sequence), "the Ack must name the pending Connect for this test to bite");
+  restarted.receive(reply, 1);
+  assert.equal(restarted.connected, false);
+  assert.deepEqual(restarted.pendingReliableSequences, [first.sequence], "an Ack retired the Connect");
+
+  const fresh = restarted.dueResends(3_000);
+  assert.equal(fresh.length, 1, "the client waits for ever with nothing to resend");
+  assert.equal(dec(fresh[0]!.payload ?? new Uint8Array()), "join");
+  const accept = server.acceptConnect(fresh[0]!, 3_000);
+  assert.equal(accept.packetType, "accept");
+  restarted.receive(accept, 3_000);
+  assert.ok(restarted.connected);
+});
+
+test("a late copy of an abandoned Connect is stale once its replacement is accepted", () => {
+  const server = session(500);
+  const client = session(10);
+  const abandoned = client.createConnect(0);
+  const fresh = client.dueResends(3_000);
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0]!.sequence, abandoned.sequence + 4_095);
+  const accept = server.acceptConnect(fresh[0]!, 3_001);
+  client.receive(accept, 3_002);
+  server.receive(client.createAckForReceived(accept.sequence), 3_002);
+  assert.ok(client.connected);
+  const a = send(client, "a");
+  assert.deepEqual(names(server.receive(a, 3_003)), ["a"]);
+  client.receive(server.createAckForReceived(a.sequence), 3_003);
+
+  assert.equal(server.connectRepeats(abandoned), true, "the late copy would restart the server");
+  const reply = server.acceptConnect(abandoned, 3_004);
+  assert.equal(reply.packetType, "ack");
+  client.receive(reply, 3_005);
+  assert.ok(client.connected);
+  assert.deepEqual(names(server.receive(send(client, "b"), 3_006)), ["b"]);
+});
+
+test("a server sitting at the jump is left by the next attempt", () => {
+  const server = session(500);
+  const old = session(5_095);
+  const oldAccept = server.acceptConnect(old.createConnect(0), 0);
+  old.receive(oldAccept, 0);
+  server.receive(old.createAckForReceived(oldAccept.sequence), 0);
+
+  const restarted = session(1_000);
+  const first = restarted.createConnect(0, enc("join"));
+  restarted.receive(server.acceptConnect(first, 1), 1);
+  assert.equal(restarted.connected, false);
+
+  const second = restarted.dueResends(3_000)[0]!;
+  assert.equal(second.sequence, 5_095, "the jump lands on the server's generation");
+  const reply = server.acceptConnect(second, 3_001);
+  assert.equal(reply.packetType, "ack");
+  restarted.receive(reply, 3_001);
+  assert.equal(restarted.connected, false);
+
+  const third = restarted.dueResends(6_000)[0]!;
+  assert.equal(third.sequence, 5_095 + 4_095);
+  const accept = server.acceptConnect(third, 6_001);
+  assert.equal(accept.packetType, "accept");
+  restarted.receive(accept, 6_001);
+  assert.ok(restarted.connected);
+});
+
+test("server mode admits a pinned client that restarts on the same address", async () => {
+  const serverSocket = await bind();
+  const peer = await bind();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "srv", socket: serverSocket, mode: "server", connectionId, resendPollMs: 20, resendDelayMs: 20,
+  });
+  const port = (serverSocket.address() as { port: number }).port;
+  const received: CultNetRudpPacket[] = [];
+  peer.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const take = async (type: string) => {
+    for (let index = 0; index < 50; index += 1) {
+      const found = received.findIndex((packet) => packet.packetType === type);
+      if (found >= 0) return received.splice(found, 1)[0]!;
+      await sleep(10);
+    }
+    throw new Error(`no ${type} arrived`);
+  };
+  try {
+    const first = session(1);
+    peer.send(encodeRudpPacket(first.createConnect(0, enc("join"))), port, "127.0.0.1");
+    const accept = await take("accept");
+    first.receive(accept, 0);
+    peer.send(encodeRudpPacket(first.createAckForReceived(accept.sequence)), port, "127.0.0.1");
+    await sleep(50);
+    received.length = 0;
+
+    const restarted = session(1);
+    peer.send(encodeRudpPacket(restarted.createConnect(0, enc("join"))), port, "127.0.0.1");
+    restarted.receive(await take("ack"), 1);
+    assert.equal(restarted.connected, false);
+
+    peer.send(encodeRudpPacket(restarted.dueResends(3_000)[0]!), port, "127.0.0.1");
+    restarted.receive(await take("accept"), 3_001);
+    assert.ok(restarted.connected, "the restarted pinned client was never admitted");
+  } finally {
+    server.close();
+    peer.close();
+  }
+});
