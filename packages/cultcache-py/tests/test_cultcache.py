@@ -186,7 +186,7 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(raw[2][0][0], "app")
             self.assertEqual(raw[2][0][1], "settings")
 
-    def test_messagepack_store_recovers_schema_stamped_record_missing_catalog_entry(self) -> None:
+    def test_messagepack_store_refuses_a_record_whose_schema_the_catalog_does_not_publish(self) -> None:
         try:
             import msgpack  # type: ignore
         except ModuleNotFoundError:
@@ -227,11 +227,9 @@ class CultCacheTests(unittest.TestCase):
                 .build()
             )
 
-            cache.pull_all_backing_stores()
-            self.assertEqual(cache.get_required(document, "record-1")["value"], "still readable")
-            envelope = cache.get_required_envelope(document, "record-1")
-            self.assertEqual(envelope.type, "runtime-policy")
-            self.assertEqual(envelope.schema_id, "sha256:stale-schema-id-from-cold-record")
+            # The payload opens with a schema version, and the catalog is the store's own description: no recovery.
+            with self.assertRaises(StoreUnreadableError):
+                cache.pull_all_backing_stores()
 
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4379,7 +4379,7 @@ mod tests {
     }
 
     #[test]
-    fn messagepack_store_recovers_schema_stamped_records_missing_catalog_entries() -> Result<()> {
+    fn messagepack_store_refuses_a_record_whose_schema_the_catalog_does_not_publish() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("missing-catalog.msgpack");
         let expected = SchemaStamped {
@@ -4387,8 +4387,7 @@ mod tests {
             name: "schema-stamped".to_string(),
             value: "still readable".to_string(),
         };
-        // An empty catalog with a stale schema id is what a record written by
-        // another runtime, or one older than its catalog, looks like on disk.
+        // An empty catalog with a stale schema id.
         let snapshot = PersistedStoreSnapshot(
             "cultcache.store.v1".to_string(),
             Vec::new(),
@@ -4404,15 +4403,9 @@ mod tests {
         let mut cache = CultCache::new();
         cache.register_entry_type::<SchemaStamped>()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store_path))?;
-        cache.pull_all_backing_stores()?;
-
-        assert_eq!(cache.get_required::<SchemaStamped>("record-1")?, expected);
-        assert_eq!(
-            cache
-                .get_required_envelope::<SchemaStamped>("record-1")?
-                .schema_id,
-            Some("sha256:stale-schema-id-from-cold-record".to_string())
-        );
+        // The payload opens with a schema version, and the catalog is the store's own description: no recovery.
+        let error = cache.pull_all_backing_stores().unwrap_err();
+        assert!(error.downcast_ref::<StoreUnreadableError>().is_some(), "{error:#}");
         Ok(())
     }
 

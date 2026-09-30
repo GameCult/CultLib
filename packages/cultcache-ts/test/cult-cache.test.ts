@@ -441,7 +441,7 @@ test("SingleFileMessagePackBackingStore reads CultCache v1 snapshots by schema i
   assert.equal(cache.getRequiredEnvelope(noteDocument, "record-1").schemaId, "schema-1");
 });
 
-test("SingleFileMessagePackBackingStore recovers schema-stamped records missing catalog entries", async () => {
+test("SingleFileMessagePackBackingStore refuses a record whose schema the catalog does not publish, whatever its payload opens with", async () => {
   const stampedDocument = defineDocumentType({
     type: "runtime-policy",
     schema: z.tuple([
@@ -481,16 +481,7 @@ test("SingleFileMessagePackBackingStore recovers schema-stamped records missing 
     .withGenericStore(new SingleFileMessagePackBackingStore(storePath))
     .build();
 
-  await cache.pullAllBackingStores();
-  assert.deepEqual(cache.getRequired(stampedDocument, "record-1"), [
-    "tests.schema_stamped_entry.v1",
-    "schema-stamped",
-    "still readable",
-  ]);
-  assert.equal(
-    cache.getRequiredEnvelope(stampedDocument, "record-1").schemaId,
-    "sha256:stale-schema-id-from-cold-record",
-  );
+  await assert.rejects(() => cache.pullAllBackingStores(), StoreUnreadableError);
 });
 
 test("SingleFileMessagePackBackingStore heals legacy envelopes whose payload was persisted as an object", async () => {
