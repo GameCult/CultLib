@@ -1922,6 +1922,8 @@ namespace GameCult.Networking
         private CultNetShardDescriptor ResolveShardInternal(CultDocumentDescriptor descriptor, CultRecordKey key) =>
             FindShard(descriptor, key) ?? throw new CultNetUnownedSchemaException(descriptor.SchemaId, key);
 
+        internal bool Owns(CultDocumentDescriptor descriptor, CultRecordKey key) => FindShard(descriptor, key) != null;
+
         private CultNetShardDescriptor? FindShard(CultDocumentDescriptor descriptor, CultRecordKey key) =>
             _shards.FirstOrDefault(shard => shard.Matches(descriptor, key));
 

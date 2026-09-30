@@ -338,6 +338,7 @@ namespace GameCult.Networking
         /// row's ordinal (the reference: <see cref="CultNetDatabase.LastWriteSequence"/>); <paramref name="asOf"/>
         /// is the snapshot the page is exact for when the selection is not shard-scoped, or the fallback
         /// used only when <paramref name="asOfForShard"/> is null or the selection matches no rows (S-9).
+        /// <paramref name="rowFilter"/>, when supplied, leaves out the cached rows it rejects before evaluation.
         /// </summary>
         public CultNetSnapshotResponseRawV1Message CreateSelectionResponse(
             CultCache cache,
@@ -348,13 +349,14 @@ namespace GameCult.Networking
             CultNetDocumentMessageOptions? options = null,
             Func<string, CultRecordKey, string>? shardIdOf = null,
             CultNetSelectionCursorKey? cursorKey = null,
-            Func<string, ulong>? asOfForShard = null)
+            Func<string, ulong>? asOfForShard = null,
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter = null)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
 
-            var page = SelectPage(cache, selection, ordinalOf, asOf, options, shardIdOf: shardIdOf, cursorKey: cursorKey, asOfForShard: asOfForShard);
+            var page = SelectPage(cache, selection, ordinalOf, asOf, options, rowFilter, shardIdOf, cursorKey, asOfForShard);
             return new CultNetSnapshotResponseRawV1Message
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),

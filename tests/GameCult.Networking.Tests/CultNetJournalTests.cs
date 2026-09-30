@@ -745,6 +745,27 @@ namespace GameCult.Networking.Tests
             Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null);
         }
 
+        // One cached row of a schema no shard owns is not part of what this database serves: the selection answers with the
+        // rest, it does not fail as a whole.
+        [Test]
+        public async Task ASelectionSkipsACachedRowNoShardOwnsAndAnswersWithTheRest()
+        {
+            var (database, cache, _, _) = OwnedNothingOfNote();
+            await database.PutAsync(One, Note("owned"));
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "u", Body = "unowned" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+            using var server = new Server(cache, ServerSecurityOptions.Development());
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var response = databaseServer.CreateSelectionResponse(new CultNetSnapshotRequestV1Message
+            {
+                MessageId = "select-all",
+                Selection = new CultNetSelection { Projection = CultNetSelectionProjections.Document }
+            });
+
+            Assert.That(response.Documents!.Select(document => document.RecordKey), Is.EqualTo(new[] { One.Value }));
+            Assert.That(response.Matched, Is.EqualTo(1u));
+        }
+
         private sealed class CapturingLogger : GameCult.Logging.ILogger
         {
             public List<string> Errors { get; } = new();

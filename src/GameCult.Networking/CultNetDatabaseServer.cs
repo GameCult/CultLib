@@ -135,6 +135,8 @@ namespace GameCult.Networking
                 // R-Q: asOf is one shard-log watermark, so a selection whose matched rows span more than
                 // one shard's log is refused rather than answered against a watermark that is not
                 // exact for all of them.
+                // A row whose schema no shard owns is not part of what this database serves: it is left out, not an error.
+                rowFilter: _database.Owns,
                 shardIdOf: (schemaId, key) => _database.ResolveShard(schemaId, key).ShardId,
                 cursorKey: _database.CursorKey,
                 // S-9: once the matched rows resolve to one shard, asOf is that shard's own watermark,
