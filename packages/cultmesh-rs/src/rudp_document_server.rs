@@ -785,10 +785,12 @@ where
 
     /// The server refused a peer's message: the session ends, and the peer is
     /// sent the refusal before the goodbye, so it can tell a refusal from loss.
-    /// The refusal carries the goodbye's acknowledgement fields, which the reset
-    /// has emptied: it must not acknowledge the refused message, because a
-    /// publisher reads that acknowledgement as admission. A refusal that cannot
-    /// be encoded or queued is not sent; the goodbye still is.
+    /// The refusal is unreliable and unordered: the session ends with it, so it
+    /// is never resent, and a gap in what the peer has received must not hold
+    /// it back. It carries the goodbye's acknowledgement fields, which the
+    /// reset has emptied: it must not acknowledge the refused message, because
+    /// a publisher reads that acknowledgement as admission. A refusal that
+    /// cannot be encoded is not sent; the goodbye still is.
     fn end_rejected_session(&mut self, key: CultMeshRudpSessionKey, reason: &str) -> Result<()> {
         let Some(mut entry) = self.sessions.remove(&key) else {
             return Ok(());
@@ -804,8 +806,8 @@ where
                     "schema",
                     payload,
                     CultNetRudpSendOptions {
-                        reliable: true,
-                        ordered: true,
+                        reliable: false,
+                        ordered: false,
                         sequenced: false,
                         now_ms: self.clock.now_monotonic_millis(),
                         reliable_expire_after_ms: None,

@@ -1385,3 +1385,105 @@ fn a_connect_storm_and_stray_frames_are_dropped_not_fatal() -> Result<()> {
     assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
     Ok(())
 }
+
+/// The refusal is unreliable and unordered: a peer missing an earlier reliable
+/// packet from the server still receives it. An ordered refusal would wait
+/// behind the gap for a resend that never comes, because the session ends with it.
+#[test]
+fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
+    use cultnet_rs::{
+        CultNetRudpPacket, CultNetRudpPacketType, CultNetRudpSendOptions, CultNetRudpSession,
+        CultNetRudpSessionOptions, decode_rudp_packet, encode_rudp_packet,
+    };
+    let mut server = server(
+        Default::default(),
+        Clock::new(71_000),
+        Sink::fail_once(),
+        Source::documents(vec![document("held", vec![1, 2, 3])]),
+    )?;
+    let target = server.local_addr()?;
+    let peer = UdpSocket::bind("127.0.0.1:0")?;
+    peer.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let received = || -> Option<CultNetRudpPacket> {
+        let mut wire = vec![0_u8; 65_535];
+        let (bytes, _) = peer.recv_from(&mut wire).ok()?;
+        decode_rudp_packet(&wire[..bytes]).ok()
+    };
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 78,
+        initial_sequence: Some(100),
+        resend_delay_ms: 10_000,
+        max_pending_reliable_packets: Some(64),
+    });
+    peer.send_to(&encode_rudp_packet(&session.create_connect(0, Vec::new())?)?, target)?;
+    server.poll_once()?;
+    let accept = received().expect("the server accepts the connect");
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    session.receive(&accept, 1)?;
+    let reliable = CultNetRudpSendOptions {
+        reliable: true,
+        ordered: true,
+        sequenced: false,
+        now_ms: 2,
+        reliable_expire_after_ms: None,
+    };
+    let send = |session: &mut CultNetRudpSession, message: &CultNetMessage| -> Result<()> {
+        let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
+        for packet in session.send_many("schema", payload, reliable.clone(), Some(1200))? {
+            peer.send_to(&encode_rudp_packet(&packet)?, target)?;
+        }
+        Ok(())
+    };
+
+    // The snapshot reply is lost: the peer never sees it, so its ordered
+    // stream from the server has a gap.
+    send(
+        &mut session,
+        &CultNetMessage::SnapshotRequest {
+            message_id: "lost".into(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    let mut lost = 0;
+    while received().is_some() {
+        lost += 1;
+    }
+    assert!(lost > 0, "fixture: the server sent the reply that is lost");
+
+    send(
+        &mut session,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "refused".into(),
+            document: document("refused", vec![4, 5, 6]),
+        },
+    )?;
+    assert!(matches!(
+        server.poll_once()?,
+        CultMeshRudpPollOutcome::ApplicationRejected(_)
+    ));
+    let mut delivered = Vec::new();
+    let mut disconnected = false;
+    while let Some(packet) = received() {
+        let result = session.receive(&packet, 3)?;
+        delivered.extend(result.delivered);
+        disconnected |= result.disconnected;
+    }
+    let refusals: Vec<_> = delivered
+        .iter()
+        .map(|frame| {
+            decode_cultnet_message_from_slice(&frame.payload, CultNetWireContract::CultNetSchemaV0)
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        refusals,
+        vec![CultNetMessage::Error {
+            error: "the catalog refused the document".into(),
+            code: None,
+            details: None,
+        }]
+    );
+    assert!(disconnected, "the refusal is followed by a goodbye");
+    Ok(())
+}
