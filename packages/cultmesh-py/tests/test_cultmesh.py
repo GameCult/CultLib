@@ -48,10 +48,12 @@ from cultnet_py import (
     CultNetSimulationConsensusCandidate,
     CultNetSimulationObservation,
     CultNetSimulationObservationHub,
+    CultNetRudpPacketType,
     CultNetRudpSocketMode,
     CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions,
     apply_shard_log_response,
+    decode_rudp_packet,
     document_delete,
     document_put_raw,
     hello,
@@ -4744,8 +4746,14 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
                 # A session that started would resend its Accept, and the resend would get through.
                 time.sleep(0.5)
                 z_socket.settimeout(0.05)
-                with self.assertRaises(TimeoutError):
-                    z_socket.recvfrom(65535)
+                received = []
+                while True:
+                    try:
+                        wire, _ = z_socket.recvfrom(65535)
+                    except TimeoutError:
+                        break
+                    received.append(decode_rudp_packet(wire).packet_type)
+                self.assertEqual(received, [CultNetRudpPacketType.DISCONNECT])
                 self.assertTrue(server._rudp_thread.is_alive())
                 self.assertIsNotNone(self._served(y))
         finally:
