@@ -3245,8 +3245,9 @@ const servedBoundRegistry = () =>
 
 /**
  * A put's own storedAt, kept by the served record and replaced in the receipt by the server's
- * 24-character clock. It is long enough that the snapshot reply is always the larger reply, so
- * fixtures built with it pin the served bound; `RECEIPT_STORED_AT` puts make the receipt the larger reply.
+ * 24-character clock. `SERVED_STORED_AT` is long, so an echoed receipt is smaller than the served
+ * reply; `RECEIPT_STORED_AT` is short, so an echoed receipt is the larger reply, which shows that
+ * admission sizes only the served reply.
  */
 const SERVED_STORED_AT = `2026-09-30T00:00:00.000Z${"~".repeat(200)}`;
 const RECEIPT_STORED_AT = "2026-09-30T00:00:00.000Z";
@@ -3310,13 +3311,12 @@ function echoReceiptBytes(put: CultNetDocumentPutRawMessage): number {
   }).byteLength;
 }
 
-/** The body length whose served-alone reply is exactly `bytes`, and the larger reply. */
+/** The body length whose served-alone reply is exactly `bytes`. */
 function bodyLengthForReplyBytes(recordKey: string, bytes: number): number {
   const probe = 8_000;
   const length = probe + bytes - servedAloneBytes(notePut("p", recordKey, probe));
   const put = notePut("p", recordKey, length);
   assert.equal(servedAloneBytes(put), bytes, "fixture: reply size is linear in the body");
-  assert.ok(echoReceiptBytes(put) < bytes, "fixture: the snapshot reply is the larger reply");
   return length;
 }
 
@@ -3358,8 +3358,8 @@ async function withServedBoundRig(
         },
       });
       if (!handler.receipt) return undefined;
-      // An echo acknowledges the stored value, as admission sizes it; an oversized receipt
-      // carries more than admission could know of.
+      // An echo acknowledges the stored value; an oversized receipt carries a tag larger than
+      // maxPayloadBytes. Admission sizes neither: receipts are the handler's choice.
       return {
         binding: defineCultNetDocumentBinding({ definition: noteDocument }),
         recordKey: document.recordKey,
@@ -3543,8 +3543,8 @@ test("CultMesh TS RUDP document server admits a put served at the bound, whateve
 });
 
 test("CultMesh TS RUDP document server tells the peer when a stored put's receipt cannot be sent", async () => {
-  // A handler whose receipt is larger than the echo admission sized: the put is stored, the
-  // receipt cannot be sent, and the peer hears that it is not coming.
+  // A handler whose receipt is larger than maxPayloadBytes: admission does not size receipts, so
+  // the put is stored, the receipt cannot be sent, and the peer hears that it is not coming.
   const limit = 4_000;
   const small = bodyLengthForReplyBytes("note:small", 1_000);
   await withServedBoundRig(0x10203064, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
