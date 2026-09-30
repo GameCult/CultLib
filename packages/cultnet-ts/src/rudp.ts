@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { type RemoteInfo, type Socket } from "node:dgram";
 
@@ -22,6 +23,35 @@ const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
 // lowest unacked one and the payload above that sequence stays within RUDP_FLOW_WINDOW_BYTES.
 const RUDP_FLOW_WINDOW_SEQUENCES = 1_023;
 const RUDP_FLOW_WINDOW_BYTES = 4 * 1024 * 1024;
+
+/// How long a client keeps retransmitting a Connect nobody answered before it
+/// abandons that attempt for a fresh one. A Connect the server answers with an
+/// Ack, never an Accept, is one the server judged stale (see `acceptConnect`);
+/// retransmitting the same sequence would never change its mind.
+const RUDP_CONNECT_ATTEMPT_MS = 3_000;
+
+/// A sequence drawn from a secure source in [1, 2^31). The Connect's sequence
+/// is what tells a peer whether a Connect repeats one it already accepted or
+/// starts a new session, so two sessions must not share one by default.
+function drawSequence(): number {
+  return randomInt(1, 2 ** 31);
+}
+
+/// Whether `sequence` is at or before `mark` in serial order, within the
+/// receive window. The compare is modular, so it holds across the wrap of the
+/// 32-bit space; a sequence further back than the window is the duplicate
+/// test's below-window clause, and one ahead of the mark is never before it.
+function atOrBefore(sequence: number, mark: number): boolean {
+  return ((mark - sequence) >>> 0) < RUDP_RECEIVED_SEQUENCE_WINDOW;
+}
+
+function packetAcknowledges(packet: CultNetRudpPacket, sequence: number): boolean {
+  if (packet.ack === sequence) return true;
+  for (let bit = 0; bit < 32; bit += 1) {
+    if ((packet.ackMask & (1 << bit)) !== 0 && packet.ack - bit - 1 === sequence) return true;
+  }
+  return false;
+}
 
 export type CultNetRudpPacketType =
   | "connect"
@@ -74,11 +104,6 @@ export interface CultNetRudpReceiveResult {
 type PendingReliablePacket = {
   packet: CultNetRudpPacket;
   lastSentAtMs: number;
-};
-
-type PendingOrderedFrame = {
-  frame: CultNetRudpDeliveredFrame;
-  nextSequence: number;
 };
 
 type FragmentBuffer = {
@@ -154,6 +179,24 @@ export class CultNetRudpSession {
   readonly #nextSequencedByChannel = new Map<string, number>();
   #nextFragmentId = 1;
   #connected = false;
+  /// Advances every time a generation ends. Everything issued in a generation
+  /// (writes, flushes) belongs to it and dies with it.
+  #generation = 0;
+  /// True from the end of a generation until the next Connect or Accept begins
+  /// one. A flush started in that interval has no live generation to wait on.
+  #ended = false;
+  /// The sequence of the Connect that started the current generation: sent by
+  /// this side, or accepted from the peer. A Connect repeats exactly when the
+  /// session is connected and the Connect carries this sequence.
+  #connectSequence: number | undefined;
+  /// A Connect this side sent is unanswered. Only then is an Accept honoured.
+  #awaitingAccept = false;
+  /// The payload of the Connect this side sent, kept so a fresh attempt can
+  /// always be built whatever became of the pending packet.
+  #connectPayload = new Uint8Array();
+  /// When the unanswered Connect first went out; `dueResends` abandons it for a
+  /// fresh attempt once `RUDP_CONNECT_ATTEMPT_MS` has passed.
+  #connectStartedAtMs = 0;
   readonly #maxPendingReliablePackets: number | undefined;
   #lastReceivedAtMs: number | undefined;
   #highestReceivedSequence: number | undefined;
@@ -161,8 +204,15 @@ export class CultNetRudpSession {
   readonly #latestSequencedByChannel = new Map<string, number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
   readonly #queuedReliable: CultNetRudpPacket[] = [];
-  readonly #orderedNextSequenceByChannel = new Map<string, number>();
-  readonly #orderedBuffers = new Map<string, Map<number, PendingOrderedFrame>>();
+  /// Every reliable sequence up to and including this one has been received
+  /// since the peer state was last reset. Only the handshake seeds it: the
+  /// peer's Connect on the accepting side, the peer's Accept on the connecting
+  /// side. Reliable data that arrives before that is refused.
+  #receivedThrough: number | undefined;
+  /// Ordered frames received but not yet deliverable, keyed by first sequence.
+  /// A frame is held for exactly one reason: a reliable sequence below it has
+  /// not arrived.
+  readonly #orderedHeld = new Map<number, CultNetRudpDeliveredFrame>();
   readonly #fragmentBuffers = new Map<string, FragmentBuffer>();
   /// Matches cultnet-rs's `max_pending_fragment_sets`. A fragment set is only
   /// removed on successful reassembly, so a set that loses one fragment is
@@ -173,7 +223,7 @@ export class CultNetRudpSession {
 
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
-    this.#nextSequence = toUint32(options.initialSequence ?? 1, "initialSequence");
+    this.#nextSequence = toUint32(options.initialSequence ?? drawSequence(), "initialSequence");
     if (this.#nextSequence === 0xffff_ffff) {
       throw new Error("RUDP initialSequence must leave room for a reliable packet.");
     }
@@ -215,23 +265,53 @@ export class CultNetRudpSession {
     return this.#lastReceivedAtMs;
   }
 
-  resetPeerState(): void {
+  get generation(): number {
+    return this.#generation;
+  }
+
+  get ended(): boolean {
+    return this.#ended;
+  }
+
+  /// The one way a session generation ends. The session stops being connected
+  /// and what it still owed the peer dies with it: a write not yet acknowledged
+  /// is dropped, so no later session retransmits it or credits an ack to it.
+  /// What was learned from the peer is not touched: the peer may not know the
+  /// session ended, and forgetting what it sent would let its retransmits be
+  /// delivered twice.
+  #endSession(): void {
     this.#connected = false;
+    this.#ended = true;
+    this.#awaitingAccept = false;
+    this.#generation += 1;
+    this.#pendingReliable.clear();
+    this.#queuedReliable.splice(0);
+  }
+
+  /// Ends the current generation and forgets everything learned from the peer;
+  /// sequence numbers already issued stay issued.
+  resetPeerState(): void {
+    this.#endSession();
     this.#lastReceivedAtMs = undefined;
     this.#highestReceivedSequence = undefined;
     this.#receivedSequences.clear();
     this.#nextSequencedByChannel.clear();
     this.#latestSequencedByChannel.clear();
-    this.#pendingReliable.clear();
-    this.#queuedReliable.splice(0);
-    this.#orderedNextSequenceByChannel.clear();
-    this.#orderedBuffers.clear();
+    this.#receivedThrough = undefined;
+    this.#orderedHeld.clear();
     this.#fragmentBuffers.clear();
     this.#fragmentSetsEvicted = 0;
   }
 
   createConnect(nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
+    // A session that has had a peer starts a new generation: nothing it learned
+    // from that peer describes the one this Connect reaches, and what it still
+    // owed that peer no longer takes room in the queue.
+    if (this.#connectSequence !== undefined) {
+      this.resetPeerState();
+    }
     this.#ensureReliableCapacity(1);
+    this.#ended = false;
     const packet = this.#createPacket({
       packetType: "connect",
       channelId: "control",
@@ -239,24 +319,68 @@ export class CultNetRudpSession {
       ordered: true,
       payload,
     });
+    this.#connectSequence = packet.sequence;
+    this.#awaitingAccept = true;
+    this.#connectStartedAtMs = nowMs;
+    this.#connectPayload = new Uint8Array(payload);
     this.#trackReliable(packet, nowMs);
     return packet;
   }
 
+  /// Whether `packet` is a Connect this session's current generation already
+  /// owns: a retransmit of the Connect that started it (the session is
+  /// connected and the sequence is that Connect's), or a stale copy of an
+  /// earlier attempt by the same client (a sequence before it, within the
+  /// receive window). Servers that keep one session per peer ask this to tell a
+  /// Connect that starts a new session from one that does not; anything else
+  /// that reaches `acceptConnect` starts a new generation.
+  connectRepeats(packet: CultNetRudpPacket): boolean {
+    return packet.packetType === "connect"
+      && this.#connected
+      && this.#connectSequence !== undefined
+      && (this.#connectSequence === packet.sequence
+        || this.#connectIsStale(packet.sequence, this.#connectSequence));
+  }
+
+  /// A Connect that precedes the current generation's within the receive window
+  /// is the client's earlier attempt, delayed in the network: a client that
+  /// retried never sends a lower sequence again. Restarting on it would strand
+  /// the client, which honours only the Accept for its newest Connect. The rule
+  /// is TCP's answer to a delayed SYN (RFC 5961's challenge ACK): keep the
+  /// connection and answer with an Ack. A restarted client whose random initial
+  /// sequence lands in this window is answered the same way and abandons the
+  /// attempt for a fresh draw (`RUDP_CONNECT_ATTEMPT_MS`).
+  #connectIsStale(sequence: number, current: number): boolean {
+    return sequence !== current && atOrBefore(sequence, current);
+  }
+
+  /// Answers a Connect. A repeat of the accepted one queues nothing, so a
+  /// Connect storm cannot grow the reliable queue: the reply is the Accept
+  /// still awaiting acknowledgement, or an Ack once it was acknowledged. A
+  /// stale copy of an earlier attempt gets the same reply and changes nothing
+  /// else: it is not evidence the peer is alive. Any other Connect ends the
+  /// current generation, forgets the peer and accepts a new one.
   acceptConnect(packet: CultNetRudpPacket, nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
     this.#requireConnection(packet);
     if (packet.packetType !== "connect") {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
-    // A Connect from a peer this session already accepted repeats.
-    if (this.#connected) {
-      return this.answerRepeatedConnect(packet, nowMs);
+    if (this.connectRepeats(packet)) {
+      if (this.#connectSequence === packet.sequence) {
+        this.#applyAcknowledgements(packet);
+        this.#rememberReceived(packet.sequence);
+        this.#lastReceivedAtMs = nowMs;
+      }
+      return this.#pendingAcceptForResend(nowMs) ?? this.createAck();
     }
+    this.resetPeerState();
     this.#ensureReliableCapacity(1);
-    this.#rememberReceived(packet.sequence);
+    this.#seedReceived(packet.sequence);
     this.#lastReceivedAtMs = nowMs;
+    this.#connectSequence = packet.sequence;
     this.#connected = true;
+    this.#ended = false;
     const response = this.#createPacket({
       packetType: "accept",
       channelId: "control",
@@ -268,24 +392,12 @@ export class CultNetRudpSession {
     return response;
   }
 
-  /**
-   * Answers a Connect from a peer this session has already accepted. The packet's
-   * sequence is remembered and nothing is queued, so a Connect storm cannot grow
-   * the reliable queue. The reply is the Accept still awaiting acknowledgement,
-   * or an Ack once it was acknowledged.
-   */
-  answerRepeatedConnect(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpPacket {
-    this.#requireConnection(packet);
-    if (packet.packetType !== "connect") {
-      throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
-    }
-    this.#applyAcknowledgements(packet);
-    this.#rememberReceived(packet.sequence);
-    this.#lastReceivedAtMs = nowMs;
+  /// The Accept still awaiting acknowledgement, resent.
+  #pendingAcceptForResend(nowMs: number): CultNetRudpPacket | undefined {
     const pendingAccept = [...this.#pendingReliable.values()]
       .find(pending => pending.packet.packetType === "accept");
     if (!pendingAccept) {
-      return this.createAck();
+      return undefined;
     }
     pendingAccept.lastSentAtMs = nowMs;
     return {
@@ -373,15 +485,28 @@ export class CultNetRudpSession {
 
   receive(packet: CultNetRudpPacket, nowMs = 0): CultNetRudpReceiveResult {
     this.#requireConnection(packet);
-    this.#applyAcknowledgements(packet);
+    // An Accept counts only while this side's Connect is unanswered and the
+    // Accept names it. A late or duplicate one, or one from an earlier
+    // generation, must not seed the watermark or revive an ended session.
+    const honoursAccept = packet.packetType === "accept"
+      && this.#awaitingAccept
+      && this.#connectSequence !== undefined
+      && packetAcknowledges(packet, this.#connectSequence);
+    if (packet.packetType === "accept" && !honoursAccept) {
+      return { delivered: [], readyToSend: [] };
+    }
+    // While this side's Connect awaits its Accept, only the Accept it honours
+    // retires it: an Ack that names the Connect (a server's reply to a repeat or
+    // a stale copy) says the server did not start a session.
+    if (honoursAccept || !this.#awaitingAccept) {
+      this.#applyAcknowledgements(packet);
+    }
     const readyToSend = this.#promoteQueuedReliable(nowMs);
     this.#lastReceivedAtMs = nowMs;
-    const expectedSequenceIfUninitialized = this.#highestReceivedSequence === undefined
-      ? packet.sequence
-      : this.#highestReceivedSequence + 1;
 
-    if (packet.packetType === "accept") {
-      this.#rememberReceived(packet.sequence);
+    if (honoursAccept) {
+      this.#awaitingAccept = false;
+      this.#seedReceived(packet.sequence);
       this.#connected = true;
       return { delivered: [], readyToSend };
     }
@@ -408,7 +533,7 @@ export class CultNetRudpSession {
     }
 
     if (packet.packetType === "disconnect") {
-      this.#connected = false;
+      this.#endSession();
       return {
         delivered: [],
         readyToSend,
@@ -421,39 +546,41 @@ export class CultNetRudpSession {
       return { delivered: [], readyToSend };
     }
 
-    const isDuplicate = (packet.reliable ?? false)
-      && (this.#receivedSequences.has(packet.sequence)
-        || (this.#highestReceivedSequence !== undefined
-          && packet.sequence < this.#highestReceivedSequence
-          && this.#highestReceivedSequence - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW));
+    // Reliable data before the handshake has seeded the watermark has no place
+    // in the order: refuse it unremembered, so it is not acknowledged and the
+    // sender retransmits it once the handshake is done.
+    if ((packet.reliable ?? false) && this.#receivedThrough === undefined) {
+      return { delivered: [], readyToSend };
+    }
+
+    const isDuplicate = (packet.reliable ?? false) && this.#wasReceived(packet.sequence);
     if (packet.reliable ?? false) this.#rememberReceived(packet.sequence);
     if (isDuplicate) {
       return { delivered: [], readyToSend };
     }
 
+    const delivered: CultNetRudpDeliveredFrame[] = [];
     const reassembled = this.#reassemble(packet);
-    if (!reassembled) {
-      return { delivered: [], readyToSend };
-    }
-
-    if (!reassembled.ordered && (packet.sequenced ?? false)) {
-      const newestSequence = reassembled.nextSequence - 1;
-      const latestSequence = this.#latestSequencedByChannel.get(reassembled.frame.channelId);
-      if (latestSequence !== undefined && newestSequence <= latestSequence) {
-        return { delivered: [], readyToSend };
+    if (reassembled) {
+      if (reassembled.ordered) {
+        this.#orderedHeld.set(reassembled.frame.sequence, reassembled.frame);
+      } else if (!(packet.sequenced ?? false)) {
+        delivered.push(reassembled.frame);
+      } else {
+        const newestSequence = reassembled.nextSequence - 1;
+        const latestSequence = this.#latestSequencedByChannel.get(reassembled.frame.channelId);
+        if (latestSequence === undefined || newestSequence > latestSequence) {
+          this.#latestSequencedByChannel.set(reassembled.frame.channelId, newestSequence);
+          delivered.push(reassembled.frame);
+        }
       }
-      this.#latestSequencedByChannel.set(reassembled.frame.channelId, newestSequence);
-      return { delivered: [reassembled.frame], readyToSend };
     }
 
-    if (!reassembled.ordered) {
-      return { delivered: [reassembled.frame], readyToSend };
-    }
-
-    return {
-      delivered: this.#deliverOrdered(reassembled.frame, reassembled.nextSequence, expectedSequenceIfUninitialized),
-      readyToSend,
-    };
+    // Any reliable packet may have advanced the watermark, a fragment or an
+    // unordered frame as much as an ordered one, so the drain runs after all of
+    // them.
+    delivered.push(...this.#drainOrdered());
+    return { delivered, readyToSend };
   }
 
   createAck(): CultNetRudpPacket {
@@ -494,7 +621,12 @@ export class CultNetRudpSession {
   }
 
   createAckForReceived(sequence: number): CultNetRudpPacket {
+    // What `receive` refused is not acknowledged by name (the ack carries only
+    // what was received), so its sender retransmits it.
     const receivedSequence = toUint32(sequence, "received sequence");
+    if (!this.#wasReceived(receivedSequence)) {
+      return this.createAck();
+    }
     const { ack } = this.#ackState();
     return ack >= receivedSequence && ack - receivedSequence <= 32
       ? this.createAck()
@@ -510,7 +642,7 @@ export class CultNetRudpSession {
   }
 
   createDisconnect(reason = new Uint8Array()): CultNetRudpPacket {
-    this.#connected = false;
+    this.#endSession();
     return this.#createPacket({
       packetType: "disconnect",
       channelId: "control",
@@ -525,11 +657,15 @@ export class CultNetRudpSession {
     if (nowMs - this.#lastReceivedAtMs <= timeoutMs) {
       return false;
     }
-    this.#connected = false;
+    this.#endSession();
     return true;
   }
 
   dueResends(nowMs: number): CultNetRudpPacket[] {
+    const fresh = this.#abandonUnansweredConnect(nowMs);
+    if (fresh) {
+      return [fresh];
+    }
     const due: CultNetRudpPacket[] = [];
     for (const pending of this.#pendingReliable.values()) {
       if (nowMs - pending.lastSentAtMs >= this.resendDelayMs) {
@@ -538,6 +674,27 @@ export class CultNetRudpSession {
       }
     }
     return due.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  /// A Connect unanswered for `RUDP_CONNECT_ATTEMPT_MS` is replaced, not
+  /// retransmitted further, by a Connect with the same payload and the
+  /// abandoned sequence plus the receive window less one. Nothing was ever sent
+  /// in an unanswered generation, so no sequence issued so far is owed. The jump
+  /// keeps a late copy of the abandoned Connect inside the new one's stale
+  /// window, so a server that took the new Connect answers the copy with an Ack
+  /// instead of restarting; and it leaves the stale window of whatever
+  /// generation the server holds, unless that generation sits exactly at the
+  /// jump, and then the next attempt leaves it. The first Connect of a session
+  /// is the only one drawn at random.
+  #abandonUnansweredConnect(nowMs: number): CultNetRudpPacket | undefined {
+    if (!this.#awaitingAccept || nowMs - this.#connectStartedAtMs < RUDP_CONNECT_ATTEMPT_MS) {
+      return undefined;
+    }
+    if (this.#connectSequence === undefined) {
+      return undefined;
+    }
+    this.#nextSequence = Math.min(this.#connectSequence + RUDP_RECEIVED_SEQUENCE_WINDOW - 1, 0xffff_fffe);
+    return this.createConnect(nowMs, this.#connectPayload);
   }
 
   #createPacket(packet: {
@@ -645,8 +802,34 @@ export class CultNetRudpSession {
     }
   }
 
+  /// The handshake's one act on the watermark: the peer's Connect or Accept is
+  /// the first sequence of the session, whatever else it has sent.
+  #seedReceived(sequence: number): void {
+    this.#receivedThrough = sequence;
+    this.#rememberReceived(sequence);
+  }
+
+  /// The one duplicate test: true for a sequence in the window that was
+  /// received, for one below the window, and for one at or before the
+  /// watermark. The watermark starts at the handshake's seed, so a frame the
+  /// peer sent in an earlier generation (every sequence it issued is below the
+  /// Connect that began this one) is a duplicate of something already delivered
+  /// and is acknowledged, never delivered again.
+  #wasReceived(sequence: number): boolean {
+    return this.#receivedSequences.has(sequence)
+      || (this.#highestReceivedSequence !== undefined
+        && sequence < this.#highestReceivedSequence
+        && this.#highestReceivedSequence - sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW)
+      || (this.#receivedThrough !== undefined && atOrBefore(sequence, this.#receivedThrough));
+  }
+
   #rememberReceived(sequence: number): void {
     this.#receivedSequences.add(sequence);
+    if (this.#receivedThrough !== undefined) {
+      let through = this.#receivedThrough;
+      while (this.#receivedSequences.has(through + 1)) through += 1;
+      this.#receivedThrough = through;
+    }
     if (this.#highestReceivedSequence === undefined || sequence > this.#highestReceivedSequence) {
       this.#highestReceivedSequence = sequence;
     }
@@ -763,68 +946,20 @@ export class CultNetRudpSession {
     };
   }
 
-  #deliverOrdered(
-    frame: CultNetRudpDeliveredFrame,
-    nextSequence: number,
-    expectedSequenceIfUninitialized: number,
-  ): CultNetRudpDeliveredFrame[] {
-    let next = this.#orderedNextSequenceByChannel.get(frame.channelId);
-    if (next === undefined) {
-      next = Math.min(expectedSequenceIfUninitialized, frame.sequence);
-      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
-    }
-
-    while (frame.sequence > next && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(frame.channelId)?.has(next)) {
-      next += 1;
-      this.#orderedNextSequenceByChannel.set(frame.channelId, next);
-    }
-
-    if (frame.sequence < next) {
-      return [];
-    }
-
-    if (frame.sequence > next) {
-      let buffer = this.#orderedBuffers.get(frame.channelId);
-      if (!buffer) {
-        buffer = new Map();
-        this.#orderedBuffers.set(frame.channelId, buffer);
-      }
-      buffer.set(frame.sequence, { frame, nextSequence });
-      return [];
-    }
-
-    this.#orderedNextSequenceByChannel.set(frame.channelId, nextSequence);
-    return [
-      frame,
-      ...this.#drainOrdered(frame.channelId),
-    ];
-  }
-
-  #drainOrdered(channelId: string): CultNetRudpDeliveredFrame[] {
-    const delivered: CultNetRudpDeliveredFrame[] = [];
-    const buffer = this.#orderedBuffers.get(channelId);
-    if (!buffer) {
-      return delivered;
-    }
-
-    let next = this.#orderedNextSequenceByChannel.get(channelId);
-    while (next !== undefined && buffer.has(next)) {
-      const pending = buffer.get(next)!;
-      buffer.delete(next);
-      delivered.push(pending.frame);
-      next = pending.nextSequence;
-      this.#orderedNextSequenceByChannel.set(channelId, next);
-      this.#skipReceivedNonChannelSequences(channelId);
-    }
-    return delivered;
-  }
-
-  #skipReceivedNonChannelSequences(channelId: string): void {
-    let next = this.#orderedNextSequenceByChannel.get(channelId);
-    while (next !== undefined && this.#receivedSequences.has(next) && !this.#orderedBuffers.get(channelId)?.has(next)) {
-      next += 1;
-      this.#orderedNextSequenceByChannel.set(channelId, next);
-    }
+  /// Delivers, in sequence order, every held ordered frame whose first sequence
+  /// is at most one past the watermark. Ordered delivery has one owner: the
+  /// watermark. A frame this call does not deliver waits for the sequence below
+  /// it, and nothing else releases it.
+  #drainOrdered(): CultNetRudpDeliveredFrame[] {
+    if (this.#receivedThrough === undefined) return [];
+    const releasable = [...this.#orderedHeld.keys()]
+      .filter((sequence) => sequence <= this.#receivedThrough! + 1)
+      .sort((left, right) => left - right);
+    return releasable.map((sequence) => {
+      const frame = this.#orderedHeld.get(sequence)!;
+      this.#orderedHeld.delete(sequence);
+      return frame;
+    });
   }
 
   #allocateFragmentId(): number {
@@ -853,12 +988,8 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
-  // A flush belongs to the session it started in. Each session start advances
-  // the generation; each session end records the generation it ended and why.
-  // A reconnect from a disconnect listener starts a new generation but cannot
-  // un-end the old one.
-  #generation = 0;
-  #endedGeneration = -1;
+  // Why the last generation ended. A report only: the session owns whether it
+  // ended.
   #endedReason: Uint8Array | undefined;
   readonly #stats: CultNetTransportStats = {
     bytesReceived: 0,
@@ -921,7 +1052,6 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     if (this.#mode !== "client") {
       throw new Error("Only a client RUDP socket transport can initiate connect.");
     }
-    this.#generation += 1;
     this.#sendPacket(this.#session.createConnect(Date.now(), payload));
   }
 
@@ -939,11 +1069,14 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   async flush(timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
-    const generation = this.#generation;
+    // A flush belongs to the generation it started in: whatever ends that
+    // generation, and whatever begins after it (a reconnect from a disconnect
+    // listener included), the writes being waited on are gone.
+    const generation = this.#session.generation;
     for (;;) {
       // An ended session forgot its unacknowledged writes; reporting them
-      // flushed would be a lie, even if a new session has since begun.
-      if (this.#endedGeneration >= generation) {
+      // flushed would be a lie.
+      if (this.#session.ended || this.#session.generation !== generation) {
         throw new Error(
           `RUDP session ended before its reliable writes were acknowledged: ${Buffer.from(this.#endedReason ?? new Uint8Array()).toString("utf8")}`,
         );
@@ -963,11 +1096,6 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
   }
 
-  #endGeneration(reason: Uint8Array): void {
-    this.#endedGeneration = this.#generation;
-    this.#endedReason = reason;
-  }
-
   ping(payload = new Uint8Array()): void {
     this.#sendPacket(this.#session.createPing(payload));
   }
@@ -975,7 +1103,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   checkTimeout(timeoutMs: number, nowMs = Date.now()): boolean {
     const timedOut = this.#session.checkTimeout(nowMs, timeoutMs);
     if (timedOut) {
-      this.#endGeneration(Buffer.from("session timed out", "utf8"));
+      this.#endedReason = Buffer.from("session timed out", "utf8");
       this.emit("timeout");
       this.emit("close");
     }
@@ -1002,7 +1130,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     // The goodbye is built after the reset, or its ack field would acknowledge
     // the very frame the session refused.
     this.#session.resetPeerState();
-    this.#endGeneration(reason);
+    this.#endedReason = reason;
     try {
       this.#sendPacket(this.#session.createDisconnect(reason));
     } catch {
@@ -1037,7 +1165,10 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       return;
     }
 
-    let movedEndpoint = false;
+    // A Connect from another endpoint is a new client, whatever sequence it
+    // carries: the endpoint moves and the Connect starts a new generation. Only
+    // a Connect from the peer's own endpoint can be its repeat.
+    let connectFromNewEndpoint = false;
     if (!this.#remoteHost || this.#remotePort === undefined) {
       if (this.#mode === "server" && packet.packetType !== "connect") {
         this.#stats.packetsDropped += 1;
@@ -1047,9 +1178,9 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       this.#remotePort = remote.port;
     } else if (remote.address !== this.#remoteHost || remote.port !== this.#remotePort) {
       if (this.#mode === "server" && packet.packetType === "connect") {
-        movedEndpoint = true;
         this.#remoteHost = remote.address;
         this.#remotePort = remote.port;
+        connectFromNewEndpoint = true;
       } else {
         this.#stats.packetsDropped += 1;
         return;
@@ -1057,22 +1188,19 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     }
 
     if (this.#mode === "server" && packet.packetType === "connect") {
-      // Only a Connect from the endpoint already accepted repeats, and the
-      // session answers it with the Accept owed. A Connect from another
-      // endpoint replaces the peer: the old session's writes die with it.
-      const repeated = this.#session.connected && !movedEndpoint;
-      if (!repeated) {
-        // A timed-out session already ended its generation; any other
-        // predecessor ends here, connected or not.
-        if (this.#endedGeneration < this.#generation) {
-          this.#endGeneration(Buffer.from("replaced by a new Connect", "utf8"));
-        }
+      // The session decides whether this Connect repeats the one it accepted; a
+      // repeat is answered with the Accept owed, anything else replaces the
+      // peer and the old session's writes die with it. A timed-out session
+      // already ended its generation; any other predecessor ends here.
+      if ((connectFromNewEndpoint || !this.#session.connectRepeats(packet)) && !this.#session.ended) {
+        this.#endedReason = Buffer.from("replaced by a new Connect", "utf8");
+      }
+      if (connectFromNewEndpoint) {
         this.#session.resetPeerState();
       }
       let accept: CultNetRudpPacket;
       try {
         accept = this.#session.acceptConnect(packet, Date.now());
-        if (!repeated) this.#generation += 1;
       } catch {
         this.#stats.packetsDropped += 1;
         return;
@@ -1110,7 +1238,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
         } satisfies CultNetTransportFrame);
       }
       if (result.disconnected) {
-        this.#endGeneration(result.disconnectReason ?? new Uint8Array());
+        this.#endedReason = result.disconnectReason ?? new Uint8Array();
         this.emit("disconnect", { reason: result.disconnectReason ?? new Uint8Array() });
         this.emit("close");
         return;

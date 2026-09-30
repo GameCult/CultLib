@@ -168,7 +168,7 @@ fn hub_keeps_independent_peer_sessions_and_exposes_connect_evidence() -> Result<
 }
 
 #[test]
-fn hub_fences_replaced_generations_and_does_not_replace_connect_retransmits() -> Result<()> {
+fn hub_fences_replaced_generations() -> Result<()> {
     let server_socket = socket()?;
     let server_addr = server_socket.local_addr()?;
     let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new(
@@ -188,12 +188,6 @@ fn hub_fences_replaced_generations_and_does_not_replace_connect_retransmits() ->
             session_token: Some("shared-session-token".to_string()),
         })?;
     let original = connect(&mut hub, &mut provider, &original_evidence)?;
-
-    provider.connect(original_evidence.clone())?;
-    for _ in 0..3 {
-        assert!(hub.receive_event_once()?.is_none());
-    }
-    assert_eq!(hub.session(original.remote_addr), Some(&original));
 
     provider.connect(replacement_evidence.clone())?;
     let mut disconnected = None;
@@ -253,7 +247,7 @@ fn identical_connect_retransmit_reuses_pending_accept_after_loss() -> Result<()>
     let client_socket = socket()?;
     let mut client_session = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -292,13 +286,13 @@ fn identical_connect_retransmit_reuses_pending_accept_after_loss() -> Result<()>
 fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -352,7 +346,7 @@ fn exact_reliable_acks_clear_more_than_one_ack_window_of_fragments() -> Result<(
 fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -360,7 +354,7 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
     receiver.set_max_pending_fragment_sets(1)?;
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
@@ -428,13 +422,13 @@ fn session_and_hub_reject_configured_memory_bounds() -> Result<()> {
 fn replay_history_is_bounded_and_idle_hub_sessions_expire() -> Result<()> {
     let mut sender = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });
     let mut receiver = CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     });

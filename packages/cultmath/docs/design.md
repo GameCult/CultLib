@@ -128,8 +128,8 @@ whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
 fields is compared to its C# counterpart field by field, recursing into each
 field's own components, down to bit-for-bit scalars, matching each leaf's
 declaration path (field names, not just position) and declared type as well
-as its value. `CultCellular` (`math.cs`, `cellular`) is the first and, for
-now, only consumer. A struct return with a mismatched, reordered-by-name, or
+as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
+(`math.Phacelle.cs`, `phacelle`) are its consumers. A struct return with a mismatched, reordered-by-name, or
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
@@ -264,6 +264,41 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   which is the right domain for `pcg3d`/`pcg4d`'s O(1) hash inputs but would
   turn an unclamped octave count into a multi-billion-iteration loop for these
   two mirrors.
+- `phacelle(float3 p, float3 side, float offset, float normalization)` is Rune
+  Skovbo Johansen's Phacelle noise ("phase + cell": a stripe pattern built by
+  blending one cosine/sine wave per jittered cell), generalised to 3D cells. It
+  returns `CultPhasor { cos, sin }`, each `(∇, value)`. `side` is the stripe
+  wave vector, whose length is 2π times the stripe frequency; in 3D the
+  perpendicular to the flow is not unique, so the caller chooses it (on a unit
+  sphere, `cross(p̂, flow)`). `offset` is the phase in cycles. It visits 4×4×4
+  cells with `pcg3d`-hashed jitter in `[-0.5, 0.5)`, weights each wave by
+  `max(0, exp(-2d²) - 0.01111)`, and normalizes the blended phasor as upstream
+  does (length 1 where the raw length is at least `1 - normalization`, scaled
+  by `1 / (1 - normalization)` below). The gradient is exact, weight
+  derivatives and normalization included, rather than upstream's
+  `∇cos ≈ -sin·side`, which ignores the weight gradient. It is discontinuous
+  where the raw length crosses the normalization threshold and where a cell's
+  weight leaves its support (d² = 2.24995, distance 1.49998); the value is
+  continuous at both. At the support edge `∇w` jumps from `-4·0.01111·v` to 0,
+  a per-cell jump of length `0.0444·|v|` (0.0667 at `|v| = 1.5`); measured over
+  random points, the output gradient jumps by a median 1.5% of its length and
+  at most about 27%. `normalization` is meant to lie in `[0, 1]`: 1 or more
+  saturates (every output is stretched to length 1), a negative value scales
+  every output down by `1 / (1 - normalization)`, and the normalized gradient
+  scales as `1 / |I|` for the blended phasor `I`, so it grows where the blend
+  nearly cancels. The total weight `W` is positive for every `pcg3d` input (the
+  smallest found by hill-climbing is 0.056); `W = 0`, and a NaN output, needs
+  adversarial jitter no hash yields.
+  Cells whose per-axis lower bound `Σ max(0, |local - g| - 0.5)²` is at least
+  2.25 lie outside the support and have weight exactly 0, so they are skipped,
+  which changes no output bit. Cells whose bound sits just under 2.25 can still
+  carry a nonzero weight, so the cut cannot be lowered; `PhacelleTests` pins
+  the cut with points next to such cells, against an internal overload with the
+  prune disabled, and the HLSL mirror test pins it on the shader side. The prune
+  keeps about 45 of the 64 cells on average (a saving of about 30%); about 14
+  have a nonzero weight. The port sits in its own MPL-2.0 files
+  (`math.Phacelle.cs`, `CultPhasor.cs`, `CultMath.Phacelle.hlsl`); see
+  `THIRD-PARTY-NOTICES.md`. No 2D variant exists; nothing consumes one.
 
 Integer hashing uses the PCG hashes from Jarzynski and Olano, "Hash Functions
 for GPU Rendering" (JCGT 9(3), 2020): `pcg(uint)` is O'Neill's RXS-M-XS 32/32

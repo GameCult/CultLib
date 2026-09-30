@@ -78,7 +78,9 @@ $requiredTemplateFiles = @(
   "Runtime\UnityBridge\UnityConversions.cs",
   "Runtime\UnityBridge\UnityConversions.cs.meta",
   "Shaders\CultMath.hlsl",
-  "Shaders\CultMath.hlsl.meta"
+  "Shaders\CultMath.hlsl.meta",
+  "Shaders\CultMath.Phacelle.hlsl",
+  "Shaders\CultMath.Phacelle.hlsl.meta"
 )
 foreach ($relativePath in $requiredTemplateFiles) {
   if (-not (Test-Path -LiteralPath (Join-Path $templateRoot $relativePath) -PathType Leaf)) {

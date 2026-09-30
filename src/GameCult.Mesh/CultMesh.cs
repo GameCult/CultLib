@@ -543,8 +543,8 @@ namespace GameCult.Mesh
         public int BindPort { get; set; }
         /// <summary>Gets or sets a caller-owned bound socket.</summary>
         public Socket? Socket { get; set; }
-        /// <summary>Gets or sets the first local packet sequence.</summary>
-        public uint InitialSequence { get; set; } = 1;
+        /// <summary>Gets or sets the first local packet sequence. Unset, each session draws its own at random.</summary>
+        public uint? InitialSequence { get; set; }
         /// <summary>Gets or sets the reliable resend delay in milliseconds.</summary>
         public long ResendDelayMs { get; set; } = 250;
         /// <summary>Gets or sets the advertised transport id.</summary>
@@ -3379,7 +3379,8 @@ namespace GameCult.Mesh
             if (document != null)
                 return document;
 
-            var untyped = database.Cache.Get(key);
+            // Through the database, which serves only what its shards own; the cache behind it may hold more.
+            var untyped = await database.GetAsync<object>(key).ConfigureAwait(false);
             if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
                 return ConvertUntypedDocument<TDocument>(untyped);
 

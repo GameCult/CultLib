@@ -180,7 +180,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     return value;
                 }),
 
-            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id].
+            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin].
             Shape<float2x2>((ref MessagePackWriter w, float2x2 v) => { w.WriteArrayHeader(2); PutFloat2(ref w, v[0]); PutFloat2(ref w, v[1]); },
                 (ref MessagePackReader r) =>
                 {
@@ -216,6 +216,21 @@ public sealed class CultMathResolver : IFormatterResolver
                             case 0: value.nearest = GetFloat4(ref r); break;
                             case 1: value.edge = GetFloat4(ref r); break;
                             case 2: value.id = r.ReadSingle(); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<CultPhasor>((ref MessagePackWriter w, CultPhasor v) => { w.WriteArrayHeader(2); PutFloat4(ref w, v.cos); PutFloat4(ref w, v.sin); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(CultPhasor);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.cos = GetFloat4(ref r); break;
+                            case 1: value.sin = GetFloat4(ref r); break;
                             default: r.Skip(); break;
                         }
                     }

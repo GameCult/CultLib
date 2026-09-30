@@ -94,6 +94,17 @@ from cultnet_py import (
 )
 
 
+def acknowledges(packet, sequence: int) -> bool:
+    """Whether the packet's ack field and mask cover the sequence."""
+    if packet.ack == sequence:
+        return True
+    return (
+        packet.ack > sequence
+        and packet.ack - sequence <= 32
+        and (packet.ack_mask & (1 << (packet.ack - sequence - 1))) != 0
+    )
+
+
 def bind_udp_socket() -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -616,12 +627,7 @@ class CultNetTests(unittest.TestCase):
         receiver = CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=7, initial_sequence=200, resend_delay_ms=100)
         )
-        sender.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 7, 1, 0, 0, "control")
-        )
-        receiver.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 7, 2, 0, 0, "control")
-        )
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         first = sender.send(
             "schema",
@@ -638,27 +644,28 @@ class CultNetTests(unittest.TestCase):
             b"third",
             CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=0),
         )
-        self.assertEqual(sender.pending_reliable_sequences, (10, 11, 12))
+        self.assertEqual(sender.pending_reliable_sequences, (11, 12, 13))
 
         receiver.receive(first)
         receiver.receive(third)
         ack_with_gap = receiver.create_ack()
-        self.assertEqual(ack_with_gap.ack, 12)
-        self.assertEqual(ack_with_gap.ack_mask, 0b10 | (1 << 9))
+        self.assertEqual(ack_with_gap.ack, 13)
+        self.assertEqual(ack_with_gap.ack_mask, 0b110)
         sender.receive(ack_with_gap)
-        self.assertEqual(sender.pending_reliable_sequences, (11,))
+        self.assertEqual(sender.pending_reliable_sequences, (12,))
 
         receiver.receive(second)
         full_ack = receiver.create_ack()
-        self.assertEqual(full_ack.ack, 12)
-        self.assertEqual(full_ack.ack_mask, 0b11 | (1 << 9))
+        self.assertEqual(full_ack.ack, 13)
+        self.assertEqual(full_ack.ack_mask, 0b111)
         sender.receive(full_ack)
         self.assertEqual(sender.pending_reliable_sequences, ())
 
     def test_cultnet_rudp_session_schedules_reliable_resends_until_acked(self) -> None:
         session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=99, initial_sequence=1, resend_delay_ms=100))
         session.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 99, 50, 0, 0, "control")
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=99, initial_sequence=900)).accept_connect(session.create_connect(0), 0),
+            0,
         )
         sent = session.send(
             "schema",
@@ -700,7 +707,7 @@ class CultNetTests(unittest.TestCase):
         server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=100))
         connect = client.create_connect(0, b"join")
         accept = server.accept_connect(connect, 0)
-        reply = server.answer_repeated_connect(replace(connect, ack=accept.sequence), 1)
+        reply = server.accept_connect(replace(connect, ack=accept.sequence), 1)
         self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
         self.assertEqual(server.outstanding_reliable_packet_count, 0)
 
@@ -708,17 +715,23 @@ class CultNetTests(unittest.TestCase):
         session = CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=102, initial_sequence=1, max_pending_reliable_packets=2)
         )
-        session.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 102, 50, 0, 0, "control"))
+        session.receive(
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=102, initial_sequence=900)).accept_connect(session.create_connect(0), 0),
+            0,
+        )
         session.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
         session.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))
         with self.assertRaisesRegex(ValueError, "reliable send queue is full"):
             session.send("schema", b"third", CultNetRudpSendOptions(reliable=True, ordered=True))
-        self.assertEqual(session.pending_reliable_sequences, (1, 2))
+        self.assertEqual(session.pending_reliable_sequences, (2, 3))
 
         fragmented = CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=103, initial_sequence=1, max_pending_reliable_packets=3)
         )
-        fragmented.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 103, 50, 0, 0, "control"))
+        fragmented.receive(
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=900)).accept_connect(fragmented.create_connect(0), 0),
+            0,
+        )
         with self.assertRaisesRegex(ValueError, "reliable send queue is full"):
             fragmented.send_many(
                 "schema",
@@ -731,12 +744,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_session_suppresses_duplicates_and_delivers_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=123, initial_sequence=100))
-        sender.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 90, 0, 0, "control")
-        )
-        receiver.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 123, 91, 0, 0, "control")
-        )
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0))
 
         first = sender.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
         second = sender.send("schema", b"second", CultNetRudpSendOptions(reliable=True, ordered=True))
@@ -753,8 +761,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_lossy_packets_cannot_create_reliable_ordered_gaps(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=198, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=198, initial_sequence=100))
-        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 198, 90, 0, 0, "control"))
-        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 198, 91, 0, 0, "control"))
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         realtime = sender.send("realtime", b"discarded realtime", CultNetRudpSendOptions())
         latest = sender.send("latest", b"discarded latest state", CultNetRudpSendOptions(sequenced=True))
@@ -770,8 +777,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_unreliable_sequenced_delivery_is_scoped_to_its_channel(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=197, initial_sequence=50))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=197, initial_sequence=100))
-        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 197, 90, 0, 0, "control"))
-        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 197, 91, 0, 0, "control"))
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         older = sender.send("latest", b"older", CultNetRudpSendOptions(sequenced=True))
         newer = sender.send("latest", b"newer", CultNetRudpSendOptions(sequenced=True))
@@ -786,7 +792,10 @@ class CultNetTests(unittest.TestCase):
 
     def test_cultnet_rudp_rejects_unreliable_ordered_delivery(self) -> None:
         session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=196, initial_sequence=1))
-        session.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 196, 50, 0, 0, "control"))
+        session.receive(
+            CultNetRudpSession(CultNetRudpSessionOptions(connection_id=196, initial_sequence=900)).accept_connect(session.create_connect(0), 0),
+            0,
+        )
 
         with self.assertRaises(ValueError) as raised:
             session.send(
@@ -799,12 +808,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_session_skips_control_packets_while_ordering_schema_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=124, initial_sequence=100))
-        sender.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 124, 90, 0, 0, "control")
-        )
-        receiver.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 124, 91, 0, 0, "control")
-        )
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         first = sender.send("schema", b"first", CultNetRudpSendOptions(reliable=True, ordered=True))
         control = sender.create_ack()
@@ -817,12 +821,7 @@ class CultNetTests(unittest.TestCase):
     def test_cultnet_rudp_session_fragments_and_reassembles_reliable_ordered_payloads(self) -> None:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=456, initial_sequence=100))
-        sender.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 456, 90, 0, 0, "control")
-        )
-        receiver.receive(
-            CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 456, 91, 0, 0, "control")
-        )
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         packets = sender.send_many(
             "schema",
@@ -847,8 +846,7 @@ class CultNetTests(unittest.TestCase):
         connection_id = 457
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=100))
-        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, connection_id, 0, 0, 0, "control"))
-        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, connection_id, 0, 0, 0, "control"))
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
 
         fragment_count = CultNetRudpSession.RELIABLE_SEND_WINDOW_PACKETS + 17
         payload = bytes(index % 251 for index in range(fragment_count * 8))
@@ -1161,14 +1159,13 @@ class CultNetTests(unittest.TestCase):
             # The peer is told, and the goodbye does not acknowledge the refused frame.
             (goodbye,) = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.DISCONNECT]
             self.assertTrue(peer.receive(goodbye, 1).disconnected)
-            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
+            self.assertFalse(acknowledges(goodbye, poison.sequence), "the goodbye acknowledged the refused frame")
 
             # A retransmit is dropped, not acknowledged.
             to_server(poison)
             self.assertIsNone(server.receive_once())
             self.assertEqual(server.stats.packets_dropped, 2)
             self.assertEqual(drain_peer(), [])
-            self.assertIn(poison.sequence, peer.pending_reliable_sequences)
 
             # A Connect claims the endpoint again.
             again = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id))
@@ -1234,6 +1231,135 @@ class CultNetTests(unittest.TestCase):
             accepts = {p.sequence for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT}
             self.assertEqual(len(accepts), 1)
             self.assertLessEqual(server.outstanding_reliable_packet_count, 1)
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_restarted_client_and_keeps_its_session_on_a_retransmit(self) -> None:
+        server, _, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x10203058)
+        connection_id = 0x10203058
+        reliable = CultNetRudpSendOptions(reliable=True, ordered=True)
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=50_000))
+            connect = first.create_connect(0, b"same")
+            to_server(connect)
+            server.receive_once()
+            first.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            sent = [first.send("schema", f"c{index}".encode(), reliable) for index in range(3)]
+            delivered = []
+            for packet in sent:
+                to_server(packet)
+                delivered.append(server.receive_once().payload)
+            self.assertEqual(delivered, [b"c0", b"c1", b"c2"])
+
+            # A retransmitted Connect is a repeat: what was delivered stays delivered once.
+            to_server(connect)
+            server.receive_once()
+            to_server(sent[0])
+            self.assertIsNone(server.receive_once(), "the retransmitted Connect reset the session")
+
+            # The same client restarted on the same address, connection id and payload.
+            drain_peer()
+            second = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=7))
+            to_server(second.create_connect(0, b"same"))
+            server.receive_once()
+            second.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            to_server(second.send("schema", b"after restart", reliable))
+            self.assertEqual(server.receive_once().payload, b"after restart")
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_pinned_client_that_restarts_on_a_new_port(self) -> None:
+        server, server_socket, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x1020305B)
+        connection_id = 0x1020305B
+        reliable = CultNetRudpSendOptions(reliable=True, ordered=True)
+        other_socket = bind_udp_socket()
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(first.create_connect(0, b"join"))
+            server.receive_once()
+            first.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            to_server(first.send("schema", b"hello", reliable))
+            self.assertEqual(server.receive_once().payload, b"hello")
+
+            # The process restarted on a new port with the same pinned sequence.
+            second = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            other_socket.sendto(encode_rudp_packet(second.create_connect(0, b"join")), server_socket.getsockname())
+            server.receive_once()
+            wire, _ = other_socket.recvfrom(65535)
+            second.receive(decode_rudp_packet(wire), 0)
+            self.assertTrue(second.connected, "the restarted client on a new port was not admitted")
+            other_socket.sendto(encode_rudp_packet(second.send("schema", b"after", reliable)), server_socket.getsockname())
+            self.assertEqual(server.receive_once().payload, b"after")
+        finally:
+            other_socket.close()
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_pinned_client_that_restarts_on_the_same_address(self) -> None:
+        server, _, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x1020305C)
+        connection_id = 0x1020305C
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(first.create_connect(0, b"join"))
+            server.receive_once()
+            accept = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0]
+            first.receive(accept, 0)
+            to_server(first.create_ack_for_received(accept.sequence))
+            server.receive_once()
+            drain_peer()
+
+            # The process restarted on the same address with the same pinned sequence.
+            restarted = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(restarted.create_connect(0, b"join"))
+            server.receive_once()
+            for packet in drain_peer():
+                restarted.receive(packet, 1)
+            self.assertFalse(restarted.connected)
+
+            to_server(restarted.due_resends(3_000)[0])
+            server.receive_once()
+            for packet in drain_peer():
+                restarted.receive(packet, 3_001)
+            self.assertTrue(restarted.connected, "the restarted pinned client was never admitted")
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_connect_from_a_new_endpoint(self) -> None:
+        server, server_socket, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x10203059)
+        other_socket = bind_udp_socket()
+        try:
+            to_server(peer.create_connect(0, b"a"))
+            server.receive_once()
+            drain_peer()
+
+            other = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=0x10203059, initial_sequence=9))
+            other_socket.sendto(encode_rudp_packet(other.create_connect(0, b"b")), server_socket.getsockname())
+            server.receive_once()
+            wire, _ = other_socket.recvfrom(65535)
+            other.receive(decode_rudp_packet(wire), 0)
+            self.assertTrue(other.connected, "the new endpoint was not admitted")
+            other_socket.sendto(
+                encode_rudp_packet(other.send("schema", b"from b", CultNetRudpSendOptions(reliable=True, ordered=True))),
+                server_socket.getsockname(),
+            )
+            self.assertEqual(server.receive_once().payload, b"from b")
+        finally:
+            other_socket.close()
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_flush_after_a_timeout_names_the_timeout(self) -> None:
+        server, _, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x1020305A)
+        try:
+            to_server(peer.create_connect(0, b"join"))
+            server.receive_once()
+            server.send("schema", b"unanswered")
+            self.assertTrue(server.check_timeout(0, now_ms=10**14))
+            with self.assertRaisesRegex(ConnectionError, "session timed out"):
+                server.flush_reliable(0.1)
         finally:
             peer_socket.close()
             server.close()
@@ -2370,8 +2496,7 @@ class CultNetRudpFragmentBoundTests(unittest.TestCase):
     def _pair(self) -> tuple[CultNetRudpSession, CultNetRudpSession]:
         sender = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=311, initial_sequence=1))
         receiver = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=311, initial_sequence=100))
-        sender.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 311, 90, 0, 0, "control"))
-        receiver.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, 311, 91, 0, 0, "control"))
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
         return sender, receiver
 
     def test_stranded_fragment_sets_are_bounded_and_evicted_oldest_first(self) -> None:

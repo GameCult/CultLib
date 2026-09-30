@@ -118,6 +118,46 @@ fn cases() -> Vec<Case> {
                 details: None,
             },
         },
+        Case {
+            name: "variant_unsupported_subscription_ended",
+            // C#: ForVariantUnsupported("variant unsupported here", "sub-1")
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72B876617269616E7420756E737570706F727465642068657265AB726F7574696E6748696E74C0A4636F6465B376617269616E745F756E737570706F72746564A764657461696C7384A56669656C64AE737562736372697074696F6E4964A576616C7565A57375622D31A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "variant unsupported here".to_string(),
+                code: Some(CultNetErrorCode::VariantUnsupported),
+                details: Some(CultNetErrorDetails {
+                    field: Some("subscriptionId".to_string()),
+                    value: Some("sub-1".to_string()),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
+        Case {
+            name: "variant_unsupported_no_subscription",
+            // C#: ForVariantUnsupported("variant unsupported here") - no subscription ended, so Details stays null.
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72B876617269616E7420756E737570706F727465642068657265AB726F7574696E6748696E74C0A4636F6465B376617269616E745F756E737570706F72746564A764657461696C73C0",
+            message: || CultNetMessage::Error {
+                error: "variant unsupported here".to_string(),
+                code: Some(CultNetErrorCode::VariantUnsupported),
+                details: None,
+            },
+        },
+        Case {
+            name: "unowned_schema",
+            // C#: ForUnownedSchema(new CultNetUnownedSchemaException("some.schema.v1", new CultRecordKey("some:key")))
+            csharp_hex: "85AD736368656D6156657273696F6EB063756C746E65742E6572726F722E7630A56572726F72D95C756E6F776E65645F736368656D613A204E6F207368617264206F776E7320736368656D612027736F6D652E736368656D612E763127206B65792027736F6D653A6B6579273B207468652077726974652077617320726566757365642EAB726F7574696E6748696E74C0A4636F6465AE756E6F776E65645F736368656D61A764657461696C7384A56669656C64A8736368656D614964A576616C7565AE736F6D652E736368656D612E7631A461734F66C0A763757272656E74C0",
+            message: || CultNetMessage::Error {
+                error: "unowned_schema: No shard owns schema 'some.schema.v1' key 'some:key'; the write was refused.".to_string(),
+                code: Some(CultNetErrorCode::UnownedSchema),
+                details: Some(CultNetErrorDetails {
+                    field: Some("schemaId".to_string()),
+                    value: Some("some.schema.v1".to_string()),
+                    as_of: None,
+                    current: None,
+                }),
+            },
+        },
     ]
 }
 
