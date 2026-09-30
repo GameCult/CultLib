@@ -393,7 +393,7 @@ def create_rudp_schema_transport(
     runtime_id: str = "cultnet-python-rudp-client",
     bind_host: str = "127.0.0.1",
     bind_port: int = 0,
-    initial_sequence: int = 1,
+    initial_sequence: int | None = None,
     resend_delay_ms: int = 25,
     transport_id: str = "rudp",
     max_payload_bytes: int | None = None,

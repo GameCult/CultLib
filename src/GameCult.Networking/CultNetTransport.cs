@@ -768,9 +768,11 @@ namespace GameCult.Networking
         /// </summary>
         public uint ConnectionId { get; set; }
         /// <summary>
-        /// Gets or sets the first local packet sequence.
+        /// Gets or sets the first local packet sequence. Unset, each session draws its own at random:
+        /// every session is a new identity to its peer, and an options object reused for several
+        /// must not give them one sequence.
         /// </summary>
-        public uint InitialSequence { get; set; } = 1;
+        public uint? InitialSequence { get; set; }
         /// <summary>
         /// Gets or sets the resend delay in milliseconds.
         /// </summary>
@@ -845,9 +847,11 @@ namespace GameCult.Networking
         /// </summary>
         public uint ConnectionId { get; set; }
         /// <summary>
-        /// Gets or sets the first local packet sequence.
+        /// Gets or sets the first local packet sequence. Unset, each session draws its own at random:
+        /// every session is a new identity to its peer, and an options object reused for several
+        /// must not give them one sequence.
         /// </summary>
-        public uint InitialSequence { get; set; } = 1;
+        public uint? InitialSequence { get; set; }
         /// <summary>
         /// Gets or sets the resend delay in milliseconds.
         /// </summary>
@@ -882,16 +886,15 @@ namespace GameCult.Networking
         /// <summary>Maximum reliable packets admitted to the wire before acknowledgements advance the window.</summary>
         public const int ReliableSendWindowPackets = 32;
         private const int ReceivedSequenceWindow = 4096;
+        // How long a client keeps retransmitting a Connect nobody answered before it abandons that
+        // attempt for a fresh one. A Connect the server answers with an Ack, never an Accept, is one
+        // the server judged stale (see AcceptConnect); retransmitting the same sequence would never
+        // change its mind.
+        private const long ConnectAttemptMs = 3_000;
         private sealed class PendingReliablePacket
         {
             public CultNetRudpPacket Packet { get; set; } = new CultNetRudpPacket();
             public long LastSentAtMs { get; set; }
-        }
-
-        private sealed class PendingOrderedFrame
-        {
-            public CultNetRudpDeliveredFrame Frame { get; set; } = new CultNetRudpDeliveredFrame();
-            public uint NextSequence { get; set; }
         }
 
         private sealed class FragmentBuffer
@@ -908,6 +911,24 @@ namespace GameCult.Networking
         private ushort _nextFragmentId = 1;
         private readonly int? _maxPendingReliablePackets;
         private volatile bool _connected;
+        // Advances every time a generation ends. Everything issued in a generation (writes, flushes)
+        // belongs to it and dies with it.
+        private long _generation;
+        // True from the end of a generation until the next Connect or Accept begins one. A flush started
+        // in that interval has no live generation to wait on.
+        private bool _ended;
+        // The sequence of the Connect that started the current generation: sent by this side, or
+        // accepted from the peer. A Connect repeats exactly when the session is connected and the
+        // Connect carries this sequence.
+        private uint? _connectSequence;
+        // A Connect this side sent is unanswered. Only then is an Accept honoured.
+        private bool _awaitingAccept;
+        // When the unanswered Connect first went out; DueResends abandons it for a fresh attempt once
+        // ConnectAttemptMs has passed.
+        private long _connectStartedAtMs;
+        // The payload of the Connect this side sent, kept so a fresh attempt can always be built
+        // whatever became of the pending packet.
+        private byte[] _connectPayload = Array.Empty<byte>();
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
@@ -915,9 +936,14 @@ namespace GameCult.Networking
         private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
         private readonly Queue<CultNetRudpPacket> _queuedReliable = new Queue<CultNetRudpPacket>();
-        private readonly Dictionary<string, uint> _orderedNextSequenceByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
-        private readonly Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>> _orderedBuffers =
-            new Dictionary<string, SortedDictionary<uint, PendingOrderedFrame>>(StringComparer.Ordinal);
+        // Every reliable sequence up to and including this one has been received since the peer state
+        // was last reset. Only the handshake seeds it: the peer's Connect on the accepting side, the
+        // peer's Accept on the connecting side. Reliable data that arrives before that is refused.
+        private uint? _receivedThrough;
+        // Ordered frames received but not yet deliverable, keyed by first sequence. A frame is held for
+        // exactly one reason: a reliable sequence below it has not arrived.
+        private readonly SortedDictionary<uint, CultNetRudpDeliveredFrame> _orderedHeld =
+            new SortedDictionary<uint, CultNetRudpDeliveredFrame>();
         private readonly Dictionary<string, FragmentBuffer> _fragmentBuffers = new Dictionary<string, FragmentBuffer>(StringComparer.Ordinal);
 
         /// <summary>
@@ -929,10 +955,31 @@ namespace GameCult.Networking
             ValidateLimits(options.InitialSequence, options.MaxPendingReliablePackets);
 
             ConnectionId = options.ConnectionId;
-            _nextSequence = options.InitialSequence;
+            _nextSequence = options.InitialSequence ?? DrawSequence();
             ResendDelayMs = options.ResendDelayMs;
             _maxPendingReliablePackets = options.MaxPendingReliablePackets;
         }
+
+        /// <summary>
+        /// A sequence drawn from a secure source in [1, 2^31). The Connect's sequence is what tells a
+        /// peer whether a Connect repeats one it already accepted or starts a new session, so two
+        /// sessions must not share one by default.
+        /// </summary>
+        private static uint DrawSequence()
+        {
+            const uint ceiling = 1u << 31;
+            var bytes = new byte[4];
+            using (var random = System.Security.Cryptography.RandomNumberGenerator.Create())
+                random.GetBytes(bytes);
+            return 1u + BitConverter.ToUInt32(bytes, 0) % (ceiling - 1u);
+        }
+
+        // Whether `sequence` is at or before `mark` in serial order, within the receive window. The
+        // compare is modular, so it holds across the wrap of the 32-bit space; a sequence further back
+        // than the window is the duplicate test's below-window clause, and one ahead of the mark is
+        // never before it.
+        private static bool AtOrBefore(uint sequence, uint mark) =>
+            unchecked(mark - sequence) < ReceivedSequenceWindow;
 
         internal static readonly byte[] RefusedPacketReason = Encoding.UTF8.GetBytes("session refused a packet");
 
@@ -940,7 +987,7 @@ namespace GameCult.Networking
         /// A session cannot admit a Connect when its sequence space starts exhausted or its reliable
         /// queue holds nothing, so neither is a usable configuration.
         /// </summary>
-        internal static void ValidateLimits(uint initialSequence, int? maxPendingReliablePackets)
+        internal static void ValidateLimits(uint? initialSequence, int? maxPendingReliablePackets)
         {
             if (initialSequence == uint.MaxValue)
             {
@@ -965,6 +1012,8 @@ namespace GameCult.Networking
         /// Gets whether the session has completed the connect/accept handshake.
         /// </summary>
         public bool Connected => _connected;
+        internal long Generation => Interlocked.Read(ref _generation);
+        internal bool Ended => _ended;
         /// <summary>
         /// Gets the logical time of the last received packet.
         /// </summary>
@@ -1000,14 +1049,57 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateConnect(long nowMs = 0, byte[]? payload = null)
         {
+            // A session that has had a peer starts a new generation: nothing it learned from that
+            // peer describes the one this Connect reaches, and what it still owed that peer no
+            // longer takes room in the queue.
+            if (_connectSequence.HasValue)
+                ResetPeerState();
             EnsureReliableCapacity(1);
+            _ended = false;
             var packet = CreatePacket(CultNetRudpPacketType.Connect, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
+            _connectSequence = packet.Sequence;
+            _awaitingAccept = true;
+            _connectStartedAtMs = nowMs;
+            _connectPayload = packet.Payload ?? Array.Empty<byte>();
             TrackReliable(packet, nowMs);
             return packet;
         }
 
         /// <summary>
-        /// Accepts a connect packet and returns a reliable ordered accept packet.
+        /// Whether <paramref name="packet"/> is a Connect this session's current generation already owns:
+        /// a retransmit of the Connect that started it (the session is connected and the sequence is
+        /// that Connect's), or a stale copy of an earlier attempt by the same client (a sequence before
+        /// it, within the receive window). Servers that keep one session per peer ask this to tell a
+        /// Connect that starts a new session from one that does not; anything else that reaches
+        /// <see cref="AcceptConnect"/> starts a new generation.
+        /// </summary>
+        public bool ConnectRepeats(CultNetRudpPacket packet)
+        {
+            if (packet == null) throw new ArgumentNullException(nameof(packet));
+            return packet.PacketType == CultNetRudpPacketType.Connect
+                && _connected
+                && _connectSequence.HasValue
+                && (_connectSequence.Value == packet.Sequence
+                    || ConnectIsStale(packet.Sequence, _connectSequence.Value));
+        }
+
+        // A Connect that precedes the current generation's within the receive window is the client's
+        // earlier attempt, delayed in the network: a client that retried never sends a lower sequence
+        // again. Restarting on it would strand the client, which honours only the Accept for its newest
+        // Connect. The rule is TCP's answer to a delayed SYN (RFC 5961's challenge ACK): keep the
+        // connection and answer with an Ack. A restarted client whose random initial sequence lands in
+        // this window is answered the same way and abandons the attempt for a fresh draw
+        // (ConnectAttemptMs).
+        private static bool ConnectIsStale(uint sequence, uint current) =>
+            sequence != current && AtOrBefore(sequence, current);
+
+        /// <summary>
+        /// Answers a connect packet. A repeat of the accepted connect queues nothing, so a connect storm
+        /// cannot grow the reliable queue: the reply is the accept still awaiting acknowledgement, or an
+        /// ack once it was acknowledged. A stale copy of an earlier attempt gets the same reply and
+        /// changes nothing else: it is not evidence the peer is alive. Any other connect ends the
+        /// current generation, forgets the peer and accepts a new one with a reliable ordered accept
+        /// packet.
         /// </summary>
         public CultNetRudpPacket AcceptConnect(CultNetRudpPacket packet, long nowMs = 0, byte[]? payload = null)
         {
@@ -1017,30 +1109,31 @@ namespace GameCult.Networking
                 throw new InvalidOperationException($"Expected RUDP connect packet, got {packet.PacketType}.");
             }
 
+            if (ConnectRepeats(packet))
+            {
+                if (_connectSequence == packet.Sequence)
+                {
+                    ApplyAcknowledgements(packet);
+                    RememberReceived(packet.Sequence);
+                    _lastReceivedAtMs = nowMs;
+                }
+                return PendingAcceptForResend(nowMs) ?? CreateAck();
+            }
+            ResetPeerState();
             EnsureReliableCapacity(1);
-            RememberReceived(packet.Sequence);
+            SeedReceived(packet.Sequence);
+            _lastReceivedAtMs = nowMs;
+            _connectSequence = packet.Sequence;
             _connected = true;
+            _ended = false;
             var response = CreatePacket(CultNetRudpPacketType.Accept, "control", payload ?? Array.Empty<byte>(), reliable: true, ordered: true, sequenced: false);
             TrackReliable(response, nowMs);
             return response;
         }
 
-        /// <summary>
-        /// Answers a connect from a peer this session has already accepted. The packet's sequence is
-        /// remembered and nothing is queued, so a connect storm cannot grow the reliable queue. The reply
-        /// is the accept still awaiting acknowledgement, or an ack once it was acknowledged.
-        /// </summary>
-        public CultNetRudpPacket AnswerRepeatedConnect(CultNetRudpPacket packet, long nowMs = 0)
+        // The Accept still awaiting acknowledgement, resent.
+        private CultNetRudpPacket? PendingAcceptForResend(long nowMs)
         {
-            RequireConnection(packet);
-            if (packet.PacketType != CultNetRudpPacketType.Connect)
-            {
-                throw new InvalidOperationException($"Expected RUDP connect packet, got {packet.PacketType}.");
-            }
-
-            ApplyAcknowledgements(packet);
-            RememberReceived(packet.Sequence);
-            _lastReceivedAtMs = nowMs;
             lock (_pendingReliableGate)
             {
                 foreach (var pending in _pendingReliable.Values)
@@ -1052,7 +1145,7 @@ namespace GameCult.Networking
                 }
             }
 
-            return CreateAck();
+            return null;
         }
 
         /// <summary>
@@ -1145,16 +1238,29 @@ namespace GameCult.Networking
         public CultNetRudpReceiveResult Receive(CultNetRudpPacket packet, long nowMs = 0)
         {
             RequireConnection(packet);
-            ApplyAcknowledgements(packet);
+            // An Accept counts only while this side's Connect is unanswered and the Accept names it.
+            // A late or duplicate one, or one from an earlier generation, must not seed the watermark
+            // or revive an ended session.
+            var honoursAccept = packet.PacketType == CultNetRudpPacketType.Accept
+                && _awaitingAccept
+                && _connectSequence.HasValue
+                && PacketAcknowledges(packet, _connectSequence.Value);
+            if (packet.PacketType == CultNetRudpPacketType.Accept && !honoursAccept)
+            {
+                return new CultNetRudpReceiveResult();
+            }
+            // While this side's Connect awaits its Accept, only the Accept it honours retires it: an Ack
+            // that names the Connect (a server's reply to a repeat or a stale copy) says the server did
+            // not start a session.
+            if (honoursAccept || !_awaitingAccept)
+                ApplyAcknowledgements(packet);
             var readyToSend = PromoteQueuedReliable(nowMs);
             _lastReceivedAtMs = nowMs;
-            var expectedSequenceIfUninitialized = _highestReceivedSequence.HasValue
-                ? _highestReceivedSequence.Value + 1
-                : packet.Sequence;
 
-            if (packet.PacketType == CultNetRudpPacketType.Accept)
+            if (honoursAccept)
             {
-                RememberReceived(packet.Sequence);
+                _awaitingAccept = false;
+                SeedReceived(packet.Sequence);
                 _connected = true;
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
             }
@@ -1189,7 +1295,7 @@ namespace GameCult.Networking
 
             if (packet.PacketType == CultNetRudpPacketType.Disconnect)
             {
-                _connected = false;
+                EndSession();
                 return new CultNetRudpReceiveResult
                 {
                     ReadyToSend = readyToSend,
@@ -1203,11 +1309,15 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
             }
 
-            var duplicate = packet.Reliable
-                && (_receivedSequences.Contains(packet.Sequence)
-                    || (_highestReceivedSequence.HasValue
-                        && packet.Sequence < _highestReceivedSequence.Value
-                        && _highestReceivedSequence.Value - packet.Sequence >= ReceivedSequenceWindow));
+            // Reliable data before the handshake has seeded the watermark has no place in the order:
+            // refuse it unremembered, so it is not acknowledged and the sender retransmits it once
+            // the handshake is done.
+            if (packet.Reliable && !_receivedThrough.HasValue)
+            {
+                return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
+            }
+
+            var duplicate = packet.Reliable && WasReceived(packet.Sequence);
             if (packet.Reliable)
             {
                 RememberReceived(packet.Sequence);
@@ -1217,30 +1327,34 @@ namespace GameCult.Networking
                 return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
             }
 
+            var delivered = new List<CultNetRudpDeliveredFrame>();
             var reassembled = Reassemble(packet);
-            if (reassembled == null)
+            if (reassembled != null)
             {
-                return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
-            }
-
-            if (!reassembled.Ordered && packet.Sequenced)
-            {
-                var newestSequence = reassembled.NextSequence - 1;
-                if (_latestSequencedByChannel.TryGetValue(reassembled.Frame.ChannelId, out var latestSequence)
-                    && newestSequence <= latestSequence)
+                if (reassembled.Ordered)
                 {
-                    return new CultNetRudpReceiveResult { ReadyToSend = readyToSend };
+                    _orderedHeld[reassembled.Frame.Sequence] = reassembled.Frame;
                 }
-                _latestSequencedByChannel[reassembled.Frame.ChannelId] = newestSequence;
+                else if (!packet.Sequenced)
+                {
+                    delivered.Add(reassembled.Frame);
+                }
+                else
+                {
+                    var newestSequence = reassembled.NextSequence - 1;
+                    if (!_latestSequencedByChannel.TryGetValue(reassembled.Frame.ChannelId, out var latestSequence)
+                        || newestSequence > latestSequence)
+                    {
+                        _latestSequencedByChannel[reassembled.Frame.ChannelId] = newestSequence;
+                        delivered.Add(reassembled.Frame);
+                    }
+                }
             }
 
-            return new CultNetRudpReceiveResult
-            {
-                ReadyToSend = readyToSend,
-                Delivered = reassembled.Ordered
-                    ? DeliverOrdered(reassembled.Frame, reassembled.NextSequence, expectedSequenceIfUninitialized)
-                    : new[] { reassembled.Frame }
-            };
+            // Any reliable packet may have advanced the watermark, a fragment or an unordered frame as
+            // much as an ordered one, so the drain runs after all of them.
+            delivered.AddRange(DrainOrdered());
+            return new CultNetRudpReceiveResult { ReadyToSend = readyToSend, Delivered = delivered };
         }
 
         /// <summary>
@@ -1272,6 +1386,10 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateAckForReceived(uint receivedSequence)
         {
+            // What Receive refused is not acknowledged by name (the ack carries only what was
+            // received), so its sender retransmits it.
+            if (!WasReceived(receivedSequence))
+                return CreateAck();
             var (ack, _) = AckState();
             return ack >= receivedSequence && ack - receivedSequence <= 32
                 ? CreateAck()
@@ -1287,23 +1405,39 @@ namespace GameCult.Networking
         }
 
         /// <summary>
-        /// Forgets everything learned from the peer; sequence numbers already issued stay issued.
+        /// The one way a session generation ends. The session stops being connected and what it still
+        /// owed the peer dies with it: a write not yet acknowledged is dropped, so no later session
+        /// retransmits it or credits an ack to it. What was learned from the peer is not touched: the
+        /// peer may not know the session ended, and forgetting what it sent would let its retransmits
+        /// be delivered twice.
         /// </summary>
-        public void ResetPeerState()
+        private void EndSession()
         {
             _connected = false;
-            _lastReceivedAtMs = null;
-            _highestReceivedSequence = null;
-            _receivedSequences.Clear();
-            _nextSequencedByChannel.Clear();
-            _latestSequencedByChannel.Clear();
+            _ended = true;
+            _awaitingAccept = false;
+            Interlocked.Increment(ref _generation);
             lock (_pendingReliableGate)
             {
                 _pendingReliable.Clear();
                 _queuedReliable.Clear();
             }
-            _orderedNextSequenceByChannel.Clear();
-            _orderedBuffers.Clear();
+        }
+
+        /// <summary>
+        /// Ends the current generation and forgets everything learned from the peer; sequence numbers
+        /// already issued stay issued.
+        /// </summary>
+        public void ResetPeerState()
+        {
+            EndSession();
+            _lastReceivedAtMs = null;
+            _highestReceivedSequence = null;
+            _receivedSequences.Clear();
+            _nextSequencedByChannel.Clear();
+            _latestSequencedByChannel.Clear();
+            _receivedThrough = null;
+            _orderedHeld.Clear();
             _fragmentBuffers.Clear();
         }
 
@@ -1323,7 +1457,7 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetRudpPacket CreateDisconnect(byte[]? reason = null)
         {
-            _connected = false;
+            EndSession();
             return CreatePacket(CultNetRudpPacketType.Disconnect, "control", reason ?? Array.Empty<byte>(), reliable: false, ordered: false, sequenced: false);
         }
 
@@ -1340,7 +1474,7 @@ namespace GameCult.Networking
             {
                 return false;
             }
-            _connected = false;
+            EndSession();
             return true;
         }
 
@@ -1349,6 +1483,9 @@ namespace GameCult.Networking
         /// </summary>
         public IReadOnlyList<CultNetRudpPacket> DueResends(long nowMs)
         {
+            var fresh = AbandonUnansweredConnect(nowMs);
+            if (fresh != null)
+                return new[] { fresh };
             var due = new List<CultNetRudpPacket>();
             lock (_pendingReliableGate)
             {
@@ -1515,9 +1652,69 @@ namespace GameCult.Networking
             }
         }
 
+        private static bool PacketAcknowledges(CultNetRudpPacket packet, uint sequence)
+        {
+            if (packet.Ack == sequence)
+                return true;
+            for (var bit = 0; bit < 32; bit++)
+            {
+                if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit && packet.Ack - (uint)bit - 1 == sequence)
+                    return true;
+            }
+            return false;
+        }
+
+        // A Connect unanswered for ConnectAttemptMs is replaced, not retransmitted further, by a Connect
+        // with the same payload and the abandoned sequence plus the receive window less one. Nothing
+        // was ever sent in an unanswered generation, so no sequence issued so far is owed. The jump
+        // keeps a late copy of the abandoned Connect inside the new one's stale window, so a server
+        // that took the new Connect answers the copy with an Ack instead of restarting; and it leaves
+        // the stale window of whatever generation the server holds, unless that generation sits
+        // exactly at the jump, and then the next attempt leaves it. The first Connect of a session is
+        // the only one drawn at random.
+        private CultNetRudpPacket? AbandonUnansweredConnect(long nowMs)
+        {
+            if (!_awaitingAccept || nowMs - _connectStartedAtMs < ConnectAttemptMs || !_connectSequence.HasValue)
+                return null;
+            var jumped = (ulong)_connectSequence.Value + ReceivedSequenceWindow - 1;
+            _nextSequence = (uint)Math.Min(jumped, uint.MaxValue - 1);
+            return CreateConnect(nowMs, _connectPayload);
+        }
+
+        // The handshake's one act on the watermark: the peer's Connect or Accept is the first sequence
+        // of the session, whatever else it has sent.
+        private void SeedReceived(uint sequence)
+        {
+            _receivedThrough = sequence;
+            RememberReceived(sequence);
+        }
+
+        // The one duplicate test: true for a sequence in the window that was received, for one below
+        // the window, and for one at or before the watermark. The watermark starts at the handshake's
+        // seed, so a frame the peer sent in an earlier generation (every sequence it issued is below
+        // the Connect that began this one) is a duplicate of something already delivered and is
+        // acknowledged, never delivered again.
+        private bool WasReceived(uint sequence)
+        {
+            return _receivedSequences.Contains(sequence)
+                || (_highestReceivedSequence.HasValue
+                    && sequence < _highestReceivedSequence.Value
+                    && _highestReceivedSequence.Value - sequence >= ReceivedSequenceWindow)
+                || (_receivedThrough.HasValue && AtOrBefore(sequence, _receivedThrough.Value));
+        }
+
         private void RememberReceived(uint sequence)
         {
             _receivedSequences.Add(sequence);
+            if (_receivedThrough.HasValue)
+            {
+                var through = _receivedThrough.Value;
+                while (through != uint.MaxValue && _receivedSequences.Contains(through + 1))
+                {
+                    through++;
+                }
+                _receivedThrough = through;
+            }
             if (!_highestReceivedSequence.HasValue || sequence > _highestReceivedSequence.Value)
             {
                 _highestReceivedSequence = sequence;
@@ -1625,78 +1822,33 @@ namespace GameCult.Networking
             };
         }
 
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DeliverOrdered(
-            CultNetRudpDeliveredFrame frame,
-            uint nextSequenceAfterFrame,
-            uint expectedSequenceIfUninitialized)
-        {
-            if (!_orderedNextSequenceByChannel.TryGetValue(frame.ChannelId, out var next))
-            {
-                next = Math.Min(expectedSequenceIfUninitialized, frame.Sequence);
-                _orderedNextSequenceByChannel[frame.ChannelId] = next;
-            }
-
-            while (frame.Sequence > next
-                   && _receivedSequences.Contains(next)
-                   && (!_orderedBuffers.TryGetValue(frame.ChannelId, out var pendingBuffer) || !pendingBuffer.ContainsKey(next)))
-            {
-                next++;
-                _orderedNextSequenceByChannel[frame.ChannelId] = next;
-            }
-
-            if (frame.Sequence < next)
-            {
-                return Array.Empty<CultNetRudpDeliveredFrame>();
-            }
-
-            if (frame.Sequence > next)
-            {
-                if (!_orderedBuffers.TryGetValue(frame.ChannelId, out var buffer))
-                {
-                    buffer = new SortedDictionary<uint, PendingOrderedFrame>();
-                    _orderedBuffers[frame.ChannelId] = buffer;
-                }
-
-                buffer[frame.Sequence] = new PendingOrderedFrame { Frame = frame, NextSequence = nextSequenceAfterFrame };
-                return Array.Empty<CultNetRudpDeliveredFrame>();
-            }
-
-            _orderedNextSequenceByChannel[frame.ChannelId] = nextSequenceAfterFrame;
-            return new[] { frame }.Concat(DrainOrdered(frame.ChannelId)).ToArray();
-        }
-
-        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainOrdered(string channelId)
+        /// <summary>
+        /// Delivers, in sequence order, every held ordered frame whose first sequence is at most one past
+        /// the watermark. Ordered delivery has one owner: the watermark. A frame this call does not
+        /// deliver waits for the sequence below it, and nothing else releases it.
+        /// </summary>
+        private IReadOnlyList<CultNetRudpDeliveredFrame> DrainOrdered()
         {
             var delivered = new List<CultNetRudpDeliveredFrame>();
-            if (!_orderedBuffers.TryGetValue(channelId, out var buffer))
+            if (!_receivedThrough.HasValue)
             {
                 return delivered;
             }
 
-            while (_orderedNextSequenceByChannel.TryGetValue(channelId, out var next) && buffer.TryGetValue(next, out var pending))
+            var through = _receivedThrough.Value;
+            foreach (var pair in _orderedHeld)
             {
-                buffer.Remove(next);
-                delivered.Add(pending.Frame);
-                _orderedNextSequenceByChannel[channelId] = pending.NextSequence;
-                SkipReceivedNonChannelSequences(channelId);
+                if (through != uint.MaxValue && pair.Key > through + 1)
+                {
+                    break;
+                }
+                delivered.Add(pair.Value);
             }
-
+            foreach (var frame in delivered)
+            {
+                _orderedHeld.Remove(frame.Sequence);
+            }
             return delivered;
-        }
-
-        private void SkipReceivedNonChannelSequences(string channelId)
-        {
-            if (!_orderedNextSequenceByChannel.TryGetValue(channelId, out var next))
-            {
-                return;
-            }
-
-            while (_receivedSequences.Contains(next)
-                   && (!_orderedBuffers.TryGetValue(channelId, out var buffer) || !buffer.ContainsKey(next)))
-            {
-                next++;
-                _orderedNextSequenceByChannel[channelId] = next;
-            }
         }
 
         private ushort AllocateFragmentId()
@@ -1917,18 +2069,23 @@ namespace GameCult.Networking
             var preserved = new List<CultNetTransportFrame>();
             while (_deliveredFrames.Count > 0)
                 preserved.Add(_deliveredFrames.Dequeue());
+            // A flush belongs to the generation it started in: whatever ends that generation, and
+            // whatever begins after it, the writes being waited on are gone.
+            long generation;
+            lock (_sessionGate)
+                generation = _session.Generation;
             try
             {
                 while (true)
                 {
-                    // An ended session forgot its unacknowledged writes; reporting them
-                    // flushed would be a lie.
-                    var ended = DisconnectReason;
-                    if (ended != null)
-                        throw new InvalidOperationException(
-                            "RUDP session ended before its reliable writes were acknowledged: " + Encoding.UTF8.GetString(ended));
                     lock (_sessionGate)
                     {
+                        // An ended session forgot its unacknowledged writes; reporting them flushed
+                        // would be a lie.
+                        if (_session.Ended || _session.Generation != generation)
+                            throw new InvalidOperationException(
+                                "RUDP session ended before its reliable writes were acknowledged: " +
+                                (DisconnectReason == null ? "no reason given" : Encoding.UTF8.GetString(DisconnectReason)));
                         if (_session.OutstandingReliablePacketCount == 0)
                             return;
                     }
@@ -2171,7 +2328,6 @@ namespace GameCult.Networking
                 error.SocketErrorCode == SocketError.ConnectionAborted ||
                 error.SocketErrorCode == SocketError.Shutdown)
             {
-                DisconnectReason = Array.Empty<byte>();
                 return false;
             }
 
@@ -2198,6 +2354,10 @@ namespace GameCult.Networking
                 _stats.PacketsDropped++;
                 return true;
             }
+            // A Connect from another endpoint is a new client, whatever sequence it carries: the endpoint
+            // moves and the Connect starts a new generation. Only a Connect from the peer's own
+            // endpoint can be its repeat.
+            var connectFromNewEndpoint = false;
             if (_remoteEndPoint == null)
             {
                 // Only a Connect claims the endpoint of a server-mode transport.
@@ -2211,8 +2371,16 @@ namespace GameCult.Networking
             }
             else if (!_remoteEndPoint.Equals(remote))
             {
-                _stats.PacketsDropped++;
-                return true;
+                if (_mode == CultNetRudpSocketMode.Server && packet.PacketType == CultNetRudpPacketType.Connect)
+                {
+                    _remoteEndPoint = remote;
+                    connectFromNewEndpoint = true;
+                }
+                else
+                {
+                    _stats.PacketsDropped++;
+                    return true;
+                }
             }
 
             TracePacket("rx", packet, received, remote);
@@ -2223,17 +2391,12 @@ namespace GameCult.Networking
                     CultNetRudpPacket accept;
                     try
                     {
-                        // A connect from the peer this transport already accepted repeats: answer it
-                        // with the accept already owed and queue nothing.
-                        if (_session.Connected)
-                        {
-                            accept = _session.AnswerRepeatedConnect(packet, NowMs());
-                        }
-                        else
-                        {
-                            accept = _session.AcceptConnect(packet, NowMs());
-                            DisconnectReason = null;
-                        }
+                        // The session answers a repeat of the connect it accepted with the accept
+                        // already owed, and anything else with a new generation.
+                        if (connectFromNewEndpoint)
+                            _session.ResetPeerState();
+                        accept = _session.AcceptConnect(packet, NowMs());
+                        DisconnectReason = null;
                     }
                     catch (InvalidOperationException)
                     {
@@ -2399,9 +2562,10 @@ namespace GameCult.Networking
         /// </summary>
         public uint ConnectionId { get; set; }
         /// <summary>
-        /// Gets or sets the first local packet sequence for each accepted peer session.
+        /// Gets or sets the first local packet sequence for each accepted peer session. Unset, each
+        /// session draws its own at random.
         /// </summary>
-        public uint InitialSequence { get; set; } = 100;
+        public uint? InitialSequence { get; set; }
         /// <summary>
         /// Gets or sets the resend delay in milliseconds.
         /// </summary>
@@ -2493,7 +2657,7 @@ namespace GameCult.Networking
         private const int WireBurstPackets = 32;
         private readonly Socket _socket;
         private readonly uint _connectionId;
-        private readonly uint _initialSequence;
+        private readonly uint? _initialSequence;
         private readonly long _resendDelayMs;
         private readonly int? _maxFragmentBytes;
         private readonly int? _maxPendingReliablePackets;
@@ -2668,25 +2832,29 @@ namespace GameCult.Networking
             {
                 var connectPayload = packet.Payload ?? Array.Empty<byte>();
                 _peers.TryGetValue(peerKey, out var admitted);
-                // The same payload from an admitted peer is a repeated Connect: answer it with the
-                // Accept already owed and queue nothing. A different payload is a new generation.
-                if (admitted != null && admitted.ConnectPayload.AsSpan().SequenceEqual(connectPayload))
+                // The admitted peer's session decides whether this Connect repeats the one it accepted:
+                // answer a repeat with the Accept already owed and queue nothing. Any other Connect is
+                // a new generation.
+                if (admitted != null)
                 {
                     lock (admitted.SessionGate)
                     {
-                        CultNetRudpPacket reply;
-                        try
+                        if (admitted.Session.ConnectRepeats(packet))
                         {
-                            reply = admitted.Session.AnswerRepeatedConnect(packet, NowMs());
-                        }
-                        catch (InvalidOperationException)
-                        {
-                            _stats.PacketsDropped++;
+                            CultNetRudpPacket reply;
+                            try
+                            {
+                                reply = admitted.Session.AcceptConnect(packet, NowMs(), _acceptPayload);
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                _stats.PacketsDropped++;
+                                return true;
+                            }
+                            SendPacket(admitted.RemoteEndPoint, reply);
                             return true;
                         }
-                        SendPacket(admitted.RemoteEndPoint, reply);
                     }
-                    return true;
                 }
 
                 var peer = new CultNetRudpSocketServerPeer(

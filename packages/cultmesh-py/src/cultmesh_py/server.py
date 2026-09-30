@@ -224,15 +224,19 @@ class CultMeshLocalServer:
             now_ms = _now_ms()
             peer = peers.get(remote_addr)
             if packet.packet_type == CultNetRudpPacketType.CONNECT:
-                peer = _RudpPeerConnection(
-                    CultNetRudpSession(
-                        CultNetRudpSessionOptions(
-                            connection_id=self.rudp_connection_id,
-                            resend_delay_ms=self.rudp_resend_delay_ms,
+                # The session decides whether this Connect repeats the one it
+                # accepted. Any other Connect is a new client session, with new
+                # subscriptions.
+                if peer is None or not peer.session.connect_repeats(packet):
+                    peer = _RudpPeerConnection(
+                        CultNetRudpSession(
+                            CultNetRudpSessionOptions(
+                                connection_id=self.rudp_connection_id,
+                                resend_delay_ms=self.rudp_resend_delay_ms,
+                            )
                         )
                     )
-                )
-                peers[remote_addr] = peer
+                    peers[remote_addr] = peer
                 self._send_rudp_packet(
                     rudp_socket,
                     remote_addr,
