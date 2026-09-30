@@ -213,7 +213,8 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
 
                 Assert.That(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)),
-                    Throws.TypeOf<InvalidOperationException>().With.Message.Contains(formatVersion));
+                    Throws.TypeOf<CultStoreUnreadableException>().With.Message.Contains(formatVersion)
+                        .And.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(manifest));
                 Assert.That(cache.BackingStores, Is.Empty);
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(bytes));
             }
