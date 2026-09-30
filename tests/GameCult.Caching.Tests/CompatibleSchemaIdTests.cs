@@ -89,6 +89,7 @@ namespace GameCult.Caching.Tests
             var entry = snapshot.SchemaCatalog.Single();
             entry.SchemaId = OldId;
             entry.SchemaName = "tests.legacy_deck";
+            entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { OldId };
             snapshot.Records.Single().SchemaId = OldId;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
@@ -134,6 +135,23 @@ namespace GameCult.Caching.Tests
                 using var reopened = Open(path, registry);
                 Assert.That(reopened.AllEntries.Count(), Is.EqualTo(1));
             }
+        }
+
+        // The name a catalog entry carries is metadata: a record resolves by its schema id, so a schema renamed under the id the
+        // registered type owns opens, with the entry's content hash no longer matching the type's.
+        [Test]
+        public void ASchemaRenamedUnderTheIdARegisteredTypeOwnsOpens()
+        {
+            var path = Path.Combine(_directory, "renamed.cc");
+            using (var cache = Open(path, Bare))
+                cache.Commit(batch => batch.Upsert(typeof(BareDeck), new BareDeck { Name = "d" }, D));
+            var snapshot = Read(path);
+            snapshot.SchemaCatalog.Single().SchemaName = "tests.renamed_deck";
+            snapshot.SchemaCatalog.Single().ContentHash = "stale";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            using var reopened = Open(path, Bare);
+            Assert.That(reopened.Get<BareDeck>(D)!.Name, Is.EqualTo("d"));
         }
 
         [Test]

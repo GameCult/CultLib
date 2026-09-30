@@ -989,11 +989,6 @@ namespace GameCult.Caching
             var ignoredExtraSlots = new List<int>();
             var defaultedMissingSlots = new List<int>();
 
-            if (!string.Equals(persisted.SchemaName, local.SchemaName, StringComparison.Ordinal))
-            {
-                errors.Add($"schema name drift '{persisted.SchemaName}' -> '{local.SchemaName}'");
-            }
-
             var persistedBySlot = persisted.Members.ToDictionary(member => member.Slot);
             var localBySlot = local.Members.ToDictionary(member => member.Slot);
 
