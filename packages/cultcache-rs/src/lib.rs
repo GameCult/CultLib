@@ -379,7 +379,7 @@ impl StoreUnreadableError {
 
 impl std::fmt::Display for StoreUnreadableError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "failed to decode MessagePack {}", self.path.display())
+        write!(formatter, "failed to decode MessagePack {}: {:#}", self.path.display(), self.source)
     }
 }
 
@@ -2672,7 +2672,12 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     let catalog = snapshot
         .1
         .into_iter()
-        .map(|entry| (entry.0, entry.1))
+        .flat_map(|entry| {
+            // A schema is published by its id or as a compatible id.
+            let published: Vec<String> = std::iter::once(entry.0).chain(entry.5).collect();
+            let name = entry.1;
+            published.into_iter().map(move |id| (id, name.clone()))
+        })
         .collect::<BTreeMap<_, _>>();
     snapshot
         .2
@@ -4780,7 +4785,7 @@ mod tests {
             }
             let bytes = std::fs::read(root.join(vector))?;
             // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
-            let header = if vector.ends_with("v3-base.msgpack") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
+            let header = if vector.contains("v3") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
             for operation in ["open", "push_all", "push"] {
                 let temp = tempfile::tempdir()?;
                 let path = temp.path().join("store.msgpack");
@@ -4796,7 +4801,8 @@ mod tests {
                 if !reads {
                     let error = outcome.unwrap_err();
                     let typed = error.downcast_ref::<StoreUnreadableError>().unwrap_or_else(|| panic!("{what}: {error:#}"));
-                    assert!(std::error::Error::source(typed).is_some(), "{what}: the cause is the source");
+                    let cause = std::error::Error::source(typed).unwrap_or_else(|| panic!("{what}: the cause is the source"));
+                    assert!(typed.to_string().contains(&cause.to_string()), "{what}: the message carries the cause: {typed}");
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
                 } else if operation != "open" {
                     assert_eq!(store_header(&std::fs::read(&path)?)?.as_deref(), Some(header), "{what}");
