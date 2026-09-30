@@ -357,57 +357,43 @@ test("CultMesh TS documents with both capabilities require an immutable writer c
   assert.deepEqual(writes, ["authoritative:canonical", "prediction:predicted"]);
 });
 
-test("CultMesh TS store document handles choose compatible foreign schema payloads", async () => {
-  const store = {
-    async pullAll() {
-      return [
-        {
-          key: "note:foreign",
-          type: "runtime.generated.incompatible-note",
-          schemaId: "runtime.generated.incompatible-note.v1",
-          storedAt: "2026-06-27T00:00:00Z",
-          payload: encode({ nope: "not the requested shape" }),
-          catalogEntry: {
-            schemaId: "runtime.generated.incompatible-note.v1",
-            schemaName: "runtime.generated.incompatible-note",
-            schemaVersion: "runtime.generated.incompatible-note.v1",
-            contentHash: "runtime.generated.incompatible-note.v1",
-            canonicalSchemaJson: "{}",
-            compatibleSchemaIds: ["runtime.generated.incompatible-note.v1"],
-          },
-        },
-        {
-          key: "note:foreign",
-          type: "runtime.generated.cultmesh.note",
-          schemaId: "runtime.generated.cultmesh.note.ui.42",
-          storedAt: "2026-06-27T00:00:01Z",
-          payload: encode({
-            noteId: "note:foreign",
-            body: "foreign schema id, local store shape",
-          }),
-          catalogEntry: {
-            schemaId: "runtime.generated.cultmesh.note.ui.42",
-            schemaName: "cultmesh.note",
-            schemaVersion: "cultmesh.note.v1",
-            contentHash: "runtime.generated.cultmesh.note.ui.42",
-            canonicalSchemaJson: "{}",
-            compatibleSchemaIds: ["runtime.generated.cultmesh.note.ui.42"],
-          },
-        },
-      ];
-    },
+// A store document reads the record under its own schema id, or under an id its definition lists as compatible. A record
+// under any other id is another type's, and is never read in its place because its payload happens to parse.
+test("CultMesh TS store document handles read only records under an id their definition declares", async () => {
+  const envelope = (schemaId: string, value: unknown) => ({
+    key: "note:store",
+    type: schemaId,
+    schemaId,
+    storedAt: "2026-06-27T00:00:00Z",
+    payload: encode(value),
+  });
+  const storeOf = (...records: ReturnType<typeof envelope>[]) => ({
+    async pullAll() { return records; },
     async push() {},
     async delete() {},
-  };
-
-  const document = CultMesh.documentFromStore(store, noteDocument, {
-    documentId: "note:foreign.store",
   });
+  const foreign = envelope("runtime.generated.cultmesh.note.ui.42", { noteId: "note:store", body: "foreign id, local shape" });
 
-  assert.deepEqual(await document.latest(), {
-    noteId: "note:foreign",
-    body: "foreign schema id, local store shape",
+  await assert.rejects(
+    CultMesh.documentFromStore(storeOf(foreign), noteDocument).latest(),
+    /did not contain schema cultmesh\.note\.v0/,
+  );
+  await assert.rejects(
+    CultMesh.documentFromStore(storeOf(foreign), "cultmesh.note.v0").latest(),
+    /did not contain schema cultmesh\.note\.v0/,
+  );
+
+  const own = envelope("cultmesh.note.v0", { noteId: "note:store", body: "own id" });
+  assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), noteDocument).latest()).body, "own id");
+
+  const renamed = defineDocumentType({
+    type: "cultmesh.note-renamed",
+    schemaId: "cultmesh.note-renamed.v1",
+    compatibleSchemaIds: ["cultmesh.note.v0"],
+    schema: noteDocument.schema,
   });
+  assert.equal((await CultMesh.documentFromStore(storeOf(foreign, own), renamed).latest()).body, "own id");
+  await assert.rejects(CultMesh.documentFromStore(storeOf(foreign), renamed).latest(), /did not contain schema/);
 });
 
 test("CultMesh TS reactive documents submit predictions from explicit updates", async () => {
@@ -3169,21 +3155,22 @@ test("CultMesh TS syncs remote RUDP snapshots into a local node", async () => {
   }
 });
 
-test("CultMesh TS peer snapshot handles choose compatible foreign schema payloads", async () => {
+// A peer snapshot is read, and synced, only under the requested type's schema id. A record the peer holds at the key under
+// another id is another type's: it is not-found for this type, and syncing never writes it anywhere.
+test("CultMesh TS peer snapshots never take another type's record at the key", async () => {
   const connectionId = 0x10203049;
-  const node = await CultMesh.startNode(
+  const source = await CultMesh.startNode(
     join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-foreign-snapshot-")), "node.ccmp"),
-    {
-      documents: [incompatibleNoteDocument, foreignNoteDocument],
-    },
+    { documents: [incompatibleNoteDocument, foreignNoteDocument] },
   );
-  await node.put(incompatibleNoteDocument, "note:foreign", {
-    nope: "not the requested shape",
-  });
-  await node.put(foreignNoteDocument, "note:foreign", {
-    noteId: "note:foreign",
-    body: "foreign schema id, local shape",
-  });
+  await source.put(incompatibleNoteDocument, "note:b", { nope: "remote b" });
+  // Parses as a note: shape routing would store it as one.
+  await source.put(foreignNoteDocument, "note:c", { noteId: "note:c", body: "remote c, note-shaped" });
+  const target = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-rudp-foreign-target-")), "node.ccmp"),
+    { documents: [noteDocument, incompatibleNoteDocument] },
+  );
+  await target.put(incompatibleNoteDocument, "note:b", { nope: "local b" });
 
   const server = CultMesh.createRudpDocumentServer(
     "cultmesh-ts-rudp-foreign-snapshot-server",
@@ -3193,7 +3180,7 @@ test("CultMesh TS peer snapshot handles choose compatible foreign schema payload
         defineCultNetDocumentBinding({ definition: incompatibleNoteDocument }),
         defineCultNetDocumentBinding({ definition: foreignNoteDocument }),
       ]),
-      getCache: () => node.cache,
+      getCache: () => source.cache,
       bindHost: "127.0.0.1",
       bindPort: 0,
       resendDelayMs: 25,
@@ -3219,20 +3206,28 @@ test("CultMesh TS peer snapshot handles choose compatible foreign schema payload
       },
     );
 
-    const foreign = CultMesh.documentFromPeerSnapshot(
-      peer,
-      noteDocument,
-      "note:foreign",
-      {
-        documentId: "note:foreign.local",
-        timeoutMs: 1_000,
-      },
+    for (const key of ["note:b", "note:c"]) {
+      const notFound = new RegExp(`did not return cultmesh\\.note\\.v0 at ${key}`);
+      await assert.rejects(
+        CultMesh.documentFromPeerSnapshot(peer, noteDocument, key, { timeoutMs: 1_000 }).latest(),
+        notFound,
+      );
+      await assert.rejects(target.syncDocumentFromPeerSnapshot(peer, noteDocument, key, { timeoutMs: 1_000 }), notFound);
+      assert.equal(target.get(noteDocument, key), undefined, key);
+    }
+    // The failed sync of a note at "note:b" left the local record of the other type there untouched.
+    assert.deepEqual(target.getRequired(incompatibleNoteDocument, "note:b"), { nope: "local b" });
+    // HELD for the schema-naming fork: a handle named by a bare id string still takes the first record at the key, which
+    // is how Eve Electron reads the C# daemon's hash-stamped records.
+    assert.deepEqual(
+      await CultMesh.documentFromPeerSnapshot(peer, "cultmesh.note.v0", "note:c", { timeoutMs: 1_000 }).latest(),
+      { noteId: "note:c", body: "remote c, note-shaped" },
     );
-
-    assert.deepEqual(await foreign.latest(), {
-      noteId: "note:foreign",
-      body: "foreign schema id, local shape",
-    });
+    // Its own type's record under its own id still syncs.
+    assert.deepEqual(
+      await target.syncDocumentFromPeerSnapshot(peer, incompatibleNoteDocument, "note:b", { timeoutMs: 1_000 }),
+      { nope: "remote b" },
+    );
   } finally {
     peer?.close();
     server.close();

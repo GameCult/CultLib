@@ -5,6 +5,7 @@ import {
   CultCache,
   SchemaConflictError,
   SingleFileMessagePackBackingStore,
+  schemaIdentityOf,
   type AnyCultCacheDocumentDefinition,
   type CacheBackingStore,
   type CultCacheEnvelope,
@@ -2549,7 +2550,7 @@ export function cultMeshDocumentFromStore(
   const documentId = options.documentId ?? resolvedSchemaId;
   const read = async () => {
     const records = await store.pullAll();
-    const record = resolveCultMeshStoreDocumentRecord(records, schema, schemaOrDefinition);
+    const record = resolveCultMeshStoreDocumentRecord(records, schemaOrDefinition);
     if (!record) {
       throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
@@ -2673,16 +2674,7 @@ export function cultMeshDocumentFromPeerSnapshot(
           {
             timeoutMs: options.timeoutMs,
             messageIdPrefix: options.messageIdPrefix ?? documentId,
-            accepts: typeof schemaOrDefinition === "string"
-              ? undefined
-              : record => {
-                  try {
-                    schemaOrDefinition.schema.parse(decodeCultNetRawDocumentPayload(record));
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                },
+            firstRecordAtKey: typeof schemaOrDefinition === "string",
           },
         ),
       ),
@@ -4004,14 +3996,6 @@ export class CultMeshNode {
       {
         timeoutMs: options.timeoutMs,
         messageIdPrefix: options.messageIdPrefix ?? key,
-        accepts: record => {
-          try {
-            definition.schema.parse(decodeCultNetRawDocumentPayload(record));
-            return true;
-          } catch {
-            return false;
-          }
-        },
       },
     );
     await this.documents.applyRawDocumentPutMessage(this.cache, {
@@ -6170,12 +6154,8 @@ export class CultMesh {
 function cultMeshSchemaFromDefinition(
   definition: AnyCultCacheDocumentDefinition,
 ): CultMeshDocumentSchemaDescriptor {
-  return {
-    type: definition.type,
-    schemaId: definition.schemaId ?? definition.type,
-    schemaName: definition.schemaName,
-    schemaVersion: definition.schemaVersion,
-  };
+  const { schemaId, schemaName, schemaVersion } = schemaIdentityOf(definition);
+  return { type: definition.type, schemaId, schemaName, schemaVersion };
 }
 
 function normalizeCultMeshDocumentSchema(
@@ -6243,57 +6223,22 @@ function inferCultMeshSchemaName(schemaId: string | undefined): string | undefin
   return /^\d+$/.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
+// The record a store document reads: the one under the handle's schema id, else, for a definition, one under an id the
+// definition lists as compatible, as CultCache resolves it. A record under any other id is not this document, whatever
+// its payload parses as.
 function resolveCultMeshStoreDocumentRecord(
   records: readonly CultCacheEnvelope[],
-  schema: CultMeshDocumentSchemaDescriptor,
   schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
 ): CultCacheEnvelope | undefined {
-  const schemaId = schema.schemaId ?? schema.type;
-  return (
-    records.find(candidate => schemaId !== undefined && candidate.schemaId === schemaId) ??
-    records.find(candidate =>
-      cultMeshEnvelopeMatchesSchema(candidate, schema) &&
-      (typeof schemaOrDefinition === "string" ||
-        cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition))) ??
-    (typeof schemaOrDefinition === "string"
-      ? undefined
-      : records.find(candidate => cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition)))
-  );
+  const schemaIds = cultMeshAcceptedSchemaIds(schemaOrDefinition);
+  return records.find(candidate => candidate.schemaId === schemaIds[0])
+    ?? records.find(candidate => candidate.schemaId !== undefined && schemaIds.includes(candidate.schemaId));
 }
 
-function cultMeshEnvelopeMatchesSchema(
-  envelope: CultCacheEnvelope,
-  schema: CultMeshDocumentSchemaDescriptor,
-): boolean {
-  const entry = envelope.catalogEntry;
-  if (!entry) {
-    return false;
-  }
-  if (
-    schema.schemaId &&
-    (entry.schemaId === schema.schemaId ||
-      envelope.schemaId === schema.schemaId ||
-      entry.compatibleSchemaIds?.includes(schema.schemaId))
-  ) {
-    return true;
-  }
-  return Boolean(
-    schema.schemaName &&
-    entry.schemaName === schema.schemaName &&
-    (schema.schemaVersion ?? "") === (entry.schemaVersion ?? ""),
-  );
-}
-
-function cultMeshEnvelopeParsesAsDefinition(
-  envelope: CultCacheEnvelope,
-  definition: AnyCultCacheDocumentDefinition,
-): boolean {
-  try {
-    definition.schema.parse(decode(envelope.payload));
-    return true;
-  } catch {
-    return false;
-  }
+function cultMeshAcceptedSchemaIds(schemaOrDefinition: string | AnyCultCacheDocumentDefinition): readonly string[] {
+  return typeof schemaOrDefinition === "string"
+    ? [schemaOrDefinition]
+    : schemaIdentityOf(schemaOrDefinition).compatibleSchemaIds;
 }
 
 function cultMeshSchemaLabel(schema: CultMeshDocumentSchemaDescriptor): string {
@@ -6336,6 +6281,13 @@ function normalizeRudpDocumentPut(
   };
 }
 
+// The peer's record at the key under exactly this schema id. A record at the key under another id is another type's, and
+// is never taken in its place; none under this id is not-found.
+//
+// HELD (fork raised to Self, 2026-09-30): a handle named by a bare schema-id string still takes the first record at the
+// key when none carries that id. Eve Electron reads the C# Aetheria daemon this way: the daemon stamps SHA-256 schema ids
+// and the client asks by "gamecult.eve.provider_advertisement.v1", so only this fallback finds its records. It is removed
+// when the fork on how a TS reader names a C#-hosted schema is ruled. Definition handles and sync never take it.
 async function requestCultNetRawSnapshotDocument(
   peerOrProvider: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
   schemaId: string,
@@ -6343,7 +6295,7 @@ async function requestCultNetRawSnapshotDocument(
   options: {
     timeoutMs?: number;
     messageIdPrefix?: string;
-    accepts?: (document: CultNetRawDocumentRecord) => boolean;
+    firstRecordAtKey?: boolean;
   } = {},
 ): Promise<CultNetRawDocumentRecord> {
   const peer = await resolveCultNetPeer(peerOrProvider);
@@ -6352,11 +6304,9 @@ async function requestCultNetRawSnapshotDocument(
     messageId,
     timeoutMs: options.timeoutMs,
   });
-  const candidates = response.documents.filter(candidate => candidate.recordKey === recordKey);
-  const document =
-    candidates.find(candidate => candidate.schemaId === schemaId) ??
-    (options.accepts ? candidates.find(options.accepts) : undefined) ??
-    candidates[0];
+  const atKey = response.documents.filter(candidate => candidate.recordKey === recordKey);
+  const document = atKey.find(candidate => candidate.schemaId === schemaId)
+    ?? (options.firstRecordAtKey ? atKey[0] : undefined);
   if (!document) {
     throw new Error(`CultMesh peer snapshot did not return ${schemaId} at ${recordKey}.`);
   }
