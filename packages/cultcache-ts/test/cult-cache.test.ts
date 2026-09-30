@@ -1165,6 +1165,60 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
   }
 });
 
+// A schema renamed under a stable id: the record's schema id names its type, and the name its catalog entry now carries is metadata.
+// A reader that resolved the record by that name would not find its type, so every runtime that can hold the stable id opens it. The
+// C# reader is not among them: its schema ids are content hashes, which this file does not carry.
+test("CultCache v1 stores stay readable across TS, Rust and Python when a schema is renamed under a stable id", async () => {
+  await buildInteropPeers();
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-rename-interop-")), "renamed.msgpack");
+  const written = await writeTsInteropStore(file, "ts-before-rename");
+  await new SingleFileMessagePackBackingStore(file).push({
+    key: "note:ts-after-rename",
+    type: "cultcache.interop-note.renamed",
+    schemaId: interopNoteDocument.schemaId,
+    catalogEntry: {
+      schemaId: interopNoteDocument.schemaId!,
+      schemaName: "cultcache.interop-note.renamed",
+      schemaVersion: interopNoteDocument.schemaVersion!,
+      contentHash: "renamed",
+      canonicalSchemaJson: interopNoteDocument.canonicalSchemaJson!,
+      compatibleSchemaIds: [interopNoteDocument.schemaId!],
+      members: interopNoteDocument.members,
+    },
+    storedAt: new Date().toISOString(),
+    payload: encode([
+      written.schemaVersion,
+      "note:ts-after-rename",
+      "ts-after-rename",
+      "ts wrote a note under the renamed schema",
+      "The v1 store format is the contract.",
+      ["interop"],
+    ]),
+  });
+  const catalog = decode(await readFile(file)) as unknown[][];
+  assert.deepEqual((catalog[1] as unknown[][]).map((entry) => [entry[0], entry[1]]), [["cultcache.interop-note", "cultcache.interop-note.renamed"]]);
+
+  const readers = [
+    { name: "ts", read: async () => readTsInteropStore(file) },
+    { name: "rust", read: async () => runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot) },
+    {
+      name: "python",
+      read: async () =>
+        runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, {
+          PYTHONPATH: cultcachePySrc,
+        }),
+    },
+  ];
+  for (const reader of readers) {
+    const read = await reader.read();
+    assert.ok(
+      ["note:ts-before-rename", "note:ts-after-rename"].includes(read.documentId),
+      `${reader.name} opened the renamed store and read a note (${read.documentId})`,
+    );
+    assert.equal(read.body, "The v1 store format is the contract.");
+  }
+});
+
 test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary members", async () => {
   await buildInteropPeers();
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-deck-"));
@@ -1458,8 +1512,9 @@ test("an entry that owns an id is chosen over one that lists it, and an entry no
 
 test("entries of one tier that tie are taken in one fixed order, and a registered entry that lists an id is chosen over an arrived one", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-tie-"));
-  const one = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h1", ["tests.x"]));
-  const two = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.y"]));
+  // The content hash orders them against the order their compatible ids would give: h1 sorts first, its list sorts last.
+  const one = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x"]));
+  const two = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
   for (const [name, order] of [["12", [one, two]], ["21", [two, one]]] as const) {
     const file = join(dir, `${name}.msgpack`);
     await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
@@ -1478,6 +1533,85 @@ test("entries of one tier that tie are taken in one fixed order, and a registere
   );
   await new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.n", "tests.r", writerEntry("tests.r", "tests.n", "fresh", ["tests.r", "old"])));
   assert.deepEqual((await catalogOf(file)).map((entry) => entry[0]), ["tests.r"]);
+});
+
+// A registered entry that owns an id keeps it against an arrived entry that owns it too and lists the id another record sits under,
+// whichever of the two ids sorts first: the arrived entry's list is not merged in, so the record under the listed id is published by
+// no chosen entry.
+for (const [ownId, listedId] of [["tests.a", "tests.b"], ["tests.b", "tests.a"]] as const) {
+  test(`an arrived entry that owns a registered id does not replace it nor publish what it lists (${ownId})`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cultcache-guard-"));
+    const file = join(dir, "guard.msgpack");
+    await writeFile(
+      file,
+      encode([
+        "cultcache.store.v1",
+        [rawCatalogEntry(writerEntry(ownId, "tests.arrived", "stale", [ownId, listedId]))],
+        [["k2", listedId, "2026-09-30T00:00:00.0000000Z", encode({ k: 2 })]],
+      ]),
+    );
+    const before = await readFile(file);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).push(writerRecord("k1", "tests.registered", ownId, writerEntry(ownId, "tests.registered", "fresh", [ownId]))),
+      (error) => error instanceof SchemaConflictError && error.schemaId === listedId && error.recordKey === "k2",
+    );
+    assert.ok(before.equals(await readFile(file)), "the file is left as it was");
+  });
+}
+
+// Ids are taken in sorted order, so which entry survives, and so which id the refusal names, does not depend on the order the records
+// arrive in.
+test("the refusal names the same id whatever order the records arrive in", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-sorted-"));
+  const one = writerRecord("r1", "tests.n", "tests.y", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
+  const two = writerRecord("r2", "tests.n", "tests.z", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.z"]));
+  for (const [name, order] of [["yz", [one, two]], ["zy", [two, one]]] as const) {
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(join(dir, `${name}.msgpack`)).pushAll([...order]),
+      (error) => error instanceof SchemaConflictError && error.schemaId === "tests.y" && error.recordKey === "r1",
+      name,
+    );
+  }
+});
+
+// A write may not retype records already in the file: across tiers the id keeps the type its records resolve to, unless the entries of
+// both tiers own it, which is a rename under a stable id and the registered descriptor wins.
+test("a write that would change the type an existing record resolves to refuses, typed, and leaves the file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-cross-tier-"));
+  const at = "2026-09-30T00:00:00.0000000Z";
+  const cases = [
+    {
+      name: "registered entry lists the id, arrived entry owns it",
+      catalog: writerEntry("tests.x", "tests.arrived", "h1", ["tests.x"]),
+      registered: writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.r", "tests.registered", "h2", ["tests.r", "tests.x"])),
+    },
+    {
+      name: "registered entry owns the id, arrived entry lists it",
+      catalog: writerEntry("tests.r", "tests.arrived", "h1", ["tests.r", "tests.x"]),
+      registered: writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.x", "tests.registered", "h2", ["tests.x"])),
+    },
+  ];
+  for (const { name, catalog, registered } of cases) {
+    const file = join(dir, `${name}.msgpack`);
+    await writeFile(file, encode(["cultcache.store.v1", [rawCatalogEntry(catalog)], [["z", "tests.x", at, encode({ z: 1 })]]]));
+    const before = await readFile(file);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).push(registered),
+      (error) =>
+        error instanceof SchemaConflictError &&
+        error.schemaId === "tests.x" &&
+        [...error.schemaNames].sort().join() === "tests.arrived,tests.registered",
+      name,
+    );
+    assert.ok(before.equals(await readFile(file)), `${name}: the file is left as it was`);
+  }
+
+  // The same registered record renames the schema when both tiers own the id: it writes, and the reader finds every record.
+  const file = join(dir, "rename.msgpack");
+  await writeFile(file, encode(["cultcache.store.v1", [rawCatalogEntry(writerEntry("tests.x", "tests.arrived", "h1", ["tests.x"]))], [["z", "tests.x", at, encode({ z: 1 })]]]));
+  await new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.registered", "tests.x", writerEntry("tests.x", "tests.registered", "h2", ["tests.x"])));
+  assert.deepEqual((await catalogOf(file)).map((entry) => [entry[0], entry[1]]), [["tests.x", "tests.registered"]]);
+  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2);
 });
 
 test("a record no chosen entry publishes refuses the write, typed, and leaves the file", async () => {
