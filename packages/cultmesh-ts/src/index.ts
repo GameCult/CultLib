@@ -14,6 +14,7 @@ import {
   CultNetRudpSession,
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
+  rudpClientBindHost,
   CultNetSchemaCatalog,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
@@ -21,7 +22,9 @@ import {
   defineCultNetDocumentBinding,
   encodeCultNetMessageForWire,
   encodeRudpPacket,
+  isPermanentSendError,
   parseCultNetMessage,
+  sendRudpDatagram,
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
   type CultNetMessage,
@@ -4303,7 +4306,7 @@ export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDoc
  *
  * A reply that cannot be sent all the same, such as a receipt larger than
  * `maxPayloadBytes`, reaches `onError`, and the peer receives a
- * `cultnet.error.v0` in its place. Every failed datagram send reaches `onError`.
+ * `cultnet.error.v0` in its place.
  */
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
@@ -4364,6 +4367,12 @@ export interface CultMeshRudpServerSession {
 
 export interface CultMeshRudpDocumentServer {
   readonly bind: { host: string; port: number };
+  /**
+   * Datagrams that could not be sent to a peer. Each is that peer's lost datagram: a
+   * reliable packet stays pending and is resent, and no other peer is affected. A datagram
+   * that can never be sent as built is not counted here: it ends that peer's session.
+   */
+  readonly sendFailures: number;
   start(): Promise<void>;
   close(): void;
 }
@@ -4388,6 +4397,11 @@ export interface CultMeshRudpEndpoint {
 }
 
 export interface CultMeshRudpSocketOptions {
+  /**
+   * Local address to bind. Unset, a server binds loopback, and a client binds
+   * loopback for a loopback endpoint and the unspecified address of the
+   * endpoint's family otherwise, so it can reach a remote host.
+   */
   bindHost?: string;
   bindPort?: number;
   socket?: Socket;
@@ -5819,15 +5833,19 @@ export class CultMesh {
     const port = options.bindPort ?? 0;
     const bind = { host, port };
     const socket = options.socket ?? createSocket(host.includes(":") ? "udp6" : "udp4");
-    const sessions = new Map<string, {
+    type SessionRecord = {
       sessionId: string;
       remote: { address: string; family: string; port: number };
       session: CultNetRudpSession;
       connectPayload: Uint8Array;
       closed: boolean;
+      /** A packet it owed could never be sent, so the session ended. */
+      unsendable: boolean;
       work: Promise<void>;
-    }>();
+    };
+    const sessions = new Map<string, SessionRecord>();
     let sessionSequence = 0;
+    let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
@@ -5863,15 +5881,15 @@ export class CultMesh {
         if (packet.packetType === "connect") {
           const connectPayload = Uint8Array.from(packet.payload ?? []);
           if (record?.session.connectRepeats(packet)) {
-            sendPacket(record.session.acceptConnect(packet, nowMs), remote);
+            sendPacket(record, record.session.acceptConnect(packet, nowMs));
             return;
           }
-          if (record) closeSession(record);
-          record = {
+          const next: SessionRecord = {
             sessionId: `${runtimeId}:${++sessionSequence}`,
             remote: { address: remote.address, family: remote.family, port: remote.port },
             connectPayload,
             closed: false,
+            unsendable: false,
             session: new CultNetRudpSession({
               connectionId,
               initialSequence: options.initialSequence,
@@ -5880,8 +5898,12 @@ export class CultMesh {
             }),
             work: Promise.resolve(),
           };
-          sessions.set(key, record);
-          sendPacket(record.session.acceptConnect(packet, nowMs), remote);
+          sendPacket(next, next.session.acceptConnect(packet, nowMs));
+          // A peer whose Accept can never be sent cannot be answered: no session
+          // starts, and one already there is left as it was.
+          if (next.unsendable) return;
+          if (record) closeSession(record);
+          sessions.set(key, next);
           return;
         }
 
@@ -5889,12 +5911,22 @@ export class CultMesh {
           return;
         }
 
-        const result = record.session.receive(packet, nowMs);
+        let result: ReturnType<CultNetRudpSession["receive"]>;
+        try {
+          result = record.session.receive(packet, nowMs);
+        } catch {
+          // receive() has already recorded the packet's reliable sequence, so the
+          // session cannot be kept: a retransmit would be acknowledged and the frame
+          // silently lost. It ends, never the server, and the peer is told. What a
+          // datagram carries is the sender's business, so nothing is reported.
+          endRefusedSession(key, record);
+          return;
+        }
         if (result.reply) {
-          sendPacket(result.reply, record.remote);
+          sendPacket(record, result.reply);
         }
         for (const ready of result.readyToSend ?? []) {
-          sendPacket(ready, record.remote);
+          sendPacket(record, ready);
         }
         for (const frame of result.delivered) {
           if (frame.channelId !== "schema") {
@@ -5910,7 +5942,7 @@ export class CultMesh {
           return;
         }
         if (packet.reliable) {
-          sendPacket(record.session.createAckForReceived(packet.sequence), record.remote);
+          sendPacket(record, record.session.createAckForReceived(packet.sequence));
         }
       } catch (error) {
         reportError(error);
@@ -5919,7 +5951,7 @@ export class CultMesh {
     socket.on("error", reportError);
 
     async function handleDocumentServerFrame(
-      record: { sessionId: string; remote: { address: string; family: string; port: number }; session: CultNetRudpSession; connectPayload: Uint8Array; closed: boolean },
+      record: SessionRecord,
       payload: Uint8Array,
     ): Promise<void> {
       if (record.closed) return;
@@ -5938,10 +5970,12 @@ export class CultMesh {
             sendSchemaMessage(record, options.documents.createRawSnapshotResponse(cache, message.messageId, message));
           } catch (error) {
             reportError(error);
+            // Unreliable and unordered: when the reply could not be queued, the answer must not
+            // need room in the queue that just refused it.
             sendSchemaMessage(record, {
               schemaVersion: "cultnet.error.v0",
               error: error instanceof Error ? error.message : String(error),
-            });
+            }, { reliable: false });
           }
           return;
         }
@@ -5989,13 +6023,7 @@ export class CultMesh {
       }
     }
 
-    function publicSession(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): CultMeshRudpServerSession {
+    function publicSession(record: SessionRecord): CultMeshRudpServerSession {
       return {
         sessionId: record.sessionId,
         remote: { ...record.remote },
@@ -6007,32 +6035,60 @@ export class CultMesh {
       };
     }
 
-    function notifySessionClosed(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): void {
+    function notifySessionClosed(record: SessionRecord): void {
       if (!options.onSessionClosed) return;
       void Promise.resolve(options.onSessionClosed(publicSession(record))).catch(reportError);
     }
 
-    function closeSession(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): void {
+    function closeSession(record: SessionRecord): void {
       if (record.closed) return;
       record.closed = true;
       notifySessionClosed(record);
     }
 
+    /**
+     * Sends one packet to a session's peer. A failure is that peer's alone: one that may
+     * pass (no route, full buffers) is a lost datagram, counted, and resent if it was
+     * reliable; one that can never pass as built ends that peer's session. Neither ends
+     * the server, a timer or another peer's session.
+     */
+    function sendPacket(record: SessionRecord, packet: CultNetRudpPacket): void {
+      sendRudpDatagram(socket, encodeRudpPacket(packet), record.remote.port, record.remote.address, (error) => {
+        if (isPermanentSendError(error)) {
+          endUnsendableSession(record, error);
+        } else {
+          sendFailures += 1;
+        }
+      });
+    }
+
+    function endRefusedSession(key: string, record: SessionRecord): void {
+      sessions.delete(key);
+      closeSession(record);
+      // The goodbye is built after the reset, or its ack field would acknowledge the
+      // very frame the session refused.
+      record.session.resetPeerState();
+      const goodbye = encodeRudpPacket(record.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+      sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
+    }
+
+    /** The session owes its peer a packet that can never be sent as built. */
+    function endUnsendableSession(record: SessionRecord, error: Error): void {
+      if (record.unsendable) return;
+      record.unsendable = true;
+      const key = `${record.remote.address}:${record.remote.port}`;
+      // A session that never started, or was already replaced, has nothing to end.
+      if (sessions.get(key) !== record) return;
+      sessions.delete(key);
+      closeSession(record);
+      const goodbye = encodeRudpPacket(record.session.endUnsendableSession(error));
+      sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
+    }
+
     function sendSchemaMessage(
-      record: { sessionId: string; remote: { address: string; port: number }; session: CultNetRudpSession; closed: boolean },
+      record: SessionRecord,
       message: CultNetMessage,
+      { reliable = true }: { reliable?: boolean } = {},
     ): void {
       if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
       const payload = encodeSchemaMessage(message);
@@ -6043,25 +6099,18 @@ export class CultMesh {
         );
       }
       for (const packet of record.session.sendMany("schema", payload, {
-        reliable: true,
-        ordered: true,
+        reliable,
+        ordered: reliable,
         nowMs: Date.now(),
         maxFragmentBytes,
       })) {
-        sendPacket(packet, record.remote);
+        sendPacket(record, packet);
       }
     }
 
     /** The one reply encoder, shared by sends and by put admission. */
     function encodeSchemaMessage(message: CultNetMessage): Uint8Array {
       return encode(encodeCultNetMessageForWire(message, wireContract));
-    }
-
-    /** A datagram that fails to leave reaches onError; nothing vanishes. */
-    function sendPacket(packet: CultNetRudpPacket, remote: { address: string; port: number }): void {
-      socket.send(encodeRudpPacket(packet), remote.port, remote.address, (error) => {
-        if (error) reportError(error);
-      });
     }
 
     /** Builds the receipt `onDocumentPutRaw` returned, under the put's message id by default. */
@@ -6115,6 +6164,9 @@ export class CultMesh {
 
     return {
       bind,
+      get sendFailures() {
+        return sendFailures;
+      },
       async start(): Promise<void> {
         await new Promise<void>((resolve, reject) => {
           socket.once("error", reject);
@@ -6136,7 +6188,7 @@ export class CultMesh {
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
-              sendPacket(packet, record.remote);
+              sendPacket(record, packet);
             }
           }
         }, resendPollMs);
@@ -6272,7 +6324,7 @@ export class CultMesh {
     options: CultMeshRudpSocketOptions = {},
   ): Promise<CultNetRudpSocketTransportConnection> {
     requireNonEmpty(runtimeId, "runtimeId");
-    const socket = options.socket ?? (await bindRudpSocket(options));
+    const socket = options.socket ?? (await bindRudpSocket(options.bindHost ?? "127.0.0.1", options));
     return new CultNetRudpSocketTransportConnection({
       runtimeId,
       socket,
@@ -6298,7 +6350,10 @@ export class CultMesh {
     requireNonEmpty(runtimeId, "runtimeId");
     const parsedEndpoint =
       typeof endpoint === "string" ? CultMesh.parseRudpEndpoint(endpoint) : endpoint;
-    const socket = options.socket ?? (await bindRudpSocket(options));
+    const socket = options.socket ?? (await bindRudpSocket(
+      options.bindHost ?? (await rudpClientBindHost(parsedEndpoint.host)),
+      options,
+    ));
     return new CultNetRudpSocketTransportConnection({
       runtimeId,
       socket,
@@ -6723,9 +6778,8 @@ function toUint8Array(value: unknown): Uint8Array {
   throw new Error("CultNet raw document payload was not binary.");
 }
 
-async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socket> {
-  const socket = createSocket("udp4");
-  const host = options.bindHost ?? "127.0.0.1";
+async function bindRudpSocket(host: string, options: CultMeshRudpSocketOptions): Promise<Socket> {
+  const socket = createSocket(host.includes(":") ? "udp6" : "udp4");
   const port = options.bindPort ?? 0;
   await new Promise<void>((resolve, reject) => {
     socket.once("error", reject);

@@ -796,8 +796,11 @@ namespace GameCult.Networking.Tests
                 serverThread.Join();
             }
 
-            Assert.That(logger.Errors, Has.Some.Contains("dispatch-backstop-probe"),
-                "the backstop must log the handler's own exception message, not swallow it silently");
+            // The log names the fault's type. The fault's own message can quote what the peer sent,
+            // so it is never logged.
+            Assert.That(logger.Errors, Has.Some.Contains(nameof(InvalidOperationException)),
+                "the backstop must log the handler's fault, not swallow it silently");
+            Assert.That(logger.Errors, Has.None.Contains("dispatch-backstop-probe"));
         }
 
         private sealed class CapturingLogger : ILogger

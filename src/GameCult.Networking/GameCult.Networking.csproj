@@ -16,6 +16,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="GameCult.Networking.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <EmbeddedResource Include="..\..\contracts\cultnet\*.schema.json" LogicalName="GameCult.Networking.Contracts.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

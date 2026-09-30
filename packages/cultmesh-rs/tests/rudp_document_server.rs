@@ -1492,3 +1492,53 @@ fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
     assert!(disconnected, "the refusal is followed by a goodbye");
     Ok(())
 }
+
+/// A snapshot the reliable queue cannot take is answered with a refusal, not
+/// left to time out: the refusal needs no room in that queue.
+#[test]
+fn a_snapshot_the_queue_cannot_take_is_answered() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 100,
+        max_pending_reliable_packets_per_session: 8,
+        max_snapshot_response_bytes: 8192,
+        ..Default::default()
+    };
+    // Each document alone is served in 800 bytes, eight fragments; both need sixteen.
+    let source = Source::documents(vec![
+        document_served_at("q1", 800)?,
+        document_served_at("q2", 800)?,
+    ]);
+    let mut server = server(options, Clock::new(72_000), Sink::default(), source)?;
+    let mut client = client(server.local_addr()?, 151)?;
+    connect(&mut server, &mut [&mut client])?;
+    let receipt = send_reliable(
+        &mut client,
+        &CultNetMessage::SnapshotRequest {
+            message_id: "both".into(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    let mut rejection = None;
+    for _ in 0..100 {
+        if let CultMeshRudpPollOutcome::ApplicationRejected(found) = server.poll_once()? {
+            rejection = Some(found);
+            break;
+        }
+        client.receive_once()?;
+    }
+    let rejection = rejection.expect("the response cannot be queued");
+    assert!(
+        matches!(
+            rejection.reason,
+            CultMeshRudpRejectionReason::ResponseQueueFailed(_)
+        ),
+        "{:?}",
+        rejection.reason
+    );
+    assert_eq!(
+        refusal_seen_by(&mut client, &receipt)?,
+        "the snapshot response could not be queued"
+    );
+    Ok(())
+}

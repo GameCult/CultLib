@@ -18,6 +18,7 @@ from cultnet_py import (
     CultNetShardCatalog,
     CultNetSimulationObservationHub,
     create_rudp_schema_transport,
+    rudp_client_bind_host,
     wire_message_schema_catalog,
 )
 
@@ -188,7 +189,7 @@ class CultMesh:
         connection_id: int,
         endpoint: str | CultMeshRudpEndpoint,
         *,
-        bind_host: str = "127.0.0.1",
+        bind_host: str | None = None,
         bind_port: int = 0,
         socket: socket_module.socket | None = None,
         initial_sequence: int | None = None,
@@ -204,7 +205,10 @@ class CultMesh:
             if isinstance(endpoint, str)
             else endpoint
         )
-        transport_socket = socket or _bind_rudp_socket(bind_host, bind_port)
+        transport_socket = socket or _bind_rudp_socket(
+            bind_host if bind_host is not None else rudp_client_bind_host(parsed_endpoint.host),
+            bind_port,
+        )
         return CultNetRudpSocketTransportConnection(
             CultNetRudpSocketTransportOptions(
                 runtime_id=runtime_id,
@@ -433,7 +437,7 @@ class CultMesh:
         endpoint: str | CultMeshRudpEndpoint | None = None,
         connection_id: int = 0x43554C54,
         runtime_id: str = "cultmesh-python-rudp-client",
-        bind_host: str = "127.0.0.1",
+        bind_host: str | None = None,
         bind_port: int = 0,
     ) -> CultNetRawClient:
         if endpoint is None and host.lower().startswith("rudp://"):
@@ -469,7 +473,7 @@ class CultMesh:
         endpoint: str | CultMeshRudpEndpoint | None = None,
         connection_id: int = 0x43554C54,
         runtime_id: str = "cultmesh-python-rudp-client",
-        bind_host: str = "127.0.0.1",
+        bind_host: str | None = None,
         bind_port: int = 0,
     ) -> CultNetRawClient:
         return CultMesh.create_client(
@@ -485,7 +489,10 @@ class CultMesh:
 
 
 def _bind_rudp_socket(bind_host: str, bind_port: int) -> socket_module.socket:
-    transport_socket = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+    transport_socket = socket_module.socket(
+        socket_module.AF_INET6 if ":" in bind_host else socket_module.AF_INET,
+        socket_module.SOCK_DGRAM,
+    )
     transport_socket.bind((bind_host, bind_port))
     transport_socket.settimeout(0.02)
     return transport_socket

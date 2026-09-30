@@ -2550,6 +2550,44 @@ test("CultMesh TS branded facade exposes schema and shard catalogs", () => {
   );
 });
 
+async function rudpClientBoundHost(endpoint: string, bindHost?: string): Promise<string | undefined> {
+  const client = await CultMesh.createRudpClient("cultmesh-ts-bind-client", 0x10203060, endpoint, { bindHost });
+  try {
+    return client.profile.transports[0]?.host;
+  } finally {
+    client.close();
+  }
+}
+
+// A client bound to loopback cannot send to another host on Windows, so a
+// client for a remote endpoint binds the unspecified address of its family.
+test("CultMesh TS RUDP client for a remote endpoint binds the unspecified address", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://10.77.0.1:17872"), "0.0.0.0");
+  assert.equal(await rudpClientBoundHost("rudp://[2001:db8::1]:17872"), "::");
+});
+
+test("CultMesh TS RUDP client for a loopback endpoint binds loopback", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://127.0.0.1:17872"), "127.0.0.1");
+  assert.equal(await rudpClientBoundHost("rudp://[::1]:17872"), "::1");
+});
+
+test("CultMesh TS RUDP client binds an explicit bindHost whatever the endpoint", async () => {
+  assert.equal(await rudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1"), "127.0.0.1");
+  assert.equal(await rudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0"), "0.0.0.0");
+});
+
+test("CultMesh TS RUDP server binds loopback unless told otherwise", async () => {
+  const loopback = await CultMesh.createRudpServer("cultmesh-ts-bind-server", 0x10203061);
+  const any = await CultMesh.createRudpServer("cultmesh-ts-bind-server", 0x10203062, { bindHost: "0.0.0.0" });
+  try {
+    assert.equal(loopback.profile.transports[0]?.host, "127.0.0.1");
+    assert.equal(any.profile.transports[0]?.host, "0.0.0.0");
+  } finally {
+    loopback.close();
+    any.close();
+  }
+});
+
 test("CultMesh TS branded facade creates RUDP clients from peer endpoints", async () => {
   const connectionId = 0x10203044;
   const server = await CultMesh.createRudpServer(
@@ -3456,6 +3494,24 @@ test("CultMesh TS RUDP document server refuses a put whose reply would overflow 
   });
 });
 
+test("CultMesh TS RUDP document server answers a snapshot its reliable queue cannot take", async () => {
+  // Two documents each served in exactly the eight fragments the queue holds are admitted; a
+  // snapshot of both needs sixteen and cannot be queued. The peer is answered with a
+  // cultnet.error.v0, not left to time out, and onError hears why.
+  const atBound = bodyLengthForReplyBytes("note:q1", 8 * 1024);
+  await withServedBoundRig(0x10203068, { maxFragmentBytes: 1024, maxPendingReliablePackets: 8 }, async (rig) => {
+    rig.peer.send(notePut("put-q1", "note:q1", atBound));
+    rig.peer.send(notePut("put-q2", "note:q2", atBound));
+    await waitForAdmission(rig, "note:q1");
+    await waitForAdmission(rig, "note:q2");
+    assert.deepEqual(rig.errors, []);
+    rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "both", recordKeys: ["note:q1", "note:q2"] });
+    await waitForPeerErrors(rig, 1);
+    assert.equal(rig.errors.length, 1);
+    assert.ok(!rig.messages.some((message) => message.schemaVersion === "cultnet.snapshot_response_raw.v0"));
+  });
+});
+
 test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and judges puts by what it would serve", async () => {
   const limit = 4_000;
   const atBound = bodyLengthForReplyBytes("note:at", limit);
@@ -3575,17 +3631,6 @@ async function waitForPeerErrors(rig: ServedBoundRig, count: number): Promise<vo
   while (errors() < count && Date.now() - startedAt < 3_000) await delay(5);
   assert.equal(errors(), count, `peer errors: ${rig.unparsed.map((error) => error.message).join("; ")}`);
 }
-
-test("CultMesh TS RUDP document server reports a datagram that fails to leave", async () => {
-  // Fragments larger than any UDP datagram: the reply's one packet cannot be sent.
-  await withServedBoundRig(0x10203063, { maxFragmentBytes: 100_000, maxPendingReliablePackets: 512 }, async (rig) => {
-    rig.peer.send(notePut("put-large", "note:large", 80_000));
-    await waitForAdmission(rig, "note:large");
-    rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "0", recordKeys: ["note:large"] });
-    const failure = await waitForError(rig, "the oversized datagram");
-    assert.match(failure.message, /EMSGSIZE|message too long/i);
-  });
-});
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
