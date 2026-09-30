@@ -5319,6 +5319,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
         assert!(io_error_in(&error).is_some(), "{error:#}");
+        assert!(error.to_string().contains(&format!("{} was not replaced", path.display())), "{error}");
         assert_eq!(fs::read(&path)?, before);
         assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain");
 
@@ -5346,6 +5347,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::ReplacedNotDurable), "{error:#}");
+        assert!(error.to_string().contains(&format!("{} was replaced, but the replacement is not yet durable", path.display())), "{error}");
         assert!(io_error_in(&error).is_some(), "{error:#}");
         assert_eq!(store.pull_all()?, replacement);
         Ok(())
