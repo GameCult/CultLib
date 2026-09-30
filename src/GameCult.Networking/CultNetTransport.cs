@@ -1460,6 +1460,53 @@ namespace GameCult.Networking
         }
 
         /// <summary>
+        /// Whether a failed send can never succeed for the datagram as built, so resending it is
+        /// pointless: it is too large for a datagram (EMSGSIZE, WSAEMSGSIZE), its address is
+        /// malformed for the socket (EINVAL, WSAEINVAL), or belongs to another address family
+        /// (EAFNOSUPPORT, WSAEAFNOSUPPORT). Everything else (no route, full buffers, firewall drops,
+        /// a refusal reported for an earlier datagram, an interrupted call) is a property of the path
+        /// or the moment and may pass, so it is a lost datagram, not a reason to end a session.
+        /// </summary>
+        internal static bool IsPermanentSendError(SocketException error) =>
+            error.SocketErrorCode == SocketError.MessageSize ||
+            error.SocketErrorCode == SocketError.InvalidArgument ||
+            error.SocketErrorCode == SocketError.AddressFamilyNotSupported;
+
+        internal const string UnsendablePacketReason = "packet could not be sent";
+
+        /// <summary>
+        /// Ends a session that owes its peer a packet that can never be sent as built. Resending it
+        /// would fail forever, and dropping it would leave a reliable sequence the peer waits on for
+        /// good, so the session cannot be kept. The goodbye's reason names the error.
+        /// </summary>
+        internal CultNetRudpPacket EndUnsendable(SocketException error)
+        {
+            ResetPeerState();
+            return CreateDisconnect(Encoding.UTF8.GetBytes(UnsendablePacketReason + ": " + error.Message));
+        }
+
+        internal uint NextSequence => _nextSequence;
+
+        /// <summary>
+        /// Undoes a send that never reached the wire: every packet it created at or after
+        /// <paramref name="firstSequence"/>, pending or queued, leaves no trace and its sequences are
+        /// reissued, so the peer never sees a gap. Only valid while nothing else has been sent since.
+        /// </summary>
+        internal void WithdrawSend(uint firstSequence)
+        {
+            lock (_pendingReliableGate)
+            {
+                foreach (var sequence in _pendingReliable.Keys.Where(sequence => sequence >= firstSequence).ToArray())
+                    _pendingReliable.Remove(sequence);
+                var kept = _queuedReliable.Where(packet => packet.Sequence < firstSequence).ToArray();
+                _queuedReliable.Clear();
+                foreach (var packet in kept)
+                    _queuedReliable.Enqueue(packet);
+            }
+            _nextSequence = firstSequence;
+        }
+
+        /// <summary>
         /// Creates a packet carrying a transport-level disconnect reason.
         /// </summary>
         public CultNetRudpPacket CreateDisconnect(byte[]? reason = null)
@@ -2733,8 +2780,25 @@ namespace GameCult.Networking
         public void Send(CultNetRudpSocketServerPeer peer, string channelId, byte[] payload)
         {
             if (peer == null) throw new ArgumentNullException(nameof(peer));
+            SocketException? unsendable = null;
+            var failedIndex = 0;
             lock (peer.SessionGate)
-                SendPackets(peer, peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes));
+            {
+                var firstSequence = peer.Session.NextSequence;
+                var packets = peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes);
+                unsendable = SendPackets(peer, packets, out failedIndex);
+                // A caller-directed send that can never succeed is the caller's error and queues
+                // nothing. Only when earlier fragments are already on the wire has the peer seen
+                // part of it, and then the session cannot be kept.
+                if (unsendable != null && failedIndex == 0)
+                    peer.Session.WithdrawSend(firstSequence);
+            }
+            if (unsendable != null)
+            {
+                if (failedIndex > 0)
+                    EndUnsendablePeer(peer, unsendable);
+                throw unsendable;
+            }
             _stats.FramesSent++;
         }
 
@@ -2844,10 +2908,13 @@ namespace GameCult.Networking
                 // a new generation.
                 if (admitted != null)
                 {
+                    var repeats = false;
+                    SocketException? unsendableReply = null;
                     lock (admitted.SessionGate)
                     {
                         if (admitted.Session.ConnectRepeats(packet))
                         {
+                            repeats = true;
                             CultNetRudpPacket reply;
                             try
                             {
@@ -2858,9 +2925,14 @@ namespace GameCult.Networking
                                 _stats.PacketsDropped++;
                                 return true;
                             }
-                            SendPacket(admitted.RemoteEndPoint, reply);
-                            return true;
+                            unsendableReply = SendPacket(admitted.RemoteEndPoint, reply);
                         }
+                    }
+                    if (repeats)
+                    {
+                        if (unsendableReply != null)
+                            EndUnsendablePeer(admitted, unsendableReply);
+                        return true;
                     }
                 }
 
@@ -2874,9 +2946,16 @@ namespace GameCult.Networking
                         ResendDelayMs = _resendDelayMs,
                         MaxPendingReliablePackets = _maxPendingReliablePackets
                     }));
-                _peers[peerKey] = peer;
+                SocketException? unsendableAccept;
                 lock (peer.SessionGate)
-                    SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
+                    unsendableAccept = SendPacket(peer.RemoteEndPoint, peer.Session.AcceptConnect(packet, NowMs(), _acceptPayload));
+                if (unsendableAccept != null)
+                {
+                    // The peer cannot be answered, so no session starts.
+                    _stats.PacketsDropped++;
+                    return true;
+                }
+                _peers[peerKey] = peer;
                 if (admitted != null)
                 {
                     admitted.DisconnectReason = ReplacedPeerReason;
@@ -2893,6 +2972,7 @@ namespace GameCult.Networking
 
             CultNetRudpReceiveResult? outcome;
             CultNetRudpPacket? acknowledgement = null;
+            SocketException? unsendable = null;
             lock (existingPeer.SessionGate)
             {
                 try
@@ -2915,8 +2995,8 @@ namespace GameCult.Networking
                 else
                 {
                     if (outcome.Reply != null)
-                        SendPacket(existingPeer.RemoteEndPoint, outcome.Reply);
-                    SendPackets(existingPeer, outcome.ReadyToSend);
+                        unsendable = SendPacket(existingPeer.RemoteEndPoint, outcome.Reply);
+                    unsendable ??= SendPackets(existingPeer, outcome.ReadyToSend, out _);
                     if (packet.PacketType == CultNetRudpPacketType.Data)
                         acknowledgement = existingPeer.Session.CreateAckForReceived(packet.Sequence);
                 }
@@ -2953,8 +3033,10 @@ namespace GameCult.Networking
             }
 
             delivered = _deliveredFrames.Count > 0 ? _deliveredFrames.Dequeue() : null;
-            if (acknowledgement != null)
-                SendPacket(existingPeer.RemoteEndPoint, acknowledgement);
+            if (acknowledgement != null && unsendable == null)
+                unsendable = SendPacket(existingPeer.RemoteEndPoint, acknowledgement);
+            if (unsendable != null)
+                EndUnsendablePeer(existingPeer, unsendable);
 
             return true;
         }
@@ -2968,19 +3050,48 @@ namespace GameCult.Networking
                 return;
             foreach (var peer in _peers.Values.ToArray())
             {
+                SocketException? unsendable;
                 lock (peer.SessionGate)
-                    SendPackets(peer, peer.Session.DueResends(NowMs()));
+                    unsendable = SendPackets(peer, peer.Session.DueResends(NowMs()), out _);
+                if (unsendable != null)
+                    EndUnsendablePeer(peer, unsendable);
             }
         }
 
-        private void SendPackets(CultNetRudpSocketServerPeer peer, IReadOnlyList<CultNetRudpPacket> packets)
+        // Stops at the first packet that can never be sent as built and returns its error and
+        // index; a transient failure is a lost datagram and the loop goes on.
+        private SocketException? SendPackets(CultNetRudpSocketServerPeer peer, IReadOnlyList<CultNetRudpPacket> packets, out int failedIndex)
         {
+            failedIndex = 0;
             for (var index = 0; index < packets.Count; index++)
             {
-                SendPacket(peer.RemoteEndPoint, packets[index]);
+                var unsendable = SendPacket(peer.RemoteEndPoint, packets[index]);
+                if (unsendable != null)
+                {
+                    failedIndex = index;
+                    return unsendable;
+                }
                 if ((index + 1) % WireBurstPackets == 0 && index + 1 < packets.Count)
                     Thread.Yield();
             }
+            return null;
+        }
+
+        // An admitted peer owes a packet that can never be sent as built. Inside a poll that ends the
+        // peer's session, never the poll: the peer is told, and PeerDisconnected carries a reason that
+        // names the error.
+        private void EndUnsendablePeer(CultNetRudpSocketServerPeer peer, SocketException error)
+        {
+            var key = RemoteKey(peer.RemoteEndPoint);
+            if (!_peers.TryGetValue(key, out var current) || !ReferenceEquals(current, peer))
+                return;
+            _peers.Remove(key);
+            CultNetRudpPacket goodbye;
+            lock (peer.SessionGate)
+                goodbye = peer.Session.EndUnsendable(error);
+            peer.DisconnectReason = goodbye.Payload;
+            SendPacket(peer.RemoteEndPoint, goodbye);
+            PeerDisconnected?.Invoke(peer);
         }
 
         /// <inheritdoc />
@@ -2995,29 +3106,50 @@ namespace GameCult.Networking
             _socket.Dispose();
         }
 
-        // A failed send is that peer's lost datagram: counted, never thrown. A reliable packet
-        // stays pending and is resent; an unreliable one was allowed to be lost. The peer's
-        // session ends by the rules that already end sessions. Only an encode failure, the
-        // listener's own bug, throws.
-        private void SendPacket(EndPoint remoteEndPoint, CultNetRudpPacket packet)
+        // A transient send failure is that peer's lost datagram: counted, never thrown. A reliable
+        // packet stays pending and is resent; an unreliable one was allowed to be lost. A permanent
+        // failure (CultNetRudpSession.IsPermanentSendError) is returned: the datagram can never be
+        // sent as built, and the caller decides between refusing the send and ending the peer's
+        // session. Only an encode failure, the listener's own bug, throws.
+        private SocketException? SendPacket(EndPoint remoteEndPoint, CultNetRudpPacket packet)
         {
             var wire = CultNetRudpPacketCodec.Encode(packet);
             try
             {
                 if (FailingSendPeers.Contains(remoteEndPoint))
                     throw new SocketException((int)SocketError.HostUnreachable);
+                if (UnsendableAfter.TryGetValue(remoteEndPoint, out var remaining))
+                {
+                    if (remaining > 0)
+                    {
+                        UnsendableAfter[remoteEndPoint] = remaining - 1;
+                    }
+                    else
+                    {
+                        UnsendableAfter.Remove(remoteEndPoint);
+                        throw new SocketException((int)SocketError.MessageSize);
+                    }
+                }
                 var sent = _socket.SendTo(wire, remoteEndPoint);
                 _stats.BytesSent += sent;
+            }
+            catch (SocketException error) when (CultNetRudpSession.IsPermanentSendError(error))
+            {
+                return error;
             }
             catch (SocketException)
             {
                 _stats.SendFailures++;
             }
+            return null;
         }
 
-        // Test seam: peers whose every datagram fails to send, standing in for an unroutable or
-        // full path that a loopback peer cannot be made to have.
+        // Test seams, standing in for paths a loopback peer cannot be made to have. Peers whose every
+        // datagram fails to send transiently:
         internal HashSet<EndPoint> FailingSendPeers { get; } = new HashSet<EndPoint>();
+
+        // Peers whose next datagram after this many fails permanently, once.
+        internal Dictionary<EndPoint, int> UnsendableAfter { get; } = new Dictionary<EndPoint, int>();
 
         private static string RemoteKey(EndPoint endpoint)
         {
