@@ -166,6 +166,23 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Get<VectorItem>(new CultRecordKey("alpha")), Is.Not.Null, "the record read as the schema that owns its id");
         }
 
+        // The registry resolves a persisted id to the entry that owns it, not to one listed earlier that lists it as compatible.
+        [Test]
+        public void ThePersistedSchemaAnIdNamesIsTheEntryThatOwnsIt()
+        {
+            CultSchemaCatalogEntry Entry(string id, string name, params string[] compatible) => new()
+            {
+                SchemaId = id, SchemaName = name, SchemaVersion = name + ".v1", ContentHash = id, CompatibleSchemaIds = compatible
+            };
+            var catalog = new[]
+            {
+                Entry("x.lists", "tests.element_id_deck", "x.own"),
+                Entry("x.own", "vectors.item", "x.own")
+            };
+
+            Assert.That(Registry.ResolvePersistedSchemaReport("x.own", catalog).LocalSchemaName, Is.EqualTo("vectors.item"));
+        }
+
         // A directory rewrite where the entry that lists a kept record's id shares its own id with the schema being written keeps that
         // id in the entry it writes, so the manifest still reads.
         [Test]
