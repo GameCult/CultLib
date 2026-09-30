@@ -24,10 +24,18 @@ from cultnet_py.cultmesh_contracts import (
 READY_SCHEMA_VERSION = "cultmesh.daemon_ready.v0"
 
 
+def _port(value: str) -> int:
+    """A TCP/UDP port: 0 (any free port) through 65535."""
+    port = int(value)
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultmesh-py-daemon")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=3075)
+    parser.add_argument("--port", type=_port, default=3075)
     parser.add_argument("--runtime-id", default="python-runtime")
     parser.add_argument("--display-name")
     parser.add_argument("--cache-file")
@@ -50,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stop = threading.Event()
     install_signal_handlers(stop)
-    server = start_server(args)
+    server = start_server(args, parser)
     try:
         ready = daemon_ready_document(server)
         publish_ready(ready, ready_file=args.ready_file)
@@ -61,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
+def start_server(args: argparse.Namespace, parser: argparse.ArgumentParser) -> CultMeshLocalServer:
     node = CultMesh.create_node(
         args.cache_file,
         runtime_id=args.runtime_id,
@@ -98,17 +106,21 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
                 quorum_ratio=args.simulation_quorum_ratio,
             )
         )
-    server = CultMesh.serve_node(
-        node,
-        verse_catalog=verse_catalog,
-        peer_catalog=peer_catalog,
-        observation_hub=observation_hub,
-        host=args.host,
-        port=args.port,
-        display_name=args.display_name,
-        max_snapshot_documents=args.max_snapshot_documents,
-        max_snapshot_bytes=args.max_snapshot_bytes,
-    )
+    try:
+        server = CultMesh.serve_node(
+            node,
+            verse_catalog=verse_catalog,
+            peer_catalog=peer_catalog,
+            observation_hub=observation_hub,
+            host=args.host,
+            port=args.port,
+            display_name=args.display_name,
+            max_snapshot_documents=args.max_snapshot_documents,
+            max_snapshot_bytes=args.max_snapshot_bytes,
+        )
+    except ValueError as error:
+        # The server owns its option rules; a limit it refuses is a usage error, not a crash.
+        parser.error(str(error))
     advertise_self(server, verse_catalog, peer_catalog, args)
     return server
 

@@ -1491,14 +1491,29 @@ namespace GameCult.Networking
         internal const string UnsendablePacketReason = "packet could not be sent";
 
         /// <summary>
+        /// The fixed name of a failed send's cause: EMSGSIZE, EINVAL or EAFNOSUPPORT for a failure
+        /// that can never pass (<see cref="IsPermanentSendError"/>), UNKNOWN for anything else, as
+        /// every runtime's goodbye names it. Never the error's own message, which is the platform's
+        /// wording.
+        /// </summary>
+        internal static string SendErrorCode(SocketException error) => error.SocketErrorCode switch
+        {
+            SocketError.MessageSize => "EMSGSIZE",
+            SocketError.InvalidArgument => "EINVAL",
+            SocketError.AddressFamilyNotSupported => "EAFNOSUPPORT",
+            _ => "UNKNOWN",
+        };
+
+        /// <summary>
         /// Ends a session that owes its peer a packet that can never be sent as built. Resending it
         /// would fail forever, and dropping it would leave a reliable sequence the peer waits on for
-        /// good, so the session cannot be kept. The goodbye's reason names the error.
+        /// good, so the session cannot be kept. The goodbye's reason names the failure by its fixed
+        /// name (<see cref="SendErrorCode"/>).
         /// </summary>
         internal CultNetRudpPacket EndUnsendable(SocketException error)
         {
             ResetPeerState();
-            return CreateDisconnect(Encoding.UTF8.GetBytes(UnsendablePacketReason + ": " + error.Message));
+            return CreateDisconnect(Encoding.UTF8.GetBytes(UnsendablePacketReason + ": " + SendErrorCode(error)));
         }
 
         internal uint NextSequence => _nextSequence;

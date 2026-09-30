@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+
+import msgpack
 from cultcache_py import (
     CultCache,
     SingleFileMessagePackBackingStore,
@@ -49,17 +51,23 @@ from cultnet_py import (
     CultNetSimulationObservation,
     CultNetSimulationObservationHub,
     CultNetRudpPacketType,
+    CultNetRudpSendOptions,
+    CultNetRudpSession,
+    CultNetRudpSessionOptions,
     CultNetRudpSocketMode,
     CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions,
     apply_shard_log_response,
+    create_rudp_schema_transport,
     decode_rudp_packet,
     document_delete,
     document_put_raw,
+    encode_rudp_packet,
     hello,
     simulation_observation,
     snapshot_request,
 )
+from cultnet_py.cultmesh_contracts import VERSE_CATALOG_REQUEST
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
@@ -3751,7 +3759,11 @@ class CultMeshTests(unittest.TestCase):
             finally:
                 self._terminate_process(process)
 
-    def test_cultmesh_daemon_enforces_snapshot_document_limit_as_peer_error(self) -> None:
+    def test_cultmesh_daemon_refuses_a_snapshot_document_limit_of_zero_at_startup(self) -> None:
+        # A limit of zero is a server that could answer no snapshot, which the Rust document
+        # server's options also refuse; the daemon passes the flag to the server, and exits with
+        # a usage error naming the rule instead of serving. The limit's enforcement as a peer error is pinned
+        # in process by test_cultmesh_local_server_rejects_oversized_snapshot_responses.
         with tempfile.TemporaryDirectory() as temp:
             ready_path = Path(temp) / "ready.json"
             package_src = Path(__file__).resolve().parents[1] / "src"
@@ -3762,7 +3774,7 @@ class CultMeshTests(unittest.TestCase):
                 if not existing_pythonpath
                 else f"{package_src}{os.pathsep}{existing_pythonpath}"
             )
-            process = subprocess.Popen(
+            completed = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -3777,25 +3789,27 @@ class CultMeshTests(unittest.TestCase):
                     "--ready-file",
                     str(ready_path),
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 env=env,
+                timeout=30,
             )
-            try:
-                ready = self._wait_for_ready_file(process, ready_path)
-                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": 0})
-                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
-
-                with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:
-                    client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
-
-                self.assertEqual(raised.exception.response["schemaVersion"], "cultnet.error.v0")
-                self.assertEqual(raised.exception.response["code"], "snapshot_document_limit_exceeded")
-                self.assertEqual(raised.exception.response["details"]["documentCount"], 1)
-                self.assertEqual(raised.exception.response["details"]["maxSnapshotDocuments"], 0)
-            finally:
-                self._terminate_process(process)
+            # A usage error from argparse: exit status 2, the rule named, no traceback.
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("error: max_snapshot_documents must be greater than zero", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+            self.assertFalse(ready_path.exists())
+            # A port no socket can bind is a usage error too.
+            completed = subprocess.run(
+                [sys.executable, "-m", "cultmesh_py.daemon", "--port", "99999"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("port must be between 0 and 65535", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
 
     def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4326,6 +4340,638 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(error["code"], "snapshot_document_limit_exceeded")
         self.assertEqual(error["details"]["documentCount"], 2)
         self.assertEqual(error["details"]["maxSnapshotDocuments"], 1)
+
+    def test_cultmesh_local_server_refuses_a_put_it_could_never_serve(self) -> None:
+        # A put is admitted only if some snapshot request could return it. The put arrives under a
+        # long foreign schema alias and is stored and served under the shorter local schema id, so
+        # the size that decides is the served one, not the put's own.
+        document = define_database_entry_type(
+            "mesh.served_bound_note",
+            [("schema_version", 0), ("body", 1)],
+            schema_id="sha256:mesh-served-bound",
+            schema_name="mesh.served_bound_note",
+            schema_version="mesh.served_bound_note.v1",
+        )
+
+        def put(message_id: str, key: str, body_length: int) -> dict[str, Any]:
+            return document_put_raw(
+                message_id=message_id,
+                key=key,
+                schema_id="runtime.generated.mesh.served_bound_note.ui.99",
+                stored_at="2026-09-30T00:00:00Z",
+                payload=document.encode_payload({
+                    "schema_version": "mesh.served_bound_note.v1",
+                    "body": "x" * body_length,
+                }),
+            ).to_wire()
+
+        def exchange(server: Any, *messages: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+            client = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=2.0)
+            with client.open_transport() as transport:
+                for message in messages:
+                    transport.send("schema", msgpack.packb(message, use_bin_type=True))
+                payload = transport.receive().payload
+            return msgpack.unpackb(payload, raw=False), payload
+
+        empty_id_snapshot = snapshot_request(message_id="").to_wire()
+
+        # The bound is what the server actually serves for the at-bound document alone, under the
+        # shortest message id it answers (an empty one), measured on an unbounded server.
+        def served_alone_bytes(key: str, body_length: int) -> int:
+            node = CultMesh.create_node(runtime_id="mesh-served-bound-probe")
+            node.database.register_document(document)
+            server = CultMesh.serve_node(node, enable_rudp=False)
+            try:
+                response, payload = exchange(server, put("probe", key, body_length), empty_id_snapshot)
+            finally:
+                server.stop()
+            self.assertEqual(response["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+            self.assertEqual(len(response["documents"]), 1)
+            return len(payload)
+
+        limit = served_alone_bytes("note:fits", 100)
+        self.assertEqual(served_alone_bytes("note:over", 101), limit + 1, "fixture: the documents must straddle the bound by one byte")
+
+        node = CultMesh.create_node(runtime_id="mesh-served-bound")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, max_snapshot_bytes=limit, enable_rudp=False)
+        try:
+            refused, _ = exchange(server, put("put-over", "note:over", 101))
+            stored_after_refusal = node.database.get(document, "note:over")
+            served, served_payload = exchange(server, put("put-at", "note:fits", 100), empty_id_snapshot)
+        finally:
+            server.stop()
+
+        self.assertEqual(refused["schemaVersion"], "cultnet.error.v0")
+        self.assertEqual(refused["messageId"], "put-over")
+        self.assertEqual(refused["code"], "document_unservable")
+        self.assertEqual(refused["details"], {"responseBytes": limit + 1, "maxSnapshotBytes": limit})
+        self.assertIn(str(limit + 1), refused["error"])
+        self.assertIn(str(limit), refused["error"])
+        self.assertIsNone(stored_after_refusal)
+
+        self.assertEqual(served["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([record["recordKey"] for record in served["documents"]], ["note:fits"])
+        self.assertEqual(served["documents"][0]["schemaId"], document.catalog_entry().schema_id)
+        self.assertEqual(len(served_payload), limit)
+
+    def _rudp_bound_note(self) -> Any:
+        return define_database_entry_type(
+            "mesh.rudp_bound_note",
+            [("schema_version", 0), ("body", 1)],
+            schema_id="sha256:mesh-rudp-bound",
+            schema_name="mesh.rudp_bound_note",
+            schema_version="mesh.rudp_bound_note.v1",
+        )
+
+    @staticmethod
+    def _rudp_note_put(document: Any, message_id: str, key: str, body_length: int) -> dict[str, Any]:
+        return document_put_raw(
+            message_id=message_id,
+            key=key,
+            schema_id=document.catalog_entry().schema_id,
+            stored_at="2026-09-30T00:00:00Z",
+            payload=document.encode_payload({"schema_version": "mesh.rudp_bound_note.v1", "body": "x" * body_length}),
+        ).to_wire()
+
+    @staticmethod
+    def _rudp_exchange(server: Any, *messages: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        """Sends each message over RUDP in 1200-byte fragments; returns the first reply."""
+        transport = create_rudp_schema_transport(
+            host="127.0.0.1",
+            port=server.port,
+            connection_id=server.rudp_connection_id,
+            timeout_seconds=4.0,
+            max_fragment_bytes=1200,
+        )
+        try:
+            for message in messages:
+                transport.send("schema", msgpack.packb(message, use_bin_type=True))
+            payload = transport.receive(timeout_seconds=4.0).payload
+        finally:
+            transport.close()
+        return msgpack.unpackb(payload, raw=False), payload
+
+    def test_cultmesh_local_server_serves_a_100_kb_put_over_rudp_in_fragments(self) -> None:
+        # The reply is larger than any one UDP datagram: it arrives only because it is sent
+        # in fragments, and the RUDP thread serves on afterwards.
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-large")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node)
+        try:
+            served, payload = self._rudp_exchange(
+                server,
+                self._rudp_note_put(document, "put-large", "note:large", 100_000),
+                snapshot_request(message_id="large").to_wire(),
+            )
+            again, _ = self._rudp_exchange(server, snapshot_request(message_id="again").to_wire())
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            server.stop()
+        self.assertEqual(served["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([record["recordKey"] for record in served["documents"]], ["note:large"])
+        self.assertGreater(len(served["documents"][0]["payload"]), 100_000)
+        self.assertGreater(len(payload), 65_507, "fixture: the reply cannot be one UDP datagram")
+        self.assertEqual(again["messageId"], "again")
+        self.assertTrue(alive)
+        self.assertEqual(server.rudp_send_failures, 0)
+
+    def _rudp_body_for(self, document: Any, key: str) -> Callable[[int], int]:
+        """The body length whose document, keyed `key`, is served alone under the empty message
+        id in exactly the given bytes, measured on an unbounded server: what a snapshot sends."""
+
+        def served_alone_bytes(body_length: int) -> int:
+            node = CultMesh.create_node(runtime_id="mesh-rudp-bound-probe")
+            node.database.register_document(document)
+            server = CultMesh.serve_node(node)
+            try:
+                _, payload = self._rudp_exchange(
+                    server, self._rudp_note_put(document, "probe", key, body_length),
+                    snapshot_request(message_id="").to_wire(),
+                )
+            finally:
+                server.stop()
+            return len(payload)
+
+        probe = served_alone_bytes(500)
+
+        def body_for(served_bytes: int) -> int:
+            body_length = 500 + served_bytes - probe
+            self.assertEqual(served_alone_bytes(body_length), served_bytes, "fixture: served size is linear in the body")
+            return body_length
+
+        return body_for
+
+    def test_cultmesh_local_server_refuses_a_rudp_put_whose_reply_would_overflow_the_reliable_queue(self) -> None:
+        # Replies go in fragments of 100 bytes and a peer's reliable queue holds 8: a put over RUDP
+        # whose served reply takes 8 fragments is admitted and served, 9 or 20 are refused. A
+        # snapshot of two such documents needs 16 and cannot be queued: the peer is answered with a
+        # small cultnet.error.v0 rather than left to time out, its session ends, and the thread
+        # serves on.
+        document = self._rudp_bound_note()
+        body_for = self._rudp_body_for(document, "note:q")
+
+        node = CultMesh.create_node(runtime_id="mesh-rudp-bound")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
+        try:
+            refusals = [
+                self._rudp_exchange(server, self._rudp_note_put(document, f"put-{served}", "note:q", body_for(served)))[0]
+                for served in (2000, 801)
+            ]
+            stored_after_refusals = node.database.get(document, "note:q")
+            served, served_payload = self._rudp_exchange(
+                server,
+                self._rudp_note_put(document, "put-at", "note:q", body_for(800)),
+                snapshot_request(message_id="").to_wire(),
+            )
+            unqueueable, _ = self._rudp_exchange(
+                server,
+                self._rudp_note_put(document, "put-r", "note:r", body_for(800)),
+                snapshot_request(message_id="both").to_wire(),
+            )
+            failures_after = server.rudp_send_failures
+            # An empty snapshot fits the small queue; a hello reply would not.
+            after_reply, _ = self._rudp_exchange(
+                server, snapshot_request(message_id="after-queue", record_keys=["note:none"]).to_wire()
+            )
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            server.stop()
+
+        for refusal, (served_bytes, fragments) in zip(refusals, ((2000, 20), (801, 9))):
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0")
+            self.assertEqual(refusal["messageId"], f"put-{served_bytes}")
+            self.assertEqual(refusal["code"], "document_unservable")
+            self.assertEqual(refusal["details"], {
+                "responseBytes": served_bytes,
+                "maxSnapshotBytes": None,
+                "fragmentCount": fragments,
+                "maxFragmentCount": 8,
+            })
+            self.assertIn(f"{served_bytes} bytes; it takes {fragments} fragments", refusal["error"])
+            self.assertNotIn("note:q", refusal["error"])
+        self.assertIsNone(stored_after_refusals)
+        self.assertEqual(served["schemaVersion"], "cultnet.snapshot_response_raw.v0")
+        self.assertEqual([record["recordKey"] for record in served["documents"]], ["note:q"])
+        self.assertEqual(len(served_payload), 800)
+        self.assertEqual(unqueueable["schemaVersion"], "cultnet.error.v0")
+        self.assertEqual(unqueueable["messageId"], "both")
+        self.assertEqual(unqueueable["code"], "response_unqueueable")
+        self.assertEqual(failures_after, 0)
+        self.assertEqual(after_reply["messageId"], "after-queue")
+        self.assertTrue(alive)
+
+    class _RawPeer:
+        """A peer driven packet by packet, so a test decides what it acknowledges: nothing."""
+
+        def __init__(self, server: Any) -> None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("127.0.0.1", 0))
+            self.sock.settimeout(0.05)
+            self.address = self.sock.getsockname()[:2]
+            self.target = ("127.0.0.1", server.port)
+            self.session = CultNetRudpSession(
+                CultNetRudpSessionOptions(
+                    connection_id=server.rudp_connection_id, initial_sequence=100, resend_delay_ms=100_000
+                )
+            )
+            self.sock.sendto(encode_rudp_packet(self.session.create_connect(0)), self.target)
+            accept = self.receive(1.0)
+            assert accept is not None and accept.packet_type == CultNetRudpPacketType.ACCEPT, accept
+            self.session.receive(accept, 1)
+
+        def receive(self, timeout: float = 0.3) -> Any:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    wire, _ = self.sock.recvfrom(65535)
+                except (TimeoutError, socket.timeout):
+                    continue
+                return decode_rudp_packet(wire)
+            return None
+
+        def drain(self, timeout: float = 0.5) -> list[Any]:
+            # Bounded overall: the server resends what the peer never acknowledges.
+            packets = []
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                packet = self.receive(0.05)
+                if packet is not None:
+                    packets.append(packet)
+            return packets
+
+        def send(self, message: dict[str, Any]) -> list[int]:
+            packets = self.session.send_many(
+                "schema",
+                msgpack.packb(message, use_bin_type=True),
+                CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=2),
+                max_fragment_bytes=1200,
+            )
+            for packet in packets:
+                self.sock.sendto(encode_rudp_packet(packet), self.target)
+            return [packet.sequence for packet in packets]
+
+        def close(self) -> None:
+            self.sock.close()
+
+    @staticmethod
+    def _acknowledges(packet: Any, sequence: int) -> bool:
+        return packet.ack == sequence or any(
+            packet.ack_mask & (1 << bit) and packet.ack > bit and packet.ack - bit - 1 == sequence
+            for bit in range(32)
+        )
+
+    def _brim_server(self) -> tuple[Any, Any]:
+        """A server whose peer's reliable queue (8) is filled exactly by an 8-fragment reply the
+        peer never acknowledges, and the peer."""
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-brim")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
+
+        def served(body: int) -> int:
+            put = self._rudp_note_put(document, "p", "note:q", body)
+            return len(msgpack.packb(node.database.raw_put_served_alone(put, message_id=""), use_bin_type=True))
+
+        body = 400 + 800 - served(400)
+        self.assertEqual(served(body), 800, "fixture: served size is linear in the body")
+        node.database.apply_raw_put_message(self._rudp_note_put(document, "p", "note:q", body))
+        peer = self._RawPeer(server)
+        peer.send(snapshot_request(message_id="", record_keys=["note:q"]).to_wire())
+        first = {p.sequence for p in peer.drain(0.3) if p.packet_type == CultNetRudpPacketType.DATA}
+        self.assertEqual(len(first), 8, "fixture: the first reply fills the queue exactly")
+        return server, peer
+
+    def test_cultmesh_local_server_answers_a_peer_whose_queue_is_full_to_the_brim(self) -> None:
+        # The next reply cannot be queued. The peer is answered with a cultnet.error.v0 that takes
+        # no room in the full queue and acknowledges nothing the peer sent, then its session ends.
+        server, peer = self._brim_server()
+        try:
+            refused = peer.send(snapshot_request(message_id="b", record_keys=["note:none"]).to_wire())
+            packets = peer.drain(0.5)
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            peer.close()
+            server.stop()
+        parts = sorted(
+            (
+                p for p in packets
+                if p.packet_type == CultNetRudpPacketType.DATA and p.channel_id == "schema" and not p.reliable
+            ),
+            key=lambda p: p.fragment_index,
+        )
+        self.assertTrue(parts, "the refusal reaches the peer")
+        for part in parts:
+            self.assertFalse(
+                any(self._acknowledges(part, sequence) for sequence in refused),
+                f"the refusal acknowledges the refused request: ack={part.ack} mask={part.ack_mask:#x}",
+            )
+        refusal = msgpack.unpackb(b"".join(bytes(p.payload) for p in parts), raw=False)
+        self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0")
+        self.assertEqual(refusal["messageId"], "b")
+        self.assertEqual(refusal["code"], "response_unqueueable")
+        goodbyes = [bytes(p.payload) for p in packets if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+        self.assertEqual(goodbyes, [b"session refused a packet"], "then the session ends")
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_names_a_refusal_that_can_never_be_sent_in_the_goodbye(self) -> None:
+        # The refusal's own fragment fails permanently: the failure is not dropped, the goodbye
+        # names it by its fixed code, never the error's text.
+        import errno
+
+        server, peer = self._brim_server()
+        original_sendto = socket.socket.sendto
+
+        def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+            packet = decode_rudp_packet(data)
+            if (
+                args and tuple(args[-1]) == tuple(peer.address)
+                and packet.packet_type == CultNetRudpPacketType.DATA and not packet.reliable
+            ):
+                raise OSError(errno.EMSGSIZE, "Message too long CANARY-7f3a")
+            return original_sendto(sock, data, *args)
+
+        try:
+            with patch.object(socket.socket, "sendto", sendto):
+                peer.send(snapshot_request(message_id="b", record_keys=["note:none"]).to_wire())
+                packets = peer.drain(0.5)
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            peer.close()
+            server.stop()
+        self.assertFalse(
+            [p for p in packets if p.packet_type == CultNetRudpPacketType.DATA and not p.reliable],
+            "the refusal could not be sent",
+        )
+        goodbyes = [bytes(p.payload) for p in packets if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+        self.assertEqual(goodbyes, [b"packet could not be sent: EMSGSIZE"])
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_refuses_a_tcp_message_it_cannot_handle_and_serves_on(self) -> None:
+        # Messages whose handling raises: the TCP peer is refused with fixed text, the log names
+        # the error type only, and the connection's thread serves its next message.
+        shapes = [
+            {"schemaVersion": "cultnet.snapshot_request.v0", "messageId": "snapshot", "recordKeys": 5},
+            {"schemaVersion": "cultnet.shard_log_request.v0", "messageId": "shard-log", "shardId": "a", "afterSequence": "CANARY-7f3a"},
+            {"schemaVersion": "cultnet.database_subscribe.v0", "messageId": "subscribe", "subscriptionId": "s", "schemaIds": 5},
+            {"schemaVersion": "cultnet.schema_catalog_request.v0", "messageId": "catalog", "schemaIds": 5},
+            {"schemaVersion": VERSE_CATALOG_REQUEST, "messageId": "verse", "verseIds": 5},
+        ]
+        deaths: list[str] = []
+        original_hook = threading.excepthook
+        threading.excepthook = lambda args: deaths.append(f"{args.exc_type.__name__}")
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-tcp-shapes"))
+        try:
+            with self.assertLogs("cultmesh_py.server", level="WARNING") as logs:
+                with CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).open_transport() as transport:
+                    refusals = []
+                    for shape in shapes:
+                        transport.send("schema", msgpack.packb(shape, use_bin_type=True))
+                        refusals.append((shape["messageId"], msgpack.unpackb(transport.receive().payload, raw=False)))
+                    transport.send("schema", msgpack.packb(hello(runtime_id="same-connection").to_wire(), use_bin_type=True))
+                    after = msgpack.unpackb(transport.receive().payload, raw=False)
+        finally:
+            server.stop()
+            threading.excepthook = original_hook
+        for message_id, refusal in refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "message_unhandled", message_id)
+            self.assertEqual(refusal["error"], "The message could not be handled.", message_id)
+        self.assertEqual(after["schemaVersion"], "cultnet.hello.v0")
+        self.assertEqual(deaths, [])
+        self.assertEqual(len(logs.output), len(shapes))
+        self.assertFalse([line for line in logs.output if "CANARY" in line])
+
+    def test_cultmesh_local_server_refuses_a_rudp_put_whose_reply_needs_more_than_65535_fragments(self) -> None:
+        # One message carries at most 65535 fragments, however deep the queue: with one-byte
+        # fragments a put served in 65536 bytes is refused, one served in 65535 is stored.
+        document = self._rudp_bound_note()
+        body_for = self._rudp_body_for(document, "note:w")
+        node = CultMesh.create_node(runtime_id="mesh-rudp-wide")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=1)
+        try:
+            transport = create_rudp_schema_transport(
+                host="127.0.0.1", port=server.port, connection_id=server.rudp_connection_id,
+                timeout_seconds=4.0, max_fragment_bytes=1200,
+            )
+            try:
+                transport.send("schema", msgpack.packb(self._rudp_note_put(document, "put-over", "note:w", body_for(65_536)), use_bin_type=True))
+                refusal = msgpack.unpackb(transport.receive(timeout_seconds=8.0).payload, raw=False)
+                transport.send("schema", msgpack.packb(self._rudp_note_put(document, "put-at", "note:w", body_for(65_535)), use_bin_type=True))
+                deadline = time.monotonic() + 4.0
+                while node.database.get(document, "note:w") is None and time.monotonic() < deadline:
+                    transport.receive_once()
+                    time.sleep(0.005)
+            finally:
+                transport.close()
+            stored = node.database.get(document, "note:w")
+        finally:
+            server.stop()
+        self.assertEqual(refusal["code"], "document_unservable")
+        self.assertEqual(refusal["details"]["fragmentCount"], 65_536)
+        self.assertEqual(refusal["details"]["maxFragmentCount"], 65_535)
+        self.assertIsNotNone(stored)
+
+    def test_cultmesh_local_server_rudp_thread_survives_a_datagram_that_cannot_leave(self) -> None:
+        # Fragments larger than any UDP datagram: the reply's one packet can never be sent as
+        # built. That is a permanent failure: it ends that peer's session and is not counted as
+        # a lost datagram; the thread serves the next peer.
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-emsgsize")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=200_000)
+        try:
+            transport = create_rudp_schema_transport(
+                host="127.0.0.1", port=server.port, connection_id=server.rudp_connection_id,
+                timeout_seconds=4.0, max_fragment_bytes=1200,
+            )
+            try:
+                transport.send("schema", msgpack.packb(self._rudp_note_put(document, "put-large", "note:big", 80_000), use_bin_type=True))
+                transport.send("schema", msgpack.packb(snapshot_request(message_id="big").to_wire(), use_bin_type=True))
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    try:
+                        transport.receive_once()
+                    except ConnectionError:
+                        break
+                    time.sleep(0.005)
+            finally:
+                transport.close()
+            failures = server.rudp_send_failures
+            hello_reply, _ = self._rudp_exchange(server, hello(runtime_id="after").to_wire())
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            server.stop()
+        self.assertEqual(failures, 0)
+        self.assertEqual(hello_reply["schemaVersion"], "cultnet.hello.v0")
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_refuses_a_malformed_put_over_rudp_and_serves_on(self) -> None:
+        # A put whose document has no string recordKey or no binary payload could never be stored
+        # or served: it is refused as malformed before any sizing reads it, and the RUDP thread
+        # serves the next peer.
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-malformed")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node)
+        try:
+            refusals = []
+            for field_name, value in (
+                ("recordKey", None),
+                ("recordKey", 5),
+                ("payload", None),
+                ("payload", "not binary"),
+            ):
+                put = self._rudp_note_put(document, f"bad-{field_name}-{value}", "note:bad", 10)
+                if value is None:
+                    del put["document"][field_name]
+                else:
+                    put["document"][field_name] = value
+                refusal, _ = self._rudp_exchange(server, put)
+                refusals.append((put["messageId"], refusal))
+            after, _ = self._rudp_exchange(server, snapshot_request(message_id="after").to_wire())
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            server.stop()
+        for message_id, refusal in refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+        self.assertEqual(after["messageId"], "after")
+        self.assertEqual(after["documents"], [])
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_refuses_a_put_its_store_cannot_take_and_serves_on(self) -> None:
+        # Well-formed puts the store refuses: a blank key, a payload that is not MessagePack, a
+        # payload its schema cannot decode, a global document under another key. Each is refused
+        # to the peer that sent it, over RUDP and over TCP; the RUDP thread lives, the TCP
+        # connection serves its next message, and other peers are served.
+        document = self._rudp_bound_note()
+        global_document = define_database_entry_type(
+            "mesh.rudp_global_note",
+            [("schema_version", 0), ("body", 1)],
+            schema_id="sha256:mesh-rudp-global",
+            schema_name="mesh.rudp_global_note",
+            schema_version="mesh.rudp_global_note.v1",
+            global_document=True,
+        )
+
+        def cases() -> list[dict[str, Any]]:
+            puts = []
+            for name, field_name, value in (
+                ("empty-key", "recordKey", ""),
+                ("blank-key", "recordKey", "   "),
+                ("garbage-payload", "payload", bytes([0xC1])),
+                ("int-payload", "payload", msgpack.packb(5)),
+            ):
+                put = self._rudp_note_put(document, name, "note:ok", 10)
+                put["document"][field_name] = value
+                puts.append(put)
+            puts.append(self._rudp_note_put(global_document, "global-wrong-key", "not-global", 10))
+            return puts
+
+        node = CultMesh.create_node(runtime_id="mesh-unstorable-put")
+        node.database.register_document(document)
+        node.database.register_document(global_document)
+        server = CultMesh.serve_node(node)
+        try:
+            rudp_refusals = [(put["messageId"], self._rudp_exchange(server, put)[0]) for put in cases()]
+            rudp_after, _ = self._rudp_exchange(server, hello(runtime_id="rudp-after").to_wire())
+            rudp_alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+
+            tcp_refusals = []
+            with CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).open_transport() as transport:
+                for put in cases():
+                    transport.send("schema", msgpack.packb(put, use_bin_type=True))
+                    tcp_refusals.append((put["messageId"], msgpack.unpackb(transport.receive().payload, raw=False)))
+                transport.send("schema", msgpack.packb(hello(runtime_id="same-connection").to_wire(), use_bin_type=True))
+                same_connection = msgpack.unpackb(transport.receive().payload, raw=False)
+            other_connection = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).request(
+                hello(runtime_id="other-connection").to_wire(), expected_schema_version="cultnet.hello.v0"
+            )
+        finally:
+            server.stop()
+        self.assertEqual(len(rudp_refusals), 5)
+        for message_id, refusal in rudp_refusals + tcp_refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertNotIn("note:ok", refusal["error"], message_id)
+        self.assertEqual(len(tcp_refusals), 5)
+        self.assertEqual(rudp_after["schemaVersion"], "cultnet.hello.v0")
+        self.assertTrue(rudp_alive)
+        self.assertEqual(same_connection["schemaVersion"], "cultnet.hello.v0")
+        self.assertEqual(other_connection["schemaVersion"], "cultnet.hello.v0")
+        self.assertIsNone(node.database.get(document, "note:ok"))
+
+    def test_cultmesh_local_server_refuses_options_that_could_answer_nothing(self) -> None:
+        # The Rust document server's option rules: every limit is greater than zero, and the limits
+        # leave room for an empty snapshot, the smallest response the server sends. One-byte
+        # fragments and a queue of 16 could never carry one, so no reply would ever be sent.
+        node = CultMesh.create_node(runtime_id="mesh-rudp-options")
+        probe = CultMesh.serve_node(node)
+        try:
+            _, empty_payload = self._rudp_exchange(probe, snapshot_request(message_id="").to_wire())
+        finally:
+            probe.stop()
+        empty = len(empty_payload)
+        self.assertGreater(empty, 16, "fixture: an empty snapshot takes more than 16 one-byte fragments")
+        self.assertNotEqual(empty % (empty - 1), 0, "fixture: empty - 1 byte fragments leave a remainder")
+
+        def refused(**options: Any) -> str:
+            server = None
+            try:
+                with self.assertRaises(ValueError, msg=str(options)) as raised:
+                    server = CultMesh.serve_node(node, **options)
+            finally:
+                if server is not None:
+                    server.stop()
+            return str(raised.exception)
+
+        def accepted(**options: Any) -> None:
+            CultMesh.serve_node(node, **options).stop()
+
+        carry = "cannot carry an empty snapshot response"
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=16))
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty - 1))
+        accepted(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty)
+        # Fragments are counted rounding up: empty - 1 bytes a fragment takes two.
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=empty - 1, rudp_max_pending_reliable_packets=1))
+        accepted(rudp_max_fragment_bytes=empty - 1, rudp_max_pending_reliable_packets=2)
+        self.assertIn("cannot hold an empty snapshot response", refused(max_snapshot_bytes=empty - 1))
+        accepted(max_snapshot_bytes=empty)
+        self.assertIn("greater than zero", refused(max_snapshot_bytes=0))
+        self.assertIn("greater than zero", refused(max_snapshot_documents=0))
+        accepted(max_snapshot_documents=1)
+        self.assertIn("greater than zero", refused(rudp_resend_delay_ms=0))
+        accepted(rudp_resend_delay_ms=1)
+        self.assertIn("greater than zero", refused(rudp_max_fragment_bytes=0))
+        self.assertIn("greater than zero", refused(rudp_max_pending_reliable_packets=0))
+        # The RUDP options configure only the RUDP server: without one, none of them is checked.
+        accepted(enable_rudp=False, rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=16)
+        accepted(
+            enable_rudp=False,
+            rudp_max_fragment_bytes=0,
+            rudp_max_pending_reliable_packets=0,
+            rudp_resend_delay_ms=0,
+        )
+        self.assertIn("greater than zero", refused(enable_rudp=False, max_snapshot_documents=0))
+        self.assertIn("cannot hold an empty snapshot response", refused(enable_rudp=False, max_snapshot_bytes=empty - 1))
+
+        # The configuration at the bound does answer: an empty snapshot in one-byte fragments,
+        # exactly as many as the queue holds.
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty)
+        try:
+            served, payload = self._rudp_exchange(server, snapshot_request(message_id="").to_wire())
+        finally:
+            server.stop()
+        self.assertEqual(served["documents"], [])
+        self.assertEqual(len(payload), empty)
+        self.assertEqual(server.rudp_send_failures, 0)
 
     def test_cultmesh_local_server_returns_errors_for_bad_requests(self) -> None:
         document = define_database_entry_type(

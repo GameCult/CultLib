@@ -137,6 +137,18 @@ namespace GameCult.Networking.Tests
         // caller-directed send throws it and queues nothing; inside a poll it ends that peer's
         // session and never the poll.
 
+        [Test]
+        public void An_unsendable_goodbye_names_the_failure_by_a_fixed_code_never_its_message()
+        {
+            var session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = 1 });
+            Assert.That(
+                Encoding.UTF8.GetString(session.EndUnsendable(new SocketException((int)SocketError.MessageSize)).Payload!),
+                Is.EqualTo("packet could not be sent: EMSGSIZE"));
+            Assert.That(CultNetRudpSession.SendErrorCode(new SocketException((int)SocketError.InvalidArgument)), Is.EqualTo("EINVAL"));
+            Assert.That(CultNetRudpSession.SendErrorCode(new SocketException((int)SocketError.AddressFamilyNotSupported)), Is.EqualTo("EAFNOSUPPORT"));
+            Assert.That(CultNetRudpSession.SendErrorCode(new SocketException((int)SocketError.ConnectionRefused)), Is.EqualTo("UNKNOWN"));
+        }
+
         private static bool IsUnsendableReason(byte[]? reason)
         {
             var text = Encoding.UTF8.GetString(reason ?? Array.Empty<byte>());

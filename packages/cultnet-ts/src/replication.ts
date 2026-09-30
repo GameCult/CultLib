@@ -246,17 +246,46 @@ export class CultNetDocumentRegistry {
     cache: CultCache,
     message: CultNetDocumentPutRawMessage,
   ): Promise<unknown> {
+    const { binding, envelope } = this.#rawPutEnvelope(message);
+    return cache.putEnvelope(binding.definition, envelope);
+  }
+
+  /**
+   * The snapshot response that would serve this raw put's document alone: the
+   * record `applyRawDocumentPutMessage` would store, as `createRawSnapshotResponse`
+   * would serve it. A server uses it to judge a put by the size it would be
+   * served at. Throws, as the put would, when no binding accepts the document.
+   */
+  createRawSnapshotResponseForPut(
+    message: CultNetDocumentPutRawMessage,
+    messageId: string,
+  ): CultNetSnapshotResponseRawMessage {
+    const { envelope } = this.#rawPutEnvelope(message);
+    return {
+      schemaVersion: "cultnet.snapshot_response_raw.v0",
+      messageId,
+      documents: [this.#createRawDocumentRecord(envelope)],
+    };
+  }
+
+  #rawPutEnvelope(message: CultNetDocumentPutRawMessage): {
+    binding: CultNetDocumentBinding;
+    envelope: CultCacheEnvelope;
+  } {
     const resolution = this.#resolveRawDocumentBinding(message.document);
     const { binding } = resolution;
-    return cache.putEnvelope(binding.definition, {
-      key: message.document.recordKey,
-      type: binding.definition.type,
-      schemaId: resolution.preserveIncomingSchemaId
-        ? message.document.schemaId
-        : schemaIdForBinding(binding),
-      payload: new Uint8Array(message.document.payload),
-      storedAt: message.document.storedAt,
-    });
+    return {
+      binding,
+      envelope: {
+        key: message.document.recordKey,
+        type: binding.definition.type,
+        schemaId: resolution.preserveIncomingSchemaId
+          ? message.document.schemaId
+          : schemaIdForBinding(binding),
+        payload: new Uint8Array(message.document.payload),
+        storedAt: message.document.storedAt,
+      },
+    };
   }
 
   async applySnapshotResponse(

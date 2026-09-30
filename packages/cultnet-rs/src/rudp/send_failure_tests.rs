@@ -500,3 +500,32 @@ fn a_send_refused_at_any_fragment_delivers_nothing_of_it() {
         }
     }
 }
+
+#[test]
+fn a_send_failure_is_named_by_a_fixed_code_never_its_text() {
+    use std::io::{Error, ErrorKind};
+    let named = |error: Error| (send_error_code(&error), is_permanent_send_error(&error));
+    assert_eq!(
+        named(Error::new(ErrorKind::InvalidInput, "CANARY-7f3a")),
+        ("EINVAL", true)
+    );
+    assert_eq!(
+        named(Error::new(ErrorKind::ConnectionRefused, "CANARY-7f3a")),
+        ("UNKNOWN", false)
+    );
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        assert_eq!(named(Error::from_raw_os_error(90)), ("EMSGSIZE", true));
+        assert_eq!(named(Error::from_raw_os_error(97)), ("EAFNOSUPPORT", true));
+        assert_eq!(named(Error::from_raw_os_error(111)), ("UNKNOWN", false));
+    }
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 1,
+        initial_sequence: None,
+        resend_delay_ms: 10,
+        max_pending_reliable_packets: None,
+    });
+    let goodbye =
+        session.end_unsendable_session(&Error::new(ErrorKind::InvalidInput, "CANARY-7f3a"));
+    assert_eq!(goodbye.payload, b"packet could not be sent: EINVAL");
+}

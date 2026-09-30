@@ -438,18 +438,28 @@ def create_rudp_transport_profile(
 
 UNSENDABLE_PACKET_REASON = "packet could not be sent"
 
-_PERMANENT_SEND_ERRNOS = frozenset(
-    code
-    for code in (
-        errno.EMSGSIZE,
-        errno.EINVAL,
-        errno.EAFNOSUPPORT,
-        getattr(errno, "WSAEMSGSIZE", None),
-        getattr(errno, "WSAEINVAL", None),
-        getattr(errno, "WSAEAFNOSUPPORT", None),
+# The fixed name of each permanent send failure, keyed by errno, Winsock equivalents included.
+_PERMANENT_SEND_ERROR_CODES = {
+    code: name
+    for code, name in (
+        (errno.EMSGSIZE, "EMSGSIZE"),
+        (errno.EINVAL, "EINVAL"),
+        (errno.EAFNOSUPPORT, "EAFNOSUPPORT"),
+        (getattr(errno, "WSAEMSGSIZE", None), "EMSGSIZE"),
+        (getattr(errno, "WSAEINVAL", None), "EINVAL"),
+        (getattr(errno, "WSAEAFNOSUPPORT", None), "EAFNOSUPPORT"),
     )
     if code is not None
-)
+}
+_UNKNOWN_SEND_ERROR = "UNKNOWN"
+
+
+def send_error_code(error: OSError) -> str:
+    """The fixed name of a failed send's cause: EMSGSIZE, EINVAL or EAFNOSUPPORT for a
+    failure that can never pass (`is_permanent_send_error`), UNKNOWN for anything else. An
+    unsendable session's goodbye carries this name, never the error's own text, which is the
+    platform's wording and can quote an address."""
+    return _PERMANENT_SEND_ERROR_CODES.get(error.errno, _UNKNOWN_SEND_ERROR)
 
 
 def is_permanent_send_error(error: OSError) -> bool:
@@ -459,7 +469,7 @@ def is_permanent_send_error(error: OSError) -> bool:
     Winsock equivalents. Everything else (no route, full buffers, firewall drops, a refusal
     reported for an earlier datagram, an interrupted call) is a property of the path or the
     moment and may pass, so it is a lost datagram, not a reason to end a session."""
-    return error.errno in _PERMANENT_SEND_ERRNOS
+    return send_error_code(error) != _UNKNOWN_SEND_ERROR
 
 
 class CultNetRudpSession:
@@ -872,9 +882,10 @@ class CultNetRudpSession:
         """Ends a session that owes its peer a packet that can never be sent as built
         (see `is_permanent_send_error`). Resending it would fail forever, and dropping it
         would leave a reliable sequence the peer waits on for good, so the session cannot
-        be kept. Returns the goodbye for the peer; its reason names the error."""
+        be kept. Returns the goodbye for the peer; its reason names the failure by its fixed
+        name (`send_error_code`), never the error's text."""
         self.reset_peer_state()
-        return self.create_disconnect(f"{UNSENDABLE_PACKET_REASON}: {error}".encode("utf-8"))
+        return self.create_disconnect(f"{UNSENDABLE_PACKET_REASON}: {send_error_code(error)}".encode("utf-8"))
 
     def create_disconnect(self, reason: bytes = b"") -> CultNetRudpPacket:
         self._end_session()

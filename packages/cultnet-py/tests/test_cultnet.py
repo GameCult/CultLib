@@ -901,6 +901,18 @@ class CultNetTests(unittest.TestCase):
             self.assertFalse(is_permanent_send_error(OSError(code, "transient")), errno.errorcode[code])
         self.assertFalse(is_permanent_send_error(OSError("no errno")))
 
+    def test_cultnet_rudp_an_unsendable_goodbye_names_the_failure_by_a_fixed_code(self) -> None:
+        import errno
+
+        from cultnet_py import send_error_code
+
+        for code, name in ((errno.EMSGSIZE, "EMSGSIZE"), (errno.EINVAL, "EINVAL"), (errno.EAFNOSUPPORT, "EAFNOSUPPORT")):
+            self.assertEqual(send_error_code(OSError(code, "CANARY-7f3a")), name)
+        self.assertEqual(send_error_code(OSError(errno.ECONNREFUSED, "CANARY-7f3a")), "UNKNOWN")
+        session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=1))
+        goodbye = session.end_unsendable_session(OSError(errno.EMSGSIZE, "Message too long CANARY-7f3a"))
+        self.assertEqual(bytes(goodbye.payload), b"packet could not be sent: EMSGSIZE")
+
     # The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023 above
     # the lowest unacked one and the payload above that sequence stays within 4 MiB.
     FLOW_CONNECTION_ID = 0x464C4F57

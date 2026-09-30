@@ -265,7 +265,7 @@ fn a_permanent_failure_acknowledging_a_document_ends_the_session_after_the_docum
 }
 
 #[test]
-fn a_permanent_failure_sending_a_snapshot_response_rejects_it_naming_the_error() {
+fn a_permanent_failure_sending_a_snapshot_response_rejects_it_and_sends_no_refusal() {
     let (mut server, _clock, _received, (mut x, x_addr), (_y, _)) = two_peers();
     server.unsendable_after.insert(x_addr, 0);
     send(&mut x, &snapshot("x-snapshot"));
@@ -280,15 +280,34 @@ fn a_permanent_failure_sending_a_snapshot_response_rejects_it_naming_the_error()
     let rejection = rejection.expect("the response can never be sent");
     assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::SnapshotRequest);
     assert_eq!(rejection.message_id, "x-snapshot");
-    assert!(
-        rejection
-            .reason
-            .starts_with("snapshot response could not be sent: ")
-            && rejection.reason.len() > "snapshot response could not be sent: ".len(),
-        "{}",
-        rejection.reason
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::ResponseSendFailed("EINVAL")
     );
     assert_eq!(server.session_count(), 1);
+    // The server knows X cannot be reached: X is sent no refusal, only the
+    // goodbye naming the error, which carries no text of the peer's.
+    let mut frames = Vec::new();
+    let mut reason = None;
+    for _ in 0..50 {
+        if let Some(frame) = x.receive_once().unwrap() {
+            frames.push(frame);
+        }
+        if let Some(found) = x.disconnect_reason() {
+            reason = Some(found.to_vec());
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        frames.is_empty(),
+        "no refusal is sent to an unreachable peer: {frames:?}"
+    );
+    // The goodbye names the failure by its fixed name, never the error's text.
+    assert_eq!(
+        reason.expect("the client was told the session ended"),
+        b"packet could not be sent: EINVAL"
+    );
 }
 
 #[test]
@@ -443,4 +462,41 @@ fn a_reset_reported_by_a_receive_is_idle_not_an_error() {
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(received.lock().unwrap().as_slice(), ["y-put"]);
+}
+
+#[test]
+fn a_refusal_that_can_never_be_sent_ends_the_session_naming_the_error() {
+    let (mut server, _clock, received, (mut x, x_addr), (mut y, _)) = two_peers();
+    // Any document is now unservable, so X's put is refused; the refusal is
+    // the first datagram X is owed, and it can never be sent as built.
+    server.options.max_snapshot_response_bytes = 16;
+    server.unsendable_after.insert(x_addr, 0);
+    send(&mut x, &put("x-put"));
+    let mut rejected = false;
+    for _ in 0..10 {
+        rejected |= matches!(
+            server.poll_once().unwrap(),
+            CultMeshRudpPollOutcome::ApplicationRejected(_)
+        );
+    }
+    assert!(rejected);
+    assert!(received.lock().unwrap().is_empty());
+    assert_eq!(server.session_count(), 1);
+    // The failure is not dropped: the goodbye names it, where a refusal's
+    // goodbye would say the session refused a packet.
+    assert!(is_unsendable_reason(&goodbye_reason(&mut x)));
+    assert_eq!(server.send_failures(), 0);
+    server.options.max_snapshot_response_bytes =
+        CultMeshRudpDocumentServerOptions::default().max_snapshot_response_bytes;
+    send(&mut y, &snapshot("y-snapshot"));
+    let mut served = false;
+    for _ in 0..50 {
+        server.poll_once().unwrap();
+        if y.receive_once().unwrap().is_some() {
+            served = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(served, "the other peer is still served");
 }
