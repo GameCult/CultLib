@@ -55,6 +55,17 @@ data class CultCacheEnvelope(
     val payload: ByteArray,
 )
 
+/**
+ * A schema this cache cannot give to one more type: another type already holds the schema id, or the type already holds
+ * another schema id. Nothing is registered. It names the refused codec's schema id and both document types.
+ */
+class CultSchemaConflictException(
+    val schemaId: String,
+    val schemaNames: List<String>,
+    val recordKey: String,
+    message: String,
+) : IOException(message)
+
 class CultCache {
     companion object {
         const val GLOBAL_KEY = "__global__"
@@ -64,7 +75,19 @@ class CultCache {
     private val codecsBySchema = linkedMapOf<String, CultDocumentCodec<*>>()
     private val values = linkedMapOf<String, LinkedHashMap<String, ByteArray>>()
 
+    // One type owns a schema id. Every path that names a codec (register, put, get, getAll, delete) comes through here.
     fun <T : Any> register(codec: CultDocumentCodec<T>) {
+        val holder = codecs[codec.documentType]?.takeIf { it.schemaVersion != codec.schemaVersion }
+            ?: codecsBySchema[codec.schemaVersion]?.takeIf { it.documentType != codec.documentType }
+        if (holder != null) {
+            throw CultSchemaConflictException(
+                codec.schemaVersion,
+                listOf(holder.documentType, codec.documentType),
+                "",
+                "Kotlin CultCache type ${holder.documentType} holds schema ${holder.schemaVersion}; " +
+                    "type ${codec.documentType} cannot also be registered for schema id ${codec.schemaVersion}",
+            )
+        }
         codecs[codec.documentType] = codec
         codecsBySchema[codec.schemaVersion] = codec
     }
@@ -3538,6 +3561,42 @@ private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
     val syncedAlias = target.syncDocument(aliasSnapshotResponse, uiNote, "note:alias")
     check(syncedAlias == KotlinUiNote("kotlin.alias_note.v1", "canonical-to-ui"))
     check(target.require(uiNote, "note:alias") == syncedAlias)
+
+    // One type per schema in one cache: a second type for a held schema id, or a held type for another schema id, is
+    // refused typed, by register and by the implicit registration in put, get, getAll and delete alike.
+    fun refusal(action: () -> Unit): CultSchemaConflictException? =
+        try { action(); null } catch (conflict: CultSchemaConflictException) { conflict }
+    val canonicalOtherSchema = cultDocument(KotlinAliasNoteCodec(
+        documentType = "kotlin.alias_note",
+        schemaVersion = "kotlin.alias_note.v2",
+        create = ::KotlinCanonicalNote,
+        readSchemaVersion = KotlinCanonicalNote::schemaVersion,
+        readBody = KotlinCanonicalNote::body,
+    ))
+    for ((first, second) in listOf(canonicalNote to uiNote, uiNote to canonicalNote, canonicalNote to canonicalOtherSchema)) {
+        @Suppress("UNCHECKED_CAST")
+        val claimant = second as CultDocumentDefinition<Any>
+        val claimantValue = claimant.codec.decode(canonicalNote.codec.encode(KotlinCanonicalNote("kotlin.alias_note.v1", "x")))
+        val attempts: List<(CultCache) -> Unit> = listOf(
+            { cache -> cache.register(claimant) },
+            { cache -> cache.put(claimant, "note:second", claimantValue) },
+            { cache -> cache.get(claimant, "note:second") },
+            { cache -> cache.getAll(claimant) },
+            { cache -> cache.delete(claimant.codec, "note:second") },
+        )
+        for (attempt in attempts) {
+            val cache = CultCache()
+            @Suppress("UNCHECKED_CAST")
+            cache.register(first as CultDocumentDefinition<Any>)
+            val conflict = refusal { attempt(cache) }
+            check(conflict != null) { "${second.documentType}/${second.schemaVersion} beside ${first.documentType}/${first.schemaVersion} was not refused" }
+            check(conflict.schemaId == second.schemaVersion && conflict.recordKey == "")
+            check(conflict.schemaNames == listOf(first.documentType, second.documentType))
+            check(conflict.message!!.contains(second.schemaVersion))
+            check(cache.codecForSchema(first.schemaVersion).documentType == first.documentType)
+        }
+    }
+    CultCache().apply { register(canonicalNote); register(canonicalNote); put(canonicalNote, "note:again", KotlinCanonicalNote("kotlin.alias_note.v1", "again")) }
 
     val reactiveUiNote = cultDocument(KotlinReactiveNoteCodec(
         documentType = "kotlin.reactive_note.ui",
