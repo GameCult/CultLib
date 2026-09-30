@@ -735,20 +735,20 @@ namespace GameCult.Networking.Tests
             var first = sender.Send("schema", Encoding.UTF8.GetBytes("first"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var second = sender.Send("schema", Encoding.UTF8.GetBytes("second"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
             var third = sender.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true });
-            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 10, 11, 12 }));
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 11, 12, 13 }));
 
             receiver.Receive(first);
             receiver.Receive(third);
             var ackWithGap = receiver.CreateAck();
-            Assert.That(ackWithGap.Ack, Is.EqualTo(12));
-            Assert.That(ackWithGap.AckMask, Is.EqualTo(0b10u | (1u << 9)));
+            Assert.That(ackWithGap.Ack, Is.EqualTo(13));
+            Assert.That(ackWithGap.AckMask, Is.EqualTo(0b110u));
             sender.Receive(ackWithGap);
-            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 11 }));
+            Assert.That(sender.PendingReliableSequences, Is.EqualTo(new uint[] { 12 }));
 
             receiver.Receive(second);
             var fullAck = receiver.CreateAck();
-            Assert.That(fullAck.Ack, Is.EqualTo(12));
-            Assert.That(fullAck.AckMask, Is.EqualTo(0b11u | (1u << 9)));
+            Assert.That(fullAck.Ack, Is.EqualTo(13));
+            Assert.That(fullAck.AckMask, Is.EqualTo(0b111u));
             sender.Receive(fullAck);
             Assert.That(sender.PendingReliableSequences, Is.Empty);
         }
@@ -983,7 +983,7 @@ namespace GameCult.Networking.Tests
             var error = Assert.Throws<InvalidOperationException>(() =>
                 session.Send("schema", Encoding.UTF8.GetBytes("third"), new CultNetRudpSendOptions { Reliable = true, Ordered = true }));
             Assert.That(error!.Message, Does.Contain("reliable send queue is full"));
-            Assert.That(session.PendingReliableSequences, Is.EqualTo(new uint[] { 1, 2 }));
+            Assert.That(session.PendingReliableSequences, Is.EqualTo(new uint[] { 2, 3 }));
 
             var fragmented = new CultNetRudpSession(new CultNetRudpSessionOptions
             {
