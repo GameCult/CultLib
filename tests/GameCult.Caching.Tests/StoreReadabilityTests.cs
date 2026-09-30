@@ -66,11 +66,16 @@ namespace GameCult.Caching.Tests
             File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), vector)));
 
             using var cache = new CultCache();
-            cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+            void Open()
+            {
+                cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            }
+
             if (reads)
-                Assert.DoesNotThrow(() => cache.PullAllBackingStoresAsync().GetAwaiter().GetResult());
+                Assert.DoesNotThrow(Open);
             else
-                Assert.That(() => cache.PullAllBackingStoresAsync().GetAwaiter().GetResult(), Throws.Exception);
+                Assert.That(Open, Throws.Exception);
         }
 
         [TestCaseSource(nameof(Vectors))]
