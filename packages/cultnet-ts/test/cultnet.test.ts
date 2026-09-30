@@ -11,6 +11,7 @@ import { z } from "zod";
 import { encode } from "@msgpack/msgpack";
 import {
   CultCache,
+  SchemaConflictError,
   SingleFileMessagePackBackingStore,
   defineDocumentType,
 } from "@gamecult/cultcache-ts";
@@ -1637,6 +1638,46 @@ test("CultNet raw replication applies compatible foreign-schema snapshots", asyn
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("CultNet document registry binds one type per schema and refuses a second, typed", () => {
+  const noteShape = z.object({ noteId: z.string() });
+  const owner = defineDocumentType({ type: "tests.note", schemaId: "id.note", schemaName: "tests.note", schema: noteShape });
+  const sameId = defineDocumentType({ type: "tests.note-ui", schemaId: "id.note", schemaName: "tests.note-ui", schema: noteShape });
+  const sameName = defineDocumentType({ type: "tests.note-named", schemaId: "id.other", schemaName: "tests.note", schema: noteShape });
+  const sameType = defineDocumentType({ type: "tests.note", schemaId: "id.third", schemaName: "tests.third", schema: noteShape });
+  const lister = defineDocumentType({
+    type: "tests.note-lister", schemaId: "id.lister", schemaName: "tests.note-lister", compatibleSchemaIds: ["id.note"], schema: noteShape,
+  });
+
+  for (const [claimant, schemaId, names] of [
+    [sameId, "id.note", ["tests.note", "tests.note-ui"]],
+    [sameName, "id.other", ["tests.note", "tests.note"]],
+    [sameType, "id.third", ["tests.note", "tests.third"]],
+  ] as const) {
+    for (const order of [[owner, claimant], [claimant, owner]]) {
+      const registry = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: order[0] })]);
+      assert.throws(() => registry.register(defineCultNetDocumentBinding({ definition: order[1] })), (error: unknown) => {
+        assert.ok(error instanceof SchemaConflictError, String(error));
+        const ownerFirst = order[0] === owner;
+        assert.equal(error.schemaId, ownerFirst ? schemaId : "id.note");
+        assert.deepEqual(error.schemaNames, ownerFirst ? names : [...names].reverse());
+        assert.equal(error.recordKey, "");
+        return true;
+      });
+      // The refused binding left nothing behind: the schema still resolves to the first type.
+      assert.equal(registry.getBySchemaId(order[0].schemaId!)?.definition, order[0]);
+      assert.equal(registry.get(order[1].type)?.definition, order[1].type === order[0].type ? order[0] : undefined);
+    }
+  }
+
+  // The same definition may be bound again, and a definition listing the id as compatible is not a second owner.
+  const registry = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: owner })]);
+  registry.register(defineCultNetDocumentBinding({ definition: owner, payloadSchemaVersion: "tests.note.v2" }));
+  registry.register(defineCultNetDocumentBinding({ definition: lister }));
+  assert.equal(registry.get("tests.note")?.payloadSchemaVersion, "tests.note.v2");
+  assert.equal(registry.getBySchemaId("id.note")?.definition, owner);
+  assert.equal(registry.getBySchemaId("id.lister")?.definition, lister);
 });
 
 test("CultNet document registry filters snapshots by schema aliases", async () => {

@@ -1,11 +1,12 @@
 import { decode, encode } from "@msgpack/msgpack";
-import type {
-  AnyCultCacheDocumentDefinition,
-  CultCache,
-  CultCacheDocumentDefinition,
-  CultCacheDocumentFormatter,
-  CultCacheDocumentValue,
-  CultCacheEnvelope,
+import {
+  type AnyCultCacheDocumentDefinition,
+  type CultCache,
+  type CultCacheDocumentDefinition,
+  type CultCacheDocumentFormatter,
+  type CultCacheDocumentValue,
+  type CultCacheEnvelope,
+  SchemaConflictError,
 } from "@gamecult/cultcache-ts";
 
 import {
@@ -47,6 +48,24 @@ export class CultNetDocumentRegistry {
   }
 
   register(binding: CultNetDocumentBinding): this {
+    // One definition owns a type, a schema id and a schema name. Another definition claiming any of them is
+    // refused, so a schema never resolves to two types.
+    const schemaId = schemaIdForBinding(binding);
+    const schemaName = schemaNameForBinding(binding);
+    for (const holder of this.#uniqueBindings()) {
+      if (holder.definition === binding.definition) {
+        continue;
+      }
+      const claimed =
+        holder.definition.type === binding.definition.type ? `type "${binding.definition.type}"`
+        : schemaIdForBinding(holder) === schemaId ? `schema id "${schemaId}"`
+        : schemaNameForBinding(holder) === schemaName ? `schema name "${schemaName}"`
+        : undefined;
+      if (claimed) {
+        throw new SchemaConflictError(schemaId, [schemaNameForBinding(holder), schemaName], "",
+          `CultNet ${claimed} is already bound to type "${holder.definition.type}" and cannot also be bound to type "${binding.definition.type}".`);
+      }
+    }
     this.#bindings.set(binding.definition.type, binding);
     this.#schemaBindings.set(schemaIdForBinding(binding), binding);
     return this;
@@ -341,6 +360,10 @@ export class CultNetDocumentRegistry {
 
 function schemaIdForBinding(binding: CultNetDocumentBinding): string {
   return binding.definition.schemaId ?? binding.definition.type;
+}
+
+function schemaNameForBinding(binding: CultNetDocumentBinding): string {
+  return binding.definition.schemaName ?? binding.definition.type;
 }
 
 function schemaMatchesBinding(
