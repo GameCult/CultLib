@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -153,8 +154,7 @@ namespace GameCult.Networking.Tests
 
             var failure = Assert.ThrowsAsync<CultNetShardLogException>(async () => await primary.PutAsync(Two, Note("two")))!;
 
-            Assert.That(failure.ShardId, Is.EqualTo(ShardId));
-            Assert.That(failure.Sequence, Is.EqualTo(2));
+            Assert.That(failure.Burned, Is.EqualTo(new[] { new CultNetBurnedSequence(ShardId, 2) }));
             Assert.That(failure, Is.Not.InstanceOf<InvalidOperationException>(), "a committed write must not read as a refused one");
             Assert.That(published, Is.EqualTo(new[] { Two.Value }), "the change was published before the writer heard");
             Assert.That(TextOf(cache, Two), Is.EqualTo("two"), "the commit stands");
@@ -356,13 +356,14 @@ namespace GameCult.Networking.Tests
             var database = Database(cache, primary: true, store);
             var published = Record(database);
 
-            var failure = Assert.Throws<AggregateException>(() => cache.Commit(batch =>
+            var failure = Assert.Throws<CultNetShardLogException>(() => cache.Commit(batch =>
             {
                 batch.Upsert(Note("one"), new CultRecordHandle<NetworkSchemaNote>(One));
                 batch.Upsert(Note("two"), new CultRecordHandle<NetworkSchemaNote>(Two));
             }))!;
 
-            Assert.That(failure.InnerExceptions.OfType<CultNetShardLogException>().Select(exception => exception.Sequence), Is.EqualTo(new[] { 1L, 2L }));
+            Assert.That(failure.Burned, Is.EqualTo(new[] { new CultNetBurnedSequence(ShardId, 1), new CultNetBurnedSequence(ShardId, 2) }), "one exception carries every burned sequence");
+            Assert.That(((AggregateException)failure.InnerException!).InnerExceptions, Has.Count.EqualTo(2), "and every store failure");
             Assert.That(published, Is.EqualTo(new[] { One.Value, Two.Value }));
             Assert.That(database.GetCompactedMutationLogSequence(ShardId), Is.EqualTo(2));
         }
@@ -566,6 +567,201 @@ namespace GameCult.Networking.Tests
             await writer;
 
             Assert.That(Sequences(store), Is.Empty, "the admission was journaled after disposal began and must not reach the durable log");
+        }
+
+        [Test]
+        public void ABatchAcrossTwoShardsWhoseStoreRefusesReachesTheWriterAsOneExceptionNamingBothShards()
+        {
+            var store = new FlakyLogStore { RefuseAppend = _ => true };
+            var cache = new CultCache();
+            _ = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                Shards =
+                [
+                    new CultNetShardDescriptor("shard-a", "primary", epoch: 1, isPrimary: true, schemaIds: [SchemaId(cache)], keyPrefix: "a:"),
+                    new CultNetShardDescriptor("shard-b", "primary", epoch: 1, isPrimary: true, schemaIds: [SchemaId(cache)], keyPrefix: "b:")
+                ],
+                MutationLogStore = store
+            });
+
+            var failure = Assert.Throws<CultNetShardLogException>(() => cache.Commit(batch =>
+            {
+                batch.Upsert(Note("a"), new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("a:1")));
+                batch.Upsert(Note("b"), new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("b:1")));
+            }))!;
+
+            Assert.That(failure.Burned, Is.EqualTo(new[] { new CultNetBurnedSequence("shard-a", 1), new CultNetBurnedSequence("shard-b", 1) }));
+        }
+
+        // The cache aggregates whatever else fails in the same hold; the documented unwrap finds the log failure inside.
+        [Test]
+        public void ALogFailureBesideAnotherFailureInTheSameHoldIsFoundByUnwrappingTheAggregate()
+        {
+            var store = new FlakyLogStore { RefuseAppend = _ => true };
+            var cache = new CultCache();
+            _ = Database(cache, primary: true, store);
+            using var second = cache.AddJournal(_ => throw new InvalidOperationException("second journal"));
+
+            var failure = Assert.Throws<AggregateException>(() => cache.Commit(batch =>
+            {
+                batch.Upsert(Note("one"), new CultRecordHandle<NetworkSchemaNote>(One));
+                batch.Upsert(Note("two"), new CultRecordHandle<NetworkSchemaNote>(Two));
+            }))!;
+
+            var logFailure = failure.InnerExceptions.OfType<CultNetShardLogException>().Single();
+            Assert.That(logFailure.Burned.Select(burned => burned.Sequence), Is.EqualTo(new[] { 1L, 2L }));
+            Assert.That(failure.InnerExceptions.OfType<InvalidOperationException>().Single().Message, Is.EqualTo("second journal"));
+        }
+
+        [Test]
+        public async Task ABareWriteOfASchemaNoShardOwnsIsNeitherLoggedNorReplicated()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, store);
+
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "n", Body = "unrelated" }, new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:n")));
+            await cache.UpsertAsync(Note("one"), new CultRecordHandle<NetworkSchemaNote>(One));
+
+            Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }), "the unrelated write minted no sequence");
+            Assert.That(database.GetMutationLog(ShardId).Select(entry => entry.Key.Value), Is.EqualTo(new[] { One.Value }));
+        }
+
+        // A door chose its shard, by the fallback when none matches; the journal honours it.
+        [Test]
+        public async Task ADatabaseWriteOfASchemaNoShardOwnsIsLoggedInTheFallbackShard()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, store);
+
+            await database.PutAsync(new CultRecordKey("unrelated:n"), new MeshQuickstartNote { NoteId = "n", Body = "door" });
+
+            Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }));
+        }
+
+        private static async Task ApplyAuthoritativeAsync(CultNetDatabase database, CultRecordKey key, string text)
+        {
+            var shard = database.Shards[0];
+            var message = database.Documents.CreateRawDocumentPutMessage("authoritative", new CultRecordHandle<NetworkSchemaNote>(key), Note(text));
+            message.ShardId = shard.ShardId;
+            message.ShardEpoch = shard.Epoch;
+            await database.ApplyPutAsync(message);
+        }
+
+        private static CultNetDatabaseOptions ClientOptions() => new()
+        {
+            RuntimeId = "local",
+            ClientAuthorityScopes = [new CultNetClientAuthorityScope("local")]
+        };
+
+        [Test]
+        public async Task APredictionOverAPredictionIsStillAPredictionAndTheAuthoritativeWriteReconcilesOnce()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache, ClientOptions());
+            var kinds = new List<CultNetDatabaseChangeKind>();
+            database.Watch<NetworkSchemaNote>().Subscribe(change => kinds.Add(change.Kind));
+
+            await database.PutPredictedAsync(One, Note("p1"));
+            await database.PutPredictedAsync(One, Note("p2"));
+            await ApplyAuthoritativeAsync(database, One, "authoritative");
+            await ApplyAuthoritativeAsync(database, One, "again");
+
+            Assert.That(kinds, Is.EqualTo(new[]
+            {
+                CultNetDatabaseChangeKind.Predicted,
+                CultNetDatabaseChangeKind.Predicted,
+                CultNetDatabaseChangeKind.Reconciled,
+                CultNetDatabaseChangeKind.Updated
+            }));
+        }
+
+        [Test]
+        public async Task AGameSessionPredictionOfTheInstanceTheCacheAlreadyHoldsIsAPredictionThatIsNeverLogged()
+        {
+            var rootPath = Path.Combine(TestContext.CurrentContext.WorkDirectory, "journal-session", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rootPath);
+            using var node = await GameCult.Mesh.CultMesh.CreateNodeAsync(Path.Combine(rootPath, "world.ccmp"), new GameCult.Mesh.CultMeshNodeOptions
+            {
+                StartServer = false,
+                DatabaseOptions = ClientOptions()
+            });
+            using var session = GameCult.Mesh.CultMesh.CreateGameSession(node, new GameCult.Mesh.CultMeshGameSessionOptions
+            {
+                ServeSimulationObservations = false,
+                ServeVerseDiscovery = false,
+                ServePeerExchange = false
+            });
+            var kinds = new List<CultNetDatabaseChangeKind>();
+            node.Database.Watch<NetworkSchemaNote>().Subscribe(change => kinds.Add(change.Kind));
+
+            await session.PredictAsync(One, Note("p1"));
+            var held = node.Cache.Get<NetworkSchemaNote>(One)!;
+            held.Text = "p2";
+            await session.PredictAsync(One, held);
+            await ApplyAuthoritativeAsync(node.Database, One, "authoritative");
+
+            Assert.That(kinds, Is.EqualTo(new[] { CultNetDatabaseChangeKind.Predicted, CultNetDatabaseChangeKind.Predicted, CultNetDatabaseChangeKind.Reconciled }));
+            Assert.That(node.Database.GetMutationLog(node.Database.Shards[0].ShardId).Select(entry => entry.Kind), Is.EqualTo(new[] { CultNetDatabaseChangeKind.Updated }));
+        }
+
+        [Test]
+        public async Task ADatabaseRecordsEveryDeleteEntryItAppliesWhileAnotherThreadRemovesTheSameKeys()
+        {
+            const int rounds = 20000;
+            var replicaCache = new CultCache();
+            var replica = Database(replicaCache, primary: false, store: null);
+            var schemaId = SchemaId(replicaCache);
+            for (var i = 1; i <= rounds; i++)
+                await replicaCache.UpsertAsync(Note("n"), new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("race:" + i)));
+
+            var current = 0;
+            var stop = false;
+            var remover = Task.Run(() =>
+            {
+                var next = 1;
+                while (next <= rounds && !Volatile.Read(ref stop))
+                {
+                    if (Volatile.Read(ref current) >= next)
+                    {
+                        replicaCache.Remove(new CultRecordKey("race:" + next));
+                        next++;
+                    }
+                }
+            });
+            for (var i = 1; i <= rounds; i++)
+            {
+                Volatile.Write(ref current, i);
+                await replica.ApplyShardLogResponseAsync(new CultNetShardLogResponseMessage
+                {
+                    ShardId = ShardId,
+                    ShardEpoch = 1,
+                    Entries =
+                    [
+                        new CultNetShardLogEntryMessage
+                        {
+                            Sequence = i,
+                            CommittedAt = DateTimeOffset.UtcNow.ToString("O"),
+                            ChangeKind = "removed",
+                            Delete = new CultNetDocumentDeleteMessage
+                            {
+                                MessageId = "d" + i,
+                                SchemaId = schemaId,
+                                RecordKey = "race:" + i,
+                                ShardId = ShardId,
+                                ShardEpoch = 1
+                            }
+                        }
+                    ]
+                });
+            }
+
+            Volatile.Write(ref stop, true);
+            await remover;
+
+            Assert.That(replica.GetMutationLog(ShardId).Select(entry => entry.Sequence), Is.EqualTo(Enumerable.Range(1, rounds).Select(i => (long)i)),
+                "a replica's log holds every entry of the primary's, whoever removed the key first");
         }
     }
 }

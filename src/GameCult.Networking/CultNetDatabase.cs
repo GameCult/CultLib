@@ -464,33 +464,39 @@ namespace GameCult.Networking
     }
 
     /// <summary>
-    /// Raised to the writer when a shard primary committed a change and could not log it. The commit stands and the
-    /// change was published; the shard's log burned <see cref="Sequence"/> and compacted past it, so every replica
-    /// behind it resynchronizes from a snapshot. It is deliberately not an <see cref="InvalidOperationException"/>:
-    /// callers that read that type as a refused write must not mistake a committed one for it. When several things
-    /// fail in one admission, the writer sees an <see cref="AggregateException"/> that contains this one.
+    /// One shard-log sequence that a primary minted for a committed change and burned because it could not log it.
     /// </summary>
+    public readonly record struct CultNetBurnedSequence(string ShardId, long Sequence);
+
+    /// <summary>
+    /// Raised to the writer when a shard primary committed changes and could not log them. The commits stand and the
+    /// changes were published; each shard's log burned the sequences in <see cref="Burned"/> and compacted past them,
+    /// so every replica behind one resynchronizes from a snapshot. A single journal call raises one of these carrying
+    /// every burned sequence, whatever number of changes or shards failed. It is deliberately not an
+    /// <see cref="InvalidOperationException"/>: callers that read that type as a refused write must not mistake a
+    /// committed one for it.
+    /// </summary>
+    /// <remarks>
+    /// The cache may still wrap this in an <see cref="AggregateException"/> when something else failed in the same hold
+    /// (an observer, a second database's journal). A writer that wants the log failure catches this type, or unwraps
+    /// <see cref="AggregateException.InnerExceptions"/> and looks for it. <see cref="Exception.InnerException"/> is the
+    /// store's failure, or an <see cref="AggregateException"/> of them when several changes failed.
+    /// </remarks>
     public sealed class CultNetShardLogException : Exception
     {
         /// <summary>
         /// Creates a shard log exception.
         /// </summary>
-        public CultNetShardLogException(string shardId, long sequence, Exception cause)
-            : base($"Shard '{shardId}' committed a change but could not log it; sequence {sequence} is burned and compacted past.", cause)
+        public CultNetShardLogException(IReadOnlyList<CultNetBurnedSequence> burned, Exception cause)
+            : base($"Committed changes could not be logged; sequences {string.Join(", ", burned.Select(entry => $"{entry.ShardId}:{entry.Sequence}"))} are burned and compacted past.", cause)
         {
-            ShardId = shardId;
-            Sequence = sequence;
+            Burned = burned;
         }
 
         /// <summary>
-        /// Gets the shard whose log refused the change.
+        /// Gets every sequence burned by the journal call, in commit order.
         /// </summary>
-        public string ShardId { get; }
-
-        /// <summary>
-        /// Gets the shard-log sequence that was minted for the change and burned.
-        /// </summary>
-        public long Sequence { get; }
+        public IReadOnlyList<CultNetBurnedSequence> Burned { get; }
     }
 
     /// <summary>
@@ -1103,8 +1109,8 @@ namespace GameCult.Networking
             }
 
             _disposed = true;
-            _cacheChanges.Dispose();
             _cacheJournal.Dispose();
+            _cacheChanges.Dispose();
             lock (_logGate)
                 _stash.Clear();
             _changes.Dispose();
@@ -1124,6 +1130,8 @@ namespace GameCult.Networking
             }
 
             List<Exception>? failures = null;
+            List<CultNetBurnedSequence>? burned = null;
+            List<Exception>? burnCauses = null;
             foreach (var change in changes)
             {
                 var identity = change.Document ?? change.PreviousDocument;
@@ -1158,9 +1166,14 @@ namespace GameCult.Networking
                     {
                         RecordReplicatedEntry(shard, logKind, descriptor.SchemaId, change, replicated);
                     }
-                    else if (door?.NoLog != true && shard.IsPrimary)
+                    else if (door?.NoLog != true && shard.IsPrimary && (door != null || _shards.Any(candidate => candidate.Matches(descriptor, change.Key))))
                     {
-                        LogPrimaryChange(shard, logKind, descriptor.SchemaId, change, door);
+                        // A door chose its shard; a bare write belongs to a shard only when one matches it.
+                        if (LogPrimaryChange(shard, logKind, descriptor.SchemaId, change, door) is { } burn)
+                        {
+                            (burned ??= new List<CultNetBurnedSequence>()).Add(new CultNetBurnedSequence(shard.ShardId, burn.Sequence));
+                            (burnCauses ??= new List<Exception>()).Add(burn.Cause);
+                        }
                     }
                 }
                 catch (Exception exception)
@@ -1172,7 +1185,14 @@ namespace GameCult.Networking
                     _stash[change.Sequence] = new Publication(documentType, kind, change.Key, descriptor.SchemaId, shard, change.Document, change.PreviousDocument);
             }
 
-            // Every change is stashed and will be published; the writer hears of a failed log afterwards.
+            // Every change is stashed and will be published; the writer hears of a failed log afterwards, in one exception.
+            if (burned != null)
+            {
+                (failures ??= new List<Exception>()).Insert(
+                    0,
+                    new CultNetShardLogException(burned, burnCauses!.Count == 1 ? burnCauses[0] : new AggregateException(burnCauses)));
+            }
+
             if (failures != null)
             {
                 throw failures.Count == 1 ? failures[0] : new AggregateException(failures);
@@ -1228,8 +1248,8 @@ namespace GameCult.Networking
 
         // A primary mints the sequence, appends durably, then records in memory. If it cannot log the change, the change is
         // still committed: the sequence is burned and compacted past, so a replica behind it is told compacted_history and
-        // resynchronizes by snapshot, and the writer is told with a CultNetShardLogException.
-        private void LogPrimaryChange(
+        // resynchronizes by snapshot. The burn is returned for the journal to tell the writer in one CultNetShardLogException.
+        private (long Sequence, Exception Cause)? LogPrimaryChange(
             CultNetShardDescriptor shard,
             CultNetDatabaseChangeKind logKind,
             string schemaId,
@@ -1259,6 +1279,7 @@ namespace GameCult.Networking
                             ? new CultNetShardLogEntryMessage { Put = door.Put, Delete = door.Delete }
                             : ToLogEntryMessage(entry);
                     RecordMutationLogEntry(entry, wireEntry);
+                    return null;
                 }
                 catch (Exception cause)
                 {
@@ -1272,15 +1293,15 @@ namespace GameCult.Networking
                         cause = new AggregateException(cause, compactCause);
                     }
 
-                    throw new CultNetShardLogException(shard.ShardId, sequence, cause);
+                    return (sequence, cause);
                 }
             }
         }
 
-        // A door's context belongs to one specific change, recognised by shape: a put door wrote an instance no cache had
-        // held, so its change carries that instance as the new document and never as the previous one; a removal door
-        // removes an instance, so its change carries it as the previous document and no new one. A plain removal of an
-        // instance a put door admitted, or an observer re-upserting that instance in place, is neither, and gets no context.
+        // A door's context belongs to one specific change, recognised by shape: a put door's change carries the instance as
+        // its new document; a removal door removes an instance, so its change carries it as the previous document and no
+        // new one. A plain removal of an instance a put door admitted is neither, and gets no context. A door's own change
+        // is journaled first, in its own hold, and takes its context there.
         private DoorContext? TakeDoor(CultCacheDocumentChange<object> change)
         {
             var identity = change.Document ?? change.PreviousDocument;
@@ -1291,7 +1312,7 @@ namespace GameCult.Networking
 
             var matches = change.Document == null
                 ? door.Removal
-                : !door.Removal && !ReferenceEquals(change.PreviousDocument, change.Document);
+                : !door.Removal;
             return matches && ((ICollection<KeyValuePair<object, DoorContext>>)_doors)
                 .Remove(new KeyValuePair<object, DoorContext>(identity, door))
                 ? door
@@ -1537,10 +1558,21 @@ namespace GameCult.Networking
                 // the last-write sequence a restart resumes with is rebuilt from it exactly as
                 // LogPrimaryChange/the replica apply paths maintain it live - a row's ordinal for
                 // the selection evaluator's order and cursor must not reset to "never written" on restart.
-                var entries = _mutationLogStore.Read(shard.ShardId);
+                var entries = _mutationLogStore.Read(shard.ShardId).OrderBy(entry => entry.Sequence).ToArray();
+                var compacted = _mutationLogStore.GetCompactedThrough(shard.ShardId);
                 var highest = 0L;
+                var expected = compacted + 1;
+                var hole = 0L;
                 foreach (var entry in entries)
                 {
+                    // A sequence the log lacks between two it holds was burned (its append and its compaction both failed, or
+                    // a compaction was interrupted). Replicas must be told compacted_history for it, not served a gapped log.
+                    if (entry.Sequence > compacted && entry.Sequence > expected)
+                    {
+                        hole = entry.Sequence - 1;
+                    }
+
+                    expected = Math.Max(expected, entry.Sequence + 1);
                     if (entry.Sequence > highest)
                     {
                         highest = entry.Sequence;
@@ -1554,7 +1586,12 @@ namespace GameCult.Networking
                 }
 
                 // Sequences at or below the compaction point are spent even when the log holds none of them.
-                highest = Math.Max(highest, _mutationLogStore.GetCompactedThrough(shard.ShardId));
+                highest = Math.Max(highest, compacted);
+                if (hole > 0)
+                {
+                    _burnedThrough[shard.ShardId] = hole;
+                }
+
                 if (highest > 0)
                 {
                     _nextLogSequences[shard.ShardId] = highest + 1;

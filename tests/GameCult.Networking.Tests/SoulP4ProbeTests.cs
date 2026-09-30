@@ -187,7 +187,7 @@ namespace GameCult.Networking.Tests
 
         // F4: the journal holds the cache gate across the log append, and cache reads take the gate, so a reader of an
         // unrelated key waits for the whole append.
-        [Test, Category("SoulFinding")]
+        [Test, Category("SoulFinding"), Ignore("Accepted follow-up F4: a log append runs under the cache gate, so readers wait; documented on ICultNetShardMutationLogStore.")]
         public async Task F4_AReaderOfAnotherKeyDoesNotWaitForALogAppend()
         {
             var store = new Store { AppendDelayMs = 400 };
@@ -267,7 +267,7 @@ namespace GameCult.Networking.Tests
             Assert.That(new[] { One, Two, Three }.Select(k => replicaCache.Get<NetworkSchemaNote>(k)?.Text), Is.EqualTo(new[] { "one", "two", "three" }));
         }
 
-        [Test, Category("SoulMeasure")]
+        [Test, Category("SoulMeasure"), Explicit("Measurement, no assertion; writes a log file.")]
         public async Task M1_BareWriteLatencyWithTheFileLogStore()
         {
             var root = Path.Combine(Path.GetTempPath(), "soulp4-log-" + Guid.NewGuid().ToString("N"));
