@@ -853,9 +853,11 @@ fn a_policy_that_cannot_form_a_block_is_refused() {
     let no_divisor = MediaFecPolicy { video_parity_divisor: 0, ..STANDARD };
     assert!(protect_video_frame(&frame(1, 2, 10, 10), &no_divisor, provenance()).is_err());
     let no_audio = MediaFecPolicy { audio_data_shards: 0, ..STANDARD };
-    assert!(protect_audio_block(&audio_block(1, 10), &no_audio, provenance()).is_err());
+    let error = protect_audio_block(&audio_block(1, 10), &no_audio, provenance()).unwrap_err();
+    assert!(is_invalid_mentioning(&error, "non-zero"), "{error}");
     let no_audio_parity = MediaFecPolicy { audio_parity_shards: 0, ..STANDARD };
-    assert!(protect_audio_block(&audio_block(1, 10), &no_audio_parity, provenance()).is_err());
+    let error = protect_audio_block(&audio_block(1, 10), &no_audio_parity, provenance()).unwrap_err();
+    assert!(is_invalid_mentioning(&error, "non-zero"), "{error}");
     let too_wide = MediaFecPolicy { video_max_block_data_shards: 255, ..STANDARD };
     assert!(protect_video_frame(&frame(1, 2, 10, 10), &too_wide, provenance()).is_err());
     let audio_too_wide = MediaFecPolicy { audio_data_shards: 255, audio_parity_shards: 2, ..STANDARD };
