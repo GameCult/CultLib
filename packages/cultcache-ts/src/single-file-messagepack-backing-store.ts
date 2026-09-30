@@ -220,13 +220,9 @@ function encodeSnapshot(entries: CultCacheEnvelope[], format: StoreFormat): unkn
 // record read under a compatible id is written back beside the entry that lists it.
 function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheSchemaCatalogEntry> {
   const catalog = new Map<string, CultCacheSchemaCatalogEntry>();
-  for (const entry of entries) {
+  const defaultEntryFor = (entry: CultCacheEnvelope): CultCacheSchemaCatalogEntry => {
     const schemaId = schemaIdForEnvelope(entry);
-    const supplied = entry.catalogEntry;
-    const publishes =
-      supplied !== undefined &&
-      (supplied.schemaId === schemaId || (supplied.compatibleSchemaIds ?? []).includes(schemaId));
-    const published: CultCacheSchemaCatalogEntry = publishes ? supplied : {
+    return {
       schemaId,
       schemaName: entry.type,
       schemaVersion: `${entry.type}.v1`,
@@ -239,19 +235,48 @@ function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheS
       compatibleSchemaIds: [schemaId],
       members: [],
     };
-    // Entries that share an id are one schema seen by different writers: the entry written lists every id any of them lists.
-    const existing = catalog.get(published.schemaId);
-    catalog.set(
-      published.schemaId,
-      existing === undefined
-        ? published
-        : {
-            ...existing,
-            compatibleSchemaIds: [
-              ...new Set([...(existing.compatibleSchemaIds ?? [existing.schemaId]), ...(published.compatibleSchemaIds ?? [published.schemaId])]),
-            ],
-          },
-    );
+  };
+  const place = (entry: CultCacheEnvelope, candidates: CultCacheSchemaCatalogEntry[]): void => {
+    for (const candidate of candidates) {
+      const existing = catalog.get(candidate.schemaId);
+      if (existing === undefined) {
+        catalog.set(candidate.schemaId, candidate);
+        return;
+      }
+
+      // Entries that share an id and a schema name are one schema seen by different writers: the entry written lists every id any
+      // of them lists. An entry of another schema is never merged: the record gets a default entry under its own id.
+      if (existing.schemaName === candidate.schemaName) {
+        catalog.set(candidate.schemaId, {
+          ...existing,
+          compatibleSchemaIds: [
+            ...new Set([...(existing.compatibleSchemaIds ?? [existing.schemaId]), ...(candidate.compatibleSchemaIds ?? [candidate.schemaId])]),
+          ],
+        });
+        return;
+      }
+    }
+
+    throw new Error(`CultCache schema id "${schemaIdForEnvelope(entry)}" cannot identify two different schemas.`);
+  };
+
+  // A record's own id is claimed first, so an entry that lists it as compatible cannot take it from the schema that owns it,
+  // whatever order the records arrive in.
+  const listed: Array<[CultCacheEnvelope, CultCacheSchemaCatalogEntry]> = [];
+  for (const entry of entries) {
+    const schemaId = schemaIdForEnvelope(entry);
+    const supplied = entry.catalogEntry;
+    if (supplied !== undefined && supplied.schemaId !== schemaId && (supplied.compatibleSchemaIds ?? []).includes(schemaId)) {
+      listed.push([entry, supplied]);
+    } else if (supplied !== undefined && supplied.schemaId === schemaId) {
+      place(entry, [supplied]);
+    } else {
+      place(entry, [defaultEntryFor(entry)]);
+    }
+  }
+
+  for (const [entry, supplied] of listed) {
+    place(entry, [supplied, defaultEntryFor(entry)]);
   }
 
   return catalog;

@@ -165,24 +165,37 @@ def _encode_snapshot(envelopes: list[CultCacheEnvelope], format_version: str) ->
     # own id or a compatible one), else a default entry under the record's id. The catalog is keyed by the entry's own id, so a
     # record read under a compatible id is written back beside the entry that lists it.
     catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}
+
+    def place(envelope: CultCacheEnvelope, candidates: list[CultCacheSchemaCatalogEntry]) -> None:
+        for candidate in candidates:
+            existing = catalog_by_schema_id.get(candidate.schema_id)
+            if existing is None:
+                catalog_by_schema_id[candidate.schema_id] = candidate
+                return
+            # Entries that share an id and a schema name are one schema seen by different writers: the entry written lists every id
+            # any of them lists. An entry of another schema is never merged: the record gets a default entry under its own id.
+            if existing.schema_name == candidate.schema_name:
+                catalog_by_schema_id[candidate.schema_id] = replace(
+                    existing,
+                    compatible_schema_ids=tuple(dict.fromkeys((*existing.compatible_schema_ids, *candidate.compatible_schema_ids))),
+                )
+                return
+        raise ValueError(f"CultCache schema id {_schema_id_for(envelope)!r} cannot identify two different schemas")
+
+    # A record's own id is claimed first, so an entry that lists it as compatible cannot take it from the schema that owns it,
+    # whatever order the records arrive in.
+    listed: list[tuple[CultCacheEnvelope, CultCacheSchemaCatalogEntry]] = []
     for envelope in envelopes:
         schema_id = _schema_id_for(envelope)
         supplied = envelope.catalog_entry
-        published = (
-            supplied
-            if supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
-            else _default_catalog_entry(envelope)
-        )
-        # Entries that share an id are one schema seen by different writers: the entry written lists every id any of them lists.
-        existing = catalog_by_schema_id.get(published.schema_id)
-        catalog_by_schema_id[published.schema_id] = (
-            published
-            if existing is None
-            else replace(
-                existing,
-                compatible_schema_ids=tuple(dict.fromkeys((*existing.compatible_schema_ids, *published.compatible_schema_ids))),
-            )
-        )
+        if supplied is not None and supplied.schema_id != schema_id and schema_id in supplied.compatible_schema_ids:
+            listed.append((envelope, supplied))
+        elif supplied is not None and supplied.schema_id == schema_id:
+            place(envelope, [supplied])
+        else:
+            place(envelope, [_default_catalog_entry(envelope)])
+    for envelope, supplied in listed:
+        place(envelope, [supplied, _default_catalog_entry(envelope)])
 
     catalog = [
         _encode_catalog_entry(entry)

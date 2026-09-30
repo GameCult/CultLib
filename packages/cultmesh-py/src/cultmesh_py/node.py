@@ -26,7 +26,7 @@ from cultnet_py import (
     apply_shard_log_response as apply_cultnet_shard_log_response,
     document_delete,
     document_put_raw,
-    resolve_document_and_schema_id_for_raw_record,
+    resolve_document_for_raw_record,
     schema_document_map,
 )
 
@@ -657,13 +657,11 @@ class CultMeshDatabase:
         schema_id = str(document_record.get("schemaId") or "")
         documents_by_schema_id = schema_document_map(self.documents)
         try:
-            document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
-                documents_by_schema_id,
-                schema_id,
-                document_record,
-            )
+            document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, document_record)
         except KeyError:
             return None
+        # One id: the local schema id, under which the cache stores the record and previous values are keyed.
+        resolved_schema_id = document.catalog_entry().schema_id
         record_key = str(document_record["recordKey"])
         previous = self.cache.get(document, record_key)
         envelope = CultCacheEnvelope(
@@ -1142,12 +1140,8 @@ class CultMeshDatabase:
         documents_by_schema_id = schema_document_map(self.documents)
         if raw_record is not None:
             try:
-                _, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
-                    documents_by_schema_id,
-                    schema_id,
-                    raw_record,
-                )
-                return resolved_schema_id, record_key
+                document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, raw_record)
+                return document.catalog_entry().schema_id, record_key
             except KeyError:
                 pass
         document = documents_by_schema_id.get(schema_id)
@@ -1307,15 +1301,11 @@ class CultMeshDatabase:
                 continue
             schema_id = str(record.get("schemaId"))
             try:
-                document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
-                    documents_by_schema_id,
-                    schema_id,
-                    record,
-                )
+                document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, record)
             except KeyError:
                 continue
             record_key = str(record.get("recordKey"))
-            previous[(resolved_schema_id, record_key)] = self.cache.get(document, record_key)
+            previous[(document.catalog_entry().schema_id, record_key)] = self.cache.get(document, record_key)
         return previous
 
     @staticmethod

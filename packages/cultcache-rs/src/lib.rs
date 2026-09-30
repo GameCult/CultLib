@@ -4826,16 +4826,19 @@ mod tests {
     // An id one entry owns and a later entry lists as compatible names the entry that owns it.
     #[test]
     fn an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("store.msgpack");
-        std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tests/vectors/document-variants-c2a/readability/own-id-over-compatible-v3.bin"),
-            &path,
-        )?;
-        let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
-        assert_eq!(envelopes.len(), 2);
-        assert!(envelopes.iter().all(|envelope| envelope.r#type == "vectors.item"), "{envelopes:?}");
+        for vector in ["own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            std::fs::copy(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/vectors/document-variants-c2a/readability")
+                    .join(vector),
+                &path,
+            )?;
+            let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+            assert_eq!(envelopes.len(), 2, "{vector}");
+            assert!(envelopes.iter().all(|envelope| envelope.r#type == "vectors.item"), "{vector}: {envelopes:?}");
+        }
         Ok(())
     }
 

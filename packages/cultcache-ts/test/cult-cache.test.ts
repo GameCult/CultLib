@@ -1383,13 +1383,48 @@ test("the store writer merges the compatible ids of entries that share a schema 
   assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2);
 });
 
+// Entries of different schemas that share an id are not merged: the record gets a default entry under its own id, so no record is
+// read as another schema, whichever order the records arrive in.
+test("the store writer never merges an entry of another schema into a record's catalog entry", async () => {
+  const entry = (schemaName: string, compatibleSchemaIds: string[]) => ({
+    schemaId: "tests.retype.x",
+    schemaName,
+    schemaVersion: `${schemaName}.v1`,
+    contentHash: "tests.retype.x",
+    canonicalSchemaJson: "",
+    compatibleSchemaIds,
+    members: [],
+  });
+  const record = (key: string, type: string, schemaId: string, catalogEntry: ReturnType<typeof entry>) => ({
+    key,
+    type,
+    schemaId,
+    payload: encode({ key }),
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry,
+  });
+  // a is schema "mine" under x; b is schema "theirs" under y, carrying an entry with x's id that lists y.
+  const a = record("a", "tests.retype.mine", "tests.retype.x", entry("tests.retype.mine", ["tests.retype.x"]));
+  const b = record("b", "tests.retype.theirs", "tests.retype.y", entry("tests.retype.theirs", ["tests.retype.x", "tests.retype.y"]));
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-retype-"));
+
+  for (const [name, order] of [["ab", [a, b]], ["ba", [b, a]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    const back = await new SingleFileMessagePackBackingStore(file).pullAll();
+    assert.deepEqual(back.map((envelope) => [envelope.key, envelope.type]).sort(), [["a", "tests.retype.mine"], ["b", "tests.retype.theirs"]], name);
+  }
+});
+
 test("an id an entry owns names that entry, not one that lists it as compatible", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-own-id-"));
-  const file = await copyVector(dir, join(c2aVectors, "readability", "own-id-over-compatible-v3.bin"), "own.msgpack");
-  const envelopes = await new SingleFileMessagePackBackingStore(file).pullAll();
-  assert.deepEqual(envelopes.map((envelope) => envelope.type), ["vectors.item", "vectors.item"]);
-  const inspection = inspectCultCacheBytes("own.msgpack", await readFile(file));
-  assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"]);
+  for (const vector of ["own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"]) {
+    const file = await copyVector(dir, join(c2aVectors, "readability", vector), "own.msgpack");
+    const envelopes = await new SingleFileMessagePackBackingStore(file).pullAll();
+    assert.deepEqual(envelopes.map((envelope) => envelope.type), ["vectors.item", "vectors.item"], vector);
+    const inspection = inspectCultCacheBytes("own.msgpack", await readFile(file));
+    assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"], vector);
+  }
 });
 
 // The inspector reads what the reader reads: a record under an id its catalog lists only as compatible is inspected.

@@ -2190,7 +2190,7 @@ class CultNetTests(unittest.TestCase):
             runtime_kind="python",
             display_name="Python Interop Test",
             agent_id="python-interop-test-agent",
-            schema_path=str(Path("contracts/cultnet/interop/cultnet.interop-note.schema.json")),
+            schema_path=str(Path(__file__).resolve().parents[3] / "contracts" / "cultnet" / "interop" / "cultnet.interop-note.schema.json"),
         )
         binding = state.bindings["note"]
         logged_value = {

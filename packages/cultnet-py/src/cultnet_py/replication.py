@@ -154,28 +154,19 @@ def can_resolve_document_for_raw_record(
         return False
 
 
+# routes a replicated raw record to a local binding; the store always persists the local schema id; this is not store-reader recovery.
 def resolve_document_for_raw_record(
     documents_by_schema_id: dict[str, DocumentDefinition[Any]],
     schema_id: str,
     record: dict[str, Any],
 ) -> DocumentDefinition[Any]:
-    return resolve_document_and_schema_id_for_raw_record(documents_by_schema_id, schema_id, record)[0]
-
-
-# routes a replicated raw record to a local binding; the store always persists the local schema id; this is not store-reader recovery.
-def resolve_document_and_schema_id_for_raw_record(
-    documents_by_schema_id: dict[str, DocumentDefinition[Any]],
-    schema_id: str,
-    record: dict[str, Any],
-) -> tuple[DocumentDefinition[Any], str]:
     document = documents_by_schema_id.get(schema_id)
     if document is not None:
-        return document, schema_id
+        return document
     schema_version = _infer_schema_version_from_payload(bytes(record["payload"]))
     schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
     if schema_name is not None and schema_name in documents_by_schema_id:
-        document = documents_by_schema_id[schema_name]
-        return document, document.catalog_entry().schema_id
+        return documents_by_schema_id[schema_name]
     raise KeyError(schema_id)
 
 

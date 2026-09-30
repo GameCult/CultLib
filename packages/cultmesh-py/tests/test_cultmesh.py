@@ -338,6 +338,46 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(observed[0].value["value"], "new")
         self.assertEqual(node.cache.get_required_envelope(document, "policy:1").schema_id, local_schema_id)
 
+    # A record arriving under a compatible id or the schema name is the same record: one id, the local one, so an existing
+    # record is updated with its previous value.
+    def test_cultmesh_node_reports_an_update_when_a_record_arrives_under_a_compatible_id_or_the_schema_name(self) -> None:
+        document = define_database_entry_type(
+            "mesh.compatible-policy",
+            [("schema_version", 0), ("name", 1), ("value", 2)],
+            schema_id="mesh.compatible-policy.current",
+            schema_name="mesh.compatible_policy",
+            schema_version="mesh.compatible_policy.v1",
+            compatible_schema_ids=["mesh.compatible-policy.current", "mesh.compatible-policy.older"],
+        )
+        for wire_schema_id in ("mesh.compatible-policy.older", "mesh.compatible_policy"):
+            node = create_node(runtime_id="python-node")
+            node.register_document(document)
+            node.put(document, "policy:1", {"schema_version": "mesh.compatible_policy.v1", "name": "policy", "value": "old"})
+            observed: list[CultMeshDatabaseChange] = []
+            unsubscribe = node.database.watch_record(document, "policy:1", observed.append)
+            try:
+                applied = node.database.apply_snapshot_response({
+                    "schemaVersion": "cultnet.snapshot_response_raw.v0",
+                    "messageId": "compatible-snapshot",
+                    "documents": [{
+                        "schemaId": wire_schema_id,
+                        "recordKey": "policy:1",
+                        "storedAt": "2026-06-25T00:00:00Z",
+                        "payloadEncoding": "messagepack",
+                        "payload": document.encode_payload({
+                            "schema_version": "mesh.compatible_policy.v1", "name": "policy", "value": "new",
+                        }),
+                    }],
+                })
+            finally:
+                unsubscribe()
+
+            local_schema_id = document.catalog_entry().schema_id
+            self.assertEqual(applied[0].schema_id, local_schema_id, wire_schema_id)
+            self.assertEqual([change.change_kind for change in observed], ["updated"], wire_schema_id)
+            self.assertEqual(observed[0].previous_value["value"], "old", wire_schema_id)
+            self.assertEqual(observed[0].value["value"], "new", wire_schema_id)
+
     def test_cultmesh_node_syncs_snapshot_and_shard_log_through_cultnet_client(self) -> None:
         import msgpack  # type: ignore
         from cultnet_py import read_frame, write_frame

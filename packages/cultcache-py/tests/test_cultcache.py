@@ -347,8 +347,35 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 2)
 
     def test_an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible(self) -> None:
-        store = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "readability" / "own-id-over-compatible-v3.bin")
-        self.assertEqual([envelope.type for envelope in store.pull_all()], ["vectors.item", "vectors.item"])
+        for vector in ("own-id-over-compatible-v3.bin", "compatible-before-owner-v3.bin"):
+            store = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "readability" / vector)
+            self.assertEqual([envelope.type for envelope in store.pull_all()], ["vectors.item", "vectors.item"], vector)
+
+    # Entries of different schemas that share an id are not merged: the record gets a default entry under its own id, so no record
+    # is read as another schema, whichever order the records arrive in.
+    def test_the_store_writer_never_merges_an_entry_of_another_schema(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+        from cultcache_py.stores import _decode_snapshot, _encode_snapshot
+
+        def entry(name: str, compatible: tuple[str, ...]) -> CultCacheSchemaCatalogEntry:
+            return CultCacheSchemaCatalogEntry(
+                schema_id="tests.retype.x", schema_name=name, schema_version=name + ".v1",
+                content_hash="tests.retype.x", canonical_schema_json="", compatible_schema_ids=compatible, members=(),
+            )
+
+        def record(key: str, type: str, schema_id: str, catalog_entry: CultCacheSchemaCatalogEntry) -> CultCacheEnvelope:
+            return CultCacheEnvelope(
+                key=key, type=type, payload=msgpack.packb({"key": key}, use_bin_type=True),
+                stored_at="2026-09-30T00:00:00Z", schema_id=schema_id, catalog_entry=catalog_entry,
+            )
+
+        a = record("a", "tests.retype.mine", "tests.retype.x", entry("tests.retype.mine", ("tests.retype.x",)))
+        b = record("b", "tests.retype.theirs", "tests.retype.y", entry("tests.retype.theirs", ("tests.retype.x", "tests.retype.y")))
+        for order in ([a, b], [b, a]):
+            decoded = msgpack.unpackb(msgpack.packb(_encode_snapshot(order, "cultcache.store.v1"), use_bin_type=True), raw=False)
+            _, envelopes = _decode_snapshot(decoded)
+            self.assertEqual(sorted((e.key, e.type) for e in envelopes), [("a", "tests.retype.mine"), ("b", "tests.retype.theirs")])
 
     def test_a_record_loaded_under_a_compatible_schema_id_is_written_back_under_the_id_its_catalog_entry_carries(self) -> None:
         import msgpack  # type: ignore

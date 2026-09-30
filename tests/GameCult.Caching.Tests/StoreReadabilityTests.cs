@@ -156,11 +156,12 @@ namespace GameCult.Caching.Tests
         }
 
         // An id one entry owns and a later entry lists as compatible names the entry that owns it.
-        [Test]
-        public void AnIdAnEntryOwnsNamesThatEntryNotOneThatListsItAsCompatible()
+        [TestCase("own-id-over-compatible-v3.bin")]
+        [TestCase("compatible-before-owner-v3.bin")]
+        public void AnIdAnEntryOwnsNamesThatEntryNotOneThatListsItAsCompatible(string vector)
         {
             var path = Path.Combine(_directory, "own-id.cc");
-            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), "own-id-over-compatible-v3.bin")));
+            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), vector)));
 
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             Assert.That(cache.Get<VectorItem>(new CultRecordKey("alpha")), Is.Not.Null, "the record read as the schema that owns its id");
@@ -200,6 +201,59 @@ namespace GameCult.Caching.Tests
 
             var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             Assert.That(rewritten.SchemaCatalog.Single().CompatibleSchemaIds, Does.Contain("vectors.old.id"));
+            Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"), "the merged entry's content hash is the schema being written's");
+        }
+
+        // The single-file writer merges the same way: a commit onto a file keeps the ids the file's entry lists, and the entry's
+        // content hash is the registered schema's, not the file's stale one.
+        [Test]
+        public void ASingleFileCommitMergesTheFilesEntryWithTheSchemaBeingWritten()
+        {
+            var path = Seed("merged-single.cc");
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            manifest.Records.Single().SchemaId = "vectors.old.id";
+            entry.ContentHash = "stale";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "vectors.old.id" };
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
+            {
+                Assert.That(cache.Commit(batch =>
+                {
+                    batch.Expect(new CultRecordKey("e"), null);
+                    batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
+                }), Is.True);
+            }
+
+            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(rewritten.SchemaCatalog.Single().CompatibleSchemaIds, Does.Contain("vectors.old.id"));
+            Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
+        }
+
+        // Entries that share an id merge only when they are the same schema: another schema's entry is dropped, its ids never
+        // listed, and the entry written is the one being written now.
+        [Test]
+        public void EntriesOfDifferentSchemasThatShareAnIdAreNotMerged()
+        {
+            CultSchemaCatalogEntry Entry(string name, string hash, params string[] compatible) => new()
+            {
+                SchemaId = "x", SchemaName = name, SchemaVersion = name + ".v1", ContentHash = hash, CompatibleSchemaIds = compatible
+            };
+            var mine = Entry("mine", "h1", "x");
+            var theirs = Entry("theirs", "h2", "x", "z");
+
+            foreach (var order in new[] { new[] { mine, theirs }, new[] { theirs, mine } })
+            {
+                var first = CultSchemaCatalogEntry.MergeById(order, preferLast: false).Single();
+                var last = CultSchemaCatalogEntry.MergeById(order, preferLast: true).Single();
+                Assert.That(first, Is.SameAs(order[0]));
+                Assert.That(last, Is.SameAs(order[1]));
+            }
+
+            var sameSchema = CultSchemaCatalogEntry.MergeById(new[] { Entry("mine", "old", "x", "y"), Entry("mine", "new", "x") }, preferLast: true).Single();
+            Assert.That(sameSchema.ContentHash, Is.EqualTo("new"));
+            Assert.That(sameSchema.CompatibleSchemaIds, Is.EquivalentTo(new[] { "x", "y" }));
         }
 
         // Entries that share an id are merged whatever order they arrive in: every id any of them lists survives.

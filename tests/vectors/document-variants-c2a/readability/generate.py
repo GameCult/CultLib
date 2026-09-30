@@ -43,6 +43,9 @@ vectors = {
     "compatible-id-only-v3": pack([base[0], [[base[1][0][0] + ".next"] + base[1][0][1:]], base[2]]),
     # An id that one entry owns and a later entry lists as compatible names the entry that owns it (here, vectors.item, which does not list itself as compatible).
     "own-id-over-compatible-v3": pack([base[0], [base[1][0][:5] + [[]] + base[1][0][6:]] + [["vectors.item.next", "vectors.other", "vectors.other.v1", "vectors.item.next", "{}", ["vectors.item"], []]], base[2]]),
+    # The same, with the entry that lists the id as compatible before the entry that owns it: a reader that takes the first entry
+    # naming an id in one pass reads the record as vectors.other.
+    "compatible-before-owner-v3": pack([base[0], [["vectors.item.next", "vectors.other", "vectors.other.v1", "vectors.item.next", "{}", ["vectors.item"], []], base[1][0][:5] + [[]] + base[1][0][6:]], base[2]]),
     # v3-base plus a variant of alpha: a fifth record slot, [baseKey, overrides[]], over an empty payload, overriding the name. Only C# reads it.
     "variant-slot-v3": pack([base[0], base[1], base[2] + [["gamma"] + base[2][0][1:3] + [b"", ["alpha", [[0, [[0, ""]], "", "gamma"]]]]]]),
     # v3-base with a fourth top-level slot after the records.
