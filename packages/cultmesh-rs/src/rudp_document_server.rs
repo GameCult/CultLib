@@ -68,11 +68,8 @@ where
 
 /// Caller-owned catalog port for serving raw snapshot requests.
 ///
-/// The caller decides which records the requester may see. CultMesh serves
+/// The caller decides which records the requester may see. CultMesh preserves
 /// those records as raw CultNet documents and does not interpret their schemas.
-/// A served record carries no source provenance: the server clears
-/// `source_runtime_id`, `source_agent_id`, `source_role` and `tags` before it
-/// sizes or sends a response, as every CultMesh runtime's server does.
 pub trait CultMeshRudpSnapshotSource {
     fn raw_snapshot(
         &mut self,
@@ -195,7 +192,7 @@ pub enum CultMeshRudpRejectionReason {
     /// The caller's sink refused the document. Carries the sink's error text.
     SinkRefused(String),
     /// The document could never be served: a snapshot response carrying it
-    /// alone, as served and under the shortest message id CultNet allows, would
+    /// alone, as received and under the shortest message id CultNet allows, would
     /// exceed `max_snapshot_response_bytes`, or would take more than
     /// `max_fragment_count` fragments of `max_fragment_bytes`: the lesser of
     /// 65535 and `max_pending_reliable_packets_per_session`. It was not offered
@@ -570,12 +567,14 @@ where
                     }))
                 };
                 // Admit only what some snapshot request can return: the smallest
-                // response that could carry this document is the record as served,
-                // alone, under the shortest message id CultNet encodes, sized by the
+                // response that could carry this document is the document alone, as
+                // received, under the shortest message id CultNet encodes, sized by the
                 // snapshot path's encoder and fragmented as the snapshot path sends it.
+                // The snapshot source owns the served record's shape, so the record
+                // as received is the server's measure of it.
                 let alone = CultNetMessage::SnapshotResponseRaw {
                     message_id: SHORTEST_MESSAGE_ID.into(),
-                    documents: vec![served_record(document.clone())],
+                    documents: vec![document],
                 };
                 let response_bytes = match encode_snapshot_response(&alone) {
                     Ok(payload) => payload.len(),
@@ -595,12 +594,15 @@ where
                         max_fragment_count,
                     });
                 }
+                let CultNetMessage::SnapshotResponseRaw { mut documents, .. } = alone else {
+                    unreachable!("constructed as a snapshot response above");
+                };
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
                     message_id: message_id.clone(),
                     transport_sequence,
                     received_at_unix_millis: now_unix,
-                    document,
+                    document: documents.remove(0),
                 };
                 if let Err(error) = self.sink.accept_raw_document(receipt) {
                     return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
@@ -646,7 +648,7 @@ where
                 }
                 let response = CultNetMessage::SnapshotResponseRaw {
                     message_id: message_id.clone(),
-                    documents: documents.into_iter().map(served_record).collect(),
+                    documents,
                 };
                 let payload = match encode_snapshot_response(&response) {
                     Ok(payload) => payload,
@@ -835,16 +837,6 @@ fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     Ok(())
 }
 
-/// The record as the server serves it: without source provenance. What a peer
-/// says about its own runtime, agent, role and tags is receipt data for the
-/// sink, not part of the served document.
-fn served_record(mut document: CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
-    document.source_runtime_id = None;
-    document.source_agent_id = None;
-    document.source_role = None;
-    document.tags = None;
-    document
-}
 
 /// The one encoder for a snapshot response, shared by the snapshot path and by
 /// put admission so the size a put is judged by is the size it would be served at.

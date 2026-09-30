@@ -211,37 +211,14 @@ fn connect(
     anyhow::bail!("client connection timed out")
 }
 
-/// The record as a server serves it: the record the peer sent, without the
-/// source provenance a peer reports about itself. Spelled out here rather than
-/// asked of the server, so a server that served another shape is caught.
-fn as_served(document: &CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
-    CultNetRawDocumentRecord {
-        source_runtime_id: None,
-        source_agent_id: None,
-        source_role: None,
-        tags: None,
-        ..document.clone()
-    }
-}
-
-/// `document` with every source provenance field filled, so its received form
-/// is larger than its served form.
-fn with_provenance(mut document: CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
-    document.source_runtime_id = Some("provenance-runtime-that-is-not-served".into());
-    document.source_agent_id = Some("provenance-agent".into());
-    document.source_role = Some("provenance-role".into());
-    document.tags = Some(vec!["provenance".into(), "tags".into()]);
-    document
-}
-
-/// The encoded size of the snapshot response that carries `document` alone, as
-/// served, under a one-character message id, the shortest CultNet encodes: the
+/// The encoded size of the snapshot response that carries `document` alone
+/// under a one-character message id, the shortest CultNet encodes: the
 /// smallest response that could ever serve it.
 fn served_alone_bytes(document: &CultNetRawDocumentRecord) -> Result<usize> {
     Ok(encode_cultnet_message_to_vec(
         &CultNetMessage::SnapshotResponseRaw {
             message_id: "r".into(),
-            documents: vec![as_served(document)],
+            documents: vec![document.clone()],
         },
         CultNetWireContract::CultNetSchemaV0,
     )?
@@ -287,8 +264,12 @@ fn poll_until_rejected_or_stored(
     receipts: usize,
 ) -> Result<Option<CultMeshRudpRejectionReason>> {
     for _ in 0..5_000 {
-        if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? {
-            return Ok(Some(rejection.reason));
+        match server.poll_once()? {
+            CultMeshRudpPollOutcome::ApplicationRejected(rejection) => {
+                return Ok(Some(rejection.reason));
+            }
+            CultMeshRudpPollOutcome::Idle => thread::sleep(Duration::from_millis(1)),
+            _ => {}
         }
         if sink.0.lock().unwrap().receipts.len() >= receipts {
             return Ok(None);
@@ -675,8 +656,10 @@ fn snapshot_response_resends_until_acknowledged() -> Result<()> {
 fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
     let clock = Clock::new(55_000);
     let sink = Sink::default();
+    // The message id is long enough that the put's frame is at least its
+    // served-alone response, so the snapshot limit below admits it.
     let message = CultNetMessage::DocumentPutRaw {
-        message_id: "budget".into(),
+        message_id: "budget-exact".into(),
         document: document("budget", vec![7; 64]),
     };
     let encoded = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
@@ -747,30 +730,16 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
 
 /// A put is admitted only if some snapshot request could return it. One byte
 /// over the served bound is refused before the sink sees it; exactly at the
-/// bound is admitted, and a snapshot then serves it at exactly that size. The
-/// bound is the record as served: provenance that makes the received record
-/// larger than the bound neither refuses it nor reaches the snapshot.
+/// bound is admitted, and a snapshot then serves it at exactly that size.
 #[test]
 fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served() -> Result<()> {
-    let at_bound = with_provenance(document("fit", vec![7; 100]));
+    let at_bound = document("fit", vec![7; 100]);
     let over_bound = document("fit", vec![7; 101]);
     let limit = served_alone_bytes(&at_bound)?;
     assert_eq!(
         served_alone_bytes(&over_bound)?,
         limit + 1,
         "fixture: the two documents must straddle the bound by one byte"
-    );
-    let received_alone = encode_cultnet_message_to_vec(
-        &CultNetMessage::SnapshotResponseRaw {
-            message_id: "r".into(),
-            documents: vec![at_bound.clone()],
-        },
-        CultNetWireContract::CultNetSchemaV0,
-    )?
-    .len();
-    assert!(
-        received_alone > limit + 1,
-        "fixture: the at-bound put is over the bound in its received form"
     );
     let options = CultMeshRudpDocumentServerOptions {
         max_snapshot_response_bytes: limit,
@@ -845,11 +814,7 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
         .iter()
         .map(|receipt| receipt.document.clone())
         .collect();
-    assert_eq!(
-        stored,
-        vec![at_bound.clone()],
-        "the sink receives the record as it was sent"
-    );
+    assert_eq!(stored, vec![at_bound.clone()]);
     source.0.lock().unwrap().documents = stored;
 
     send(
@@ -879,7 +844,7 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
         decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
         CultNetMessage::SnapshotResponseRaw {
             message_id: "r".into(),
-            documents: vec![as_served(&at_bound)],
+            documents: vec![at_bound],
         }
     );
     Ok(())
@@ -957,7 +922,7 @@ fn a_put_whose_response_would_overflow_the_reliable_queue_is_refused() -> Result
         decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
         CultNetMessage::SnapshotResponseRaw {
             message_id: "r".into(),
-            documents: vec![as_served(&at_bound)],
+            documents: vec![at_bound],
         }
     );
     Ok(())
