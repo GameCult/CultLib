@@ -4,7 +4,7 @@
 maintaining a robust custom transport across runtimes, when it started as just 'hey, let's do LiteNetLib but
 better'. Is there any point maintaining it when we have QUIC?" and then "Yeah, pivot to QUIC adoption, I ain't
 gonna let sunk costs take the wheel."
-- **Lands:** Cut D, still in progress. It fixes live crashes: a spoofed datagram crashing Node, a malformed frame
+- **Landed 2026-09-30: Cut D, merged at `2f06ef84`** (Soul passes 1-4, batch 5 closing pass 4). It fixes live crashes: a spoofed datagram crashing Node, a malformed frame
   killing Python's server, C# stale peers corrupting sessions.
 - **Parked, not built:** Cut F, Cut 2 (held on F), Cut 4, Cut K and K1 (including the Kotlin resend-loop gap), Cut 7
   and the receipts port. Nothing of theirs exists to tag, so this map is their record.
