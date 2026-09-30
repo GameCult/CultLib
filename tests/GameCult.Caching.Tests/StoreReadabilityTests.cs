@@ -134,27 +134,6 @@ namespace GameCult.Caching.Tests
                 Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
         }
 
-        // A record kept under an id its catalog entry lists only as a compatible id keeps that entry through a rewrite: the manifest
-        // the rewrite leaves is one this runtime reads.
-        [Test]
-        public void ADirectoryRewriteKeepsTheCatalogEntryThatPublishesAKeptRecordAsACompatibleId()
-        {
-            var path = DirectoryStore("compatible.cc");
-            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var entry = manifest.SchemaCatalog.Single();
-            manifest.Records.Single().SchemaId = "vectors.old.id";
-            entry.SchemaId = "vectors.old.next";
-            entry.CompatibleSchemaIds = new[] { "vectors.old.id" };
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
-
-            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
-
-            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(rewritten.SchemaCatalog.Select(catalogEntry => catalogEntry.SchemaId), Does.Contain("vectors.old.next"));
-            Assert.That(rewritten.Records.Select(record => record.SchemaId), Does.Contain("vectors.old.id"));
-        }
-
         // An id one entry owns and a later entry lists as compatible names the entry that owns it.
         [TestCase("own-id-over-compatible-v3.bin")]
         [TestCase("compatible-before-owner-v3.bin")]
@@ -184,38 +163,96 @@ namespace GameCult.Caching.Tests
             Assert.That(Registry.ResolvePersistedSchemaReport("x.own", catalog).LocalSchemaName, Is.EqualTo("vectors.item"));
         }
 
-        // A directory rewrite where the entry that lists a kept record's id shares its own id with the schema being written keeps that
-        // id in the entry it writes, so the manifest still reads.
-        [Test]
-        public void ADirectoryRewriteMergesEntriesThatShareAnIdAndKeepsEveryIdTheyList()
+        // The catalog a write leaves is derived from its records: one entry per carried id, the entry that owns the id (a registered
+        // descriptor over an arrived entry), else one that lists it as compatible, written as chosen.
+        private static CultSchemaCatalogEntry Entry(string id, string name, string hash, params string[] compatible) => new()
         {
-            var path = DirectoryStore("merged.cc");
-            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var entry = manifest.SchemaCatalog.Single();
-            entry.ContentHash = "stale";
-            manifest.Records.Single().SchemaId = "vectors.old.id";
-            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "vectors.old.id" };
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+            SchemaId = id, SchemaName = name, SchemaVersion = name + ".v1", ContentHash = hash, CompatibleSchemaIds = compatible
+        };
 
-            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+        private static CultPersistedRecord Rec(string key, string schemaId) => new() { Key = key, SchemaId = schemaId, StoredAt = "t" };
 
-            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(rewritten.SchemaCatalog.Single().CompatibleSchemaIds, Does.Contain("vectors.old.id"));
-            Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"), "the merged entry's content hash is the schema being written's");
+        [Test]
+        public void ARegisteredDescriptorWinsOverAnArrivedEntryWithTheSameOwnId()
+        {
+            var registered = new[] { Entry("x", "new.name", "fresh", "x") };
+            var arrived = new[] { Entry("x", "old.name", "stale", "x", "old") };
+
+            var derived = CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, registered, arrived).Single();
+            Assert.That(derived.SchemaName, Is.EqualTo("new.name"));
+            Assert.That(derived.ContentHash, Is.EqualTo("fresh"));
+            Assert.That(derived.CompatibleSchemaIds, Is.EqualTo(new[] { "x" }), "written as chosen: no union with the arrived entry's ids");
         }
 
-        // The single-file writer merges the same way: a commit onto a file keeps the ids the file's entry lists, and the entry's
-        // content hash is the registered schema's, not the file's stale one.
         [Test]
-        public void ASingleFileCommitMergesTheFilesEntryWithTheSchemaBeingWritten()
+        public void AnEntryThatOwnsAnIdIsChosenOverOneThatListsItAsCompatibleInEveryOrder()
         {
-            var path = Seed("merged-single.cc");
+            var owner = Entry("y", "owner", "h1", "y");
+            var lister = Entry("x", "lister", "h2", "x", "y");
+            foreach (var arrived in new[] { new[] { owner, lister }, new[] { lister, owner } })
+            {
+                var derived = CultSchemaCatalogEntry.Derive(new[] { Rec("a", "y") }, Array.Empty<CultSchemaCatalogEntry>(), arrived);
+                Assert.That(derived.Select(entry => entry.SchemaId), Is.EqualTo(new[] { "y" }), "an entry no record needs is not written");
+            }
+
+            var registeredLister = Entry("r", "registered.lister", "h3", "r", "z");
+            var arrivedLister = Entry("a", "arrived.lister", "h4", "a", "z");
+            foreach (var arrived in new[] { new[] { arrivedLister }, Array.Empty<CultSchemaCatalogEntry>() })
+            {
+                var derived = CultSchemaCatalogEntry.Derive(new[] { Rec("a", "z") }, new[] { registeredLister }, arrived).Single();
+                Assert.That(derived.SchemaId, Is.EqualTo("r"), "with no owner, a registered entry that lists the id is chosen over an arrived one");
+            }
+        }
+
+        [Test]
+        public void TwoArrivedEntriesThatShareAnOwnIdAndDisagreeOnTheSchemaNameRefuseTheWrite()
+        {
+            var arrived = new[] { Entry("x", "first", "h1", "x"), Entry("x", "second", "h2", "x") };
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                CultSchemaCatalogEntry.Derive(new[] { Rec("b", "x"), Rec("a", "x") }, Array.Empty<CultSchemaCatalogEntry>(), arrived))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo("x"));
+            Assert.That(refusal.SchemaNames, Is.EquivalentTo(new[] { "first", "second" }));
+            Assert.That(refusal.RecordKey, Is.EqualTo("a"));
+
+            // A registered descriptor that owns the id settles the disagreement.
+            Assert.DoesNotThrow(() => CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, new[] { Entry("x", "first", "h3", "x") }, arrived));
+        }
+
+        [Test]
+        public void ARecordNoChosenEntryPublishesRefusesTheWrite()
+        {
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                CultSchemaCatalogEntry.Derive(new[] { Rec("a", "orphan") }, new[] { Entry("x", "n", "h", "x") }, Array.Empty<CultSchemaCatalogEntry>()))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo("orphan"));
+            Assert.That(refusal.RecordKey, Is.EqualTo("a"));
+        }
+
+        // A file entry that names an older schema under the registered schema's id, with a record kept under an older id it lists: a
+        // commit onto the file, or a whole-view flush, leaves a store that reopens with the record readable and the registered entry.
+        private string LegacyFile(string name)
+        {
+            var path = Seed(name);
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = manifest.SchemaCatalog.Single();
-            manifest.Records.Single().SchemaId = "vectors.old.id";
+            entry.SchemaName = "vectors.legacy";
             entry.ContentHash = "stale";
-            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "vectors.old.id" };
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
+            manifest.Records.Single().SchemaId = "old.id";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+            return path;
+        }
+
+        [Test]
+        public void ACommitOntoAFileWhoseEntryListsAnOlderIdLeavesAStoreThatReopens()
+        {
+            var path = Seed("legacy-conditional.cc");
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            manifest.Records.Single().SchemaId = "old.id";
+            entry.SchemaName = "vectors.legacy";
+            entry.ContentHash = "stale";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
 
             using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
@@ -227,53 +264,75 @@ namespace GameCult.Caching.Tests
                 }), Is.True);
             }
 
+            var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(written.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"), "the registered entry is written");
+            Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
+            using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "the record kept under the older id stays readable");
+        }
+
+        [Test]
+        public void AWholeViewFlushAfterARenameWithAStableIdWritesTheRegisteredEntry()
+        {
+            var path = LegacyFile("legacy-flush.cc");
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+
+            var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(written.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"));
+            Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
+            using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
+        }
+
+        // A record the cache does not hold, under an id only an arrived entry publishes while a registered descriptor owns that
+        // entry's own id, cannot be written readable: the write is refused and the file is left as it was.
+        [Test]
+        public void ARecordOnlyAnOverriddenEntryPublishesRefusesTheWriteAndLeavesTheFile()
+        {
+            var path = Seed("legacy-orphan.cc");
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            entry.SchemaName = "vectors.legacy";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
+            var existing = manifest.Records.Single();
+            manifest.Records = new[] { existing, new CultPersistedRecord { Key = "z", SchemaId = "old.id", StoredAt = "t", Payload = existing.Payload } };
+            var bytes = CultDocumentMessagePackSerialization.SerializeSnapshot(manifest);
+            File.WriteAllBytes(path, bytes);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("e"), null);
+                batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
+            }))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo("old.id"));
+            Assert.That(refusal.RecordKey, Is.EqualTo("z"));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
+        }
+
+        // The directory store derives its manifest the same way: a record kept under an older id, the entry naming an older schema,
+        // and a commit leaves a manifest that reads, with the registered entry.
+        [Test]
+        public void ADirectoryRewriteWhoseEntryListsAnOlderIdLeavesAManifestThatReads()
+        {
+            var path = DirectoryStore("legacy-dir.cc");
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            entry.SchemaName = "vectors.legacy";
+            entry.ContentHash = "stale";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
+            manifest.Records.Single().SchemaId = "old.id";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+
             var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(rewritten.SchemaCatalog.Single().CompatibleSchemaIds, Does.Contain("vectors.old.id"));
+            Assert.That(rewritten.SchemaCatalog.Single().SchemaName, Is.Not.EqualTo("vectors.legacy"));
             Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
-        }
-
-        // Entries that share an id merge only when they are the same schema: another schema's entry is dropped, its ids never
-        // listed, and the entry written is the one being written now.
-        [Test]
-        public void EntriesOfDifferentSchemasThatShareAnIdAreNotMerged()
-        {
-            CultSchemaCatalogEntry Entry(string name, string hash, params string[] compatible) => new()
-            {
-                SchemaId = "x", SchemaName = name, SchemaVersion = name + ".v1", ContentHash = hash, CompatibleSchemaIds = compatible
-            };
-            var mine = Entry("mine", "h1", "x");
-            var theirs = Entry("theirs", "h2", "x", "z");
-
-            foreach (var order in new[] { new[] { mine, theirs }, new[] { theirs, mine } })
-            {
-                var first = CultSchemaCatalogEntry.MergeById(order, preferLast: false).Single();
-                var last = CultSchemaCatalogEntry.MergeById(order, preferLast: true).Single();
-                Assert.That(first, Is.SameAs(order[0]));
-                Assert.That(last, Is.SameAs(order[1]));
-            }
-
-            var sameSchema = CultSchemaCatalogEntry.MergeById(new[] { Entry("mine", "old", "x", "y"), Entry("mine", "new", "x") }, preferLast: true).Single();
-            Assert.That(sameSchema.ContentHash, Is.EqualTo("new"));
-            Assert.That(sameSchema.CompatibleSchemaIds, Is.EquivalentTo(new[] { "x", "y" }));
-        }
-
-        // Entries that share an id are merged whatever order they arrive in: every id any of them lists survives.
-        [Test]
-        public void EntriesThatShareAnIdMergeTheirCompatibleIdsInEitherOrder()
-        {
-            CultSchemaCatalogEntry Entry(params string[] compatible) => new()
-            {
-                SchemaId = "x", SchemaName = "n", SchemaVersion = "n.v1", ContentHash = "h", CompatibleSchemaIds = compatible
-            };
-            var plain = Entry("x");
-            var wide = Entry("x", "y");
-
-            foreach (var order in new[] { new[] { plain, wide }, new[] { wide, plain } })
-            foreach (var preferLast in new[] { false, true })
-            {
-                var merged = CultSchemaCatalogEntry.MergeById(order, preferLast).Single();
-                Assert.That(merged.CompatibleSchemaIds, Is.EquivalentTo(new[] { "x", "y" }));
-            }
+            using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true });
+            Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
         }
 
         // A directory manifest in a format the directory store does not read is refused with the typed exception, naming it.
