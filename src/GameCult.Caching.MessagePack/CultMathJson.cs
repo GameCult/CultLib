@@ -14,7 +14,7 @@ namespace GameCult.Caching.MessagePack;
 /// The canonical System.Text.Json shape of every public CultMath value type, the JSON twin of
 /// <see cref="CultMathResolver"/>. Vectors, quaternions and colors are objects keyed by their
 /// field names (<c>{"x":1,"y":2}</c>), matrices are arrays of row objects, <c>rect</c> is
-/// <c>{"min":..,"max":..}</c>, and <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>.
+/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, and <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>.
 /// Property names are fixed: <c>PropertyNamingPolicy</c> does not rename them, and
 /// <c>PropertyNameCaseInsensitive</c> makes reading case-insensitive.
 /// <para>
@@ -481,7 +481,7 @@ public static class CultMathJson
             Add<Random, uint>(UIntScalar.Instance, new Fields<uint>(("state", Val<uint>())),
                 a => new Random { state = a[0] }, (v, a) => a[0] = v.state),
 
-            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}.
+            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}.
             Add<float2x2, float>(f, new Rows<float>(2, Xy<float>()),
                 a => new float2x2(a[0], a[1], a[2], a[3]),
                 (v, a) => { a[0] = v[0].x; a[1] = v[0].y; a[2] = v[1].x; a[3] = v[1].y; }),
@@ -506,6 +506,13 @@ public static class CultMathJson
                     a[0] = v.nearest.x; a[1] = v.nearest.y; a[2] = v.nearest.z; a[3] = v.nearest.w;
                     a[4] = v.edge.x; a[5] = v.edge.y; a[6] = v.edge.z; a[7] = v.edge.w;
                     a[8] = v.id;
+                }),
+            Add<CultPhasor, float>(f, new Fields<float>(("cos", Xyzw<float>()), ("sin", Xyzw<float>())),
+                a => new CultPhasor(new float4(a[0], a[1], a[2], a[3]), new float4(a[4], a[5], a[6], a[7])),
+                (v, a) =>
+                {
+                    a[0] = v.cos.x; a[1] = v.cos.y; a[2] = v.cos.z; a[3] = v.cos.w;
+                    a[4] = v.sin.x; a[5] = v.sin.y; a[6] = v.sin.z; a[7] = v.sin.w;
                 }),
         };
 
