@@ -293,6 +293,29 @@ writes. That protects ordinary multi-process access to the same file. It is
 still not a multi-master replication protocol, and it is not a substitute for a
 coordinator when higher-level write ordering matters.
 
+A write that fails part way, for example on a full disk, removes its staging
+file and leaves the store as it was. A read that fails tells you why through
+the error chain:
+
+```rust
+use cultcache_rs::{CacheBackingStore, CultCacheStoreUnreadable, CultCacheStoreUnreadableKind, SingleFileMessagePackBackingStore};
+
+let store = SingleFileMessagePackBackingStore::new("cache.cc");
+if let Err(error) = store.pull_all() {
+    match error.downcast_ref::<CultCacheStoreUnreadable>().map(|unreadable| unreadable.kind) {
+        // The bytes were read and are not a store: truncated, garbled, or invalid.
+        Some(CultCacheStoreUnreadableKind::Undecodable) => {}
+        // The header names a format this runtime does not read, such as a newer one.
+        Some(CultCacheStoreUnreadableKind::UnsupportedFormat) => {}
+        // The bytes could not be read at all: a std::io::Error is in the chain.
+        _ => {}
+    }
+}
+```
+
+An I/O failure never carries `CultCacheStoreUnreadable`, and the chain under
+`CultCacheStoreUnreadable` never holds a `std::io::Error`.
+
 ## Near-Term Ergonomic Improvements
 
 1. **Derive macro**
