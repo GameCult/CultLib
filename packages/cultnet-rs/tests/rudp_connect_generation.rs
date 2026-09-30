@@ -106,11 +106,8 @@ fn a_retransmitted_connect_after_data_has_flowed_does_not_reset_the_session() ->
 
     assert!(server.connect_repeats(&connect));
     let reply = server.accept_connect(&connect, 2, Vec::new())?;
-    assert!(matches!(
-        reply.packet_type,
-        CultNetRudpPacketType::Accept | CultNetRudpPacketType::Ack
-    ));
-    assert_eq!(server.queued_reliable_packet_count() + server.pending_reliable_sequences().len(), 1, "a repeat queues nothing");
+    assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack, "the Accept was already acknowledged");
+    assert_eq!(server.outstanding_reliable_packet_count(), 0, "a repeat queued something");
     assert!(
         server.receive(&frame, 3)?.delivered.is_empty(),
         "a retransmitted Connect made the server forget what it had delivered"
@@ -415,8 +412,15 @@ fn connected_client(
     ))?;
     client.connect(b"hello".to_vec())?;
     let mut buffer = vec![0_u8; 65_535];
-    let (received, client_addr) = server_socket.recv_from(&mut buffer)?;
-    let accept = session(500).accept_connect(&decode_rudp_packet(&buffer[..received])?, 0, Vec::new())?;
+    // Another client's acknowledgements may be queued ahead of this Connect.
+    let (connect, client_addr) = loop {
+        let (received, from) = server_socket.recv_from(&mut buffer)?;
+        let packet = decode_rudp_packet(&buffer[..received])?;
+        if packet.packet_type == CultNetRudpPacketType::Connect {
+            break (packet, from);
+        }
+    };
+    let accept = session(500).accept_connect(&connect, 0, Vec::new())?;
     server_socket.send_to(&encode_rudp_packet(&accept)?, client_addr)?;
     client.receive_once()?;
     assert!(client.connected());
