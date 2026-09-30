@@ -181,25 +181,30 @@ fn the_media_channel_is_sent_with_the_delivery_the_profile_advertises() {
     assert!(!sent[0].ordered && !sent[0].sequenced);
 }
 
-/// A reliable media packet stops being retransmitted once its expiry passes,
-/// and keeps being retransmitted when it has none.
+/// A reliable media packet with an expiry is dropped once it has passed, and
+/// one without is retransmitted until acknowledged. The session reclaims
+/// expired packets on the next send, so the probe sends a second packet.
+fn first_packet_is_resent_after_a_later_send(expire_after_ms: Option<u64>) -> bool {
+    let mut link = Link::open(None, expire_after_ms);
+    let first = media_only(link.send_media(Duration::from_millis(50)));
+    assert_eq!(first.len(), 1);
+    sleep(Duration::from_millis(150));
+    assert_eq!(media_only(link.send_media(Duration::from_millis(50))).len(), 1);
+    sleep(Duration::from_millis(15));
+    link.client.poll_resends().unwrap();
+    media_only(link.datagrams(Duration::from_millis(100)))
+        .iter()
+        .any(|packet| packet.sequence == first[0].sequence)
+}
+
 #[test]
 fn the_media_channels_expiry_is_applied_to_its_packets() {
-    let mut expiring = Link::open(None, Some(20));
-    assert_eq!(media_only(expiring.send_media(Duration::from_millis(50))).len(), 1);
-    sleep(Duration::from_millis(150));
-    expiring.client.poll_resends().unwrap();
     assert!(
-        media_only(expiring.datagrams(Duration::from_millis(150))).is_empty(),
+        !first_packet_is_resent_after_a_later_send(Some(20)),
         "an expired media packet is dropped, not retransmitted"
     );
-
-    let mut patient = Link::open(None, None);
-    assert_eq!(media_only(patient.send_media(Duration::from_millis(50))).len(), 1);
-    sleep(Duration::from_millis(150));
-    patient.client.poll_resends().unwrap();
     assert!(
-        !media_only(patient.datagrams(Duration::from_millis(150))).is_empty(),
+        first_packet_is_resent_after_a_later_send(None),
         "without an expiry the unacknowledged packet is retransmitted"
     );
 }
