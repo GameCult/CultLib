@@ -1590,6 +1590,16 @@ profiles.
   a permanent failure is returned from a caller-directed send and, inside a poll, ends only that peer's session with a
   typed reason; transient failures stay counted losses. Windows `ConnectionResetError` on receive is idle, never fatal,
   in every server. Cut D's negative grep `send_packet(...)?;` is obsolete: the `?` now propagates encode errors only.
+- **Cut 3 merged at `1210fdc7` (2026-09-30).**
+  - Batch 2 fixed Rust `send`, which checked the window before purging expired packets. It also added a
+    new-generation test in all four runtimes.
+  - Soul pass on batch 2: nothing found. 18 mutants were killed. Interop was 27/27, run in `ack1d-interop:2`,
+    whose Linux wrappers let the Windows-only Kotlin build run.
+  - Residual: `packages/cultmesh-rs/Cargo.lock` is stale.
+  - Also recorded: `packages/cultmesh-kotlin/build.ps1` is Windows-only, so Kotlin interop runs off Windows only
+    through an image with wrappers.
+  - P2 (the expiry hole) stays with Cut F.
+- **Cut D batch 2** is in Soul (pass 2).
 - **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
   while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
   limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.
