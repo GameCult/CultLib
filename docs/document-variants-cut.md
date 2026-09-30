@@ -389,7 +389,13 @@ example after a rename that declared nothing.
 - **F9.** Compatible ids compare as a set.
 - **F10.** Typed refusal errors in TS and Python.
 - Batch 10 is in Hands.
-- **F7 (`AsSchemaAlias` order) is an open operator question.**
+- **F7 ruled (operator, 2026-09-30): retire `AsSchemaAlias`.** "Schema aliasing sounds like a really bad idea, I
+  support retiring it."
+  - C# refuses a second type for one schema, as TS, Python and Rust already do. There is one type per schema in
+    every runtime.
+  - The API, its registry path (`IsExactWireAlias`) and the tests that exercised it (7 Mesh, 2 Caching) are
+    deleted or rewritten.
+  - No consumer called it.
 
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
