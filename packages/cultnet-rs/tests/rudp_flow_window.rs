@@ -249,3 +249,34 @@ fn acknowledged_bytes_stop_counting_when_the_lowest_unacked_packet_expires() -> 
     }
     Ok(())
 }
+
+#[test]
+fn a_direct_send_is_not_refused_for_bytes_whose_lowest_packet_has_expired() -> Result<()> {
+    let mut sender = connected(1)?;
+    let expiring = CultNetRudpSendOptions {
+        reliable: true,
+        now_ms: 0,
+        reliable_expire_after_ms: Some(100),
+        ..Default::default()
+    };
+    let g = sender
+        .send_many("state", vec![7], expiring, None)?
+        .remove(0);
+    for offset in 1..=4u32 {
+        assert_eq!(send(&mut sender, MIB)?.len(), 1);
+        sender.receive(&ack_for(g.sequence + offset), 1)?;
+    }
+    assert!(sender.send("state", vec![7; MIB], reliable()).is_err());
+
+    // The first call after g's deadline is a direct send: it measures the
+    // window without g, as `send_many` would, and goes on the wire.
+    let at_200 = CultNetRudpSendOptions {
+        reliable: true,
+        now_ms: 200,
+        ..Default::default()
+    };
+    let sent = sender.send("state", vec![7; MIB], at_200)?;
+    assert_eq!(sent.sequence, g.sequence + 5);
+    assert_eq!(sender.outstanding_reliable_packet_count(), 1);
+    Ok(())
+}

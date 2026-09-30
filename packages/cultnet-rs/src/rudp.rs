@@ -574,6 +574,11 @@ impl CultNetRudpSession {
         payload: Vec<u8>,
         options: CultNetRudpSendOptions,
     ) -> Result<CultNetRudpPacket> {
+        // Measure the window as `send_many` will: without the deadline-passed
+        // sends it is about to reclaim.
+        if options.reliable {
+            self.purge_expired_reliable(options.now_ms);
+        }
         if options.reliable
             && (!self.queued_reliable.is_empty()
                 || !self.window_admits(self.next_sequence, payload.len()))
