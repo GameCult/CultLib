@@ -4823,6 +4823,37 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_a_message_whose_handling_fails_ends_only_that_peers_session(self) -> None:
+        import msgpack  # type: ignore
+
+        canary = "canary-7f3e1c"
+        # Well-formed frames whose fields have the wrong type: handling raises TypeError.
+        frames = [
+            {"schemaVersion": "cultnet.database_subscribe.v0", "subscriptionId": canary, "schemaIds": 5},
+            {"schemaVersion": "cultnet.database_subscribe.v0", "subscriptionId": canary, "recordKeys": True},
+        ]
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        try:
+            y, _ = self._client(server, "peer-y")
+            for frame in frames:
+                with self.subTest(frame=frame):
+                    x, _ = self._client(server, "peer-x")
+                    with self.assertLogs("cultmesh_py.server", level="WARNING") as logs:
+                        x.send("schema", msgpack.packb(frame, use_bin_type=True))
+                        for _ in range(200):
+                            x.receive_once()
+                            if x.disconnect_reason is not None:
+                                break
+                            time.sleep(0.005)
+                    self.assertEqual(x.disconnect_reason, b"session refused a packet")
+                    self.assertTrue(server._rudp_thread.is_alive())
+                    self.assertIsNotNone(self._served(y), "Y is still served")
+                    self.assertEqual(len(logs.output), 1)
+                    self.assertIn("TypeError", logs.output[0])
+                    self.assertNotIn(canary, logs.output[0])
+        finally:
+            server.stop()
+
     def _raw_peer(self, server: Any) -> tuple[socket.socket, Any]:
         """A peer driven packet by packet, to deliver frames in an order a client would not."""
         from cultnet_py import CultNetRudpSession, CultNetRudpSessionOptions, encode_rudp_packet

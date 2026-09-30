@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -31,6 +32,8 @@ from cultnet_py.cultmesh_contracts import (
     CultMeshPeerCatalog,
     CultMeshVerseCatalog,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -278,24 +281,37 @@ class CultMeshLocalServer:
             if result.disconnected:
                 peers.pop(remote_addr, None)
                 continue
-            for delivered in result.delivered:
-                if delivered.channel_id != "schema":
-                    continue
-                try:
-                    message = msgpack.unpackb(delivered.payload, raw=False)
-                except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
-                    continue
-                if not isinstance(message, dict):
-                    continue
-                responses = self._handle_connection_message(message, peer.subscriptions)
-                for response in responses:
-                    if unsendable is None:
-                        unsendable = self._send_rudp_schema_frame(
-                            rudp_socket,
-                            remote_addr,
-                            peer.session,
-                            msgpack.packb(response, use_bin_type=True),
-                        )
+            try:
+                for delivered in result.delivered:
+                    if delivered.channel_id != "schema":
+                        continue
+                    try:
+                        message = msgpack.unpackb(delivered.payload, raw=False)
+                    except (msgpack.ExtraData, msgpack.FormatError, msgpack.StackError, ValueError):
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    responses = self._handle_connection_message(message, peer.subscriptions)
+                    for response in responses:
+                        if unsendable is None:
+                            unsendable = self._send_rudp_schema_frame(
+                                rudp_socket,
+                                remote_addr,
+                                peer.session,
+                                msgpack.packb(response, use_bin_type=True),
+                            )
+            except Exception as error:  # noqa: BLE001 - one peer's message never ends the thread
+                # Whatever a peer's message makes the handling raise is that peer's failure.
+                # The session recorded the frame's sequence, so it cannot be kept: a retransmit
+                # would be acknowledged and never handled. The session ends, never the thread,
+                # and the peer is told. The log names the error type only, because the error's
+                # own message can quote what the peer sent.
+                _LOGGER.warning(
+                    "CultMesh RUDP server could not handle a peer's message (%s); that peer's session ended.",
+                    type(error).__name__,
+                )
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+                continue
             if unsendable is None and (
                 packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered
             ):
