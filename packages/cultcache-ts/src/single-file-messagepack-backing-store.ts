@@ -284,15 +284,8 @@ function catalogEntriesFor(
     }
 
     const prior = chosen.get(pick.entry.schemaId);
-    if (prior !== undefined) {
-      if (prior.registered && !pick.registered) {
-        continue;
-      }
-
-      // Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
-      if (prior.registered === pick.registered && prior.entry.schemaName !== pick.entry.schemaName) {
-        throw new SchemaConflictError(pick.entry.schemaId, [prior.entry.schemaName, pick.entry.schemaName].sort(compareOrdinal), recordKey);
-      }
+    if (prior !== undefined && prior.registered && !pick.registered) {
+      continue;
     }
 
     chosen.set(pick.entry.schemaId, pick);

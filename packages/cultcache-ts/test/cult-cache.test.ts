@@ -1456,6 +1456,30 @@ test("an entry that owns an id is chosen over one that lists it, and an entry no
   }
 });
 
+test("entries of one tier that tie are taken in one fixed order, and a registered entry that lists an id is chosen over an arrived one", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-tie-"));
+  const one = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h1", ["tests.x"]));
+  const two = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.y"]));
+  for (const [name, order] of [["12", [one, two]], ["21", [two, one]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    assert.deepEqual((await catalogOf(file)).map((entry) => entry[3]), ["h1"], name);
+  }
+
+  // z sits under old, which the arrived entry (id x) lists; the supplied entry (id r) lists it too: the registered one publishes it.
+  const file = join(dir, "lister.msgpack");
+  await writeFile(
+    file,
+    encode([
+      "cultcache.store.v1",
+      [rawCatalogEntry(writerEntry("tests.x", "tests.n", "stale", ["tests.x", "old"]))],
+      [["z", "old", "2026-09-30T00:00:00.0000000Z", encode({ z: 1 })]],
+    ]),
+  );
+  await new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.n", "tests.r", writerEntry("tests.r", "tests.n", "fresh", ["tests.r", "old"])));
+  assert.deepEqual((await catalogOf(file)).map((entry) => entry[0]), ["tests.r"]);
+});
+
 test("a record no chosen entry publishes refuses the write, typed, and leaves the file", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-orphan-"));
   const file = join(dir, "orphan.msgpack");

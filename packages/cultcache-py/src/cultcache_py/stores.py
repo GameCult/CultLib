@@ -218,12 +218,8 @@ def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultC
         if pick is None:
             continue
         prior = chosen.get(pick.schema_id)
-        if prior is not None:
-            if prior[1] and not registered_pick:
-                continue
-            # Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
-            if prior[1] == registered_pick and prior[0].schema_name != pick.schema_name:
-                raise SchemaConflictError(pick.schema_id, sorted({prior[0].schema_name, pick.schema_name}), record_key)
+        if prior is not None and prior[1] and not registered_pick:
+            continue
         chosen[pick.schema_id] = (pick, registered_pick)
 
     for schema_id in sorted(by_id):

@@ -204,6 +204,19 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // Entries of one tier that tie are taken in one fixed order: the catalog does not depend on the order they arrive in.
+        [Test]
+        public void EntriesThatTieAreTakenInOneFixedOrder()
+        {
+            var one = Entry("x", "n", "h1", "x");
+            var two = Entry("x", "n", "h2", "x", "y");
+            foreach (var order in new[] { new[] { one, two }, new[] { two, one } })
+            {
+                Assert.That(CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, order, Array.Empty<CultSchemaCatalogEntry>()).Single().ContentHash, Is.EqualTo("h1"));
+                Assert.That(CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, Array.Empty<CultSchemaCatalogEntry>(), order).Single().ContentHash, Is.EqualTo("h1"));
+            }
+        }
+
         [Test]
         public void TwoArrivedEntriesThatShareAnOwnIdAndDisagreeOnTheSchemaNameRefuseTheWrite()
         {

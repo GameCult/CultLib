@@ -415,6 +415,29 @@ class CultCacheTests(unittest.TestCase):
             SingleFileMessagePackBackingStore(path).push_all([owner])
             self.assertEqual([entry[0] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["tests.y"])
 
+    def test_entries_of_one_tier_that_tie_are_taken_in_one_fixed_order_and_a_registered_lister_beats_an_arrived_one(self) -> None:
+        import msgpack  # type: ignore
+
+        one = self._writer_record("a", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "h1", ("tests.x",)))
+        two = self._writer_record("b", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "h2", ("tests.x", "tests.y")))
+        for order in ([one, two], [two, one]):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "store.msgpack"
+                SingleFileMessagePackBackingStore(path).push_all(order)
+                self.assertEqual([entry[3] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["h1"])
+
+        # z sits under old, which the arrived entry (id x) lists; the supplied entry (id r) lists it too: the registered one publishes it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            path.write_bytes(msgpack.packb([
+                "cultcache.store.v1", [self._raw_entry(self._writer_entry("tests.x", "tests.n", "stale", ("tests.x", "old")))],
+                [["z", "old", "2026-09-30T00:00:00Z", msgpack.packb({"z": 1}, use_bin_type=True)]],
+            ], use_bin_type=True))
+            SingleFileMessagePackBackingStore(path).push(
+                self._writer_record("a", "tests.n", "tests.r", self._writer_entry("tests.r", "tests.n", "fresh", ("tests.r", "old")))
+            )
+            self.assertEqual([entry[0] for entry in msgpack.unpackb(path.read_bytes(), raw=False)[1]], ["tests.r"])
+
     def test_a_record_no_chosen_entry_publishes_refuses_the_write_typed_and_leaves_the_file(self) -> None:
         import msgpack  # type: ignore
         from cultcache_py import SchemaConflictError

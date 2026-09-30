@@ -85,20 +85,8 @@ namespace GameCult.Caching
 
                 if (pick == null)
                     continue;
-                if (chosen.TryGetValue(pick.SchemaId, out var prior))
-                {
-                    if (prior.Registered && !isRegistered)
-                        continue;
-
-                    // Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
-                    if (prior.Registered == isRegistered && !string.Equals(prior.Entry.SchemaName, pick.SchemaName, StringComparison.Ordinal))
-                    {
-                        var names = new[] { prior.Entry.SchemaName, pick.SchemaName };
-                        throw new CultSchemaConflictException(
-                            $"Schema id '{pick.SchemaId}' is claimed by schemas '{names[0]}' and '{names[1]}'; record '{recordKey}' cannot be written under it.",
-                            pick.SchemaId, names, recordKey);
-                    }
-                }
+                if (chosen.TryGetValue(pick.SchemaId, out var prior) && prior.Registered && !isRegistered)
+                    continue;
                 chosen[pick.SchemaId] = (pick, isRegistered);
             }
 
