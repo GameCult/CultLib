@@ -354,6 +354,82 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // A caller's send ends X's session over a fragment it could never send. Before the listener
+        // retires X, the polling thread answers X's Ping on the ended session, and that Pong can never
+        // be sent either. The polling thread read the generation only after the session ended, so the
+        // generation alone cannot tell it the session is gone. It says no second goodbye, and the
+        // first failure's reason stands. The hook admits the Ping while the first goodbye is on its way,
+        // after the session ended and before the peer is queued for retirement.
+        [Test]
+        public void AFailureAnsweringAPingOnAnAlreadyEndedSessionSaysNoSecondGoodbye()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var ended = RecordDisconnects(server);
+                byte[]? firstReason = null;
+                server.BeforeSend = (remote, packet) =>
+                {
+                    if (!remote.Equals(x.EndPoint) || packet.PacketType != CultNetRudpPacketType.Disconnect)
+                        return;
+                    server.BeforeSend = null;
+                    firstReason = x.Server.UnsendableReason;
+                    server.UnsendableAfter[x.EndPoint] = 0;
+                    server.ReceiveOnce();
+                };
+                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(x.Session.CreatePing(Encoding.UTF8.GetBytes("ping"))), listenerEndPoint);
+                server.UnsendableAfter[x.EndPoint] = 1;
+
+                Assert.Throws<SocketException>(() => server.SendSchema(x.Server, new byte[3000]));
+                server.ReceiveOnce();
+
+                var goodbyes = Drain(x.Socket).Where(p => p.PacketType == CultNetRudpPacketType.Disconnect).ToList();
+                Assert.That(goodbyes, Has.Count.EqualTo(1));
+                Assert.That(firstReason, Is.Not.Null);
+                Assert.That(x.Server.UnsendableReason, Is.SameAs(firstReason), "the second failure overwrote the first's reason");
+                Assert.That(ended, Is.EqualTo(new[] { x.Server }));
+                Assert.That(x.Server.DisconnectReason, Is.SameAs(firstReason));
+            }
+        }
+
+        // The goodbye for a failed send is sent under the session's gate. The polling thread, admitting
+        // a new Connect from X, waits on that gate, so the ended generation's goodbye can never follow
+        // the new session's Accept. The hook starts the polling thread just before the goodbye leaves
+        // and gives it a second to get ahead if nothing holds it back.
+        [Test]
+        public void AFailedSendsGoodbyeLeavesBeforeANewConnectFromTheEndpointIsAdmitted()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var stale = x.Server;
+                Drain(x.Socket);
+                x.Session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(x.Session.CreateConnect(0)), listenerEndPoint);
+
+                Thread? poller = null;
+                server.BeforeSend = (remote, packet) =>
+                {
+                    if (!remote.Equals(x.EndPoint) || packet.PacketType != CultNetRudpPacketType.Disconnect)
+                        return;
+                    server.BeforeSend = null;
+                    poller = new Thread(() => server.ReceiveOnce());
+                    poller.Start();
+                    poller.Join(1000);
+                };
+                server.UnsendableAfter[x.EndPoint] = 1;
+                Assert.Throws<SocketException>(() => server.SendSchema(stale, new byte[3000]));
+                Assert.That(poller, Is.Not.Null);
+                poller!.Join();
+
+                var types = Drain(x.Socket).Select(p => p.PacketType).ToList();
+                Assert.That(types, Does.Contain(CultNetRudpPacketType.Disconnect));
+                Assert.That(types, Does.Contain(CultNetRudpPacketType.Accept));
+                Assert.That(types.IndexOf(CultNetRudpPacketType.Disconnect), Is.LessThan(types.IndexOf(CultNetRudpPacketType.Accept)),
+                    "the ended generation's goodbye followed the new session's Accept");
+            }
+        }
+
         [Test]
         public void ASessionEndedByACallerAndThePollingThreadTogetherSaysGoodbyeOnce()
         {

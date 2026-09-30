@@ -3172,14 +3172,16 @@ namespace GameCult.Networking
         // Ends the session and tells the peer, on whichever thread found the failure. The peer stays in
         // _peers until the polling thread retires it. The failure belongs to the generation the thread
         // read under the gate when it sent; if that generation has already ended (another thread
-        // ended it over its own failure, or a new Connect from the endpoint replaced it), there is
-        // nothing left to end, and a goodbye would reach the session that now owns the endpoint. The
+        // ended it over its own failure, or a new Connect from the endpoint replaced it), or the
+        // thread read it only after the session had ended (a Pong or ack answered on an ended
+        // session the polling thread has not yet retired), there is nothing left to end, and a
+        // goodbye would reach the session that now owns the endpoint or repeat the first one. The
         // goodbye is built and sent under the gate, so no Connect is admitted between the two.
         private void EndUnsendableSession(CultNetRudpSocketServerPeer peer, SocketException error, long generation)
         {
             lock (peer.SessionGate)
             {
-                if (peer.Session.Generation != generation)
+                if (peer.Session.Generation != generation || peer.Session.Ended)
                     return;
                 var goodbye = peer.Session.EndUnsendable(error);
                 peer.UnsendableReason = goodbye.Payload;
