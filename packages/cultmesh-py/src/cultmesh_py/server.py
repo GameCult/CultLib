@@ -262,7 +262,14 @@ class CultMeshLocalServer:
             if peer is None:
                 continue
 
-            result = peer.session.receive(packet, now_ms)
+            try:
+                result = peer.session.receive(packet, now_ms)
+            except ValueError:
+                # receive() has already recorded the packet's reliable sequence, so the
+                # session cannot be kept: a retransmit would be acknowledged and the
+                # frame silently lost. It ends, never the thread, and the peer is told.
+                self._end_refused_peer(rudp_socket, peers, remote_addr)
+                continue
             unsendable: OSError | None = None
             for outgoing in (*([result.reply] if result.reply is not None else []), *result.ready_to_send):
                 unsendable = self._send_rudp_packet(rudp_socket, remote_addr, outgoing)
@@ -348,6 +355,19 @@ class CultMeshLocalServer:
                 return error
             self._rudp_send_failures += 1
         return None
+
+    def _end_refused_peer(
+        self,
+        rudp_socket: socket.socket,
+        peers: dict[tuple[str, int], _RudpPeerConnection],
+        remote_addr: tuple[str, int],
+    ) -> None:
+        peer = peers.pop(remote_addr)
+        # The goodbye is built after the reset, or its ack field would acknowledge the
+        # very frame the session refused.
+        peer.session.reset_peer_state()
+        goodbye = peer.session.create_disconnect(b"session refused a packet")
+        self._send_rudp_packet(rudp_socket, remote_addr, goodbye)
 
     def _end_unsendable_peer(
         self,

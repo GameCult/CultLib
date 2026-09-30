@@ -4759,6 +4759,131 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_a_packet_the_session_refuses_ends_only_that_peers_session(self) -> None:
+        from cultnet_py import CultNetRudpPacket, encode_rudp_packet
+
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        try:
+            x, _ = self._client(server, "peer-x")
+            y, _ = self._client(server, "peer-y")
+            # A fragment whose metadata the session refuses: fragment id 0 names no set.
+            refused = CultNetRudpPacket(
+                packet_type=CultNetRudpPacketType.DATA,
+                connection_id=server.rudp_connection_id,
+                sequence=0,
+                ack=0,
+                ack_mask=0,
+                channel_id="schema",
+                reliable=False,
+                fragment_id=0,
+                fragment_index=0,
+                fragment_count=2,
+                payload=b"x",
+            )
+            x.socket.sendto(encode_rudp_packet(refused), ("127.0.0.1", server.port))
+            for _ in range(200):
+                x.receive_once()
+                if x.disconnect_reason is not None:
+                    break
+                time.sleep(0.005)
+            self.assertEqual(x.disconnect_reason, b"session refused a packet")
+            self.assertTrue(server._rudp_thread.is_alive())
+            self.assertIsNotNone(self._served(y), "Y is still served")
+        finally:
+            server.stop()
+
+    def _raw_peer(self, server: Any) -> tuple[socket.socket, Any]:
+        """A peer driven packet by packet, to deliver frames in an order a client would not."""
+        from cultnet_py import CultNetRudpSession, CultNetRudpSessionOptions, encode_rudp_packet
+
+        sock = bind_udp_socket()
+        sock.settimeout(0.05)
+        session = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=server.rudp_connection_id))
+        sock.sendto(encode_rudp_packet(session.create_connect(0, b"join")), ("127.0.0.1", server.port))
+        wire, _ = sock.recvfrom(65535)
+        accept = decode_rudp_packet(wire)
+        self.assertEqual(accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        session.receive(accept, 0)
+        return sock, session
+
+    def test_responses_after_one_that_can_never_be_sent_are_not_sent(self) -> None:
+        from cultnet_py import CultNetRudpSendOptions, encode_rudp_packet
+
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            sock, session = self._raw_peer(server)
+            addr = sock.getsockname()[:2]
+            request = hello(runtime_id="probe").to_bytes()
+            options = CultNetRudpSendOptions(reliable=True, ordered=True)
+            first = session.send("schema", request, options)
+            second = session.send("schema", request, options)
+            attempts: list[CultNetRudpPacketType] = []
+            failures = [1]
+
+            def sendto(sock_: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(addr):
+                    packet_type = decode_rudp_packet(data).packet_type
+                    attempts.append(packet_type)
+                    if packet_type == CultNetRudpPacketType.DATA and failures[0] > 0:
+                        failures[0] -= 1
+                        raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock_, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                # The second frame waits for the first, so one receive delivers both, and
+                # the first of the two responses can never be sent as built.
+                sock.sendto(encode_rudp_packet(second), ("127.0.0.1", server.port))
+                time.sleep(0.1)
+                attempts.clear()
+                sock.sendto(encode_rudp_packet(first), ("127.0.0.1", server.port))
+                self._wait_for(lambda: CultNetRudpPacketType.DISCONNECT in attempts)
+                time.sleep(0.1)
+
+            # The unsendable response, then only the goodbye: no second response, no ack.
+            self.assertEqual(attempts, [CultNetRudpPacketType.DATA, CultNetRudpPacketType.DISCONNECT])
+            self.assertTrue(server._rudp_thread.is_alive())
+        finally:
+            server.stop()
+
+    def test_a_peer_ended_in_the_resend_loop_is_sent_nothing_more_from_it(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            x, x_addr = self._client(server, "peer-x")
+            mode = ["transient"]
+            attempts: list[CultNetRudpPacketType] = []
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(x_addr):
+                    packet_type = decode_rudp_packet(data).packet_type
+                    if mode[0] != "transient":
+                        attempts.append(packet_type)
+                    # Only responses fail; X's requests are acknowledged, so X goes quiet.
+                    if packet_type == CultNetRudpPacketType.DATA and mode[0] == "transient":
+                        raise OSError(errno.ENOBUFS, "injected transient failure")
+                    if packet_type == CultNetRudpPacketType.DATA and mode[0] == "permanent":
+                        mode[0] = "healthy"
+                        raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                x.send("schema", hello(runtime_id="one").to_bytes())
+                x.send("schema", hello(runtime_id="two").to_bytes())
+                for _ in range(40):
+                    x.receive_once()
+                    time.sleep(0.005)
+                self._wait_for(lambda: server.rudp_send_failures >= 2)
+                # Both responses are owed; the next resend of the first can never be sent.
+                mode[0] = "permanent"
+                self._wait_for(lambda: CultNetRudpPacketType.DISCONNECT in attempts)
+                time.sleep(0.2)
+
+            self.assertEqual(attempts, [CultNetRudpPacketType.DATA, CultNetRudpPacketType.DISCONNECT])
+            self.assertTrue(server._rudp_thread.is_alive())
+        finally:
+            server.stop()
+
     def _wait_for(self, predicate: Callable[[], bool]) -> None:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
