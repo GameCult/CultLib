@@ -1049,6 +1049,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     framesReceived: 0,
     framesSent: 0,
     packetsDropped: 0,
+    sendFailures: 0,
   };
 
   constructor(options: CultNetRudpSocketTransportOptions) {
@@ -1363,14 +1364,15 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
 
   /**
    * A datagram that can never be sent ends the session; any other failure is a lost
-   * datagram, reported on "error" as the socket reports it.
+   * datagram, counted and never emitted. Node reports a failed send only to its callback,
+   * not on the socket's "error" event, and an "error" with no listener ends the process.
    */
   #sendFailed(error: Error): void {
     if (isPermanentSendError(error)) {
       this.#endUnsendableSession(error);
       return;
     }
-    this.emit("error", error);
+    this.#stats.sendFailures += 1;
   }
 }
 

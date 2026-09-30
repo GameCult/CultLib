@@ -4310,6 +4310,12 @@ export interface CultMeshRudpServerSession {
 
 export interface CultMeshRudpDocumentServer {
   readonly bind: { host: string; port: number };
+  /**
+   * Datagrams that could not be sent to a peer. Each is that peer's lost datagram: a
+   * reliable packet stays pending and is resent, and no other peer is affected. A datagram
+   * that can never be sent as built is not counted here: it ends that peer's session.
+   */
+  readonly sendFailures: number;
   start(): Promise<void>;
   close(): void;
 }
@@ -5782,6 +5788,7 @@ export class CultMesh {
     };
     const sessions = new Map<string, SessionRecord>();
     let sessionSequence = 0;
+    let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
@@ -5963,7 +5970,7 @@ export class CultMesh {
 
     /**
      * Sends one packet to a session's peer. A failure is that peer's alone: one that may
-     * pass (no route, full buffers) is a lost datagram, reported, and resent if it was
+     * pass (no route, full buffers) is a lost datagram, counted, and resent if it was
      * reliable; one that can never pass as built ends that peer's session. Neither ends
      * the server, a timer or another peer's session.
      */
@@ -5972,7 +5979,7 @@ export class CultMesh {
         if (isPermanentSendError(error)) {
           endUnsendableSession(record, error);
         } else {
-          reportError(error);
+          sendFailures += 1;
         }
       });
     }
@@ -6017,6 +6024,9 @@ export class CultMesh {
 
     return {
       bind,
+      get sendFailures() {
+        return sendFailures;
+      },
       async start(): Promise<void> {
         await new Promise<void>((resolve, reject) => {
           socket.once("error", reject);

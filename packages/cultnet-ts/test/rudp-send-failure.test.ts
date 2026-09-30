@@ -10,6 +10,7 @@ import {
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,
   encodeRudpPacket,
+  invokeCultNetOperation,
   isPermanentSendError,
   startCultNetOperationServer,
   type CultNetOperationResponseMessage,
@@ -212,8 +213,8 @@ test("a server transport whose resend can never be sent ends the session and sen
     mode = "lost";
     server.send("schema", Buffer.from("one", "utf8"));
     server.send("schema", Buffer.from("two", "utf8"));
-    await waitFor(() => errors.length >= 2, "both writes lost");
-    assert.deepEqual([...new Set(errors)], ["EHOSTUNREACH"], "a loss that may pass is reported and ends nothing");
+    await waitFor(() => server.stats.sendFailures >= 4, "both writes lost, and lost again when resent");
+    assert.deepEqual(errors, [], "a loss that may pass is counted, never emitted");
     assert.deepEqual(reasons, []);
 
     // Both writes are due again together; the first can never be sent.
@@ -227,5 +228,66 @@ test("a server transport whose resend can never be sent ends the session and sen
     uncaught.stop();
     client.close();
     server.close();
+  }
+});
+
+// The kernel refuses a datagram to the limited broadcast address from a socket that has
+// not asked for broadcast (EACCES): a real failure that may pass once the socket or the
+// route changes, so it is a lost datagram. Node reports it only to the send's callback,
+// never on the socket's "error" event, so nothing may turn it into an "error" either.
+const UNREACHABLE = { host: "255.255.255.255", port: 9 };
+
+test("a client transport with no error listener counts a send the network refuses and does not end the process", async () => {
+  const socket = await new Promise<Socket>((resolve) => {
+    const created = dgram.createSocket("udp4");
+    created.bind(0, "0.0.0.0", () => resolve(created));
+  });
+  const uncaught = watchUncaught();
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-client",
+    socket,
+    mode: "client",
+    remoteHost: UNREACHABLE.host,
+    remotePort: UNREACHABLE.port,
+    connectionId: 0x10203095,
+    resendDelayMs: 10,
+    resendPollMs: 5,
+  });
+  try {
+    client.connect();
+    // The Connect and its resends, each refused by the kernel.
+    await waitFor(() => client.stats.sendFailures >= 5, "the refused Connect and its resends");
+    assert.equal(client.connected, false);
+    assert.deepEqual(uncaught.errors, []);
+  } finally {
+    uncaught.stop();
+    client.close();
+  }
+});
+
+test("an operation call the network refuses rejects with a timeout and does not end the process", async () => {
+  const uncaught = watchUncaught();
+  try {
+    await assert.rejects(
+      invokeCultNetOperation(
+        `rudp://${UNREACHABLE.host}:${UNREACHABLE.port}`,
+        {
+          schemaVersion: "cultnet.operation_request.v0",
+          messageId: "refused",
+          serviceId: "service",
+          operation: "operation",
+          payloadSchema: "payload",
+          payloadEncoding: "messagepack",
+          payload: new Uint8Array(),
+          diagnostics: [],
+          sourceRuntimeId: "caller",
+        },
+        { runtimeId: "caller", timeoutMs: 400 },
+      ),
+      /CultNet operation connection timed out/,
+    );
+    assert.deepEqual(uncaught.errors, []);
+  } finally {
+    uncaught.stop();
   }
 });

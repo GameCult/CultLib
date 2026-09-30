@@ -115,7 +115,7 @@ test("a Connect whose Accept can never be sent starts no session, and the server
   }
 });
 
-test("a datagram that may yet pass is reported; one that never can ends only that peer's session", async () => {
+test("a datagram that may yet pass is counted; one that never can ends only that peer's session", async () => {
   const connectionId = 0x10203092;
   const socket = createSocket("udp4");
   // Sends to a failing port report the failure the way Node reports a system one:
@@ -142,13 +142,16 @@ test("a datagram that may yet pass is reported; one that never can ends only tha
     await waitFor(() => served.puts.has("x-1"), "X's first put");
     const xPort = served.puts.get("x-1")!;
 
-    // No route: X's acknowledgements are lost datagrams, reported, and end nothing.
+    // No route: X's acknowledgements are lost datagrams, counted, never reported as errors,
+    // and end nothing.
+    assert.equal(served.server.sendFailures, 0);
     failing.set(xPort, "EHOSTUNREACH");
     x.send(put("x-2"));
-    await waitFor(() => served.errors.some((error) => (error as NodeJS.ErrnoException).code === "EHOSTUNREACH"), "the reported loss");
+    await waitFor(() => served.server.sendFailures >= 2, "the counted losses");
     y.send(put("y-1"));
     await waitFor(() => served.puts.has("y-1"), "Y's put");
     assert.deepEqual(served.closed, [], "a loss that may pass ends no session");
+    assert.deepEqual(served.errors.map((error) => error.message), [], "a lost datagram is not an error");
 
     // X's retransmitted put is acknowledged again, and that datagram can never be sent.
     failing.set(xPort, "EMSGSIZE");
