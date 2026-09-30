@@ -1165,6 +1165,55 @@ test("CultCache v1 MessagePack stores are readable across TS, Rust, C#, and Pyth
   }
 });
 
+// Records and catalog entries a runtime does not own survive its writes. C# writes a store and each other runtime writes its own
+// note into it: C# reads its note back, and its record and catalog entry are as C# wrote them. C# then writes again, and the other
+// runtime's record and catalog entry are as that runtime wrote them. Identity is compared on the decoded MessagePack values, every
+// slot of the entry and of its members included.
+test("A runtime's writes lay back another runtime's records and catalog entries unchanged", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-lay-back-"));
+  const csharpWrite = (file: string, runtimeId: string) =>
+    runJsonCommand("csharp-write", dotnetCommand, [csharpInteropDll, "write", "--file", file, "--runtime-id", runtimeId], cultLibRoot);
+  const others = [
+    {
+      name: "rust",
+      write: (file: string) => runJsonCommand("rust-write", rustInteropBinary, ["write", "--file", file, "--runtime-id", "rust-writer"], cultcacheRsRoot),
+    },
+    { name: "ts", write: (file: string) => writeTsInteropStore(file, "ts-writer") },
+    {
+      name: "python",
+      write: (file: string) => runJsonCommand("python-write", pythonCommand, [
+        "-m", "cultcache_py.interop", "write", "--file", file, "--runtime-id", "python-writer",
+      ], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
+    },
+  ];
+  const stored = async (file: string, key: string) => {
+    const [, catalog, records] = decode(await readFile(file)) as [string, unknown[][], unknown[][]];
+    const record = records.find((candidate) => candidate[0] === key);
+    assert.ok(record, `${file} holds no record ${key}`);
+    const entry = catalog.find((candidate) => candidate[0] === record[1]);
+    assert.ok(entry, `${file} publishes no entry owning ${String(record[1])}`);
+    return { record, entry };
+  };
+
+  for (const other of others) {
+    const file = join(tempDir, `${other.name}.cc`);
+    await csharpWrite(file, "csharp-writer");
+    const csharp = await stored(file, "note:csharp-writer");
+
+    const written = await other.write(file);
+    assert.deepEqual(await stored(file, "note:csharp-writer"), csharp, `${other.name} rewrote the C# record or its catalog entry`);
+    const read = await runJsonCommand("csharp-read", dotnetCommand, [csharpInteropDll, "read", "--file", file], cultLibRoot);
+    assert.ok(read.documentId === "note:csharp-writer" || read.documentId === written.documentId, `C# failed to read after ${other.name}`);
+    const theirs = await stored(file, written.documentId);
+    assert.notEqual(theirs.record[1], csharp.record[1], `${other.name} writes under its own id`);
+
+    await csharpWrite(file, "csharp-again");
+    assert.deepEqual(await stored(file, written.documentId), theirs, `C# rewrote the ${other.name} record or its catalog entry`);
+    assert.deepEqual(await stored(file, "note:csharp-writer"), csharp);
+  }
+});
+
 // A schema renamed under a stable id: the record's schema id names its type, and the name its catalog entry now carries is metadata.
 // A reader that resolved the record by that name would not find its type, so every runtime that can hold the stable id opens it. The
 // C# reader is not among them: its schema ids are content hashes, which this file does not carry.
