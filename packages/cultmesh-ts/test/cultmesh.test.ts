@@ -24,6 +24,8 @@ const noteDocument = defineDocumentType({
   name: "noteId",
 });
 
+type Note = z.infer<typeof noteDocument.schema>;
+
 // Another type claiming noteDocument's schema. It is never registered beside noteDocument: one type owns a schema.
 const otherTypeForNoteSchema = defineDocumentType({
   type: "cultmesh.note.ui",
@@ -133,7 +135,7 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
     body: "catalog-updated",
   });
   assert.equal(
-    (await catalog.latest(noteDocument, "browser-client")).body,
+    (await catalog.latest<Note>(noteDocument, "browser-client")).body,
     "catalog-updated",
   );
   // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
@@ -939,7 +941,7 @@ test("CultMesh TS binds publication document catalogs from source resolvers", as
     ["daemon:first", "daemon:second"],
   );
   assert.equal(
-    (await catalog.document(noteDocument).latest()).body,
+    (await catalog.document<Note>(noteDocument).latest()).body,
     "second source",
   );
   assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
@@ -1115,7 +1117,7 @@ test("CultMesh TS collection handles expose typed snapshots and reset watches", 
 
   const catalog = CultMesh.collections(collection);
   assert.deepEqual(
-    (await catalog.latest(noteDocument, "local")).map(note => note.body).sort(),
+    (await catalog.latest<Note>(noteDocument, "local")).map(note => note.body).sort(),
     ["alpha", "bravo"],
   );
   // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
