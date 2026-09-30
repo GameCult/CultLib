@@ -4,7 +4,7 @@ import logging
 import socket
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import msgpack
@@ -39,6 +39,8 @@ CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES = 1200
 # The answer to a request whose reply the peer's reliable queue cannot take. Fixed text: it
 # never quotes the reply or the queue's error.
 _REPLY_UNQUEUEABLE = "The reply could not be queued for this peer."
+# The answer to a message the server could not handle. Fixed text: it never quotes the message.
+_MESSAGE_UNHANDLED = "The message could not be handled."
 from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     VERSE_CATALOG_REQUEST,
@@ -47,6 +49,15 @@ from cultnet_py.cultmesh_contracts import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _ReplyUnqueueable(Exception):
+    """A reply the peer's reliable queue cannot take. The peer's session ends, and the peer is
+    answered first with a small cultnet.error.v0 under the request's message id."""
+
+    def __init__(self, message_id: str) -> None:
+        super().__init__("reply could not be queued")
+        self.message_id = message_id
 
 
 @dataclass(frozen=True)
@@ -259,7 +270,22 @@ class CultMeshLocalServer:
                     return
                 if not isinstance(message, dict):
                     continue
-                responses = self._handle_connection_message(message, subscriptions)
+                try:
+                    responses = self._handle_connection_message(message, subscriptions)
+                except Exception as error:  # noqa: BLE001 - one message never ends the connection
+                    # Whatever a peer's message makes the handling raise is that peer's failure:
+                    # it is refused with fixed text and the connection serves on. The log names
+                    # the error type only, because the error's own message can quote the peer.
+                    _LOGGER.warning(
+                        "CultMesh server could not handle a peer's message (%s); it was refused.",
+                        type(error).__name__,
+                    )
+                    message_id = message.get("messageId")
+                    responses = [self._error_response(
+                        _MESSAGE_UNHANDLED,
+                        message_id=message_id if isinstance(message_id, str) else "",
+                        code="message_unhandled",
+                    )]
                 for response in responses:
                     transport.send("schema", msgpack.packb(response, use_bin_type=True))
 
@@ -361,7 +387,14 @@ class CultMeshLocalServer:
                     "CultMesh RUDP server could not handle a peer's message (%s); that peer's session ended.",
                     type(error).__name__,
                 )
-                self._end_refused_peer(rudp_socket, peers, remote_addr)
+                refusal = None
+                if isinstance(error, _ReplyUnqueueable):
+                    refusal = self._error_response(
+                        _REPLY_UNQUEUEABLE,
+                        message_id=error.message_id,
+                        code="response_unqueueable",
+                    )
+                self._end_refused_peer(rudp_socket, peers, remote_addr, refusal=refusal)
                 continue
             if unsendable is None and (
                 packet.reliable or packet.packet_type == CultNetRudpPacketType.DATA or result.delivered
@@ -405,23 +438,8 @@ class CultMeshLocalServer:
             )
         except ValueError:
             # The peer's reliable queue cannot take this reply. The peer is answered, not left
-            # to time out: a small cultnet.error.v0 goes unreliable and unordered, so it needs
-            # no room in the queue that just refused. Then the error ends the session, as any
-            # message the handling cannot serve does.
-            refusal = self._error_response(
-                _REPLY_UNQUEUEABLE,
-                message_id=message_id,
-                code="response_unqueueable",
-            )
-            for packet in session.send_many(
-                "schema",
-                msgpack.packb(refusal, use_bin_type=True),
-                CultNetRudpSendOptions(reliable=False, ordered=False, now_ms=_now_ms()),
-                max_fragment_bytes=self.rudp_max_fragment_bytes,
-            ):
-                if self._send_rudp_packet(rudp_socket, remote_addr, packet) is not None:
-                    break
-            raise
+            # to time out, and its session ends: see _end_refused_peer.
+            raise _ReplyUnqueueable(message_id) from None
         for packet in packets:
             unsendable = self._send_rudp_packet(rudp_socket, remote_addr, packet)
             if unsendable is not None:
@@ -452,11 +470,36 @@ class CultMeshLocalServer:
         rudp_socket: socket.socket,
         peers: dict[tuple[str, int], _RudpPeerConnection],
         remote_addr: tuple[str, int],
+        *,
+        refusal: dict[str, Any] | None = None,
     ) -> None:
+        """Ends a peer's session that refused one of its messages, and says goodbye. A
+        refusal, when there is one, goes first, unreliable and unordered: the session ends
+        with it, so it is never resent and needs no room in the reliable queue. It is built
+        before the reset and carries acknowledgement fields built after it, which acknowledge
+        nothing, like the goodbye: the ack would otherwise cover the very frame refused. A
+        refusal fragment that can never be sent is not dropped: the goodbye names its failure."""
         peer = peers.pop(remote_addr)
-        # The goodbye is built after the reset, or its ack field would acknowledge the
-        # very frame the session refused.
+        packets: list[CultNetRudpPacket] = []
+        if refusal is not None:
+            try:
+                packets = peer.session.send_many(
+                    "schema",
+                    msgpack.packb(refusal, use_bin_type=True),
+                    CultNetRudpSendOptions(reliable=False, ordered=False, now_ms=_now_ms()),
+                    max_fragment_bytes=self.rudp_max_fragment_bytes,
+                )
+            except ValueError:
+                packets = []
         peer.session.reset_peer_state()
+        nothing = peer.session.create_ack()
+        for packet in packets:
+            unsendable = self._send_rudp_packet(
+                rudp_socket, remote_addr, replace(packet, ack=nothing.ack, ack_mask=nothing.ack_mask)
+            )
+            if unsendable is not None:
+                self._send_rudp_packet(rudp_socket, remote_addr, peer.session.end_unsendable_session(unsendable))
+                return
         goodbye = peer.session.create_disconnect(b"session refused a packet")
         self._send_rudp_packet(rudp_socket, remote_addr, goodbye)
 

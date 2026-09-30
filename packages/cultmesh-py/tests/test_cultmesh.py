@@ -51,6 +51,9 @@ from cultnet_py import (
     CultNetSimulationObservation,
     CultNetSimulationObservationHub,
     CultNetRudpPacketType,
+    CultNetRudpSendOptions,
+    CultNetRudpSession,
+    CultNetRudpSessionOptions,
     CultNetRudpSocketMode,
     CultNetRudpSocketTransportConnection,
     CultNetRudpSocketTransportOptions,
@@ -59,10 +62,12 @@ from cultnet_py import (
     decode_rudp_packet,
     document_delete,
     document_put_raw,
+    encode_rudp_packet,
     hello,
     simulation_observation,
     snapshot_request,
 )
+from cultnet_py.cultmesh_contracts import VERSE_CATALOG_REQUEST
 from cultmesh_py import create_node
 from cultmesh_py import (
     CultMesh,
@@ -3794,6 +3799,17 @@ class CultMeshTests(unittest.TestCase):
             self.assertIn("error: max_snapshot_documents must be greater than zero", completed.stderr)
             self.assertNotIn("Traceback", completed.stderr)
             self.assertFalse(ready_path.exists())
+            # A port no socket can bind is a usage error too.
+            completed = subprocess.run(
+                [sys.executable, "-m", "cultmesh_py.daemon", "--port", "99999"],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("port must be between 0 and 65535", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
 
     def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4546,6 +4562,188 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(failures_after, 0)
         self.assertEqual(after_reply["messageId"], "after-queue")
         self.assertTrue(alive)
+
+    class _RawPeer:
+        """A peer driven packet by packet, so a test decides what it acknowledges: nothing."""
+
+        def __init__(self, server: Any) -> None:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("127.0.0.1", 0))
+            self.sock.settimeout(0.05)
+            self.address = self.sock.getsockname()[:2]
+            self.target = ("127.0.0.1", server.port)
+            self.session = CultNetRudpSession(
+                CultNetRudpSessionOptions(
+                    connection_id=server.rudp_connection_id, initial_sequence=100, resend_delay_ms=100_000
+                )
+            )
+            self.sock.sendto(encode_rudp_packet(self.session.create_connect(0)), self.target)
+            accept = self.receive(1.0)
+            assert accept is not None and accept.packet_type == CultNetRudpPacketType.ACCEPT, accept
+            self.session.receive(accept, 1)
+
+        def receive(self, timeout: float = 0.3) -> Any:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    wire, _ = self.sock.recvfrom(65535)
+                except (TimeoutError, socket.timeout):
+                    continue
+                return decode_rudp_packet(wire)
+            return None
+
+        def drain(self, timeout: float = 0.5) -> list[Any]:
+            # Bounded overall: the server resends what the peer never acknowledges.
+            packets = []
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                packet = self.receive(0.05)
+                if packet is not None:
+                    packets.append(packet)
+            return packets
+
+        def send(self, message: dict[str, Any]) -> list[int]:
+            packets = self.session.send_many(
+                "schema",
+                msgpack.packb(message, use_bin_type=True),
+                CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=2),
+                max_fragment_bytes=1200,
+            )
+            for packet in packets:
+                self.sock.sendto(encode_rudp_packet(packet), self.target)
+            return [packet.sequence for packet in packets]
+
+        def close(self) -> None:
+            self.sock.close()
+
+    @staticmethod
+    def _acknowledges(packet: Any, sequence: int) -> bool:
+        return packet.ack == sequence or any(
+            packet.ack_mask & (1 << bit) and packet.ack > bit and packet.ack - bit - 1 == sequence
+            for bit in range(32)
+        )
+
+    def _brim_server(self) -> tuple[Any, Any]:
+        """A server whose peer's reliable queue (8) is filled exactly by an 8-fragment reply the
+        peer never acknowledges, and the peer."""
+        document = self._rudp_bound_note()
+        node = CultMesh.create_node(runtime_id="mesh-rudp-brim")
+        node.database.register_document(document)
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=100, rudp_max_pending_reliable_packets=8)
+
+        def served(body: int) -> int:
+            put = self._rudp_note_put(document, "p", "note:q", body)
+            return len(msgpack.packb(node.database.raw_put_served_alone(put, message_id=""), use_bin_type=True))
+
+        body = 400 + 800 - served(400)
+        self.assertEqual(served(body), 800, "fixture: served size is linear in the body")
+        node.database.apply_raw_put_message(self._rudp_note_put(document, "p", "note:q", body))
+        peer = self._RawPeer(server)
+        peer.send(snapshot_request(message_id="", record_keys=["note:q"]).to_wire())
+        first = {p.sequence for p in peer.drain(0.3) if p.packet_type == CultNetRudpPacketType.DATA}
+        self.assertEqual(len(first), 8, "fixture: the first reply fills the queue exactly")
+        return server, peer
+
+    def test_cultmesh_local_server_answers_a_peer_whose_queue_is_full_to_the_brim(self) -> None:
+        # The next reply cannot be queued. The peer is answered with a cultnet.error.v0 that takes
+        # no room in the full queue and acknowledges nothing the peer sent, then its session ends.
+        server, peer = self._brim_server()
+        try:
+            refused = peer.send(snapshot_request(message_id="b", record_keys=["note:none"]).to_wire())
+            packets = peer.drain(0.5)
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            peer.close()
+            server.stop()
+        parts = sorted(
+            (
+                p for p in packets
+                if p.packet_type == CultNetRudpPacketType.DATA and p.channel_id == "schema" and not p.reliable
+            ),
+            key=lambda p: p.fragment_index,
+        )
+        self.assertTrue(parts, "the refusal reaches the peer")
+        for part in parts:
+            self.assertFalse(
+                any(self._acknowledges(part, sequence) for sequence in refused),
+                f"the refusal acknowledges the refused request: ack={part.ack} mask={part.ack_mask:#x}",
+            )
+        refusal = msgpack.unpackb(b"".join(bytes(p.payload) for p in parts), raw=False)
+        self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0")
+        self.assertEqual(refusal["messageId"], "b")
+        self.assertEqual(refusal["code"], "response_unqueueable")
+        goodbyes = [bytes(p.payload) for p in packets if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+        self.assertEqual(goodbyes, [b"session refused a packet"], "then the session ends")
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_names_a_refusal_that_can_never_be_sent_in_the_goodbye(self) -> None:
+        # The refusal's own fragment fails permanently: the failure is not dropped, the goodbye
+        # names it by its fixed code, never the error's text.
+        import errno
+
+        server, peer = self._brim_server()
+        original_sendto = socket.socket.sendto
+
+        def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+            packet = decode_rudp_packet(data)
+            if (
+                args and tuple(args[-1]) == tuple(peer.address)
+                and packet.packet_type == CultNetRudpPacketType.DATA and not packet.reliable
+            ):
+                raise OSError(errno.EMSGSIZE, "Message too long CANARY-7f3a")
+            return original_sendto(sock, data, *args)
+
+        try:
+            with patch.object(socket.socket, "sendto", sendto):
+                peer.send(snapshot_request(message_id="b", record_keys=["note:none"]).to_wire())
+                packets = peer.drain(0.5)
+            alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+        finally:
+            peer.close()
+            server.stop()
+        self.assertFalse(
+            [p for p in packets if p.packet_type == CultNetRudpPacketType.DATA and not p.reliable],
+            "the refusal could not be sent",
+        )
+        goodbyes = [bytes(p.payload) for p in packets if p.packet_type == CultNetRudpPacketType.DISCONNECT]
+        self.assertEqual(goodbyes, [b"packet could not be sent: EMSGSIZE"])
+        self.assertTrue(alive)
+
+    def test_cultmesh_local_server_refuses_a_tcp_message_it_cannot_handle_and_serves_on(self) -> None:
+        # Messages whose handling raises: the TCP peer is refused with fixed text, the log names
+        # the error type only, and the connection's thread serves its next message.
+        shapes = [
+            {"schemaVersion": "cultnet.snapshot_request.v0", "messageId": "snapshot", "recordKeys": 5},
+            {"schemaVersion": "cultnet.shard_log_request.v0", "messageId": "shard-log", "shardId": "a", "afterSequence": "CANARY-7f3a"},
+            {"schemaVersion": "cultnet.database_subscribe.v0", "messageId": "subscribe", "subscriptionId": "s", "schemaIds": 5},
+            {"schemaVersion": "cultnet.schema_catalog_request.v0", "messageId": "catalog", "schemaIds": 5},
+            {"schemaVersion": VERSE_CATALOG_REQUEST, "messageId": "verse", "verseIds": 5},
+        ]
+        deaths: list[str] = []
+        original_hook = threading.excepthook
+        threading.excepthook = lambda args: deaths.append(f"{args.exc_type.__name__}")
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-tcp-shapes"))
+        try:
+            with self.assertLogs("cultmesh_py.server", level="WARNING") as logs:
+                with CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).open_transport() as transport:
+                    refusals = []
+                    for shape in shapes:
+                        transport.send("schema", msgpack.packb(shape, use_bin_type=True))
+                        refusals.append((shape["messageId"], msgpack.unpackb(transport.receive().payload, raw=False)))
+                    transport.send("schema", msgpack.packb(hello(runtime_id="same-connection").to_wire(), use_bin_type=True))
+                    after = msgpack.unpackb(transport.receive().payload, raw=False)
+        finally:
+            server.stop()
+            threading.excepthook = original_hook
+        for message_id, refusal in refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "message_unhandled", message_id)
+            self.assertEqual(refusal["error"], "The message could not be handled.", message_id)
+        self.assertEqual(after["schemaVersion"], "cultnet.hello.v0")
+        self.assertEqual(deaths, [])
+        self.assertEqual(len(logs.output), len(shapes))
+        self.assertFalse([line for line in logs.output if "CANARY" in line])
 
     def test_cultmesh_local_server_refuses_a_rudp_put_whose_reply_needs_more_than_65535_fragments(self) -> None:
         # One message carries at most 65535 fragments, however deep the queue: with one-byte

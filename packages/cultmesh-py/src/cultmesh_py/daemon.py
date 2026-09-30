@@ -24,10 +24,18 @@ from cultnet_py.cultmesh_contracts import (
 READY_SCHEMA_VERSION = "cultmesh.daemon_ready.v0"
 
 
+def _port(value: str) -> int:
+    """A TCP/UDP port: 0 (any free port) through 65535."""
+    port = int(value)
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cultmesh-py-daemon")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=3075)
+    parser.add_argument("--port", type=_port, default=3075)
     parser.add_argument("--runtime-id", default="python-runtime")
     parser.add_argument("--display-name")
     parser.add_argument("--cache-file")
