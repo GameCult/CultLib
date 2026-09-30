@@ -30,6 +30,10 @@ import {
 const RUDP_MAGIC = [0x43, 0x4e, 0x52, 0x30] as const; // CNR0
 const RUDP_VERSION = 0;
 const RUDP_FIXED_HEADER_BYTES = 36;
+/// The largest UDP payload a datagram can carry: 65,535 less the UDP header and,
+/// over IPv4, the minimal IP header. IPv6's header is outside its payload length.
+const MAX_UDP4_DATAGRAM_BYTES = 65_507;
+const MAX_UDP6_DATAGRAM_BYTES = 65_527;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
@@ -1037,6 +1041,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   readonly #mode: "client" | "server";
   readonly #resendTimer: NodeJS.Timeout;
   readonly #maxFragmentBytes: number | undefined;
+  readonly #maxDatagramBytes: number;
   #remoteHost: string | undefined;
   #remotePort: number | undefined;
   #closed = false;
@@ -1068,6 +1073,8 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
     const address = this.#socket.address();
     const localPort = typeof address === "string" ? undefined : address.port;
     const localHost = typeof address === "string" ? undefined : address.address;
+    this.#maxDatagramBytes =
+      typeof address !== "string" && String(address.family).endsWith("6") ? MAX_UDP6_DATAGRAM_BYTES : MAX_UDP4_DATAGRAM_BYTES;
     this.profile = createRudpTransportProfile(options.runtimeId, {
       transportId: options.transportId,
       host: localHost,
@@ -1109,6 +1116,15 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
   }
 
   send(channelId: string, payload: Uint8Array): void {
+    // A datagram larger than UDP can carry can never be sent, and Node reports that
+    // only later, to the send's callback. Checked here it is the caller's error, as
+    // in the other runtimes: the send throws, and nothing of it is queued or takes a
+    // sequence. Every datagram of a send is at most one fragment of its payload.
+    const largestPayload =
+      this.#maxFragmentBytes === undefined ? payload.byteLength : Math.min(payload.byteLength, this.#maxFragmentBytes);
+    if (RUDP_FIXED_HEADER_BYTES + Buffer.byteLength(channelId, "utf8") + largestPayload > this.#maxDatagramBytes) {
+      throw Object.assign(new Error("RUDP datagram is larger than UDP can carry."), { code: "EMSGSIZE" });
+    }
     const packets = this.#session.sendMany(channelId, payload, {
       ...channelOptions(channelId),
       nowMs: Date.now(),

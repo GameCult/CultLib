@@ -433,3 +433,46 @@ test("an operation server ignores a send failure reported after the generation t
     await server.close();
   }
 });
+
+test("a caller's send larger than a UDP datagram throws and takes nothing from the session", async () => {
+  const serverSocket = await bindUdpSocket();
+  const clientSocket = await bindUdpSocket();
+  const connectionId = 0x10203097;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+  });
+  const client = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-client",
+    socket: clientSocket,
+    mode: "client",
+    remoteHost: "127.0.0.1",
+    remotePort: udpPort(serverSocket),
+    connectionId,
+  });
+  const frames: number[] = [];
+  server.on("frame", (frame: { payload: Uint8Array }) => frames.push(frame.payload.byteLength));
+  // 36 header bytes and the six of "schema": the largest payload one IPv4 datagram carries.
+  const largest = 65_507 - 36 - "schema".length;
+  try {
+    client.connect();
+    await waitFor(() => client.connected && server.connected, "the handshake");
+    await waitFor(() => client.outstandingReliablePacketCount === 0, "the Connect acknowledged");
+
+    client.send("schema", new Uint8Array(largest));
+    assert.throws(() => client.send("schema", new Uint8Array(largest + 1)), { code: "EMSGSIZE" });
+    assert.equal(client.stats.framesSent, 1);
+    client.send("schema", Buffer.from("next", "utf8"));
+
+    // The refused send took no sequence: the next frame is not held behind a gap.
+    await waitFor(() => frames.length === 2, "both sent frames");
+    assert.deepEqual(frames, [largest, 4]);
+    assert.equal(client.connected, true);
+    await waitFor(() => client.outstandingReliablePacketCount === 0, "both frames acknowledged");
+  } finally {
+    client.close();
+    server.close();
+  }
+});
