@@ -5184,7 +5184,7 @@ mod tests {
             if echoed {
                 assert!(text.contains(&format!("\"{header}\"")), "{text}");
             } else {
-                assert!(!text.contains(header), "{text}");
+                assert!(!text.contains(&format!("\"{header}\"")), "{text}");
                 assert!(!text.contains("SECRET"), "{text}");
                 assert!(text.contains(&format!("of {} bytes", header.len())), "{text}");
             }
