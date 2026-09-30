@@ -9,6 +9,7 @@ from typing import Any
 import msgpack
 
 from cultnet_py import (
+    CultNetRawSnapshotResponse,
     CultNetSimulationObservationHub,
     CultNetRudpPacket,
     CultNetRudpPacketType,
@@ -98,14 +99,38 @@ class CultMeshLocalServer:
         return self._rudp_send_failures
 
     def __post_init__(self) -> None:
-        if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
-            raise ValueError("max_snapshot_documents must be non-negative")
-        if self.max_snapshot_bytes is not None and self.max_snapshot_bytes < 0:
-            raise ValueError("max_snapshot_bytes must be non-negative")
-        if self.rudp_max_fragment_bytes <= 0:
-            raise ValueError("rudp_max_fragment_bytes must be greater than zero")
+        # The Rust document server's option rules (validate_options), for each option this
+        # server shares with it: every limit is greater than zero, and the limits leave room for
+        # the smallest response the server sends, an empty snapshot. A server that could answer
+        # nothing is misconfigured.
+        if self.max_snapshot_bytes is not None and self.max_snapshot_bytes <= 0:
+            raise ValueError("max_snapshot_bytes must be greater than zero")
+        if self.max_snapshot_documents is not None and self.max_snapshot_documents <= 0:
+            raise ValueError("max_snapshot_documents must be greater than zero")
+        if self.rudp_resend_delay_ms <= 0:
+            raise ValueError("rudp_resend_delay_ms must be greater than zero")
         if self.rudp_max_pending_reliable_packets is not None and self.rudp_max_pending_reliable_packets <= 0:
             raise ValueError("rudp_max_pending_reliable_packets must be greater than zero")
+        if self.rudp_max_fragment_bytes <= 0:
+            raise ValueError("rudp_max_fragment_bytes must be greater than zero")
+        empty = _snapshot_response_bytes(
+            CultNetRawSnapshotResponse(message_id=_SHORTEST_SERVED_MESSAGE_ID, documents=()).to_wire()
+        )
+        if self.max_snapshot_bytes is not None and empty > self.max_snapshot_bytes:
+            raise ValueError("max_snapshot_bytes cannot hold an empty snapshot response")
+        if -(-empty // self.rudp_max_fragment_bytes) > self._max_rudp_reply_fragments():
+            raise ValueError(
+                "rudp_max_fragment_bytes and rudp_max_pending_reliable_packets cannot carry an empty "
+                "snapshot response"
+            )
+
+    def _max_rudp_reply_fragments(self) -> int:
+        """The most fragments one RUDP reply can take: one message's fragment count, and the
+        peer's reliable queue it must fit into whole."""
+        return min(
+            _MAX_FRAGMENTS_PER_MESSAGE,
+            self.rudp_max_pending_reliable_packets or _MAX_FRAGMENTS_PER_MESSAGE,
+        )
 
     def start(self) -> "CultMeshLocalServer":
         if self._socket is not None:
@@ -633,10 +658,7 @@ class CultMeshLocalServer:
         limits = f"limit is {self.max_snapshot_bytes}"
         if over_rudp:
             fragment_count = max(1, -(-response_bytes // self.rudp_max_fragment_bytes))
-            max_fragment_count = min(
-                _MAX_FRAGMENTS_PER_MESSAGE,
-                self.rudp_max_pending_reliable_packets or _MAX_FRAGMENTS_PER_MESSAGE,
-            )
+            max_fragment_count = self._max_rudp_reply_fragments()
             details |= {"fragmentCount": fragment_count, "maxFragmentCount": max_fragment_count}
             fits = fits and fragment_count <= max_fragment_count
             limits = (

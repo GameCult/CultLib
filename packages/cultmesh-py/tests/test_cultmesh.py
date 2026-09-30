@@ -4585,6 +4585,61 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(hello_reply["schemaVersion"], "cultnet.hello.v0")
         self.assertTrue(alive)
 
+    def test_cultmesh_local_server_refuses_options_that_could_answer_nothing(self) -> None:
+        # The Rust document server's option rules: every limit is greater than zero, and the limits
+        # leave room for an empty snapshot, the smallest response the server sends. One-byte
+        # fragments and a queue of 16 could never carry one, so no reply would ever be sent.
+        node = CultMesh.create_node(runtime_id="mesh-rudp-options")
+        probe = CultMesh.serve_node(node)
+        try:
+            _, empty_payload = self._rudp_exchange(probe, snapshot_request(message_id="").to_wire())
+        finally:
+            probe.stop()
+        empty = len(empty_payload)
+        self.assertGreater(empty, 16, "fixture: an empty snapshot takes more than 16 one-byte fragments")
+        self.assertNotEqual(empty % (empty - 1), 0, "fixture: empty - 1 byte fragments leave a remainder")
+
+        def refused(**options: Any) -> str:
+            server = None
+            try:
+                with self.assertRaises(ValueError, msg=str(options)) as raised:
+                    server = CultMesh.serve_node(node, **options)
+            finally:
+                if server is not None:
+                    server.stop()
+            return str(raised.exception)
+
+        def accepted(**options: Any) -> None:
+            CultMesh.serve_node(node, **options).stop()
+
+        carry = "cannot carry an empty snapshot response"
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=16))
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty - 1))
+        accepted(rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty)
+        # Fragments are counted rounding up: empty - 1 bytes a fragment takes two.
+        self.assertIn(carry, refused(rudp_max_fragment_bytes=empty - 1, rudp_max_pending_reliable_packets=1))
+        accepted(rudp_max_fragment_bytes=empty - 1, rudp_max_pending_reliable_packets=2)
+        self.assertIn("cannot hold an empty snapshot response", refused(max_snapshot_bytes=empty - 1))
+        accepted(max_snapshot_bytes=empty)
+        self.assertIn("greater than zero", refused(max_snapshot_bytes=0))
+        self.assertIn("greater than zero", refused(max_snapshot_documents=0))
+        accepted(max_snapshot_documents=1)
+        self.assertIn("greater than zero", refused(rudp_resend_delay_ms=0))
+        accepted(rudp_resend_delay_ms=1)
+        self.assertIn("greater than zero", refused(rudp_max_fragment_bytes=0))
+        self.assertIn("greater than zero", refused(rudp_max_pending_reliable_packets=0))
+
+        # The configuration at the bound does answer: an empty snapshot in one-byte fragments,
+        # exactly as many as the queue holds.
+        server = CultMesh.serve_node(node, rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=empty)
+        try:
+            served, payload = self._rudp_exchange(server, snapshot_request(message_id="").to_wire())
+        finally:
+            server.stop()
+        self.assertEqual(served["documents"], [])
+        self.assertEqual(len(payload), empty)
+        self.assertEqual(server.rudp_send_failures, 0)
+
     def test_cultmesh_local_server_returns_errors_for_bad_requests(self) -> None:
         document = define_database_entry_type(
             "mesh.error_note",
