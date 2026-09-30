@@ -382,6 +382,47 @@ fn a_restarted_client_on_the_same_address_and_connection_id_is_admitted() -> Res
     Ok(())
 }
 
+/// A restarted client is a new session, and starts with a new payload budget:
+/// what the old one spent is not charged to it.
+#[test]
+fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
+    let put = |id: &str| CultNetMessage::DocumentPutRaw {
+        message_id: id.into(),
+        document: document("budget", vec![7; 64]),
+    };
+    let encoded = encode_cultnet_message_to_vec(&put("first"), CultNetWireContract::CultNetSchemaV0)?;
+    let options = CultMeshRudpDocumentServerOptions {
+        max_admitted_payload_bytes: encoded.len() * 2,
+        max_admitted_payload_bytes_per_session: encoded.len(),
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(47_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+    let shared = UdpSocket::bind("127.0.0.1:0")?;
+    let twin = shared.try_clone()?;
+    let mut first = client_on(shared, target, 94, 50)?;
+    connect(&mut server, &mut [&mut first])?;
+    send(&mut first, &put("first"))?;
+    for _ in 0..20 {
+        server.poll_once()?;
+    }
+    assert_eq!(sink.0.lock().unwrap().receipts.len(), 1);
+
+    let mut restarted = client_on(twin, target, 94, 7)?;
+    connect(&mut server, &mut [&mut restarted])?;
+    send(&mut restarted, &put("second"))?;
+    for _ in 0..20 {
+        server.poll_once()?;
+    }
+    assert_eq!(
+        sink.0.lock().unwrap().receipts.len(),
+        2,
+        "the restarted client was charged what the old session spent"
+    );
+    Ok(())
+}
+
 #[test]
 fn application_rejection_is_nonfatal_peer_scoped_and_unacknowledged() -> Result<()> {
     let clock = Clock::new(48_000);
