@@ -156,12 +156,15 @@ namespace GameCult.Networking.Tests
             var (server, _, x, y) = TwoPeers();
             using (server)
             {
+                // Each peer's own Accept is still awaiting its ack; the refused send adds nothing to it.
+                var outstanding = x.Server.Session.OutstandingReliablePacketCount;
+                var otherOutstanding = y.Server.Session.OutstandingReliablePacketCount;
                 var error = Assert.Throws<SocketException>(() => server.SendSchema(x.Server, new byte[70_000]))!;
                 Assert.That(CultNetRudpSession.IsPermanentSendError(error), Is.True, error.SocketErrorCode.ToString());
                 Assert.That(server.Stats.SendFailures, Is.Zero);
                 Assert.That(server.Stats.FramesSent, Is.Zero);
                 Assert.That(server.Peers, Has.Count.EqualTo(2), "the caller's error ends no session");
-                Assert.That(x.Server.Session.OutstandingReliablePacketCount, Is.Zero, "nothing is pending or queued to resend");
+                Assert.That(x.Server.Session.OutstandingReliablePacketCount, Is.EqualTo(outstanding), "nothing is pending or queued to resend");
 
                 // The refused send consumed no sequence: the next frame is delivered in order instead
                 // of waiting behind a gap that never fills.
@@ -169,7 +172,7 @@ namespace GameCult.Networking.Tests
                 var data = Drain(x.Socket).Single(p => p.PacketType == CultNetRudpPacketType.Data);
                 var delivered = x.Session.Receive(data, 1).Delivered;
                 Assert.That(delivered.Select(frame => Encoding.UTF8.GetString(frame.Payload)), Is.EqualTo(new[] { "next" }));
-                Assert.That(y.Server.Session.OutstandingReliablePacketCount, Is.Zero);
+                Assert.That(y.Server.Session.OutstandingReliablePacketCount, Is.EqualTo(otherOutstanding));
             }
         }
 
