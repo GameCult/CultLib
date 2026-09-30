@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import socket
 import threading
 import time
@@ -292,10 +293,29 @@ class CultNetRudpReceiveResult:
     disconnect_reason: bytes = b""
 
 
+def random_initial_sequence() -> int:
+    """A fresh default initial sequence, drawn from a secure source in [1, 2^31).
+
+    The Connect's sequence is what tells a peer whether a Connect repeats one it
+    already accepted or starts a new session, so two sessions must not share one
+    by default.
+    """
+    return secrets.randbelow(2**31 - 1) + 1
+
+
+def _packet_acknowledges(packet: "CultNetRudpPacket", sequence: int) -> bool:
+    if packet.ack == sequence:
+        return True
+    return any(
+        packet.ack_mask & (1 << bit) and packet.ack > bit and packet.ack - bit - 1 == sequence
+        for bit in range(32)
+    )
+
+
 @dataclass(frozen=True)
 class CultNetRudpSessionOptions:
     connection_id: int
-    initial_sequence: int = 1
+    initial_sequence: int = field(default_factory=random_initial_sequence)
     resend_delay_ms: int = 250
     max_pending_reliable_packets: int | None = None
 
@@ -320,7 +340,7 @@ class CultNetRudpSocketTransportOptions:
     mode: CultNetRudpSocketMode
     connection_id: int
     remote_addr: tuple[str, int] | None = None
-    initial_sequence: int = 1
+    initial_sequence: int = field(default_factory=random_initial_sequence)
     resend_delay_ms: int = 250
     transport_id: str = "rudp"
     max_payload_bytes: int | None = None
@@ -422,6 +442,12 @@ class CultNetRudpSession:
         # begins one. A flush started in that interval has no live generation
         # to wait on.
         self._ended = False
+        # The sequence of the Connect that started the current generation: sent
+        # by this side, or accepted from the peer. A Connect repeats exactly when
+        # the session is connected and the Connect carries this sequence.
+        self._connect_sequence: int | None = None
+        # A Connect this side sent is unanswered. Only then is an Accept honoured.
+        self._awaiting_accept = False
         self._last_received_at_ms: int | None = None
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
@@ -429,9 +455,9 @@ class CultNetRudpSession:
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
         self._queued_reliable: deque[CultNetRudpPacket] = deque()
         # Every reliable sequence up to and including this one has been received
-        # since the peer state was last reset. The first reliable sequence after
-        # a reset seeds it: the peer's Connect or Accept, or, for a session that
-        # never handshook, its first packet.
+        # since the peer state was last reset. Only the handshake seeds it: the
+        # peer's Connect on the accepting side, the peer's Accept on the
+        # connecting side. Reliable data that arrives before that is refused.
         self._received_through: int | None = None
         # Ordered frames received but not yet deliverable, keyed by first
         # sequence. A frame is held for exactly one reason: a reliable sequence
@@ -486,6 +512,7 @@ class CultNetRudpSession:
         retransmits be delivered twice."""
         self._connected = False
         self._ended = True
+        self._awaiting_accept = False
         self._generation += 1
         self._pending_reliable.clear()
         self._queued_reliable.clear()
@@ -505,6 +532,10 @@ class CultNetRudpSession:
 
     def create_connect(self, now_ms: int = 0, payload: bytes = b"") -> CultNetRudpPacket:
         self._ensure_reliable_capacity(1)
+        # A session that has had a peer starts a new generation: nothing it
+        # learned from that peer describes the one this Connect reaches.
+        if self._connect_sequence is not None:
+            self.reset_peer_state()
         self._ended = False
         packet = self._create_packet(
             CultNetRudpPacketType.CONNECT,
@@ -513,8 +544,22 @@ class CultNetRudpSession:
             reliable=True,
             ordered=True,
         )
+        self._connect_sequence = packet.sequence
+        self._awaiting_accept = True
         self._track_reliable(packet, now_ms)
         return packet
+
+    def connect_repeats(self, packet: CultNetRudpPacket) -> bool:
+        """Whether `packet` is a retransmit of the Connect that started this
+        session's current generation: the session is connected and the Connect
+        carries that Connect's sequence. Servers that keep one session per peer
+        ask this to tell a repeat from a new session; anything else that reaches
+        `accept_connect` starts a new generation."""
+        return (
+            packet.packet_type == CultNetRudpPacketType.CONNECT
+            and self._connected
+            and self._connect_sequence == packet.sequence
+        )
 
     def accept_connect(
         self,
@@ -526,8 +571,16 @@ class CultNetRudpSession:
         if packet.packet_type != CultNetRudpPacketType.CONNECT:
             raise ValueError(f"Expected RUDP connect packet, got {packet.packet_type.value}")
 
+        # A repeat of the accepted Connect queues nothing, so a Connect storm
+        # cannot grow the reliable queue. Any other Connect ends the current
+        # generation, forgets the peer and accepts a new one.
+        if self.connect_repeats(packet):
+            return self._answer_repeated_connect(packet, now_ms)
         self._ensure_reliable_capacity(1)
-        self._remember_received(packet.sequence)
+        self.reset_peer_state()
+        self._seed_received(packet.sequence)
+        self._last_received_at_ms = now_ms
+        self._connect_sequence = packet.sequence
         self._connected = True
         self._ended = False
         response = self._create_packet(
@@ -540,16 +593,9 @@ class CultNetRudpSession:
         self._track_reliable(response, now_ms)
         return response
 
-    def answer_repeated_connect(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpPacket:
-        """Answers a Connect from a peer this session already accepted.
-
-        The packet's sequence is remembered and nothing is queued, so a Connect
-        storm cannot grow the reliable queue. The reply is the Accept still awaiting
-        acknowledgement, or an Ack once it was acknowledged.
-        """
-        self._require_connection(packet)
-        if packet.packet_type != CultNetRudpPacketType.CONNECT:
-            raise ValueError(f"Expected RUDP connect packet, got {packet.packet_type.value}")
+    def _answer_repeated_connect(self, packet: CultNetRudpPacket, now_ms: int) -> CultNetRudpPacket:
+        """The reply to a repeated Connect is the Accept still awaiting
+        acknowledgement, or an Ack once it was acknowledged."""
         self._apply_acknowledgements(packet)
         self._remember_received(packet.sequence)
         self._last_received_at_ms = now_ms
@@ -624,12 +670,24 @@ class CultNetRudpSession:
 
     def receive(self, packet: CultNetRudpPacket, now_ms: int = 0) -> CultNetRudpReceiveResult:
         self._require_connection(packet)
+        # An Accept counts only while this side's Connect is unanswered and the
+        # Accept names it. A late or duplicate one, or one from an earlier
+        # generation, must not seed the watermark or revive an ended session.
+        honours_accept = (
+            packet.packet_type == CultNetRudpPacketType.ACCEPT
+            and self._awaiting_accept
+            and self._connect_sequence is not None
+            and _packet_acknowledges(packet, self._connect_sequence)
+        )
+        if packet.packet_type == CultNetRudpPacketType.ACCEPT and not honours_accept:
+            return CultNetRudpReceiveResult()
         self._apply_acknowledgements(packet)
         ready_to_send = self._promote_queued_reliable(now_ms)
         self._last_received_at_ms = now_ms
 
-        if packet.packet_type == CultNetRudpPacketType.ACCEPT:
-            self._remember_received(packet.sequence)
+        if honours_accept:
+            self._awaiting_accept = False
+            self._seed_received(packet.sequence)
             self._connected = True
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
@@ -655,6 +713,12 @@ class CultNetRudpSession:
             )
 
         if packet.packet_type != CultNetRudpPacketType.DATA:
+            return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
+
+        # Reliable data before the handshake has seeded the watermark has no place
+        # in the order: refuse it unremembered, so it is not acknowledged and the
+        # sender retransmits it once the handshake is done.
+        if packet.reliable and self._received_through is None:
             return CultNetRudpReceiveResult(ready_to_send=ready_to_send)
 
         duplicate = packet.reliable and (
@@ -714,7 +778,11 @@ class CultNetRudpSession:
         )
 
     def create_ack_for_received(self, sequence: int) -> CultNetRudpPacket:
+        # What `receive` refused is not acknowledged by name (the ack carries only
+        # what was received), so its sender retransmits it.
         received_sequence = _uint32(sequence, "received sequence")
+        if not self._was_received(received_sequence):
+            return self.create_ack()
         ack, _ = self._ack_state()
         if ack >= received_sequence and ack - received_sequence <= 32:
             return self.create_ack()
@@ -837,12 +905,28 @@ class CultNetRudpSession:
             if packet.ack_mask & (1 << bit):
                 self._pending_reliable.pop(packet.ack - bit - 1, None)
 
+    def _seed_received(self, sequence: int) -> None:
+        """The handshake's one act on the watermark: the peer's Connect or Accept
+        is the first sequence of the session, whatever else it has sent."""
+        self._received_through = sequence
+        self._remember_received(sequence)
+
+    def _was_received(self, sequence: int) -> bool:
+        """True for a sequence in the window that was received, and for one below
+        the window, which `receive` treats as a duplicate of something received."""
+        return sequence in self._received_sequences or (
+            self._highest_received_sequence is not None
+            and sequence < self._highest_received_sequence
+            and self._highest_received_sequence - sequence >= self.RECEIVED_SEQUENCE_WINDOW
+        )
+
     def _remember_received(self, sequence: int) -> None:
         self._received_sequences.add(sequence)
-        through = sequence if self._received_through is None else self._received_through
-        while through + 1 in self._received_sequences:
-            through += 1
-        self._received_through = through
+        if self._received_through is not None:
+            through = self._received_through
+            while through + 1 in self._received_sequences:
+                through += 1
+            self._received_through = through
         if self._highest_received_sequence is None or sequence > self._highest_received_sequence:
             self._highest_received_sequence = sequence
         if len(self._received_sequences) > self.RECEIVED_SEQUENCE_WINDOW:
@@ -1032,18 +1116,20 @@ class CultNetRudpSocketTransportConnection:
                 return None
             self.remote_addr = remote_addr
         elif remote_addr != self.remote_addr:
-            self._packets_dropped += 1
-            return None
+            # A Connect from another endpoint claims the transport for it: the
+            # session decides whether it starts a new generation.
+            if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type == CultNetRudpPacketType.CONNECT:
+                self.remote_addr = remote_addr
+            else:
+                self._packets_dropped += 1
+                return None
 
         if self.mode == CultNetRudpSocketMode.SERVER and packet.packet_type == CultNetRudpPacketType.CONNECT:
-            # A Connect from the peer this transport already accepted repeats:
-            # answer it with the Accept already owed and queue nothing.
+            # The session answers a repeat of the Connect it accepted with the
+            # Accept already owed, and anything else with a new generation.
             try:
-                if self.session.connected:
-                    reply = self.session.answer_repeated_connect(packet, _now_ms())
-                else:
-                    reply = self.session.accept_connect(packet, _now_ms())
-                    self.disconnect_reason = None
+                reply = self.session.accept_connect(packet, _now_ms())
+                self.disconnect_reason = None
             except ValueError:
                 self._packets_dropped += 1
                 return None
@@ -1134,7 +1220,10 @@ class CultNetRudpSocketTransportConnection:
         self._send_packet(self.session.create_ping(payload))
 
     def check_timeout(self, timeout_ms: int, now_ms: int | None = None) -> bool:
-        return self.session.check_timeout(_now_ms() if now_ms is None else now_ms, timeout_ms)
+        timed_out = self.session.check_timeout(_now_ms() if now_ms is None else now_ms, timeout_ms)
+        if timed_out:
+            self.disconnect_reason = b"session timed out"
+        return timed_out
 
     def poll_resends(self) -> None:
         for packet in self.session.due_resends(_now_ms()):

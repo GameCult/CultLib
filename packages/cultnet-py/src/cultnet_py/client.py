@@ -28,6 +28,7 @@ from .transport import (
     CultNetRudpSocketTransportOptions,
     TcpFramedTransportConnection,
     create_tcp_framed_transport_profile,
+    random_initial_sequence,
 )
 
 
@@ -393,7 +394,7 @@ def create_rudp_schema_transport(
     runtime_id: str = "cultnet-python-rudp-client",
     bind_host: str = "127.0.0.1",
     bind_port: int = 0,
-    initial_sequence: int = 1,
+    initial_sequence: int | None = None,
     resend_delay_ms: int = 25,
     transport_id: str = "rudp",
     max_payload_bytes: int | None = None,
@@ -410,7 +411,7 @@ def create_rudp_schema_transport(
             mode=CultNetRudpSocketMode.CLIENT,
             remote_addr=(host, port),
             connection_id=connection_id,
-            initial_sequence=initial_sequence,
+            initial_sequence=random_initial_sequence() if initial_sequence is None else initial_sequence,
             resend_delay_ms=resend_delay_ms,
             transport_id=transport_id,
             max_payload_bytes=max_payload_bytes,
