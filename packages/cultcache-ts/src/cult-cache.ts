@@ -462,8 +462,10 @@ export class CultCache {
         type: envelope.type,
         payload,
         storedAt: envelope.storedAt,
-        schemaId: envelope.schemaId ?? registered.catalogEntry.schemaId,
-        catalogEntry: envelope.catalogEntry ?? registered.catalogEntry,
+        // The record is stamped with its registered schema's id, whatever id the envelope arrived under, so the
+        // catalog entry the store writes is the one its schema id names.
+        schemaId: registered.catalogEntry.schemaId,
+        catalogEntry: registered.catalogEntry,
       };
       await this.#writeNow(registered, entry, parsed);
       return parsed;
@@ -876,8 +878,10 @@ export class CultCache {
     return {
       ...entry,
       payload: this.#cloneBytes(entry.payload),
-      schemaId: entry.schemaId ?? registered.catalogEntry.schemaId,
-      catalogEntry: entry.catalogEntry ?? registered.catalogEntry,
+      // Admitted under the registered schema's id, as a put stamps it: a record loaded under a compatible id is
+      // written back under the id its catalog entry carries.
+      schemaId: registered.catalogEntry.schemaId,
+      catalogEntry: registered.catalogEntry,
       value,
       lookups: this.#lookupsFor(registered.nameAccessor, registered.indexAccessors, value),
     };

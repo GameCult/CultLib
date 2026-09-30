@@ -1341,6 +1341,56 @@ test("CultNet raw replication preserves CultCache payload bytes for bit-compatib
   }
 });
 
+test("CultNet raw replication under a compatible schema id leaves a store that reopens and takes the next write", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-raw-compatible-"));
+
+  try {
+    const definition = defineDocumentType({
+      type: "tests.raw-compatible",
+      schema: z.object({ name: z.string() }),
+      schemaId: "tests.raw-compatible.current",
+      schemaName: "tests.raw-compatible",
+      schemaVersion: "tests.raw_compatible.v1",
+      compatibleSchemaIds: ["tests.raw-compatible.current", "tests.raw-compatible.older"],
+    });
+    const registry = new CultNetDocumentRegistry([
+      defineCultNetDocumentBinding({ definition, payloadSchemaVersion: "tests.raw_compatible.v1" }),
+    ]);
+    const open = async (): Promise<CultCache> => {
+      const cache = CultCache.builder()
+        .withDocumentType(definition)
+        .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "target.msgpack")))
+        .build();
+      await cache.pullAllBackingStores();
+      return cache;
+    };
+
+    const origin = CultCache.builder().withDocumentType(definition).build();
+    await origin.put(definition, "seed", { name: "seed" });
+    const payload = origin.getRequiredEnvelope(definition, "seed").payload;
+
+    const target = await open();
+    await registry.applyRawDocumentPutMessage(target, {
+      schemaVersion: "cultnet.document_put_raw.v0",
+      messageId: "raw-compatible-1",
+      document: {
+        schemaId: "tests.raw-compatible.older",
+        recordKey: "replicated",
+        storedAt: "2026-09-30T00:00:00.0000000Z",
+        payloadEncoding: "messagepack",
+        payload,
+      },
+    } as Parameters<CultNetDocumentRegistry["applyRawDocumentPutMessage"]>[1]);
+
+    const reopened = await open();
+    assert.deepEqual(reopened.getRequired(definition, "replicated"), { name: "seed" });
+    await reopened.put(definition, "next", { name: "next" });
+    assert.deepEqual((await open()).getRequired(definition, "next"), { name: "next" });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("operation envelopes preserve typed service routing and payload correlation", () => {
   const request = parseCultNetMessage({
     schemaVersion: "cultnet.operation_request.v0",

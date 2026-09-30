@@ -215,24 +215,32 @@ function encodeSnapshot(entries: CultCacheEnvelope[], format: StoreFormat): unkn
   ];
 }
 
+// Every record's schema id is published by a catalog entry: the entry the envelope carries when it publishes that id (as its
+// own id or a compatible one), else a default entry under the record's id. The catalog is keyed by the entry's own id, so a
+// record read under a compatible id is written back beside the entry that lists it.
 function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheSchemaCatalogEntry> {
   const catalog = new Map<string, CultCacheSchemaCatalogEntry>();
   for (const entry of entries) {
     const schemaId = schemaIdForEnvelope(entry);
-    if (!catalog.has(schemaId)) {
-      catalog.set(schemaId, entry.catalogEntry ?? {
-        schemaId,
+    const supplied = entry.catalogEntry;
+    const publishes =
+      supplied !== undefined &&
+      (supplied.schemaId === schemaId || (supplied.compatibleSchemaIds ?? []).includes(schemaId));
+    const published: CultCacheSchemaCatalogEntry = publishes ? supplied : {
+      schemaId,
+      schemaName: entry.type,
+      schemaVersion: `${entry.type}.v1`,
+      contentHash: schemaId,
+      canonicalSchemaJson: JSON.stringify({
         schemaName: entry.type,
         schemaVersion: `${entry.type}.v1`,
-        contentHash: schemaId,
-        canonicalSchemaJson: JSON.stringify({
-          schemaName: entry.type,
-          schemaVersion: `${entry.type}.v1`,
-          members: [],
-        }),
-        compatibleSchemaIds: [schemaId],
         members: [],
-      });
+      }),
+      compatibleSchemaIds: [schemaId],
+      members: [],
+    };
+    if (!catalog.has(published.schemaId)) {
+      catalog.set(published.schemaId, published);
     }
   }
 

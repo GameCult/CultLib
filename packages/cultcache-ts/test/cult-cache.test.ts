@@ -1244,40 +1244,108 @@ test("CultCache inspector decodes v1 store catalog and record payloads from byte
   ]);
 });
 
-test("CultCache inspector recovers schema-stamped records missing catalog entries", async () => {
+test("CultCache inspector refuses a record whose schema the catalog does not publish, and a store of the wrong slot count", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-inspector-"));
-  const file = join(tempDir, "missing-catalog.cc");
+  const record = [
+    "record-1",
+    "sha256:stale-schema-id-from-cold-record",
+    "2026-06-25T12:00:00Z",
+    encode(["tests.schema_stamped_entry.v1", "schema-stamped", "still readable"]),
+  ];
 
+  assert.throws(
+    () => inspectCultCacheBytes("missing-catalog.cc", encode(["cultcache.store.v1", [], [record]])),
+    /references missing schema id/u,
+  );
+  assert.throws(() => inspectCultCacheBytes("header-only.cc", encode(["cultcache.store.v1"])), /top-level slots/u);
+  assert.throws(
+    () => inspectCultCacheBytes("extra-slot.cc", encode(["cultcache.store.v1", [], [], 0])),
+    /top-level slots/u,
+  );
+  await rm(tempDir, { recursive: true, force: true });
+});
+
+// A record written under an id its schema only lists as compatible is stamped with the registered id, and the store the write
+// leaves opens and takes the next write. The envelope carries a catalog entry under the foreign id, as a replicated one does.
+const foreignIdDocument = defineDocumentType({
+  type: "tests.foreign-id",
+  schema: z.object({ name: z.string() }),
+  schemaId: "tests.foreign-id.current",
+  schemaName: "tests.foreign-id",
+  schemaVersion: "tests.foreign_id.v1",
+  compatibleSchemaIds: ["tests.foreign-id.current", "tests.foreign-id.older"],
+});
+
+async function reopenForeignIdStore(file: string): Promise<CultCache> {
+  const cache = CultCache.builder()
+    .withDocumentType(foreignIdDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(file))
+    .build();
+  await cache.pullAllBackingStores();
+  return cache;
+}
+
+function schemaIdsOf(bytes: Uint8Array): { record: string; catalog: string[] } {
+  const decoded = decode(bytes) as [string, unknown[][], unknown[][]];
+  return { record: decoded[2][0]![1] as string, catalog: decoded[1].map((entry) => entry[0] as string) };
+}
+
+test("putEnvelope under a compatible schema id writes a store that reopens and takes the next write", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
+  const cache = await reopenForeignIdStore(file);
+  const seed = await cache.put(foreignIdDocument, "seed", { name: "seed" });
+  const payload = cache.getRequiredEnvelope(foreignIdDocument, "seed").payload;
+
+  await cache.putEnvelope(foreignIdDocument, {
+    key: "foreign",
+    type: "tests.foreign-id",
+    schemaId: "tests.foreign-id.older",
+    payload,
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry: {
+      schemaId: "tests.foreign-id.older",
+      schemaName: "tests.foreign-id",
+      schemaVersion: "tests.foreign_id.v1",
+      contentHash: "tests.foreign-id.older",
+      canonicalSchemaJson: "",
+      compatibleSchemaIds: ["tests.foreign-id.older"],
+      members: [],
+    },
+  });
+
+  const ids = schemaIdsOf(await readFile(file));
+  assert.deepEqual(ids, { record: "tests.foreign-id.current", catalog: ["tests.foreign-id.current"] });
+  const reopened = await reopenForeignIdStore(file);
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "foreign"), seed);
+  await reopened.put(foreignIdDocument, "next", { name: "next" });
+  assert.deepEqual((await reopenForeignIdStore(file)).getRequired(foreignIdDocument, "next"), { name: "next" });
+});
+
+test("a record loaded under a compatible schema id is written back under the id its catalog entry carries", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
+  const payload = encode({ name: "old" });
   await writeFile(
     file,
     encode([
       "cultcache.store.v1",
-      [],
-      [
-        [
-          "record-1",
-          "sha256:stale-schema-id-from-cold-record",
-          "2026-06-25T12:00:00Z",
-          encode([
-            "tests.schema_stamped_entry.v1",
-            "schema-stamped",
-            "still readable",
-          ]),
-        ],
-      ],
+      [[
+        "tests.foreign-id.current",
+        "tests.foreign-id",
+        "tests.foreign_id.v1",
+        "tests.foreign-id.current",
+        "",
+        ["tests.foreign-id.current", "tests.foreign-id.older"],
+        [],
+      ]],
+      [["old", "tests.foreign-id.older", "2026-09-30T00:00:00.0000000Z", payload]],
     ]),
   );
 
-  const inspection = inspectCultCacheBytes(file, await readFile(file));
-  assert.equal(inspection.catalog.length, 1);
-  assert.equal(inspection.catalog[0]?.schemaId, "sha256:stale-schema-id-from-cold-record");
-  assert.equal(inspection.catalog[0]?.schemaName, "tests.schema_stamped_entry");
-  assert.equal(inspection.records[0]?.schemaName, "tests.schema_stamped_entry");
-  assert.deepEqual(inspection.records[0]?.payloadPreview, [
-    "tests.schema_stamped_entry.v1",
-    "schema-stamped",
-    "still readable",
-  ]);
+  const cache = await reopenForeignIdStore(file);
+  await cache.put(foreignIdDocument, "next", { name: "next" });
+  const reopened = await reopenForeignIdStore(file);
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "old"), { name: "old" });
+  assert.deepEqual(reopened.getRequired(foreignIdDocument, "next"), { name: "next" });
 });
 
 interface InteropNote {
@@ -1615,7 +1683,7 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
 
         // The replaced file is a store: it carries the header its old content decides (a v3 store keeps its marker, all else
         // is v1), and it holds what the operation wrote.
-        assert.equal((decode(await readFile(file)) as unknown[])[0], vector.endsWith("v3-base.msgpack") ? "cultcache.store.v3" : "cultcache.store.v1", `${vector} ${operation}`);
+        assert.equal((decode(await readFile(file)) as unknown[])[0], vector.includes("v3") ? "cultcache.store.v3" : "cultcache.store.v1", `${vector} ${operation}`);
         const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
         if (operation === "pushAll") {
           assert.deepEqual(keys, envelopes.map((entry) => entry.key).sort(), `${vector} ${operation}`);
