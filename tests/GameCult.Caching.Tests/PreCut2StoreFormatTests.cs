@@ -123,6 +123,15 @@ namespace GameCult.Caching.Tests
             Assert.That(Refusal("unknown-header.msgpack"), Does.Contain("cultcache.store.v9"));
         }
 
+        // Slots of the current catalog layout that do not decode are refused by name, as a malformed store is.
+        [TestCase("current-catalog-bad-canonical.msgpack")]
+        [TestCase("current-catalog-bad-members.msgpack")]
+        [TestCase("current-catalog-bad-compat.msgpack")]
+        public void SingleFileRefusesAMalformedCurrentCatalogEntry(string vector)
+        {
+            Assert.That(Refusal(vector), Is.Not.Empty);
+        }
+
         [Test]
         public void SingleFileRefusesExtraRecordSlotNamingTheRecord()
         {

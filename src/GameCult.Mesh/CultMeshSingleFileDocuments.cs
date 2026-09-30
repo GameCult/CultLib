@@ -270,10 +270,9 @@ namespace GameCult.Mesh
             WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
-        // Every refusal is a CultStoreUnreadableException. A store whose catalog entries are in the older layout is read by the
-        // same store reader with the older entry reader, so it is judged by the same framing, slot count and records. Only a
-        // catalog entry the current layout cannot decode (a MessagePack or shape failure) sends it there; a store refused for its
-        // framing, its slot count or a record keeps that refusal.
+        // Every refusal is a CultStoreUnreadableException naming the file. A store whose catalog entries are in the older layout is
+        // read by the same store reader with the older entry reader, so it is judged by the same framing, slot count and records.
+        // Only a store that is in the older layout goes there; any other refusal stands as the current reader gave it.
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
@@ -282,15 +281,53 @@ namespace GameCult.Mesh
             CultPersistedStoreSnapshot snapshot;
             try
             {
-                snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                try
+                {
+                    snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                }
+                catch (CultStoreUnreadableException) when (HasOlderCatalogLayout(bytes))
+                {
+                    snapshot = CultDocumentMessagePackSerialization.ReadStore(bytes, ReadLegacySchemaCatalogEntry);
+                }
+
+                CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
             }
-            catch (CultStoreUnreadableException ex) when (ex.InnerException is MessagePackSerializationException or InvalidOperationException)
+            catch (CultStoreUnreadableException ex) when (ex.Path == null)
             {
-                snapshot = CultDocumentMessagePackSerialization.ReadStore(bytes, ReadLegacySchemaCatalogEntry);
+                throw new CultStoreUnreadableException(ex.Message, path, ex.InnerException);
             }
 
-            CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
             return snapshot;
+        }
+
+        // The older layout puts the content hash, a string, at catalog entry slot 5, where the current layout has the array of
+        // compatible schema ids.
+        private static bool HasOlderCatalogLayout(byte[] bytes)
+        {
+            try
+            {
+                var reader = new MessagePackReader(bytes);
+                if (reader.ReadArrayHeader() != 3)
+                    return false;
+                reader.Skip();
+                var entries = reader.ReadArrayHeader();
+                for (var entry = 0; entry < entries; entry++)
+                {
+                    var fields = reader.ReadArrayHeader();
+                    for (var field = 0; field < fields; field++)
+                    {
+                        if (field == 5 && reader.NextMessagePackType == MessagePackType.String)
+                            return true;
+                        reader.Skip();
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
+            {
+                return false;
+            }
         }
 
         private static CultSchemaCatalogEntry ReadLegacySchemaCatalogEntry(ref MessagePackReader reader)

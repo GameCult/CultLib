@@ -529,7 +529,9 @@ namespace GameCult.Caching
                     });
             }
 
-            var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal));
+            // A schema is published by its id or as a compatible id.
+            var persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
+                            ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
             if (persisted == null)
             {
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
@@ -3601,7 +3603,16 @@ namespace GameCult.Caching
         private CultPersistedStoreSnapshot? ReadSnapshot()
         {
             var bytes = ReadDisk();
-            return bytes == null ? null : DeserializeSnapshot(bytes);
+            if (bytes == null)
+                return null;
+            try
+            {
+                return DeserializeSnapshot(bytes);
+            }
+            catch (CultStoreUnreadableException ex) when (ex.Path == null)
+            {
+                throw new CultStoreUnreadableException(ex.Message, FileInfo.FullName, ex.InnerException);
+            }
         }
 
         private byte[]? ReadDisk()

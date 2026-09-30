@@ -12,6 +12,12 @@ at test time. Run: python generate.py  (needs msgpack).
                                   legacy reader accepts
   legacy-catalog-trailing.msgpack legacy-catalog-plain plus three bytes after the array: one array is
                                   required of the legacy layout too
+  current-catalog-bad-canonical.msgpack
+  current-catalog-bad-members.msgpack
+  current-catalog-bad-compat.msgpack
+                                  v1 header, plain records, and the first catalog entry of the current layout with one slot
+                                  malformed (canonical schema json an int; members an int; a compatible id an int). Not the
+                                  older layout, so CultMesh refuses them as CultCache does
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
@@ -49,3 +55,10 @@ write("legacy-catalog-extra-slot.msgpack",
 write("legacy-catalog-plain.msgpack", [header, [legacy(entry) for entry in catalog], records])
 (here / "legacy-catalog-trailing.msgpack").write_bytes(
     msgpack.packb([header, [legacy(entry) for entry in catalog], records], use_bin_type=True) + b"\x01\x02\x03")
+current = catalog[0]
+for name, entry in (
+    ("current-catalog-bad-canonical", current[:4] + [5]),
+    ("current-catalog-bad-members", current[:6] + [5]),
+    ("current-catalog-bad-compat", current[:5] + [[7]] + current[6:]),
+):
+    write(name + ".msgpack", [header, [entry] + catalog[1:], records])

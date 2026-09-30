@@ -122,6 +122,10 @@ A reader never recovers a schema from a record's payload: a record whose schema 
 catalog does not publish (by id or as a compatible id) makes the store unreadable, whatever
 the payload's first field says. The catalog is the store's own description of itself.
 
+A writer keeps the same invariant: every record it writes carries a schema id that some catalog
+entry it writes publishes, as that entry's id or as one of its compatible ids. A cache stamps a
+record with its registered schema's id, whatever id the record arrived under.
+
 This is not decorative paperwork. It is what allows another CultCache
 implementation to inspect an old store, resolve the schema for each record, and
 decide whether it can:

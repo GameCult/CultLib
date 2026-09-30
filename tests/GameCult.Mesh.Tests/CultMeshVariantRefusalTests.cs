@@ -56,6 +56,16 @@ public sealed class CultMeshVariantRefusalTests
         Refusal("legacy-catalog-trailing.msgpack").Message.Should().Contain("after its MessagePack array");
     }
 
+    // A store in the current layout with one catalog slot malformed is refused as CultCache refuses it. It is not the older layout,
+    // so it is not read with the older reader, which would take the malformed canonical schema slot for a slot to skip.
+    [TestCase("current-catalog-bad-canonical.msgpack")]
+    [TestCase("current-catalog-bad-members.msgpack")]
+    [TestCase("current-catalog-bad-compat.msgpack")]
+    public void ReadSingleFileDocument_RefusesAMalformedCurrentCatalogEntry(string vector)
+    {
+        Refusal(vector).Path.Should().Be(VectorPath(vector));
+    }
+
     // Q6: CultMesh does not resolve variants. It refuses a variant key naming it and its base, and still reads the plain
     // records of the same v2 store.
     [Test]

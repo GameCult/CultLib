@@ -39,6 +39,8 @@ vectors = {
     "missing-schema-v3": pack([base[0], [], base[2]]),
     # The same, with each payload opening with its schema version: no runtime recovers a schema from a payload.
     "missing-schema-versioned-v3": pack([base[0], [], [record[:3] + [pack(["vectors.item.v1", "n", 1])] for record in base[2]]]),
+    # The record names its schema by an id the catalog publishes only as a compatible id of an entry with another id.
+    "compatible-id-only-v3": pack([base[0], [[base[1][0][0] + ".next"] + base[1][0][1:]], base[2]]),
     # v3-base plus a variant of alpha: a fifth record slot, [baseKey, overrides[]], over an empty payload, overriding the name. Only C# reads it.
     "variant-slot-v3": pack([base[0], base[1], base[2] + [["gamma"] + base[2][0][1:3] + [b"", ["alpha", [[0, [[0, ""]], "", "gamma"]]]]]]),
     # v3-base with a fourth top-level slot after the records.

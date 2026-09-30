@@ -234,7 +234,7 @@ public static class CultDocumentMessagePackSerialization
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            throw new CultStoreUnreadableException(ex.Message, ex);
+            throw new CultStoreUnreadableException(ex.Message, innerException: ex);
         }
     }
 
@@ -268,7 +268,7 @@ public static class CultDocumentMessagePackSerialization
         }
         catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
         {
-            throw new CultStoreUnreadableException("The store is not one complete MessagePack array.", ex);
+            throw new CultStoreUnreadableException("The store is not one complete MessagePack array.", innerException: ex);
         }
 
         if (!whole.End)

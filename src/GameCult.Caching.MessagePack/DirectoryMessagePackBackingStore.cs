@@ -451,7 +451,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             };
         }
 
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
+        CultPersistedStoreSnapshot snapshot;
+        try
+        {
+            snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(manifestBytes);
+        }
+        catch (CultStoreUnreadableException ex) when (ex.Path == null)
+        {
+            throw new CultStoreUnreadableException(ex.Message, _manifestFile.FullName, ex.InnerException);
+        }
+
         if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
             !string.Equals(snapshot.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal))
         {
