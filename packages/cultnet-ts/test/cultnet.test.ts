@@ -14,6 +14,7 @@ import {
   SchemaConflictError,
   SingleFileMessagePackBackingStore,
   defineDocumentType,
+  schemaIdentityOf,
 } from "@gamecult/cultcache-ts";
 
 import {
@@ -1605,6 +1606,7 @@ test("CultNet raw replication refuses a record under a schema id no binding decl
   await origin.put(note, "k", { body: "from a peer" });
   const snapshot = registry.createRawSnapshotResponse(origin, "p5");
   assert.equal(snapshot.documents[0]?.schemaId, "p5.note.v1");
+  assert.equal(snapshot.documents[0]?.payloadEncoding, "messagepack");
 
   for (const schemaId of ["runtime.generated.p5.note.ui.99", "p5.note.v7", "p5.note"]) {
     const target = CultCache.builder().withDocumentType(note).withDocumentType(anything).build();
@@ -1630,6 +1632,9 @@ test("CultNet registry derives a definition's schema id as the cache does, and r
     definition: defineDocumentType({ type: `p1.filler${index}`, schema: shape }),
   }));
 
+  assert.deepEqual(schemaIdentityOf(a), {
+    schemaId: "p1.shared", schemaName: "p1.shared", schemaVersion: "p1.shared.v1", compatibleSchemaIds: ["p1.shared"],
+  });
   // The cache refuses B beside A: A's records carry "p1.shared".
   await assert.rejects(CultCache.builder().withDocumentType(a).build().registerDocumentType(b), SchemaConflictError);
   for (const [first, second] of [[a, b], [b, a]]) {
@@ -1673,7 +1678,9 @@ test("CultNet registry refuses an unowned schema id that several bindings list, 
       assert.ok(error instanceof SchemaConflictError, String(error));
       assert.equal(error.schemaId, "p2.old");
       assert.deepEqual(error.schemaNames, ["p2.first", "p2.second"]);
+      assert.equal(error.recordKey, "");
       assert.ok(error.message.includes("(p2.first, p2.second)"), error.message);
+      assert.ok(error.message.includes("so it resolves to none. Bind the type that owns the id"), error.message);
       return true;
     });
     const cache = CultCache.builder().withDocumentType(first).withDocumentType(second).build();
@@ -1690,7 +1697,15 @@ test("CultNet registry refuses an unowned schema id that several bindings list, 
       assert.equal(new CultNetDocumentRegistry(withOwner.map(bind)).getBySchemaId("p2.old")?.definition, owner);
     }
   }
-  assert.equal(new CultNetDocumentRegistry([bind(first)]).getBySchemaId("p2.old")?.definition, first);
+  // One lister, bound twice, is still one lister.
+  const single = new CultNetDocumentRegistry([bind(first), bind(first)]);
+  assert.equal(single.getBySchemaId("p2.old")?.definition, first);
+  // A snapshot filtered by an id a binding lists returns that binding's records under their own id.
+  const origin = CultCache.builder().withDocumentType(first).build();
+  await origin.put(first, "k", { body: "listed" });
+  const filter = { schemaVersion: "cultnet.snapshot_request.v0" as const, messageId: "f", schemaIds: ["p2.old"] };
+  assert.deepEqual(single.createRawSnapshotResponse(origin, "f", filter).documents.map(document => document.schemaId), ["p2.first"]);
+  assert.deepEqual(single.createSnapshotResponse(origin, "f", filter).documents.map(document => document.schemaId), ["p2.first"]);
 });
 
 // A schema id is only ever an id a definition declares. A version string, a schema name, or an id that differs from a
