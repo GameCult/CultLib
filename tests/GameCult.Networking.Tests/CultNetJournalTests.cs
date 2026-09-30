@@ -727,7 +727,7 @@ namespace GameCult.Networking.Tests
         // CultNetErrorMessage carrying the refusal. The handler is reached through its private delegate with an
         // uninitialized peer, as the R-AM test does; the send then fails on that peer, after the failure was logged.
         [Test]
-        public async Task TheServerAnswersARemotePutOfASchemaNoShardOwnsWithAnApplicationRejection()
+        public void TheServerAnswersARemotePutOfASchemaNoShardOwnsWithAnApplicationRejection()
         {
             var (database, cache, _, unowned) = OwnedNothingOfNote();
             using var server = new Server(cache, ServerSecurityOptions.Development());
@@ -739,7 +739,8 @@ namespace GameCult.Networking.Tests
                 .GetValue(databaseServer)!;
             var peer = (CultNetServerPeer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
 
-            try { await handler(UnownedPut(database), peer); } catch (Exception) { }
+            // The handler answers the peer with the refusal; the uninitialized peer cannot send, which is how the test knows it tried.
+            Assert.CatchAsync(async () => await handler(UnownedPut(database), peer));
 
             Assert.That(logger.Warnings, Has.Some.Contains("raw put refused").And.Contains(unowned));
             Assert.That(logger.Errors, Is.Empty, "a refusal is not a fault");
