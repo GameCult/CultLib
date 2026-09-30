@@ -182,7 +182,14 @@ pub fn encode_media_wire_record(
         },
     };
 
-    encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).map_err(Into::into)
+    let wire = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
+    if wire.len() > GAMECULT_MEDIA_MAX_WIRE_BYTES {
+        return Err(anyhow!(
+            "media record is {} bytes, over the {GAMECULT_MEDIA_MAX_WIRE_BYTES}-byte ceiling",
+            wire.len()
+        ));
+    }
+    Ok(wire)
 }
 
 /// Unwraps a media record from the wire.

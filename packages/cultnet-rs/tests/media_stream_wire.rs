@@ -512,8 +512,10 @@ fn a_media_record_one_byte_over_the_ceiling_is_refused_at_decode() {
         decode_media_wire_record(&wire)
             .unwrap_or_else(|error| panic!("{name} at the ceiling is refused: {error}"));
 
-        let over = encode_media_wire_record(&wrap(at + 1), provenance()).unwrap();
-        assert_eq!(over.len(), ceiling + 1);
+        // The encoder refuses to make an over-ceiling record, so one byte of
+        // padding stands in for a peer that sent one.
+        let mut over = wire.clone();
+        over.push(0);
         let error = decode_media_wire_record(&over).unwrap_err();
         assert!(error.to_string().contains("ceiling"), "{name}: {error}");
     }
@@ -638,4 +640,15 @@ fn a_session_refuses_to_reassemble_more_than_the_ceiling_on_the_media_channel() 
     assert_eq!(frames[0].payload.len(), ceiling + 1);
     let error = deliver(GAMECULT_MEDIA_CHANNEL).unwrap_err();
     assert!(error.to_string().contains("max_payload_bytes"), "{error}");
+}
+
+/// A producer learns at encode time that a record is over the ceiling, rather
+/// than the receiver dropping it.
+#[test]
+fn the_encoder_refuses_a_record_over_the_ceiling() {
+    let wrap = |payload: usize| GameCultMediaWireRecord::AudioParity(audio_parity(payload, 300));
+    let at = payload_for_wire_len(GAMECULT_MEDIA_MAX_WIRE_BYTES, &wrap);
+    assert!(encode_media_wire_record(&wrap(at), provenance()).is_ok());
+    let error = encode_media_wire_record(&wrap(at + 1), provenance()).unwrap_err();
+    assert!(error.to_string().contains("ceiling"), "{error}");
 }
