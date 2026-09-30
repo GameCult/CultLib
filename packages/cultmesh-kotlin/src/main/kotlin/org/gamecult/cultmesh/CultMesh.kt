@@ -3623,8 +3623,8 @@ private fun cultCacheRawSnapshotsRoundTripThroughCultNetMessages() {
     }
 
     val reactiveCanonicalNote = cultDocument(KotlinReactiveNoteCodec(
-        documentType = "kotlin.reactive_note",
-        schemaVersion = "kotlin.reactive_note.v1",
+        documentType = "kotlin.reconcile_note",
+        schemaVersion = "kotlin.reconcile_note.v1",
     ))
     target.cache.register(reactiveCanonicalNote)
     target.remember(reactiveCanonicalNote, "note:reconcile", KotlinReactiveNote("initial", 1))
