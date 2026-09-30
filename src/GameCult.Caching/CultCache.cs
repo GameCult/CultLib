@@ -790,10 +790,8 @@ namespace GameCult.Caching
             var contentHash = Sha256(schemaJson);
             var semanticFingerprint = BuildSemanticFingerprint(attribute.SchemaName, attribute.SchemaVersion, descriptorMembers);
             var schemaId = Sha256(semanticFingerprint);
-            if (attribute.CompatibleSchemaIds.Any(string.IsNullOrWhiteSpace))
-                throw new InvalidOperationException($"Type {type.FullName} declares an empty compatible schema id.");
             var compatibleSchemaIds = attribute.CompatibleSchemaIds
-                .Where(id => !string.Equals(id, schemaId, StringComparison.Ordinal))
+                .Where(id => !string.IsNullOrWhiteSpace(id) && !string.Equals(id, schemaId, StringComparison.Ordinal))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
 

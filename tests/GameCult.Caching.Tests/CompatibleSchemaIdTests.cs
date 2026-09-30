@@ -32,7 +32,7 @@ namespace GameCult.Caching.Tests
             [Key(0)] [CultName] public string Name { get; set; } = "";
         }
 
-        [CultDocument("tests.compat_owner", "tests.compat_owner.v1", CompatibleSchemaIds = new[] { OwnerId })]
+        [CultDocument("tests.compat_owner", "tests.compat_owner.v1", CompatibleSchemaIds = new[] { OwnerId, " " })]
         [MessagePackObject]
         public sealed class Owner
         {
@@ -49,13 +49,6 @@ namespace GameCult.Caching.Tests
         [CultDocument("tests.compat_second_claimant", "tests.compat_second_claimant.v1", CompatibleSchemaIds = new[] { SharedId })]
         [MessagePackObject]
         public sealed class SecondClaimant
-        {
-            [Key(0)] [CultName] public string Name { get; set; } = "";
-        }
-
-        [CultDocument("tests.compat_empty", "tests.compat_empty.v1", CompatibleSchemaIds = new[] { " " })]
-        [MessagePackObject]
-        public sealed class EmptyClaim
         {
             [Key(0)] [CultName] public string Name { get; set; } = "";
         }
@@ -232,7 +225,7 @@ namespace GameCult.Caching.Tests
             var descriptor = registry.GetRequired<Owner>();
 
             Assert.That(descriptor.SchemaId, Is.EqualTo(OwnerId), "the pinned id is this schema's id");
-            Assert.That(descriptor.CompatibleSchemaIds, Is.Empty, "a type's own id is not a declared compatible id");
+            Assert.That(descriptor.CompatibleSchemaIds, Is.Empty, "a type's own id and a blank id are not declared compatible ids");
             Assert.That(descriptor.ToCatalogEntry().CompatibleSchemaIds, Is.EqualTo(new[] { OwnerId }));
         }
 
@@ -260,13 +253,6 @@ namespace GameCult.Caching.Tests
         public void AnIdNoTypeClaimsIsItsOwnCanonicalId()
         {
             Assert.That(Declaring.CanonicalSchemaId("nobody.id"), Is.EqualTo("nobody.id"));
-        }
-
-        [Test]
-        public void AnEmptyDeclaredIdIsRefused()
-        {
-            Assert.That(() => CultDocumentRegistry.ForTypes(new[] { typeof(EmptyClaim) }).GetRequired<EmptyClaim>(),
-                Throws.InvalidOperationException.With.Message.Contains("empty compatible schema id"));
         }
     }
 }
