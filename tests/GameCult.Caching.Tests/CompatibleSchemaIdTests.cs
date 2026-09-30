@@ -542,6 +542,25 @@ namespace GameCult.Caching.Tests
             }), Is.EqualTo(CultCommitOutcome.Committed));
         }
 
+        // A whole-view write that stores a record under another id than it was loaded under gives it a later storedAt, even when
+        // the file no longer holds the record it loaded.
+        [Test]
+        public void AFlushStoringARecordUnderANewIdGivesItALaterStoredAtWhateverTheFileHolds()
+        {
+            using (var older = OpenRoll(RollV1))
+                older.Commit(batch => batch.Upsert(RollV1, New(RollV1, ("Name", "k")), RollK));
+            var loaded = Read(RollPath).Records.Single();
+
+            using var cache = OpenRoll(RollV2);
+            using (var older = OpenRoll(RollV1))
+                older.Commit(batch => batch.Remove(RollK));
+            cache.BackingStores.Single().PushAll();
+
+            var flushed = Read(RollPath).Records.Single();
+            Assert.That(flushed.SchemaId, Is.Not.EqualTo(RollV1Id));
+            Assert.That(string.CompareOrdinal(flushed.StoredAt, loaded.StoredAt), Is.GreaterThan(0));
+        }
+
         // A record a whole-view write stores exactly as the file holds it keeps its storedAt, so a condition another cache holds
         // on it survives an unrelated flush.
         [TestCase(false)]
