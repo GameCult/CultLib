@@ -56,20 +56,29 @@ public sealed class CultMeshSingleFileReadabilityTests
     };
 
     [TestCaseSource(nameof(Vectors))]
-    public void ATypedWriteReplacesAFileExactlyWhenItReads(string vector, bool reads)
+    public void AWriteReplacesAFileExactlyWhenItReads(string vector, bool reads)
     {
-        var path = Path.Combine(_root, "doc.cc");
-        var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
-        File.WriteAllBytes(path, bytes);
-
-        if (reads)
+        var raw = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
+        var writes = new (string Name, Action<string> Write)[]
         {
-            CultMesh.WriteSingleFileDocument(path, new CultRecordKey("publication"), Publication());
-            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Should().ContainSingle();
-            return;
-        }
+            ("typed", path => CultMesh.WriteSingleFileDocument(path, new CultRecordKey("publication"), Publication())),
+            ("raw payload", path => CultMesh.WriteSingleFileDocumentPayload(path, new CultRecordKey("publication"), raw, null, new byte[] { 0x90 }))
+        };
+        foreach (var (name, write) in writes)
+        {
+            var path = Path.Combine(_root, name.Replace(' ', '-') + ".cc");
+            var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
+            File.WriteAllBytes(path, bytes);
 
-        Assert.That(() => CultMesh.WriteSingleFileDocument(path, new CultRecordKey("publication"), Publication()), Throws.Exception);
-        File.ReadAllBytes(path).Should().Equal(bytes, "a file this runtime cannot read was rewritten");
+            if (reads)
+            {
+                write(path);
+                CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Should().ContainSingle(name);
+                continue;
+            }
+
+            Assert.That(() => write(path), Throws.Exception, name);
+            File.ReadAllBytes(path).Should().Equal(bytes, name + " rewrote a file this runtime cannot read");
+        }
     }
 }
