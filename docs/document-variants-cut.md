@@ -1334,3 +1334,22 @@ All of them run on Yggdrasil through `ygg-verify.sh`.
   C1.
 - **F-C1-AEVE-CONST:** the AetheriaEve daemon compares wire ids with version constants (`Program.cs:1591`) and so never
   matched under sha256. It is archaeology; record only.
+
+## F2 forks (operator, 2026-10-01)
+
+These came from the C2a F2 Hands at `a771e71b`.
+
+- **Fork A: RULED, forbid slot reuse.** Operator: "Forbid slot reuse. This is expected behavior for any MessagePack or
+  protobuf veterans."
+  - A whole-view write keeps laying back records the type does not own.
+  - Registration refuses a type that puts a different member in a slot the stored catalog shows was used before.
+    This follows protobuf's reserved field numbers.
+  - `VariantTests.AFlushShedsAnOverrideOfADroppedSlotSoALaterTypeReusingTheSlotDoesNotResurrectIt` is rewritten to pin
+    the refusal instead.
+- **Fork B: DEFERRED, foreign records in TS, Python and Rust.** Operator: "Foreign records in other runtimes can wait,
+  I suppose, though I don't love leaving parity on the table."
+  - Today those runtimes refuse to open a store that holds a record they cannot claim. That is safe, but it is not
+  parity with C#.
+  - Carrying foreign records needs their whole-store writers taught first: TS `pushAll` via CultMesh `flush`, and Rust
+    `put_prepared_batch` → `push_all`.
+  - Recorded as the next parity cut, not dropped.
