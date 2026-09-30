@@ -622,6 +622,12 @@ The ack cuts build on these behaviours and do not alter them:
   drops what it owed. How a new generation is recognised (Cut 1c) needs one (Q-A6). The two are separable
   because 1b does not forget peer state: the peer may not know the session ended, and forgetting what was
   received would let its retransmits be delivered twice.
+  **Correction (Cut 1/1b Soul, 2026-09-30): they are separable as specs, not as merges.** 1b drops owed
+  writes, which leaves holes the sender will never fill; the receiver keeps `R` across the ending, so if the
+  next handshake does not reset it, every later ordered frame is held and acked, and flush succeeds while
+  nothing is delivered. Only 1c's reset on a non-repeated handshake removes that. **1b merges only together
+  with 1c.** Soul also found `R` seeded by the first reliable packet rather than the handshake; ruled:
+  `R` is seeded only by the handshake, and reliable data before the Accept is neither acked nor delivered.
 - **What must hold after both.** A write is Acknowledged or Invalidated within the generation it was
   issued in. A restarted client is admitted. A new server session's frames are delivered after a
   reconnect. A retransmitted Connect is still a repeat.
