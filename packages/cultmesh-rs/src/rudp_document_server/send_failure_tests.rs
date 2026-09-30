@@ -209,3 +209,138 @@ fn one_peer_whose_sends_fail_does_not_stop_the_server_serving_the_others() {
     assert_eq!(maintenance.sessions_expired, 1);
     assert_eq!(server.session_count(), 1);
 }
+
+// A permanent send failure is one that can never succeed for the datagram as
+// built (`is_permanent_send_error`). It ends that peer's session, never the
+// poll, and the peer's goodbye names the error.
+
+fn put(id: &str) -> CultNetMessage {
+    CultNetMessage::DocumentPutRaw {
+        message_id: id.into(),
+        document: document(id),
+    }
+}
+
+fn snapshot(id: &str) -> CultNetMessage {
+    CultNetMessage::SnapshotRequest {
+        message_id: id.into(),
+        schema_ids: None,
+        record_keys: None,
+    }
+}
+
+fn goodbye_reason(client: &mut Client) -> Vec<u8> {
+    for _ in 0..50 {
+        client.receive_once().unwrap();
+        if let Some(reason) = client.disconnect_reason() {
+            return reason.to_vec();
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    panic!("the client was never told the session ended");
+}
+
+fn is_unsendable_reason(reason: &[u8]) -> bool {
+    reason.starts_with(b"packet could not be sent: ")
+        && reason.len() > b"packet could not be sent: ".len()
+}
+
+#[test]
+fn a_permanent_failure_acknowledging_a_document_ends_the_session_after_the_document_is_kept() {
+    let (mut server, _clock, received, (mut x, x_addr), (mut y, _)) = two_peers();
+    server.unsendable_after.insert(x_addr, 0);
+    send(&mut x, &put("x-put"));
+    send(&mut y, &put("y-put"));
+
+    for _ in 0..10 {
+        // Never `Err`: the failure ends X's session, not the poll.
+        server.poll_once().unwrap();
+    }
+    let mut kept = received.lock().unwrap().clone();
+    kept.sort();
+    assert_eq!(kept, ["x-put", "y-put"]);
+    assert_eq!(server.session_count(), 1);
+    assert_eq!(server.send_failures(), 0);
+    assert!(is_unsendable_reason(&goodbye_reason(&mut x)));
+}
+
+#[test]
+fn a_permanent_failure_sending_a_snapshot_response_rejects_it_naming_the_error() {
+    let (mut server, _clock, _received, (mut x, x_addr), (_y, _)) = two_peers();
+    server.unsendable_after.insert(x_addr, 0);
+    send(&mut x, &snapshot("x-snapshot"));
+
+    let mut rejection = None;
+    for _ in 0..10 {
+        if let CultMeshRudpPollOutcome::ApplicationRejected(found) = server.poll_once().unwrap() {
+            rejection = Some(found);
+            break;
+        }
+    }
+    let rejection = rejection.expect("the response can never be sent");
+    assert_eq!(rejection.operation, CultMeshRudpApplicationOperation::SnapshotRequest);
+    assert_eq!(rejection.message_id, "x-snapshot");
+    assert!(
+        rejection
+            .reason
+            .starts_with("snapshot response could not be sent: ")
+            && rejection.reason.len() > "snapshot response could not be sent: ".len(),
+        "{}",
+        rejection.reason
+    );
+    assert_eq!(server.session_count(), 1);
+}
+
+#[test]
+fn a_permanent_failure_in_resends_ends_only_that_peers_session() {
+    let (mut server, clock, received, (mut x, x_addr), (mut y, _)) = two_peers();
+    // X's snapshot response is lost, so a resend is due; then the datagram can
+    // never be sent as built.
+    server.failing_peers.insert(x_addr);
+    send(&mut x, &snapshot("x-snapshot"));
+    for _ in 0..5 {
+        server.poll_once().unwrap();
+    }
+    server.failing_peers.clear();
+    server.unsendable_after.insert(x_addr, 0);
+    clock.0.store(1_200, Ordering::SeqCst);
+
+    let maintenance = server.maintain().unwrap();
+    assert!(maintenance.packets_resent > 0);
+    assert_eq!(server.session_count(), 1);
+    assert!(is_unsendable_reason(&goodbye_reason(&mut x)));
+
+    send(&mut y, &put("y-put"));
+    for _ in 0..5 {
+        server.poll_once().unwrap();
+    }
+    assert_eq!(received.lock().unwrap().as_slice(), ["y-put"]);
+}
+
+#[test]
+fn a_connect_whose_accept_can_never_be_sent_starts_no_session() {
+    let (mut server, _clock, _received, _x, _y) = two_peers();
+    let (mut z, z_addr) = client(server.local_addr().unwrap(), 9);
+    server.unsendable_after.insert(z_addr, 0);
+    z.connect(Vec::new()).unwrap();
+
+    for _ in 0..10 {
+        server.poll_once().unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(server.session_count(), 2);
+    assert_eq!(server.packets_dropped(), 1);
+}
+
+#[test]
+fn healthy_sends_are_not_failures() {
+    let (mut server, _clock, _received, (mut x, _), (_y, _)) = two_peers();
+    send(&mut x, &put("x-put"));
+    send(&mut x, &snapshot("x-snapshot"));
+    for _ in 0..10 {
+        server.poll_once().unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(server.send_failures(), 0);
+    assert_eq!(server.session_count(), 2);
+}

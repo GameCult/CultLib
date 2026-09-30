@@ -454,6 +454,28 @@ impl CultNetRudpSession {
         self.create_disconnect(RUDP_REFUSED_PACKET_REASON.to_vec())
     }
 
+    /// Ends a session that owes its peer a packet that can never be sent as
+    /// built (see `is_permanent_send_error`). Resending it would fail forever,
+    /// and dropping it would leave a reliable sequence the peer waits on for
+    /// good, so the session cannot be kept. Returns the goodbye for the peer;
+    /// its reason names the error.
+    pub fn end_unsendable_session(&mut self, error: &std::io::Error) -> CultNetRudpPacket {
+        self.reset_peer_state();
+        self.create_disconnect(format!("{RUDP_UNSENDABLE_PACKET_REASON}: {error}").into_bytes())
+    }
+
+    /// Undoes a send that never reached the wire: every packet it created at
+    /// or after `first_sequence`, pending or queued, leaves no trace and its
+    /// sequences are reissued, so the peer never sees a gap. Only valid while
+    /// nothing else has been sent since.
+    fn withdraw_send(&mut self, first_sequence: u32) {
+        self.pending_reliable
+            .retain(|sequence, _| *sequence < first_sequence);
+        self.queued_reliable
+            .retain(|(packet, _)| packet.sequence < first_sequence);
+        self.next_sequence = first_sequence;
+    }
+
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
         // A session that has had a peer starts a new generation: nothing it
         // learned from that peer describes the one this Connect reaches, and
@@ -1564,6 +1586,9 @@ pub struct CultNetRudpServerHub {
     /// or full path that a loopback peer cannot be made to have.
     #[cfg(test)]
     failing_peers: BTreeSet<SocketAddr>,
+    /// Peers whose next datagram after this many fails permanently, once.
+    #[cfg(test)]
+    unsendable_after: BTreeMap<SocketAddr, usize>,
 }
 
 impl CultNetRudpServerHub {
@@ -1614,6 +1639,8 @@ impl CultNetRudpServerHub {
             stats: CultNetTransportStats::default(),
             #[cfg(test)]
             failing_peers: BTreeSet::new(),
+            #[cfg(test)]
+            unsendable_after: BTreeMap::new(),
         })
     }
 
@@ -1654,7 +1681,7 @@ impl CultNetRudpServerHub {
         payload: Vec<u8>,
     ) -> Result<()> {
         let remote_addr = session.remote_addr;
-        let packets = {
+        let (first_sequence, packets) = {
             let peer = self
                 .peers
                 .get_mut(&remote_addr)
@@ -1665,7 +1692,8 @@ impl CultNetRudpServerHub {
                     session.session_generation
                 ));
             }
-            peer.session.send_many(
+            let first_sequence = peer.session.next_sequence;
+            let packets = peer.session.send_many(
                 channel_id,
                 payload,
                 channel_send_options(
@@ -1675,10 +1703,25 @@ impl CultNetRudpServerHub {
                 channel_delivery(&self.profile, channel_id),
             ),
                 self.max_fragment_bytes,
-            )?
+            )?;
+            (first_sequence, packets)
         };
-        for packet in packets {
-            self.send_packet(remote_addr, &packet)?;
+        for (index, packet) in packets.iter().enumerate() {
+            let Some(error) = self.send_packet(remote_addr, packet)? else {
+                continue;
+            };
+            // A caller-directed send that can never succeed is the caller's
+            // error and queues nothing. Only when earlier fragments are already
+            // on the wire has the peer seen part of it, and then the session
+            // cannot be kept.
+            if index == 0 {
+                if let Some(peer) = self.peers.get_mut(&remote_addr) {
+                    peer.session.withdraw_send(first_sequence);
+                }
+            } else {
+                self.end_unsendable_peer(remote_addr, &error)?;
+            }
+            return Err(error.into());
         }
         self.stats.frames_sent += 1;
         Ok(())
@@ -1709,7 +1752,9 @@ impl CultNetRudpServerHub {
             .remove(&session.remote_addr)
             .expect("validated RUDP peer exists");
         let packet = peer.session.create_disconnect(reason);
-        self.send_packet(session.remote_addr, &packet)?;
+        if let Some(error) = self.send_packet(session.remote_addr, &packet)? {
+            return Err(error.into());
+        }
         Ok(true)
     }
 
@@ -1767,7 +1812,7 @@ impl CultNetRudpServerHub {
                     self.end_refusing_peer(remote_addr)?;
                     return Ok(true);
                 };
-                self.send_packet(remote_addr, &reply)?;
+                self.send_in_poll(remote_addr, &reply)?;
                 return Ok(true);
             }
             if !self.peers.contains_key(&remote_addr) && self.peers.len() >= self.max_peers {
@@ -1796,7 +1841,11 @@ impl CultNetRudpServerHub {
                 self.stats.packets_dropped += 1;
                 return Ok(true);
             };
-            self.send_packet(remote_addr, &accept)?;
+            if self.send_packet(remote_addr, &accept)?.is_some() {
+                // The peer cannot be answered, so no session starts.
+                self.stats.packets_dropped += 1;
+                return Ok(true);
+            }
             let replaced = self.peers.insert(
                 remote_addr,
                 CultNetRudpServerPeer {
@@ -1830,14 +1879,17 @@ impl CultNetRudpServerHub {
         } else {
             None
         };
-        if let Some(reply) = result.reply {
-            self.send_packet(remote_addr, &reply)?;
-        }
-        for ready in result.ready_to_send {
-            self.send_packet(remote_addr, &ready)?;
-        }
-        if let Some(ack) = ack {
-            self.send_packet(remote_addr, &ack)?;
+        let mut unsendable = None;
+        for packet in result
+            .reply
+            .iter()
+            .chain(&result.ready_to_send)
+            .chain(ack.iter())
+        {
+            unsendable = self.send_packet(remote_addr, packet)?;
+            if unsendable.is_some() {
+                break;
+            }
         }
         if result.pong {
             self.pending_events.push_back(CultNetRudpServerEvent::Pong {
@@ -1863,6 +1915,8 @@ impl CultNetRudpServerHub {
                     reason: result.disconnect_reason,
                 });
             self.peers.remove(&remote_addr);
+        } else if let Some(error) = unsendable {
+            self.end_unsendable_peer(remote_addr, &error)?;
         }
         Ok(true)
     }
@@ -1882,7 +1936,37 @@ impl CultNetRudpServerHub {
                 session: peer.context,
                 reason: goodbye.payload.clone(),
             });
-        self.send_packet(remote_addr, &goodbye)
+        self.send_packet(remote_addr, &goodbye)?;
+        Ok(())
+    }
+
+    /// An admitted peer owes a packet that can never be sent as built. Inside a
+    /// poll that ends the peer's session, never the poll: the peer is told, and
+    /// the caller sees `Disconnected` with a reason that names the error.
+    fn end_unsendable_peer(
+        &mut self,
+        remote_addr: SocketAddr,
+        error: &std::io::Error,
+    ) -> Result<()> {
+        let Some(mut peer) = self.peers.remove(&remote_addr) else {
+            return Ok(());
+        };
+        let goodbye = peer.session.end_unsendable_session(error);
+        self.pending_events
+            .push_back(CultNetRudpServerEvent::Disconnected {
+                session: peer.context,
+                reason: goodbye.payload.clone(),
+            });
+        self.send_packet(remote_addr, &goodbye)?;
+        Ok(())
+    }
+
+    /// A send inside a poll: a permanent failure ends that peer's session.
+    fn send_in_poll(&mut self, remote_addr: SocketAddr, packet: &CultNetRudpPacket) -> Result<()> {
+        if let Some(error) = self.send_packet(remote_addr, packet)? {
+            self.end_unsendable_peer(remote_addr, &error)?;
+        }
+        Ok(())
     }
 
     pub fn poll_resends(&mut self) -> Result<()> {
@@ -1897,7 +1981,10 @@ impl CultNetRudpServerHub {
             );
         }
         for (remote_addr, packet) in packets {
-            self.send_packet(remote_addr, &packet)?;
+            // A peer ended earlier in this loop has nothing left to resend.
+            if self.peers.contains_key(&remote_addr) {
+                self.send_in_poll(remote_addr, &packet)?;
+            }
         }
         Ok(())
     }
@@ -1922,23 +2009,42 @@ impl CultNetRudpServerHub {
         timed_out.into_iter().map(|(_, context)| context).collect()
     }
 
-    /// A failed send is that peer's lost datagram: counted, never an error. A
-    /// reliable packet stays pending and is resent; an unreliable one was
-    /// allowed to be lost. The peer's session ends by the rules that already
-    /// end sessions. Only an encode failure, the hub's own bug, is an error.
-    fn send_packet(&mut self, remote_addr: SocketAddr, packet: &CultNetRudpPacket) -> Result<()> {
+    /// A transient send failure is that peer's lost datagram: counted, never an
+    /// error. A reliable packet stays pending and is resent; an unreliable one
+    /// was allowed to be lost. A permanent failure (`is_permanent_send_error`)
+    /// is returned as `Some`: the datagram can never be sent as built, and the
+    /// caller decides between refusing the send and ending the peer's session.
+    /// Only an encode failure, the hub's own bug, is an error.
+    fn send_packet(
+        &mut self,
+        remote_addr: SocketAddr,
+        packet: &CultNetRudpPacket,
+    ) -> Result<Option<std::io::Error>> {
         let wire = encode_rudp_packet(packet)?;
         match self.send_datagram(&wire, remote_addr) {
             Ok(sent) => self.stats.bytes_sent += sent as u64,
+            Err(error) if is_permanent_send_error(&error) => return Ok(Some(error)),
             Err(_) => self.stats.send_failures += 1,
         }
-        Ok(())
+        Ok(None)
     }
 
-    fn send_datagram(&self, wire: &[u8], remote_addr: SocketAddr) -> std::io::Result<usize> {
+    fn send_datagram(&mut self, wire: &[u8], remote_addr: SocketAddr) -> std::io::Result<usize> {
         #[cfg(test)]
-        if self.failing_peers.contains(&remote_addr) {
-            return Err(std::io::Error::other("injected send failure"));
+        {
+            if self.failing_peers.contains(&remote_addr) {
+                return Err(std::io::Error::other("injected send failure"));
+            }
+            match self.unsendable_after.get(&remote_addr).copied() {
+                Some(0) => {
+                    self.unsendable_after.remove(&remote_addr);
+                    return Err(std::io::Error::from(ErrorKind::InvalidInput));
+                }
+                Some(remaining) => {
+                    self.unsendable_after.insert(remote_addr, remaining - 1);
+                }
+                None => {}
+            }
         }
         self.socket.send_to(wire, remote_addr)
     }
@@ -2428,6 +2534,50 @@ where
 /// the local caller as the disconnect reason.
 const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
 const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
+/// Prefix of the goodbye reason for a session that owed a packet which can
+/// never be sent; the error's own description follows it.
+const RUDP_UNSENDABLE_PACKET_REASON: &str = "packet could not be sent";
+
+/// Whether a failed `send_to` can never succeed for the datagram as built, so
+/// resending it is pointless: it is too large for a datagram (`EMSGSIZE`), its
+/// address is malformed for the socket (`EINVAL`), or belongs to another
+/// address family (`EAFNOSUPPORT`). Everything else (no route, full buffers,
+/// firewall drops, a refusal reported for an earlier datagram, an interrupted
+/// call) is a property of the path or the moment and may pass, so it is a lost
+/// datagram, not a reason to end a session.
+pub fn is_permanent_send_error(error: &std::io::Error) -> bool {
+    // `EMSGSIZE` and `EAFNOSUPPORT`, or their Winsock equivalents.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const PERMANENT_OS_ERRORS: [i32; 2] = [90, 97];
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    const PERMANENT_OS_ERRORS: [i32; 2] = [40, 47];
+    #[cfg(windows)]
+    const PERMANENT_OS_ERRORS: [i32; 2] = [10040, 10047];
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )))]
+    const PERMANENT_OS_ERRORS: [i32; 0] = [];
+    // `InvalidInput` is `EINVAL` and `WSAEINVAL`.
+    error.kind() == ErrorKind::InvalidInput
+        || error
+            .raw_os_error()
+            .is_some_and(|code| PERMANENT_OS_ERRORS.contains(&code))
+}
 
 /// A session cannot admit a Connect when its sequence space starts exhausted or
 /// its reliable queue holds nothing, so neither is a usable configuration.
