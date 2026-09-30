@@ -10,6 +10,14 @@ gonna let sunk costs take the wheel."
   and the receipts port. Nothing of theirs exists to tag, so this map is their record.
 - Defects found in RUDP from here on are fixed only if they are live crashes or data loss, until the QUIC campaign
   sets RUDP's retirement.
+- **Data-loss item from Odin Soul S-5 (2026-09-30).** At Odin's pin `3bf1c0ce`, cultnet-rs records a reliable
+  packet as received when it arrives, and `create_ack` reports it while ordered delivery still holds an earlier
+  packet.
+  - Probe: two pipelined puts, with the first datagram dropped. The second put was ACKed but not on disk. If the
+    first never arrives, the ACKed second put is never delivered.
+  - Sessions that carry a single put are safe.
+  - To do: check whether current main (after the landed ack cuts) already ACKs only delivered packets in Rust. If
+    it does, Odin's pin bump closes this. If not, it qualifies as a data-loss fix under the pivot rule.
 - The "CultNet over QUIC" campaign is new, so it opens as a typed Eureka campaign in the Huginn-backed session, not
   as a prose map here.
 
