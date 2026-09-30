@@ -501,7 +501,8 @@ namespace GameCult.Networking
     }
 
     /// <summary>
-    /// Raised when a database write names a schema and key that no configured shard owns. Nothing was cached.
+    /// Raised when a database write, or a resolution, names a schema and key that no configured shard owns. A refused write
+    /// caches nothing.
     /// </summary>
     public sealed class CultNetUnownedSchemaException : InvalidOperationException
     {
@@ -655,7 +656,7 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             var descriptor = _cache.Registry.GetRequired<T>();
-            return ResolveShardInternal(descriptor, key).IsPrimary;
+            return FindShard(descriptor, key)?.IsPrimary ?? false;
         }
 
         /// <summary>Gets whether this database instance can submit a prediction for the document at a key.</summary>
@@ -906,6 +907,7 @@ namespace GameCult.Networking
         /// <summary>
         /// Resolves the shard that governs the supplied schema and key.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No configured shard owns the schema and key.</exception>
         public CultNetShardDescriptor ResolveShard(string schemaId, CultRecordKey key)
         {
             ThrowIfDisposed();
@@ -957,7 +959,7 @@ namespace GameCult.Networking
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired(document.GetType());
-            EnsurePrimary(OwningShard(descriptor, key), descriptor.SchemaId, key);
+            EnsurePrimary(ResolveShardInternal(descriptor, key), descriptor.SchemaId, key);
 
             return await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
         }
@@ -993,7 +995,7 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             var descriptor = _cache.Registry.GetRequired<T>();
-            EnsurePrimary(OwningShard(descriptor, key), descriptor.SchemaId, key);
+            EnsurePrimary(ResolveShardInternal(descriptor, key), descriptor.SchemaId, key);
 
             _cache.Remove(new CultRecordHandle<T>(key));
             return Task.CompletedTask;
@@ -1199,7 +1201,13 @@ namespace GameCult.Networking
                 var door = TakeDoor(change);
                 var documentType = identity.GetType();
                 var descriptor = _cache.Registry.GetRequired(documentType);
-                var shard = door?.Shard ?? ResolveShardInternal(descriptor, change.Key);
+                var shard = door?.Shard ?? FindShard(descriptor, change.Key);
+                if (shard == null)
+                {
+                    // No shard owns a bare cache write of this schema: the database neither logs nor publishes it.
+                    continue;
+                }
+
                 var kind = door?.Kind ?? change.Kind switch
                 {
                     CultCacheDocumentChangeKind.Removed => CultNetDatabaseChangeKind.Removed,
@@ -1222,9 +1230,8 @@ namespace GameCult.Networking
                     {
                         RecordReplicatedEntry(shard, logKind, descriptor.SchemaId, change, replicated);
                     }
-                    else if (door?.NoLog != true && shard.IsPrimary && (door != null || _shards.Any(candidate => candidate.Matches(descriptor, change.Key))))
+                    else if (door?.NoLog != true && shard.IsPrimary)
                     {
-                        // A door chose its shard; a bare write belongs to a shard only when one matches it.
                         if (LogPrimaryChange(shard, logKind, descriptor.SchemaId, change, door) is { } burn)
                         {
                             (burned ??= new List<CultNetBurnedSequence>()).Add(new CultNetBurnedSequence(shard.ShardId, burn.Sequence));
@@ -1864,20 +1871,6 @@ namespace GameCult.Networking
             };
         }
 
-        private void EnsureClientAuthority(string schemaId, CultRecordKey key)
-        {
-            if (_clientAuthorityScopes.Any(scope => scope.Matches(_runtimeId, schemaId, key)))
-            {
-                return;
-            }
-
-            var shard = ResolveShardInternal(schemaId, key);
-            throw new CultNetShardAuthorityException(
-                shard,
-                $"Runtime '{_runtimeId}' does not have client prediction authority for schema '{schemaId}' key '{key.Value}'.",
-                "not_client_authority");
-        }
-
         private void EnsureClientAuthority(CultDocumentDescriptor descriptor, CultRecordKey key)
         {
             if (_clientAuthorityScopes.Any(scope => scope.Matches(_runtimeId, descriptor, key)))
@@ -1922,21 +1915,15 @@ namespace GameCult.Networking
             }
         }
 
-        private CultNetShardDescriptor ResolveShardInternal(string schemaId, CultRecordKey key)
-        {
-            return _shards.FirstOrDefault(shard => shard.Matches(schemaId, key)) ?? _shards[0];
-        }
+        // No shard owns a schema and key that no descriptor matches, and nothing is written to one: every write path refuses.
+        private CultNetShardDescriptor ResolveShardInternal(string schemaId, CultRecordKey key) =>
+            _shards.FirstOrDefault(shard => shard.Matches(schemaId, key)) ?? throw new CultNetUnownedSchemaException(schemaId, key);
 
-        private CultNetShardDescriptor ResolveShardInternal(CultDocumentDescriptor descriptor, CultRecordKey key)
-        {
-            return _shards.FirstOrDefault(shard => shard.Matches(descriptor, key)) ?? _shards[0];
-        }
+        private CultNetShardDescriptor ResolveShardInternal(CultDocumentDescriptor descriptor, CultRecordKey key) =>
+            FindShard(descriptor, key) ?? throw new CultNetUnownedSchemaException(descriptor.SchemaId, key);
 
-        // The shard that owns the schema and key, for a write that carries no door and so cannot be placed by the wire message:
-        // a write no shard owns would be cached and never logged, so it is refused.
-        private CultNetShardDescriptor OwningShard(CultDocumentDescriptor descriptor, CultRecordKey key) =>
-            _shards.FirstOrDefault(shard => shard.Matches(descriptor, key))
-            ?? throw new CultNetUnownedSchemaException(descriptor.SchemaId, key);
+        private CultNetShardDescriptor? FindShard(CultDocumentDescriptor descriptor, CultRecordKey key) =>
+            _shards.FirstOrDefault(shard => shard.Matches(descriptor, key));
 
         private static void EnsurePrimary(CultNetShardDescriptor shard, string schemaId, CultRecordKey key, long? expectedEpoch = null)
         {

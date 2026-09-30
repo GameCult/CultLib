@@ -614,46 +614,144 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
-        public async Task ABareWriteOfASchemaNoShardOwnsIsNeitherLoggedNorReplicated()
+        public async Task ABareWriteOfASchemaNoShardOwnsIsNeitherLoggedNorPublishedNorReplicated()
         {
             var store = new FlakyLogStore();
             var cache = new CultCache();
             var database = Database(cache, primary: true, store);
+            var published = Record(database);
 
             await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "n", Body = "unrelated" }, new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:n")));
             await cache.UpsertAsync(Note("one"), new CultRecordHandle<NetworkSchemaNote>(One));
 
             Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }), "the unrelated write minted no sequence");
             Assert.That(database.GetMutationLog(ShardId).Select(entry => entry.Key.Value), Is.EqualTo(new[] { One.Value }));
+            Assert.That(published, Is.EqualTo(new[] { One.Value }), "no shard owns the unrelated write, so the database does not publish it");
         }
 
-        // The database is the sharded write door: a write it cannot place in a shard is refused before anything is cached.
-        // (An authoritative wire put carries a door that names its shard, and keeps the fallback shard.)
-        [Test]
-        public async Task ADatabaseWriteOfASchemaNoShardOwnsIsRefusedNamingTheSchemaAndAnAuthoritativePutKeepsTheFallbackShard()
+        // The database is the sharded write door: a schema and key no shard owns cannot be written on any path, and a refused
+        // write caches and logs nothing.
+        private static (CultNetDatabase Database, CultCache Cache, FlakyLogStore Store, string SchemaId) OwnedNothingOfNote()
         {
             var store = new FlakyLogStore();
             var cache = new CultCache();
-            var database = Database(cache, primary: true, store);
-            var shard = database.Shards[0];
-            var unowned = cache.Registry.GetRequired<MeshQuickstartNote>().SchemaId;
-            var plainKey = new CultRecordKey("unrelated:plain");
+            return (Database(cache, primary: true, store), cache, store, cache.Registry.GetRequired<MeshQuickstartNote>().SchemaId);
+        }
+
+        private static readonly CultRecordKey Unowned = new("unrelated:note");
+
+        private static CultNetDocumentPutRawMessage UnownedPut(CultNetDatabase database)
+        {
+            var message = database.Documents.CreateRawDocumentPutMessage("wire", new CultRecordHandle<MeshQuickstartNote>(Unowned), new MeshQuickstartNote { NoteId = "w", Body = "wire" });
+            message.ShardId = database.Shards[0].ShardId;
+            message.ShardEpoch = database.Shards[0].Epoch;
+            return message;
+        }
+
+        [Test]
+        public void ADatabasePutOrDeleteOfASchemaNoShardOwnsIsRefusedNamingTheSchema()
+        {
+            var (database, cache, store, unowned) = OwnedNothingOfNote();
 
             var put = Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () =>
-                await database.PutAsync(plainKey, new MeshQuickstartNote { NoteId = "p", Body = "plain" }))!;
+                await database.PutAsync(Unowned, new MeshQuickstartNote { NoteId = "p", Body = "plain" }))!;
             Assert.That(put.SchemaId, Is.EqualTo(unowned));
             Assert.That(put.Message, Does.Contain(unowned));
             Assert.That(put, Is.InstanceOf<InvalidOperationException>(), "a refused write reads as one");
-            Assert.That(cache.Get<MeshQuickstartNote>(plainKey), Is.Null, "nothing was cached");
-            Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () => await database.DeleteAsync<MeshQuickstartNote>(plainKey));
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null, "nothing was cached");
+            Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () => await database.DeleteAsync<MeshQuickstartNote>(Unowned));
             Assert.That(Sequences(store), Is.Empty);
+        }
 
-            var message = database.Documents.CreateRawDocumentPutMessage("door", new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:door")), new MeshQuickstartNote { NoteId = "d", Body = "door" });
-            message.ShardId = shard.ShardId;
-            message.ShardEpoch = shard.Epoch;
-            await database.ApplyPutAsync(message);
+        [Test]
+        public void ARemoteAuthoritativePutOfASchemaNoShardOwnsIsRefusedAndCachesNothing()
+        {
+            var (database, cache, store, unowned) = OwnedNothingOfNote();
 
-            Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }));
+            var refusal = Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () => await database.ApplyPutAsync(UnownedPut(database)))!;
+
+            Assert.That(refusal.SchemaId, Is.EqualTo(unowned));
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null);
+            Assert.That(Sequences(store), Is.Empty);
+        }
+
+        [Test]
+        public async Task ARemoteDeleteOfASchemaNoShardOwnsIsRefusedEvenWhenTheKeyIsCached()
+        {
+            var (database, cache, store, unowned) = OwnedNothingOfNote();
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "c", Body = "cached" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+
+            var refusal = Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () => await database.ApplyDeleteAsync(new CultNetDocumentDeleteMessage
+            {
+                MessageId = "d",
+                SchemaId = unowned,
+                RecordKey = Unowned.Value,
+                ShardId = database.Shards[0].ShardId,
+                ShardEpoch = database.Shards[0].Epoch
+            }))!;
+
+            Assert.That(refusal.SchemaId, Is.EqualTo(unowned));
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Not.Null, "the refused delete removed nothing");
+            Assert.That(Sequences(store), Is.Empty);
+        }
+
+        [Test]
+        public void APredictionOfASchemaNoShardOwnsIsRefused()
+        {
+            var cache = new CultCache();
+            var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+            {
+                RuntimeId = "local",
+                Shards = [new CultNetShardDescriptor("only-notes", "local", epoch: 1, isPrimary: true, schemaIds: [SchemaId(cache)])],
+                ClientAuthorityScopes = [new CultNetClientAuthorityScope("local")]
+            });
+
+            Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () =>
+                await database.PutPredictedAsync(Unowned, new MeshQuickstartNote { NoteId = "p", Body = "predicted" }));
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null);
+        }
+
+        [Test]
+        public void ASchemaNoShardOwnsCannotBeWrittenAuthoritativelyAndHasNoShardToResolve()
+        {
+            var (database, cache, _, unowned) = OwnedNothingOfNote();
+
+            Assert.That(database.CanWriteAuthoritatively<MeshQuickstartNote>(Unowned), Is.False);
+            Assert.That(database.CanWriteAuthoritatively<NetworkSchemaNote>(One), Is.True, "an owned schema is unaffected");
+            var refusal = Assert.Throws<CultNetUnownedSchemaException>(() => database.ResolveShard(unowned, Unowned))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo(unowned));
+            Assert.That(database.ResolveShard(SchemaId(cache), One).ShardId, Is.EqualTo(ShardId));
+        }
+
+        // The server answers a refused remote put the way it answers any other: it logs the failure and sends the peer a
+        // CultNetErrorMessage carrying the refusal. The handler is reached through its private delegate with an
+        // uninitialized peer, as the R-AM test does; the send then fails on that peer, after the failure was logged.
+        [Test]
+        public async Task TheServerAnswersARemotePutOfASchemaNoShardOwnsWithAnApplicationRejection()
+        {
+            var (database, cache, _, unowned) = OwnedNothingOfNote();
+            using var server = new Server(cache, ServerSecurityOptions.Development());
+            var logger = new CapturingLogger();
+            server.Logger = logger;
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+            var handler = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer)
+                .GetField("_putHandler", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .GetValue(databaseServer)!;
+            var peer = (CultNetServerPeer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
+
+            try { await handler(UnownedPut(database), peer); } catch (Exception) { }
+
+            Assert.That(logger.Errors, Has.Some.Contains("CultNet raw put failed").And.Contains(unowned));
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null);
+        }
+
+        private sealed class CapturingLogger : GameCult.Logging.ILogger
+        {
+            public List<string> Errors { get; } = new();
+            public void LogInfo(string message) { }
+            public void LogWarning(string message) { }
+            public void LogError(string message) => Errors.Add(message);
+            public void LogDebug(string message) { }
         }
 
         private static async Task ApplyAuthoritativeAsync(CultNetDatabase database, CultRecordKey key, string text)
