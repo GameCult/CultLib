@@ -341,8 +341,8 @@ class CultCacheTests(unittest.TestCase):
     def test_a_registered_entry_is_written_as_it_is_over_the_arrived_entries_with_the_same_own_id_in_either_order(self) -> None:
         import msgpack  # type: ignore
 
-        stale1 = self._writer_entry("tests.x", "tests.n", "stale-1", ("tests.x", "old"))
-        stale2 = self._writer_entry("tests.x", "tests.n", "stale-2", ("tests.x",))
+        stale1 = self._writer_entry("tests.x", "tests.n", "a-stale-1", ("tests.x", "old"))
+        stale2 = self._writer_entry("tests.x", "tests.n", "a-stale-2", ("tests.x",))
         registered = self._writer_record("a", "tests.n", "tests.x", self._writer_entry("tests.x", "tests.n", "fresh", ("tests.x",)))
         for entries in ([stale1, stale2], [stale2, stale1]):
             with tempfile.TemporaryDirectory() as tmp:

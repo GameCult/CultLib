@@ -1377,8 +1377,8 @@ const catalogOf = async (file: string): Promise<unknown[][]> =>
 
 test("a registered entry is written as it is, over the arrived entries with the same own id, in either order", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-registered-wins-"));
-  const stale1 = writerEntry("tests.x", "tests.n", "stale-1", ["tests.x", "old"]);
-  const stale2 = writerEntry("tests.x", "tests.n", "stale-2", ["tests.x"]);
+  const stale1 = writerEntry("tests.x", "tests.n", "a-stale-1", ["tests.x", "old"]);
+  const stale2 = writerEntry("tests.x", "tests.n", "a-stale-2", ["tests.x"]);
   const registered = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "fresh", ["tests.x"]));
 
   for (const [name, entries] of [["12", [stale1, stale2]], ["21", [stale2, stale1]]] as const) {
