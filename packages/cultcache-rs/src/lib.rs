@@ -915,20 +915,14 @@ impl SingleFileMessagePackBackingStore {
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_shared(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
-        let result = action();
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
-        result
+        release_lock(lock, action())
     }
 
     fn with_exclusive_lock<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
         let lock = self.open_lock_file()?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", self.lock_path().display()))?;
-        let result = action();
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
-        result
+        release_lock(lock, action())
     }
 
     /// Replaces the named entries only if each still matches its expectation.
@@ -1045,10 +1039,7 @@ impl SingleFileMessagePackBackingStore {
                     .with_context(|| format!("failed to lock {}", self.lock_path().display()));
             }
         }
-        let result = action();
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", self.lock_path().display()))?;
-        result.map(Some)
+        release_lock(lock, action()).map(Some)
     }
 
     fn open_lock_file(&self) -> Result<File> {
@@ -1238,10 +1229,7 @@ impl RedbMessagePackBackingStore {
             .with_context(|| format!("failed to open {}", lock_path.display()))?;
         fs2::FileExt::lock_exclusive(&lock)
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
-        let result = self.open_database().and_then(|database| action(&database));
-        fs2::FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
-        result
+        release_lock(lock, self.open_database().and_then(|database| action(&database)))
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -2880,6 +2868,16 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
     replace_file_atomically(staged_path, destination)
 }
 
+/// Releases a lock taken around `result`'s action and returns that result. Closing the
+/// lock file releases the lock whether or not the explicit unlock succeeds, so an unlock
+/// failure never replaces the action's result: a write that landed is reported as landed.
+fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
+    let _unlock_failure_released_by_close =
+        injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
+    drop(lock);
+    result
+}
+
 /// True only when nothing is at `path`; a symbolic link, dangling or not, is something.
 /// A path that cannot be inspected (a file where a directory should be, no permission)
 /// is an error, never absent.
@@ -3040,13 +3038,14 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to sync {}", parent.display()))
 }
 
-/// The write steps no test can make fail for real: fsync does not fail on a healthy
+/// The steps no test can make fail for real: fsync and unlock do not fail on a healthy
 /// filesystem. Tests arm one step on their own thread; builds outside tests never fail here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 enum WriteStep {
     StagingSync,
     DirectorySync,
+    Unlock,
 }
 
 #[cfg(test)]
@@ -5363,6 +5362,35 @@ mod tests {
         .unwrap_err();
         assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
         assert!(!format!("{error:#}").contains("SECRET"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_that_landed_is_reported_as_landed_when_the_unlock_after_it_fails() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (mut store, _) = written_store(&path)?;
+        let replacement = vec![snapshot_envelope("delta", b"4")];
+        let exchanged = with_write_fault(WriteStep::Unlock, || {
+            store.compare_exchange_snapshot(&store.pull_all().unwrap(), &replacement)
+        })?;
+        assert!(exchanged);
+        assert_eq!(store.pull_all()?, replacement);
+
+        let pushed = snapshot_envelope("epsilon", b"5");
+        with_write_fault(WriteStep::Unlock, || store.push(&pushed))?;
+        assert!(with_write_fault(WriteStep::Unlock, || store.pull_all())?.contains(&pushed));
+
+        // The lock was released: another writer takes it at once.
+        assert!(matches!(
+            store.try_compare_exchange_snapshot(&store.pull_all()?, &replacement)?,
+            TryCompareExchangeSnapshotOutcome::Exchanged
+        ));
+
+        // The keyed store releases its lock the same way.
+        let mut keyed = RedbMessagePackBackingStore::new(temp.path().join("keyed.redb"))?;
+        with_write_fault(WriteStep::Unlock, || keyed.push(&pushed))?;
+        assert_eq!(keyed.pull_all()?, vec![pushed]);
         Ok(())
     }
 }
