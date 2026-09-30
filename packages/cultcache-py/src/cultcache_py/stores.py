@@ -23,6 +23,16 @@ _STORE_FORMAT_PREFIX = "cultcache.store."
 _PERSISTED_RECORD_SLOTS = 4
 
 
+class StoreUnreadableError(ValueError):
+    """A store file this runtime cannot read: not exactly one complete store (truncated, bytes after it, a missing or extra
+    slot), a header or record it does not know, or a body it cannot decode. Open, push, delete and push_all refuse a file
+    with this error, and a refused file is left as it was. The cause is `__cause__`."""
+
+    def __init__(self, path: Path, cause: BaseException) -> None:
+        super().__init__(f"CultCache store {path} is not readable: {cause}")
+        self.path = path
+
+
 class JsonLinesBackingStore:
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
@@ -102,12 +112,15 @@ class SingleFileMessagePackBackingStore:
             data = self.path.read_bytes()
             if not data:
                 return []
-            decoded = msgpack.unpackb(data, raw=False)
-            snapshot = _decode_snapshot(decoded)
-            if snapshot is not None:
-                self._format, envelopes = snapshot
-                return envelopes
-            return _decode_legacy_envelopes(decoded, msgpack)
+            try:
+                decoded = msgpack.unpackb(data, raw=False)
+                snapshot = _decode_snapshot(decoded)
+                if snapshot is not None:
+                    self._format, envelopes = snapshot
+                    return envelopes
+                return _decode_legacy_envelopes(decoded, msgpack)
+            except Exception as exc:
+                raise StoreUnreadableError(self.path, exc) from exc
 
     def push(self, envelope: CultCacheEnvelope) -> None:
         with self._lock:
@@ -174,7 +187,9 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
         )
     if decoded[0] not in _READABLE_STORE_FORMATS:
         return None
-    if len(decoded) < 3 or not isinstance(decoded[1], list) or not isinstance(decoded[2], list):
+    if len(decoded) != 3:
+        raise ValueError(f"CultCache store has {len(decoded)} top-level slots; this runtime reads 3 (header, schema catalog, records)")
+    if not isinstance(decoded[1], list) or not isinstance(decoded[2], list):
         raise ValueError("CultCache v1 snapshot must contain a schema catalog and record array")
 
     catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}

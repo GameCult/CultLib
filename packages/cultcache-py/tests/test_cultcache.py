@@ -11,6 +11,7 @@ from cultcache_py import (
     CultCache,
     JsonLinesBackingStore,
     SingleFileMessagePackBackingStore,
+    StoreUnreadableError,
     define_database_entry_type,
     define_document_type,
 )
@@ -899,7 +900,7 @@ class CultCacheTests(unittest.TestCase):
                 store_path = Path(tmp) / "store.msgpack"
                 store_path.write_bytes(vector.read_bytes())
                 before = store_path.read_bytes()
-                with self.assertRaisesRegex(ValueError, "is not readable"):
+                with self.assertRaisesRegex(StoreUnreadableError, "is not readable"):
                     SingleFileMessagePackBackingStore(store_path).push_all(envelopes)
                 self.assertEqual(store_path.read_bytes(), before, f"{vector.name} was rewritten")
 
@@ -907,13 +908,19 @@ class CultCacheTests(unittest.TestCase):
     # pull_all, push_all, push and delete alike. The bytes and every runtime's verdict:
     # tests/vectors/document-variants-c2a/readability.
     def test_single_file_replaces_a_file_exactly_when_it_reads(self) -> None:
+        import msgpack  # type: ignore
+
         root = self._C2A_VECTORS / "readability"
         rows = [
             line.split()
             for line in (root / "manifest.txt").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        self.assertEqual(len(rows), 15)
+        # Every vector in the folder has a manifest row.
+        self.assertEqual(
+            sorted(path.name for path in root.glob("*.bin")),
+            sorted(vector for vector, *_ in rows if not vector.startswith("..")),
+        )
         envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
         for vector, _, _, _, python in rows:
             content = (root / vector).read_bytes()
@@ -930,9 +937,23 @@ class CultCacheTests(unittest.TestCase):
                     }[operation]
                     if python == "reads":
                         run()
+                        if operation == "pull_all":
+                            continue
+                        # The replaced file is a store: it carries the header its old content decides (a v3 store keeps its
+                        # marker, all else is v1), and it holds what the operation wrote.
+                        expected = "cultcache.store.v3" if vector.endswith("v3-base.msgpack") else "cultcache.store.v1"
+                        self.assertEqual(msgpack.unpackb(store_path.read_bytes(), raw=False)[0], expected, f"{vector} {operation}")
+                        keys = [envelope.key for envelope in SingleFileMessagePackBackingStore(store_path).pull_all()]
+                        if operation == "push_all":
+                            self.assertEqual(sorted(set(keys) & {e.key for e in envelopes}), sorted(e.key for e in envelopes), f"{vector} {operation}")
+                        elif operation == "push":
+                            self.assertIn(envelopes[0].key, keys, f"{vector} {operation}")
+                        else:
+                            self.assertNotIn(envelopes[0].key, keys, f"{vector} {operation}")
                     else:
-                        with self.assertRaises(Exception, msg=f"{vector} {operation}"):
+                        with self.assertRaises(StoreUnreadableError, msg=f"{vector} {operation}") as refused:
                             run()
+                        self.assertIsNotNone(refused.exception.__cause__, f"{vector} {operation}")
                         self.assertEqual(store_path.read_bytes(), content, f"{vector} {operation} rewrote a file it cannot read")
 
 
