@@ -320,7 +320,27 @@ Only a store file that does not exist (`std::io::ErrorKind::NotFound`) reads as
 an empty store. Any other failure to reach it, such as a symlink loop, a file
 where a parent directory should be, or a missing permission, is an I/O error.
 A store file that exists and holds zero bytes is `Undecodable`: no CultCache
-writer leaves one.
+writer leaves one. A symbolic link whose target is gone is not a missing store:
+reading it is an I/O error, so no write replaces the link. A refusal names no
+value read from the file; it names a record only by its key and schema id, and
+a header only when it has the shape `cultcache.store.v<digits>`.
+
+A write that fails says what it left on disk:
+
+```rust
+use cultcache_rs::{CultCacheStoreWriteFailed, CultCacheStoreWriteFailedKind};
+
+fn outcome(error: &anyhow::Error) {
+    match error.downcast_ref::<CultCacheStoreWriteFailed>().map(|failed| failed.kind) {
+        // Staging, fsync or rename failed: the store file holds what it held before.
+        Some(CultCacheStoreWriteFailedKind::NotReplaced) => {}
+        // The rename landed and the directory sync failed: the new snapshot is in
+        // place but may not survive a crash.
+        Some(CultCacheStoreWriteFailedKind::ReplacedNotDurable) => {}
+        _ => {}
+    }
+}
+```
 
 ## Near-Term Ergonomic Improvements
 

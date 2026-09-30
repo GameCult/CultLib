@@ -414,6 +414,44 @@ impl std::fmt::Display for CultCacheStoreUnreadable {
 
 impl std::error::Error for CultCacheStoreUnreadable {}
 
+/// A write to a single-file store that failed, and what it left on disk. It sits in the
+/// error chain of every such failure, above the cause, so a consumer tells the outcomes
+/// apart with `error.downcast_ref::<CultCacheStoreWriteFailed>()`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CultCacheStoreWriteFailed {
+    pub path: PathBuf,
+    pub kind: CultCacheStoreWriteFailedKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CultCacheStoreWriteFailedKind {
+    /// The write failed before the store file was replaced (creating, writing or
+    /// syncing the staging file, or renaming it): the file holds what it held before.
+    NotReplaced,
+    /// The store file was replaced, then syncing its directory failed: the new
+    /// snapshot is in place but may not survive a crash.
+    ReplacedNotDurable,
+}
+
+impl std::fmt::Display for CultCacheStoreWriteFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.kind {
+            CultCacheStoreWriteFailedKind::NotReplaced => {
+                write!(formatter, "CultCache store {} was not replaced", self.path.display())
+            }
+            CultCacheStoreWriteFailedKind::ReplacedNotDurable => write!(
+                formatter,
+                "CultCache store {} was replaced, but the replacement is not yet durable",
+                self.path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CultCacheStoreWriteFailed {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
     pub soft: bool,
@@ -838,6 +876,19 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn write_all_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
+        let failed = |kind| CultCacheStoreWriteFailed {
+            path: self.path.clone(),
+            kind,
+        };
+        self.replace_unlocked(entries)
+            .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::NotReplaced)))?;
+        sync_parent_directory(&self.path)
+            .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::ReplacedNotDurable)))
+    }
+
+    /// Everything up to and including the rename over the store file. On failure the
+    /// store file is as it was.
+    fn replace_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -857,7 +908,6 @@ impl SingleFileMessagePackBackingStore {
             let _ = fs::remove_file(&tmp_path);
             return Err(error);
         }
-        sync_parent_directory(&self.path)?;
         Ok(())
     }
 
@@ -2823,8 +2873,8 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
     staged
         .write_all(bytes)
         .with_context(|| format!("failed to write {}", staged_path.display()))?;
-    staged
-        .sync_all()
+    injected_write_fault(WriteStep::StagingSync)
+        .and_then(|()| staged.sync_all())
         .with_context(|| format!("failed to sync {}", staged_path.display()))?;
     drop(staged);
     replace_file_atomically(staged_path, destination)
@@ -2984,9 +3034,38 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
-    File::open(parent)
+    injected_write_fault(WriteStep::DirectorySync)
+        .and_then(|()| File::open(parent))
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("failed to sync {}", parent.display()))
+}
+
+/// The write steps no test can make fail for real: fsync does not fail on a healthy
+/// filesystem. Tests arm one step on their own thread; builds outside tests never fail here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum WriteStep {
+    StagingSync,
+    DirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_WRITE_FAULT: std::cell::Cell<Option<WriteStep>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn injected_write_fault(step: WriteStep) -> std::io::Result<()> {
+    if INJECTED_WRITE_FAULT.with(|fault| fault.get()) == Some(step) {
+        return Err(std::io::Error::other("injected write fault"));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn injected_write_fault(_step: WriteStep) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -4945,6 +5024,7 @@ mod tests {
                 .unwrap_err();
             let io = io_error_in(&error).expect("a size-limited write fails with an io::Error");
             assert_eq!(io.kind(), std::io::ErrorKind::FileTooLarge, "{error:#}");
+            assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
             assert_eq!(unreadable_kind(&error), None, "{error:#}");
             return Ok(());
         }
@@ -5212,6 +5292,77 @@ mod tests {
         assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
         assert!(!target.exists());
         assert_eq!(fs::read_dir(&volume)?.count(), 0);
+        Ok(())
+    }
+
+    fn write_failure_kind(error: &anyhow::Error) -> Option<CultCacheStoreWriteFailedKind> {
+        error
+            .downcast_ref::<CultCacheStoreWriteFailed>()
+            .map(|failed| failed.kind)
+    }
+
+    /// Runs `write` with `step` made to fail on this thread.
+    fn with_write_fault<T>(step: WriteStep, write: impl FnOnce() -> T) -> T {
+        INJECTED_WRITE_FAULT.with(|fault| fault.set(Some(step)));
+        let result = write();
+        INJECTED_WRITE_FAULT.with(|fault| fault.set(None));
+        result
+    }
+
+    #[test]
+    fn a_write_that_fails_before_the_rename_is_not_replaced_and_the_store_is_intact() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (store, before) = written_store(&path)?;
+        let error = with_write_fault(WriteStep::StagingSync, || {
+            store.compare_exchange_snapshot(&store.pull_all().unwrap(), &[snapshot_envelope("delta", b"4")])
+        })
+        .unwrap_err();
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(io_error_in(&error).is_some(), "{error:#}");
+        assert_eq!(fs::read(&path)?, before);
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain");
+
+        // The rename fails when the store path is a directory.
+        let blocked = temp.path().join("blocked.cc");
+        fs::create_dir(&blocked)?;
+        let mut blocked_store = SingleFileMessagePackBackingStore::new(&blocked);
+        let error = blocked_store
+            .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
+            .unwrap_err();
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(fs::metadata(&blocked)?.is_dir());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_whose_directory_sync_fails_is_replaced_but_not_durable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (store, _) = written_store(&path)?;
+        let replacement = vec![snapshot_envelope("delta", b"4")];
+        let error = with_write_fault(WriteStep::DirectorySync, || {
+            store.compare_exchange_snapshot(&store.pull_all().unwrap(), &replacement)
+        })
+        .unwrap_err();
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::ReplacedNotDurable), "{error:#}");
+        assert!(io_error_in(&error).is_some(), "{error:#}");
+        assert_eq!(store.pull_all()?, replacement);
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_failure_names_no_value_from_the_snapshot() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        let error = with_write_fault(WriteStep::StagingSync, || {
+            store.compare_exchange_snapshot(&[], &[snapshot_envelope("SECRET-KEY", b"SECRET-PAYLOAD")])
+        })
+        .unwrap_err();
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(!format!("{error:#}").contains("SECRET"), "{error:#}");
         Ok(())
     }
 }
