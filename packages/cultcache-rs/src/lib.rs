@@ -781,21 +781,21 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
-        Ok(self.read_store_unlocked()?.1)
+        Ok(self.read_store_unlocked()?.envelopes)
     }
 
     /// The one reader of the store file: open, every rewrite and the read-only snapshot ask it, so they agree on which
     /// files are stores. A file that is gone or zero bytes is an empty v1 store. Anything else must decode completely, as
     /// exactly one store or one legacy envelope array; a file this runtime cannot read is refused with
     /// [`StoreUnreadableError`], so a rewrite never overwrites what it cannot see.
-    fn read_store_unlocked(&self) -> Result<(&'static str, Vec<CultCacheEnvelope>)> {
+    fn read_store_unlocked(&self) -> Result<DiskStore> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((STORE_FORMAT_V1, Vec::new())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(DiskStore::empty()),
             Err(error) => return Err(error).with_context(|| format!("failed to read {}", self.path.display())),
         };
         if bytes.is_empty() {
-            return Ok((STORE_FORMAT_V1, Vec::new()));
+            return Ok(DiskStore::empty());
         }
         decode_store_file(&bytes).map_err(|source| {
             anyhow::Error::new(StoreUnreadableError { path: self.path.clone(), source })
@@ -824,8 +824,8 @@ impl SingleFileMessagePackBackingStore {
         // payloads this store passes through may hold ids), one that is gone, empty or legacy is written v1. The file is read
         // by the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
         // and never overwritten.
-        let (format, disk) = self.read_store_unlocked()?;
-        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, &disk, format)?)
+        let disk = self.read_store_unlocked()?;
+        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, &disk)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
         let mut staged = OpenOptions::new()
@@ -2610,8 +2610,8 @@ fn now_utc_second() -> String {
 /// one the caller supplies is registered. Records of one tier under one id are one type. Across tiers a write may not
 /// retype what the file holds, unless the registered type owns the id (a registered type's id is its entry type): that is
 /// a rename under a stable id, and the registered type names the id.
-fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelope], format: &str) -> Result<PersistedStoreSnapshot> {
-    let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.iter().map(|entry| (entry_id(entry), entry)).collect();
+fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &DiskStore) -> Result<PersistedStoreSnapshot> {
+    let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.envelopes.iter().map(|entry| (entry_id(entry), entry)).collect();
     // Per schema id and tier: the type its records carry, and the key of the record that named it.
     let mut schema_types = BTreeMap::<(String, bool), (String, String)>::new();
     for entry in entries {
@@ -2646,24 +2646,28 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelop
             }));
         }
     }
-    let catalog = named
-        .into_iter()
-        .map(|(schema_id, document_type)| {
-            PersistedSchemaCatalogEntry(
-                schema_id.clone(),
-                document_type,
-                format!("{schema_id}.v1"),
-                schema_id.clone(),
-                format!(
-                    "{{\"schemaName\":\"{}\",\"schemaVersion\":\"{}.v1\",\"members\":[]}}",
-                    escape_json_string(&schema_id),
-                    escape_json_string(&schema_id)
-                ),
-                vec![schema_id],
-                Vec::new(),
-            )
-        })
+    // An entry the file holds for an id is written back as the file holds it: this runtime keeps no description of another
+    // runtime's schema, so it never replaces one. It describes an id itself only when the file has no entry for it, or when a
+    // registered type owns the id under another name (a rename, where the registered type names the id).
+    let owned: BTreeSet<&str> = entries
+        .iter()
+        .filter(|entry| entry.schema_id.as_deref().is_none_or(|schema_id| schema_id == entry.r#type))
+        .map(|entry| entry.r#type.as_str())
         .collect();
+    let mut catalog = BTreeMap::<String, PersistedSchemaCatalogEntry>::new();
+    for (schema_id, document_type) in named {
+        let held = disk
+            .catalog
+            .iter()
+            .find(|entry| entry.0 == schema_id)
+            .or_else(|| disk.catalog.iter().find(|entry| entry.5.contains(&schema_id)))
+            .filter(|entry| !owned.contains(schema_id.as_str()) || entry.1 == document_type);
+        let entry = match held {
+            Some(entry) => entry.clone(),
+            None => described(&schema_id, document_type),
+        };
+        catalog.entry(entry.0.clone()).or_insert(entry);
+    }
     let records = entries
         .iter()
         .map(|entry| {
@@ -2680,10 +2684,27 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelop
         .collect();
 
     Ok(PersistedStoreSnapshot(
-        format.to_string(),
-        catalog,
+        disk.format.to_string(),
+        catalog.into_values().collect(),
         records,
     ))
+}
+
+/// The entry this runtime writes for a schema id it describes itself: its entry type is the id and the schema's name.
+fn described(schema_id: &str, document_type: String) -> PersistedSchemaCatalogEntry {
+    PersistedSchemaCatalogEntry(
+        schema_id.to_string(),
+        document_type,
+        format!("{schema_id}.v1"),
+        schema_id.to_string(),
+        format!(
+            "{{\"schemaName\":\"{}\",\"schemaVersion\":\"{}.v1\",\"members\":[]}}",
+            escape_json_string(schema_id),
+            escape_json_string(schema_id)
+        ),
+        vec![schema_id.to_string()],
+        Vec::new(),
+    )
 }
 
 fn readable_store_format(header: &str) -> Result<&'static str> {
@@ -2698,10 +2719,29 @@ fn readable_store_format(header: &str) -> Result<&'static str> {
 
 /// One store file's bytes, decoded whole: the header it carries (the one a rewrite keeps) and its envelopes. An array whose
 /// first slot is not a store header is the legacy envelope array.
-fn decode_store_file(bytes: &[u8]) -> Result<(&'static str, Vec<CultCacheEnvelope>)> {
+fn decode_store_file(bytes: &[u8]) -> Result<DiskStore> {
     match store_header(bytes)? {
-        Some(header) => Ok((readable_store_format(&header)?, decode_store_snapshot(bytes)?)),
-        None => Ok((STORE_FORMAT_V1, decode_legacy_envelopes(bytes)?)),
+        Some(header) => {
+            let format = readable_store_format(&header)?;
+            let (envelopes, catalog) = decode_store_snapshot(bytes)?;
+            Ok(DiskStore { format, envelopes, catalog })
+        }
+        None => Ok(DiskStore { format: STORE_FORMAT_V1, envelopes: decode_legacy_envelopes(bytes)?, catalog: Vec::new() }),
+    }
+}
+
+/// What a store file holds, as its one reader decoded it: the header a rewrite keeps, its envelopes, and the catalog entries it
+/// publishes them by, which a rewrite lays back for the ids they name.
+struct DiskStore {
+    format: &'static str,
+    envelopes: Vec<CultCacheEnvelope>,
+    catalog: Vec<PersistedSchemaCatalogEntry>,
+}
+
+impl DiskStore {
+    /// A file that is gone or zero bytes: an empty v1 store.
+    fn empty() -> Self {
+        Self { format: STORE_FORMAT_V1, envelopes: Vec::new(), catalog: Vec::new() }
     }
 }
 
@@ -2711,7 +2751,7 @@ fn decode_legacy_envelopes(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     rmp_serde::from_slice(bytes).map_err(anyhow::Error::from)
 }
 
-fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
+fn decode_store_snapshot(bytes: &[u8]) -> Result<(Vec<CultCacheEnvelope>, Vec<PersistedSchemaCatalogEntry>)> {
     let snapshot: PersistedStoreSnapshot =
         rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
 
@@ -2725,7 +2765,7 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
             catalog.entry(compatible.clone()).or_insert_with(|| entry.1.clone());
         }
     }
-    snapshot
+    let envelopes = snapshot
         .2
         .into_iter()
         .map(|record| {
@@ -2745,7 +2785,8 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
                 schema_id: Some(record.1),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((envelopes, snapshot.1))
 }
 
 /// A record resolves by its schema id: a registered type's id is its entry type. The name its catalog carries is metadata,
@@ -4919,6 +4960,49 @@ mod tests {
             assert_eq!(names, vec!["tests.m".to_string(), "tests.n".to_string()]);
             assert!(conflict.record_key == "a" || conflict.record_key == "b");
             assert!(!path.exists(), "nothing is written");
+        }
+        Ok(())
+    }
+
+    // Another runtime's catalog entry survives this runtime's writes: a write of any record lays back, byte for byte, the entry the
+    // file holds for an id this runtime does not own. This one carries what a C# writer publishes (a version, a content hash,
+    // canonical JSON, members), none of which this runtime could describe. Whole-store writes and single pushes alike.
+    #[test]
+    fn a_write_lays_back_the_catalog_entry_the_file_holds_for_an_id_it_does_not_own() -> Result<()> {
+        let held = PersistedSchemaCatalogEntry(
+            "sha256:csharp".into(),
+            "tests.note".into(),
+            "tests.note_v7".into(),
+            "sha256:content".into(),
+            "{\"schemaName\":\"tests.note\"}".into(),
+            vec!["sha256:csharp".into()],
+            vec![PersistedSchemaCatalogMember(0, "Title".into(), "System.String".into(), false, false, None, true, Some("title".into()))],
+        );
+        let own = CultCacheEnvelope {
+            key: "b".into(),
+            r#type: "tests.other".into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("tests.other".into()),
+        };
+        for whole_store in [false, true] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let record = PersistedRecord("a".into(), "sha256:csharp".into(), "2026-09-30T00:00:00Z".into(), b"one".to_vec());
+            std::fs::write(&path, rmp_serde::to_vec(&PersistedStoreSnapshot("cultcache.store.v1".into(), vec![held.clone()], vec![record]))?)?;
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            if whole_store {
+                let mut entries = store.pull_all()?;
+                entries.push(own.clone());
+                store.push_all(&entries, PushAllOptions::default())?;
+            } else {
+                store.push(&own)?;
+            }
+
+            let written: PersistedStoreSnapshot = rmp_serde::from_slice(&std::fs::read(&path)?)?;
+            let entry = written.1.iter().find(|entry| entry.0 == "sha256:csharp").expect("the entry for the id is written");
+            assert_eq!(rmp_serde::to_vec(entry)?, rmp_serde::to_vec(&held)?, "whole store: {whole_store}");
+            assert!(written.1.iter().any(|entry| entry.0 == "tests.other"), "its own id is described");
         }
         Ok(())
     }
