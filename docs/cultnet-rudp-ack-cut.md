@@ -743,7 +743,7 @@ The ack cuts build on these behaviours and do not alter them:
 | Rust hub `CultNetRudpServerHub` | `poll_resends` returns on the first failure (`rudp.rs:1762-1777`); the receive path's sends to one peer abort `receive_event_once` (`:1644`, `:1673`, `:1708`, `:1711`, `:1714`, `:1759`, through `send_packet` `:1799-1804`) | Cut D |
 | C# `CultNetRudpSocketTransportServer` (and `RudpCultNetSchemaServer` over it) | `PollResends` walks every peer and the first `SocketException` from `SendTo` (`CultNetTransport.cs:2829-2834`) escapes the loop (`:2796-2805`); `TryReceiveOnce`'s sends are unguarded except the refusal goodbye (`:2687`, `:2704`, `:2749-2750`, `:2788`; guarded `:2739-2745`) | Cut D |
 | cultmesh-py server | worse: an `OSError` from `sendto` (`server.py:302-307`) in `_poll_rudp_resends` (`:277-285`) or the receive path escapes `_rudp_loop` (`:203-…`, which catches only `recvfrom`'s errors), and the RUDP thread dies for every peer | Cut D |
-| cultmesh-ts document server | none: Node's `socket.send` is asynchronous and reports failures on the socket's `error` event (`cultmesh-ts/src/index.ts:5858`), which `reportError` logs (`:5778-5785`) | none |
+| cultmesh-ts document server | none. **Corrected 2026-09-30:** Node does not report send failures on the socket's `error` event. With a callback they go to the callback; without one, libuv drops them silently (Node 24). Only port 0 throws synchronously. Cut D routes every send through `sendRudpDatagram`. | none |
 | Kotlin interop server | none that matters: a catch-all logs and continues (K:4025), and it is interop-only | none (Cut K1 reviews it) |
 
 
@@ -1061,8 +1061,8 @@ Design in §10. Independent of every other cut; it touches send sites, not sessi
     (`:2739-2745`) becomes redundant and goes;
   - cultmesh-py `server.py`: `_send_rudp_packet` (`:302-307`) catches `OSError` and counts it.
 - **Not changed:** single-peer socket transports (a failed send already concerns only their one peer, and
-  their callers, flush among them, get the error); `cultmesh-ts`'s document server (Node reports send
-  failures on the socket's `error` event, `index.ts:5858`).
+  their callers, flush among them, get the error); `cultmesh-ts`'s document server. (Corrected 2026-09-30: Node reports send failures only to a send
+  callback, never on the socket's `error` event; see the table above.)
 - **Authority map:**
   - Owner: each peer's session owns its peer's fate (idle timeout, lifetime, refusal, Disconnect). A send
     failure is an input to nothing but a counter.
