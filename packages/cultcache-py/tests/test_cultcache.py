@@ -628,6 +628,26 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(cache.get_required(second, "k")["name"], "k", schema_id)
                 self.assertIsNone(cache.get(first, "k"), schema_id)
 
+    def test_an_id_a_document_owns_names_that_document_not_one_registered_earlier_that_lists_it(self) -> None:
+        lister = define_database_entry_type(
+            "tests.lister", [("name", 0)], schema_id="id.lister", schema_name="tests.lister", schema_version="tests.lister.v1",
+            compatible_schema_ids=["id.lister", "id.owned"],
+        )
+        owner = define_database_entry_type("tests.owner", [("name", 0)], schema_id="id.owned", schema_name="tests.owner", schema_version="tests.owner.v1")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            self._store_of(
+                path,
+                [["id.owned", "tests.lister", "tests.owner.v1", "h", "", ["id.owned"], []]],
+                [["k", "id.owned", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "k"})]],
+            )
+            cache = CultCache.builder().register_document_type(lister).register_document_type(owner).add_generic_store(
+                SingleFileMessagePackBackingStore(path)
+            ).build()
+            cache.pull_all_backing_stores()
+            self.assertEqual(cache.get_required(owner, "k")["name"], "k")
+            self.assertIsNone(cache.get(lister, "k"))
+
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store_path = str(Path(tmp) / "cache.msgpack")
