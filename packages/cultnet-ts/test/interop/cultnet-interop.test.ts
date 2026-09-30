@@ -61,13 +61,6 @@ const cultMeshTsRoot = resolve(cultLibRoot, "packages", "cultmesh-ts");
 const cultMeshQuicPeerScript = resolve(cultMeshTsRoot, "dist-test", "test", "interop", "cultmesh-quic-peer.js");
 const quicNativeTestsProject = resolve(cultLibRoot, "tests", "GameCult.Mesh.Quic.Native.Tests", "GameCult.Mesh.Quic.Native.Tests.csproj");
 const quicManagedTestsProject = resolve(cultLibRoot, "tests", "GameCult.Mesh.Quic.Tests", "GameCult.Mesh.Quic.Tests.csproj");
-const rustBinaryPath = resolve(
-  cultnetRsRoot,
-  "target",
-  "debug",
-  "examples",
-  process.platform === "win32" ? "cultnet_interop_peer.exe" : "cultnet_interop_peer",
-);
 
 const discoveryGroup = "239.77.44.11";
 const serveReadyTimeoutMs = 90_000;
@@ -77,6 +70,67 @@ let rustInteropPeerBuild: Promise<void> | undefined;
 let csharpInteropPeerBuild: Promise<void> | undefined;
 let kotlinInteropPeerBuild: Promise<void> | undefined;
 let cultMeshTsInteropPeerBuild: Promise<void> | undefined;
+
+let rustInteropPeerPathCache: string | undefined;
+let tsInteropPeerChecked = false;
+let pythonInteropChecked = false;
+
+// Cargo decides where it builds: CARGO_TARGET_DIR, a config's build.target-dir, or the crate's own
+// target directory. The peer's path is asked of cargo, not assumed.
+function rustInteropPeerPath(): string {
+  if (rustInteropPeerPathCache !== undefined) {
+    return rustInteropPeerPathCache;
+  }
+  const metadata = spawnSync(cargoCommand, ["metadata", "--format-version", "1", "--no-deps"], {
+    cwd: cultnetRsRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (metadata.status !== 0) {
+    throw new Error(
+      `The Rust interop peer's target directory is unknown: \`cargo metadata\` failed in ${cultnetRsRoot}.\n${metadata.stderr ?? metadata.error?.message ?? ""}`,
+    );
+  }
+  const targetDirectory = (JSON.parse(metadata.stdout) as { target_directory: string }).target_directory;
+  rustInteropPeerPathCache = resolve(
+    targetDirectory,
+    "debug",
+    "examples",
+    process.platform === "win32" ? "cultnet_interop_peer.exe" : "cultnet_interop_peer",
+  );
+  return rustInteropPeerPathCache;
+}
+
+// The TypeScript peer imports @gamecult/cultcache-ts from its built output. Unbuilt, the peer dies
+// on import and a lane fails with a spawn or timeout error that names neither.
+function tsInteropPeerScript(): string {
+  if (!tsInteropPeerChecked) {
+    try {
+      require.resolve("@gamecult/cultcache-ts");
+    } catch {
+      throw new Error(
+        "@gamecult/cultcache-ts is not built, and the TypeScript interop peer imports it. Run `npm run build --workspace packages/cultcache-ts` first.",
+      );
+    }
+    tsInteropPeerChecked = true;
+  }
+  return tsPeerScript;
+}
+
+// The Python peers import msgpack. Missing, each Python lane fails with a traceback in a child's
+// stderr instead of a reason.
+function pythonInteropCommand(): string {
+  if (!pythonInteropChecked) {
+    const probe = spawnSync(pythonCommand, ["-c", "import msgpack"], { encoding: "utf8" });
+    if (probe.status !== 0) {
+      throw new Error(
+        `${pythonCommand} cannot import msgpack, which the Python interop peers need. Install the Python packages first: \`python -m pip install -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py\`.\n${probe.stderr ?? probe.error?.message ?? ""}`,
+      );
+    }
+    pythonInteropChecked = true;
+  }
+  return pythonCommand;
+}
 
 function resolvePythonCommand(): string {
   const codexPythonCommand = join(homedir(), ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "python", "python.exe");
@@ -743,7 +797,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "start rust peer");
   servers.push(await spawnServeProcess("rust", {
-    command: rustBinaryPath,
+    command: rustInteropPeerPath(),
     args: [
       "serve",
       "--runtime-id", "rust-peer",
@@ -765,7 +819,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   servers.push(await spawnServeProcess("ts", {
     command: process.execPath,
     args: [
-      tsPeerScript,
+      tsInteropPeerScript(),
       "serve",
       "--runtime-id", "ts-peer",
       "--runtime-kind", "node",
@@ -805,7 +859,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "start python peer");
   servers.push(await spawnServeProcess("python", {
-    command: pythonCommand,
+    command: pythonInteropCommand(),
     args: [
       "-m", "cultnet_py.interop_peer",
       "serve",
@@ -827,7 +881,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "typescript dials rust");
   const tsDial = await runJsonCommand("ts-dial", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-client",
     "--runtime-kind", "node",
@@ -846,7 +900,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "typescript dials typescript over rudp");
   const tsRudpDial = await runJsonCommand("ts-rudp-dial", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-rudp-client",
     "--runtime-kind", "node",
@@ -864,7 +918,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(tsRudpDial.fireReceipt.accepted, true);
 
   logInteropPhase("schema-v0", "rust dials csharp");
-  const rustDial = await runJsonCommand("rust-dial", rustBinaryPath, [
+  const rustDial = await runJsonCommand("rust-dial", rustInteropPeerPath(), [
     "dial",
     "--runtime-id", "rust-client",
     "--runtime-kind", "rust",
@@ -899,7 +953,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(csharpDial.fireReceipt.accepted, true);
 
   logInteropPhase("schema-v0", "python dials rust");
-  const pythonDial = await runJsonCommand("python-dial", pythonCommand, [
+  const pythonDial = await runJsonCommand("python-dial", pythonInteropCommand(), [
     "-m", "cultnet_py.interop_peer",
     "dial",
     "--runtime-id", "python-client",
@@ -917,7 +971,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   assert.equal(pythonDial.fireReceipt.accepted, true);
 
   logInteropPhase("schema-v0", "python dials python over rudp");
-  const pythonRudpDial = await runJsonCommand("python-rudp-dial", pythonCommand, [
+  const pythonRudpDial = await runJsonCommand("python-rudp-dial", pythonInteropCommand(), [
     "-m", "cultnet_py.interop_peer",
     "dial",
     "--runtime-id", "python-rudp-client",
@@ -937,7 +991,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "typescript dials python");
   const tsDialPython = await runJsonCommand("ts-dial-python", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-python-client",
     "--runtime-kind", "node",
@@ -1257,7 +1311,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
 
   logInteropPhase("schema-v0", "typescript discovery probe");
   await expectProbePeers("ts-probe", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "probe",
     "--runtime-id", "ts-prober",
     "--discovery-port", String(discoveryPort),
@@ -1266,7 +1320,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   ], cultNetTsRoot, {}, expectedPeers);
 
   logInteropPhase("schema-v0", "rust discovery probe");
-  await expectProbePeers("rust-probe", rustBinaryPath, [
+  await expectProbePeers("rust-probe", rustInteropPeerPath(), [
     "probe",
     "--runtime-id", "rust-prober",
     "--discovery-port", String(discoveryPort),
@@ -1285,7 +1339,7 @@ test("CultNet TS/Rust/C#/Python peers discover each other and exchange raw state
   ], cultLibRoot, {}, expectedPeers);
 
   logInteropPhase("schema-v0", "python discovery probe");
-  await expectProbePeers("python-probe", pythonCommand, [
+  await expectProbePeers("python-probe", pythonInteropCommand(), [
     "-m", "cultnet_py.interop_peer",
     "probe",
     "--runtime-id", "python-prober",
@@ -1319,7 +1373,7 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
   });
 
   servers.push(await spawnServeProcess("rust-rudp", {
-    command: rustBinaryPath,
+    command: rustInteropPeerPath(),
     args: [
       "serve",
       "--runtime-id", "rust-rudp-peer",
@@ -1341,7 +1395,7 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
   servers.push(await spawnServeProcess("ts-rust-rudp", {
     command: process.execPath,
     args: [
-      tsPeerScript,
+      tsInteropPeerScript(),
       "serve",
       "--runtime-id", "ts-rust-rudp-peer",
       "--runtime-kind", "node",
@@ -1361,7 +1415,7 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
 
   logInteropPhase("ts-rust-full-rudp", "typescript dials rust over rudp");
   const tsRudpDial = await runJsonCommand("ts-rust-rudp-dial", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-rust-rudp-client",
     "--runtime-kind", "node",
@@ -1379,7 +1433,7 @@ test("CultNet TypeScript and Rust full interop peers exchange schema-v0 over RUD
   assert.equal(tsRudpDial.fireReceipt.accepted, true);
 
   logInteropPhase("ts-rust-full-rudp", "rust dials typescript over rudp");
-  const rustRudpDial = await runJsonCommand("rust-rudp-dial", rustBinaryPath, [
+  const rustRudpDial = await runJsonCommand("rust-rudp-dial", rustInteropPeerPath(), [
     "dial",
     "--runtime-id", "rust-rudp-client",
     "--runtime-kind", "rust",
@@ -2186,7 +2240,7 @@ test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP"
   servers.push(await spawnServeProcess("ts-csharp-rudp", {
     command: process.execPath,
     args: [
-      tsPeerScript,
+      tsInteropPeerScript(),
       "serve",
       "--runtime-id", "ts-csharp-rudp-peer",
       "--runtime-kind", "node",
@@ -2206,7 +2260,7 @@ test("CultNet TypeScript and C# full interop peers exchange schema-v0 over RUDP"
 
   logInteropPhase("ts-csharp-full-rudp", "typescript dials csharp over rudp");
   const tsRudpDial = await runJsonCommand("ts-csharp-rudp-dial", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-csharp-rudp-client",
     "--runtime-kind", "node",
@@ -2289,7 +2343,7 @@ test("CultNet TypeScript and Kotlin full interop peers exchange schema-v0 over R
   servers.push(await spawnServeProcess("ts-kotlin-rudp", {
     command: process.execPath,
     args: [
-      tsPeerScript,
+      tsInteropPeerScript(),
       "serve",
       "--runtime-id", "ts-kotlin-rudp-peer",
       "--runtime-kind", "node",
@@ -2309,7 +2363,7 @@ test("CultNet TypeScript and Kotlin full interop peers exchange schema-v0 over R
 
   logInteropPhase("ts-kotlin-full-rudp", "typescript dials kotlin over rudp");
   const tsRudpDial = await runJsonCommand("ts-kotlin-rudp-dial", process.execPath, [
-    tsPeerScript,
+    tsInteropPeerScript(),
     "dial",
     "--runtime-id", "ts-kotlin-rudp-client",
     "--runtime-kind", "node",
@@ -2962,7 +3016,7 @@ interface RunningPythonRudpPeer {
 }
 
 function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
-  const child = spawn(pythonCommand, ["-c", pythonRudpPeerScript], {
+  const child = spawn(pythonInteropCommand(), ["-c", pythonRudpPeerScript], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -3018,7 +3072,7 @@ function spawnPythonRudpPeer(options: RudpServerSpawnOptions = {}): RunningPytho
 }
 
 function spawnPythonRudpMessagePeer(): RunningPythonRudpPeer {
-  const child = spawn(pythonCommand, ["-c", pythonRudpMessagePeerScript], {
+  const child = spawn(pythonInteropCommand(), ["-c", pythonRudpMessagePeerScript], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
     stdio: ["ignore", "pipe", "pipe"],
@@ -3066,7 +3120,7 @@ function spawnPythonRudpMessagePeer(): RunningPythonRudpPeer {
 }
 
 function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPythonRudpPeer {
-  const child = spawn(rustBinaryPath, [
+  const child = spawn(rustInteropPeerPath(), [
     "rudp-serve-once",
     "--bind-host", "127.0.0.1",
     ...(options.clientPayload ? ["--client-payload", options.clientPayload] : []),
@@ -3124,7 +3178,7 @@ function spawnRustRudpServer(options: RudpServerSpawnOptions = {}): RunningPytho
 }
 
 function spawnRustRudpMessageServer(): RunningPythonRudpPeer {
-  const child = spawn(rustBinaryPath, [
+  const child = spawn(rustInteropPeerPath(), [
     "rudp-serve-message-once",
     "--bind-host", "127.0.0.1",
   ], {
@@ -3405,7 +3459,7 @@ function spawnKotlinRudpMessageServer(): RunningPythonRudpPeer {
 }
 
 function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
-  const child = spawn(pythonCommand, ["-c", pythonRudpClientScript, String(remotePort)], {
+  const child = spawn(pythonInteropCommand(), ["-c", pythonRudpClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
     stdio: ["ignore", "pipe", "pipe"],
@@ -3420,7 +3474,7 @@ function spawnPythonRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, 
 }
 
 function spawnPythonRudpMessageClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
-  const child = spawn(pythonCommand, ["-c", pythonRudpMessageClientScript, String(remotePort)], {
+  const child = spawn(pythonInteropCommand(), ["-c", pythonRudpMessageClientScript, String(remotePort)], {
     cwd: cultcachePyRoot,
     env: { ...process.env, PYTHONPATH: cultcachePySrc },
     stdio: ["ignore", "pipe", "pipe"],
@@ -3517,7 +3571,7 @@ function spawnCSharpRudpMessageClient(remotePort: number): Omit<RunningPythonRud
 }
 
 function spawnRustRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
-  const child = spawn(rustBinaryPath, [
+  const child = spawn(rustInteropPeerPath(), [
     "rudp-dial-once",
     "--target-host", "127.0.0.1",
     "--target-port", String(remotePort),
@@ -3536,7 +3590,7 @@ function spawnRustRudpClient(remotePort: number): Omit<RunningPythonRudpPeer, "r
 }
 
 function spawnRustRudpMessageClient(remotePort: number): Omit<RunningPythonRudpPeer, "ready"> {
-  const child = spawn(rustBinaryPath, [
+  const child = spawn(rustInteropPeerPath(), [
     "rudp-dial-message-once",
     "--target-host", "127.0.0.1",
     "--target-port", String(remotePort),
@@ -3832,7 +3886,7 @@ async function runPythonCultMeshClient(port: number): Promise<any> {
     "  'peers': [{'peerId': peer.peer_id, 'roles': list(peer.roles)} for peer in peers],",
     "}))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -3857,7 +3911,7 @@ async function runPythonCultNetRawClient(port: number): Promise<any> {
     "  'shards': [{'shardId': shard.get('shardId'), 'epoch': shard.get('epoch')} for shard in shards.get('shards', [])],",
     "}))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -3894,7 +3948,7 @@ async function runPythonCultMeshNodeSync(port: number): Promise<any> {
     "  'note': note,",
     "}))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -3959,7 +4013,7 @@ async function runPythonCultMeshNodeEmit(port: number): Promise<any> {
     "  'note': note,",
     "}))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -4013,7 +4067,7 @@ async function runPythonCultNetSubscription(port: number): Promise<any> {
     "  'recordKey': change.get('document', {}).get('recordKey'),",
     "}))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
@@ -4067,7 +4121,7 @@ async function runPythonCultMeshPredictionReconcile(port: number): Promise<any> 
     "    'note': note,",
     "  }))",
   ].join("\n");
-  const { stdout } = await execFileAsync(pythonCommand, ["-c", script], {
+  const { stdout } = await execFileAsync(pythonInteropCommand(), ["-c", script], {
     cwd: cultcachePyRoot,
     env: {
       ...process.env,
