@@ -63,7 +63,7 @@ export class CultNetDocumentRegistry {
         : undefined;
       if (claimed) {
         throw new SchemaConflictError(schemaId, [schemaNameForBinding(holder), schemaName], "",
-          `CultNet ${claimed} is already bound to type "${holder.definition.type}" and cannot also be bound to type "${binding.definition.type}".`);
+          `CultNet ${claimed} is already bound to type "${holder.definition.type}"; type "${binding.definition.type}" (schema id "${schemaId}") cannot also be bound.`);
       }
     }
     this.#bindings.set(binding.definition.type, binding);

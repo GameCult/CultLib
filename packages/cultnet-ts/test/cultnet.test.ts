@@ -1663,6 +1663,7 @@ test("CultNet document registry binds one type per schema and refuses a second, 
         assert.equal(error.schemaId, ownerFirst ? schemaId : "id.note");
         assert.deepEqual(error.schemaNames, ownerFirst ? names : [...names].reverse());
         assert.equal(error.recordKey, "");
+        assert.ok(error.message.includes(`schema id "${error.schemaId}"`), error.message);
         return true;
       });
       // The refused binding left nothing behind: the schema still resolves to the first type.
