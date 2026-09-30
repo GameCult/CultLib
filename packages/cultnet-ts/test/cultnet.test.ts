@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { z } from "zod";
-import { encode } from "@msgpack/msgpack";
+import { decode as decodeMsgpack, encode } from "@msgpack/msgpack";
 import {
   CultCache,
   SingleFileMessagePackBackingStore,
@@ -2576,5 +2576,111 @@ test("a flush started after the server accepts a new Connect waits on the new se
   } finally {
     peerSocket.close();
     server.close();
+  }
+});
+
+test("server-mode transport admits a restarted client and keeps its session when a Connect is retransmitted", async () => {
+  const serverSocket = await bindUdpSocket();
+  const peerSocket = await bindUdpSocket();
+  const connectionId = 0x10203059;
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendPollMs: 1000,
+  });
+  let received: CultNetRudpPacket[] = [];
+  peerSocket.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const frames: string[] = [];
+  server.on("frame", (frame: { payload: Uint8Array }) => frames.push(Buffer.from(frame.payload).toString("utf8")));
+  const toServer = (packet: CultNetRudpPacket) =>
+    peerSocket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
+  const reliable = { reliable: true, ordered: true };
+  try {
+    const first = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+    const connect = first.createConnect(0, Buffer.from("same"));
+    toServer(connect);
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the first Accept");
+    first.receive(received.find((p) => p.packetType === "accept")!, 0);
+    const sent = [0, 1, 2].map((index) => first.send("schema", Buffer.from(`c${index}`), reliable));
+    sent.forEach(toServer);
+    await waitFor(() => frames.length === 3, "the first client's frames");
+
+    // A retransmitted Connect is a repeat: what was delivered stays delivered once.
+    toServer(connect);
+    toServer(sent[0]!);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(frames, ["c0", "c1", "c2"]);
+
+    // The same client restarted on the same address, connection id and payload.
+    received = [];
+    const second = new CultNetRudpSession({ connectionId, initialSequence: 7 });
+    toServer(second.createConnect(0, Buffer.from("same")));
+    await waitFor(() => received.some((p) => p.packetType === "accept"), "the restarted client's Accept");
+    second.receive(received.find((p) => p.packetType === "accept")!, 0);
+    toServer(second.send("schema", Buffer.from("after restart"), reliable));
+    await waitFor(() => frames.includes("after restart"), "the restarted client's frame");
+  } finally {
+    peerSocket.close();
+    server.close();
+  }
+});
+
+test("RUDP operation service admits a restarted client on the same address", async () => {
+  const server = await startCultNetOperationServer({
+    runtimeId: "sai-sidecar",
+    handler: request => ({
+      schemaVersion: "cultnet.operation_response.v0",
+      messageId: request.messageId,
+      serviceId: request.serviceId,
+      operation: request.operation,
+      status: "ok",
+      payloadSchema: "gamecult.eve.plugin_abi.response.v1",
+      payloadEncoding: "messagepack-base64",
+      payload: request.payload,
+      diagnostics: [],
+      sourceRuntimeId: "sai-sidecar",
+    }),
+  });
+  const connectionId = 0x43554c54;
+  const port = Number(new URL(server.endpoint).port);
+  const socket = await bindUdpSocket();
+  let session = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+  const answered: string[] = [];
+  socket.on("message", (wire) => {
+    const packet = decodeRudpPacket(wire);
+    const result = session.receive(packet, Date.now());
+    if (packet.packetType === "accept" || packet.reliable) {
+      socket.send(encodeRudpPacket(session.createAckForReceived(packet.sequence)), port, "127.0.0.1");
+    }
+    for (const frame of result.delivered) {
+      answered.push((decodeMsgpack(frame.payload) as { messageId: string }).messageId);
+    }
+  });
+  const toServer = (packet: CultNetRudpPacket) => socket.send(encodeRudpPacket(packet), port, "127.0.0.1");
+  const request = (messageId: string) => Buffer.from(encode(encodeCultNetMessageForWire({
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId,
+    serviceId: "sai.vn",
+    operation: "describe",
+    payloadSchema: "gamecult.eve.plugin_abi.request.v1",
+    payloadEncoding: "messagepack-base64",
+    payload: "gaZzY2hlbWE=",
+  } satisfies CultNetOperationRequestMessage)));
+  try {
+    toServer(session.createConnect(Date.now()));
+    await waitFor(() => session.connected, "the first Accept");
+    toServer(session.send("schema", request("before-restart"), { reliable: true, ordered: true }));
+    await waitFor(() => answered.includes("before-restart"), "the first answer");
+
+    session = new CultNetRudpSession({ connectionId, initialSequence: 7 });
+    toServer(session.createConnect(Date.now()));
+    await waitFor(() => session.connected, "the restarted client's Accept");
+    toServer(session.send("schema", request("after-restart"), { reliable: true, ordered: true }));
+    await waitFor(() => answered.includes("after-restart"), "the restarted client's answer");
+  } finally {
+    socket.close();
+    await server.close();
   }
 });
