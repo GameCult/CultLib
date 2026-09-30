@@ -17,7 +17,7 @@ namespace GameCult.Caching.Tests
         private const string OwnerId = "sha256:86186abf7d63d8a326c725d39a10f3a4db11b1e8698e8c0fcf6d9720031bc480";
         private const string SharedId = "shared.id";
 
-        [CultDocument("tests.compat_deck", "tests.compat_deck.v2", CompatibleSchemaIds = new[] { OldId })]
+        [CultDocument("tests.compat_deck", "tests.compat_deck.v2", CompatibleSchemaIds = new[] { OldId, OldId })]
         [MessagePackObject]
         public sealed class DeclaringDeck
         {
@@ -229,6 +229,31 @@ namespace GameCult.Caching.Tests
             using var cache = Open(path, Declaring);
             var current = cache.Get<DeclaringDeck>(D)!;
             Assert.That(cache.TryCommit(batch =>
+            {
+                batch.Expect(D, current);
+                batch.ExpectUnchanged();
+                batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e"));
+            }), Is.EqualTo(CultCommitOutcome.Committed));
+        }
+
+        // The directory store judges conditions against its manifest, whose record still sits under the older id.
+        [Test]
+        public void AConditionOnARecordUnderADeclaredOldIdHoldsInTheDirectoryStore()
+        {
+            var path = Path.Combine(_directory, "dir.cc");
+            var options = new CultCacheOpenOptions { Registry = Bare, UseDirectoryStore = true };
+            using (var cache = CultCacheMessagePack.Create(path, options))
+                cache.Commit(batch => batch.Upsert(typeof(BareDeck), new BareDeck { Name = "d" }, D));
+            var manifest = Read(path);
+            var entry = manifest.SchemaCatalog.Single();
+            entry.ContentHash = "stale";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, OldId };
+            manifest.Records.Single().SchemaId = OldId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+
+            using var declaring = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Declaring, UseDirectoryStore = true });
+            var current = declaring.Get<DeclaringDeck>(D)!;
+            Assert.That(declaring.TryCommit(batch =>
             {
                 batch.Expect(D, current);
                 batch.ExpectUnchanged();

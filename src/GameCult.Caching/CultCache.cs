@@ -3689,7 +3689,7 @@ namespace GameCult.Caching
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
                     continue;
-                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == Registry.CanonicalSchemaId(record.SchemaId))
+                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == record.SchemaId)
                     continue;
                 arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
             }
