@@ -711,7 +711,7 @@ class CultNetTests(unittest.TestCase):
         server = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=103, initial_sequence=100))
         connect = client.create_connect(0, b"join")
         accept = server.accept_connect(connect, 0)
-        reply = server.answer_repeated_connect(replace(connect, ack=accept.sequence), 1)
+        reply = server.accept_connect(replace(connect, ack=accept.sequence), 1)
         self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
         self.assertEqual(server.outstanding_reliable_packet_count, 0)
 
@@ -1146,6 +1146,78 @@ class CultNetTests(unittest.TestCase):
             accepts = {p.sequence for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT}
             self.assertEqual(len(accepts), 1)
             self.assertLessEqual(server.outstanding_reliable_packet_count, 1)
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_restarted_client_and_keeps_its_session_on_a_retransmit(self) -> None:
+        server, _, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x10203058)
+        connection_id = 0x10203058
+        reliable = CultNetRudpSendOptions(reliable=True, ordered=True)
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=50))
+            connect = first.create_connect(0, b"same")
+            to_server(connect)
+            server.receive_once()
+            first.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            sent = [first.send("schema", f"c{index}".encode(), reliable) for index in range(3)]
+            delivered = []
+            for packet in sent:
+                to_server(packet)
+                delivered.append(server.receive_once().payload)
+            self.assertEqual(delivered, [b"c0", b"c1", b"c2"])
+
+            # A retransmitted Connect is a repeat: what was delivered stays delivered once.
+            to_server(connect)
+            server.receive_once()
+            to_server(sent[0])
+            self.assertIsNone(server.receive_once(), "the retransmitted Connect reset the session")
+
+            # The same client restarted on the same address, connection id and payload.
+            drain_peer()
+            second = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=7))
+            to_server(second.create_connect(0, b"same"))
+            server.receive_once()
+            second.receive([p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0], 0)
+            to_server(second.send("schema", b"after restart", reliable))
+            self.assertEqual(server.receive_once().payload, b"after restart")
+        finally:
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_server_mode_admits_a_connect_from_a_new_endpoint(self) -> None:
+        server, server_socket, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x10203059)
+        other_socket = bind_udp_socket()
+        try:
+            to_server(peer.create_connect(0, b"a"))
+            server.receive_once()
+            drain_peer()
+
+            other = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=0x10203059, initial_sequence=9))
+            other_socket.sendto(encode_rudp_packet(other.create_connect(0, b"b")), server_socket.getsockname())
+            server.receive_once()
+            wire, _ = other_socket.recvfrom(65535)
+            other.receive(decode_rudp_packet(wire), 0)
+            self.assertTrue(other.connected, "the new endpoint was not admitted")
+            other_socket.sendto(
+                encode_rudp_packet(other.send("schema", b"from b", CultNetRudpSendOptions(reliable=True, ordered=True))),
+                server_socket.getsockname(),
+            )
+            self.assertEqual(server.receive_once().payload, b"from b")
+        finally:
+            other_socket.close()
+            peer_socket.close()
+            server.close()
+
+    def test_cultnet_rudp_flush_after_a_timeout_names_the_timeout(self) -> None:
+        server, _, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x1020305A)
+        try:
+            to_server(peer.create_connect(0, b"join"))
+            server.receive_once()
+            server.send("schema", b"unanswered")
+            self.assertTrue(server.check_timeout(0, now_ms=10**12))
+            with self.assertRaisesRegex(ConnectionError, "session timed out"):
+                server.flush_reliable(0.1)
         finally:
             peer_socket.close()
             server.close()
