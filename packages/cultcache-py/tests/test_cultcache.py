@@ -367,7 +367,7 @@ class CultCacheTests(unittest.TestCase):
                 [["a", "tests.x", "2026-09-30T00:00:00Z", msgpack.packb({"a": 1}, use_bin_type=True)]],
             ], use_bin_type=True))
             SingleFileMessagePackBackingStore(path).push_all(
-                [self._writer_record("a", "tests.new", "tests.x", self._writer_entry("tests.x", "tests.new", "fresh", ("tests.x",)))]
+                [self._writer_record("a", "tests.old", "tests.x", self._writer_entry("tests.x", "tests.new", "fresh", ("tests.x",)))]
             )
             catalog = msgpack.unpackb(path.read_bytes(), raw=False)[1]
             self.assertEqual([(entry[1], entry[3]) for entry in catalog], [("tests.new", "fresh")])

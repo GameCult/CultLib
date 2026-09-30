@@ -230,6 +230,7 @@ function catalogEntriesFor(
 ): CultCacheSchemaCatalogEntry[] {
   const entries: Array<{ entry: CultCacheSchemaCatalogEntry; registered: boolean }> = [];
   const byId = new Map<string, CultCacheEnvelope[]>();
+  const tiers = new Map<string, Array<{ envelope: CultCacheEnvelope; registered: boolean }>>();
   for (const { envelope, registered } of records) {
     const schemaId = schemaIdForEnvelope(envelope);
     const supplied = envelope.catalogEntry;
@@ -237,6 +238,7 @@ function catalogEntriesFor(
       supplied !== undefined && (supplied.schemaId === schemaId || (supplied.compatibleSchemaIds ?? []).includes(schemaId));
     entries.push({ entry: publishes && supplied ? supplied : defaultEntryFor(envelope), registered });
     byId.set(schemaId, [...(byId.get(schemaId) ?? []), envelope]);
+    tiers.set(schemaId, [...(tiers.get(schemaId) ?? []), { envelope, registered }]);
   }
 
   const lists = (entry: CultCacheSchemaCatalogEntry, schemaId: string): boolean =>
@@ -245,9 +247,14 @@ function catalogEntriesFor(
   for (const schemaId of [...byId.keys()].sort(compareOrdinal)) {
     const carrying = byId.get(schemaId)!;
     const recordKey = carrying.map((envelope) => envelope.key).sort(compareOrdinal)[0]!;
-    const types = [...new Set(carrying.map((envelope) => envelope.type))].sort(compareOrdinal);
-    if (types.length > 1) {
-      throw new SchemaConflictError(schemaId, types, recordKey);
+    // Records of one tier under one id are one type. A read-back record's type is its schema's name, so tiers are not compared.
+    for (const tier of [true, false]) {
+      const types = [
+        ...new Set(tiers.get(schemaId)!.filter((candidate) => candidate.registered === tier).map((candidate) => candidate.envelope.type)),
+      ].sort(compareOrdinal);
+      if (types.length > 1) {
+        throw new SchemaConflictError(schemaId, types, recordKey);
+      }
     }
 
     const ownRegistered = canonical(entries.filter((candidate) => candidate.registered && candidate.entry.schemaId === schemaId))[0];

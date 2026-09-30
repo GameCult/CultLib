@@ -181,20 +181,24 @@ def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultC
     envelope the caller supplied is registered, one read back from the file is arrived."""
     entries: list[tuple[CultCacheSchemaCatalogEntry, bool]] = []
     by_id: dict[str, list[CultCacheEnvelope]] = {}
+    tiers: dict[str, list[tuple[CultCacheEnvelope, bool]]] = {}
     for envelope, registered in records:
         schema_id = _schema_id_for(envelope)
         supplied = envelope.catalog_entry
         publishes = supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
         entries.append((supplied if publishes else _default_catalog_entry(envelope), registered))
         by_id.setdefault(schema_id, []).append(envelope)
+        tiers.setdefault(schema_id, []).append((envelope, registered))
 
     chosen: dict[str, tuple[CultCacheSchemaCatalogEntry, bool]] = {}
     for schema_id in sorted(by_id):
         carrying = by_id[schema_id]
         record_key = min(envelope.key for envelope in carrying)
-        types = sorted({envelope.type for envelope in carrying})
-        if len(types) > 1:
-            raise SchemaConflictError(schema_id, types, record_key)
+        # Records of one tier under one id are one type. A read-back record's type is its schema's name, so tiers are not compared.
+        for tier in (True, False):
+            types = sorted({envelope.type for envelope, registered in tiers[schema_id] if registered == tier})
+            if len(types) > 1:
+                raise SchemaConflictError(schema_id, types, record_key)
         own_registered = next(iter(canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)), None)
         own_arrived = canonical(entry for entry, registered in entries if not registered and entry.schema_id == schema_id)
         own_registered_all = canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)
