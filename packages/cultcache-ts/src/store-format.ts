@@ -14,11 +14,21 @@ export function isV1Snapshot(decoded: unknown): decoded is unknown[] {
 
   if (decoded[0] !== STORE_FORMAT_VERSION) {
     throw new Error(
-      `CultCache store format "${decoded[0]}" is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" only.`,
+      `CultCache store format ${describeHeader(decoded[0])} is not one this runtime reads; it reads "${STORE_FORMAT_VERSION}" only.`,
     );
   }
 
   return true;
+}
+
+/**
+ * A store header as a refusal may show it: echoed in the shape `cultcache.store.v<digits>`,
+ * and otherwise described only by its length, since the bytes are the store's.
+ */
+function describeHeader(header: string): string {
+  return /^cultcache\.store\.v[0-9]+$/u.test(header)
+    ? `"${header}"`
+    : `an unrecognised ${STORE_FORMAT_PREFIX}* header of ${new TextEncoder().encode(header).length} bytes`;
 }
 
 /** Refuses a persisted record with more slots than v1 defines, naming its key and schema id. */
