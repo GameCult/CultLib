@@ -1719,3 +1719,115 @@ fn a_response_that_is_too_large_to_send_is_named_emsgsize() -> Result<()> {
     );
     Ok(())
 }
+
+/// Every datagram waiting at `peer`, encoded as hex, one per line. A reliable
+/// packet's own sequence is drawn at random per session, so it is written as
+/// zero; everything else, the acknowledgement fields above all, is kept.
+fn datagrams_hex(peer: &RawPeer) -> Result<String> {
+    let mut lines = String::new();
+    for mut packet in peer.drain() {
+        if packet.reliable {
+            packet.sequence = 0;
+        }
+        for byte in cultnet_rs::encode_rudp_packet(&packet)? {
+            lines.push_str(&format!("{byte:02x}"));
+        }
+        lines.push('\n');
+    }
+    Ok(lines)
+}
+
+/// A closure sink answers at once, and the server sends exactly the datagrams it
+/// sent before a sink could answer later: a Pong, the put's acknowledgement,
+/// a snapshot response and its acknowledgement, and for a refused put the
+/// refusal and the goodbye. The bytes were recorded from the server before
+/// the reply handle existed.
+#[test]
+fn a_closure_sink_sends_the_same_datagrams_as_before_replies_could_wait() -> Result<()> {
+    let accepting = |_: CultMeshRudpRawDocumentReceipt| -> Result<()> { Ok(()) };
+    let mut server = CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        accepting,
+        Source::documents(vec![document("held", vec![1, 2, 3])]),
+        Clock::new(75_000),
+        Default::default(),
+    )?;
+    let mut peer = RawPeer::connect(&mut server, 80)?;
+    let mut seen = String::new();
+    let ping = peer.session.create_ping(b"hi".to_vec());
+    peer.send_packet(&ping)?;
+    server.poll_once()?;
+    seen += &datagrams_hex(&peer)?;
+    peer.send(&CultNetMessage::DocumentPutRaw {
+        message_id: "put".into(),
+        document: document("put", vec![4, 5, 6]),
+    })?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    seen += &datagrams_hex(&peer)?;
+    peer.send(&CultNetMessage::SnapshotRequest {
+        message_id: "read".into(),
+        schema_ids: None,
+        record_keys: None,
+    })?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    seen += &datagrams_hex(&peer)?;
+
+    let refusing = |_: CultMeshRudpRawDocumentReceipt| -> Result<()> {
+        anyhow::bail!("injected sink failure CANARY-7f3a")
+    };
+    let mut server = CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        refusing,
+        Source::default(),
+        Clock::new(76_000),
+        Default::default(),
+    )?;
+    let mut peer = RawPeer::connect(&mut server, 81)?;
+    peer.send(&CultNetMessage::DocumentPutRaw {
+        message_id: "put".into(),
+        document: document("put", vec![4, 5, 6]),
+    })?;
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the closure refuses the put");
+    };
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::SinkRefused("injected sink failure CANARY-7f3a".into())
+    );
+    seen += &datagrams_hex(&peer)?;
+
+    assert_eq!(
+        seen,
+        concat!(
+            // Pong
+            "434e52300006002b00000050000000000000006400000000000000000000000000020700636f6e74726f6c6869
+",
+            // the put's acknowledgement
+            "434e52300004002b00000050000000000000006500000001000000000000000000000700636f6e74726f6c
+",
+            // the snapshot response
+            "434e52300003032a00000050000000000000006600000003000000000000000000f50600736368656d6183ad",
+            "736368656d6156657273696f6ed92063756c746e65742e736e617073686f745f726573706f6e73655f7261",
+            "772e7630a96d6573736167654964a472656164a9646f63756d656e74739189a8736368656d614964ab7465",
+            "73742e7261772e7631a97265636f72644b6579a468656c64a873746f7265644174b4323032362d30392d30",
+            "335430303a30303a30305aaf7061796c6f6164456e636f64696e67ab6d6573736167657061636ba77061796c",
+            "6f6164c403010203af736f7572636552756e74696d654964ac72756e74696d652d68656c64ad736f757263",
+            "654167656e744964c0aa736f75726365526f6c65c0a474616773c0
+",
+            // the snapshot request's acknowledgement
+            "434e52300004002b00000050000000000000006600000003000000000000000000000700636f6e74726f6c
+",
+            // the refusal, acknowledging nothing
+            "434e52300003002a00000051000000000000000000000000000000000000000000640600736368656d6185ad",
+            "736368656d6156657273696f6eb063756c746e65742e6572726f722e7630a56572726f72d9207468652063",
+            "6174616c6f6720726566757365642074686520646f63756d656e74ab726f7574696e6748696e74c0a4636f",
+            "6465c0a764657461696c73c0
+",
+            // the goodbye
+            "434e52300007002b00000051000000000000000000000000000000000000000000180700636f6e74726f6c",
+            "73657373696f6e20726566757365642061207061636b6574
+",
+        )
+    );
+    Ok(())
+}
