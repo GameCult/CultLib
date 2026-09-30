@@ -369,6 +369,28 @@ stripped (probe). Other findings:
 refuses v3 also contains C2a, so no released reader strips ids. C0 and C1 are never released on their own.
 Raw and cross-runtime writers that cannot see ids stay sticky-only. Fix batch 4 is in Hands.
 
+**C2a F2 ruled (operator, 2026-09-30, accepting Self's recommendation B): records nobody claims are carried
+untouched.** A store may hold records under a schema id that no local type owns or lists as compatible, for
+example after a rename that declared nothing.
+- Both store kinds carry those records byte for byte under their own id. The catalog lists them as foreign
+  records.
+- Writes to other records proceed.
+- A write that would overwrite or relabel an unclaimed record is refused with a typed schema conflict.
+- The single-file store's whole-view write stops relabelling such records onto local types. The directory
+  store stops refusing every commit while it holds one.
+- Why: batches 8-9 showed that the danger is rewriting a record under a new identity (F1, F6), not an
+  undeclared old id. Batch 10's owner-beats-lister rule makes declaring an old id cheap anyway.
+- Self's first lean, "refuse loudly" (A), is superseded.
+
+**C2a batches 9-10 (Soul pass on `fdb8a60a`, 2026-09-30): hold.**
+- **F6, A-B-A lost update on the single-file store.** Ruled by Self: any write that changes a record's bytes or
+  schema id mints a later `storedAt`.
+- **F8, batch 9 over-refused.** An owner beats a lister, so v1 and v2 coexist.
+- **F9.** Compatible ids compare as a set.
+- **F10.** Typed refusal errors in TS and Python.
+- Batch 10 is in Hands.
+- **F7 (`AsSchemaAlias` order) is an open operator question.**
+
 **Operator rulings, 2026-09-30:**
 - **Duplicate unique-index values do not load** ("Duplicate indices should not load"). This covers
   plain records too, so R6-for-indexes becomes one general rule:
