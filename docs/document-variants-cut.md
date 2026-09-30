@@ -546,3 +546,151 @@ dependency-level for most, read in detail for Aetheria and AetheriaEve).
   `Aetheria.cc`. Raw readers refuse through the empty payload plus C0/C1: `CultMesh`
   single-file reads, AetheriaEve's directory-page reader (the directory store refuses
   variants, Q6), and Mimir (writer only).
+
+## Schema identity across runtimes (Imagination, 2026-09-30)
+
+Probed at CultLib `hands/variants-c2a` 92d9e138. The probe ran on Yggdrasil in `ack1d-interop:2` from a scratch branch, which has since been deleted. Sources: `scratchpad/schema-identity-probe/`. Full output: `scratchpad/probe2.log` (store round trip, section 1), plus a wire rerun shown inline below. Every probe used one declared schema: the interop note, name `cultcache.interop-note`, version `cultcache.interop_note.v1`, with six members.
+
+### 1. How each runtime derives a schema id (probed)
+
+| Runtime | Id it stamps | Derived from | Carries name / version / content hash? |
+|---|---|---|---|
+| C# | `sha256:eafe3e…b249` | `sha256("name\|version\|slot:Member:ClrType:value/ref:target:one/many\|…")`. Recomputing it by hand gives the same id. | Store catalog: name, version, `contentHash = sha256(canonical JSON)`, canonical JSON, members. Wire: `schemaName`, `schemaVersion`, `schemaContentHash` are all filled. |
+| TS | `cultcache.interop-note` | `definition.schemaId ?? schemaName ?? type`. There is no hash. With no declared version, the version defaults to `<name>.v1`. | contentHash is whatever the author declares. The interop test declares the id string itself. |
+| Python | `cultcache.interop-note` | `schema_id or type`. There is no hash. contentHash defaults to the id. | Same as TS. |
+| Rust | `cultcache.interop-note` | `#[cultcache(type=…)]`. There is no hash. `schema = "CultCacheInteropNote"` never reaches the catalog. | The catalog entry it writes is fabricated: version `"<type>.v1"` (`cultcache.interop-note.v1`, not the declared `…_note.v1`), `members: []`, `contentHash = type`. |
+| Kotlin (CultMesh only; it has no store) | `cultcache.interop_note.v1` | `codec.schemaVersion` | Nothing else. |
+
+On the C# fingerprint:
+- **The id stays the same** when only the CLR class or namespace changes (V1).
+- **The id changes** when a member is renamed (V2), a slot is appended (V3), `string[]` becomes `List<string>` (V4), the version string changes (V5), or a slot is removed (V6).
+- **V2 and V4 produce identical wire bytes.** MessagePack slot arrays carry neither member names nor CLR collection types. So the fingerprint witnesses the C# declaration, not the wire layout.
+
+The C# registry already refuses two CLR types for one `(name, version)` in a process. The probe crashed on exactly that when V6 and the base type shared an assembly. Inside C#, `(name, version)` is already the ownership key, and the hash adds nothing to ownership.
+
+### 2. Wire parity for identity does not hold (probed)
+
+No two runtimes agree, and C# is the only one that hashes. The CultNet interop harness is the parity witness in CI. It never exercises the C# default: `tests/GameCult.Networking.InteropPeer/Program.cs:77,201,1183-1196` binds every type with `ForDocument(schemaId: <readable JSON-schema URL>)`.
+
+What reads what today:
+
+- **Stores (`.cc`). C#, Rust, TS and Python all read each other's notes.** It works only because each reader, when the id is unknown, falls back to the embedded catalog's **schemaName**: C# `CultCache.cs:653` `BySchemaName`, TS `cult-cache.ts:827`, Rust `resolve_registered_type` `lib.rs:2754`. Round trip, C# → X → C#:
+  - Each writer stamps its own record with its own id.
+  - **A C# rewrite restamps every other runtime's record to `sha256:…`** and drops their catalog entries.
+  - **A Rust write destroys the C# catalog entry for the id it read.** The entry becomes name=`cultcache.interop-note`, version=`sha256:…eafe….v1`, contentHash=`sha256:…eafe…`, canonical JSON with `schemaName: "sha256:…"`, `members: []`. The C# record bytes survive, but their description is lost. That breaks F2 ("never relabels…") at the catalog level, and it is a defect whatever this fork decides.
+  - TS and Python kept the C# catalog entry intact.
+- **Wire (CultNet raw record carrying a C# `sha256` id):**
+
+| Reader | `sha256:…` | `cultcache.interop-note` (name) | `cultcache.interop_note.v1` (version) |
+|---|---|---|---|
+| TS `CultNetDocumentRegistry.applyRawDocumentPut` (probed) | refused | ok | refused |
+| Kotlin `CultCache.putRaw` (probed) | refused | ok (documentType) | ok |
+| C# `CultNetDocumentRegistry.DeserializeRawDocument` (probed) | ok | ok | ok, **and `gamecult.unknown.v1` → `Note` too** |
+| Python `cultnet_py` `resolve_document_for_raw_record` (read only) | only if declared | ok | ok, plus payload sniffing |
+| Rust `pull_rudp_catalog_snapshot` (read only, per the Eyes sweep) | dropped silently | — | strips `.vN` and matches the type |
+
+C# accepts any id because `TryResolveDescriptorBySchemaAlias` and `TryResolveDescriptorByPayloadSchema` (`CultNetDocumentRegistry.cs:755-830`) read slot 0 of the payload as a schema version. Python does the same (`replication.py:160-196`). **Shape routing and aliasing are still live in C# and Python CultNet on c2a**, and so is C# request matching `CultNetSchemaAliasMatching` (`CultNetDatabase.cs:52-89`). F7 has not reached them.
+
+- **The C# wire id is readable only when the binding is overridden.** The probe showed `ForDocument<Note>(schemaId: "cultcache.interop-note")` emits that id with the same payload, name, version and contentHash. `CultMesh.CreateCultNetDocumentRegistry` (`src/GameCult.Mesh/CultMeshDocumentRegistries.cs:69`) never overrides it, so every C# CultMesh host publishes `sha256` ids.
+
+### 3. Live cross-runtime paths that depend on the fallback
+
+This section comes from the Eyes sweep. I spot-checked the Hermodr lines, the Odin rule and `CultMeshDocumentRegistries.cs`; the rest I only read. Every one of these paths is **TS reader → C# host (the Aetheria daemon in `F:\Projects\AetheriaEve`)**.
+
+| # | Consumer | Asks for | Works via | Under C1 |
+|---|---|---|---|---|
+| 1 | `EveElectron/src/cultmesh-provider-client.mjs:129-143`, started by `AetheriaEve/Aetheria.Rts.Web/Electron/main.ts:65` | `gamecult.eve.provider_advertisement.v1`, `…surface.v1`, `gamecult.fields.*.v1`, `…command_receipt.v1`, `gamecult.cultmesh.cdn.asset_blob.v1` | cultmesh-ts HELD `firstRecordAtKey` | Exact match. The exception is `cdn.asset_blob.v1`: **no writer anywhere declares it**, so that read needs a declaration. |
+| 1b | same file, lines 94-108 (command put) | `gamecult.eve.command_invocation.v1` | C# inbound alias (g), probably | Exact match |
+| 2 | `AetheriaEve/Aetheria.Rts.Web/Electron/aetheria-cultmesh.ts:138-147, 345-406` (only the verify-stage7* scripts use it) | `gamecult.aetheria.*.v1`, `gamecult.fields.*.v1` | first-record fallback | Exact match |
+| 3 | `Hermodr/src/hermodr-daemon.cjs:1335-1363` | provider state, surfaces, CDN | Its own `|| candidates[0]` / `|| documents[0]`, plus C# request alias (f) | Exact match. Delete both fallbacks. |
+| 4 | `AetheriaEve/scripts/aetheria-browser-provider-witness.ts:49-60` (a witness, not product code) | eve schemas | cultmesh-browser `recordMatchesSchema` name/version arms | Exact match |
+| 5 | `aetheria-cultmesh.ts:408-411`, local `.cc` read | same ids | none: probably already broken (unverified) | still a store-path question |
+
+**Paths that already work without a fallback, because everyone hand-stamps `<name>.vN`:**
+- The Aetheria daemon and Gjallar hand-stamp `.v1` puts to Odin: `Program.cs:4574-4830` and `Gjallar/Program.cs:3040-3080`.
+- Odin **refuses any id without `.vN`**: `Odin/crates/odin-daemon/src/main.rs:1310-1326`.
+- Rust hosts bind `.vN` through `cultmesh_documents!`: Ghostlight, Epiphany, Muninn.
+- Kotlin uses its schemaVersion.
+- The Eve C# declaration itself reads `[CultDocument("gamecult.eve.provider_advertisement", SchemaId)]` with `const SchemaId = "gamecult.eve.provider_advertisement.v1"`. Authors already treat the version string as the id.
+
+Scope flag: every broken consumer lives in `AetheriaEve`, which the CultCache campaign ruled "taxidermy". The operator should confirm those paths are live consumers of this campaign before any cut is shaped for them.
+
+Stored data:
+- `Aetheria/GameData/Aetheria.cc`, `run.cc` and `player.cc` hold 21 C# schemas under `sha256` ids. The Eyes sweep found only C# readers.
+- The versions there are the bare string `"1"`: `[CultDocument("aetheria.faction", "1")]`. So a version string is not globally unique across the estate.
+- TS stores (Bifrost, VoidBot, weksa, Stonks) are TS-only and hold readable ids.
+- Odin's Rust store holds `.vN` ids.
+
+### 4. What the C# fingerprint protects
+
+A C#-to-C# store read. A record whose declaration drifted misses the exact id and falls to the persisted-catalog comparison: `CompatibleDrift`, or refused as incompatible (`CultCache.cs:900-936`).
+
+Across runtimes it protects nothing today:
+- The other runtimes do not compute it.
+- Their content hashes are placeholder strings.
+- The C# wire receiver accepts any id through payload sniffing (probed).
+- The hash reacts to renames and CLR collection spellings, which do not change wire bytes (probed V2, V4).
+
+### Fork F-ID: what names a schema across runtimes
+
+**(A) Every runtime computes the C# semantic fingerprint; readers name schemas by definition.**
+- Every non-C# runtime has to emit C# type spellings: `System.String[]` versus `System.Collections.Generic.List<System.String>`.
+- Rust has to start declaring members and versions at all.
+- String-named readers can no longer name a schema. Eve Electron and Hermodr read ids from provider advertisements.
+- Odin refuses the ids outright (`.vN` rule).
+- Every TS, Python and Rust store holds readable ids. Under no-relabel those records become permanently held unless each runtime lists its old ids.
+- Gain: a layout witness that is still over-sensitive (V2 and V4 change the id with no wire change).
+- Stored data: Aetheria is untouched; every non-C# store is orphaned.
+- Not recommended.
+
+**(B) Readers match the declared `(schemaName, schemaVersion)` pair the envelope carries.**
+- The C# wire already carries both. Store catalogs carry both.
+- Two identity strings stay in play: the id for storage, the pair for lookup. That is a split owner.
+- `sha256` ids still reach Odin, which refuses them.
+- The version alone is ambiguous (Aetheria's `"1"`), so every reader API has to take a pair instead of the one string readers pass today.
+- Rust writes a fabricated version, so pair matching against a Rust host fails until Rust declares versions.
+- Layout protection is only as good as a contentHash comparison, and no runtime but C# computes a real one.
+- Stored data: unchanged, and nothing is relabelled. Resolution becomes pair matching against the catalog, which is a formalised form of today's schemaName fallback.
+
+**(C) C# puts the readable id on the wire, and the id is the declared version string `<name>.v<N>`.**
+
+This is what Odin enforces, Rust and Kotlin use, and Eve and Gjallar already hand-stamp.
+- C1, wire only:
+  - `ForDocument` and `CultMesh.CreateCultNetDocumentRegistry` default the binding id to `descriptor.SchemaVersion`.
+  - Registering a wire binding whose version lacks `.vN` is refused. Aetheria's `"1"` types are not on the wire today.
+  - Then delete the HELD first-record fallback (cultmesh-ts), Hermodr's two fallbacks, the name and version arms of cultmesh-browser `recordMatchesSchema`, C# `TryResolveDescriptorBySchemaAlias`, payload sniffing and `CultNetSchemaAliasMatching`, and the Python CultNet alias map and sniffing. That finishes F7 on the wire.
+- C2, the store as well, as a later cut: C# stamps new writes with the version id and resolves an old `sha256` record by the type's own **computed** former fingerprint. That is a derivation, not an alias. Where a version string changes (Aetheria's `"1"` → `aetheria.faction.v1`), the old id goes into the existing `CompatibleSchemaIds`.
+- The fingerprint is demoted to `schemaContentHash`, which the wire already carries. It stays a C#-to-C# drift witness and does not decide identity.
+- Costs:
+  - C#: the default in two files, plus deleting the alias and sniffing paths.
+  - TS, Hermodr and Python: deletions only.
+  - Rust and Kotlin: none.
+  - Mixed-version C# peers: an old host sends `sha256` and a new receiver without sniffing refuses it, so C# peers upgrade together.
+  - Eve Electron `cdn.asset_blob.v1`: needs a declaring writer.
+- Stored data: C1 changes nothing on disk. Under C2, Aetheria's catalogs are read unchanged and records are restamped only when C# rewrites records it understands, which F2 allows. TS, Rust and Odin stores are untouched.
+
+**Recommendation: C1 now; decide C2 separately.** C1 is the only option where one string names a schema on every runtime and at Odin, where every reader already asks for that string, and where the work is almost entirely deletion. It makes the F7 retirement possible on the wire, because readers no longer need a fallback to find their records. Aetheria's `.cc` files are untouched. B keeps the split and A breaks every readable-id store. Separately from F-ID, the Rust catalog-destruction defect (§2) and the live C# and Python CultNet aliasing should be admitted as findings or follow-ups whatever is ruled.
+
+**Sub-questions for the operator:**
+- F-ID.1: Is the id the version string (`<name>.vN`, as Odin, Rust, Kotlin and Eve do), or `schemaName`, which CultLib's own TS and Python tests use and which is also TS's default?
+- F-ID.2: Are the AetheriaEve consumers live for this campaign?
+- F-ID.3: Should C2 (store identity) be mapped now, or deferred until a non-C# reader of a C# store exists?
+
+### Probed versus read
+
+- **Probed:**
+  - All C# ids and variants, and the hand-recomputed fingerprint.
+  - The TS and Python default ids.
+  - Rust's id and catalog entry, from store bytes.
+  - Kotlin's id and its accept/refuse behaviour.
+  - Store round trips C#→Rust/Python/TS→C#, with bytes, including the C# restamp and the Rust catalog destruction.
+  - C# wire record bytes, default and overridden.
+  - C# CultNet accepting any id.
+  - TS CultNet exact-id behaviour.
+- **Read only:**
+  - Python CultNet aliasing and sniffing, and Rust `pull_rudp_catalog_snapshot` dropping unknown records.
+  - C# request alias matching (f).
+  - Every consumer path in §3, from the Eyes sweep. I spot-checked Hermodr 1335-1363, Odin 1310-1326, `CultMeshDocumentRegistries.cs:69` and the Eve declaration.
+  - Path 1b/2b's dependence on (g).
+  - Path 5 being broken.
+  - The Aetheria `.cc` catalogs were decoded from the files, with no git.
