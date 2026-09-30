@@ -5262,10 +5262,49 @@ namespace GameCult.Networking.Tests
 #pragma warning restore CS0618
         }
 
-        [Test]
-        public void CultMeshRudpClient_DefaultBindAllowsRemoteRoutes()
+        private static string? RudpClientBoundHost(string endpoint, string? bindHost = null)
         {
-            Assert.That(new CultMeshRudpSocketOptions().BindHost, Is.EqualTo("0.0.0.0"));
+            using var client = CultMesh.CreateRudpClient(
+                "csharp-cultmesh-bind-client",
+                0x10203060u,
+                endpoint,
+                new CultMeshRudpSocketOptions { BindHost = bindHost });
+            return client.Profile.Transports[0].Host;
+        }
+
+        // A client bound to loopback cannot send to another host on Windows, so a client for a
+        // remote endpoint binds the unspecified address of its family.
+        [Test]
+        public void CultMeshRudpClient_ForARemoteEndpoint_BindsTheUnspecifiedAddress()
+        {
+            Assert.That(RudpClientBoundHost("rudp://10.77.0.1:17872"), Is.EqualTo("0.0.0.0"));
+            Assert.That(RudpClientBoundHost("rudp://[2001:db8::1]:17872"), Is.EqualTo("::"));
+        }
+
+        [Test]
+        public void CultMeshRudpClient_ForALoopbackEndpoint_BindsLoopback()
+        {
+            Assert.That(RudpClientBoundHost("rudp://127.0.0.1:17872"), Is.EqualTo("127.0.0.1"));
+            Assert.That(RudpClientBoundHost("rudp://[::1]:17872"), Is.EqualTo("::1"));
+        }
+
+        [Test]
+        public void CultMeshRudpClient_BindsAnExplicitBindHostWhateverTheEndpoint()
+        {
+            Assert.That(RudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1"), Is.EqualTo("127.0.0.1"));
+            Assert.That(RudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0"), Is.EqualTo("0.0.0.0"));
+        }
+
+        [Test]
+        public void CultMeshRudpServer_BindsEveryIPv4InterfaceUnlessToldOtherwise()
+        {
+            using var anywhere = CultMesh.CreateRudpServer("csharp-cultmesh-bind-server", 0x10203061u);
+            using var loopback = CultMesh.CreateRudpServer(
+                "csharp-cultmesh-bind-server",
+                0x10203062u,
+                new CultMeshRudpSocketOptions { BindHost = "127.0.0.1" });
+            Assert.That(anywhere.Profile.Transports[0].Host, Is.EqualTo("0.0.0.0"));
+            Assert.That(loopback.Profile.Transports[0].Host, Is.EqualTo("127.0.0.1"));
         }
 
         [Test]
