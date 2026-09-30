@@ -4985,14 +4985,31 @@ mod tests {
             stored_at: "2026-09-30T00:00:00Z".into(),
             schema_id: Some("tests.other".into()),
         };
+        // An older entry that lists the id: the entry that owns the id is the one laid back.
+        let lister = PersistedSchemaCatalogEntry(
+            "sha256:older".into(),
+            "tests.note".into(),
+            "tests.note_v6".into(),
+            "sha256:older".into(),
+            String::new(),
+            vec!["sha256:older".into(), "sha256:csharp".into()],
+            Vec::new(),
+        );
         for whole_store in [false, true] {
             let temp = tempfile::tempdir()?;
             let path = temp.path().join("store.msgpack");
             let record = PersistedRecord("a".into(), "sha256:csharp".into(), "2026-09-30T00:00:00Z".into(), b"one".to_vec());
-            std::fs::write(&path, rmp_serde::to_vec(&PersistedStoreSnapshot("cultcache.store.v1".into(), vec![held.clone()], vec![record]))?)?;
+            std::fs::write(
+                &path,
+                rmp_serde::to_vec(&PersistedStoreSnapshot("cultcache.store.v1".into(), vec![lister.clone(), held.clone()], vec![record]))?,
+            )?;
             let mut store = SingleFileMessagePackBackingStore::new(&path);
             if whole_store {
+                // As a Rust cache holds it after a pull: under the registered type that reads the schema by name.
                 let mut entries = store.pull_all()?;
+                for entry in &mut entries {
+                    entry.r#type = "tests.rust_note".into();
+                }
                 entries.push(own.clone());
                 store.push_all(&entries, PushAllOptions::default())?;
             } else {
@@ -5004,6 +5021,27 @@ mod tests {
             assert_eq!(rmp_serde::to_vec(entry)?, rmp_serde::to_vec(&held)?, "whole store: {whole_store}");
             assert!(written.1.iter().any(|entry| entry.0 == "tests.other"), "its own id is described");
         }
+        Ok(())
+    }
+
+    // Only a file that is not there is an empty store; any other failure to read it is an error, so a write never replaces a
+    // file it could not read.
+    #[test]
+    fn a_store_path_that_cannot_be_read_is_an_error_not_an_empty_store() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        std::fs::create_dir(&path)?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        assert!(store.pull_all().is_err(), "a directory is not an empty store");
+        let own = CultCacheEnvelope {
+            key: "b".into(),
+            r#type: "tests.other".into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("tests.other".into()),
+        };
+        assert!(store.push(&own).is_err());
+        assert!(path.is_dir(), "the path is left as it was");
         Ok(())
     }
 
