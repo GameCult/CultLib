@@ -1,5 +1,18 @@
 # CultNet RUDP: Acknowledged means delivered, one watermark owns ordered delivery, and a write belongs to its session
 
+**PIVOT, 2026-09-30 (operator): RUDP is retired in favour of QUIC.** Operator: "RUDP really ballooned into
+maintaining a robust custom transport across runtimes, when it started as just 'hey, let's do LiteNetLib but
+better'. Is there any point maintaining it when we have QUIC?" and then "Yeah, pivot to QUIC adoption, I ain't
+gonna let sunk costs take the wheel."
+- **Lands:** Cut D, still in progress. It fixes live crashes: a spoofed datagram crashing Node, a malformed frame
+  killing Python's server, C# stale peers corrupting sessions.
+- **Parked, not built:** Cut F, Cut 2 (held on F), Cut 4, Cut K and K1 (including the Kotlin resend-loop gap), Cut 7
+  and the receipts port. Nothing of theirs exists to tag, so this map is their record.
+- Defects found in RUDP from here on are fixed only if they are live crashes or data loss, until the QUIC campaign
+  sets RUDP's retirement.
+- The "CultNet over QUIC" campaign is new, so it opens as a typed Eureka campaign in the Huginn-backed session, not
+  as a prose map here.
+
 Status: cut map, Imagination pass 3, 2026-09-30. Pass 3 maps the four rulings below, re-maps Cuts 1c and
 4, and adds Cut F (FORWARD-TSN), Cuts 6a-6c (receipts), Cut 7 (expiry, if Q-A8), Cut K (Kotlin), Cut 2c (the
 C# fragment bound) and Cut D (a failed send to one peer stays that peer's loss). The text of Cuts 1, 1b, 2
