@@ -394,6 +394,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
     let options = CultMeshRudpDocumentServerOptions {
         max_admitted_payload_bytes: encoded.len() * 2,
         max_admitted_payload_bytes_per_session: encoded.len(),
+        max_snapshot_response_bytes: encoded.len(),
         ..Default::default()
     };
     let sink = Sink::default();
