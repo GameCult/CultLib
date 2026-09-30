@@ -23,13 +23,15 @@ use crate::CultNetTransportProfile;
 use crate::CultNetTransportProtocol;
 use crate::CultNetTransportStats;
 use crate::CultNetWireContract;
+use crate::GAMECULT_MEDIA_CHANNEL;
+use crate::GAMECULT_MEDIA_MAX_WIRE_BYTES;
 use crate::create_reconnect_policy;
 use crate::decode_cultnet_message_from_slice;
 use crate::encode_cultnet_message_to_vec;
 
 const RUDP_MAGIC: [u8; 4] = [0x43, 0x4e, 0x52, 0x30];
 const RUDP_VERSION: u8 = 0;
-const RUDP_FIXED_HEADER_BYTES: usize = 36;
+pub(crate) const RUDP_FIXED_HEADER_BYTES: usize = 36;
 pub const CULTNET_RUDP_DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS: usize = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW: usize = 4_096;
@@ -468,7 +470,7 @@ impl CultNetRudpSession {
         if options.ordered && !options.reliable {
             return Err(anyhow!("RUDP ordered delivery requires reliability"));
         }
-        self.require_payload_size(payload.len())?;
+        self.require_payload_size(channel_id, payload.len())?;
         // Reclaim deadline-passed sends before measuring window capacity, so an
         // expiring stream cannot be refused for a backlog it no longer owns.
         self.purge_expired_reliable(options.now_ms);
@@ -1003,7 +1005,7 @@ impl CultNetRudpSession {
         packet: &CultNetRudpPacket,
     ) -> Result<Option<(CultNetRudpDeliveredFrame, bool, u32)>> {
         if packet.fragment_count == 0 {
-            self.require_payload_size(packet.payload.len())?;
+            self.require_payload_size(&packet.channel_id, packet.payload.len())?;
             return Ok(Some((
                 CultNetRudpDeliveredFrame {
                     channel_id: packet.channel_id.clone(),
@@ -1055,7 +1057,7 @@ impl CultNetRudpSession {
                     .sum::<usize>()
             })
             .unwrap_or(0);
-        if let Err(error) = self.require_payload_size(buffered_bytes + packet.payload.len()) {
+        if let Err(error) = self.require_payload_size(&packet.channel_id, buffered_bytes + packet.payload.len()) {
             self.fragment_buffers.remove(&key);
             return Err(error);
         }
@@ -1113,11 +1115,12 @@ impl CultNetRudpSession {
         )))
     }
 
-    fn require_payload_size(&self, payload_bytes: usize) -> Result<()> {
-        if self
-            .max_payload_bytes
-            .is_some_and(|max_payload_bytes| payload_bytes > max_payload_bytes)
-        {
+    /// The session's cap, tightened on the media channel to the ceiling every
+    /// media record is held to (`GAMECULT_MEDIA_MAX_WIRE_BYTES`), so media
+    /// reassembly never buffers more than a record may be.
+    fn require_payload_size(&self, channel_id: &str, payload_bytes: usize) -> Result<()> {
+        let limit = channel_payload_limit(channel_id, self.max_payload_bytes);
+        if limit.is_some_and(|limit| payload_bytes > limit) {
             return Err(anyhow!("RUDP payload exceeds max_payload_bytes"));
         }
         Ok(())
@@ -2309,6 +2312,18 @@ pub struct RudpTransportProfileOptions {
     pub media_delivery: Option<CultNetTransportDelivery>,
 }
 
+/// The largest payload a channel accepts: the session-wide cap, tightened on
+/// the media channel to the media ceiling.
+fn channel_payload_limit(channel_id: &str, session_limit: Option<usize>) -> Option<usize> {
+    if channel_id == GAMECULT_MEDIA_CHANNEL {
+        Some(session_limit.map_or(GAMECULT_MEDIA_MAX_WIRE_BYTES, |limit| {
+            limit.min(GAMECULT_MEDIA_MAX_WIRE_BYTES)
+        }))
+    } else {
+        session_limit
+    }
+}
+
 pub fn create_rudp_transport_profile(
     runtime_id: impl Into<String>,
     options: RudpTransportProfileOptions,
@@ -2358,23 +2373,16 @@ pub fn create_rudp_transport_profile(
                     reliable_expire_after_ms: None,
                 },
                 CultNetTransportChannel {
-                    channel_id: "media".to_string(),
+                    channel_id: GAMECULT_MEDIA_CHANNEL.to_string(),
                     delivery: options
                         .media_delivery
                         .unwrap_or(CultNetTransportDelivery::Reliable),
                     ordering: CultNetTransportOrdering::Unordered,
-                    max_payload_bytes: options.max_payload_bytes,
-                    max_fragment_bytes: options.max_fragment_bytes,
-                    max_pending_reliable_packets: options.max_pending_reliable_packets,
-                    reliable_expire_after_ms: options.media_reliable_expire_after_ms,
-                },
-                // Audio beside lossy video on one session: reliable, but a packet
-                // older than the media expiry is not worth a retransmit.
-                CultNetTransportChannel {
-                    channel_id: "audio".to_string(),
-                    delivery: CultNetTransportDelivery::Reliable,
-                    ordering: CultNetTransportOrdering::Unordered,
-                    max_payload_bytes: options.max_payload_bytes,
+                    max_payload_bytes: channel_payload_limit(
+                        GAMECULT_MEDIA_CHANNEL,
+                        options.max_payload_bytes.map(|limit| limit as usize),
+                    )
+                    .map(|limit| limit as u32),
                     max_fragment_bytes: options.max_fragment_bytes,
                     max_pending_reliable_packets: options.max_pending_reliable_packets,
                     reliable_expire_after_ms: options.media_reliable_expire_after_ms,
@@ -2544,7 +2552,7 @@ fn channel_send_options(
         // The one channel whose delivery a caller chooses. Media that has gone
         // stale is worth dropping, not retransmitting: a reliable media channel
         // under loss adds load exactly when the link has least to give.
-        "media" | "audio" => CultNetRudpSendOptions {
+        "media" => CultNetRudpSendOptions {
             reliable: matches!(delivery, CultNetTransportDelivery::Reliable),
             ordered: false,
             sequenced: false,
