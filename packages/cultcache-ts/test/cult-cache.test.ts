@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { exec, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve, delimiter } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
+import { StoreUnreadableError } from "../src/store-format";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
@@ -1577,7 +1578,11 @@ test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it 
   ]) {
     const file = await copyVector(dir, vector, "store.msgpack");
     const before = await readFile(file);
-    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll(envelopes), /is not readable/u, vector);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll(envelopes),
+      (error) => error instanceof StoreUnreadableError && /is not readable/u.test(error.message),
+      vector,
+    );
     assert.deepEqual(await readFile(file), before, `${vector} was rewritten`);
   }
 });
@@ -1590,7 +1595,9 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
     .split(/\r?\n/u)
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .map((line) => line.split(/\s+/u));
-  assert.equal(rows.length, 15);
+  // Every vector in the folder has a manifest row.
+  const listed = rows.map(([vector]) => vector!).filter((vector) => !vector.startsWith("..")).sort();
+  assert.deepEqual((await readdir(root)).filter((name) => name.endsWith(".bin")).sort(), listed);
   const dir = await mkdtemp(join(tmpdir(), "cultcache-readability-"));
   const seed = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack");
   const envelopes = await new SingleFileMessagePackBackingStore(seed).pullAll();
@@ -1611,8 +1618,27 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
               : store.delete(envelopes[0]!);
       if (reads) {
         await run();
+        if (operation === "pullAll") {
+          continue;
+        }
+
+        // The replaced file is a store: it carries the header its old content decides (a v3 store keeps its marker, all else
+        // is v1), and it holds what the operation wrote.
+        assert.equal((decode(await readFile(file)) as unknown[])[0], vector.endsWith("v3-base.msgpack") ? "cultcache.store.v3" : "cultcache.store.v1", `${vector} ${operation}`);
+        const keys = (await new SingleFileMessagePackBackingStore(file).pullAll()).map((entry) => entry.key);
+        if (operation === "pushAll") {
+          assert.deepEqual(keys, envelopes.map((entry) => entry.key).sort(), `${vector} ${operation}`);
+        } else if (operation === "push") {
+          assert.ok(keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
+        } else {
+          assert.ok(!keys.includes(envelopes[0]!.key), `${vector} ${operation}`);
+        }
       } else {
-        await assert.rejects(run, Error, `${vector} ${operation}`);
+        await assert.rejects(
+          run,
+          (error) => error instanceof StoreUnreadableError && error.cause !== undefined,
+          `${vector} ${operation}`,
+        );
         assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a file it cannot read`);
       }
     }

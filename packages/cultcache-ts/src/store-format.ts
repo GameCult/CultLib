@@ -11,6 +11,7 @@ export type StoreFormat = typeof STORE_FORMAT_VERSION | typeof STORE_FORMAT_ELEM
 
 const STORE_FORMAT_PREFIX = "cultcache.store.";
 const PERSISTED_RECORD_SLOTS = 4;
+const STORE_SLOTS = 3;
 
 /**
  * True for a v1 or v3 snapshot, false for anything that is not a CultCache store header (the legacy
@@ -32,25 +33,18 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
 }
 
 /**
- * The header of a decoded store file about to be rewritten: `undefined` for a legacy envelope array (an array whose first
- * slot is not a string, empty included), the header otherwise. A value that is not an array, or whose first slot is a string
- * but not a header this runtime reads, is refused, so a writer never overwrites a file it cannot see. Bytes after the array
- * are refused by `decode` itself.
+ * A store file this runtime cannot read: not exactly one complete store (truncated, bytes after it, a missing or extra slot),
+ * a header or record it does not know, or a body it cannot decode. Open, flush and every rewrite refuse a file with this
+ * error, and a refused file is left as it was. `cause` is what the reader choked on.
  */
-export function storeHeader(decoded: unknown): StoreFormat | undefined {
-  if (!Array.isArray(decoded)) {
-    throw new Error("CultCache store is not a MessagePack array; it is not rewritten.");
-  }
+export class StoreUnreadableError extends Error {
+  readonly filePath: string;
 
-  if (typeof decoded[0] !== "string") {
-    return undefined;
+  constructor(filePath: string, cause: unknown) {
+    super(`CultCache store ${filePath} is not readable: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "StoreUnreadableError";
+    this.filePath = filePath;
   }
-
-  if (!isStoreSnapshot(decoded)) {
-    throw new Error(`CultCache store's first slot is the string "${decoded[0]}", not a store header; it is not rewritten.`);
-  }
-
-  return decoded[0];
 }
 
 /** Refuses a persisted record with more slots than v1 defines, naming its key and schema id. */
@@ -60,5 +54,12 @@ export function requireV1RecordSlots(record: unknown[]): void {
       `CultCache record "${String(record[0])}" (schema "${String(record[1])}") has ${record.length} slots; ` +
         `this runtime reads ${PERSISTED_RECORD_SLOTS}. The store needs a runtime that resolves document variants.`,
     );
+  }
+}
+
+/** Refuses a store array with more or fewer slots than the header, the schema catalog and the records; a header alone is not a store. */
+export function requireStoreSlots(decoded: unknown[]): void {
+  if (decoded.length !== STORE_SLOTS) {
+    throw new Error(`CultCache store has ${decoded.length} top-level slots; this runtime reads ${STORE_SLOTS} (header, schema catalog, records).`);
   }
 }

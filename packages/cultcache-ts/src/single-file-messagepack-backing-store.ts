@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
-import { STORE_FORMAT_VERSION, type StoreFormat, isStoreSnapshot, requireV1RecordSlots, storeHeader } from "./store-format";
+import { STORE_FORMAT_VERSION, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -46,65 +46,13 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async pullAll(): Promise<CultCacheEnvelope[]> {
     // The disk decides the header: a file that is gone, empty or legacy is not marked.
     this.#format = STORE_FORMAT_VERSION;
-    try {
-      const data = await readFile(this.filePath);
-      if (data.length === 0) {
-        return [];
-      }
-
-      const decoded = decode(data);
-      const snapshot = decodeSnapshot(decoded);
-      if (snapshot) {
-        this.#format = snapshot.format;
-        return snapshot.records.map((record) => {
-          const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
-          if (!catalogEntry) {
-            throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
-          }
-
-          return {
-            key: record.key,
-            type: catalogEntry.schemaName,
-            schemaId: record.schemaId,
-            catalogEntry,
-            payload: record.payload,
-            storedAt: record.storedAt,
-          };
-        });
-      }
-
-      const legacy = decodeLegacyEnvelopeArray(decoded);
-      if (legacy) {
-        let repairedLegacyPayload = false;
-        const normalized = legacy.map((entry) => {
-          const payload = normalizePayload(entry.payload);
-          if (payload !== entry.payload) {
-            repairedLegacyPayload = true;
-          }
-
-          return {
-            ...entry,
-            payload,
-          };
-        });
-        const parsed = envelopeArraySchema.parse(normalized) as CultCacheEnvelope[];
-
-        if (repairedLegacyPayload) {
-          await this.#writeAll(parsed);
-        }
-
-        return parsed;
-      }
-
-      throw new Error(`CultCache file ${this.filePath} is not a recognized CultCache MessagePack store.`);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        return [];
-      }
-
-      throw error;
+    const disk = await this.#readDisk();
+    this.#format = disk.format;
+    if (disk.repairedLegacyPayload) {
+      await this.#writeAll(disk.envelopes);
     }
+
+    return disk.envelopes;
   }
 
   async push(entry: CultCacheEnvelope): Promise<void> {
@@ -143,33 +91,36 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       }
 
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
-      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. A file `pullAll` would refuse
-      // (not exactly one store, not a legacy envelope array) is refused and left as it is.
-      await this.#readDiskFormat();
+      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. The file is read by the same
+      // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
+      // and left as it is.
+      this.#format = (await this.#readDisk()).format;
       await this.#writeAll(entries);
     });
   }
 
-  async #readDiskFormat(): Promise<void> {
+  // The one reader of the store file, asked by open, push, delete and flush alike. A file that is gone or zero bytes is an
+  // empty unmarked store; anything else must decode completely or the read throws StoreUnreadableError.
+  async #readDisk(): Promise<DiskStore> {
+    let data: Uint8Array;
     try {
-      const data = await readFile(this.filePath);
-      let header: StoreFormat | undefined;
-      if (data.length > 0) {
-        const decoded = decode(data);
-        header = storeHeader(decoded);
-        if (header === undefined) {
-          // Not a store header: only a legacy envelope array is replaced, and only one `pullAll` would read.
-          decodeLegacyEnvelopeArray(decoded);
-        }
-      }
-
-      this.#format = header ?? STORE_FORMAT_VERSION;
+      data = await readFile(this.filePath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
       }
 
-      this.#format = STORE_FORMAT_VERSION;
+      throw error;
+    }
+
+    if (data.length === 0) {
+      return { format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
+    }
+
+    try {
+      return decodeStoreFile(data);
+    } catch (error) {
+      throw new StoreUnreadableError(this.filePath, error);
     }
   }
 
@@ -317,11 +268,61 @@ function encodeCatalogMember(member: CultCacheSchemaCatalogMember): unknown[] {
   ];
 }
 
+type DiskStore = {
+  format: StoreFormat;
+  envelopes: CultCacheEnvelope[];
+  // A legacy file whose payloads were not bytes: reading it repairs them, and the store rewrites the file.
+  repairedLegacyPayload: boolean;
+};
+
+function decodeStoreFile(data: Uint8Array): DiskStore {
+  const decoded = decode(data);
+  const snapshot = decodeSnapshot(decoded);
+  if (snapshot) {
+    const envelopes = snapshot.records.map((record): CultCacheEnvelope => {
+      const catalogEntry = resolveCatalogEntryForRecord(record, snapshot.catalogBySchemaId);
+      if (!catalogEntry) {
+        throw new Error(`CultCache persisted record "${record.key}" references missing schema id "${record.schemaId}".`);
+      }
+
+      return {
+        key: record.key,
+        type: catalogEntry.schemaName,
+        schemaId: record.schemaId,
+        catalogEntry,
+        payload: record.payload,
+        storedAt: record.storedAt,
+      };
+    });
+    return { format: snapshot.format, envelopes, repairedLegacyPayload: false };
+  }
+
+  const legacy = decodeLegacyEnvelopeArray(decoded);
+  if (!legacy) {
+    throw new Error("CultCache file is not a recognized CultCache MessagePack store.");
+  }
+
+  let repairedLegacyPayload = false;
+  const normalized = legacy.map((entry) => {
+    const payload = normalizePayload(entry.payload);
+    if (payload !== entry.payload) {
+      repairedLegacyPayload = true;
+    }
+
+    return {
+      ...entry,
+      payload,
+    };
+  });
+  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized) as CultCacheEnvelope[], repairedLegacyPayload };
+}
+
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
   if (!isStoreSnapshot(decoded)) {
     return undefined;
   }
 
+  requireStoreSlots(decoded);
   const catalogRaw = decoded[1];
   const recordsRaw = decoded[2];
   if (!Array.isArray(catalogRaw) || !Array.isArray(recordsRaw)) {
