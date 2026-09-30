@@ -920,16 +920,18 @@ namespace GameCult.Networking
         public Task<T?> GetAsync<T>(CultRecordKey key) where T : class
         {
             ThrowIfDisposed();
-            return Task.FromResult(_cache.Get<T>(key));
+            var document = _cache.Get<T>(key);
+            return Task.FromResult(document != null && Owns(_cache.Registry.GetRequired(document.GetType()), key) ? document : null);
         }
 
         /// <summary>
-        /// Gets all documents assignable to the requested type.
+        /// Gets all documents assignable to the requested type. A database serves only what its shards own: a cached row no
+        /// shard owns is left out here, as it is from every read and projection. The cache itself still holds it.
         /// </summary>
         public IEnumerable<T> GetAll<T>() where T : class
         {
             ThrowIfDisposed();
-            return _cache.GetAll<T>();
+            return _cache.GetAll<T>().Where(Serves);
         }
 
         /// <summary>
@@ -938,7 +940,8 @@ namespace GameCult.Networking
         public T? GetByName<T>(string name) where T : class
         {
             ThrowIfDisposed();
-            return _cache.GetByName<T>(name);
+            var document = _cache.GetByName<T>(name);
+            return document != null && Serves(document) ? document : null;
         }
 
         /// <summary>
@@ -947,12 +950,15 @@ namespace GameCult.Networking
         public T? GetByIndex<T>(string alias, string value) where T : class
         {
             ThrowIfDisposed();
-            return _cache.GetByIndex<T>(alias, value);
+            var document = _cache.GetByIndex<T>(alias, value);
+            return document != null && Serves(document) ? document : null;
         }
 
         /// <summary>
         /// Adds or replaces a document at a specific key.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
+        /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
         public async Task<CultRecordHandle<T>> PutAsync<T>(CultRecordKey key, T document) where T : class
         {
             ThrowIfDisposed();
@@ -967,6 +973,7 @@ namespace GameCult.Networking
         /// <summary>
         /// Applies a locally predicted document for a client-owned input scope.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
         public async Task<CultRecordHandle<T>> PutPredictedAsync<T>(CultRecordKey key, T document) where T : class
         {
             ThrowIfDisposed();
@@ -991,6 +998,8 @@ namespace GameCult.Networking
         /// <summary>
         /// Deletes a document by key.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
+        /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
         public Task DeleteAsync<T>(CultRecordKey key) where T : class
         {
             ThrowIfDisposed();
@@ -1004,6 +1013,8 @@ namespace GameCult.Networking
         /// <summary>
         /// Applies a raw document mutation after checking shard authority.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
+        /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
         public async Task<object> ApplyPutAsync(CultNetDocumentPutRawMessage message)
         {
             ThrowIfDisposed();
@@ -1026,6 +1037,8 @@ namespace GameCult.Networking
         /// <summary>
         /// Applies a raw document delete after checking shard authority.
         /// </summary>
+        /// <exception cref="CultNetUnownedSchemaException">No shard owns the schema and key; nothing was written.</exception>
+        /// <exception cref="CultNetShardLogException">The change committed and was published, but the shard log could not record it.</exception>
         public Task ApplyDeleteAsync(CultNetDocumentDeleteMessage message)
         {
             ThrowIfDisposed();
@@ -1729,6 +1742,12 @@ namespace GameCult.Networking
             // The replica's log records the primary's own entry under the primary's own sequence, in the same hold that
             // admits the change; the journal does both. A retry after a refused append is a fresh instance, so it matches
             // its door again and re-records the entry.
+            if (!shard.Matches(descriptor, key))
+            {
+                RecordUnappliedEntry(shard, kind, descriptor.SchemaId, key, entry);
+                return;
+            }
+
             var document = _documents.DeserializeRawDocument(message.Document);
             using (Door(document, new DoorContext(shard) { Kind = kind, Replica = entry, PredictionKey = PredictionKey(descriptor.SchemaId, key) }))
                 await _cache.UpsertAsync(descriptor.DocumentType, document, key).ConfigureAwait(false);
@@ -1750,6 +1769,12 @@ namespace GameCult.Networking
 
             var key = new CultRecordKey(message.RecordKey);
             var descriptor = _cache.Registry.GetRequiredBySchemaId(message.SchemaId);
+            if (!shard.Matches(descriptor, key))
+            {
+                RecordUnappliedEntry(shard, CultNetDatabaseChangeKind.Removed, descriptor.SchemaId, key, entry);
+                return;
+            }
+
             var admitted = false;
             var previous = _cache.Get(key);
             if (previous != null)
@@ -1761,15 +1786,26 @@ namespace GameCult.Networking
 
             if (!admitted)
             {
-                // The key is not here, so nothing was admitted to log. This replica's log must still hold every entry of the
-                // primary's, or a replica chained on it sees a gap.
-                lock (_logGate)
-                {
-                    RecordMutationLogEntry(new CultNetShardMutationLogEntry(
-                        shard.ShardId, shard.Epoch, entry.Sequence, entry.CommittedAt, CultNetDatabaseChangeKind.Removed,
-                        descriptor.SchemaId, key, document: null, previousDocument: null), entry);
-                    _lastWriteSequence[(descriptor.SchemaId, key.Value)] = entry.Sequence;
-                }
+                // The key is not here, so nothing was admitted to log.
+                RecordUnappliedEntry(shard, CultNetDatabaseChangeKind.Removed, descriptor.SchemaId, key, entry);
+            }
+        }
+
+        // An entry that changed nothing here (an absent key, or a row this shard does not own - the snapshot path leaves such
+        // rows out too). This replica's log must still hold every entry of the primary's, or a replica chained on it sees a gap.
+        private void RecordUnappliedEntry(
+            CultNetShardDescriptor shard,
+            CultNetDatabaseChangeKind kind,
+            string schemaId,
+            CultRecordKey key,
+            CultNetShardLogEntryMessage entry)
+        {
+            lock (_logGate)
+            {
+                RecordMutationLogEntry(new CultNetShardMutationLogEntry(
+                    shard.ShardId, shard.Epoch, entry.Sequence, entry.CommittedAt, kind,
+                    schemaId, key, document: null, previousDocument: null), entry);
+                _lastWriteSequence[(schemaId, key.Value)] = entry.Sequence;
             }
         }
 
@@ -1923,6 +1959,19 @@ namespace GameCult.Networking
             FindShard(descriptor, key) ?? throw new CultNetUnownedSchemaException(descriptor.SchemaId, key);
 
         internal bool Owns(CultDocumentDescriptor descriptor, CultRecordKey key) => FindShard(descriptor, key) != null;
+
+        // Whether the database serves this cached instance: a shard owns its schema and key. A shard that owns everything makes
+        // the lookup of the instance's key unnecessary.
+        private bool Serves(object document)
+        {
+            if (_shards.Any(shard => shard.SchemaIds.Count == 0 && string.IsNullOrEmpty(shard.KeyPrefix)))
+            {
+                return true;
+            }
+
+            var type = document.GetType();
+            return Owns(_cache.Registry.GetRequired(type), GetTrackedKey(document, type));
+        }
 
         private CultNetShardDescriptor? FindShard(CultDocumentDescriptor descriptor, CultRecordKey key) =>
             _shards.FirstOrDefault(shard => shard.Matches(descriptor, key));

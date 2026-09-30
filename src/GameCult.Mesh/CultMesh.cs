@@ -3370,6 +3370,20 @@ namespace GameCult.Mesh
                        $"CultMesh document '{key.Value}' was not found as {typeof(TDocument).FullName}.");
         }
 
+        // A database serves only what its shards own; the cache behind it may hold more.
+        private static bool DatabaseServes(CultNetDatabase database, object document, CultRecordKey key)
+        {
+            try
+            {
+                database.ResolveShard(CultDocumentRegistry.Shared.GetRequired(document.GetType()).SchemaId, key);
+                return true;
+            }
+            catch (CultNetUnownedSchemaException)
+            {
+                return false;
+            }
+        }
+
         private static async Task<TDocument> ReadDatabaseDocumentRequiredAsync<TDocument>(
             CultNetDatabase database,
             CultRecordKey key)
@@ -3380,7 +3394,7 @@ namespace GameCult.Mesh
                 return document;
 
             var untyped = database.Cache.Get(key);
-            if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
+            if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()) && DatabaseServes(database, untyped, key))
                 return ConvertUntypedDocument<TDocument>(untyped);
 
             throw new KeyNotFoundException(

@@ -2124,10 +2124,15 @@ namespace GameCult.Caching
             Remove(handle.Key);
         }
 
-        // false: a condition failed; nothing was written, changed in memory, or published. A commit that succeeds and then
-        // fails in a journal or observer still stands and is published; the writer receives the failure. One failure arrives
-        // as itself, several as an AggregateException. A writer that wants a particular failure (CultNetShardLogException, when
-        // a database's log refused the commit) catches that type, or unwraps AggregateException.InnerExceptions.
+        /// <summary>
+        /// Commits the staged batch. Returns false when a condition failed: nothing was written, changed in memory, or published.
+        /// </summary>
+        /// <remarks>
+        /// A commit that succeeds and then fails in a journal or observer still stands and is published, and the writer
+        /// receives the failure. One failure arrives as itself, several as an <see cref="AggregateException"/>. A writer that
+        /// wants a particular failure (a CultNetShardLogException, when a database's log refused the commit) catches that type,
+        /// or unwraps <see cref="AggregateException.InnerExceptions"/> and looks for it.
+        /// </remarks>
         public bool Commit(Action<CultCacheBatch> stage)
         {
             return Land(stage, wait: true) == CultCommitOutcome.Committed;

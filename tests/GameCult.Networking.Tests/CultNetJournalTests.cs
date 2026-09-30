@@ -741,7 +741,8 @@ namespace GameCult.Networking.Tests
 
             try { await handler(UnownedPut(database), peer); } catch (Exception) { }
 
-            Assert.That(logger.Errors, Has.Some.Contains("CultNet raw put failed").And.Contains(unowned));
+            Assert.That(logger.Warnings, Has.Some.Contains("raw put refused").And.Contains(unowned));
+            Assert.That(logger.Errors, Is.Empty, "a refusal is not a fault");
             Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Null);
         }
 
@@ -766,11 +767,296 @@ namespace GameCult.Networking.Tests
             Assert.That(response.Matched, Is.EqualTo(1u));
         }
 
+        [CultDocument("tests.journal_indexed", "tests.journal_indexed.v1")]
+        [MessagePack.MessagePackObject]
+        public sealed class JournalIndexedNote
+        {
+            [MessagePack.Key(0)]
+            [CultName]
+            public string Name { get; set; } = string.Empty;
+
+            [MessagePack.Key(1)]
+            [CultIndex("tag")]
+            public string Tag { get; set; } = string.Empty;
+        }
+
+        // A database serves only what its shards own: reads, the legacy and shard-less snapshot, selections, subscription
+        // snapshots and the watch agree. The cache behind it still holds the row.
+        [Test]
+        public async Task ADatabaseReadsServeOnlyWhatItsShardsOwnWhileTheCacheStillHoldsTheRest()
+        {
+            var (database, cache, _, _) = OwnedNothingOfNote();
+            var seen = Record(database);
+            await database.PutAsync(One, Note("owned"));
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "u", Body = "unowned" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+            await cache.UpsertAsync(new JournalIndexedNote { Name = "n", Tag = "t" }, new CultRecordHandle<JournalIndexedNote>(new CultRecordKey("unrelated:indexed")));
+
+            Assert.That(database.GetAll<MeshQuickstartNote>(), Is.Empty);
+            Assert.That(database.GetAll<object>().Count(), Is.EqualTo(1), "only the owned row");
+            Assert.That(database.GetAll<NetworkSchemaNote>().Count(), Is.EqualTo(1));
+            Assert.That(await database.GetAsync<MeshQuickstartNote>(Unowned), Is.Null);
+            Assert.That(await database.GetAsync<NetworkSchemaNote>(One), Is.Not.Null);
+            Assert.That(database.GetByName<MeshQuickstartNote>("u"), Is.Null);
+            Assert.That(database.GetByName<JournalIndexedNote>("n"), Is.Null);
+            Assert.That(database.GetByIndex<JournalIndexedNote>("tag", "t"), Is.Null);
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Not.Null, "the cache itself still holds it");
+            Assert.That(seen, Is.EqualTo(new[] { One.Value }), "what the database reads out is what it publishes");
+        }
+
+        [Test]
+        public async Task ADatabaseCollectionOfASchemaNoShardOwnsIsEmpty()
+        {
+            var (database, cache, _, _) = OwnedNothingOfNote();
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "u", Body = "unowned" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+
+            var collection = GameCult.Mesh.CultMesh.Collection<MeshQuickstartNote>(database);
+
+            Assert.That(await collection.LatestAsync(), Is.Empty);
+        }
+
+        [Test]
+        public async Task TheShardlessSnapshotOmitsARowNoShardOwns()
+        {
+            var (database, cache, _, _) = OwnedNothingOfNote();
+            await database.PutAsync(One, Note("owned"));
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "u", Body = "unowned" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+            using var server = new Server(cache, ServerSecurityOptions.Development());
+            using var databaseServer = new CultNetDatabaseServer(server, database);
+
+            var response = databaseServer.CreateSnapshotResponse(new CultNetSnapshotRequestMessage { MessageId = "all" });
+
+            Assert.That(response.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { One.Value }));
+        }
+
+        [Test]
+        public async Task ASubscriptionSnapshotOmitsARowNoShardOwns()
+        {
+            var (database, cache, _, _) = OwnedNothingOfNote();
+            await database.PutAsync(One, Note("owned"));
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "u", Body = "unowned" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+            var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+            socket.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+            socket.ReceiveTimeout = 20;
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions { RuntimeId = "owned-reads-server", Socket = socket });
+            using var subscriptions = new CultNetDatabaseSubscriptionServer(server, database);
+            using var cancellation = new CancellationTokenSource();
+            var serverThread = new Thread(() =>
+            {
+                while (!cancellation.IsCancellationRequested)
+                {
+                    _ = server.PollOnceAsync().GetAwaiter().GetResult();
+                    Thread.Sleep(1);
+                }
+            }) { IsBackground = true };
+            serverThread.Start();
+            try
+            {
+                using var client = CultNetSchemaClients.CreateRudp("owned-reads-client");
+                CultNetSnapshotResponseRawMessage? snapshot = null;
+                client.OnCultNet<CultNetSnapshotResponseRawMessage>(message => snapshot = message);
+                client.Connect("127.0.0.1", server.LocalEndPoint.Port);
+                for (var attempt = 0; attempt < 300 && !client.Connected; attempt++)
+                    await Task.Delay(10);
+                client.SendCultNet(new CultNetDatabaseSubscribeMessage { MessageId = "subscribe-all", SubscriptionId = "all", IncludeSnapshot = true });
+                for (var attempt = 0; attempt < 300 && snapshot == null; attempt++)
+                    await Task.Delay(10);
+
+                Assert.That(snapshot, Is.Not.Null, "the subscription answered a snapshot");
+                Assert.That(snapshot!.Documents.Select(document => document.RecordKey), Is.EqualTo(new[] { One.Value }));
+            }
+            finally
+            {
+                cancellation.Cancel();
+                serverThread.Join();
+            }
+        }
+
+        // A replica applies the log the way it applies a snapshot: a row its shard does not own is left out. The entry is
+        // still recorded, so a replica chained on this one sees no gap.
+        [Test]
+        public async Task AReplicaLogApplySkipsARowItsShardDoesNotOwnButRecordsTheEntry()
+        {
+            var cache = new CultCache();
+            var replica = Database(cache, primary: false, store: null);
+            await cache.UpsertAsync(new MeshQuickstartNote { NoteId = "c", Body = "cached" }, new CultRecordHandle<MeshQuickstartNote>(Unowned));
+            var put = replica.Documents.CreateRawDocumentPutMessage("wire", new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:put")), new MeshQuickstartNote { NoteId = "p", Body = "replicated" });
+            put.ShardId = ShardId;
+            put.ShardEpoch = 1;
+            var owned = replica.Documents.CreateRawDocumentPutMessage("wire", new CultRecordHandle<NetworkSchemaNote>(One), Note("owned"));
+            owned.ShardId = ShardId;
+            owned.ShardEpoch = 1;
+            var now = DateTimeOffset.UtcNow.ToString("O");
+
+            await replica.ApplyShardLogResponseAsync(new CultNetShardLogResponseMessage
+            {
+                MessageId = "log",
+                ShardId = ShardId,
+                ShardEpoch = 1,
+                Entries =
+                [
+                    new CultNetShardLogEntryMessage { Sequence = 1, CommittedAt = now, ChangeKind = "added", Put = put },
+                    new CultNetShardLogEntryMessage
+                    {
+                        Sequence = 2,
+                        CommittedAt = now,
+                        ChangeKind = "removed",
+                        Delete = new CultNetDocumentDeleteMessage
+                        {
+                            MessageId = "d",
+                            SchemaId = cache.Registry.GetRequired<MeshQuickstartNote>().SchemaId,
+                            RecordKey = Unowned.Value,
+                            ShardId = ShardId,
+                            ShardEpoch = 1
+                        }
+                    },
+                    new CultNetShardLogEntryMessage { Sequence = 3, CommittedAt = now, ChangeKind = "added", Put = owned }
+                ]
+            });
+
+            Assert.That(cache.Get<MeshQuickstartNote>(new CultRecordKey("unrelated:put")), Is.Null, "the put was left out");
+            Assert.That(cache.Get<MeshQuickstartNote>(Unowned), Is.Not.Null, "the delete removed nothing the shard owns");
+            Assert.That(TextOf(cache, One), Is.EqualTo("owned"), "owned entries still apply");
+            Assert.That(replica.GetMutationLog(ShardId).Select(entry => entry.Sequence), Is.EqualTo(new[] { 1L, 2L, 3L }));
+            Assert.That(replica.GetAppliedShardSequence(ShardId), Is.EqualTo(3));
+        }
+
+        // The server's put and delete handlers are reached through their private delegates with an uninitialized peer (as
+        // the R-AM test does): anything the handler tries to send throws on that peer, so a handler that returns quietly
+        // sent nothing.
+        private static (CultNetDatabaseServer Server, Func<CultNetDocumentPutRawMessage, Task> Put, Func<CultNetDocumentDeleteMessage, Task> Delete, CapturingLogger Logger, Server Host) WireHandlers(CultNetDatabase database, CultCache cache)
+        {
+            var host = new Server(cache, ServerSecurityOptions.Development());
+            var logger = new CapturingLogger();
+            host.Logger = logger;
+            var databaseServer = new CultNetDatabaseServer(host, database);
+            var peer = (CultNetServerPeer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(CultNetServerPeer));
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var put = (Func<CultNetDocumentPutRawMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer).GetField("_putHandler", flags)!.GetValue(databaseServer)!;
+            var delete = (Func<CultNetDocumentDeleteMessage, CultNetServerPeer, Task>)typeof(CultNetDatabaseServer).GetField("_deleteHandler", flags)!.GetValue(databaseServer)!;
+            return (databaseServer, message => put(message, peer), message => delete(message, peer), logger, host);
+        }
+
+        private static CultNetDocumentPutRawMessage OwnedPut(CultNetDatabase database)
+        {
+            var message = database.Documents.CreateRawDocumentPutMessage("wire", new CultRecordHandle<NetworkSchemaNote>(One), Note("wire"));
+            message.ShardId = ShardId;
+            message.ShardEpoch = 1;
+            return message;
+        }
+
+        [Test]
+        public async Task ACommittedRemotePutWhoseLogFailedIsNotAnsweredAsARefusal()
+        {
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, new FlakyLogStore { RefuseAppend = _ => true });
+            var (databaseServer, put, _, logger, host) = WireHandlers(database, cache);
+            using var _1 = databaseServer;
+            using var _2 = host;
+
+            await put(OwnedPut(database));
+
+            Assert.That(TextOf(cache, One), Is.EqualTo("wire"), "the put committed");
+            Assert.That(logger.Errors, Is.Empty);
+            Assert.That(logger.Warnings, Has.Some.Contains("committed but its shard log failed"));
+        }
+
+        [Test]
+        public async Task ACommittedRemotePutWhoseLogFailedBesideAnotherFailureIsStillNotAnsweredAsARefusal()
+        {
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, new FlakyLogStore { RefuseAppend = _ => true });
+            using var second = cache.AddJournal(_ => throw new InvalidOperationException("second journal"));
+            var (databaseServer, put, _, logger, host) = WireHandlers(database, cache);
+            using var _1 = databaseServer;
+            using var _2 = host;
+
+            await put(OwnedPut(database));
+
+            Assert.That(TextOf(cache, One), Is.EqualTo("wire"));
+            Assert.That(logger.Errors, Is.Empty);
+            Assert.That(logger.Warnings, Has.Some.Contains("committed but its shard log failed"));
+        }
+
+        [Test]
+        public async Task ACommittedRemoteDeleteWhoseLogFailedIsNotAnsweredAsARefusal()
+        {
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, new FlakyLogStore { RefuseAppend = sequence => sequence == 2 });
+            await database.PutAsync(One, Note("one"));
+            var (databaseServer, _, delete, logger, host) = WireHandlers(database, cache);
+            using var _1 = databaseServer;
+            using var _2 = host;
+
+            await delete(new CultNetDocumentDeleteMessage
+            {
+                MessageId = "d",
+                SchemaId = SchemaId(cache),
+                RecordKey = One.Value,
+                ShardId = ShardId,
+                ShardEpoch = 1
+            });
+
+            Assert.That(TextOf(cache, One), Is.Null, "the delete committed");
+            Assert.That(logger.Warnings, Has.Some.Contains("committed but its shard log failed"));
+        }
+
+        [Test]
+        public void ARemoteDeleteOfASchemaNoShardOwnsIsRefusedOnTheWireAtWarningLevel()
+        {
+            var (database, cache, _, unowned) = OwnedNothingOfNote();
+            var (databaseServer, _, delete, logger, host) = WireHandlers(database, cache);
+            using var _1 = databaseServer;
+            using var _2 = host;
+
+            // The handler answers the peer with the refusal; the uninitialized peer cannot send, which is how the test knows it tried.
+            Assert.CatchAsync(async () => await delete(new CultNetDocumentDeleteMessage
+            {
+                MessageId = "d",
+                SchemaId = unowned,
+                RecordKey = Unowned.Value,
+                ShardId = database.Shards[0].ShardId,
+                ShardEpoch = database.Shards[0].Epoch
+            }));
+
+            Assert.That(logger.Warnings, Has.Some.Contains("raw delete refused").And.Contains(unowned));
+            Assert.That(logger.Errors, Is.Empty);
+        }
+
+        // The journal is disposed before the observer: an admission the journal logs while the database is being disposed is
+        // still published, never logged and then dropped.
+        [Test]
+        public async Task ADatabaseDisposedWhileAWriteIsInItsLogAppendStillPublishesWhatItLogged()
+        {
+            var store = new FlakyLogStore();
+            var cache = new CultCache();
+            var database = Database(cache, primary: true, store);
+            var seen = Record(database);
+            using var inAppend = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            store.OnAppend = () =>
+            {
+                inAppend.Set();
+                release.Wait(TimeSpan.FromSeconds(10));
+            };
+            var writer = Task.Run(async () => await database.PutAsync(One, Note("one")));
+            Assert.That(inAppend.Wait(TimeSpan.FromSeconds(10)), Is.True);
+
+            var dispose = Task.Run(database.Dispose);
+            await Task.Delay(300);
+            release.Set();
+            await writer;
+            await dispose;
+
+            Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }), "the write was logged");
+            Assert.That(seen, Is.EqualTo(new[] { One.Value }), "and published");
+        }
+
         private sealed class CapturingLogger : GameCult.Logging.ILogger
         {
             public List<string> Errors { get; } = new();
+            public List<string> Warnings { get; } = new();
             public void LogInfo(string message) { }
-            public void LogWarning(string message) { }
+            public void LogWarning(string message) => Warnings.Add(message);
             public void LogError(string message) => Errors.Add(message);
             public void LogDebug(string message) { }
         }

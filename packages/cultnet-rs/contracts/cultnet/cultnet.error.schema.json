@@ -28,7 +28,7 @@
     "code": {
       "description": "Machine-readable refusal code (R-N). Additive: a v0 peer that does not know this field ignores it.",
       "type": ["string", "null"],
-      "enum": [null, "selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target", "variant_unsupported"]
+      "enum": [null, "selection_invalid", "cursor_stale", "cursor_invalid", "reference_outside_target", "variant_unsupported", "unowned_schema"]
     },
     "details": {
       "description": "Code-specific structured detail (R-N). Every field is populated only for the code that defines it; the others are null, not omitted.",
@@ -36,8 +36,8 @@
       "additionalProperties": false,
       "required": ["field", "value", "asOf", "current"],
       "properties": {
-        "field": { "description": "selection_invalid: the selection field that failed. variant_unsupported: \"subscriptionId\", when a subscription was ended.", "type": ["string", "null"] },
-        "value": { "description": "selection_invalid: the offending value, when there is one string worth naming. variant_unsupported: the id of the subscription that ended.", "type": ["string", "null"] },
+        "field": { "description": "selection_invalid: the selection field that failed. variant_unsupported: \"subscriptionId\", when a subscription was ended. unowned_schema: \"schemaId\".", "type": ["string", "null"] },
+        "value": { "description": "selection_invalid: the offending value, when there is one string worth naming. variant_unsupported: the id of the subscription that ended. unowned_schema: the schema id no shard owns.", "type": ["string", "null"] },
         "asOf": { "description": "cursor_stale: the cursor's own minted asOf.", "type": ["integer", "null"], "minimum": 0 },
         "current": { "description": "cursor_stale: the answering server's current asOf.", "type": ["integer", "null"], "minimum": 0 }
       }

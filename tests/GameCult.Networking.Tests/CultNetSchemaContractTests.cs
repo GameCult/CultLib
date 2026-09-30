@@ -195,6 +195,17 @@ namespace GameCult.Networking.Tests
             AssertErrorMatchesSchema(CultNetErrorMessage.ForReferenceOutsideTarget(ex));
         }
 
+        [Test]
+        public void ErrorMessage_UnownedSchemaRealBytes_MatchesItsSchema()
+        {
+            var message = CultNetErrorMessage.ForUnownedSchema(new CultNetUnownedSchemaException("some.schema.v1", new CultRecordKey("some:key")));
+
+            Assert.That(message.Code, Is.EqualTo("unowned_schema"));
+            Assert.That(message.Details!.Field, Is.EqualTo("schemaId"));
+            Assert.That(message.Details.Value, Is.EqualTo("some.schema.v1"));
+            AssertErrorMatchesSchema(message);
+        }
+
         private static void AssertErrorMatchesSchema(CultNetErrorMessage message)
         {
             var validator = new MiniJsonSchemaValidator(SchemaDir());

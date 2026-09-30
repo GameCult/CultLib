@@ -421,7 +421,8 @@ namespace GameCult.Networking
                 documentSelection,
                 ordinalOf: (schemaId, key) => _database.LastWriteSequence(schemaId, key) ?? 0,
                 asOf: _database.CurrentAsOf(),
-                options: null);
+                options: null,
+                rowFilter: _database.Owns);
             // The snapshot is one row per record key by construction, so the duplicate-key throw this
             // used to guard can no longer fire (docs/cultnet-selection-cut.md, S2-2); deleted rather
             // than tested around.

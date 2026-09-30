@@ -511,7 +511,7 @@ namespace GameCult.Networking
         [Key("routingHint")] public CultNetShardRoutingHint? RoutingHint { get; set; }
         /// <summary>
         /// Gets or sets the machine-readable refusal code (R-N), e.g. <c>selection_invalid</c>,
-        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>. Additive to
+        /// <c>cursor_stale</c>, <c>cursor_invalid</c>, <c>reference_outside_target</c>, <c>unowned_schema</c>. Additive to
         /// <c>cultnet.error.v0</c>; a v0 peer that does not know this field ignores it.
         /// </summary>
         [Key("code")] public string? Code { get; set; }
@@ -530,6 +530,17 @@ namespace GameCult.Networking
                 Error = $"selection_invalid: {ex.Message}",
                 Code = "selection_invalid",
                 Details = new CultNetErrorDetails { Field = ex.Field, Value = ex.Value }
+            };
+
+        /// <summary>
+        /// Builds the wire error for a write no shard owns: code <c>unowned_schema</c>, details <c>{ field: "schemaId", value }</c>.
+        /// </summary>
+        public static CultNetErrorMessage ForUnownedSchema(CultNetUnownedSchemaException ex) =>
+            new CultNetErrorMessage
+            {
+                Error = $"unowned_schema: {ex.Message}",
+                Code = "unowned_schema",
+                Details = new CultNetErrorDetails { Field = "schemaId", Value = ex.SchemaId }
             };
 
         /// <summary>
