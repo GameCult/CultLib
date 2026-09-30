@@ -382,6 +382,21 @@ fn refusal_seen_by(
     Ok(error)
 }
 
+/// Reads every datagram waiting at the server, such as a refused peer's
+/// acknowledgement of its refusal, which reaches no session and is dropped.
+fn drain_until_idle<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
+) -> Result<()> {
+    for _ in 0..100 {
+        match server.poll_once()? {
+            CultMeshRudpPollOutcome::Idle => return Ok(()),
+            CultMeshRudpPollOutcome::Handled => {}
+            rejected => panic!("draining must not reject: {rejected:?}"),
+        }
+    }
+    anyhow::bail!("the server never went idle")
+}
+
 fn send(client: &mut CultNetRudpSocketTransportConnection, message: &CultNetMessage) -> Result<()> {
     client.send(
         "schema",
@@ -653,6 +668,7 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
         refusal_seen_by(&mut publisher, &publish_receipt)?,
         "injected sink failure"
     );
+    drain_until_idle(&mut server)?;
 
     let snapshot_receipt = send_reliable(
         &mut snapshot_client,
@@ -680,6 +696,7 @@ fn application_rejection_is_nonfatal_peer_scoped_refused_to_the_peer_and_unackno
         refusal_seen_by(&mut snapshot_client, &snapshot_receipt)?,
         "injected source failure"
     );
+    drain_until_idle(&mut server)?;
 
     let survivor_receipt = send_reliable(
         &mut survivor,
