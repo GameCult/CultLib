@@ -546,14 +546,13 @@ where
                 now_unix,
                 now_monotonic,
             )? {
-                // A reply that already failed permanently this poll is not dropped:
-                // the session ends over it.
-                let end = match (unsendable.take(), &rejection.reason) {
-                    (Some(error), _) => SessionEnd::Unsendable(error),
-                    (None, CultMeshRudpRejectionReason::ResponseSendFailed(kind)) => {
+                // The only reply `receive` returns is a Pong, which delivers no
+                // frame, so no earlier send of this poll can precede a rejection.
+                let end = match &rejection.reason {
+                    CultMeshRudpRejectionReason::ResponseSendFailed(kind) => {
                         SessionEnd::Unsendable(std::io::Error::from(*kind))
                     }
-                    (None, reason) => SessionEnd::Rejected(reason.refusal_text()),
+                    reason => SessionEnd::Rejected(reason.refusal_text()),
                 };
                 self.end_session(key, end)?;
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
@@ -896,7 +895,11 @@ where
     }
 
     /// The refusal a rejected peer is sent, as unreliable, unordered packets.
-    fn refusal_packets(&self, session: &mut CultNetRudpSession, text: &str) -> Vec<CultNetRudpPacket> {
+    fn refusal_packets(
+        &self,
+        session: &mut CultNetRudpSession,
+        text: &str,
+    ) -> Vec<CultNetRudpPacket> {
         let refusal = CultNetMessage::Error {
             error: text.into(),
             code: None,

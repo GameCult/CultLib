@@ -299,8 +299,13 @@ fn a_permanent_failure_sending_a_snapshot_response_rejects_it_and_sends_no_refus
         }
         thread::sleep(Duration::from_millis(2));
     }
-    assert!(frames.is_empty(), "no refusal is sent to an unreachable peer: {frames:?}");
-    assert!(is_unsendable_reason(&reason.expect("the client was told the session ended")));
+    assert!(
+        frames.is_empty(),
+        "no refusal is sent to an unreachable peer: {frames:?}"
+    );
+    assert!(is_unsendable_reason(
+        &reason.expect("the client was told the session ended")
+    ));
 }
 
 #[test]

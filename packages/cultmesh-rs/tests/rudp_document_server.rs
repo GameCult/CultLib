@@ -1420,7 +1420,10 @@ fn a_refusal_reaches_a_peer_missing_an_earlier_packet() -> Result<()> {
         resend_delay_ms: 10_000,
         max_pending_reliable_packets: Some(64),
     });
-    peer.send_to(&encode_rudp_packet(&session.create_connect(0, Vec::new())?)?, target)?;
+    peer.send_to(
+        &encode_rudp_packet(&session.create_connect(0, Vec::new())?)?,
+        target,
+    )?;
     server.poll_once()?;
     let accept = received().expect("the server accepts the connect");
     assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
