@@ -2,7 +2,7 @@
 
 This is CultMath's Unity 2021.3-compatible Git-UPM surface. It contains the
 precompiled `CultMath.dll`, portable symbols, the numeric
-`Shaders/CultMath.hlsl` mirror, and the `CultMath.UnityBridge` assembly.
+`Shaders/CultMath.hlsl` mirror (with its `CultMath.Phacelle.hlsl` include), and the `CultMath.UnityBridge` assembly.
 
 `CultMath.UnityBridge` is the only C# source Unity compiles here. It holds the
 UnityEngine conversions the engine-free core cannot declare: `ToCultMath()` on

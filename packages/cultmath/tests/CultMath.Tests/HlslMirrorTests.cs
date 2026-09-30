@@ -7,7 +7,7 @@ public sealed class HlslMirrorTests
     [Fact]
     public void HlslMirrorDoesNotPublishGeometryKernels()
     {
-        var source = File.ReadAllText(Path.Combine(GetCultMathRoot(), "shaders", "CultMath.hlsl"));
+        var source = HlslSourceCompatibilityTests.ReadShaderSource(GetCultMathRoot());
         Assert.DoesNotContain("AdvancedErosionFilter.hlsl", source);
         Assert.DoesNotContain("Planetary.hlsl", source);
         Assert.DoesNotContain("spherical_erosion", source);
@@ -17,7 +17,7 @@ public sealed class HlslMirrorTests
     [Fact]
     public void HlslMirrorPublishesCultMathPrimitives()
     {
-        var include = File.ReadAllText(Path.Combine(GetCultMathRoot(), "shaders", "CultMath.hlsl"));
+        var include = HlslSourceCompatibilityTests.ReadShaderSource(GetCultMathRoot());
         var requiredSymbols = new[]
         {
             "cultmath_radians",
@@ -60,6 +60,17 @@ public sealed class HlslMirrorTests
 
         // HLSL's normalize intrinsic is the contract; a mirror copy would only restate it.
         Assert.DoesNotContain("cultmath_normalize", include);
+    }
+
+    [Theory]
+    [InlineData("CultMath.hlsl")]
+    [InlineData("CultMath.Phacelle.hlsl")]
+    public void UnityPackageShaderIsIdenticalToTheCanonicalShader(string name)
+    {
+        var root = GetCultMathRoot();
+        Assert.Equal(
+            File.ReadAllText(Path.Combine(root, "shaders", name)).ReplaceLineEndings("\n"),
+            File.ReadAllText(Path.Combine(root, "unity", "org.gamecult.cultmath", "Shaders", name)).ReplaceLineEndings("\n"));
     }
 
     private static string GetCultMathRoot()
