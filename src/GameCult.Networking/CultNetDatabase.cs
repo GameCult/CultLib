@@ -466,7 +466,39 @@ namespace GameCult.Networking
     /// <summary>
     /// One shard-log sequence that a primary minted for a committed change and burned because it could not log it.
     /// </summary>
-    public readonly record struct CultNetBurnedSequence(string ShardId, long Sequence);
+    public readonly struct CultNetBurnedSequence : IEquatable<CultNetBurnedSequence>
+    {
+        /// <summary>
+        /// Creates a burned sequence.
+        /// </summary>
+        public CultNetBurnedSequence(string shardId, long sequence)
+        {
+            ShardId = shardId;
+            Sequence = sequence;
+        }
+
+        /// <summary>
+        /// Gets the shard whose log burned the sequence.
+        /// </summary>
+        public string ShardId { get; }
+
+        /// <summary>
+        /// Gets the burned shard-log sequence.
+        /// </summary>
+        public long Sequence { get; }
+
+        /// <inheritdoc />
+        public bool Equals(CultNetBurnedSequence other) => Sequence == other.Sequence && string.Equals(ShardId, other.ShardId, StringComparison.Ordinal);
+
+        /// <inheritdoc />
+        public override bool Equals(object? obj) => obj is CultNetBurnedSequence other && Equals(other);
+
+        /// <inheritdoc />
+        public override int GetHashCode() => (StringComparer.Ordinal.GetHashCode(ShardId ?? string.Empty) * 397) ^ Sequence.GetHashCode();
+
+        /// <inheritdoc />
+        public override string ToString() => $"{ShardId}:{Sequence}";
+    }
 
     /// <summary>
     /// Raised to the writer when a shard primary committed changes and could not log them. The commits stand and the
