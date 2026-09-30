@@ -4495,7 +4495,10 @@ class CultMeshTests(unittest.TestCase):
             finally:
                 transport.close()
             failures_after = server.rudp_send_failures
-            hello_reply, _ = self._rudp_exchange(server, hello(runtime_id="after-queue").to_wire())
+            # An empty snapshot fits the small queue; a hello reply would not.
+            after_reply, _ = self._rudp_exchange(
+                server, snapshot_request(message_id="after-queue", record_keys=["note:none"]).to_wire()
+            )
             alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
         finally:
             server.stop()
@@ -4518,7 +4521,7 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(len(served_payload), 800)
         self.assertEqual(failures_before, 0)
         self.assertEqual(failures_after, 1)
-        self.assertEqual(hello_reply["schemaVersion"], "cultnet.hello.v0")
+        self.assertEqual(after_reply["messageId"], "after-queue")
         self.assertTrue(alive)
 
     def test_cultmesh_local_server_refuses_a_rudp_put_whose_reply_needs_more_than_65535_fragments(self) -> None:
