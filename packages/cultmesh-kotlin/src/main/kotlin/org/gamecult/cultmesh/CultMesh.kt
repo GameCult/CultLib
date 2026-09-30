@@ -5400,14 +5400,16 @@ private fun rudpClientBoundHost(endpoint: String, bindHost: String? = null): Ine
     }
 
 // A client bound to loopback cannot send to another host on Windows, so a
-// client for a remote endpoint binds the unspecified address of its family.
+// client for a remote endpoint binds the unspecified address. A JVM wildcard
+// socket is dual-stack and reports one wildcard for either family, so the
+// family is not observable here.
 private fun rudpClientBindsLoopbackOnlyForALoopbackEndpoint() {
-    check(rudpClientBoundHost("rudp://10.77.0.1:17872") == InetAddress.getByName("0.0.0.0"))
-    check(rudpClientBoundHost("rudp://[2001:db8::1]:17872") == InetAddress.getByName("::"))
+    check(rudpClientBoundHost("rudp://10.77.0.1:17872").isAnyLocalAddress)
+    check(rudpClientBoundHost("rudp://[2001:db8::1]:17872").isAnyLocalAddress)
     check(rudpClientBoundHost("rudp://127.0.0.1:17872") == InetAddress.getByName("127.0.0.1"))
     check(rudpClientBoundHost("rudp://[::1]:17872") == InetAddress.getByName("::1"))
     check(rudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1") == InetAddress.getByName("127.0.0.1"))
-    check(rudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0") == InetAddress.getByName("0.0.0.0"))
+    check(rudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0").isAnyLocalAddress)
     CultMesh.createRudpServer("kotlin-rudp-bind-server", 0x10203061L).use { server ->
         check(InetAddress.getByName(server.profile.transports.single().host) == InetAddress.getByName("127.0.0.1"))
     }
