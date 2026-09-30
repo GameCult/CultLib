@@ -3411,6 +3411,8 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts
   const limit = 4_000;
   const atBound = bodyLengthForReplyBytes("note:at", limit);
   const overBound = bodyLengthForReplyBytes("note:ov", limit + 1);
+  // A put's own frame is only a few bytes under its reply, so a long message id would push an
+  // at-bound put over the inbound limit before admission is asked. Keep these ids short.
   await withServedBoundRig(0x10203062, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
     rig.peer.send(notePut("put-over", "note:ov", overBound));
     const refusal = await waitForError(rig, "the over-bound put");
@@ -3436,7 +3438,7 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts
     assert.deepEqual(rig.admitted, ["note:at"]);
 
     // Two servable documents make a reply over the limit: it is not sent, and onError hears why.
-    rig.peer.send(notePut("put-second", "note:a2", atBound));
+    rig.peer.send(notePut("put-a2", "note:a2", atBound));
     await waitForAdmission(rig, "note:a2");
     rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "0", recordKeys: ["note:at", "note:a2"] });
     const replyStartedAt = Date.now();
