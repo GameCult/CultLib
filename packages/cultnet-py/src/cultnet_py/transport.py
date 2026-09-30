@@ -482,6 +482,9 @@ class CultNetRudpSession:
         self._received_sequences: set[int] = set()
         self._latest_sequenced_by_channel: dict[str, int] = {}
         self._pending_reliable: dict[int, _PendingReliablePacket] = {}
+        # Payload sizes of acknowledged reliable sequences above the lowest unacknowledged one. The receiver still
+        # holds those bytes behind the gap, so the flow window keeps counting them until the lowest sequence passes them.
+        self._acked_above_lowest: dict[int, int] = {}
         self._queued_reliable: deque[CultNetRudpPacket] = deque()
         # Every reliable sequence up to and including this one has been received
         # since the peer state was last reset. Only the handshake seeds it: the
@@ -544,6 +547,7 @@ class CultNetRudpSession:
         self._awaiting_accept = False
         self._generation += 1
         self._pending_reliable.clear()
+        self._acked_above_lowest.clear()
         self._queued_reliable.clear()
 
     def reset_peer_state(self) -> None:
@@ -950,7 +954,7 @@ class CultNetRudpSession:
         lowest = min(self._pending_reliable)
         bytes_above = sum(
             len(pending.packet.payload) for pending_sequence, pending in self._pending_reliable.items() if pending_sequence > lowest
-        )
+        ) + sum(self._acked_above_lowest.values())
         return sequence - lowest <= self.FLOW_WINDOW_SEQUENCES and bytes_above + payload_length <= self.FLOW_WINDOW_BYTES
 
     def _admit_reliable_packets(
@@ -984,10 +988,21 @@ class CultNetRudpSession:
             raise ValueError("RUDP reliable send queue is full")
 
     def _apply_acknowledgements(self, packet: CultNetRudpPacket) -> None:
-        self._pending_reliable.pop(packet.ack, None)
+        self._acknowledge(packet.ack)
         for bit in range(32):
             if packet.ack_mask & (1 << bit):
-                self._pending_reliable.pop(packet.ack - bit - 1, None)
+                self._acknowledge(packet.ack - bit - 1)
+        # Acknowledged sizes stop counting once the lowest unacknowledged sequence passes them, and all of them stop
+        # when nothing is unacknowledged.
+        lowest = min(self._pending_reliable, default=None)
+        self._acked_above_lowest = (
+            {} if lowest is None else {sequence: length for sequence, length in self._acked_above_lowest.items() if sequence > lowest}
+        )
+
+    def _acknowledge(self, sequence: int) -> None:
+        pending = self._pending_reliable.pop(sequence, None)
+        if pending is not None:
+            self._acked_above_lowest[sequence] = len(pending.packet.payload)
 
     def _seed_received(self, sequence: int) -> None:
         """The handshake's one act on the watermark: the peer's Connect or Accept

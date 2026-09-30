@@ -1524,6 +1524,37 @@ test("a small packet does not overtake a queued large one", () => {
   assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend ?? []), [g.sequence + 2, g.sequence + 3]);
 });
 
+test("acknowledged bytes above a lost packet still count against 4 MiB", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  // g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it behind the
+  // gap, so it keeps counting.
+  for (let offset = 1; offset <= 4; offset++) {
+    assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + offset]);
+    sender.receive(flowAck(g.sequence + offset), 1);
+  }
+  assert.equal(flowSend(sender, MIB).length, 0);
+  assert.equal(sender.queuedReliablePacketCount, 1);
+  assert.throws(() => sender.send("state", new Uint8Array(MIB), { reliable: true }));
+
+  // g arrives: nothing is held behind a gap any more, and the queue drains.
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 2).readyToSend ?? []), [g.sequence + 5]);
+});
+
+test("acknowledged bytes count against the lowest unacked sequence as it advances", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  const h = flowSend(sender, 1)[0]!;
+  for (let index = 0; index < 3; index++) flowSend(sender, MIB);
+  // g and the 3 MiB above h are acknowledged; h is lost.
+  for (const offset of [2, 3, 4, 0]) sender.receive(flowAck(g.sequence + offset), 1);
+  assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + 5]);
+  // 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+  assert.equal(flowSend(sender, 1).length, 0);
+  // h arrives, the floor moves to g + 5, and the byte fits.
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(h.sequence), 2).readyToSend ?? []), [g.sequence + 6]);
+});
+
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {
   const originalBuffer = globalThis.Buffer;
   try {

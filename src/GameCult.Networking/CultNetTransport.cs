@@ -939,6 +939,9 @@ namespace GameCult.Networking
         private readonly Dictionary<string, uint> _latestSequencedByChannel = new Dictionary<string, uint>(StringComparer.Ordinal);
         private readonly object _pendingReliableGate = new object();
         private readonly Dictionary<uint, PendingReliablePacket> _pendingReliable = new Dictionary<uint, PendingReliablePacket>();
+        // Payload sizes of acknowledged reliable sequences above the lowest unacknowledged one. The receiver still
+        // holds those bytes behind the gap, so the flow window keeps counting them until the lowest sequence passes them.
+        private readonly Dictionary<uint, int> _ackedAboveLowest = new Dictionary<uint, int>();
         private readonly Queue<CultNetRudpPacket> _queuedReliable = new Queue<CultNetRudpPacket>();
         // Every reliable sequence up to and including this one has been received since the peer state
         // was last reset. Only the handshake seeds it: the peer's Connect on the accepting side, the
@@ -1424,6 +1427,7 @@ namespace GameCult.Networking
             lock (_pendingReliableGate)
             {
                 _pendingReliable.Clear();
+                _ackedAboveLowest.Clear();
                 _queuedReliable.Clear();
             }
         }
@@ -1595,6 +1599,8 @@ namespace GameCult.Networking
                 if (pending.Key > lowest)
                     bytesAbove += pending.Value.Packet.Payload.Length;
             }
+            foreach (var length in _ackedAboveLowest.Values)
+                bytesAbove += length;
             return sequence - lowest <= FlowWindowSequences && bytesAbove + payloadLength <= FlowWindowBytes;
         }
 
@@ -1665,15 +1671,34 @@ namespace GameCult.Networking
         {
             lock (_pendingReliableGate)
             {
-                _pendingReliable.Remove(packet.Ack);
+                Acknowledge(packet.Ack);
                 for (var bit = 0; bit < 32; bit++)
                 {
                     if ((packet.AckMask & (1u << bit)) != 0 && packet.Ack > bit)
                     {
-                        _pendingReliable.Remove(packet.Ack - (uint)bit - 1);
+                        Acknowledge(packet.Ack - (uint)bit - 1);
                     }
                 }
+                // Acknowledged sizes stop counting once the lowest unacknowledged sequence passes them, and all
+                // of them stop when nothing is unacknowledged.
+                if (_pendingReliable.Count == 0)
+                {
+                    _ackedAboveLowest.Clear();
+                }
+                else
+                {
+                    var lowest = _pendingReliable.Keys.Min();
+                    foreach (var sequence in _ackedAboveLowest.Keys.Where(sequence => sequence <= lowest).ToArray())
+                        _ackedAboveLowest.Remove(sequence);
+                }
             }
+        }
+
+        // Callers hold the pending gate.
+        private void Acknowledge(uint sequence)
+        {
+            if (_pendingReliable.Remove(sequence, out var pending))
+                _ackedAboveLowest[sequence] = pending.Packet.Payload.Length;
         }
 
         private static bool PacketAcknowledges(CultNetRudpPacket packet, uint sequence)

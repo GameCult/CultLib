@@ -251,6 +251,11 @@ pub struct CultNetRudpSession {
     received_sequences: BTreeSet<u32>,
     latest_sequenced_by_channel: BTreeMap<String, u32>,
     pending_reliable: BTreeMap<u32, PendingReliablePacket>,
+    /// Payload sizes of acknowledged reliable sequences above the lowest
+    /// unacknowledged one. The receiver still holds those bytes behind the gap,
+    /// so the flow window keeps counting them until the lowest sequence
+    /// advances past them.
+    acked_above_lowest: BTreeMap<u32, usize>,
     queued_reliable: VecDeque<(CultNetRudpPacket, Option<u64>)>,
     reliable_packets_expired: u64,
     /// Every reliable sequence up to and including this one has been received
@@ -291,6 +296,7 @@ impl CultNetRudpSession {
             received_sequences: BTreeSet::new(),
             latest_sequenced_by_channel: BTreeMap::new(),
             pending_reliable: BTreeMap::new(),
+            acked_above_lowest: BTreeMap::new(),
             queued_reliable: VecDeque::new(),
             reliable_packets_expired: 0,
             received_through: None,
@@ -375,6 +381,7 @@ impl CultNetRudpSession {
         self.awaiting_accept = false;
         self.generation += 1;
         self.pending_reliable.clear();
+        self.acked_above_lowest.clear();
         self.queued_reliable.clear();
     }
 
@@ -1080,6 +1087,7 @@ impl CultNetRudpSession {
             .retain(|_, pending| pending.expires_at_ms.is_none_or(|at| now_ms <= at));
         self.queued_reliable
             .retain(|(_, expires_at_ms)| expires_at_ms.is_none_or(|at| now_ms <= at));
+        self.forget_acked_below_lowest();
         let after = self.pending_reliable.len() + self.queued_reliable.len();
         self.reliable_packets_expired = self
             .reliable_packets_expired
@@ -1096,12 +1104,14 @@ impl CultNetRudpSession {
         let Some((&lowest, _)) = self.pending_reliable.first_key_value() else {
             return true;
         };
-        let bytes_above: usize = self
+        let pending_bytes: usize = self
             .pending_reliable
             .iter()
             .filter(|(pending_sequence, _)| **pending_sequence > lowest)
             .map(|(_, pending)| pending.packet.payload.len())
             .sum();
+        let acked_bytes: usize = self.acked_above_lowest.values().sum();
+        let bytes_above = pending_bytes + acked_bytes;
         sequence.saturating_sub(lowest) <= RUDP_FLOW_WINDOW_SEQUENCES
             && bytes_above + payload_len <= RUDP_FLOW_WINDOW_BYTES
     }
@@ -1163,11 +1173,28 @@ impl CultNetRudpSession {
     }
 
     fn apply_acknowledgements(&mut self, packet: &CultNetRudpPacket) {
-        self.pending_reliable.remove(&packet.ack);
+        self.acknowledge(packet.ack);
         for bit in 0..32 {
             if (packet.ack_mask & (1_u32 << bit)) != 0 && packet.ack > bit {
-                self.pending_reliable.remove(&(packet.ack - bit - 1));
+                self.acknowledge(packet.ack - bit - 1);
             }
+        }
+        self.forget_acked_below_lowest();
+    }
+
+    fn acknowledge(&mut self, sequence: u32) {
+        if let Some(pending) = self.pending_reliable.remove(&sequence) {
+            self.acked_above_lowest
+                .insert(sequence, pending.packet.payload.len());
+        }
+    }
+
+    /// Acknowledged sizes stop counting once the lowest unacknowledged
+    /// sequence passes them, and all of them stop when nothing is unacknowledged.
+    fn forget_acked_below_lowest(&mut self) {
+        match self.pending_reliable.first_key_value() {
+            Some((&lowest, _)) => self.acked_above_lowest.retain(|sequence, _| *sequence > lowest),
+            None => self.acked_above_lowest.clear(),
         }
     }
 

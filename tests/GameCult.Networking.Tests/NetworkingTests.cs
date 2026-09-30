@@ -1266,6 +1266,46 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void RudpSession_AcknowledgedBytesAboveALostPacketStillCountAgainst4MiB()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            // g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it
+            // behind the gap, so it keeps counting.
+            for (uint offset = 1; offset <= 4; offset++)
+            {
+                Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + offset }));
+                sender.Receive(FlowAck(g.Sequence + offset), 1);
+            }
+            Assert.That(FlowSend(sender, Mib), Is.Empty);
+            Assert.That(sender.QueuedReliablePacketCount, Is.EqualTo(1));
+            Assert.Throws<InvalidOperationException>(() => sender.Send("state", new byte[Mib], new CultNetRudpSendOptions { Reliable = true }));
+
+            // g arrives: nothing is held behind a gap any more, and the queue drains.
+            var promoted = sender.Receive(FlowAck(g.Sequence), 2).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+        }
+
+        [Test]
+        public void RudpSession_AcknowledgedBytesCountAgainstTheLowestUnackedSequenceAsItAdvances()
+        {
+            var sender = ConnectedFlowSession(1);
+            var g = FlowSend(sender, 1).Single();
+            var h = FlowSend(sender, 1).Single();
+            for (var index = 0; index < 3; index++)
+                FlowSend(sender, Mib);
+            // g and the 3 MiB above h are acknowledged; h is lost.
+            foreach (uint offset in new uint[] { 2, 3, 4, 0 })
+                sender.Receive(FlowAck(g.Sequence + offset), 1);
+            Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            // 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+            Assert.That(FlowSend(sender, 1), Is.Empty);
+            // h arrives, the floor moves to g + 5, and the byte fits.
+            var promoted = sender.Receive(FlowAck(h.Sequence), 2).ReadyToSend;
+            Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 6 }));
+        }
+
+        [Test]
         public void RudpSocketTransport_HandshakesAndCarriesReliableOrderedSchemaFrames()
         {
             using var serverSocket = BindUdpSocket();

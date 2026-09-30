@@ -172,3 +172,45 @@ fn a_small_packet_does_not_overtake_a_queued_large_one() -> Result<()> {
     assert_eq!(sequences(&promoted), vec![g.sequence + 2, g.sequence + 3]);
     Ok(())
 }
+
+#[test]
+fn acknowledged_bytes_above_a_lost_packet_still_count_against_4_mib() -> Result<()> {
+    let mut sender = connected(1)?;
+    let g = send(&mut sender, 1)?.remove(0);
+    // g is lost. Each 1 MiB frame above it is delivered and acknowledged, and
+    // the receiver still holds it behind the gap, so it keeps counting.
+    for offset in 1..=4u32 {
+        let sent = send(&mut sender, MIB)?;
+        assert_eq!(sequences(&sent), vec![g.sequence + offset]);
+        sender.receive(&ack_for(g.sequence + offset), 1)?;
+    }
+    assert!(send(&mut sender, MIB)?.is_empty());
+    assert_eq!(sender.queued_reliable_packet_count(), 1);
+    assert!(sender.send("state", vec![7; MIB], reliable()).is_err());
+
+    // g arrives: nothing is held behind a gap any more, and the queue drains.
+    let promoted = sender.receive(&ack_for(g.sequence), 2)?.ready_to_send;
+    assert_eq!(sequences(&promoted), vec![g.sequence + 5]);
+    Ok(())
+}
+
+#[test]
+fn acknowledged_bytes_count_against_the_lowest_unacked_sequence_as_it_advances() -> Result<()> {
+    let mut sender = connected(1)?;
+    let g = send(&mut sender, 1)?.remove(0);
+    let h = send(&mut sender, 1)?.remove(0);
+    for _ in 0..3 {
+        send(&mut sender, MIB)?;
+    }
+    // g and the 3 MiB above h are acknowledged; h is lost.
+    for offset in [2, 3, 4, 0] {
+        sender.receive(&ack_for(g.sequence + offset), 1)?;
+    }
+    assert_eq!(sequences(&send(&mut sender, MIB)?), vec![g.sequence + 5]);
+    // 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+    assert!(send(&mut sender, 1)?.is_empty());
+    // h arrives, the floor moves to g + 5, and the byte fits.
+    let promoted = sender.receive(&ack_for(h.sequence), 2)?.ready_to_send;
+    assert_eq!(sequences(&promoted), vec![g.sequence + 6]);
+    Ok(())
+}

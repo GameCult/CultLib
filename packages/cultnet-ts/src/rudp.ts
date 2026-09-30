@@ -203,6 +203,9 @@ export class CultNetRudpSession {
   readonly #receivedSequences = new Set<number>();
   readonly #latestSequencedByChannel = new Map<string, number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
+  /// Payload sizes of acknowledged reliable sequences above the lowest unacknowledged one. The receiver still holds
+  /// those bytes behind the gap, so the flow window keeps counting them until the lowest sequence passes them.
+  readonly #ackedAboveLowest = new Map<number, number>();
   readonly #queuedReliable: CultNetRudpPacket[] = [];
   /// Every reliable sequence up to and including this one has been received
   /// since the peer state was last reset. Only the handshake seeds it: the
@@ -285,6 +288,7 @@ export class CultNetRudpSession {
     this.#awaitingAccept = false;
     this.#generation += 1;
     this.#pendingReliable.clear();
+    this.#ackedAboveLowest.clear();
     this.#queuedReliable.splice(0);
   }
 
@@ -756,6 +760,7 @@ export class CultNetRudpSession {
     for (const [pendingSequence, pending] of this.#pendingReliable) {
       if (pendingSequence > lowest) bytesAbove += pending.packet.payload?.length ?? 0;
     }
+    for (const length of this.#ackedAboveLowest.values()) bytesAbove += length;
     return sequence - lowest <= RUDP_FLOW_WINDOW_SEQUENCES && bytesAbove + payloadLength <= RUDP_FLOW_WINDOW_BYTES;
   }
 
@@ -794,11 +799,32 @@ export class CultNetRudpSession {
   }
 
   #applyAcknowledgements(packet: CultNetRudpPacket): void {
-    this.#pendingReliable.delete(packet.ack);
+    this.#acknowledge(packet.ack);
     for (let bit = 0; bit < 32; bit += 1) {
       if ((packet.ackMask & (1 << bit)) !== 0) {
-        this.#pendingReliable.delete(packet.ack - bit - 1);
+        this.#acknowledge(packet.ack - bit - 1);
       }
+    }
+    this.#forgetAckedBelowLowest();
+  }
+
+  #acknowledge(sequence: number): void {
+    const pending = this.#pendingReliable.get(sequence);
+    if (pending === undefined) return;
+    this.#pendingReliable.delete(sequence);
+    this.#ackedAboveLowest.set(sequence, pending.packet.payload?.length ?? 0);
+  }
+
+  /// Acknowledged sizes stop counting once the lowest unacknowledged sequence passes them, and all of them stop
+  /// when nothing is unacknowledged.
+  #forgetAckedBelowLowest(): void {
+    if (this.#pendingReliable.size === 0) {
+      this.#ackedAboveLowest.clear();
+      return;
+    }
+    const lowest = Math.min(...this.#pendingReliable.keys());
+    for (const sequence of this.#ackedAboveLowest.keys()) {
+      if (sequence <= lowest) this.#ackedAboveLowest.delete(sequence);
     }
   }
 

@@ -980,6 +980,39 @@ class CultNetTests(unittest.TestCase):
         promoted = sender.receive(self._flow_ack(g.sequence), 1).ready_to_send
         self.assertEqual([p.sequence for p in promoted], [g.sequence + 2, g.sequence + 3])
 
+    def test_cultnet_rudp_acknowledged_bytes_above_a_lost_packet_still_count_against_4_mib(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        # g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it behind
+        # the gap, so it keeps counting.
+        for offset in range(1, 5):
+            self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + offset])
+            sender.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual(len(self._flow_send(sender, self.MIB)), 0)
+        self.assertEqual(sender.queued_reliable_packet_count, 1)
+        with self.assertRaises(ValueError):
+            sender.send("state", bytes(self.MIB), CultNetRudpSendOptions(reliable=True))
+
+        # g arrives: nothing is held behind a gap any more, and the queue drains.
+        promoted = sender.receive(self._flow_ack(g.sequence), 2).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 5])
+
+    def test_cultnet_rudp_acknowledged_bytes_count_against_the_lowest_unacked_sequence_as_it_advances(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        h = self._flow_send(sender, 1)[0]
+        for _ in range(3):
+            self._flow_send(sender, self.MIB)
+        # g and the 3 MiB above h are acknowledged; h is lost.
+        for offset in (2, 3, 4, 0):
+            sender.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + 5])
+        # 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+        self.assertEqual(len(self._flow_send(sender, 1)), 0)
+        # h arrives, the floor moves to g + 5, and the byte fits.
+        promoted = sender.receive(self._flow_ack(h.sequence), 2).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 6])
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()
