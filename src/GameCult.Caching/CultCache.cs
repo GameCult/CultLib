@@ -29,34 +29,92 @@ namespace GameCult.Caching
 
         public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
 
-        // One entry per schema id, whatever order the candidates come in. Entries that share an id and a schema name are one schema seen
-        // by different writers: the merged entry takes its name, content hash and members from the entry being written now (the
-        // last with preferLast, else the first) and lists every id any of them lists. An entry of another schema under the same id is
-        // dropped, never merged: its ids are not this schema's.
-        internal static IEnumerable<CultSchemaCatalogEntry> MergeById(IEnumerable<CultSchemaCatalogEntry> entries, bool preferLast = false)
+        // The catalog a write leaves, derived from the records being written and nothing else. For each schema id a record carries, one
+        // entry that publishes it: the entry that owns the id (a registered descriptor, else one that arrived with the records), else
+        // one that lists it as compatible (registered first). Entries are written as chosen, never merged; a registered descriptor
+        // wins over an arrived entry with the same own id. Two arrived entries with the same own id and different schema names, or a
+        // record no chosen entry publishes, refuse the write.
+        // Entries that tie are taken in one fixed order, so the catalog does not depend on the order they arrive in.
+        private static IEnumerable<CultSchemaCatalogEntry> Canonical(IEnumerable<CultSchemaCatalogEntry> entries) => entries
+            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+            .ThenBy(entry => entry.ContentHash, StringComparer.Ordinal)
+            .ThenBy(entry => string.Join(",", entry.CompatibleSchemaIds), StringComparer.Ordinal);
+
+        internal static CultSchemaCatalogEntry[] Derive(
+            IEnumerable<CultPersistedRecord> records,
+            IReadOnlyCollection<CultSchemaCatalogEntry> registered,
+            IReadOnlyCollection<CultSchemaCatalogEntry> arrived)
         {
-            foreach (var group in entries.GroupBy(entry => entry.SchemaId, StringComparer.Ordinal))
+            var chosen = new Dictionary<string, (CultSchemaCatalogEntry Entry, bool Registered)>(StringComparer.Ordinal);
+            var carried = records.GroupBy(record => record.SchemaId, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal).ToArray();
+            foreach (var group in carried)
             {
-                var members = group.ToArray();
-                var chosen = preferLast ? members[^1] : members[0];
-                var sameSchema = members.Where(entry => string.Equals(entry.SchemaName, chosen.SchemaName, StringComparison.Ordinal)).ToArray();
-                if (sameSchema.Length == 1)
+                var schemaId = group.Key;
+                var recordKey = group.Min(record => record.Key)!;
+                var ownRegisteredAll = Canonical(registered.Where(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))).ToArray();
+                var ownRegistered = ownRegisteredAll.FirstOrDefault();
+                var ownArrived = Canonical(arrived.Where(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))).ToArray();
+                // Entries of one tier that share an own id must be one schema; a registered entry settles a disagreement among arrived ones.
+                var disagreeing = ownRegisteredAll.Length > 0 ? ownRegisteredAll : ownArrived;
+                if (disagreeing.Select(entry => entry.SchemaName).Distinct(StringComparer.Ordinal).Count() > 1)
                 {
-                    yield return chosen;
-                    continue;
+                    var names = disagreeing.Select(entry => entry.SchemaName).Distinct(StringComparer.Ordinal).ToArray();
+                    throw new CultSchemaConflictException(
+                        $"Schema id '{schemaId}' is claimed by schemas {string.Join(" and ", names.Select(name => $"'{name}'"))}; record '{recordKey}' cannot be written under it.",
+                        schemaId, names, recordKey);
                 }
 
-                yield return new CultSchemaCatalogEntry
+                CultSchemaCatalogEntry? pick;
+                bool isRegistered;
+                if (ownRegistered != null)
                 {
-                    SchemaId = chosen.SchemaId,
-                    SchemaName = chosen.SchemaName,
-                    SchemaVersion = chosen.SchemaVersion,
-                    ContentHash = chosen.ContentHash,
-                    CanonicalSchemaJson = chosen.CanonicalSchemaJson,
-                    CompatibleSchemaIds = sameSchema.SelectMany(entry => entry.CompatibleSchemaIds).Distinct(StringComparer.Ordinal).ToArray(),
-                    Members = chosen.Members
-                };
+                    pick = ownRegistered;
+                    isRegistered = true;
+                }
+                else if (ownArrived.Length > 0)
+                {
+                    pick = ownArrived[0];
+                    isRegistered = false;
+                }
+                else
+                {
+                    pick = Canonical(registered.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal))).FirstOrDefault();
+                    isRegistered = pick != null;
+                    pick ??= Canonical(arrived.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal))).FirstOrDefault();
+                }
+
+                if (pick == null)
+                    continue;
+                if (chosen.TryGetValue(pick.SchemaId, out var prior))
+                {
+                    if (prior.Registered && !isRegistered)
+                        continue;
+
+                    // Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
+                    if (prior.Registered == isRegistered && !string.Equals(prior.Entry.SchemaName, pick.SchemaName, StringComparison.Ordinal))
+                    {
+                        var names = new[] { prior.Entry.SchemaName, pick.SchemaName };
+                        throw new CultSchemaConflictException(
+                            $"Schema id '{pick.SchemaId}' is claimed by schemas '{names[0]}' and '{names[1]}'; record '{recordKey}' cannot be written under it.",
+                            pick.SchemaId, names, recordKey);
+                    }
+                }
+                chosen[pick.SchemaId] = (pick, isRegistered);
             }
+
+            foreach (var group in carried)
+            {
+                if (!chosen.Values.Any(pair => string.Equals(pair.Entry.SchemaId, group.Key, StringComparison.Ordinal) ||
+                                               pair.Entry.CompatibleSchemaIds.Contains(group.Key, StringComparer.Ordinal)))
+                {
+                    var recordKey = group.Min(record => record.Key)!;
+                    throw new CultSchemaConflictException(
+                        $"No schema entry publishes schema id '{group.Key}' of record '{recordKey}'.",
+                        group.Key, chosen.Values.Select(pair => pair.Entry.SchemaName).ToArray(), recordKey);
+                }
+            }
+
+            return chosen.Values.Select(pair => pair.Entry).ToArray();
         }
     }
 
@@ -3536,7 +3594,8 @@ namespace GameCult.Caching
                     ReadSnapshot();
                     WriteSnapshot(
                         Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)),
-                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()),
+                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
+                        Array.Empty<CultSchemaCatalogEntry>(),
                         Entries.Values.Any(entry => entry.HoldsIds),
                         existingHeader: null,
                         wholeStore: true);
@@ -3569,9 +3628,6 @@ namespace GameCult.Caching
             var records = ontoDisk
                 ? disk.Records.ToDictionary(record => record.Key, StringComparer.Ordinal)
                 : Entries.Values.Select(entry => ToPersistedRecord(entry, SerializePayload)).ToDictionary(record => record.Key, StringComparer.Ordinal);
-            var catalog = ontoDisk
-                ? disk.SchemaCatalog
-                : Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry());
             // The committer judged the batch against its own view; the file may have moved since. A merge is judged on the
             // set the file will hold, exactly as that set would be judged loading: what other processes wrote (arriving),
             // what they removed (departing), and this batch.
@@ -3581,6 +3637,20 @@ namespace GameCult.Caching
                 records.Remove(entry.Key.Value);
             foreach (var entry in request.Upserts)
                 records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
+            if (ontoDisk)
+            {
+                // A record this cache holds, unchanged since the file was read, is written under its registered schema's id, as a
+                // whole-view write writes it: the file's entry that lists an older id for it is then not needed to publish it.
+                foreach (var record in disk.Records)
+                {
+                    if (records.TryGetValue(record.Key, out var carried) && ReferenceEquals(carried, record) &&
+                        Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt &&
+                        !string.Equals(known.Descriptor.SchemaId, record.SchemaId, StringComparison.Ordinal))
+                    {
+                        records[record.Key] = ToPersistedRecord(known, SerializePayload);
+                    }
+                }
+            }
 
             // Onto the file, only the batch's records are seen: the rest stay as they are, and the header they carry stays. An
             // unconditional commit writes this store's whole view, so what its records hold decides. A record this commit
@@ -3588,7 +3658,10 @@ namespace GameCult.Caching
             var replaced = request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
             var holdsIds = request.Upserts.Any(entry => entry.HoldsIds) ||
                            (!ontoDisk && Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value)));
-            WriteSnapshot(records.Values, catalog.Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry())), holdsIds, disk.FormatVersion, wholeStore: !ontoDisk);
+            var registered = Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())
+                .Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry()))
+                .ToArray();
+            WriteSnapshot(records.Values, registered, ontoDisk ? disk.SchemaCatalog : Array.Empty<CultSchemaCatalogEntry>(), holdsIds, disk.FormatVersion, wholeStore: !ontoDisk);
             if (!ontoDisk)
                 Cache?.IdsPersisted(records.Keys);
             foreach (var entry in request.Deletes)
@@ -3660,17 +3733,15 @@ namespace GameCult.Caching
             }
         }
 
-        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IEnumerable<CultSchemaCatalogEntry> catalog, bool holdsElementIds, string? existingHeader, bool wholeStore)
+        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IReadOnlyCollection<CultSchemaCatalogEntry> registered, IReadOnlyCollection<CultSchemaCatalogEntry> arrived, bool holdsElementIds, string? existingHeader, bool wholeStore)
         {
             var ordered = records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
-            var used = new HashSet<string>(ordered.Select(record => record.SchemaId), StringComparer.Ordinal);
             var snapshot = new CultPersistedStoreSnapshot
             {
                 FormatVersion = HeaderFor(holdsElementIds, existingHeader, wholeStore, directoryStore: false, holdsVariants: ordered.Any(record => record.Variant != null)),
-                SchemaCatalog = CultSchemaCatalogEntry.MergeById(catalog, preferLast: true)
-                    // An entry stays while it publishes a schema id some record carries, as its own id or a compatible one.
-                    .Where(entry => used.Contains(entry.SchemaId) || entry.CompatibleSchemaIds.Any(used.Contains))
+                SchemaCatalog = CultSchemaCatalogEntry.Derive(ordered, registered, arrived)
                     .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+                    .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
                     .ToArray(),
                 Records = ordered
             };

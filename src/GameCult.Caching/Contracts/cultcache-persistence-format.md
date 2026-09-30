@@ -128,9 +128,20 @@ record with its registered schema's id, whatever id the record arrived under.
 
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
-in catalog order). Two entries that share a `schemaId` are one schema seen by different writers: a
-writer that merges them writes one entry whose compatible ids are the union of theirs, whatever
-order they arrive in, so it lists every id any record it writes carries.
+in catalog order).
+
+A writer derives the catalog from the records it writes, and from nothing else. For each distinct
+schema id a record carries it chooses exactly one entry that publishes it: the entry that owns the id
+(a registered schema's descriptor, else an entry the record arrived with), else an entry that lists
+it as compatible (again registered first). When a registered descriptor and an arrived entry share an
+own id, the descriptor wins: a rename or a stale content hash takes the descriptor's name, hash,
+members and compatible ids as they are. Entries are written as chosen, deduplicated by own id, with
+no union of compatible ids and no dependence on the order records arrive in; an entry no record needs
+is not written. A write is refused, and the store left as it was, when two entries of one tier share
+an own id and disagree on the schema name, when records of different types share a schema id, or when
+a record's id is published by no chosen entry. Each runtime refuses with one typed error naming the
+id, the schema names and a record key: `CultSchemaConflictException` (C#), `SchemaConflictError`
+(Rust, TypeScript, Python).
 
 This is not decorative paperwork. It is what allows another CultCache
 implementation to inspect an old store, resolve the schema for each record, and

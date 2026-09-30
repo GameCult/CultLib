@@ -15,7 +15,7 @@ import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
-import { StoreUnreadableError } from "../src/store-format";
+import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
@@ -1344,76 +1344,136 @@ test("the store publishes a record's schema id even when the envelope's catalog 
   assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 1);
 });
 
-// Entries that share a schema id are one schema seen by different writers: the catalog written lists every id any of them lists,
-// whichever order the records arrive in.
-test("the store writer merges the compatible ids of entries that share a schema id, in either order", async () => {
-  const entry = (compatibleSchemaIds: string[]) => ({
-    schemaId: "tests.merge.x",
-    schemaName: "tests.merge",
-    schemaVersion: "tests.merge.v1",
-    contentHash: "tests.merge.x",
-    canonicalSchemaJson: "",
-    compatibleSchemaIds,
-    members: [],
-  });
-  const record = (key: string, schemaId: string, compatibleSchemaIds: string[]) => ({
-    key,
-    type: "tests.merge",
-    schemaId,
-    payload: encode({ key }),
-    storedAt: "2026-09-30T00:00:00.0000000Z",
-    catalogEntry: entry(compatibleSchemaIds),
-  });
-  const a = record("a", "tests.merge.x", ["tests.merge.x"]);
-  const b = record("b", "tests.merge.y", ["tests.merge.x", "tests.merge.y"]);
-  const dir = await mkdtemp(join(tmpdir(), "cultcache-merge-"));
+// The catalog a write leaves is derived from its records: one entry per carried id, chosen and never merged, the same whatever order
+// the records arrive in. A registered (supplied) entry wins over an arrived (read back) entry with the same own id.
+const writerEntry = (schemaId: string, schemaName: string, contentHash: string, compatibleSchemaIds: string[]) => ({
+  schemaId,
+  schemaName,
+  schemaVersion: `${schemaName}.v1`,
+  contentHash,
+  canonicalSchemaJson: "",
+  compatibleSchemaIds,
+  members: [],
+});
+const writerRecord = (key: string, type: string, schemaId: string, catalogEntry?: ReturnType<typeof writerEntry>) => ({
+  key,
+  type,
+  schemaId,
+  payload: encode({ key }),
+  storedAt: "2026-09-30T00:00:00.0000000Z",
+  ...(catalogEntry ? { catalogEntry } : {}),
+});
+const rawCatalogEntry = (entry: ReturnType<typeof writerEntry>) => [
+  entry.schemaId,
+  entry.schemaName,
+  entry.schemaVersion,
+  entry.contentHash,
+  entry.canonicalSchemaJson,
+  entry.compatibleSchemaIds,
+  [],
+];
+const catalogOf = async (file: string): Promise<unknown[][]> =>
+  (decode(await readFile(file)) as [string, unknown[][], unknown[][]])[1];
 
-  for (const [name, order] of [["ab", [a, b]], ["ba", [b, a]]] as const) {
+test("a registered entry is written as it is, over the arrived entries with the same own id, in either order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-registered-wins-"));
+  const stale1 = writerEntry("tests.x", "tests.n", "stale-1", ["tests.x", "old"]);
+  const stale2 = writerEntry("tests.x", "tests.n", "stale-2", ["tests.x"]);
+  const registered = writerRecord("a", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "fresh", ["tests.x"]));
+
+  for (const [name, entries] of [["12", [stale1, stale2]], ["21", [stale2, stale1]]] as const) {
     const file = join(dir, `${name}.msgpack`);
-    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
-    const decoded = decode(await readFile(file)) as [string, unknown[][], unknown[][]];
-    assert.deepEqual(decoded[1].map((catalogEntry) => (catalogEntry[5] as string[]).slice().sort()), [["tests.merge.x", "tests.merge.y"]], name);
-    assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2, name);
+    await writeFile(
+      file,
+      encode(["cultcache.store.v1", entries.map(rawCatalogEntry), [["b", "tests.x", "2026-09-30T00:00:00.0000000Z", encode({ b: 1 })]]]),
+    );
+    await new SingleFileMessagePackBackingStore(file).push(registered);
+    const catalog = await catalogOf(file);
+    assert.equal(catalog.length, 1, name);
+    assert.equal(catalog[0]![3], "fresh", `${name}: the registered entry's hash is written`);
+    assert.deepEqual(catalog[0]![5], ["tests.x"], `${name}: written as chosen, no union with the arrived entries' ids`);
   }
-
-  // A put over a key of a file whose other record is stored under the wider entry's compatible id.
-  const file = join(dir, "push.msgpack");
-  await new SingleFileMessagePackBackingStore(file).pushAll([b]);
-  await new SingleFileMessagePackBackingStore(file).push(a);
-  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2);
 });
 
-// Entries of different schemas that share an id are not merged: the record gets a default entry under its own id, so no record is
-// read as another schema, whichever order the records arrive in.
-test("the store writer never merges an entry of another schema into a record's catalog entry", async () => {
-  const entry = (schemaName: string, compatibleSchemaIds: string[]) => ({
-    schemaId: "tests.retype.x",
-    schemaName,
-    schemaVersion: `${schemaName}.v1`,
-    contentHash: "tests.retype.x",
-    canonicalSchemaJson: "",
-    compatibleSchemaIds,
-    members: [],
-  });
-  const record = (key: string, type: string, schemaId: string, catalogEntry: ReturnType<typeof entry>) => ({
-    key,
-    type,
-    schemaId,
-    payload: encode({ key }),
-    storedAt: "2026-09-30T00:00:00.0000000Z",
-    catalogEntry,
-  });
-  // a is schema "mine" under x; b is schema "theirs" under y, carrying an entry with x's id that lists y.
-  const a = record("a", "tests.retype.mine", "tests.retype.x", entry("tests.retype.mine", ["tests.retype.x"]));
-  const b = record("b", "tests.retype.theirs", "tests.retype.y", entry("tests.retype.theirs", ["tests.retype.x", "tests.retype.y"]));
+test("a rename with a stable schema id: a whole-view write names the registered schema", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-rename-"));
+  const file = join(dir, "rename.msgpack");
+  await writeFile(
+    file,
+    encode(["cultcache.store.v1", [rawCatalogEntry(writerEntry("tests.x", "tests.old", "stale", ["tests.x"]))], [["a", "tests.x", "2026-09-30T00:00:00.0000000Z", encode({ a: 1 })]]]),
+  );
+  await new SingleFileMessagePackBackingStore(file).pushAll([writerRecord("a", "tests.new", "tests.x", writerEntry("tests.x", "tests.new", "fresh", ["tests.x"]))]);
+  assert.deepEqual((await catalogOf(file)).map((entry) => [entry[1], entry[3]]), [["tests.new", "fresh"]]);
+});
+
+test("two entries of one tier that share an own id and disagree on the schema name refuse the write, typed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-disagree-"));
+  const first = writerRecord("b", "tests.first", "tests.x", writerEntry("tests.x", "tests.first", "h1", ["tests.x"]));
+  const second = writerRecord("a", "tests.first", "tests.x", writerEntry("tests.x", "tests.second", "h2", ["tests.x"]));
+  for (const [name, order] of [["fs", [first, second]], ["sf", [second, first]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll([...order]),
+      (error) =>
+        error instanceof SchemaConflictError &&
+        error.schemaId === "tests.x" &&
+        error.recordKey === "a" &&
+        [...error.schemaNames].sort().join() === "tests.first,tests.second",
+      name,
+    );
+  }
+});
+
+test("records of different types under one schema id refuse the write, typed, and no record changes type", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-retype-"));
+  const a = writerRecord("a", "tests.n", "tests.y", writerEntry("tests.x", "tests.n", "h1", ["tests.x", "tests.y"]));
+  const b = writerRecord("b", "tests.m", "tests.y", writerEntry("tests.y", "tests.m", "h2", ["tests.y"]));
 
   for (const [name, order] of [["ab", [a, b]], ["ba", [b, a]]] as const) {
     const file = join(dir, `${name}.msgpack`);
-    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
-    const back = await new SingleFileMessagePackBackingStore(file).pullAll();
-    assert.deepEqual(back.map((envelope) => [envelope.key, envelope.type]).sort(), [["a", "tests.retype.mine"], ["b", "tests.retype.theirs"]], name);
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pushAll([...order]),
+      (error) => error instanceof SchemaConflictError && error.schemaId === "tests.y" && error.schemaNames.join() === "tests.m,tests.n",
+      name,
+    );
   }
+});
+
+test("an entry that owns an id is chosen over one that lists it, and an entry no record needs is not written", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-own-first-"));
+  const owner = writerRecord("a", "tests.n", "tests.y", writerEntry("tests.y", "tests.n", "h1", ["tests.y"]));
+  const lister = writerRecord("b", "tests.n", "tests.x", writerEntry("tests.x", "tests.n", "h2", ["tests.x", "tests.y"]));
+  const onlyOwner = join(dir, "own.msgpack");
+  await new SingleFileMessagePackBackingStore(onlyOwner).pushAll([owner]);
+  assert.deepEqual((await catalogOf(onlyOwner)).map((entry) => entry[0]), ["tests.y"]);
+
+  // The lister carried only its own id: its list of y is not needed, and the owner's entry publishes y.
+  for (const [name, order] of [["lo", [lister, owner]], ["ol", [owner, lister]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    const catalog = await catalogOf(file);
+    assert.deepEqual(catalog.map((entry) => [entry[0], entry[5]]).sort(), [["tests.x", ["tests.x", "tests.y"]], ["tests.y", ["tests.y"]]], name);
+  }
+});
+
+test("a record no chosen entry publishes refuses the write, typed, and leaves the file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-orphan-"));
+  const file = join(dir, "orphan.msgpack");
+  // z sits under old, which only the arrived entry (id x) lists; the supplied entry owns x and does not.
+  await writeFile(
+    file,
+    encode([
+      "cultcache.store.v1",
+      [rawCatalogEntry(writerEntry("tests.x", "tests.legacy", "stale", ["tests.x", "old"]))],
+      [["z", "old", "2026-09-30T00:00:00.0000000Z", encode({ z: 1 })]],
+    ]),
+  );
+  const before = await readFile(file);
+  await assert.rejects(
+    () => new SingleFileMessagePackBackingStore(file).push(writerRecord("a", "tests.legacy", "tests.x", writerEntry("tests.x", "tests.legacy", "fresh", ["tests.x"]))),
+    (error) => error instanceof SchemaConflictError && error.schemaId === "old" && error.recordKey === "z",
+  );
+  assert.ok(before.equals(await readFile(file)), "the file is left as it was");
 });
 
 test("an id an entry owns names that entry, not one that lists it as compatible", async () => {

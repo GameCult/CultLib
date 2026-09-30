@@ -4,7 +4,6 @@ import base64
 import json
 import os
 import threading
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,20 @@ class StoreUnreadableError(ValueError):
     def __init__(self, path: Path, cause: BaseException) -> None:
         super().__init__(f"CultCache store {path} is not readable: {cause}")
         self.path = path
+
+
+class SchemaConflictError(ValueError):
+    """A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id
+    and disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names
+    involved (`schema_names`) and a record key (`record_key`)."""
+
+    def __init__(self, schema_id: str, schema_names: list[str], record_key: str) -> None:
+        super().__init__(
+            f"Schema id {schema_id!r} cannot describe record {record_key!r}: {', '.join(repr(name) for name in schema_names)}"
+        )
+        self.schema_id = schema_id
+        self.schema_names = schema_names
+        self.record_key = record_key
 
 
 class JsonLinesBackingStore:
@@ -125,27 +138,21 @@ class SingleFileMessagePackBackingStore:
 
     def push(self, envelope: CultCacheEnvelope) -> None:
         with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+            self._replace_all([envelope], self.pull_all())
 
     def push_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         with self._lock:
-            existing = {(item.type, item.key): item for item in self.pull_all()}
-            for envelope in envelopes:
-                existing[(envelope.type, envelope.key)] = envelope
-            self._replace_all(list(existing.values()))
+            self._replace_all(list(envelopes), self.pull_all())
 
     def delete(self, type: str, key: str) -> None:
         with self._lock:
-            existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
-            self._replace_all(existing)
+            self._replace_all([], [item for item in self.pull_all() if not (item.type == type and item.key == key)])
 
-    def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+    def _replace_all(self, supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope]) -> None:
         msgpack = self._msgpack()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_bytes(msgpack.packb(_encode_snapshot(envelopes, self._format), use_bin_type=True))
+        temp.write_bytes(msgpack.packb(_encode_snapshot(supplied, arrived, self._format), use_bin_type=True))
         temp.replace(self.path)
 
     @staticmethod
@@ -160,46 +167,81 @@ class SingleFileMessagePackBackingStore:
         return msgpack
 
 
-def _encode_snapshot(envelopes: list[CultCacheEnvelope], format_version: str) -> list[Any]:
-    # Every record's schema id is published by a catalog entry: the entry the envelope carries when it publishes that id (as its
-    # own id or a compatible one), else a default entry under the record's id. The catalog is keyed by the entry's own id, so a
-    # record read under a compatible id is written back beside the entry that lists it.
-    catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}
+def canonical(candidates: Any) -> list[CultCacheSchemaCatalogEntry]:
+    """Entries that tie, in one fixed order, so the catalog does not depend on the order they arrive in."""
+    return sorted(candidates, key=lambda entry: (entry.schema_name, entry.content_hash, ",".join(entry.compatible_schema_ids)))
 
-    def place(envelope: CultCacheEnvelope, candidates: list[CultCacheSchemaCatalogEntry]) -> None:
-        for candidate in candidates:
-            existing = catalog_by_schema_id.get(candidate.schema_id)
-            if existing is None:
-                catalog_by_schema_id[candidate.schema_id] = candidate
-                return
-            # Entries that share an id and a schema name are one schema seen by different writers: the entry written lists every id
-            # any of them lists. An entry of another schema is never merged: the record gets a default entry under its own id.
-            if existing.schema_name == candidate.schema_name:
-                catalog_by_schema_id[candidate.schema_id] = replace(
-                    existing,
-                    compatible_schema_ids=tuple(dict.fromkeys((*existing.compatible_schema_ids, *candidate.compatible_schema_ids))),
-                )
-                return
-        raise ValueError(f"CultCache schema id {_schema_id_for(envelope)!r} cannot identify two different schemas")
 
-    # A record's own id is claimed first, so an entry that lists it as compatible cannot take it from the schema that owns it,
-    # whatever order the records arrive in.
-    listed: list[tuple[CultCacheEnvelope, CultCacheSchemaCatalogEntry]] = []
-    for envelope in envelopes:
+def _derive_catalog(records: list[tuple[CultCacheEnvelope, bool]]) -> list[CultCacheSchemaCatalogEntry]:
+    """The catalog a write leaves, derived from the records being written and nothing else. For each schema id a record carries,
+    one entry that publishes it: the entry that owns the id (a registered one, else one that arrived with the records), else one
+    that lists it as compatible (registered first). Entries are written as chosen, never merged; a registered entry wins over an
+    arrived one with the same own id. Records of different types under one id, two arrived entries with the same own id and
+    different schema names, or a record no chosen entry publishes, refuse the write. `records` are (envelope, registered): an
+    envelope the caller supplied is registered, one read back from the file is arrived."""
+    entries: list[tuple[CultCacheSchemaCatalogEntry, bool]] = []
+    by_id: dict[str, list[CultCacheEnvelope]] = {}
+    for envelope, registered in records:
         schema_id = _schema_id_for(envelope)
         supplied = envelope.catalog_entry
-        if supplied is not None and supplied.schema_id != schema_id and schema_id in supplied.compatible_schema_ids:
-            listed.append((envelope, supplied))
-        elif supplied is not None and supplied.schema_id == schema_id:
-            place(envelope, [supplied])
-        else:
-            place(envelope, [_default_catalog_entry(envelope)])
-    for envelope, supplied in listed:
-        place(envelope, [supplied, _default_catalog_entry(envelope)])
+        publishes = supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
+        entries.append((supplied if publishes else _default_catalog_entry(envelope), registered))
+        by_id.setdefault(schema_id, []).append(envelope)
 
+    chosen: dict[str, tuple[CultCacheSchemaCatalogEntry, bool]] = {}
+    for schema_id in sorted(by_id):
+        carrying = by_id[schema_id]
+        record_key = min(envelope.key for envelope in carrying)
+        types = sorted({envelope.type for envelope in carrying})
+        if len(types) > 1:
+            raise SchemaConflictError(schema_id, types, record_key)
+        own_registered = next(iter(canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)), None)
+        own_arrived = canonical(entry for entry, registered in entries if not registered and entry.schema_id == schema_id)
+        own_registered_all = canonical(entry for entry, registered in entries if registered and entry.schema_id == schema_id)
+        # Entries of one tier that share an own id must be one schema; a registered entry settles a disagreement among arrived ones.
+        names = sorted({entry.schema_name for entry in (own_registered_all or own_arrived)})
+        if len(names) > 1:
+            raise SchemaConflictError(schema_id, names, record_key)
+        if own_registered is not None:
+            pick, registered_pick = own_registered, True
+        elif own_arrived:
+            pick, registered_pick = own_arrived[0], False
+        else:
+            listed_registered = next(iter(canonical(entry for entry, registered in entries if registered and schema_id in entry.compatible_schema_ids)), None)
+            listed_arrived = next(iter(canonical(entry for entry, registered in entries if not registered and schema_id in entry.compatible_schema_ids)), None)
+            pick = listed_registered if listed_registered is not None else listed_arrived
+            registered_pick = listed_registered is not None
+        if pick is None:
+            continue
+        prior = chosen.get(pick.schema_id)
+        if prior is not None:
+            if prior[1] and not registered_pick:
+                continue
+            # Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
+            if prior[1] == registered_pick and prior[0].schema_name != pick.schema_name:
+                raise SchemaConflictError(pick.schema_id, sorted({prior[0].schema_name, pick.schema_name}), record_key)
+        chosen[pick.schema_id] = (pick, registered_pick)
+
+    for schema_id in sorted(by_id):
+        if not any(entry.schema_id == schema_id or schema_id in entry.compatible_schema_ids for entry, _ in chosen.values()):
+            raise SchemaConflictError(
+                schema_id, sorted(entry.schema_name for entry, _ in chosen.values()), min(envelope.key for envelope in by_id[schema_id])
+            )
+    return [entry for entry, _ in chosen.values()]
+
+
+def _encode_snapshot(
+    supplied: list[CultCacheEnvelope], arrived: list[CultCacheEnvelope], format_version: str
+) -> list[Any]:
+    replaced = {(envelope.type, envelope.key) for envelope in supplied}
+    kept = [envelope for envelope in arrived if (envelope.type, envelope.key) not in replaced]
+    envelopes = [*kept, *supplied]
     catalog = [
         _encode_catalog_entry(entry)
-        for entry in sorted(catalog_by_schema_id.values(), key=lambda item: item.schema_name)
+        for entry in sorted(
+            _derive_catalog([*((envelope, False) for envelope in kept), *((envelope, True) for envelope in supplied)]),
+            key=lambda item: (item.schema_name, item.schema_id),
+        )
     ]
     records = [
         [envelope.key, _schema_id_for(envelope), envelope.stored_at, envelope.payload]

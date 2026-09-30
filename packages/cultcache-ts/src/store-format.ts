@@ -33,6 +33,25 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
 }
 
 /**
+ * A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id and
+ * disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names involved and
+ * a record key.
+ */
+export class SchemaConflictError extends Error {
+  readonly schemaId: string;
+  readonly schemaNames: string[];
+  readonly recordKey: string;
+
+  constructor(schemaId: string, schemaNames: string[], recordKey: string) {
+    super(`Schema id "${schemaId}" cannot describe record "${recordKey}": ${schemaNames.map((name) => `"${name}"`).join(", ")}.`);
+    this.name = "SchemaConflictError";
+    this.schemaId = schemaId;
+    this.schemaNames = schemaNames;
+    this.recordKey = recordKey;
+  }
+}
+
+/**
  * A store file this runtime cannot read: not exactly one complete store (truncated, bytes after it, a missing or extra slot),
  * a header or record it does not know, or a body it cannot decode. Open, flush and every rewrite refuse a file with this
  * error, and a refused file is left as it was. `cause` is what the reader choked on.

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
-import { STORE_FORMAT_VERSION, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
+import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
   CultCacheEnvelope,
@@ -49,7 +49,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     const disk = await this.#readDisk();
     this.#format = disk.format;
     if (disk.repairedLegacyPayload) {
-      await this.#writeAll(disk.envelopes);
+      await this.#writeAll([], disk.envelopes);
     }
 
     return disk.envelopes;
@@ -61,8 +61,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
-      filtered.push(entry);
-      await this.#writeAll(filtered);
+      await this.#writeAll([entry], filtered);
     });
   }
 
@@ -72,7 +71,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       const filtered = existing.filter(
         (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
       );
-      await this.#writeAll(filtered);
+      await this.#writeAll([], filtered);
     });
   }
 
@@ -95,7 +94,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
       // and left as it is.
       this.#format = (await this.#readDisk()).format;
-      await this.#writeAll(entries);
+      await this.#writeAll(entries, []);
     });
   }
 
@@ -140,7 +139,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     return result;
   }
 
-  async #writeAll(entries: CultCacheEnvelope[]): Promise<void> {
+  async #writeAll(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[]): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
 
     const tempPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}-${Math.random()
@@ -148,7 +147,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       .slice(2)}`;
 
     try {
-      await writeFile(tempPath, encode(encodeSnapshot(entries, this.#format)));
+      await writeFile(tempPath, encode(encodeSnapshot(supplied, arrived, this.#format)));
       await renameWithRetry(tempPath, this.filePath);
     } catch (error) {
       await rm(tempPath, { force: true }).catch(() => undefined);
@@ -196,9 +195,14 @@ type DecodedSnapshot = {
   records: PersistedRecord[];
 };
 
-function encodeSnapshot(entries: CultCacheEnvelope[], format: StoreFormat): unknown[] {
-  const catalog = [...catalogEntriesFor(entries).values()]
-    .sort((left, right) => compareOrdinal(left.schemaName, right.schemaName));
+function encodeSnapshot(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelope[], format: StoreFormat): unknown[] {
+  const replaced = new Set(supplied.map((entry) => `${entry.type}::${entry.key}`));
+  const kept = arrived.filter((entry) => !replaced.has(`${entry.type}::${entry.key}`));
+  const entries = [...kept, ...supplied];
+  const catalog = catalogEntriesFor([
+    ...kept.map((envelope) => ({ envelope, registered: false })),
+    ...supplied.map((envelope) => ({ envelope, registered: true })),
+  ]).sort((left, right) => compareOrdinal(left.schemaName, right.schemaName) || compareOrdinal(left.schemaId, right.schemaId));
   const records = [...entries]
     .sort((left, right) => compareOrdinal(left.key, right.key))
     .map((entry) => [
@@ -215,71 +219,113 @@ function encodeSnapshot(entries: CultCacheEnvelope[], format: StoreFormat): unkn
   ];
 }
 
-// Every record's schema id is published by a catalog entry: the entry the envelope carries when it publishes that id (as its
-// own id or a compatible one), else a default entry under the record's id. The catalog is keyed by the entry's own id, so a
-// record read under a compatible id is written back beside the entry that lists it.
-function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheSchemaCatalogEntry> {
-  const catalog = new Map<string, CultCacheSchemaCatalogEntry>();
-  const defaultEntryFor = (entry: CultCacheEnvelope): CultCacheSchemaCatalogEntry => {
-    const schemaId = schemaIdForEnvelope(entry);
-    return {
-      schemaId,
+// The catalog a write leaves, derived from the records being written and nothing else. For each schema id a record carries, one
+// entry that publishes it: the entry that owns the id (a registered one, else one that arrived with the records), else one that
+// lists it as compatible (registered first). Entries are written as chosen, never merged; a registered entry wins over an arrived
+// one with the same own id. Records of different types under one id, two arrived entries with the same own id and different schema
+// names, or a record no chosen entry publishes, refuse the write. An envelope the caller supplied is registered; one read back
+// from the file is arrived.
+function catalogEntriesFor(
+  records: Array<{ envelope: CultCacheEnvelope; registered: boolean }>,
+): CultCacheSchemaCatalogEntry[] {
+  const entries: Array<{ entry: CultCacheSchemaCatalogEntry; registered: boolean }> = [];
+  const byId = new Map<string, CultCacheEnvelope[]>();
+  for (const { envelope, registered } of records) {
+    const schemaId = schemaIdForEnvelope(envelope);
+    const supplied = envelope.catalogEntry;
+    const publishes =
+      supplied !== undefined && (supplied.schemaId === schemaId || (supplied.compatibleSchemaIds ?? []).includes(schemaId));
+    entries.push({ entry: publishes && supplied ? supplied : defaultEntryFor(envelope), registered });
+    byId.set(schemaId, [...(byId.get(schemaId) ?? []), envelope]);
+  }
+
+  const lists = (entry: CultCacheSchemaCatalogEntry, schemaId: string): boolean =>
+    (entry.compatibleSchemaIds ?? [entry.schemaId]).includes(schemaId);
+  const chosen = new Map<string, { entry: CultCacheSchemaCatalogEntry; registered: boolean }>();
+  for (const schemaId of [...byId.keys()].sort(compareOrdinal)) {
+    const carrying = byId.get(schemaId)!;
+    const recordKey = carrying.map((envelope) => envelope.key).sort(compareOrdinal)[0]!;
+    const types = [...new Set(carrying.map((envelope) => envelope.type))].sort(compareOrdinal);
+    if (types.length > 1) {
+      throw new SchemaConflictError(schemaId, types, recordKey);
+    }
+
+    const ownRegistered = canonical(entries.filter((candidate) => candidate.registered && candidate.entry.schemaId === schemaId))[0];
+    const ownArrived = canonical(entries.filter((candidate) => !candidate.registered && candidate.entry.schemaId === schemaId));
+    // Entries of one tier that share an own id must be one schema; a registered entry settles a disagreement among arrived ones.
+    const ownRegisteredAll = canonical(entries.filter((candidate) => candidate.registered && candidate.entry.schemaId === schemaId));
+    const names = [
+      ...new Set((ownRegisteredAll.length > 0 ? ownRegisteredAll : ownArrived).map((candidate) => candidate.entry.schemaName)),
+    ].sort(compareOrdinal);
+    if (names.length > 1) {
+      throw new SchemaConflictError(schemaId, names, recordKey);
+    }
+
+    let pick: { entry: CultCacheSchemaCatalogEntry; registered: boolean } | undefined;
+    if (ownRegistered !== undefined) {
+      pick = ownRegistered;
+    } else if (ownArrived.length > 0) {
+      pick = ownArrived[0];
+    } else {
+      pick =
+        canonical(entries.filter((candidate) => candidate.registered && lists(candidate.entry, schemaId)))[0] ??
+        canonical(entries.filter((candidate) => !candidate.registered && lists(candidate.entry, schemaId)))[0];
+    }
+
+    if (pick === undefined) {
+      continue;
+    }
+
+    const prior = chosen.get(pick.entry.schemaId);
+    if (prior !== undefined) {
+      if (prior.registered && !pick.registered) {
+        continue;
+      }
+
+      // Two entries of one tier that share an own id must be one schema: otherwise a record would be read as the other.
+      if (prior.registered === pick.registered && prior.entry.schemaName !== pick.entry.schemaName) {
+        throw new SchemaConflictError(pick.entry.schemaId, [prior.entry.schemaName, pick.entry.schemaName].sort(compareOrdinal), recordKey);
+      }
+    }
+
+    chosen.set(pick.entry.schemaId, pick);
+  }
+
+  for (const [schemaId, carrying] of byId) {
+    if (![...chosen.values()].some(({ entry }) => entry.schemaId === schemaId || lists(entry, schemaId))) {
+      throw new SchemaConflictError(
+        schemaId,
+        [...chosen.values()].map(({ entry }) => entry.schemaName).sort(compareOrdinal),
+        carrying.map((envelope) => envelope.key).sort(compareOrdinal)[0]!,
+      );
+    }
+  }
+
+  return [...chosen.values()].map(({ entry }) => entry);
+}
+
+// Entries that tie, in one fixed order, so the catalog does not depend on the order they arrive in.
+function canonical<T extends { entry: CultCacheSchemaCatalogEntry }>(candidates: T[]): T[] {
+  const key = (candidate: T): string =>
+    [candidate.entry.schemaName, candidate.entry.contentHash ?? "", (candidate.entry.compatibleSchemaIds ?? []).join(",")].join("\u0000");
+  return [...candidates].sort((left, right) => compareOrdinal(key(left), key(right)));
+}
+
+function defaultEntryFor(entry: CultCacheEnvelope): CultCacheSchemaCatalogEntry {
+  const schemaId = schemaIdForEnvelope(entry);
+  return {
+    schemaId,
+    schemaName: entry.type,
+    schemaVersion: `${entry.type}.v1`,
+    contentHash: schemaId,
+    canonicalSchemaJson: JSON.stringify({
       schemaName: entry.type,
       schemaVersion: `${entry.type}.v1`,
-      contentHash: schemaId,
-      canonicalSchemaJson: JSON.stringify({
-        schemaName: entry.type,
-        schemaVersion: `${entry.type}.v1`,
-        members: [],
-      }),
-      compatibleSchemaIds: [schemaId],
       members: [],
-    };
+    }),
+    compatibleSchemaIds: [schemaId],
+    members: [],
   };
-  const place = (entry: CultCacheEnvelope, candidates: CultCacheSchemaCatalogEntry[]): void => {
-    for (const candidate of candidates) {
-      const existing = catalog.get(candidate.schemaId);
-      if (existing === undefined) {
-        catalog.set(candidate.schemaId, candidate);
-        return;
-      }
-
-      // Entries that share an id and a schema name are one schema seen by different writers: the entry written lists every id any
-      // of them lists. An entry of another schema is never merged: the record gets a default entry under its own id.
-      if (existing.schemaName === candidate.schemaName) {
-        catalog.set(candidate.schemaId, {
-          ...existing,
-          compatibleSchemaIds: [
-            ...new Set([...(existing.compatibleSchemaIds ?? [existing.schemaId]), ...(candidate.compatibleSchemaIds ?? [candidate.schemaId])]),
-          ],
-        });
-        return;
-      }
-    }
-
-    throw new Error(`CultCache schema id "${schemaIdForEnvelope(entry)}" cannot identify two different schemas.`);
-  };
-
-  // A record's own id is claimed first, so an entry that lists it as compatible cannot take it from the schema that owns it,
-  // whatever order the records arrive in.
-  const listed: Array<[CultCacheEnvelope, CultCacheSchemaCatalogEntry]> = [];
-  for (const entry of entries) {
-    const schemaId = schemaIdForEnvelope(entry);
-    const supplied = entry.catalogEntry;
-    if (supplied !== undefined && supplied.schemaId !== schemaId && (supplied.compatibleSchemaIds ?? []).includes(schemaId)) {
-      listed.push([entry, supplied]);
-    } else if (supplied !== undefined && supplied.schemaId === schemaId) {
-      place(entry, [supplied]);
-    } else {
-      place(entry, [defaultEntryFor(entry)]);
-    }
-  }
-
-  for (const [entry, supplied] of listed) {
-    place(entry, [supplied, defaultEntryFor(entry)]);
-  }
-
-  return catalog;
 }
 
 function schemaIdForEnvelope(entry: CultCacheEnvelope): string {

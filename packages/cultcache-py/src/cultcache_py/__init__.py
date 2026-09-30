@@ -9,7 +9,7 @@ from .documents import (
     define_document_registry,
     define_document_type,
 )
-from .stores import JsonLinesBackingStore, SingleFileMessagePackBackingStore, StoreUnreadableError
+from .stores import JsonLinesBackingStore, SchemaConflictError, SingleFileMessagePackBackingStore, StoreUnreadableError
 
 __all__ = [
     "BackingStore",
@@ -21,6 +21,7 @@ __all__ = [
     "DatabaseEntryField",
     "DocumentDefinition",
     "JsonLinesBackingStore",
+    "SchemaConflictError",
     "SingleFileMessagePackBackingStore",
     "StoreUnreadableError",
     "database_entry_field",

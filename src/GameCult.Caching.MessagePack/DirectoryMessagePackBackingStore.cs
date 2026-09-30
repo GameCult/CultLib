@@ -251,18 +251,16 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 currentIndex[key] = ToIndexRecord(stored);
         }
 
-        var catalogCandidates = CultSchemaCatalogEntry.MergeById(
-                currentManifest.SchemaCatalog
-                    .Concat(_durableCatalog)
-                    .Concat(Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())),
-                preferLast: true)
-            .ToArray();
-        var usedSchemaIds = currentIndex.Values.Select(record => record.SchemaId).ToHashSet(StringComparer.Ordinal);
-        var targetCatalog = catalogCandidates
-            .Where(entry => usedSchemaIds.Contains(entry.SchemaId) || entry.CompatibleSchemaIds.Any(usedSchemaIds.Contains))
-            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+        // A record this cache holds, unchanged since the manifest was read, is rewritten under its registered schema's id, as a dirty
+        // one is: the manifest entry that lists an older id for it is then not needed to publish it.
+        var restamped = currentIndex.Values
+            .Where(record => !_dirtyKeys.ContainsKey(record.Key) &&
+                             Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt &&
+                             !string.Equals(known.Descriptor.SchemaId, record.SchemaId, StringComparison.Ordinal))
+            .Select(record => record.Key)
             .ToArray();
         var keysToWrite = _dirtyKeys.Keys
+            .Concat(restamped)
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
         foreach (var key in keysToWrite)
@@ -284,6 +282,14 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 ContentAddressedRecordPath(indexRecord),
                 pagePayload);
         }
+
+        var targetCatalog = CultSchemaCatalogEntry.Derive(
+                currentIndex.Values,
+                Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
+                currentManifest.SchemaCatalog.Concat(_durableCatalog).ToArray())
+            .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+            .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
+            .ToArray();
 
         // The directory store writes only its dirty pages, so it keeps a manifest already marked.
         var header = HeaderFor(

@@ -389,6 +389,27 @@ impl std::error::Error for StoreUnreadableError {
     }
 }
 
+/// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
+/// schema id from its records, so that is its only conflict. Nothing is written. It names the id, the two names and a record key.
+#[derive(Debug)]
+pub struct SchemaConflictError {
+    pub schema_id: String,
+    pub schema_names: Vec<String>,
+    pub record_key: String,
+}
+
+impl std::fmt::Display for SchemaConflictError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "schema id {:?} cannot describe record {:?}: {:?}",
+            self.schema_id, self.record_key, self.schema_names
+        )
+    }
+}
+
+impl std::error::Error for SchemaConflictError {}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
     pub soft: bool,
@@ -2592,11 +2613,13 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], format: &str) -> Result<
             .clone()
             .unwrap_or_else(|| entry.r#type.clone());
         if let Some(existing_type) = schema_types.insert(schema_id.clone(), entry.r#type.clone()) {
-            ensure!(
-                existing_type == entry.r#type,
-                "CultCache schema {schema_id:?} cannot identify both {existing_type:?} and {:?}",
-                entry.r#type
-            );
+            if existing_type != entry.r#type {
+                return Err(anyhow::Error::new(SchemaConflictError {
+                    schema_id,
+                    schema_names: vec![existing_type, entry.r#type.clone()],
+                    record_key: entry.key.clone(),
+                }));
+            }
         }
     }
 
@@ -4838,6 +4861,33 @@ mod tests {
             let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
             assert_eq!(envelopes.len(), 2, "{vector}");
             assert!(envelopes.iter().all(|envelope| envelope.r#type == "vectors.item"), "{vector}: {envelopes:?}");
+        }
+        Ok(())
+    }
+
+    // Records of different types under one schema id cannot be described by one catalog entry: the write is refused, typed, in
+    // either order, and the file is left as it was. A rename with a stable id (same type name in the new schema) writes fine.
+    #[test]
+    fn records_of_different_types_under_one_schema_id_refuse_the_write_typed() -> Result<()> {
+        let record = |key: &str, r#type: &str| CultCacheEnvelope {
+            key: key.into(),
+            r#type: r#type.into(),
+            payload: b"one".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some("tests.x".into()),
+        };
+        for order in [vec![record("a", "tests.n"), record("b", "tests.m")], vec![record("b", "tests.m"), record("a", "tests.n")]] {
+            let temp = tempfile::tempdir()?;
+            let path = temp.path().join("store.msgpack");
+            let mut store = SingleFileMessagePackBackingStore::new(&path);
+            let error = store.push_all(&order, PushAllOptions::default()).unwrap_err();
+            let conflict = error.downcast_ref::<SchemaConflictError>().unwrap_or_else(|| panic!("{error:#}"));
+            assert_eq!(conflict.schema_id, "tests.x");
+            let mut names = conflict.schema_names.clone();
+            names.sort();
+            assert_eq!(names, vec!["tests.m".to_string(), "tests.n".to_string()]);
+            assert!(conflict.record_key == "a" || conflict.record_key == "b");
+            assert!(!path.exists(), "nothing is written");
         }
         Ok(())
     }
