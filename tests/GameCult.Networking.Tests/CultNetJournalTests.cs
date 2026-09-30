@@ -627,15 +627,23 @@ namespace GameCult.Networking.Tests
             Assert.That(database.GetMutationLog(ShardId).Select(entry => entry.Key.Value), Is.EqualTo(new[] { One.Value }));
         }
 
-        // A door chose its shard, by the fallback when none matches; the journal honours it.
+        // A door chose its shard, by the fallback when none matches; the journal honours it. A plain PutAsync carries no
+        // door, so an unowned schema written through it is cached and not logged.
         [Test]
-        public async Task ADatabaseWriteOfASchemaNoShardOwnsIsLoggedInTheFallbackShard()
+        public async Task AnAuthoritativePutOfASchemaNoShardOwnsIsLoggedInTheFallbackShardButAPlainPutIsNot()
         {
             var store = new FlakyLogStore();
             var cache = new CultCache();
             var database = Database(cache, primary: true, store);
+            var shard = database.Shards[0];
 
-            await database.PutAsync(new CultRecordKey("unrelated:n"), new MeshQuickstartNote { NoteId = "n", Body = "door" });
+            await database.PutAsync(new CultRecordKey("unrelated:plain"), new MeshQuickstartNote { NoteId = "p", Body = "plain" });
+            Assert.That(Sequences(store), Is.Empty);
+
+            var message = database.Documents.CreateRawDocumentPutMessage("door", new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:door")), new MeshQuickstartNote { NoteId = "d", Body = "door" });
+            message.ShardId = shard.ShardId;
+            message.ShardEpoch = shard.Epoch;
+            await database.ApplyPutAsync(message);
 
             Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }));
         }
