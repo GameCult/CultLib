@@ -343,10 +343,11 @@ namespace GameCult.Caching.Tests
             AssertUnchangedConditionsHold(reader, D, reader.Get(D)!, BareDeck, Deck("e"));
         }
 
-        // A whole-view commit writes every record under its type's own id, so the cache now holds each loaded record under that
-        // id: a later condition on one of them, plain or variant, holds against the rewritten file.
+        // A plain record and a variant loaded under a declared old id carry that id, so a condition on either holds while the file
+        // is unchanged. A whole-view commit then writes every record under its type's own id, and the cache holds each under that
+        // id: the same conditions hold against the rewritten file.
         [Test]
-        public void AfterAWholeViewCommitConditionsOnRecordsLoadedUnderAnOldIdHold()
+        public void ConditionsOnRecordsLoadedUnderAnOldIdHoldBeforeAndAfterAWholeViewCommit()
         {
             var path = Path.Combine(_directory, "restamped.cc");
             var b = new CultRecordKey("b");
@@ -364,24 +365,53 @@ namespace GameCult.Caching.Tests
             });
 
             using var reader = Open(path, Declaring);
+            void ConditionsHold(string phase)
+            {
+                foreach (var key in new[] { b, v })
+                {
+                    Assert.That(reader.TryCommit(batch =>
+                    {
+                        batch.Expect(key, reader.Get(key)!);
+                        batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "f" }, new CultRecordKey($"f-{phase}-{key.Value}"));
+                    }), Is.EqualTo(CultCommitOutcome.Committed), $"{phase}: Expect {key.Value}");
+                }
+
+                Assert.That(reader.TryCommit(batch =>
+                {
+                    batch.ExpectUnchanged();
+                    batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "g" }, new CultRecordKey($"g-{phase}"));
+                }), Is.EqualTo(CultCommitOutcome.Committed), $"{phase}: ExpectUnchanged");
+            }
+
+            ConditionsHold("loaded");
+            Assert.That(Read(path).Records.Where(record => record.Key is "b" or "v").Select(record => record.SchemaId), Is.All.EqualTo(OldId),
+                "commits onto the file left the loaded records under the old id");
+
             reader.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e")));
             Assert.That(Read(path).Records.Select(record => record.SchemaId), Is.All.EqualTo(Declaring.GetRequired<DeclaringDeck>().SchemaId),
                 "the whole-view commit rewrote every record under the registered id");
+            ConditionsHold("rewritten");
+        }
 
-            foreach (var key in new[] { b, v })
-            {
-                Assert.That(reader.TryCommit(batch =>
-                {
-                    batch.Expect(key, reader.Get(key)!);
-                    batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "f" }, new CultRecordKey("f-" + key.Value));
-                }), Is.EqualTo(CultCommitOutcome.Committed), "Expect " + key.Value);
-            }
+        // The directory store rereads a record whose manifest entry moved to another id with the same storedAt, as a rewrite that
+        // mints no storedAt leaves it: after a pull the cache holds the record under that id, and a condition on it holds.
+        [Test]
+        public void ADirectoryStorePullRereadsARecordWhoseIdAloneChanged()
+        {
+            var path = Path.Combine(_directory, "dir-moved.cc");
+            var options = new CultCacheOpenOptions { Registry = Declaring, UseDirectoryStore = true };
+            using (var writer = CultCacheMessagePack.Create(path, options))
+                writer.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "d" }, D));
 
-            Assert.That(reader.TryCommit(batch =>
+            using var cache = CultCacheMessagePack.Create(path, options);
+            Rewrite(path, manifest => manifest.Records.Single().SchemaId = OldId);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(cache.TryCommit(batch =>
             {
-                batch.ExpectUnchanged();
-                batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "g" }, new CultRecordKey("g"));
-            }), Is.EqualTo(CultCommitOutcome.Committed), "ExpectUnchanged");
+                batch.Expect(D, cache.Get<DeclaringDeck>(D)!);
+                batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e"));
+            }), Is.EqualTo(CultCommitOutcome.Committed));
         }
 
         // A rolling deployment shares one single-file store between v1 (one member) and v2 (a second member, declaring v1's id).
