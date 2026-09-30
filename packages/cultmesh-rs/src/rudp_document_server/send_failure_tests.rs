@@ -56,7 +56,7 @@ fn client(target: SocketAddr, id: u32) -> (Client, SocketAddr) {
         mode: CultNetRudpSocketMode::Client,
         remote_addr: Some(target),
         connection_id: id,
-        initial_sequence: 1,
+        initial_sequence: Some(1),
         resend_delay_ms: 10,
         transport_id: None,
         max_payload_bytes: None,
