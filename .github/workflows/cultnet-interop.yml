@@ -69,7 +69,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $stray = git ls-files '*.schema.json' | Where-Object { $_ -notmatch '^contracts/cultnet/' }
+          # packages/cultnet-rs/contracts/cultnet/ holds R-AB's vendored byte copies (the crate must build
+          # when copied alone). Their drift guard is packages/cultnet-rs/tests/schema_discovery_contracts.rs:74-99.
+          $stray = git ls-files '*.schema.json' | Where-Object { $_ -notmatch '^(packages/cultnet-rs/)?contracts/cultnet/' }
           # -I skips binary files: unity/org.gamecult.cultlib/Runtime/Plugins/GameCult.Networking.dll
           # still embeds the retired namespace until it is rebuilt (REC-032 D4, deferred).
           $oldNamespace = git grep -I -lE 'GameCult/cultnet-ts/(integration/)?contracts' -- ':!.voidbot'
