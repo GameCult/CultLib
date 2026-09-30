@@ -16,8 +16,10 @@ gonna let sunk costs take the wheel."
   - Probe: two pipelined puts, with the first datagram dropped. The second put was ACKed but not on disk. If the
     first never arrives, the ACKed second put is never delivered.
   - Sessions that carry a single put are safe.
-  - To do: check whether current main (after the landed ack cuts) already ACKs only delivered packets in Rust. If
-    it does, Odin's pin bump closes this. If not, it qualifies as a data-loss fix under the pivot rule.
+  - **Checked (Odin Q5 Imagination, probe P1 at `e4e2a0b9`): still open after ack Cuts 1-1c.** A held, undelivered
+    put is ACKed, so the pin bump does not close it, and it is a data-loss fix under the pivot rule. Related, P2: a
+    Pong ACKs a put received before the Ping; P3: a reliable reply created after a put ACKs it. The Odin writer-thread
+    cut (C5) adds `acknowledgement_withheld` to the document server; the transport fix belongs in cultnet-rs.
 - The "CultNet over QUIC" campaign is new, so it opens as a typed Eureka campaign in the Huginn-backed session, not
   as a prose map here.
 
