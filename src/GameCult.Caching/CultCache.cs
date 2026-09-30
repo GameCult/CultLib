@@ -688,30 +688,34 @@ namespace GameCult.Caching
                     return descriptor;
                 }
 
+                if (string.Equals(schemaVersionOwner.SchemaId, descriptor.SchemaId, StringComparison.Ordinal))
+                    throw SchemaIdClaimedTwice(descriptor.SchemaId, schemaVersionOwner, descriptor);
                 throw DuplicateSchemaRegistration(
                     $"schema name '{descriptor.SchemaName}' version '{descriptor.SchemaVersion}'",
                     schemaVersionOwner.DocumentType,
                     descriptor.DocumentType);
             }
 
-            if (indexes.BySchemaId.TryGetValue(descriptor.SchemaId, out var schemaIdOwner))
+            // One type carries each schema id, its own or declared compatible, so which type a record resolves to never
+            // depends on the order types were registered in.
+            foreach (var carried in descriptor.CompatibleSchemaIds.Prepend(descriptor.SchemaId))
             {
-                throw DuplicateSchemaRegistration(
-                    $"schema id '{descriptor.SchemaId}'",
-                    schemaIdOwner.DocumentType,
-                    descriptor.DocumentType);
+                if (indexes.BySchemaId.TryGetValue(carried, out var claimant) || indexes.ByCompatibleSchemaId.TryGetValue(carried, out claimant))
+                    throw SchemaIdClaimedTwice(carried, claimant, descriptor);
             }
 
             indexes.ByType[descriptor.DocumentType] = descriptor;
             indexes.BySchemaId[descriptor.SchemaId] = descriptor;
             foreach (var compatibleSchemaId in descriptor.CompatibleSchemaIds)
-                indexes.ByCompatibleSchemaId.TryAdd(compatibleSchemaId, descriptor);
+                indexes.ByCompatibleSchemaId[compatibleSchemaId] = descriptor;
             indexes.BySchemaName[descriptor.SchemaName] = schemaNameVersions == null
                 ? [descriptor]
                 : [.. schemaNameVersions, descriptor];
             return descriptor;
         }
 
+        // An alias is the same schema in every respect a store sees, including the ids it declares compatible: a type whose
+        // declaration differed would have it dropped by whichever registered second.
         private static bool IsExactWireAlias(
             CultDocumentDescriptor canonical,
             CultDocumentDescriptor candidate) =>
@@ -719,7 +723,20 @@ namespace GameCult.Caching
             string.Equals(canonical.SchemaVersion, candidate.SchemaVersion, StringComparison.Ordinal) &&
             string.Equals(canonical.SchemaId, candidate.SchemaId, StringComparison.Ordinal) &&
             string.Equals(canonical.ContentHash, candidate.ContentHash, StringComparison.Ordinal) &&
-            string.Equals(canonical.CanonicalSchemaJson, candidate.CanonicalSchemaJson, StringComparison.Ordinal);
+            string.Equals(canonical.CanonicalSchemaJson, candidate.CanonicalSchemaJson, StringComparison.Ordinal) &&
+            canonical.CompatibleSchemaIds.SequenceEqual(candidate.CompatibleSchemaIds, StringComparer.Ordinal);
+
+        private static CultSchemaConflictException SchemaIdClaimedTwice(
+            string schemaId,
+            CultDocumentDescriptor existing,
+            CultDocumentDescriptor claimed) =>
+            new(
+                $"CultCache schema id '{schemaId}' is already carried by CLR type '{existing.DocumentType.FullName}' " +
+                $"(schema '{existing.SchemaName}') and cannot also be claimed by '{claimed.DocumentType.FullName}' " +
+                $"(schema '{claimed.SchemaName}'). A schema id, owned or declared compatible, belongs to one registered type.",
+                schemaId,
+                new[] { existing.SchemaName, claimed.SchemaName },
+                string.Empty);
 
         private static InvalidOperationException DuplicateSchemaRegistration(
             string identity,
