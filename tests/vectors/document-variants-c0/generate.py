@@ -61,4 +61,6 @@ for name, entry in (
     ("current-catalog-bad-members", current[:6] + [5]),
     ("current-catalog-bad-compat", current[:5] + [[7]] + current[6:]),
 ):
-    write(name + ".msgpack", [header, [entry] + catalog[1:], records])
+    # One catalog entry and the records that use it: the older-layout reader takes an entry's slot 5 for a string, so a second
+    # current-layout entry would make it refuse for that reason, not for the malformed slot under test.
+    write(name + ".msgpack", [header, [entry], [record for record in records if record[1] == current[0]]])
