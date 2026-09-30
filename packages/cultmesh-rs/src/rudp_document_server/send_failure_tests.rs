@@ -344,3 +344,25 @@ fn healthy_sends_are_not_failures() {
     assert_eq!(server.send_failures(), 0);
     assert_eq!(server.session_count(), 2);
 }
+
+#[test]
+fn a_session_ended_in_the_resend_loop_is_sent_nothing_more_from_it() {
+    let (mut server, clock, _received, (mut x, x_addr), (_y, _)) = two_peers();
+    server.failing_peers.insert(x_addr);
+    send(&mut x, &snapshot("one"));
+    send(&mut x, &snapshot("two"));
+    for _ in 0..10 {
+        server.poll_once().unwrap();
+    }
+    let before = server.send_failures();
+
+    server.unsendable_after.insert(x_addr, 0);
+    clock.0.store(1_200, Ordering::SeqCst);
+    let maintenance = server.maintain().unwrap();
+
+    // Both responses are due. The first can never be sent and ends the session;
+    // the goodbye is the only other datagram attempted at X.
+    assert_eq!(maintenance.packets_resent, 2);
+    assert_eq!(server.send_failures() - before, 1);
+    assert_eq!(server.session_count(), 1);
+}

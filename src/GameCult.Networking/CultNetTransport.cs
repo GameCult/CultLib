@@ -3116,8 +3116,6 @@ namespace GameCult.Networking
             var wire = CultNetRudpPacketCodec.Encode(packet);
             try
             {
-                if (FailingSendPeers.Contains(remoteEndPoint))
-                    throw new SocketException((int)SocketError.HostUnreachable);
                 if (UnsendableAfter.TryGetValue(remoteEndPoint, out var remaining))
                 {
                     if (remaining > 0)
@@ -3130,6 +3128,8 @@ namespace GameCult.Networking
                         throw new SocketException((int)SocketError.MessageSize);
                     }
                 }
+                if (FailingSendPeers.Contains(remoteEndPoint))
+                    throw new SocketException((int)SocketError.HostUnreachable);
                 var sent = _socket.SendTo(wire, remoteEndPoint);
                 _stats.BytesSent += sent;
             }

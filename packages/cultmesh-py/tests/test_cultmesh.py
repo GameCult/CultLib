@@ -4651,6 +4651,106 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
         finally:
             server.stop()
 
+    def test_a_permanent_failure_in_a_resend_ends_only_that_peers_session(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            x, x_addr = self._client(server, "peer-x")
+            y, _ = self._client(server, "peer-y")
+            mode = ["transient"]
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(x_addr) and mode[0] == "transient":
+                    raise OSError(errno.ENOBUFS, "injected transient failure")
+                if args and tuple(args[-1]) == tuple(x_addr) and mode[0] == "permanent":
+                    mode[0] = "healthy"
+                    raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                # X's response is lost, so a resend is pending; then it can never be sent as built.
+                x.send("schema", hello(runtime_id="probe").to_bytes())
+                self._wait_for(lambda: server.rudp_send_failures > 0)
+                self.assertFalse(x.disconnect_reason, "a transient failure ends no session")
+                mode[0] = "permanent"
+                for _ in range(200):
+                    x.receive_once()
+                    if x.disconnect_reason is not None:
+                        break
+                    time.sleep(0.005)
+                self.assertIsNotNone(x.disconnect_reason)
+                self.assertTrue(x.disconnect_reason.startswith(b"packet could not be sent: "))
+                self.assertTrue(server._rudp_thread.is_alive())
+                self.assertIsNotNone(self._served(y))
+        finally:
+            server.stop()
+
+    def test_a_permanent_failure_acknowledging_a_frame_ends_the_session(self) -> None:
+        import msgpack  # type: ignore
+
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            x, x_addr = self._client(server, "peer-x")
+            failures = [1]
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(x_addr) and failures[0] > 0:
+                    failures[0] -= 1
+                    raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                # Not a message the server answers, so its ack is the only datagram owed.
+                x.send("schema", msgpack.packb(1))
+                for _ in range(200):
+                    x.receive_once()
+                    if x.disconnect_reason is not None:
+                        break
+                    time.sleep(0.005)
+                self.assertIsNotNone(x.disconnect_reason)
+                self.assertTrue(x.disconnect_reason.startswith(b"packet could not be sent: "))
+                self.assertTrue(server._rudp_thread.is_alive())
+        finally:
+            server.stop()
+
+    def test_a_connect_whose_accept_can_never_be_sent_starts_no_session(self) -> None:
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        original_sendto = socket.socket.sendto
+        try:
+            y, _ = self._client(server, "peer-y")
+            z_socket = bind_udp_socket()
+            z_addr = z_socket.getsockname()[:2]
+            failures = [1]
+
+            def sendto(sock: socket.socket, data: bytes, *args: Any) -> int:
+                if args and tuple(args[-1]) == tuple(z_addr) and failures[0] > 0:
+                    failures[0] -= 1
+                    raise OSError(errno.EMSGSIZE, "Message too long")
+                return original_sendto(sock, data, *args)
+
+            with patch.object(socket.socket, "sendto", sendto):
+                z = CultNetRudpSocketTransportConnection(
+                    CultNetRudpSocketTransportOptions(
+                        runtime_id="peer-z",
+                        socket=z_socket,
+                        mode=CultNetRudpSocketMode.CLIENT,
+                        connection_id=server.rudp_connection_id,
+                        remote_addr=("127.0.0.1", server.port),
+                        resend_delay_ms=25,
+                    )
+                )
+                z.connect(b"join")
+                # A session that started would resend its Accept, and the resend would get through.
+                time.sleep(0.5)
+                z_socket.settimeout(0.05)
+                with self.assertRaises(TimeoutError):
+                    z_socket.recvfrom(65535)
+                self.assertTrue(server._rudp_thread.is_alive())
+                self.assertIsNotNone(self._served(y))
+        finally:
+            server.stop()
+
     def _wait_for(self, predicate: Callable[[], bool]) -> None:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:

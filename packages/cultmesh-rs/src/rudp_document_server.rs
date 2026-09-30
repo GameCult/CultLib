@@ -724,9 +724,6 @@ where
     fn send_datagram(&mut self, wire: &[u8], remote_addr: SocketAddr) -> std::io::Result<usize> {
         #[cfg(test)]
         {
-            if self.failing_peers.contains(&remote_addr) {
-                return Err(std::io::Error::other("injected send failure"));
-            }
             match self.unsendable_after.get(&remote_addr).copied() {
                 Some(0) => {
                     self.unsendable_after.remove(&remote_addr);
@@ -736,6 +733,9 @@ where
                     self.unsendable_after.insert(remote_addr, remaining - 1);
                 }
                 None => {}
+            }
+            if self.failing_peers.contains(&remote_addr) {
+                return Err(std::io::Error::other("injected send failure"));
             }
         }
         self.socket.send_to(wire, remote_addr)

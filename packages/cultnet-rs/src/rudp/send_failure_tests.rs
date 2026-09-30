@@ -162,6 +162,10 @@ fn one_peer(
 #[test]
 fn an_oversized_send_returns_the_error_and_queues_nothing() {
     let (mut hub, mut peer, session) = one_peer(None);
+    // The hub's own Accept is still awaiting its ack; the refused send adds nothing to it.
+    let outstanding = hub.peers[&session.remote_addr]
+        .session
+        .outstanding_reliable_packet_count();
 
     let error = hub
         .send(&session, "schema", vec![7; 70_000])
@@ -176,7 +180,7 @@ fn an_oversized_send_returns_the_error_and_queues_nothing() {
     let remote = session.remote_addr;
     assert_eq!(
         hub.peers[&remote].session.outstanding_reliable_packet_count(),
-        0,
+        outstanding,
         "nothing is pending or queued to resend"
     );
 
@@ -213,7 +217,7 @@ fn a_send_that_fails_permanently_after_a_fragment_left_ends_the_session() {
 
 #[test]
 fn a_permanent_failure_in_resends_ends_only_that_peers_session() {
-    let (mut hub, (_x, x_session), (mut y, y_session)) = two_peers();
+    let (mut hub, (mut x, x_session), (mut y, y_session)) = two_peers();
     // Both peers' first datagram is lost, so both have a reliable resend due.
     hub.failing_peers.insert(x_session.remote_addr);
     hub.failing_peers.insert(y_session.remote_addr);
@@ -240,6 +244,16 @@ fn a_permanent_failure_in_resends_ends_only_that_peers_session() {
         }
     }
     assert_eq!(delivered.expect("Y receives its resend").payload, b"for-y");
+    // The goodbye reaches X and names the error.
+    for _ in 0..20 {
+        x.receive_once().unwrap();
+        if x.disconnect_reason().is_some() {
+            break;
+        }
+    }
+    assert!(is_unsendable_reason(
+        x.disconnect_reason().expect("X is told its session ended")
+    ));
 }
 
 #[test]
@@ -368,4 +382,35 @@ fn only_a_datagram_that_can_never_be_sent_is_a_permanent_failure() {
             );
         }
     }
+}
+
+#[test]
+fn a_permanent_failure_sending_a_disconnect_is_returned_to_the_caller() {
+    let (mut hub, _peer, session) = one_peer(None);
+    hub.unsendable_after.insert(session.remote_addr, 0);
+
+    let error = hub
+        .disconnect(&session, b"bye".to_vec())
+        .expect_err("the goodbye can never be sent");
+    assert!(is_permanent_send_error(
+        error.downcast_ref::<std::io::Error>().unwrap()
+    ));
+}
+
+#[test]
+fn a_peer_ended_in_the_resend_loop_is_sent_nothing_more_from_it() {
+    let (mut hub, (_x, x_session), (_y, _y_session)) = two_peers();
+    hub.failing_peers.insert(x_session.remote_addr);
+    hub.send(&x_session, "schema", b"one".to_vec()).unwrap();
+    hub.send(&x_session, "schema", b"two".to_vec()).unwrap();
+    assert_eq!(hub.stats().send_failures, 2);
+
+    hub.unsendable_after.insert(x_session.remote_addr, 0);
+    std::thread::sleep(Duration::from_millis(40));
+    hub.poll_resends().unwrap();
+
+    // Both resends are due. The first can never be sent and ends the session;
+    // the goodbye is the only other datagram attempted at X.
+    assert_eq!(hub.stats().send_failures, 3);
+    assert_eq!(hub.sessions().len(), 1);
 }

@@ -294,6 +294,28 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void APeerEndedInTheResendLoopIsSentNothingMoreFromIt()
+        {
+            var (server, _, x, _) = TwoPeers();
+            using (server)
+            {
+                server.FailingSendPeers.Add(x.EndPoint);
+                server.SendSchema(x.Server, "one");
+                server.SendSchema(x.Server, "two");
+                Assert.That(server.Stats.SendFailures, Is.EqualTo(2));
+
+                server.UnsendableAfter[x.EndPoint] = 0;
+                Thread.Sleep(30);
+                server.PollResends();
+
+                // Both resends are due. The first can never be sent and ends the session; the
+                // goodbye is the only other datagram attempted at X.
+                Assert.That(server.Stats.SendFailures, Is.EqualTo(3));
+                Assert.That(server.Peers, Has.Count.EqualTo(1));
+            }
+        }
+
+        [Test]
         public void AHealthySendCountsItsBytesAndNoFailure()
         {
             var (server, _, x, _) = TwoPeers();
