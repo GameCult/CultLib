@@ -628,25 +628,47 @@ class CultCacheTests(unittest.TestCase):
                 self.assertEqual(cache.get_required(second, "k")["name"], "k", schema_id)
                 self.assertIsNone(cache.get(first, "k"), schema_id)
 
-    def test_an_id_a_document_owns_names_that_document_not_one_registered_earlier_that_lists_it(self) -> None:
+    def _assert_second_claim_refused(self, first, second, schema_id: str) -> None:
+        """One document carries each schema id, owned or declared compatible, whichever order the documents register in: a
+        second claimant is refused, typed, naming both, and the cache keeps what it had."""
+        from cultcache_py import SchemaConflictError
+
+        cache = CultCache()
+        cache.register_document_type(first)
+        with self.assertRaises(SchemaConflictError) as refused:
+            cache.register_document_type(second)
+        self.assertEqual(refused.exception.schema_id, schema_id)
+        self.assertEqual(refused.exception.schema_names, [first.catalog_entry().schema_name, second.catalog_entry().schema_name])
+        self.assertIn(first.type, str(refused.exception))
+        self.assertIn(second.type, str(refused.exception))
+        with self.assertRaisesRegex(CultCacheError, "not registered"):
+            cache.put(second, "k", {"name": "k"})
+
+    def test_a_document_listing_an_id_another_document_owns_is_refused_in_either_order(self) -> None:
         lister = define_database_entry_type(
             "tests.lister", [("name", 0)], schema_id="id.lister", schema_name="tests.lister", schema_version="tests.lister.v1",
             compatible_schema_ids=["id.lister", "id.owned"],
         )
         owner = define_database_entry_type("tests.owner", [("name", 0)], schema_id="id.owned", schema_name="tests.owner", schema_version="tests.owner.v1")
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "store.msgpack"
-            self._store_of(
-                path,
-                [["id.owned", "tests.lister", "tests.owner.v1", "h", "", ["id.owned"], []]],
-                [["k", "id.owned", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "k"})]],
-            )
-            cache = CultCache.builder().register_document_type(lister).register_document_type(owner).add_generic_store(
-                SingleFileMessagePackBackingStore(path)
-            ).build()
-            cache.pull_all_backing_stores()
-            self.assertEqual(cache.get_required(owner, "k")["name"], "k")
-            self.assertIsNone(cache.get(lister, "k"))
+        self._assert_second_claim_refused(lister, owner, "id.owned")
+        self._assert_second_claim_refused(owner, lister, "id.owned")
+
+    def test_two_documents_listing_one_compatible_id_are_refused_in_either_order(self) -> None:
+        a = define_database_entry_type(
+            "tests.list-a", [("name", 0)], schema_id="id.a", schema_name="tests.list-a", compatible_schema_ids=["id.a", "id.shared"],
+        )
+        b = define_database_entry_type(
+            "tests.list-b", [("name", 0)], schema_id="id.b", schema_name="tests.list-b", compatible_schema_ids=["id.b", "id.shared"],
+        )
+        self._assert_second_claim_refused(a, b, "id.shared")
+        self._assert_second_claim_refused(b, a, "id.shared")
+
+    def test_two_documents_owning_one_schema_id_are_refused_in_either_order(self) -> None:
+        # Each declares an older id and not its own, so the id they share is only ever their own.
+        a = define_database_entry_type("tests.own-a", [("name", 0)], schema_id="id.same", schema_name="tests.own-a", compatible_schema_ids=["id.a-older"])
+        b = define_database_entry_type("tests.own-b", [("name", 0)], schema_id="id.same", schema_name="tests.own-b", compatible_schema_ids=["id.b-older"])
+        self._assert_second_claim_refused(a, b, "id.same")
+        self._assert_second_claim_refused(b, a, "id.same")
 
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

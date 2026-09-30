@@ -36,11 +36,13 @@ class StoreUnreadableError(ValueError):
 class SchemaConflictError(ValueError):
     """A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id
     and disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names
-    involved (`schema_names`) and a record key (`record_key`)."""
+    involved (`schema_names`) and a record key (`record_key`). A cache raises it too, with an empty record key, when a
+    document registers a schema id another registered document already carries."""
 
-    def __init__(self, schema_id: str, schema_names: list[str], record_key: str) -> None:
+    def __init__(self, schema_id: str, schema_names: list[str], record_key: str, *, message: str | None = None) -> None:
         super().__init__(
-            f"Schema id {schema_id!r} cannot describe record {record_key!r}: {', '.join(repr(name) for name in schema_names)}"
+            message
+            or f"Schema id {schema_id!r} cannot describe record {record_key!r}: {', '.join(repr(name) for name in schema_names)}"
         )
         self.schema_id = schema_id
         self.schema_names = schema_names

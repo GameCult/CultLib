@@ -7,6 +7,7 @@ from typing import Any, Callable, Generic, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import DocumentDefinition, extract_value
+from .stores import SchemaConflictError
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -140,9 +141,23 @@ class CultCache:
     def _register_document_type(self, document: DocumentDefinition[Any]) -> None:
         if document.type in self._state.documents:
             raise CultCacheError(f"Document type already registered: {document.type}")
-        schema_name = document.catalog_entry().schema_name
+        entry = document.catalog_entry()
+        schema_name = entry.schema_name
         if schema_name in self._state.documents_by_schema_name:
             raise CultCacheError(f"Document schema name already registered: {schema_name}")
+        # One document carries each schema id, its own or declared compatible, so which document a record resolves to never
+        # depends on the order documents were registered in.
+        for registered in self._state.documents.values():
+            other = registered.catalog_entry()
+            shared = sorted(({entry.schema_id, *entry.compatible_schema_ids}) & ({other.schema_id, *other.compatible_schema_ids}))
+            if shared:
+                raise SchemaConflictError(
+                    shared[0],
+                    [other.schema_name, schema_name],
+                    "",
+                    message=f"Schema id {shared[0]!r} is already carried by document type {registered.type!r} and cannot also be "
+                    f"claimed by {document.type!r}. A schema id, owned or declared compatible, belongs to one registered document.",
+                )
         name_extractors = dict(self._state.name_extractors)
         index_extractors = {type: dict(indexes) for type, indexes in self._state.index_extractors.items()}
         if document.name is not None:
@@ -592,16 +607,13 @@ class CultCache:
             raise CultCacheError(f"Document type is not global: {document.type}")
 
     def _resolve_document_for_envelope(self, envelope: CultCacheEnvelope) -> DocumentDefinition[Any] | None:
-        """A record resolves by its schema id: the document that owns the id, else one that lists it as compatible. The name
-        its catalog carries is metadata; it names a document only when the id names none (a store from a runtime whose
-        schema ids this one cannot know)."""
+        """A record resolves by its schema id: the one document that owns the id or lists it as compatible. The name its
+        catalog carries is metadata; it names a document only when the id names none (a store from a runtime whose schema
+        ids this one cannot know)."""
         if envelope.schema_id:
-            catalogs = [(document, document.catalog_entry()) for document in self._state.documents.values()]
-            for document, entry in catalogs:
-                if entry.schema_id == envelope.schema_id:
-                    return document
-            for document, entry in catalogs:
-                if envelope.schema_id in entry.compatible_schema_ids:
+            for document in self._state.documents.values():
+                entry = document.catalog_entry()
+                if entry.schema_id == envelope.schema_id or envelope.schema_id in entry.compatible_schema_ids:
                     return document
         document = self._state.documents.get(envelope.type)
         if document is not None:
