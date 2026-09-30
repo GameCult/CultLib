@@ -316,6 +316,12 @@ if let Err(error) = store.pull_all() {
 An I/O failure never carries `CultCacheStoreUnreadable`, and the chain under
 `CultCacheStoreUnreadable` never holds a `std::io::Error`.
 
+Only a store file that does not exist (`std::io::ErrorKind::NotFound`) reads as
+an empty store. Any other failure to reach it, such as a symlink loop, a file
+where a parent directory should be, or a missing permission, is an I/O error.
+A store file that exists and holds zero bytes is `Undecodable`: no CultCache
+writer leaves one.
+
 ## Near-Term Ergonomic Improvements
 
 1. **Derive macro**
