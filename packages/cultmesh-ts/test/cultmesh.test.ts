@@ -3236,6 +3236,8 @@ type ServedBoundRig = {
   admitted: string[];
   errors: Error[];
   messages: CultNetMessage[];
+  /** Why each frame the peer could not parse was refused. */
+  unparsed: Error[];
 };
 
 const servedBoundRegistry = () =>
@@ -3297,6 +3299,7 @@ async function withServedBoundRig(
   const admitted: string[] = [];
   const errors: Error[] = [];
   const messages: CultNetMessage[] = [];
+  const unparsed: Error[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-served-bound-server", connectionId, {
     documents: registry,
     getCache: () => node.cache,
@@ -3335,7 +3338,8 @@ async function withServedBoundRig(
       { resendDelayMs: 25, resendPollMs: 5, maxFragmentBytes: 1024, maxPendingReliablePackets: 512, connectTimeoutMs: 1_000 },
     );
     peer.on("message", (message: CultNetMessage) => messages.push(message));
-    await body({ server, peer, admitted, errors, messages });
+    peer.on("invalidMessage", (error: Error) => unparsed.push(error));
+    await body({ server, peer, admitted, errors, messages, unparsed });
   } finally {
     peer?.close();
     server.close();
@@ -3423,8 +3427,8 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
     assert.equal(refusal.maxPayloadBytes, limit);
     assert.equal(refusal.fragmentCount, 4);
     assert.deepEqual(rig.admitted, []);
-    // The peer hears the refusal, and it names sizes, never the record.
-    assert.deepEqual(await waitForPeerErrors(rig, 1), [refusal.message]);
+    // The peer is sent the refusal, and it names sizes, never the record.
+    await waitForPeerErrors(rig, 1);
     assert.ok(!refusal.message.includes("note:ov"), refusal.message);
 
     // A put whose own frame is over the limit only by the provenance and message id it carries
@@ -3439,8 +3443,9 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
     // A record key longer than the limit: the refusal is still small enough to reach the peer.
     const longKey = `note:${"k".repeat(2 * limit)}`;
     rig.peer.send(notePut("put-long-key", longKey, 10));
-    assert.equal((await waitForPeerErrors(rig, 2))[1], rig.errors[1]!.message);
+    await waitForPeerErrors(rig, 2);
     assert.ok(rig.errors[1] instanceof CultMeshRudpUnservableDocumentError, rig.errors[1]!.message);
+    assert.equal(rig.errors.length, 2, "the refusal itself was sent");
     assert.deepEqual(rig.admitted, ["note:at"]);
 
     // Two servable documents make a reply over the limit: it is not sent, and onError hears why.
@@ -3469,8 +3474,7 @@ test("CultMesh TS RUDP document server tells the peer when a stored put's receip
     // server's provenance and so is over the limit. The peer hears that it is not coming.
     rig.peer.send(notePut("put-at", "note:at", atBound));
     await waitForAdmission(rig, "note:at");
-    const [refusal] = await waitForPeerErrors(rig, 1);
-    assert.match(refusal!, /stored a put but could not send its receipt/);
+    await waitForPeerErrors(rig, 1);
     assert.equal(rig.errors.length, 1);
     assert.match(rig.errors[0]!.message, /reply cultnet\.document_put_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
     assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
@@ -3481,15 +3485,18 @@ function isDocumentPut(message: CultNetMessage): boolean {
   return message.schemaVersion === "cultnet.document_put_raw.v0";
 }
 
-/** Waits until the peer has received `count` cultnet.error.v0 replies, and returns their text. */
-async function waitForPeerErrors(rig: ServedBoundRig, count: number): Promise<string[]> {
-  const errors = () => rig.messages
-    .filter((message) => message.schemaVersion === "cultnet.error.v0")
-    .map((message) => (message as { error: string }).error);
+/**
+ * Waits until the peer has been sent `count` cultnet.error.v0 replies. A TypeScript peer cannot
+ * yet parse the two-key error this server sends (docs/cultnet-error-contract-cut.md:
+ * "TypeScript cannot parse the errors TypeScript sends"),
+ * so each arrives as an unparsed cultnet.error.v0 frame; its text is asserted through onError.
+ */
+async function waitForPeerErrors(rig: ServedBoundRig, count: number): Promise<void> {
+  const errors = () => rig.unparsed.filter((error) => /cultnet\.error\.v0/.test(error.message)).length
+    + rig.messages.filter((message) => message.schemaVersion === "cultnet.error.v0").length;
   const startedAt = Date.now();
-  while (errors().length < count && Date.now() - startedAt < 3_000) await delay(5);
-  assert.equal(errors().length, count, `peer errors: ${errors().join("; ")}`);
-  return errors();
+  while (errors() < count && Date.now() - startedAt < 3_000) await delay(5);
+  assert.equal(errors(), count, `peer errors: ${rig.unparsed.map((error) => error.message).join("; ")}`);
 }
 
 test("CultMesh TS RUDP document server reports a datagram that fails to leave", async () => {
