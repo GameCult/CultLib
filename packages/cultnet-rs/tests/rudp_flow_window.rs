@@ -214,3 +214,36 @@ fn acknowledged_bytes_count_against_the_lowest_unacked_sequence_as_it_advances()
     assert_eq!(sequences(&promoted), vec![g.sequence + 6]);
     Ok(())
 }
+
+#[test]
+fn acknowledged_bytes_stop_counting_when_the_lowest_unacked_packet_expires() -> Result<()> {
+    let mut sender = connected(1)?;
+    let expiring = CultNetRudpSendOptions {
+        reliable: true,
+        now_ms: 0,
+        reliable_expire_after_ms: Some(100),
+        ..Default::default()
+    };
+    let g = sender
+        .send_many("state", vec![7], expiring, None)?
+        .remove(0);
+    for offset in 1..=4u32 {
+        assert_eq!(send(&mut sender, MIB)?.len(), 1);
+        sender.receive(&ack_for(g.sequence + offset), 1)?;
+    }
+    assert!(sender.send("state", vec![7; MIB], reliable()).is_err());
+
+    // g's deadline passes and it leaves the window; nothing is unacked, so the
+    // acknowledged bytes no longer sit above any gap.
+    let at = |now_ms| CultNetRudpSendOptions {
+        reliable: true,
+        now_ms,
+        ..Default::default()
+    };
+    let first = sender.send_many("state", vec![7], at(200), None)?;
+    assert_eq!(first.len(), 1);
+    for _ in 0..4 {
+        assert_eq!(sender.send_many("state", vec![7; MIB], at(200), None)?.len(), 1);
+    }
+    Ok(())
+}
