@@ -3720,7 +3720,11 @@ class CultMeshTests(unittest.TestCase):
             finally:
                 self._terminate_process(process)
 
-    def test_cultmesh_daemon_enforces_snapshot_document_limit_as_peer_error(self) -> None:
+    def test_cultmesh_daemon_refuses_a_snapshot_document_limit_of_zero_at_startup(self) -> None:
+        # A limit of zero is a server that could answer no snapshot, which the Rust document
+        # server's options also refuse; the daemon passes the flag to the server, and exits
+        # naming the rule instead of serving. The limit's enforcement as a peer error is pinned
+        # in process by test_cultmesh_local_server_rejects_oversized_snapshot_responses.
         with tempfile.TemporaryDirectory() as temp:
             ready_path = Path(temp) / "ready.json"
             package_src = Path(__file__).resolve().parents[1] / "src"
@@ -3731,7 +3735,7 @@ class CultMeshTests(unittest.TestCase):
                 if not existing_pythonpath
                 else f"{package_src}{os.pathsep}{existing_pythonpath}"
             )
-            process = subprocess.Popen(
+            completed = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -3746,25 +3750,14 @@ class CultMeshTests(unittest.TestCase):
                     "--ready-file",
                     str(ready_path),
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 env=env,
+                timeout=30,
             )
-            try:
-                ready = self._wait_for_ready_file(process, ready_path)
-                self.assertEqual(ready["snapshotLimits"], {"maxSnapshotBytes": None, "maxSnapshotDocuments": 0})
-                client = CultMesh.create_client("127.0.0.1", int(ready["port"]), timeout_seconds=2.0)
-
-                with self.assertRaisesRegex(CultNetPeerError, "Snapshot document limit exceeded") as raised:
-                    client.fetch_snapshot_response(schema_ids=["cultcache.interop-note"])
-
-                self.assertEqual(raised.exception.response["schemaVersion"], "cultnet.error.v0")
-                self.assertEqual(raised.exception.response["code"], "snapshot_document_limit_exceeded")
-                self.assertEqual(raised.exception.response["details"]["documentCount"], 1)
-                self.assertEqual(raised.exception.response["details"]["maxSnapshotDocuments"], 0)
-            finally:
-                self._terminate_process(process)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("max_snapshot_documents must be greater than zero", completed.stderr)
+            self.assertFalse(ready_path.exists())
 
     def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
