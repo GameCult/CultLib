@@ -508,33 +508,32 @@ test("rudp session handshake acks reliable connect and accept packets", () => {
 test("rudp session computes ack masks and clears pending reliable packets", () => {
   const sender = new CultNetRudpSession({ connectionId: 7, initialSequence: 10, resendDelayMs: 100 });
   const receiver = new CultNetRudpSession({ connectionId: 7, initialSequence: 200, resendDelayMs: 100 });
-  sender.receive({ packetType: "accept", connectionId: 7, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId: 7, sequence: 2, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
 
   const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true, nowMs: 0 });
   const second = sender.send("schema", Buffer.from("second"), { reliable: true, ordered: true, nowMs: 0 });
   const third = sender.send("schema", Buffer.from("third"), { reliable: true, ordered: true, nowMs: 0 });
-  assert.deepEqual(sender.pendingReliableSequences, [10, 11, 12]);
+  assert.deepEqual(sender.pendingReliableSequences, [11, 12, 13]);
 
   receiver.receive(first);
   receiver.receive(third);
   const ackWithGap = receiver.createAck();
-  assert.equal(ackWithGap.ack, 12);
-  assert.equal(ackWithGap.ackMask, 0b10 | (1 << 9));
+  assert.equal(ackWithGap.ack, 13);
+  assert.equal(ackWithGap.ackMask, 0b110);
   sender.receive(ackWithGap);
-  assert.deepEqual(sender.pendingReliableSequences, [11]);
+  assert.deepEqual(sender.pendingReliableSequences, [12]);
 
   receiver.receive(second);
   const fullAck = receiver.createAck();
-  assert.equal(fullAck.ack, 12);
-  assert.equal(fullAck.ackMask, 0b11 | (1 << 9));
+  assert.equal(fullAck.ack, 13);
+  assert.equal(fullAck.ackMask, 0b111);
   sender.receive(fullAck);
   assert.deepEqual(sender.pendingReliableSequences, []);
 });
 
 test("rudp session schedules reliable resends until acked", () => {
   const session = new CultNetRudpSession({ connectionId: 99, initialSequence: 1, resendDelayMs: 100 });
-  session.receive({ packetType: "accept", connectionId: 99, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  session.receive(new CultNetRudpSession({ connectionId: 99, initialSequence: 900 }).acceptConnect(session.createConnect(0), 0), 0);
   const sent = session.send("schema", Buffer.from("payload"), { reliable: true, ordered: true, nowMs: 10 });
 
   assert.deepEqual(session.dueResends(90), []);
@@ -605,7 +604,7 @@ test("rudp unreliable sequenced delivery is scoped to its channel", () => {
 
 test("rudp rejects unreliable ordered delivery", () => {
   const session = new CultNetRudpSession({ connectionId: 196 });
-  session.receive({ packetType: "accept", connectionId: 196, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  session.receive(new CultNetRudpSession({ connectionId: 196, initialSequence: 900 }).acceptConnect(session.createConnect(0), 0), 0);
   assert.throws(
     () => session.send("schema", Buffer.from("cannot order what will not retransmit"), { ordered: true }),
     /ordered delivery requires reliability/,
@@ -614,7 +613,7 @@ test("rudp rejects unreliable ordered delivery", () => {
 
 test("rudp session bounds pending reliable packets before enqueue", () => {
   const session = new CultNetRudpSession({ connectionId: 102, initialSequence: 1, maxPendingReliablePackets: 2 });
-  session.receive({ packetType: "accept", connectionId: 102, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  session.receive(new CultNetRudpSession({ connectionId: 102, initialSequence: 900 }).acceptConnect(session.createConnect(0), 0), 0);
 
   session.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
   session.send("schema", Buffer.from("second"), { reliable: true, ordered: true });
@@ -622,10 +621,10 @@ test("rudp session bounds pending reliable packets before enqueue", () => {
     () => session.send("schema", Buffer.from("third"), { reliable: true, ordered: true }),
     /reliable send queue is full/,
   );
-  assert.deepEqual(session.pendingReliableSequences, [1, 2]);
+  assert.deepEqual(session.pendingReliableSequences, [2, 3]);
 
   const fragmented = new CultNetRudpSession({ connectionId: 103, initialSequence: 1, maxPendingReliablePackets: 3 });
-  fragmented.receive({ packetType: "accept", connectionId: 103, sequence: 50, ack: 0, ackMask: 0, channelId: "control" });
+  fragmented.receive(new CultNetRudpSession({ connectionId: 103, initialSequence: 900 }).acceptConnect(fragmented.createConnect(0), 0), 0);
   assert.throws(
     () => fragmented.sendMany("schema", Buffer.from("fragment-me"), { reliable: true, ordered: true, maxFragmentBytes: 3 }),
     /reliable send queue is full/,
@@ -654,8 +653,7 @@ test("rudp session suppresses duplicates and delivers reliable ordered payloads 
 test("rudp session skips received control packets while ordering schema payloads", () => {
   const sender = new CultNetRudpSession({ connectionId: 124, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 124, initialSequence: 100 });
-  sender.receive({ packetType: "accept", connectionId: 124, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId: 124, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
 
   const first = sender.send("schema", Buffer.from("first"), { reliable: true, ordered: true });
   const control = sender.createAck();
@@ -672,8 +670,7 @@ test("rudp session skips received control packets while ordering schema payloads
 test("rudp session fragments and reassembles reliable ordered payloads", () => {
   const sender = new CultNetRudpSession({ connectionId: 456, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 456, initialSequence: 100 });
-  sender.receive({ packetType: "accept", connectionId: 456, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId: 456, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
 
   const packets = sender.sendMany("schema", Buffer.from("fragment-me-please"), {
     reliable: true,
@@ -1382,8 +1379,7 @@ test("rudp session advances large fragment sets through a bounded reliable windo
   const connectionId = 457;
   const sender = new CultNetRudpSession({ connectionId, initialSequence: 1, resendDelayMs: 25 });
   const receiver = new CultNetRudpSession({ connectionId, initialSequence: 100, resendDelayMs: 25 });
-  sender.receive({ packetType: "accept", connectionId, sequence: 0, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId, sequence: 0, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
 
   const fragmentCount = CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS + 17;
   const payload = Uint8Array.from(
@@ -1533,8 +1529,7 @@ test("RUDP operation service correlates typed payload envelopes", async () => {
 test("rudp sequence-neutral acknowledgements interoperate with ordered receivers", () => {
   const sender = new CultNetRudpSession({ connectionId: 125, initialSequence: 1 });
   const receiver = new CultNetRudpSession({ connectionId: 125, initialSequence: 100 });
-  sender.receive({ packetType: "accept", connectionId: 125, sequence: 90, ack: 0, ackMask: 0, channelId: "control" });
-  receiver.receive({ packetType: "accept", connectionId: 125, sequence: 91, ack: 0, ackMask: 0, channelId: "control" });
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
 
   const ack = sender.createAck();
   const request = sender.send("schema", Buffer.from("snapshot"), { reliable: true, ordered: true });
@@ -1839,7 +1834,7 @@ test("rudp receiver evicts stranded fragment sets instead of refusing new ones",
   // Heimdall fragmented envelopes (max_fragment_bytes = 2048), so on the live
   // auth path this map grew for every lost fragment and was never swept.
   const receiver = new CultNetRudpSession({ connectionId: 9, initialSequence: 1, resendDelayMs: 50 });
-  receiver.receive({ packetType: "accept", connectionId: 9, sequence: 1, ack: 0, ackMask: 0, channelId: "control" });
+  receiver.acceptConnect(new CultNetRudpSession({ connectionId: 9, initialSequence: 1 }).createConnect(0), 0);
 
   // 200 fragment sets that each lose their second fragment.
   for (let id = 1; id <= 200; id += 1) {
