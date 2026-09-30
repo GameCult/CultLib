@@ -43,9 +43,10 @@ namespace GameCult.Networking
         /// </summary>
         public uint ConnectionId { get; set; } = 0x43554c54;
         /// <summary>
-        /// Gets or sets the first local packet sequence for each accepted peer.
+        /// Gets or sets the first local packet sequence for each accepted peer. Unset, each peer's
+        /// session draws its own at random.
         /// </summary>
-        public uint InitialSequence { get; set; } = CultNetRudpSession.RandomInitialSequence();
+        public uint? InitialSequence { get; set; }
         /// <summary>
         /// Gets or sets the resend delay in milliseconds.
         /// </summary>
