@@ -1353,3 +1353,15 @@ These came from the C2a F2 Hands at `a771e71b`.
   - Carrying foreign records needs their whole-store writers taught first: TS `pushAll` via CultMesh `flush`, and Rust
     `put_prepared_batch` → `push_all`.
   - Recorded as the next parity cut, not dropped.
+
+## Soul: cultcache-ts push identity (`hands/cultcache-ts-push-identity` `1d6e1364..a00bb01f`, 2026-10-01)
+
+Verdict: **hold, not merged.** Recorded under drain mode; no fix dispatched.
+
+- **Held:** the Stonks duplicate is fixed; the suites on a merge with main are green (cultcache-ts 54/54 with four-runtime interop, cultnet-ts 198/198, cultmesh-ts 128 passing).
+- **F1 (CONFIRMED, high):** `isSameRecord` (`single-file-messagepack-backing-store.ts:284-286`) still matches on the stored label. When one definition's type equals another's schemaName, a put or delete for one destroys the other's record at the same key, globals included. The branch's own test "an envelope with no catalog entry replaces a record stored under another schema id that carries its label" pins this hole. The coherent cut: the cache resolver hands the store the persisted identity (key plus schemaId), and the store compares only that.
+- **F2 (CONFIRMED, high):** Python (`stores.py:54-67, 105-119`) has the same duplicate bug. A second `put_global` makes the store unloadable.
+- **F3 (CONFIRMED, medium):** Rust `entry_id` is `(type, key)`, which duplicates records written by another runtime. Rust also writes its TYPE into the catalog schemaName slot, a parity defect.
+- **F4:** mutant MA (legacy global labelled by schema name) survives; the rule needs a committed test.
+- **F5 (PLAUSIBLE, high after c2a):** c2a's compatible-owned ids plus clause 1 let a non-owner's write delete the owner's record. c2a's `encodeSnapshot` `${type}::${key}` is a second identity authority.
+- Probes survive as unreachable commit `1c7744e2` (ts, rs, py); recover them before gc.
