@@ -11,6 +11,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -581,7 +582,7 @@ object CultMesh {
         connectionId: Long,
         remoteHost: String,
         remotePort: Int,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
     ): CultNetRudpSocketTransportConnection = cultNetRudpClient(
@@ -600,7 +601,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         endpoint: CultNetRudpEndpoint,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
     ): CultNetRudpSocketTransportConnection = createRudpClient(
@@ -617,7 +618,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         endpoint: String,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
     ): CultNetRudpSocketTransportConnection = createRudpClient(
@@ -633,7 +634,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         peer: CultMeshPeerCard,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
     ): CultNetRudpSocketTransportConnection {
@@ -651,7 +652,7 @@ object CultMesh {
         role: String,
         shardId: String? = null,
         at: Instant = Instant.now(),
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
     ): CultNetRudpSocketTransportConnection {
@@ -664,7 +665,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         endpoint: CultNetRudpEndpoint,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
         connectPayload: ByteArray = ByteArray(0),
@@ -683,7 +684,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         endpoint: String,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
         connectPayload: ByteArray = ByteArray(0),
@@ -705,7 +706,7 @@ object CultMesh {
         runtimeId: String,
         connectionId: Long,
         peer: CultMeshPeerCard,
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
         connectPayload: ByteArray = ByteArray(0),
@@ -736,7 +737,7 @@ object CultMesh {
         role: String,
         shardId: String? = null,
         at: Instant = Instant.now(),
-        bindHost: String = "127.0.0.1",
+        bindHost: String? = null,
         bindPort: Int = 0,
         tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
         connectPayload: ByteArray = ByteArray(0),
@@ -3028,22 +3029,36 @@ fun cultNetRudpServer(
     )
 }
 
+/**
+ * The address an RUDP client binds when its caller names none: loopback for a
+ * loopback endpoint, otherwise the unspecified address of the endpoint's family.
+ * A socket bound to loopback cannot send off the host on Windows.
+ */
+fun cultNetRudpClientBindAddress(remote: InetAddress): InetAddress = when {
+    remote is Inet6Address && remote.isLoopbackAddress -> InetAddress.getByName("::1")
+    remote is Inet6Address -> InetAddress.getByName("::")
+    remote.isLoopbackAddress -> InetAddress.getByName("127.0.0.1")
+    else -> InetAddress.getByName("0.0.0.0")
+}
+
 fun cultNetRudpClient(
     runtimeId: String,
     connectionId: Long,
     remoteHost: String,
     remotePort: Int,
-    bindHost: String = "127.0.0.1",
+    bindHost: String? = null,
     bindPort: Int = 0,
     tuning: CultNetRudpSocketTuning = CultNetRudpSocketTuning(),
 ): CultNetRudpSocketTransportConnection {
-    val socket = DatagramSocket(bindPort, InetAddress.getByName(bindHost)).also { it.soTimeout = 20 }
+    val remote = InetAddress.getByName(remoteHost)
+    val bindAddress = bindHost?.let(InetAddress::getByName) ?: cultNetRudpClientBindAddress(remote)
+    val socket = DatagramSocket(bindPort, bindAddress).also { it.soTimeout = 20 }
     return CultNetRudpSocketTransportConnection(
         socket = socket,
         mode = CultNetRudpSocketMode.Client,
         runtimeId = runtimeId,
         connectionId = connectionId,
-        remoteAddress = InetSocketAddress(InetAddress.getByName(remoteHost), remotePort),
+        remoteAddress = InetSocketAddress(remote, remotePort),
         initialSequence = tuning.initialSequence,
         resendDelayMs = tuning.resendDelayMs,
         maxFragmentBytes = tuning.maxFragmentBytes,
@@ -3368,6 +3383,7 @@ fun main(args: Array<String>) {
         rudpSessionFragmentsAndReassemblesReliableOrderedPayloads()
         rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow()
         rudpSocketTransportErgonomicFactoriesCarrySchemaFrames()
+        rudpClientBindsLoopbackOnlyForALoopbackEndpoint()
         rudpSocketTransportHandshakesAndCarriesReliableOrderedSchemaFrames()
         rudpSocketTransportCarriesFragmentedReliableOrderedSchemaFrames()
         return
@@ -5376,6 +5392,25 @@ private fun rudpSessionAdvancesLargeFragmentSetsThroughBoundedReliableWindow() {
     val oldAck = receiver.createAckForReceived(oldestSequence)
     check(oldAck.ack == oldestSequence)
     check(oldAck.ackMask == 0L)
+}
+
+private fun rudpClientBoundHost(endpoint: String, bindHost: String? = null): InetAddress =
+    CultMesh.createRudpClient("kotlin-rudp-bind-client", 0x10203060L, endpoint, bindHost).use { client ->
+        InetAddress.getByName(client.profile.transports.single().host)
+    }
+
+// A client bound to loopback cannot send to another host on Windows, so a
+// client for a remote endpoint binds the unspecified address of its family.
+private fun rudpClientBindsLoopbackOnlyForALoopbackEndpoint() {
+    check(rudpClientBoundHost("rudp://10.77.0.1:17872") == InetAddress.getByName("0.0.0.0"))
+    check(rudpClientBoundHost("rudp://[2001:db8::1]:17872") == InetAddress.getByName("::"))
+    check(rudpClientBoundHost("rudp://127.0.0.1:17872") == InetAddress.getByName("127.0.0.1"))
+    check(rudpClientBoundHost("rudp://[::1]:17872") == InetAddress.getByName("::1"))
+    check(rudpClientBoundHost("rudp://10.77.0.1:17872", "127.0.0.1") == InetAddress.getByName("127.0.0.1"))
+    check(rudpClientBoundHost("rudp://127.0.0.1:17872", "0.0.0.0") == InetAddress.getByName("0.0.0.0"))
+    CultMesh.createRudpServer("kotlin-rudp-bind-server", 0x10203061L).use { server ->
+        check(InetAddress.getByName(server.profile.transports.single().host) == InetAddress.getByName("127.0.0.1"))
+    }
 }
 
 private fun rudpSocketTransportErgonomicFactoriesCarrySchemaFrames() {
