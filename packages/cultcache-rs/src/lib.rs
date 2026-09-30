@@ -4800,7 +4800,14 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
         let store = SingleFileMessagePackBackingStore::new(&path);
-        for bytes in [&b"not a store at all"[..], &[0x92, 0xa3, b'a', b'b'][..], &[0xc1][..]] {
+        // The last opens like a store, with a string where the header goes, but only a
+        // `cultcache.store.*` header claims a format this runtime might not read.
+        for bytes in [
+            &b"not a store at all"[..],
+            &[0x92, 0xa3, b'a', b'b'][..],
+            &[0xc1][..],
+            &[0x92, 0xa2, b'a', b'b', 0x90][..],
+        ] {
             fs::write(&path, bytes)?;
             let error = store.pull_all().unwrap_err();
             assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{bytes:?}: {error:#}");
@@ -4875,13 +4882,20 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
         let (store, before) = written_store(&path)?;
-        let status = std::process::Command::new("sh")
+        let child = std::process::Command::new("sh")
             .arg("-c")
             .arg("trap '' XFSZ; ulimit -f 64; exec \"$0\" --exact --test-threads=1 --quiet tests::a_write_that_fails_part_way_leaves_no_staging_file_and_keeps_the_store")
             .arg(std::env::current_exe()?)
             .env(CHILD_STORE, &path)
-            .status()?;
-        assert!(status.success(), "the size-limited child did not fail its write as expected: {status}");
+            .output()?;
+        assert!(
+            child.status.success(),
+            "the size-limited child did not fail its write as expected: {}
+{}{}",
+            child.status,
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
 
         let staging: Vec<_> = fs::read_dir(temp.path())?
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
