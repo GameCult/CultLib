@@ -425,6 +425,7 @@ namespace GameCult.Caching
             Key = key;
             StoredAt = storedAt;
             Descriptor = descriptor;
+            StoredSchemaId = descriptor.SchemaId;
             _document = document;
         }
 
@@ -440,6 +441,7 @@ namespace GameCult.Caching
             Key = key;
             StoredAt = storedAt;
             Descriptor = descriptor;
+            StoredSchemaId = descriptor.SchemaId;
             Variant = variant;
             _document = resolved;
             _codec = codec;
@@ -453,6 +455,11 @@ namespace GameCult.Caching
         public CultRecordKey Key { get; }
         public string StoredAt { get; }
         public CultDocumentDescriptor Descriptor { get; }
+
+        // The schema id the record carries in its store: the id it was loaded under, which may be an older or foreign id that
+        // resolved to Descriptor, until a write of this record puts it under Descriptor's id. With StoredAt it is the record's
+        // identity on disk, and a commit condition compares the pair with the store's bytes exactly.
+        public string StoredSchemaId { get; internal set; }
 
         // The complete document. For a variant, the resolved view: derived, never written back.
         public object Document => _document ??
@@ -487,7 +494,7 @@ namespace GameCult.Caching
         }
 
         internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, CultCodec codec) =>
-            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly };
+            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId };
     }
 
     public sealed class CultDocumentRegistry
@@ -581,16 +588,6 @@ namespace GameCult.Caching
             }
 
             throw new InvalidOperationException($"Unknown CultCache schema id '{schemaId}'.");
-        }
-
-        // The id a record under schemaId is stamped with: the own id of the type that owns it, else of the first registered
-        // type that declares it compatible; an id no registered type claims is its own.
-        internal string CanonicalSchemaId(string schemaId)
-        {
-            var indexes = _indexes;
-            return indexes.BySchemaId.TryGetValue(schemaId, out var owner) || indexes.ByCompatibleSchemaId.TryGetValue(schemaId, out owner)
-                ? owner.SchemaId
-                : schemaId;
         }
 
         public CultDocumentDescriptor ResolvePersistedSchema(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
@@ -1807,8 +1804,10 @@ namespace GameCult.Caching
         public bool HasConditions => Expected.Count > 0 || ExpectUnchanged;
 
         // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
-        // Identity is (schemaId, storedAt), sound because every write to a key mints a later storedAt.
-        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed, Func<string, string> canonicalSchemaId)
+        // Identity is (stored schema id, storedAt), compared exactly. A write of a key mints a later storedAt, but a whole-view
+        // write rewrites every record it holds under its own type's id with the storedAt it loaded, and may shed members its
+        // type lacks: only the id says the bytes changed.
+        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
         {
             var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
             foreach (var (key, schemaId, storedAt) in Expected)
@@ -1816,16 +1815,16 @@ namespace GameCult.Caching
                 byKey.TryGetValue(key.Value, out var record);
                 var holds = schemaId == null
                     ? record == null
-                    : record != null && canonicalSchemaId(record.SchemaId) == schemaId && record.StoredAt == storedAt;
+                    : record != null && record.SchemaId == schemaId && record.StoredAt == storedAt;
                 if (!holds)
                     return false;
             }
 
             return !ExpectUnchanged ||
-                   durable.Select(record => Identity(record.Key, canonicalSchemaId(record.SchemaId), record.StoredAt))
+                   durable.Select(record => Identity(record.Key, record.SchemaId, record.StoredAt))
                        .OrderBy(identity => identity, StringComparer.Ordinal)
                        .SequenceEqual(observed
-                           .Select(stored => Identity(stored.Key.Value, stored.Descriptor.SchemaId, stored.StoredAt))
+                           .Select(stored => Identity(stored.Key.Value, stored.StoredSchemaId, stored.StoredAt))
                            .OrderBy(identity => identity, StringComparer.Ordinal));
         }
 
@@ -1903,7 +1902,7 @@ namespace GameCult.Caching
         {
             ThrowIfSealed();
             var observed = _cache.Observe(key, current);
-            Expected.Add((key, observed?.Descriptor.SchemaId, observed?.StoredAt));
+            Expected.Add((key, observed?.StoredSchemaId, observed?.StoredAt));
         }
 
         public void ExpectUnchanged()
@@ -1967,13 +1966,17 @@ namespace GameCult.Caching
         // Read under the gate, by a store judging a merge.
         internal bool HoldsVariants => _variantKeys.Count > 0;
 
-        // A store wrote its whole view: a plain record it wrote carries the ids it held, so it is no longer in-memory only. A
-        // variant is not cleared here: the store wrote the delta it was handed, and only a write of the variant changes that.
-        internal void IdsPersisted(IEnumerable<string> keys) => Held(() =>
+        // A store wrote its whole view: every record it wrote is stored under its type's own id, and a plain record carries the
+        // ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the store wrote the delta it was
+        // handed, and only a write of the variant changes that.
+        internal void WroteWholeView(IEnumerable<string> keys) => Held(() =>
         {
             foreach (var key in keys)
             {
-                if (_entries.TryGetValue(key, out var entry) && entry.Variant == null)
+                if (!_entries.TryGetValue(key, out var entry))
+                    continue;
+                entry.StoredSchemaId = entry.Descriptor.SchemaId;
+                if (entry.Variant == null)
                     entry.IdsInMemoryOnly = false;
             }
 
@@ -2565,9 +2568,9 @@ namespace GameCult.Caching
                     if (request.HasConditions && _stores.Count > 0)
                         throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
                     var inMemory = _entries.Values
-                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.Descriptor.SchemaId, StoredAt = entry.StoredAt })
+                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.StoredSchemaId, StoredAt = entry.StoredAt })
                         .ToArray();
-                    return request.ConditionsHold(inMemory, _entries.Values, Registry.CanonicalSchemaId) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
+                    return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
             });
         }
@@ -3487,7 +3490,10 @@ namespace GameCult.Caching
                     descriptor,
                     new CultVariantDelta(record.Variant.BaseKey, record.Variant.Overrides.Where(Has).ToArray()),
                     null,
-                    Cache?.Codec);
+                    Cache?.Codec)
+                {
+                    StoredSchemaId = record.SchemaId
+                };
             }
 
             var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
@@ -3495,7 +3501,10 @@ namespace GameCult.Caching
                 new CultRecordKey(record.Key),
                 record.StoredAt,
                 resolution.Descriptor,
-                document);
+                document)
+            {
+                StoredSchemaId = record.SchemaId
+            };
         }
 
         protected void SetLastSchemaMigrationReports(IEnumerable<CultSchemaMigrationReport> reports)
@@ -3561,7 +3570,7 @@ namespace GameCult.Caching
             var loaded = persisted.Values
                 .Where(stored => !Entries.TryGetValue(stored.Key.Value, out var existing) ||
                                  existing.StoredAt != stored.StoredAt ||
-                                 existing.Descriptor.SchemaId != stored.Descriptor.SchemaId)
+                                 existing.StoredSchemaId != stored.StoredSchemaId)
                 .ToArray();
             var dropped = Entries.Values.Where(existing => !persisted.ContainsKey(existing.Key.Value)).ToArray();
             if (loaded.Length > 0 || dropped.Length > 0)
@@ -3612,7 +3621,7 @@ namespace GameCult.Caching
                         Entries.Values.Any(entry => entry.HoldsIds),
                         existingHeader: null,
                         wholeStore: true);
-                    Cache?.IdsPersisted(Entries.Keys);
+                    WroteWholeView(Entries.Keys);
                 }
 
                 MarkFlushSucceeded();
@@ -3632,7 +3641,7 @@ namespace GameCult.Caching
                 return CultCommitOutcome.Contended;
 
             var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
-            if (!request.ConditionsHold(disk.Records, Entries.Values, Registry.CanonicalSchemaId))
+            if (!request.ConditionsHold(disk.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
             // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
@@ -3661,14 +3670,22 @@ namespace GameCult.Caching
                 .Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry()))
                 .ToArray();
             WriteSnapshot(records.Values, registered, ontoDisk ? disk.SchemaCatalog : Array.Empty<CultSchemaCatalogEntry>(), holdsIds, disk.FormatVersion, wholeStore: !ontoDisk);
-            if (!ontoDisk)
-                Cache?.IdsPersisted(records.Keys);
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
+            if (!ontoDisk)
+                WroteWholeView(records.Keys);
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
+        }
+
+        // The file now holds every record of this store's view under its type's own id: the store's entries and the cache's say so.
+        private void WroteWholeView(IEnumerable<string> keys)
+        {
+            foreach (var entry in Entries.Values)
+                entry.StoredSchemaId = entry.Descriptor.SchemaId;
+            Cache?.WroteWholeView(keys);
         }
 
         // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote
@@ -3689,7 +3706,7 @@ namespace GameCult.Caching
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
                     continue;
-                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.Descriptor.SchemaId == record.SchemaId)
+                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.StoredSchemaId == record.SchemaId)
                     continue;
                 arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
             }

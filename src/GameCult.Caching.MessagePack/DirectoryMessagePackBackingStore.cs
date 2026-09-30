@@ -109,7 +109,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             .Where(pair => !Staged(pair.Key) &&
                            (!Entries.TryGetValue(pair.Key, out var existing) ||
                             existing.StoredAt != pair.Value.StoredAt ||
-                            existing.Descriptor.SchemaId != pair.Value.Descriptor.SchemaId))
+                            existing.StoredSchemaId != pair.Value.StoredSchemaId))
             .Select(pair => pair.Value)
             .ToArray();
         var departed = _hydratedKeys
@@ -178,7 +178,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
             var manifest = ReadManifest();
-            if (!request.ConditionsHold(manifest.Records, Entries.Values, Registry.CanonicalSchemaId))
+            if (!request.ConditionsHold(manifest.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
