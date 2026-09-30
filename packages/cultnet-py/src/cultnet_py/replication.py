@@ -175,4 +175,33 @@ def resolve_document_and_schema_id_for_raw_record(
     document = documents_by_schema_id.get(schema_id)
     if document is not None:
         return document, schema_id
+    schema_version = _infer_schema_version_from_payload(bytes(record["payload"]))
+    schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
+    if schema_name is not None and schema_name in documents_by_schema_id:
+        document = documents_by_schema_id[schema_name]
+        return document, document.catalog_entry().schema_id
     raise KeyError(schema_id)
+
+
+def _infer_schema_version_from_payload(payload: bytes) -> str | None:
+    try:
+        import msgpack  # type: ignore
+        decoded = msgpack.unpackb(payload, raw=False)
+    except Exception:
+        return None
+    if isinstance(decoded, list) and decoded and isinstance(decoded[0], str):
+        return decoded[0]
+    if isinstance(decoded, dict):
+        value = decoded.get("schemaVersion", decoded.get("schema_version"))
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _infer_schema_name(schema_version: str) -> str | None:
+    marker = schema_version.rfind(".v")
+    if marker <= 0:
+        return None
+    version = schema_version[marker + 2:]
+    if not version or not version.isdigit():
+        return None
+    return schema_version[:marker]

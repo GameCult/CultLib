@@ -287,6 +287,34 @@ class CultCacheTests(unittest.TestCase):
             reopened.put(document, "next", {"name": "next"})
             self.assertEqual(self._open_foreign_id_store(document, path).get_required(document, "next")["name"], "next")
 
+    def test_the_store_publishes_a_records_schema_id_even_when_the_envelopes_catalog_entry_does_not(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            store = SingleFileMessagePackBackingStore(path)
+            store.push(CultCacheEnvelope(
+                key="k",
+                type="tests.store-publishes",
+                payload=msgpack.packb({"name": "k"}, use_bin_type=True),
+                stored_at="2026-09-30T00:00:00Z",
+                schema_id="tests.store-publishes.record",
+                catalog_entry=CultCacheSchemaCatalogEntry(
+                    schema_id="tests.store-publishes.other",
+                    schema_name="tests.store-publishes",
+                    schema_version="tests.store_publishes.v1",
+                    content_hash="tests.store-publishes.other",
+                    canonical_schema_json="",
+                    compatible_schema_ids=("tests.store-publishes.other",),
+                    members=(),
+                ),
+            ))
+            stored = msgpack.unpackb(path.read_bytes(), raw=False)
+            self.assertEqual(stored[2][0][1], "tests.store-publishes.record")
+            self.assertEqual([entry[0] for entry in stored[1]], ["tests.store-publishes.record"])
+            self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 1)
+
     def test_a_record_loaded_under_a_compatible_schema_id_is_written_back_under_the_id_its_catalog_entry_carries(self) -> None:
         import msgpack  # type: ignore
 
@@ -300,6 +328,7 @@ class CultCacheTests(unittest.TestCase):
                 [["old", "tests.foreign-id.older", "2026-09-30T00:00:00Z", document.encode_payload({"name": "old"})]],
             ], use_bin_type=True))
             cache = self._open_foreign_id_store(document, path)
+            self.assertEqual(cache.get_required_envelope(document, "old").schema_id, "tests.foreign-id.current")
             cache.put(document, "next", {"name": "next"})
             reopened = self._open_foreign_id_store(document, path)
             self.assertEqual(reopened.get_required(document, "old")["name"], "old")

@@ -1321,6 +1321,29 @@ test("putEnvelope under a compatible schema id writes a store that reopens and t
   assert.deepEqual((await reopenForeignIdStore(file)).getRequired(foreignIdDocument, "next"), { name: "next" });
 });
 
+test("the store publishes a record's schema id even when the envelope's catalog entry does not", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-store-publishes-")), "store.msgpack");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push({
+    key: "k",
+    type: "tests.store-publishes",
+    schemaId: "tests.store-publishes.record",
+    payload: encode({ name: "k" }),
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry: {
+      schemaId: "tests.store-publishes.other",
+      schemaName: "tests.store-publishes",
+      schemaVersion: "tests.store_publishes.v1",
+      contentHash: "tests.store-publishes.other",
+      canonicalSchemaJson: "",
+      compatibleSchemaIds: ["tests.store-publishes.other"],
+      members: [],
+    },
+  });
+  assert.deepEqual(schemaIdsOf(await readFile(file)), { record: "tests.store-publishes.record", catalog: ["tests.store-publishes.record"] });
+  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 1);
+});
+
 test("a record loaded under a compatible schema id is written back under the id its catalog entry carries", async () => {
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
   const payload = encode({ name: "old" });
@@ -1342,6 +1365,7 @@ test("a record loaded under a compatible schema id is written back under the id 
   );
 
   const cache = await reopenForeignIdStore(file);
+  assert.equal(cache.getRequiredEnvelope(foreignIdDocument, "old").schemaId, "tests.foreign-id.current");
   await cache.put(foreignIdDocument, "next", { name: "next" });
   const reopened = await reopenForeignIdStore(file);
   assert.deepEqual(reopened.getRequired(foreignIdDocument, "old"), { name: "old" });
