@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading.Tasks;
 using GameCult.Logging;
 using MessagePack;
@@ -177,6 +178,102 @@ namespace GameCult.Networking.Tests
             Assert.That(scene.Bad.Session.Receive(goodbye, 1).Disconnected, Is.True);
             Assert.That(Drain(scene.Good.Socket).Select(packet => packet.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect));
             Assert.That(scene.Logger.Errors, Has.Count.EqualTo(1));
+        }
+
+        // The peer's malformed message and a well-formed one after it arrive in one datagram's
+        // delivery: the second is held for order, and both are released together. The session ends
+        // on the first, so the second belongs to no session and is never handled.
+        [Test]
+        public async Task ARefusedPeersFramesStillQueuedAreNotHandled()
+        {
+            var logger = new CapturingLogger();
+            using var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-peer-input",
+                ConnectionId = ConnectionId
+            });
+            server.Logger = logger;
+            var served = new List<string>();
+            server.OnCultNet<CultNetShardCatalogRequestMessage>((message, _) => served.Add(message.MessageId));
+            var bad = await Connect(server);
+            var options = new CultNetRudpSendOptions { Reliable = true, Ordered = true };
+            var malformed = bad.Session.Send("schema", Malformed(), options);
+            var after = bad.Session.Send("schema", CultNetSchemaMessageSerialization.Serialize(
+                new CultNetShardCatalogRequestMessage { MessageId = "after-the-refused-one" }), options);
+            bad.Socket.SendTo(CultNetRudpPacketCodec.Encode(after), server.LocalEndPoint);
+            bad.Socket.SendTo(CultNetRudpPacketCodec.Encode(malformed), server.LocalEndPoint);
+
+            await server.PollAvailableAsync(16);
+
+            Assert.That(served, Is.Empty);
+            Assert.That(server.Peers, Is.Empty);
+            Assert.That(logger.Errors, Has.Count.EqualTo(1));
+            bad.Socket.Dispose();
+        }
+
+        private static async Task<(RudpCultNetSchemaServer Server, Client Client, CapturingLogger Logger)> ServerWhoseHandlerAnswers(
+            byte[] response, int? maxFragmentBytes, int? unsendableAfter = null)
+        {
+            var logger = new CapturingLogger();
+            var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
+            {
+                RuntimeId = "csharp-peer-input",
+                ConnectionId = ConnectionId,
+                MaxFragmentBytes = maxFragmentBytes
+            });
+            server.Logger = logger;
+            server.OnCultNet<CultNetShardCatalogRequestMessage>((_, peer) =>
+            {
+                if (unsendableAfter is { } count)
+                    server.Transport.UnsendableAfter[peer.RemoteEndPoint] = count;
+                server.Transport.SendSchema(peer.TransportPeer, response);
+            });
+            var client = await Connect(server);
+            SendSchema(server, client, CultNetSchemaMessageSerialization.Serialize(
+                new CultNetShardCatalogRequestMessage { MessageId = "ask" }));
+            return (server, client, logger);
+        }
+
+        // A handler whose own response can never be sent (larger than a datagram, unfragmented) fails
+        // on the server's account, not the peer's. The session still ends, but its goodbye does not say
+        // the peer's packet was refused.
+        [Test]
+        public async Task AHandlerFaultEndsTheSessionWithAReasonThatDoesNotBlameThePeer()
+        {
+            var (server, client, logger) = await ServerWhoseHandlerAnswers(new byte[70_000], maxFragmentBytes: null);
+            using (server)
+            {
+                await server.PollAvailableAsync(16);
+
+                var goodbye = Drain(client.Socket).Single(packet => packet.PacketType == CultNetRudpPacketType.Disconnect);
+                Assert.That(Encoding.UTF8.GetString(goodbye.Payload!), Is.EqualTo("server could not handle a message"));
+                Assert.That(server.Peers, Is.Empty);
+                Assert.That(logger.Errors, Has.Count.EqualTo(1));
+                Assert.That(logger.Errors[0], Does.Contain("handler failed (SocketException)"));
+                Assert.That(logger.Errors[0], Does.Contain("that peer's session ended."));
+            }
+            client.Socket.Dispose();
+        }
+
+        // A response that fails after its first fragment has already ended the session over the send,
+        // with a goodbye that names the send failure. The backstop ends nothing more and says so.
+        [Test]
+        public async Task AHandlerWhoseResponseEndedTheSessionIsLoggedAsAlreadyEnded()
+        {
+            var (server, client, logger) = await ServerWhoseHandlerAnswers(new byte[3000], maxFragmentBytes: 1000, unsendableAfter: 1);
+            using (server)
+            {
+                await server.PollAvailableAsync(16);
+                await server.PollAvailableAsync(16);
+
+                var goodbyes = Drain(client.Socket).Where(packet => packet.PacketType == CultNetRudpPacketType.Disconnect).ToList();
+                Assert.That(goodbyes, Has.Count.EqualTo(1));
+                Assert.That(Encoding.UTF8.GetString(goodbyes[0].Payload!), Does.StartWith("packet could not be sent: "));
+                Assert.That(server.Peers, Is.Empty);
+                Assert.That(logger.Errors, Has.Count.EqualTo(1));
+                Assert.That(logger.Errors[0], Does.Contain("that peer's session had already ended."));
+            }
+            client.Socket.Dispose();
         }
 
         [Test]

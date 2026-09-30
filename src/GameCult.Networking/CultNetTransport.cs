@@ -1462,10 +1462,17 @@ namespace GameCult.Networking
         /// sequence, so the peer's sequences are forgotten before the goodbye is built: its ack field
         /// would otherwise acknowledge the very frame the session refused.
         /// </summary>
-        internal CultNetRudpPacket EndRefused()
+        internal CultNetRudpPacket EndRefused() => EndWith(RefusedPacketReason);
+
+        /// <summary>
+        /// Ends a session whose peer's frame the application above it refused or failed on, after the
+        /// session acknowledged it. As with <see cref="EndRefused"/>, the peer's sequences are forgotten
+        /// before the goodbye is built.
+        /// </summary>
+        internal CultNetRudpPacket EndWith(byte[] reason)
         {
             ResetPeerState();
-            return CreateDisconnect(RefusedPacketReason);
+            return CreateDisconnect(reason);
         }
 
         /// <summary>
@@ -3191,19 +3198,21 @@ namespace GameCult.Networking
         }
 
         // Polling thread only. Ends the session of a peer whose delivered frame the application could not
-        // decode or handle. The frame is already acknowledged, so the session cannot be kept: a
-        // retransmit would never be handled. The peer is told, the drop is counted, and the peer's
-        // frames still queued are not delivered. A session that already ended (a new Connect replaced
-        // it, or a send failure ended it) owes no goodbye; the endpoint may belong to a new session.
-        internal void EndRefusedPeer(CultNetRudpSocketServerPeer peer)
+        // decode or handle, with a goodbye carrying the application's reason. The frame is already
+        // acknowledged, so the session cannot be kept: a retransmit would never be handled. The peer
+        // is told, the drop is counted, and the peer's frames still queued are not delivered. A
+        // session that already ended (a new Connect replaced it, or a send failure ended it) owes no
+        // goodbye, since the endpoint may belong to a new session; the call then returns false.
+        internal bool EndPeerSession(CultNetRudpSocketServerPeer peer, byte[] reason)
         {
             if (peer == null) throw new ArgumentNullException(nameof(peer));
+            if (reason == null) throw new ArgumentNullException(nameof(reason));
             _stats.PacketsDropped++;
             lock (peer.SessionGate)
             {
                 if (peer.Session.Ended)
-                    return;
-                SendPacket(peer.RemoteEndPoint, peer.Session.EndRefused());
+                    return false;
+                SendPacket(peer.RemoteEndPoint, peer.Session.EndWith(reason));
             }
 
             var kept = _deliveredFrames.Where(frame => !ReferenceEquals(frame.Peer, peer)).ToArray();
@@ -3213,10 +3222,11 @@ namespace GameCult.Networking
 
             var key = RemoteKey(peer.RemoteEndPoint);
             if (!_peers.TryGetValue(key, out var current) || !ReferenceEquals(current, peer))
-                return;
+                return true;
             _peers.Remove(key);
-            peer.DisconnectReason = CultNetRudpSession.RefusedPacketReason;
+            peer.DisconnectReason = reason;
             PeerDisconnected?.Invoke(peer);
+            return true;
         }
 
         // Polling thread only. A peer a new Connect already replaced was reported then, and its key now

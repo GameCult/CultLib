@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading.Tasks;
 using GameCult.Logging;
 
@@ -169,6 +170,9 @@ namespace GameCult.Networking
         /// </summary>
         public CultNetTransportStats Stats => _transport.Stats;
 
+        // The listener this server drives, for tests that inject send failures through its seams.
+        internal CultNetRudpSocketTransportServer Transport => _transport;
+
         /// <summary>
         /// Gets the currently tracked RUDP peers.
         /// </summary>
@@ -283,27 +287,49 @@ namespace GameCult.Networking
             return new RudpCultNetSchemaPollResult(consumed, dispatched);
         }
 
+        /// <summary>
+        /// The goodbye's reason when a handler fails on a peer's message: the server could not handle
+        /// it, which says nothing about whether the peer's packet was well formed.
+        /// </summary>
+        internal static readonly byte[] HandlerFailedReason = Encoding.UTF8.GetBytes("server could not handle a message");
+
+        private static string SessionOutcome(bool ended) =>
+            ended ? "that peer's session ended." : "that peer's session had already ended.";
+
         private async Task<bool> DispatchAsync(CultNetRudpSocketServerFrame delivered)
         {
             if (!string.Equals(delivered.Frame.ChannelId, "schema", StringComparison.Ordinal))
                 return false;
 
             // A peer's message that cannot be decoded (malformed bytes, an unknown schemaVersion) or
-            // handled is that peer's failure, never the poll's: the drain goes on serving every other
-            // peer. The transport already acknowledged the frame, so the peer's session cannot be kept
-            // (a retransmit would never be handled). It ends, the peer is told, and the drop is counted
-            // and logged, as cultmesh-py's server does. A handler is still expected to answer its own
-            // typed refusals on the wire (HandleSnapshotRequestV1Async does, R-AM); this is the backstop
-            // for whatever it does not. The log names the fault's type only: its message can quote
-            // what the peer sent.
+            // handled ends that peer's session, never the poll: the drain goes on serving every other
+            // peer. The transport already acknowledged the frame, so the session cannot be kept (a
+            // retransmit would never be handled). The peer is told, and the drop is counted and logged.
+            // The C# TCP schema server (CultNetTcpSchemaTransport.ServePeerAsync) likewise ends the one
+            // peer whose message fails to decode or handle. A handler is still expected to answer its
+            // own typed refusals on the wire (HandleSnapshotRequestV1Async does, R-AM); this is the
+            // backstop for whatever it does not. The log names the fault's type only: its message can
+            // quote what the peer sent.
+            ICultNetSchemaMessage message;
             try
             {
-                var message = CultNetSchemaMessageSerialization.Deserialize(delivered.Frame.Payload);
-                if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)
-                {
-                    return false;
-                }
+                message = CultNetSchemaMessageSerialization.Deserialize(delivered.Frame.Payload);
+            }
+            catch (Exception ex)
+            {
+                // The peer sent something no runtime can read: the refusal is the peer's.
+                var ended = _transport.EndPeerSession(delivered.Peer, CultNetRudpSession.RefusedPacketReason);
+                Logger.LogError($"CultNet RUDP schema server could not decode a peer's message ({ex.GetType().Name}); {SessionOutcome(ended)}");
+                return false;
+            }
 
+            if (!_handlers.TryGetValue(message.GetType(), out var handler) || handler == null)
+            {
+                return false;
+            }
+
+            try
+            {
                 var result = handler.DynamicInvoke(message, new RudpCultNetSchemaServerPeer(this, delivered.Peer));
                 if (result is Task task)
                 {
@@ -313,10 +339,13 @@ namespace GameCult.Networking
             catch (Exception ex)
             {
                 // DynamicInvoke wraps a synchronously-thrown handler fault in TargetInvocationException;
-                // name the real fault, not that wrapper.
+                // name the real fault, not that wrapper. The fault is the server's (a response too large
+                // to send, a handler bug) or a refusal the handler did not type, so the goodbye does not
+                // say the peer's packet was refused. A response that failed after its first fragment
+                // already ended the session over the send, and the log says so.
                 var reported = ex is System.Reflection.TargetInvocationException { InnerException: { } inner } ? inner : ex;
-                Logger.LogError($"CultNet RUDP schema server could not decode or handle a peer's message ({reported.GetType().Name}); that peer's session ended.");
-                _transport.EndRefusedPeer(delivered.Peer);
+                var ended = _transport.EndPeerSession(delivered.Peer, HandlerFailedReason);
+                Logger.LogError($"CultNet RUDP schema server's {message.GetType().Name} handler failed ({reported.GetType().Name}); {SessionOutcome(ended)}");
                 return false;
             }
             return true;

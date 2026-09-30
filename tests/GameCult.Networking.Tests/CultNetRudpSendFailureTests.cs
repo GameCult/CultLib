@@ -430,6 +430,28 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // An application ending a peer's session (a message it could not decode or handle) says no
+        // goodbye to a session that already ended: a new Connect replaced it, and the endpoint now
+        // belongs to the session that replaced it.
+        [Test]
+        public void EndingAReplacedPeersSessionSaysNoGoodbyeToTheSessionThatReplacedIt()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers();
+            using (server)
+            {
+                var (stale, replacing) = Reconnect(server, listenerEndPoint, x);
+                var ended = RecordDisconnects(server);
+
+                Assert.That(server.EndPeerSession(stale, Encoding.UTF8.GetBytes("application reason")), Is.False);
+
+                Assert.That(Drain(x.Socket).Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect));
+                Assert.That(x.Session.Connected, Is.True);
+                Assert.That(replacing.Connected, Is.True);
+                Assert.That(server.Peers, Has.Member(replacing));
+                Assert.That(ended, Is.Empty);
+            }
+        }
+
         [Test]
         public void ASessionEndedByACallerAndThePollingThreadTogetherSaysGoodbyeOnce()
         {
