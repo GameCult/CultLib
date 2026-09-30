@@ -53,6 +53,10 @@ struct SourceState {
     documents: Vec<CultNetRawDocumentRecord>,
     failures_remaining: usize,
     calls: usize,
+    /// Serves records without source provenance, and says so to admission.
+    strips_provenance: bool,
+    /// Refuses to say what it would serve.
+    served_record_fails: bool,
 }
 
 #[derive(Clone, Default)]
@@ -70,8 +74,26 @@ impl Source {
         Self(Arc::new(Mutex::new(SourceState {
             documents,
             failures_remaining: 1,
-            calls: 0,
+            ..Default::default()
         })))
+    }
+
+    fn stripping() -> Self {
+        Self(Arc::new(Mutex::new(SourceState {
+            strips_provenance: true,
+            ..Default::default()
+        })))
+    }
+}
+
+/// `document` without the source provenance a peer reports about itself.
+fn stripped(document: &CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
+    CultNetRawDocumentRecord {
+        source_runtime_id: None,
+        source_agent_id: None,
+        source_role: None,
+        tags: None,
+        ..document.clone()
     }
 }
 
@@ -86,7 +108,27 @@ impl CultMeshRudpSnapshotSource for Source {
             state.failures_remaining -= 1;
             anyhow::bail!("injected source failure");
         }
-        Ok(state.documents.clone())
+        let documents = state.documents.clone();
+        Ok(if state.strips_provenance {
+            documents.iter().map(stripped).collect()
+        } else {
+            documents
+        })
+    }
+
+    fn served_record(
+        &mut self,
+        document: &CultNetRawDocumentRecord,
+    ) -> Result<CultNetRawDocumentRecord> {
+        let state = self.0.lock().unwrap();
+        if state.served_record_fails {
+            anyhow::bail!("injected served-record failure");
+        }
+        Ok(if state.strips_provenance {
+            stripped(document)
+        } else {
+            document.clone()
+        })
     }
 }
 
@@ -734,7 +776,8 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
 
 /// A put is admitted only if some snapshot request could return it. One byte
 /// over the served bound is refused before the sink sees it; exactly at the
-/// bound is admitted, and a snapshot then serves it at exactly that size.
+/// bound is admitted, and a snapshot then serves it at exactly that size. The
+/// source keeps the default `served_record`, so the record is sized as received.
 #[test]
 fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served() -> Result<()> {
     let at_bound = document("fit", vec![7; 100]);
@@ -851,6 +894,122 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
             documents: vec![at_bound],
         }
     );
+    Ok(())
+}
+
+/// A source that serves records without provenance says so through
+/// `served_record`, and admission sizes that: a put over the bound only in its
+/// received form is admitted and served at exactly the bound.
+#[test]
+fn a_put_is_sized_as_its_source_would_serve_it() -> Result<()> {
+    let provenance = |mut document: CultNetRawDocumentRecord| {
+        document.source_agent_id = Some("provenance-agent-that-is-not-served".into());
+        document.source_role = Some("provenance-role".into());
+        document.tags = Some(vec!["provenance".into(), "tags".into()]);
+        document
+    };
+    let at_bound = provenance(document("fit", vec![7; 100]));
+    let over_bound = provenance(document("fit", vec![7; 101]));
+    let limit = served_alone_bytes(&stripped(&at_bound))?;
+    assert_eq!(
+        served_alone_bytes(&stripped(&over_bound))?,
+        limit + 1,
+        "fixture: the two documents must straddle the bound by one byte as served"
+    );
+    assert!(
+        served_alone_bytes(&at_bound)? > limit + 1,
+        "fixture: the at-bound put is over the bound as received"
+    );
+    let options = CultMeshRudpDocumentServerOptions {
+        max_snapshot_response_bytes: limit,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let source = Source::stripping();
+    let mut server = server(options, Clock::new(64_000), sink.clone(), source.clone())?;
+    let target = server.local_addr()?;
+
+    let mut refused = client(target, 151)?;
+    connect(&mut server, &mut [&mut refused])?;
+    send(
+        &mut refused,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-over".into(),
+            document: over_bound,
+        },
+    )?;
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut refused, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::DocumentUnservable {
+            response_bytes: limit + 1,
+            max_snapshot_response_bytes: limit,
+            fragment_count: 1,
+            max_fragment_count: 1024,
+        })
+    );
+
+    let mut writer = client(target, 152)?;
+    connect(&mut server, &mut [&mut writer])?;
+    send(
+        &mut writer,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-at".into(),
+            document: at_bound.clone(),
+        },
+    )?;
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut writer, &sink, 1)?,
+        None
+    );
+    assert_eq!(
+        sink.0.lock().unwrap().receipts[0].document,
+        at_bound,
+        "the sink receives the record as it was sent"
+    );
+    source.0.lock().unwrap().documents = vec![at_bound.clone()];
+    send(
+        &mut writer,
+        &CultNetMessage::SnapshotRequest {
+            message_id: "r".into(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    let served = serve_until_frame(&mut server, &mut writer)?;
+    assert_eq!(served.len(), limit);
+    assert_eq!(
+        decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
+        CultNetMessage::SnapshotResponseRaw {
+            message_id: "r".into(),
+            documents: vec![stripped(&at_bound)],
+        }
+    );
+    Ok(())
+}
+
+/// A source that cannot say what it would serve refuses the put.
+#[test]
+fn a_put_whose_served_record_the_source_cannot_give_is_refused() -> Result<()> {
+    let sink = Sink::default();
+    let source = Source::default();
+    source.0.lock().unwrap().served_record_fails = true;
+    let mut server = server(Default::default(), Clock::new(65_000), sink.clone(), source)?;
+    let mut refused = client(server.local_addr()?, 161)?;
+    connect(&mut server, &mut [&mut refused])?;
+    send(
+        &mut refused,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put".into(),
+            document: document("unsized", vec![1, 2, 3]),
+        },
+    )?;
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut refused, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::SnapshotSourceFailed(
+            "injected served-record failure".into()
+        ))
+    );
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
     Ok(())
 }
 

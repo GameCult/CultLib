@@ -75,6 +75,20 @@ pub trait CultMeshRudpSnapshotSource {
         &mut self,
         query: &CultMeshRudpSnapshotQuery,
     ) -> Result<Vec<CultNetRawDocumentRecord>>;
+
+    /// The record this source would serve for a received put's `document`.
+    ///
+    /// The server admits a put only if a snapshot response carrying this record
+    /// alone fits its limits, so a source that serves a different shape than it
+    /// receives (dropping provenance, or adding its own) overrides this to keep
+    /// admission exact. The default serves the record as received. An error
+    /// refuses the put as `SnapshotSourceFailed`.
+    fn served_record(
+        &mut self,
+        document: &CultNetRawDocumentRecord,
+    ) -> Result<CultNetRawDocumentRecord> {
+        Ok(document.clone())
+    }
 }
 
 impl<F> CultMeshRudpSnapshotSource for F
@@ -192,7 +206,8 @@ pub enum CultMeshRudpRejectionReason {
     /// The caller's sink refused the document. Carries the sink's error text.
     SinkRefused(String),
     /// The document could never be served: a snapshot response carrying it
-    /// alone, as received and under the shortest message id CultNet allows, would
+    /// alone, as the snapshot source would serve it (`served_record`) and under
+    /// the shortest message id CultNet allows, would
     /// exceed `max_snapshot_response_bytes`, or would take more than
     /// `max_fragment_count` fragments of `max_fragment_bytes`: the lesser of
     /// 65535 and `max_pending_reliable_packets_per_session`. It was not offered
@@ -567,14 +582,21 @@ where
                     }))
                 };
                 // Admit only what some snapshot request can return: the smallest
-                // response that could carry this document is the document alone, as
-                // received, under the shortest message id CultNet encodes, sized by the
-                // snapshot path's encoder and fragmented as the snapshot path sends it.
-                // The snapshot source owns the served record's shape, so the record
-                // as received is the server's measure of it.
+                // response that could carry this document is the record the snapshot
+                // source would serve for it, alone, under the shortest message id
+                // CultNet encodes, sized by the snapshot path's encoder and fragmented
+                // as the snapshot path sends it.
+                let served = match self.snapshot_source.served_record(&document) {
+                    Ok(served) => served,
+                    Err(error) => {
+                        return reject(CultMeshRudpRejectionReason::SnapshotSourceFailed(
+                            format!("{error:#}"),
+                        ));
+                    }
+                };
                 let alone = CultNetMessage::SnapshotResponseRaw {
                     message_id: SHORTEST_MESSAGE_ID.into(),
-                    documents: vec![document],
+                    documents: vec![served],
                 };
                 let response_bytes = match encode_snapshot_response(&alone) {
                     Ok(payload) => payload.len(),
@@ -594,15 +616,12 @@ where
                         max_fragment_count,
                     });
                 }
-                let CultNetMessage::SnapshotResponseRaw { mut documents, .. } = alone else {
-                    unreachable!("constructed as a snapshot response above");
-                };
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
                     message_id: message_id.clone(),
                     transport_sequence,
                     received_at_unix_millis: now_unix,
-                    document: documents.remove(0),
+                    document,
                 };
                 if let Err(error) = self.sink.accept_raw_document(receipt) {
                     return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
