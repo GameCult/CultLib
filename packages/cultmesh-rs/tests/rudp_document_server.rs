@@ -257,13 +257,17 @@ fn serve_until_frame(
     anyhow::bail!("the client received no frame")
 }
 
-/// Polls the server until it returns a rejection or the sink holds `receipts`.
+/// Polls the server, and the client so its sends progress, until the server
+/// returns a rejection or the sink holds `receipts`.
 fn poll_until_rejected_or_stored(
     server: &mut Server,
+    client: &mut CultNetRudpSocketTransportConnection,
     sink: &Sink,
     receipts: usize,
 ) -> Result<Option<CultMeshRudpRejectionReason>> {
     for _ in 0..5_000 {
+        client.receive_once()?;
+        client.poll_resends()?;
         match server.poll_once()? {
             CultMeshRudpPollOutcome::ApplicationRejected(rejection) => {
                 return Ok(Some(rejection.reason));
@@ -885,7 +889,7 @@ fn a_put_whose_response_would_overflow_the_reliable_queue_is_refused() -> Result
                 document: document_served_at("queue", bytes)?,
             },
         )?;
-        let reason = poll_until_rejected_or_stored(&mut server, &sink, 1)?;
+        let reason = poll_until_rejected_or_stored(&mut server, &mut refused, &sink, 1)?;
         assert_eq!(reason, unservable(bytes, fragments));
         let sentence = reason.unwrap().to_string();
         assert!(
@@ -906,7 +910,10 @@ fn a_put_whose_response_would_overflow_the_reliable_queue_is_refused() -> Result
             document: at_bound.clone(),
         },
     )?;
-    assert_eq!(poll_until_rejected_or_stored(&mut server, &sink, 1)?, None);
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut writer, &sink, 1)?,
+        None
+    );
     source.0.lock().unwrap().documents = vec![at_bound.clone()];
     send(
         &mut writer,
@@ -952,7 +959,7 @@ fn a_put_whose_response_needs_more_than_65535_fragments_is_refused() -> Result<(
         },
     )?;
     assert_eq!(
-        poll_until_rejected_or_stored(&mut server, &sink, 1)?,
+        poll_until_rejected_or_stored(&mut server, &mut refused, &sink, 1)?,
         Some(CultMeshRudpRejectionReason::DocumentUnservable {
             response_bytes: 65_536,
             max_snapshot_response_bytes: 70_000,
@@ -970,7 +977,10 @@ fn a_put_whose_response_needs_more_than_65535_fragments_is_refused() -> Result<(
             document: document_served_at("wide", 65_535)?,
         },
     )?;
-    assert_eq!(poll_until_rejected_or_stored(&mut server, &sink, 1)?, None);
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &mut writer, &sink, 1)?,
+        None
+    );
     Ok(())
 }
 
