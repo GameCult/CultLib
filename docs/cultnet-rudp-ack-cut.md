@@ -1599,7 +1599,16 @@ profiles.
   - Also recorded: `packages/cultmesh-kotlin/build.ps1` is Windows-only, so Kotlin interop runs off Windows only
     through an image with wrappers.
   - P2 (the expiry hole) stays with Cut F.
-- **Cut D batch 2** is in Soul (pass 2).
+- **Cut D batch 2, Soul pass 2: fix first.**
+  - cultnet-ts emits transient send failures as `"error"`, which crashes processes with no listener. Section 10's
+    claim that "Node reports send failures on the socket's error event" is false on Node 24 without a callback:
+    they are dropped silently.
+  - C# stale peer objects write into the replacing session.
+  - cultmesh-py dies on a non-ValueError per-peer failure.
+  - Six guards are unpinned.
+  - Batch 3 is in Hands.
+  - **K1 gains:** Kotlin's idle resend loop (`CultMesh.kt:4033-4036`) is one `try`, so one peer's permanent failure
+    stops resends for every later peer. That is in addition to a refused packet not ending that peer's session.
 - **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
   while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
   limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.
