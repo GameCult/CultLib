@@ -1204,6 +1204,36 @@ class CultNetTests(unittest.TestCase):
             peer_socket.close()
             server.close()
 
+    def test_cultnet_rudp_server_mode_admits_a_pinned_client_that_restarts_on_the_same_address(self) -> None:
+        server, _, peer_socket, _, to_server, drain_peer = self._server_mode_pair(0x1020305C)
+        connection_id = 0x1020305C
+        try:
+            first = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(first.create_connect(0, b"join"))
+            server.receive_once()
+            accept = [p for p in drain_peer() if p.packet_type == CultNetRudpPacketType.ACCEPT][0]
+            first.receive(accept, 0)
+            to_server(first.create_ack_for_received(accept.sequence))
+            server.receive_once()
+            drain_peer()
+
+            # The process restarted on the same address with the same pinned sequence.
+            restarted = CultNetRudpSession(CultNetRudpSessionOptions(connection_id=connection_id, initial_sequence=1))
+            to_server(restarted.create_connect(0, b"join"))
+            server.receive_once()
+            for packet in drain_peer():
+                restarted.receive(packet, 1)
+            self.assertFalse(restarted.connected)
+
+            to_server(restarted.due_resends(3_000)[0])
+            server.receive_once()
+            for packet in drain_peer():
+                restarted.receive(packet, 3_001)
+            self.assertTrue(restarted.connected, "the restarted pinned client was never admitted")
+        finally:
+            peer_socket.close()
+            server.close()
+
     def test_cultnet_rudp_server_mode_admits_a_connect_from_a_new_endpoint(self) -> None:
         server, server_socket, peer_socket, peer, to_server, drain_peer = self._server_mode_pair(0x10203059)
         other_socket = bind_udp_socket()

@@ -300,16 +300,12 @@ class CultNetRudpReceiveResult:
 _RUDP_CONNECT_ATTEMPT_MS = 3_000
 
 
-def _draw_sequence(floor: int) -> int:
-    """A sequence drawn from a secure source in [floor, 2^31). The Connect's
+def _draw_sequence() -> int:
+    """A sequence drawn from a secure source in [1, 2^31). The Connect's
     sequence is what tells a peer whether a Connect repeats one it already
     accepted or starts a new session, so two sessions must not share one by
-    default. A floor above the range draws nothing new: the caller keeps its own
-    sequence."""
-    low = max(1, floor)
-    if low >= 2**31:
-        return low
-    return low + secrets.randbelow(2**31 - low)
+    default."""
+    return 1 + secrets.randbelow(2**31 - 1)
 
 
 def _at_or_before(sequence: int, mark: int, window: int) -> bool:
@@ -450,7 +446,7 @@ class CultNetRudpSession:
             raise ValueError("RUDP max_pending_reliable_packets must be greater than zero")
         self.max_pending_reliable_packets = options.max_pending_reliable_packets
         self._next_sequence = _uint32(
-            _draw_sequence(1) if options.initial_sequence is None else options.initial_sequence,
+            _draw_sequence() if options.initial_sequence is None else options.initial_sequence,
             "initial_sequence",
         )
         if self._next_sequence == 0xFFFFFFFF:
@@ -474,6 +470,9 @@ class CultNetRudpSession:
         # When the unanswered Connect first went out; `due_resends` abandons it
         # for a fresh attempt once _RUDP_CONNECT_ATTEMPT_MS has passed.
         self._connect_started_at_ms = 0
+        # The payload of the Connect this side sent, kept so a fresh attempt can
+        # always be built whatever became of the pending packet.
+        self._connect_payload = b""
         self._last_received_at_ms: int | None = None
         self._highest_received_sequence: int | None = None
         self._received_sequences: set[int] = set()
@@ -574,6 +573,7 @@ class CultNetRudpSession:
         self._connect_sequence = packet.sequence
         self._awaiting_accept = True
         self._connect_started_at_ms = now_ms
+        self._connect_payload = packet.payload
         self._track_reliable(packet, now_ms)
         return packet
 
@@ -725,7 +725,11 @@ class CultNetRudpSession:
         )
         if packet.packet_type == CultNetRudpPacketType.ACCEPT and not honours_accept:
             return CultNetRudpReceiveResult()
-        self._apply_acknowledgements(packet)
+        # While this side's Connect awaits its Accept, only the Accept it
+        # honours retires it: an Ack that names the Connect (a server's reply to
+        # a repeat or a stale copy) says the server did not start a session.
+        if honours_accept or not self._awaiting_accept:
+            self._apply_acknowledgements(packet)
         ready_to_send = self._promote_queued_reliable(now_ms)
         self._last_received_at_ms = now_ms
 
@@ -854,18 +858,21 @@ class CultNetRudpSession:
 
     def _abandon_unanswered_connect(self, now_ms: int) -> CultNetRudpPacket | None:
         """A Connect unanswered for _RUDP_CONNECT_ATTEMPT_MS is replaced, not
-        retransmitted further, by a Connect with a newly drawn sequence and the
-        same payload. Nothing was ever sent in an unanswered generation, so no
-        sequence issued so far is owed; the draw stays above them, so a frame the
-        peer still remembers from an earlier generation of this session stays at
-        or before the new Connect."""
+        retransmitted further, by a Connect with the same payload and the
+        abandoned sequence plus the receive window less one. Nothing was ever
+        sent in an unanswered generation, so no sequence issued so far is owed.
+        The jump keeps a late copy of the abandoned Connect inside the new one's
+        stale window, so a server that took the new Connect answers the copy
+        with an Ack instead of restarting; and it leaves the stale window of
+        whatever generation the server holds, unless that generation sits
+        exactly at the jump, and then the next attempt leaves it. The first
+        Connect of a session is the only one drawn at random."""
         if not self._awaiting_accept or now_ms - self._connect_started_at_ms < _RUDP_CONNECT_ATTEMPT_MS:
             return None
-        pending = self._pending_reliable.get(self._connect_sequence) if self._connect_sequence is not None else None
-        if pending is None:
+        if self._connect_sequence is None:
             return None
-        self._next_sequence = _draw_sequence(self._next_sequence)
-        return self.create_connect(now_ms, pending.packet.payload)
+        self._next_sequence = min(self._connect_sequence + self.RECEIVED_SEQUENCE_WINDOW - 1, 0xFFFFFFFE)
+        return self.create_connect(now_ms, self._connect_payload)
 
     def _create_packet(
         self,

@@ -351,5 +351,77 @@ class CultNetRudpConnectGenerationTests(unittest.TestCase):
         self.assertTrue(server.check_timeout(100_000, 1_000))
 
 
+    # Ack Cut 1d, batch 2: the connect-attempt timeout.
+
+    def test_an_ack_naming_the_pending_connect_does_not_retire_it(self) -> None:
+        server, old = session(500), session(1)
+        old_accept = server.accept_connect(old.create_connect(0), 0)
+        old.receive(old_accept, 0)
+        server.receive(old.create_ack_for_received(old_accept.sequence), 0)
+
+        restarted = session(1)
+        first = restarted.create_connect(0, b"join")
+        reply = server.accept_connect(first, 1)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        self.assertTrue(self.names_sequence(reply, first.sequence), "the Ack must name the pending Connect for this test to bite")
+        restarted.receive(reply, 1)
+        self.assertFalse(restarted.connected)
+        self.assertEqual(restarted.pending_reliable_sequences, (first.sequence,), "an Ack retired the Connect")
+
+        fresh = restarted.due_resends(3_000)
+        self.assertEqual(len(fresh), 1, "the client waits for ever with nothing to resend")
+        self.assertEqual(fresh[0].payload, b"join")
+        accept = server.accept_connect(fresh[0], 3_000)
+        self.assertEqual(accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        restarted.receive(accept, 3_000)
+        self.assertTrue(restarted.connected)
+
+    def test_a_late_copy_of_an_abandoned_connect_is_stale_once_its_replacement_is_accepted(self) -> None:
+        server, client = session(500), session(10)
+        abandoned = client.create_connect(0)
+        fresh = client.due_resends(3_000)
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(fresh[0].sequence, abandoned.sequence + 4_095)
+        accept = server.accept_connect(fresh[0], 3_001)
+        client.receive(accept, 3_002)
+        server.receive(client.create_ack_for_received(accept.sequence), 3_002)
+        self.assertTrue(client.connected)
+        a = send(client, "a")
+        self.assertEqual(names(server.receive(a, 3_003)), ["a"])
+        client.receive(server.create_ack_for_received(a.sequence), 3_003)
+
+        self.assertTrue(server.connect_repeats(abandoned), "the late copy would restart the server")
+        reply = server.accept_connect(abandoned, 3_004)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        client.receive(reply, 3_005)
+        self.assertTrue(client.connected)
+        self.assertEqual(names(server.receive(send(client, "b"), 3_006)), ["b"])
+
+    def test_a_server_sitting_at_the_jump_is_left_by_the_next_attempt(self) -> None:
+        server, old = session(500), session(5_095)
+        old_accept = server.accept_connect(old.create_connect(0), 0)
+        old.receive(old_accept, 0)
+        server.receive(old.create_ack_for_received(old_accept.sequence), 0)
+
+        restarted = session(1_000)
+        first = restarted.create_connect(0, b"join")
+        restarted.receive(server.accept_connect(first, 1), 1)
+        self.assertFalse(restarted.connected)
+
+        second = restarted.due_resends(3_000)[0]
+        self.assertEqual(second.sequence, 5_095, "the jump lands on the server's generation")
+        reply = server.accept_connect(second, 3_001)
+        self.assertEqual(reply.packet_type, CultNetRudpPacketType.ACK)
+        restarted.receive(reply, 3_001)
+        self.assertFalse(restarted.connected)
+
+        third = restarted.due_resends(6_000)[0]
+        self.assertEqual(third.sequence, 5_095 + 4_095)
+        accept = server.accept_connect(third, 6_001)
+        self.assertEqual(accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        restarted.receive(accept, 6_001)
+        self.assertTrue(restarted.connected)
+
+
 if __name__ == "__main__":
     unittest.main()
