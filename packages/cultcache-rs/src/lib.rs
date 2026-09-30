@@ -361,6 +361,34 @@ fn store_header(bytes: &[u8]) -> Result<Option<String>> {
     Ok(header.0)
 }
 
+/// A store file this runtime cannot read: not exactly one complete store (truncated, bytes after it, a missing or extra
+/// slot), a header or record it does not know, or a body it cannot decode. Open, every rewrite and the read-only snapshot
+/// refuse a file with this error, and a refused file is left as it was. The cause is the error's source. Test for it with
+/// `error.downcast_ref::<StoreUnreadableError>()`.
+#[derive(Debug)]
+pub struct StoreUnreadableError {
+    path: PathBuf,
+    source: anyhow::Error,
+}
+
+impl StoreUnreadableError {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for StoreUnreadableError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "failed to decode MessagePack {}", self.path.display())
+    }
+}
+
+impl std::error::Error for StoreUnreadableError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.chain().next()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
     pub soft: bool,
@@ -732,22 +760,25 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let bytes = fs::read(&self.path)
-            .with_context(|| format!("failed to read {}", self.path.display()))?;
+        Ok(self.read_store_unlocked()?.1)
+    }
+
+    /// The one reader of the store file: open, every rewrite and the read-only snapshot ask it, so they agree on which
+    /// files are stores. A file that is gone or zero bytes is an empty v1 store. Anything else must decode completely, as
+    /// exactly one store or one legacy envelope array; a file this runtime cannot read is refused with
+    /// [`StoreUnreadableError`], so a rewrite never overwrites what it cannot see.
+    fn read_store_unlocked(&self) -> Result<(&'static str, Vec<CultCacheEnvelope>)> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((STORE_FORMAT_V1, Vec::new())),
+            Err(error) => return Err(error).with_context(|| format!("failed to read {}", self.path.display())),
+        };
         if bytes.is_empty() {
-            return Ok(Vec::new());
+            return Ok((STORE_FORMAT_V1, Vec::new()));
         }
-        (|| match store_header(&bytes)? {
-            Some(header) => {
-                readable_store_format(&header)?;
-                decode_store_snapshot(&bytes)
-            }
-            None => decode_legacy_envelopes(&bytes),
-        })()
-        .map_err(|error| anyhow!("failed to decode MessagePack {}: {error:#}", self.path.display()))
+        decode_store_file(&bytes).map_err(|source| {
+            anyhow::Error::new(StoreUnreadableError { path: self.path.clone(), source })
+        })
     }
 
     /// Reads one filesystem snapshot without creating or opening the sibling
@@ -769,24 +800,10 @@ impl SingleFileMessagePackBackingStore {
         }
         remove_abandoned_staging_files(&self.path)?;
         // The header a rewrite writes is the one the file on disk carries: a file marked for element ids stays marked (the
-        // payloads this store passes through may hold ids), one that is gone, empty or legacy is written v1, and a header
-        // this runtime cannot read refuses the rewrite, so a store that holds variants is never overwritten by a runtime that
-        // would drop them.
-        let format = match fs::read(&self.path) {
-            Ok(bytes) if bytes.is_empty() => STORE_FORMAT_V1,
-            Ok(bytes) => match store_header(&bytes)
-                .map_err(|error| anyhow!("{}: {error:#}; the store is not rewritten", self.path.display()))?
-            {
-                Some(header) => readable_store_format(&header)?,
-                None => {
-                    decode_legacy_envelopes(&bytes)
-                        .map_err(|error| anyhow!("{}: {error:#}; the store is not rewritten", self.path.display()))?;
-                    STORE_FORMAT_V1
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => STORE_FORMAT_V1,
-            Err(error) => return Err(error).with_context(|| format!("failed to read {}", self.path.display())),
-        };
+        // payloads this store passes through may hold ids), one that is gone, empty or legacy is written v1. The file is read
+        // by the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
+        // and never overwritten.
+        let (format, _) = self.read_store_unlocked()?;
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries, format)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
@@ -2630,6 +2647,15 @@ fn readable_store_format(header: &str) -> Result<&'static str> {
         _ => Err(anyhow!(
             "CultCache store format {header:?} is not readable; this runtime reads \"cultcache.store.v1\" and \"cultcache.store.v3\" only. The store needs a runtime that resolves document variants."
         )),
+    }
+}
+
+/// One store file's bytes, decoded whole: the header it carries (the one a rewrite keeps) and its envelopes. An array whose
+/// first slot is not a store header is the legacy envelope array.
+fn decode_store_file(bytes: &[u8]) -> Result<(&'static str, Vec<CultCacheEnvelope>)> {
+    match store_header(bytes)? {
+        Some(header) => Ok((readable_store_format(&header)?, decode_store_snapshot(bytes)?)),
+        None => Ok((STORE_FORMAT_V1, decode_legacy_envelopes(bytes)?)),
     }
 }
 
@@ -4828,16 +4854,21 @@ mod tests {
 
     // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by open,
     // push_all and push alike. The bytes and every runtime's verdict are tests/vectors/document-variants-c2a/readability.
+    // A refusal is a StoreUnreadableError, and a replaced file carries the header its old content decides.
     #[test]
     fn a_file_is_replaced_exactly_when_it_reads() -> Result<()> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c2a/readability");
         let manifest = std::fs::read_to_string(root.join("manifest.txt"))?;
-        let mut rows = 0;
+        let mut listed = Vec::new();
         for line in manifest.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
             let cells: Vec<&str> = line.split_whitespace().collect();
             let (vector, reads) = (cells[0], cells[2] == "reads");
+            if !vector.starts_with("..") {
+                listed.push(vector.to_string());
+            }
             let bytes = std::fs::read(root.join(vector))?;
-            rows += 1;
+            // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
+            let header = if vector.ends_with("v3-base.msgpack") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
             for operation in ["open", "push_all", "push"] {
                 let temp = tempfile::tempdir()?;
                 let path = temp.path().join("store.msgpack");
@@ -4851,14 +4882,51 @@ mod tests {
                 let what = format!("{vector} {operation}");
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
                 if !reads {
+                    let error = outcome.unwrap_err();
+                    assert!(error.downcast_ref::<StoreUnreadableError>().is_some(), "{what}: {error:#}");
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
                 } else if operation != "open" {
-                    assert!(store_header(&std::fs::read(&path)?)?.is_some(), "{what} left a file that is not a store");
+                    assert_eq!(store_header(&std::fs::read(&path)?)?.as_deref(), Some(header), "{what}");
                     assert!(store.pull_all()?.iter().any(|entry| entry.key == "x"), "{what}");
                 }
             }
         }
-        assert_eq!(rows, 15);
+        // Every vector in the folder has a manifest row.
+        let mut files: Vec<String> = std::fs::read_dir(&root)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".bin"))
+            .collect();
+        files.sort();
+        listed.sort();
+        assert_eq!(listed, files);
+        Ok(())
+    }
+
+    // A store cut short is refused whatever its version, and left as it is.
+    #[test]
+    fn a_truncated_v1_or_v2_store_is_refused_on_open_and_rewrite() -> Result<()> {
+        for vector in [
+            "document-variants-c0/v1-base.msgpack",
+            "document-variants-c0/variant-v2.msgpack",
+            "document-variants-c1/variant-store.msgpack",
+        ] {
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors").join(vector);
+            let whole = std::fs::read(source)?;
+            let cut = &whole[..whole.len() - 1];
+            for operation in ["open", "push_all"] {
+                let temp = tempfile::tempdir()?;
+                let path = temp.path().join("store.msgpack");
+                std::fs::write(&path, cut)?;
+                let mut store = SingleFileMessagePackBackingStore::new(&path);
+                let outcome = match operation {
+                    "open" => store.pull_all().map(|_| ()),
+                    _ => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
+                };
+                let error = outcome.expect_err(&format!("{vector} {operation}"));
+                assert!(error.downcast_ref::<StoreUnreadableError>().is_some(), "{vector} {operation}: {error:#}");
+                assert_eq!(std::fs::read(&path)?, cut, "{vector} {operation} rewrote a truncated store");
+            }
+        }
         Ok(())
     }
 
