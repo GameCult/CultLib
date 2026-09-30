@@ -938,6 +938,32 @@ public sealed class CultMeshStreamingTests
         await act.Should().ThrowAsync<NotSupportedException>();
     }
 
+    // A database serves only what its shards own, including when a handle reads a same-schema instance of another CLR type
+    // out of the cache behind it.
+    [TestCase("tests.mesh_note.v1", true)]
+    [TestCase("tests.unrelated.v1", false)]
+    public async Task DocumentHandle_ReadsASameSchemaInstanceOnlyWhenAShardOwnsIt(string ownedSchemaId, bool served)
+    {
+        var cache = new CultCache();
+        var key = new CultRecordKey("note:one");
+        await cache.UpsertAsync(new MeshNoteDocument { Schema = "tests.mesh_note.v1", Text = "cached" }, new CultRecordHandle<MeshNoteDocument>(key));
+        var database = new CultNetDatabase(cache, new CultNetDatabaseOptions
+        {
+            RuntimeId = "reader",
+            Shards = new[] { new CultNetShardDescriptor("notes", "reader", epoch: 1, isPrimary: true, schemaIds: new[] { ownedSchemaId }) }
+        });
+        var handle = CultMesh.Document<MeshNoteAliasDocument>(database, key, CultMesh.Verse("starbridge", "reader"));
+
+        if (served)
+        {
+            (await handle.LatestAsync()).Text.Should().Be("cached");
+        }
+        else
+        {
+            await FluentActions.Awaiting(() => handle.LatestAsync()).Should().ThrowAsync<KeyNotFoundException>();
+        }
+    }
+
     [Test]
     public async Task DocumentHandle_SubmitsPredictionsThroughCultNetDatabase()
     {

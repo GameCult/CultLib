@@ -3379,7 +3379,8 @@ namespace GameCult.Mesh
             if (document != null)
                 return document;
 
-            var untyped = database.Cache.Get(key);
+            // Through the database, which serves only what its shards own; the cache behind it may hold more.
+            var untyped = await database.GetAsync<object>(key).ConfigureAwait(false);
             if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
                 return ConvertUntypedDocument<TDocument>(untyped);
 

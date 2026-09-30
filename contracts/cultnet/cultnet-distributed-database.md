@@ -104,6 +104,16 @@ Not implemented yet:
 - cross-runtime rollback/resimulation helpers for simulation frames
 - declared CRDT merge policies
 
+## Error Codes
+
+`cultnet.error.v0` carries an optional machine-readable `code`. The set of codes is a closed enum
+(`cultnet.error.schema.json`): Rust and TypeScript refuse a message whose code they do not know, they do
+not guess. Adding a code is therefore a coordinated change across every runtime, made together: the schema (both
+copies), the C# `CultNetErrorMessage` factory, the Rust `CultNetErrorCode`, and a captured-bytes case in
+`packages/cultnet-rs/tests/error_message.rs` for it. TypeScript reads the schema. The current codes are
+`selection_invalid`, `cursor_stale`, `cursor_invalid`, `reference_outside_target`, `variant_unsupported` and
+`unowned_schema` (a write, or a remote put or delete, for a schema and key no shard owns).
+
 ## Live Invariants
 
 - CultCache owns document schema, identity, local indexes, and local diffing.

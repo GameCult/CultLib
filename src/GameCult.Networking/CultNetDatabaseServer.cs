@@ -112,10 +112,13 @@ namespace GameCult.Networking
                     request);
             }
 
+            // A database serves only what its shards own.
             return _database.Documents.CreateRawSnapshotResponse(
                 _database.Cache,
                 string.IsNullOrWhiteSpace(request.MessageId) ? Guid.NewGuid().ToString("N") : request.MessageId,
-                request);
+                request,
+                options: null,
+                rowFilter: _database.Owns);
         }
 
         /// <summary>
@@ -135,6 +138,9 @@ namespace GameCult.Networking
                 // R-Q: asOf is one shard-log watermark, so a selection whose matched rows span more than
                 // one shard's log is refused rather than answered against a watermark that is not
                 // exact for all of them.
+                // A row whose schema no shard owns is not part of what this database serves: it is left out, not an error.
+                options: null,
+                rowFilter: _database.Owns,
                 shardIdOf: (schemaId, key) => _database.ResolveShard(schemaId, key).ShardId,
                 cursorKey: _database.CursorKey,
                 // S-9: once the matched rows resolve to one shard, asOf is that shard's own watermark,
@@ -312,6 +318,16 @@ namespace GameCult.Networking
                     peer.SendCultNet(CreateRoutingError(ex));
                 }
             }
+            catch (CultNetUnownedSchemaException ex)
+            {
+                _server.Logger.LogWarning($"CultNet raw put refused: {ex.Message}");
+                peer.SendCultNet(CultNetErrorMessage.ForUnownedSchema(ex));
+            }
+            catch (Exception ex) when (CommittedWithLogFailure(ex))
+            {
+                // The write committed and was published; only its shard log failed, so the peer is not told it was refused.
+                _server.Logger.LogWarning($"CultNet raw put committed but its shard log failed: {ex.Message}");
+            }
             catch (Exception ex)
             {
                 _server.Logger.LogError($"CultNet raw put failed: {ex.Message}");
@@ -331,6 +347,15 @@ namespace GameCult.Networking
                 {
                     peer.SendCultNet(CreateRoutingError(ex));
                 }
+            }
+            catch (CultNetUnownedSchemaException ex)
+            {
+                _server.Logger.LogWarning($"CultNet raw delete refused: {ex.Message}");
+                peer.SendCultNet(CultNetErrorMessage.ForUnownedSchema(ex));
+            }
+            catch (Exception ex) when (CommittedWithLogFailure(ex))
+            {
+                _server.Logger.LogWarning($"CultNet raw delete committed but its shard log failed: {ex.Message}");
             }
             catch (Exception ex)
             {
@@ -603,6 +628,12 @@ namespace GameCult.Networking
                 ? Guid.NewGuid().ToString("N")
                 : messageId;
         }
+
+        // A CultNetShardLogException means the write committed and was published (the writer hears of a failed log afterwards);
+        // the cache wraps it in an AggregateException when something else failed in the same hold.
+        private static bool CommittedWithLogFailure(Exception exception) =>
+            exception is CultNetShardLogException ||
+            exception is AggregateException aggregate && aggregate.Flatten().InnerExceptions.Any(inner => inner is CultNetShardLogException);
 
         private static CultNetErrorMessage CreateRoutingError(CultNetShardAuthorityException exception)
         {

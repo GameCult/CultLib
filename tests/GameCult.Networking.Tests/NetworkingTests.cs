@@ -1898,7 +1898,7 @@ namespace GameCult.Networking.Tests
                     Assert.That(cache.Get(batched), Is.Null);
                 }), Is.True);
 
-                Assert.That(published, Is.EqualTo(new[] { put }));
+                Assert.That(published, Is.EqualTo(new[] { put, batched }), "the batch publishes when the store commits it");
                 Assert.That(cache.Get<NetworkSchemaNote>(batched)?.Text, Is.EqualTo("batched"));
                 var reopened = new CultCache();
                 reopened.AddBackingStore(new SingleFileMessagePackBackingStore(path));
@@ -2627,7 +2627,8 @@ namespace GameCult.Networking.Tests
 
             var cache = new CultCache();
             var delivering = new ManualResetEventSlim();
-            cache.OnUpdate += (_, _) => delivering.Set();
+            // Subscribed before the database, so it runs before the database's own observer of the same change.
+            using var loadDelivering = cache.Watch<object>().Subscribe(_ => delivering.Set());
             var database = new CultNetDatabase(cache);
             var server = new RudpCultNetSchemaServer(new RudpCultNetSchemaServerOptions
             {
@@ -4211,13 +4212,13 @@ namespace GameCult.Networking.Tests
                 Schema = "tests.networking_note.v1",
                 Text = "two"
             });
-            // Outside the shard's key prefix: must reach the non-shard snapshot but never the
+            // Outside the shard's key prefix (written to the cache directly: the database refuses a write no shard owns): must reach the non-shard snapshot but never the
             // shard-scoped one, so an unfiltered request still proves shard membership is enforced.
-            await database.PutAsync(new CultRecordKey("other-note:outside-shard"), new NetworkSchemaNote
+            await cache.UpsertAsync(new NetworkSchemaNote
             {
                 Schema = "tests.networking_note.v1",
                 Text = "outside"
-            });
+            }, new CultRecordHandle<NetworkSchemaNote>(new CultRecordKey("other-note:outside-shard")));
 
             var nonShard = registry.CreateRawSnapshotResponse(cache, "snapshot-nonshard-unfiltered", filter: null);
             var shardScoped = database.CreateShardSnapshotResponse(shard, "snapshot-shard-unfiltered", filter: null);
