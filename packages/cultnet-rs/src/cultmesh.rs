@@ -256,7 +256,7 @@ impl Default for CultMeshRudpSocketOptions {
             bind_host: "127.0.0.1".to_string(),
             bind_port: 0,
             read_timeout: Some(Duration::from_millis(20)),
-            initial_sequence: 1,
+            initial_sequence: crate::rudp::random_initial_sequence(),
             resend_delay_ms: 250,
             max_payload_bytes: None,
             max_fragment_bytes: None,

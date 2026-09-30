@@ -104,11 +104,32 @@ impl Default for CultNetRudpSessionOptions {
     fn default() -> Self {
         Self {
             connection_id: 0,
-            initial_sequence: 1,
+            initial_sequence: random_initial_sequence(),
             resend_delay_ms: 250,
             max_pending_reliable_packets: None,
         }
     }
+}
+
+/// A fresh default initial sequence, drawn from a secure source in [1, 2^31).
+/// The Connect's sequence is what tells a peer whether a Connect repeats one it
+/// already accepted or starts a new session, so two sessions must not share
+/// one by default. At least 2^31 sequences remain before the space is
+/// exhausted.
+pub fn random_initial_sequence() -> u32 {
+    rand::random_range(1..(1_u32 << 31))
+}
+
+/// Whether the packet's ack field, or its mask, names `sequence`.
+fn packet_acknowledges(packet: &CultNetRudpPacket, sequence: u32) -> bool {
+    if packet.ack == sequence {
+        return true;
+    }
+    (0..32).any(|bit| {
+        packet.ack_mask & (1_u32 << bit) != 0
+            && packet.ack > bit
+            && packet.ack - bit - 1 == sequence
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -130,6 +151,7 @@ pub struct CultNetRudpSendOptions {
 /// a timeout, a refused packet) invalidates the receipts it issued for good.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CultNetRudpReliableSendReceipt {
+    session_id: u64,
     generation: u64,
     sequences: Vec<u32>,
 }
@@ -168,12 +190,22 @@ struct FragmentBuffer {
 }
 
 pub struct CultNetRudpSession {
+    /// Random per session. A receipt carries its session's id, so one asked of
+    /// another session reads `Invalidated` instead of borrowing that session's
+    /// generation numbers.
+    session_id: u64,
     /// Advances every time a generation ends. Everything issued in a generation
     /// (writes, receipts, flushes) belongs to it and dies with it.
     generation: u64,
     /// True from the end of a generation until the next Connect or Accept begins
     /// one. A flush started in that interval has no live generation to wait on.
     ended: bool,
+    /// The sequence of the Connect that started the current generation: sent
+    /// by this side, or accepted from the peer. A Connect repeats exactly when
+    /// the session is connected and the Connect carries this sequence.
+    connect_sequence: Option<u32>,
+    /// A Connect this side sent is unanswered. Only then is an Accept honoured.
+    awaiting_accept: bool,
     connection_id: u32,
     resend_delay_ms: u64,
     max_pending_reliable_packets: Option<usize>,
@@ -191,9 +223,9 @@ pub struct CultNetRudpSession {
     queued_reliable: VecDeque<(CultNetRudpPacket, Option<u64>)>,
     reliable_packets_expired: u64,
     /// Every reliable sequence up to and including this one has been received
-    /// since the peer state was last reset. The first reliable sequence after a
-    /// reset seeds it: the peer's Connect or Accept, or, for a session that
-    /// never handshook, its first packet.
+    /// since the peer state was last reset. Only the handshake seeds it: the
+    /// peer's Connect on the accepting side, the peer's Accept on the
+    /// connecting side. Reliable data that arrives before that is refused.
     received_through: Option<u32>,
     /// Ordered frames received but not yet deliverable, keyed by first
     /// sequence. A frame is held for exactly one reason: a reliable sequence
@@ -207,8 +239,11 @@ pub struct CultNetRudpSession {
 impl CultNetRudpSession {
     pub fn new(options: CultNetRudpSessionOptions) -> Self {
         Self {
+            session_id: rand::random(),
             generation: 0,
             ended: false,
+            connect_sequence: None,
+            awaiting_accept: false,
             connection_id: options.connection_id,
             resend_delay_ms: options.resend_delay_ms,
             max_pending_reliable_packets: options.max_pending_reliable_packets,
@@ -304,6 +339,7 @@ impl CultNetRudpSession {
     fn end_session(&mut self) {
         self.connected = false;
         self.ended = true;
+        self.awaiting_accept = false;
         self.generation += 1;
         self.pending_reliable.clear();
         self.queued_reliable.clear();
@@ -313,7 +349,7 @@ impl CultNetRudpSession {
         &self,
         receipt: &CultNetRudpReliableSendReceipt,
     ) -> CultNetRudpReliableSendStatus {
-        if receipt.generation != self.generation {
+        if receipt.session_id != self.session_id || receipt.generation != self.generation {
             return CultNetRudpReliableSendStatus::Invalidated;
         }
         if receipt
@@ -337,6 +373,7 @@ impl CultNetRudpSession {
             ));
         }
         Ok(CultNetRudpReliableSendReceipt {
+            session_id: self.session_id,
             generation: self.generation,
             sequences: packets.iter().map(|packet| packet.sequence).collect(),
         })
@@ -390,6 +427,11 @@ impl CultNetRudpSession {
 
     pub fn create_connect(&mut self, now_ms: u64, payload: Vec<u8>) -> Result<CultNetRudpPacket> {
         self.ensure_reliable_capacity(1)?;
+        // A session that has had a peer starts a new generation: nothing it
+        // learned from that peer describes the one this Connect reaches.
+        if self.connect_sequence.is_some() {
+            self.reset_peer_state();
+        }
         let packet = self.create_packet(
             CultNetRudpPacketType::Connect,
             "control",
@@ -399,10 +441,28 @@ impl CultNetRudpSession {
             false,
         );
         self.ended = false;
+        self.connect_sequence = Some(packet.sequence);
+        self.awaiting_accept = true;
         self.track_reliable(packet.clone(), now_ms, None);
         Ok(packet)
     }
 
+    /// Whether `packet` is a retransmit of the Connect that started this
+    /// session's current generation: the session is connected and the Connect
+    /// carries that Connect's sequence. Servers that keep one session per peer
+    /// ask this to tell a repeat from a new session; anything else that
+    /// reaches `accept_connect` starts a new generation.
+    pub fn connect_repeats(&self, packet: &CultNetRudpPacket) -> bool {
+        packet.packet_type == CultNetRudpPacketType::Connect
+            && self.connected
+            && self.connect_sequence == Some(packet.sequence)
+    }
+
+    /// Answers a Connect. A repeat of the accepted one queues nothing, so a
+    /// Connect storm cannot grow the reliable queue: the reply is the Accept
+    /// still awaiting acknowledgement, or an Ack once it was acknowledged.
+    /// Any other Connect ends the current generation, forgets the peer and
+    /// accepts a new one.
     pub fn accept_connect(
         &mut self,
         packet: &CultNetRudpPacket,
@@ -417,9 +477,20 @@ impl CultNetRudpSession {
             ));
         }
 
+        if self.connect_repeats(packet) {
+            self.apply_acknowledgements(packet);
+            self.remember_received(packet.sequence);
+            self.last_received_at_ms = Some(now_ms);
+            return Ok(self
+                .pending_accept_for_resend(now_ms)
+                .unwrap_or_else(|| self.create_ack()));
+        }
+
         self.ensure_reliable_capacity(1)?;
-        self.remember_received(packet.sequence);
+        self.reset_peer_state();
+        self.seed_received(packet.sequence);
         self.last_received_at_ms = Some(now_ms);
+        self.connect_sequence = Some(packet.sequence);
         self.connected = true;
         self.ended = false;
         let response = self.create_packet(
@@ -432,30 +503,6 @@ impl CultNetRudpSession {
         );
         self.track_reliable(response.clone(), now_ms, None);
         Ok(response)
-    }
-
-    /// Answers a Connect from a peer this session has already accepted. The
-    /// packet's sequence is remembered and nothing is queued, so a Connect storm
-    /// cannot grow the reliable queue. The reply is the Accept still awaiting
-    /// acknowledgement, or an Ack once it was acknowledged.
-    pub fn answer_repeated_connect(
-        &mut self,
-        packet: &CultNetRudpPacket,
-        now_ms: u64,
-    ) -> Result<CultNetRudpPacket> {
-        self.require_connection(packet)?;
-        if packet.packet_type != CultNetRudpPacketType::Connect {
-            return Err(anyhow!(
-                "Expected RUDP connect packet, got {:?}",
-                packet.packet_type
-            ));
-        }
-        self.apply_acknowledgements(packet);
-        self.remember_received(packet.sequence);
-        self.last_received_at_ms = Some(now_ms);
-        Ok(self
-            .pending_accept_for_resend(now_ms)
-            .unwrap_or_else(|| self.create_ack()))
     }
 
     pub fn send(
@@ -557,13 +604,33 @@ impl CultNetRudpSession {
         now_ms: u64,
     ) -> Result<CultNetRudpReceiveResult> {
         self.require_connection(packet)?;
+        // An Accept counts only while this side's Connect is unanswered and the
+        // Accept names it. A late or duplicate one, or one from an earlier
+        // generation, must not seed the watermark or revive an ended session.
+        let honours_accept = packet.packet_type == CultNetRudpPacketType::Accept
+            && self.awaiting_accept
+            && self
+                .connect_sequence
+                .is_some_and(|connect| packet_acknowledges(packet, connect));
+        if packet.packet_type == CultNetRudpPacketType::Accept && !honours_accept {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                ready_to_send: Vec::new(),
+                reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
+                disconnected: false,
+                disconnect_reason: Vec::new(),
+            });
+        }
         self.apply_acknowledgements(packet);
         self.purge_expired_reliable(now_ms);
         let ready_to_send = self.promote_queued_reliable(now_ms);
         self.last_received_at_ms = Some(now_ms);
 
-        if packet.packet_type == CultNetRudpPacketType::Accept {
-            self.remember_received(packet.sequence);
+        if honours_accept {
+            self.awaiting_accept = false;
+            self.seed_received(packet.sequence);
             self.connected = true;
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
@@ -627,6 +694,21 @@ impl CultNetRudpSession {
         }
 
         if packet.packet_type != CultNetRudpPacketType::Data {
+            return Ok(CultNetRudpReceiveResult {
+                delivered: Vec::new(),
+                ready_to_send,
+                reply: None,
+                pong: false,
+                pong_payload: Vec::new(),
+                disconnected: false,
+                disconnect_reason: Vec::new(),
+            });
+        }
+
+        // Reliable data before the handshake has seeded the watermark has no
+        // place in the order: refuse it unremembered, so it is not acknowledged
+        // and the sender retransmits it once the handshake is done.
+        if packet.reliable && self.received_through.is_none() {
             return Ok(CultNetRudpReceiveResult {
                 delivered: Vec::new(),
                 ready_to_send,
@@ -756,9 +838,14 @@ impl CultNetRudpSession {
         }
     }
 
+    /// The acknowledgement for a reliable packet `receive` just handled. What
+    /// `receive` refused is not acknowledged by name (the ack carries only what
+    /// was received), so its sender retransmits it.
     pub fn create_ack_for_received(&mut self, sequence: u32) -> CultNetRudpPacket {
         let (ack, _) = self.ack_state();
-        if ack >= sequence && ack - sequence <= 32 {
+        if !self.was_received(sequence) {
+            self.create_ack()
+        } else if ack >= sequence && ack - sequence <= 32 {
             self.create_ack()
         } else {
             self.create_ack_for(sequence)
@@ -978,16 +1065,24 @@ impl CultNetRudpSession {
         }
     }
 
+    /// The handshake's one act on the watermark: the peer's Connect or Accept
+    /// is the first sequence of the session, whatever else it has sent.
+    fn seed_received(&mut self, sequence: u32) {
+        self.received_through = Some(sequence);
+        self.remember_received(sequence);
+    }
+
     fn remember_received(&mut self, sequence: u32) {
         self.received_sequences.insert(sequence);
-        let mut through = self.received_through.unwrap_or(sequence);
-        while let Some(next) = through.checked_add(1) {
-            if !self.received_sequences.contains(&next) {
-                break;
+        if let Some(mut through) = self.received_through {
+            while let Some(next) = through.checked_add(1) {
+                if !self.received_sequences.contains(&next) {
+                    break;
+                }
+                through = next;
             }
-            through = next;
+            self.received_through = Some(through);
         }
-        self.received_through = Some(through);
         if self
             .highest_received_sequence
             .is_none_or(|highest| sequence > highest)
@@ -1001,6 +1096,15 @@ impl CultNetRudpSession {
                 .saturating_sub(RUDP_RECEIVED_SEQUENCE_WINDOW as u32 - 1);
             self.received_sequences = self.received_sequences.split_off(&keep_from);
         }
+    }
+
+    /// True for a sequence in the window that was received, and for one below
+    /// the window, which `receive` treats as a duplicate of something received.
+    fn was_received(&self, sequence: u32) -> bool {
+        self.received_sequences.contains(&sequence)
+            || self.highest_received_sequence.is_some_and(|highest| {
+                sequence < highest && highest - sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW as u32
+            })
     }
 
     fn ack_state(&self) -> (u32, u32) {
@@ -1236,7 +1340,7 @@ impl CultNetRudpSocketTransportOptions {
             mode: CultNetRudpSocketMode::Client,
             remote_addr: Some(remote_addr),
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: random_initial_sequence(),
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1255,7 +1359,7 @@ impl CultNetRudpSocketTransportOptions {
             mode: CultNetRudpSocketMode::Server,
             remote_addr: None,
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: random_initial_sequence(),
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1303,7 +1407,7 @@ impl CultNetRudpServerHubOptions {
             runtime_id: runtime_id.into(),
             socket,
             connection_id,
-            initial_sequence: 1,
+            initial_sequence: random_initial_sequence(),
             resend_delay_ms: 250,
             transport_id: None,
             max_payload_bytes: None,
@@ -1564,9 +1668,9 @@ impl CultNetRudpServerHub {
 
         if packet.packet_type == CultNetRudpPacketType::Connect {
             if let Some(peer) = self.peers.get_mut(&remote_addr)
-                && peer.context.connect_payload == packet.payload
+                && peer.session.connect_repeats(&packet)
             {
-                let Ok(reply) = peer.session.answer_repeated_connect(&packet, now_ms()) else {
+                let Ok(reply) = peer.session.accept_connect(&packet, now_ms(), Vec::new()) else {
                     self.end_refusing_peer(remote_addr)?;
                     return Ok(true);
                 };
@@ -1907,7 +2011,11 @@ impl CultNetRudpSocketTransportConnection {
     }
 
     pub fn check_timeout(&mut self, timeout_ms: u64) -> bool {
-        self.session.check_timeout(now_ms(), timeout_ms)
+        let timed_out = self.session.check_timeout(now_ms(), timeout_ms);
+        if timed_out {
+            self.disconnect_reason = Some(SESSION_TIMED_OUT_REASON.to_vec());
+        }
+        timed_out
     }
 
     pub fn pending_reliable_packet_count(&self) -> usize {
@@ -2036,7 +2144,6 @@ impl CultNetRudpSocketTransportConnection {
         if self.mode == CultNetRudpSocketMode::Server
             && packet.packet_type == CultNetRudpPacketType::Connect
         {
-            self.session.reset_peer_state();
             self.disconnect_reason = None;
             let Ok(accept) = self.session.accept_connect(&packet, now_ms(), Vec::new()) else {
                 self.stats.packets_dropped += 1;
@@ -2205,6 +2312,7 @@ where
 /// Sent to a peer whose session refused one of its packets, and reported to
 /// the local caller as the disconnect reason.
 const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
+const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
 
 /// A session cannot admit a Connect when its sequence space starts exhausted or
 /// its reliable queue holds nothing, so neither is a usable configuration.

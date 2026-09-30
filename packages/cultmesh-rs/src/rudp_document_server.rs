@@ -3,7 +3,7 @@ use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet,
+    encode_rudp_packet, random_initial_sequence,
 };
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -410,12 +410,20 @@ where
         packet: &CultNetRudpPacket,
         now: u64,
     ) -> Result<bool> {
+        // The session decides whether a Connect repeats the one it accepted. Any
+        // other Connect from this key is a new client session: the old one ends
+        // with its budget, and the new one starts fresh.
+        if self
+            .sessions
+            .get(&key)
+            .is_some_and(|entry| !entry.session.connect_repeats(packet))
+        {
+            self.sessions.remove(&key);
+        }
         let reply = match self.sessions.get_mut(&key) {
-            // The same key is a retransmitted Connect for the existing epoch.
-            // A genuinely fresh client incarnation must choose a fresh id.
             Some(entry) => {
                 entry.last_activity_monotonic_millis = now;
-                match entry.session.answer_repeated_connect(packet, now) {
+                match entry.session.accept_connect(packet, now, Vec::new()) {
                     Ok(reply) => reply,
                     Err(_) => {
                         self.end_refused_session(key)?;
@@ -429,7 +437,7 @@ where
                 }
                 let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
                     connection_id: key.connection_id,
-                    initial_sequence: 1,
+                    initial_sequence: random_initial_sequence(),
                     resend_delay_ms: duration_millis(self.options.resend_delay),
                     max_pending_reliable_packets: Some(
                         self.options.max_pending_reliable_packets_per_session,

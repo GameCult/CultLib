@@ -168,7 +168,7 @@ fn hub_keeps_independent_peer_sessions_and_exposes_connect_evidence() -> Result<
 }
 
 #[test]
-fn hub_fences_replaced_generations_and_does_not_replace_connect_retransmits() -> Result<()> {
+fn hub_fences_replaced_generations() -> Result<()> {
     let server_socket = socket()?;
     let server_addr = server_socket.local_addr()?;
     let mut hub = CultNetRudpServerHub::new(CultNetRudpServerHubOptions::new(
@@ -188,12 +188,6 @@ fn hub_fences_replaced_generations_and_does_not_replace_connect_retransmits() ->
             session_token: Some("shared-session-token".to_string()),
         })?;
     let original = connect(&mut hub, &mut provider, &original_evidence)?;
-
-    provider.connect(original_evidence.clone())?;
-    for _ in 0..3 {
-        assert!(hub.receive_event_once()?.is_none());
-    }
-    assert_eq!(hub.session(original.remote_addr), Some(&original));
 
     provider.connect(replacement_evidence.clone())?;
     let mut disconnected = None;
