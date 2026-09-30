@@ -1417,6 +1417,167 @@ test("rudp session advances large fragment sets through a bounded reliable windo
   assert.equal(oldAck.ackMask, 0);
 });
 
+// The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023 above the
+// lowest unacked one and the payload above that sequence stays within 4 MiB.
+const FLOW_CONNECTION_ID = 0x464c4f57;
+const MIB = 1024 * 1024;
+
+function flowSession(initialSequence: number): CultNetRudpSession {
+  return new CultNetRudpSession({ connectionId: FLOW_CONNECTION_ID, initialSequence, resendDelayMs: 25 });
+}
+
+// A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's Connect, and the
+// sender's Connect is acknowledged, so nothing is pending on the sender.
+function connectedFlowPair(senderInitialSequence: number, receiverInitialSequence: number): [CultNetRudpSession, CultNetRudpSession] {
+  const sender = flowSession(senderInitialSequence);
+  const receiver = flowSession(receiverInitialSequence);
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
+  return [sender, receiver];
+}
+
+function connectedFlowSession(initialSequence: number): CultNetRudpSession {
+  return connectedFlowPair(initialSequence, 900)[0];
+}
+
+function flowSend(session: CultNetRudpSession, payloadBytes: number): CultNetRudpPacket[] {
+  return session.sendMany("state", new Uint8Array(payloadBytes), { reliable: true });
+}
+
+function flowAck(sequence: number): CultNetRudpPacket {
+  return { packetType: "ack", connectionId: FLOW_CONNECTION_ID, sequence: 0, ack: sequence, ackMask: 0, channelId: "control" };
+}
+
+const sequencesOf = (packets: CultNetRudpPacket[]): number[] => packets.map((packet) => packet.sequence);
+
+function loseGAndFillTheSpan(session: CultNetRudpSession): CultNetRudpPacket {
+  const g = flowSend(session, 1)[0]!;
+  for (let offset = 1; offset <= 1023; offset++) {
+    assert.deepEqual(sequencesOf(flowSend(session, 1)), [g.sequence + offset]);
+    session.receive(flowAck(g.sequence + offset), 1);
+  }
+  return g;
+}
+
+test("a lost packet holds the sender 1023 sequences ahead and is still delivered", () => {
+  const [sender, receiver] = connectedFlowPair(1, 100);
+  const g = flowSend(sender, 1)[0]!;
+  let admittedAfterG = 0;
+  for (let index = 0; index < 4200; index++) {
+    for (const packet of flowSend(sender, 1)) {
+      admittedAfterG++;
+      receiver.receive(packet, 1);
+      sender.receive(receiver.createAck(), 1);
+    }
+  }
+  assert.equal(admittedAfterG, 1023);
+  assert.equal(sender.queuedReliablePacketCount, 4200 - 1023);
+
+  const retransmit = sender.dueResends(1000).find((packet) => packet.sequence === g.sequence)!;
+  const delivered = receiver.receive(retransmit, 1000).delivered;
+  assert.deepEqual(delivered.map((frame) => frame.sequence), [g.sequence]);
+
+  const promoted = sender.receive(receiver.createAckForReceived(g.sequence), 1001).readyToSend ?? [];
+  assert.equal(promoted[0]!.sequence, g.sequence + 1024);
+});
+
+test("a direct send past the span is refused without consuming a sequence", () => {
+  const sender = connectedFlowSession(1);
+  const g = loseGAndFillTheSpan(sender);
+  assert.throws(() => sender.send("state", new Uint8Array(1), { reliable: true }));
+  assert.equal(sender.queuedReliablePacketCount, 0);
+  sender.receive(flowAck(g.sequence), 2);
+  assert.equal(sender.send("state", new Uint8Array(1), { reliable: true }).sequence, g.sequence + 1024);
+});
+
+test("payload above the lowest unacked sequence is bounded by 4 MiB", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, MIB)[0]!;
+  // The lowest unacked packet's own bytes do not count: four more MiB fit above it.
+  for (let index = 0; index < 4; index++) assert.equal(flowSend(sender, MIB).length, 1);
+  assert.equal(flowSend(sender, MIB).length, 0);
+  assert.equal(flowSend(sender, MIB).length, 0);
+  assert.equal(sender.queuedReliablePacketCount, 2);
+
+  // Acking g moves the floor up one packet: exactly one MiB more fits.
+  const promoted = sender.receive(flowAck(g.sequence), 1).readyToSend ?? [];
+  assert.deepEqual(sequencesOf(promoted), [g.sequence + 5]);
+  assert.equal(sender.queuedReliablePacketCount, 1);
+});
+
+test("a packet larger than the window goes out alone and waits behind anything unacked", () => {
+  assert.equal(flowSend(connectedFlowSession(1), 5 * MIB).length, 1);
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  assert.equal(flowSend(sender, 5 * MIB).length, 0);
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend ?? []), [g.sequence + 1]);
+});
+
+test("a small packet does not overtake a queued large one", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  assert.equal(flowSend(sender, 3 * MIB).length, 1);
+  assert.equal(flowSend(sender, 2 * MIB).length, 0);
+  // A direct send refuses instead of queueing behind it, and takes no sequence.
+  assert.throws(() => sender.send("state", new Uint8Array(1), { reliable: true }));
+  assert.equal(sender.queuedReliablePacketCount, 1);
+  // One byte would fit above g, but the 2 MiB packet is ahead of it.
+  assert.equal(flowSend(sender, 1).length, 0);
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 1).readyToSend ?? []), [g.sequence + 2, g.sequence + 3]);
+});
+
+test("acknowledged bytes above a lost packet still count against 4 MiB", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  // g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it behind the
+  // gap, so it keeps counting.
+  for (let offset = 1; offset <= 4; offset++) {
+    assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + offset]);
+    sender.receive(flowAck(g.sequence + offset), 1);
+  }
+  assert.equal(flowSend(sender, MIB).length, 0);
+  assert.equal(sender.queuedReliablePacketCount, 1);
+  assert.throws(() => sender.send("state", new Uint8Array(MIB), { reliable: true }));
+
+  // g arrives: nothing is held behind a gap any more, and the queue drains.
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 2).readyToSend ?? []), [g.sequence + 5]);
+  // The bytes above the old gap no longer count: another MiB fits.
+  assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + 6]);
+});
+
+test("acknowledged bytes count against the lowest unacked sequence as it advances", () => {
+  const sender = connectedFlowSession(1);
+  const g = flowSend(sender, 1)[0]!;
+  const h = flowSend(sender, 1)[0]!;
+  for (let index = 0; index < 3; index++) flowSend(sender, MIB);
+  // g and the 3 MiB above h are acknowledged; h is lost.
+  for (const offset of [2, 3, 4, 0]) sender.receive(flowAck(g.sequence + offset), 1);
+  assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + 5]);
+  // 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+  assert.equal(flowSend(sender, 1).length, 0);
+  // h arrives, the floor moves to g + 5, and the byte fits.
+  assert.deepEqual(sequencesOf(sender.receive(flowAck(h.sequence), 2).readyToSend ?? []), [g.sequence + 6]);
+});
+
+// A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of the new
+// generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost packet belong to
+// no receiver's hold any more and must not count.
+test("a new generation on the server does not inherit acknowledged bytes", () => {
+  const server = flowSession(500);
+  const accept = server.acceptConnect(flowSession(1).createConnect(0), 0);
+  server.receive(flowAck(accept.sequence), 0);
+  const g = flowSend(server, 1)[0]!;
+  for (let offset = 1; offset <= 4; offset++) {
+    assert.deepEqual(sequencesOf(flowSend(server, MIB)), [g.sequence + offset]);
+    server.receive(flowAck(g.sequence + offset), 1);
+  }
+  assert.equal(flowSend(server, MIB).length, 0);
+
+  const nextAccept = server.acceptConnect(flowSession(200_000).createConnect(2), 2);
+  assert.equal(nextAccept.packetType, "accept");
+  // The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+  assert.equal(server.send("state", new Uint8Array(MIB), { reliable: true }).sequence, nextAccept.sequence + 1);
+});
+
 test("CultNet contracts encode legacy bytes without Node Buffer authority", () => {
   const originalBuffer = globalThis.Buffer;
   try {

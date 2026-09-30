@@ -879,6 +879,163 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(old_ack.ack, oldest_sequence)
         self.assertEqual(old_ack.ack_mask, 0)
 
+    # The sender's flow window: a reliable packet goes on the wire only while its sequence is at most 1,023 above
+    # the lowest unacked one and the payload above that sequence stays within 4 MiB.
+    FLOW_CONNECTION_ID = 0x464C4F57
+    MIB = 1024 * 1024
+
+    def _flow_session(self, initial_sequence: int) -> CultNetRudpSession:
+        return CultNetRudpSession(
+            CultNetRudpSessionOptions(connection_id=self.FLOW_CONNECTION_ID, initial_sequence=initial_sequence)
+        )
+
+    def _connected_flow_pair(
+        self, sender_initial_sequence: int, receiver_initial_sequence: int
+    ) -> tuple[CultNetRudpSession, CultNetRudpSession]:
+        """A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's
+        Connect, and the sender's Connect is acknowledged, so nothing is pending on the sender."""
+        sender = self._flow_session(sender_initial_sequence)
+        receiver = self._flow_session(receiver_initial_sequence)
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
+        return sender, receiver
+
+    def _connected_flow_session(self, initial_sequence: int) -> CultNetRudpSession:
+        return self._connected_flow_pair(initial_sequence, 900)[0]
+
+    @staticmethod
+    def _flow_send(session: CultNetRudpSession, payload_bytes: int) -> tuple[CultNetRudpPacket, ...]:
+        return session.send_many("state", bytes(payload_bytes), CultNetRudpSendOptions(reliable=True))
+
+    def _flow_ack(self, sequence: int) -> CultNetRudpPacket:
+        return CultNetRudpPacket(CultNetRudpPacketType.ACK, self.FLOW_CONNECTION_ID, 0, sequence, 0, "control")
+
+    def _lose_g_and_fill_the_span(self, session: CultNetRudpSession) -> CultNetRudpPacket:
+        g = self._flow_send(session, 1)[0]
+        for offset in range(1, 1024):
+            self.assertEqual([p.sequence for p in self._flow_send(session, 1)], [g.sequence + offset])
+            session.receive(self._flow_ack(g.sequence + offset), 1)
+        return g
+
+    def test_cultnet_rudp_a_lost_packet_holds_the_sender_1023_sequences_ahead_and_is_still_delivered(self) -> None:
+        sender, receiver = self._connected_flow_pair(1, 100)
+        g = self._flow_send(sender, 1)[0]
+        admitted_after_g = 0
+        for _ in range(4200):
+            for packet in self._flow_send(sender, 1):
+                admitted_after_g += 1
+                receiver.receive(packet, 1)
+                sender.receive(receiver.create_ack(), 1)
+        self.assertEqual(admitted_after_g, 1023)
+        self.assertEqual(sender.queued_reliable_packet_count, 4200 - 1023)
+
+        retransmit = next(p for p in sender.due_resends(1000) if p.sequence == g.sequence)
+        delivered = receiver.receive(retransmit, 1000).delivered
+        self.assertEqual([frame.sequence for frame in delivered], [g.sequence])
+
+        promoted = sender.receive(receiver.create_ack_for_received(g.sequence), 1001).ready_to_send
+        self.assertEqual(promoted[0].sequence, g.sequence + 1024)
+
+    def test_cultnet_rudp_a_direct_send_past_the_span_is_refused_without_consuming_a_sequence(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._lose_g_and_fill_the_span(sender)
+        with self.assertRaises(ValueError):
+            sender.send("state", bytes(1), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(sender.queued_reliable_packet_count, 0)
+        sender.receive(self._flow_ack(g.sequence), 2)
+        following = sender.send("state", bytes(1), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(following.sequence, g.sequence + 1024)
+
+    def test_cultnet_rudp_payload_above_the_lowest_unacked_sequence_is_bounded_by_4_mib(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, self.MIB)[0]
+        # The lowest unacked packet's own bytes do not count: four more MiB fit above it.
+        for _ in range(4):
+            self.assertEqual(len(self._flow_send(sender, self.MIB)), 1)
+        self.assertEqual(len(self._flow_send(sender, self.MIB)), 0)
+        self.assertEqual(len(self._flow_send(sender, self.MIB)), 0)
+        self.assertEqual(sender.queued_reliable_packet_count, 2)
+
+        # Acking g moves the floor up one packet: exactly one MiB more fits.
+        promoted = sender.receive(self._flow_ack(g.sequence), 1).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 5])
+        self.assertEqual(sender.queued_reliable_packet_count, 1)
+
+    def test_cultnet_rudp_a_packet_larger_than_the_window_goes_out_alone_and_waits_behind_anything_unacked(self) -> None:
+        self.assertEqual(len(self._flow_send(self._connected_flow_session(1), 5 * self.MIB)), 1)
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        self.assertEqual(len(self._flow_send(sender, 5 * self.MIB)), 0)
+        promoted = sender.receive(self._flow_ack(g.sequence), 1).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 1])
+
+    def test_cultnet_rudp_a_small_packet_does_not_overtake_a_queued_large_one(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        self.assertEqual(len(self._flow_send(sender, 3 * self.MIB)), 1)
+        self.assertEqual(len(self._flow_send(sender, 2 * self.MIB)), 0)
+        # A direct send refuses instead of queueing behind it, and takes no sequence.
+        with self.assertRaises(ValueError):
+            sender.send("state", bytes(1), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(sender.queued_reliable_packet_count, 1)
+        # One byte would fit above g, but the 2 MiB packet is ahead of it.
+        self.assertEqual(len(self._flow_send(sender, 1)), 0)
+        promoted = sender.receive(self._flow_ack(g.sequence), 1).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 2, g.sequence + 3])
+
+    def test_cultnet_rudp_acknowledged_bytes_above_a_lost_packet_still_count_against_4_mib(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        # g is lost. Each 1 MiB frame above it is delivered and acknowledged, and the receiver still holds it behind
+        # the gap, so it keeps counting.
+        for offset in range(1, 5):
+            self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + offset])
+            sender.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual(len(self._flow_send(sender, self.MIB)), 0)
+        self.assertEqual(sender.queued_reliable_packet_count, 1)
+        with self.assertRaises(ValueError):
+            sender.send("state", bytes(self.MIB), CultNetRudpSendOptions(reliable=True))
+
+        # g arrives: nothing is held behind a gap any more, and the queue drains.
+        promoted = sender.receive(self._flow_ack(g.sequence), 2).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 5])
+        # The bytes above the old gap no longer count: another MiB fits.
+        self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + 6])
+
+    def test_cultnet_rudp_acknowledged_bytes_count_against_the_lowest_unacked_sequence_as_it_advances(self) -> None:
+        sender = self._connected_flow_session(1)
+        g = self._flow_send(sender, 1)[0]
+        h = self._flow_send(sender, 1)[0]
+        for _ in range(3):
+            self._flow_send(sender, self.MIB)
+        # g and the 3 MiB above h are acknowledged; h is lost.
+        for offset in (2, 3, 4, 0):
+            sender.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + 5])
+        # 4 MiB sit above h, acknowledged or not: one more byte does not fit.
+        self.assertEqual(len(self._flow_send(sender, 1)), 0)
+        # h arrives, the floor moves to g + 5, and the byte fits.
+        promoted = sender.receive(self._flow_ack(h.sequence), 2).ready_to_send
+        self.assertEqual([p.sequence for p in promoted], [g.sequence + 6])
+
+    def test_cultnet_rudp_a_new_generation_on_the_server_does_not_inherit_acknowledged_bytes(self) -> None:
+        # A server that accepts a fresh Connect may send before its Accept is acknowledged, so no acknowledgement of
+        # the new generation has moved the floor yet. Bytes the ended generation had acknowledged above its own lost
+        # packet belong to no receiver's hold any more and must not count.
+        server = self._flow_session(500)
+        accept = server.accept_connect(self._flow_session(1).create_connect(0), 0)
+        server.receive(self._flow_ack(accept.sequence), 0)
+        g = self._flow_send(server, 1)[0]
+        for offset in range(1, 5):
+            self.assertEqual([p.sequence for p in self._flow_send(server, self.MIB)], [g.sequence + offset])
+            server.receive(self._flow_ack(g.sequence + offset), 1)
+        self.assertEqual(len(self._flow_send(server, self.MIB)), 0)
+
+        next_accept = server.accept_connect(self._flow_session(200_000).create_connect(2), 2)
+        self.assertEqual(next_accept.packet_type, CultNetRudpPacketType.ACCEPT)
+        # The Accept is unacknowledged and the only thing pending: 1 MiB fits above it.
+        sent = server.send("state", bytes(self.MIB), CultNetRudpSendOptions(reliable=True))
+        self.assertEqual(sent.sequence, next_accept.sequence + 1)
+
     def test_cultnet_rudp_socket_transport_handshakes_and_carries_reliable_ordered_schema_frames(self) -> None:
         server_socket = bind_udp_socket()
         client_socket = bind_udp_socket()

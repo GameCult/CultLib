@@ -33,6 +33,11 @@ const RUDP_FIXED_HEADER_BYTES = 36;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
+// Flow window: a reliable packet is admitted only while its sequence is at most RUDP_FLOW_WINDOW_SEQUENCES above the
+// lowest unacked one and the payload above that sequence stays within RUDP_FLOW_WINDOW_BYTES.
+const RUDP_FLOW_WINDOW_SEQUENCES = 1_023;
+const RUDP_FLOW_WINDOW_BYTES = 4 * 1024 * 1024;
+
 /// How long a client keeps retransmitting a Connect nobody answered before it
 /// abandons that attempt for a fresh one. A Connect the server answers with an
 /// Ack, never an Accept, is one the server judged stale (see `acceptConnect`);
@@ -212,6 +217,9 @@ export class CultNetRudpSession {
   readonly #receivedSequences = new Set<number>();
   readonly #latestSequencedByChannel = new Map<string, number>();
   readonly #pendingReliable = new Map<number, PendingReliablePacket>();
+  /// Payload sizes of acknowledged reliable sequences above the lowest unacknowledged one. The receiver still holds
+  /// those bytes behind the gap, so the flow window keeps counting them until the lowest sequence passes them.
+  readonly #ackedAboveLowest = new Map<number, number>();
   readonly #queuedReliable: CultNetRudpPacket[] = [];
   /// Every reliable sequence up to and including this one has been received
   /// since the peer state was last reset. Only the handshake seeds it: the
@@ -294,6 +302,7 @@ export class CultNetRudpSession {
     this.#awaitingAccept = false;
     this.#generation += 1;
     this.#pendingReliable.clear();
+    this.#ackedAboveLowest.clear();
     this.#queuedReliable.splice(0);
   }
 
@@ -420,7 +429,7 @@ export class CultNetRudpSession {
     payload: Uint8Array,
     options: { reliable?: boolean; ordered?: boolean; sequenced?: boolean; nowMs?: number } = {},
   ): CultNetRudpPacket {
-    if (options.reliable && this.#pendingReliable.size >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS) {
+    if (options.reliable && (this.#queuedReliable.length > 0 || !this.#windowAdmits(this.#nextSequence, payload.length))) {
       throw new Error("RUDP reliable send window is full; receive acknowledgements before sending.");
     }
     return this.sendMany(channelId, payload, options)[0]!;
@@ -753,18 +762,44 @@ export class CultNetRudpSession {
     });
   }
 
+  /**
+   * Whether a reliable packet may go on the wire now: the window has a slot, and its sequence and the payload above
+   * the lowest unacked sequence stay inside the flow window. With nothing pending, any packet is admissible.
+   */
+  #windowAdmits(sequence: number, payloadLength: number): boolean {
+    if (this.#pendingReliable.size >= CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS) return false;
+    if (this.#pendingReliable.size === 0) return true;
+    const lowest = Math.min(...this.#pendingReliable.keys());
+    let bytesAbove = 0;
+    for (const [pendingSequence, pending] of this.#pendingReliable) {
+      if (pendingSequence > lowest) bytesAbove += pending.packet.payload?.length ?? 0;
+    }
+    for (const length of this.#ackedAboveLowest.values()) bytesAbove += length;
+    return sequence - lowest <= RUDP_FLOW_WINDOW_SEQUENCES && bytesAbove + payloadLength <= RUDP_FLOW_WINDOW_BYTES;
+  }
+
   #admitReliablePackets(packets: CultNetRudpPacket[], nowMs: number): CultNetRudpPacket[] {
-    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
-    const ready = packets.slice(0, available);
-    for (const packet of ready) this.#trackReliable(packet, nowMs);
-    this.#queuedReliable.push(...packets.slice(available));
+    const ready: CultNetRudpPacket[] = [];
+    for (const packet of packets) {
+      if (this.#queuedReliable.length === 0 && this.#windowAdmits(packet.sequence, packet.payload?.length ?? 0)) {
+        this.#trackReliable(packet, nowMs);
+        ready.push(packet);
+      } else {
+        this.#queuedReliable.push(packet);
+      }
+    }
     return ready;
   }
 
   #promoteQueuedReliable(nowMs: number): CultNetRudpPacket[] {
-    const available = Math.max(0, CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS - this.#pendingReliable.size);
-    const ready = this.#queuedReliable.splice(0, available);
-    for (const packet of ready) this.#trackReliable(packet, nowMs);
+    const ready: CultNetRudpPacket[] = [];
+    while (this.#queuedReliable.length > 0) {
+      const packet = this.#queuedReliable[0];
+      if (!this.#windowAdmits(packet.sequence, packet.payload?.length ?? 0)) break;
+      this.#queuedReliable.shift();
+      this.#trackReliable(packet, nowMs);
+      ready.push(packet);
+    }
     return ready;
   }
 
@@ -778,11 +813,32 @@ export class CultNetRudpSession {
   }
 
   #applyAcknowledgements(packet: CultNetRudpPacket): void {
-    this.#pendingReliable.delete(packet.ack);
+    this.#acknowledge(packet.ack);
     for (let bit = 0; bit < 32; bit += 1) {
       if ((packet.ackMask & (1 << bit)) !== 0) {
-        this.#pendingReliable.delete(packet.ack - bit - 1);
+        this.#acknowledge(packet.ack - bit - 1);
       }
+    }
+    this.#forgetAckedBelowLowest();
+  }
+
+  #acknowledge(sequence: number): void {
+    const pending = this.#pendingReliable.get(sequence);
+    if (pending === undefined) return;
+    this.#pendingReliable.delete(sequence);
+    this.#ackedAboveLowest.set(sequence, pending.packet.payload?.length ?? 0);
+  }
+
+  /// Acknowledged sizes stop counting once the lowest unacknowledged sequence passes them, and all of them stop
+  /// when nothing is unacknowledged.
+  #forgetAckedBelowLowest(): void {
+    if (this.#pendingReliable.size === 0) {
+      this.#ackedAboveLowest.clear();
+      return;
+    }
+    const lowest = Math.min(...this.#pendingReliable.keys());
+    for (const sequence of this.#ackedAboveLowest.keys()) {
+      if (sequence <= lowest) this.#ackedAboveLowest.delete(sequence);
     }
   }
 

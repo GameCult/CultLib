@@ -271,6 +271,15 @@ Current progress:
   flush where the runtime supports one, so callers that require confirmed
   transport delivery do not substitute a fixed sleep. TCP-framed profiles do
   not publish the field because they do not own the RUDP pending-reliable queue.
+- The receive window is a contract, not a discovery. A receiver must hold 1,023
+  sequences and 4 MiB of payload beyond its contiguous received watermark, and
+  a conforming sender never exceeds either. The sender's flow window enforces
+  it without a wire field: a reliable packet is admitted only while its
+  sequence is at most 1,023 above the lowest unacked sequence and the payload
+  above that sequence stays within 4 MiB. The first packet is always
+  admissible, so a payload larger than 4 MiB goes out alone, and packets wait
+  in the FIFO in order, so a small packet never overtakes a large one. C#,
+  Rust, TypeScript, and Python enforce it; Kotlin does not yet.
 - TypeScript, C#, Rust, Python, and Kotlin now share a portable
   `cultnet.reconnect_policy.v0` document and deterministic exponential delay
   helper, and RUDP transport profiles advertise that policy under
