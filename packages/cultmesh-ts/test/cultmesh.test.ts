@@ -3241,7 +3241,12 @@ type ServedBoundRig = {
 const servedBoundRegistry = () =>
   new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: noteDocument })]);
 
-function notePut(messageId: string, recordKey: string, bodyLength: number): CultNetDocumentPutRawMessage {
+function notePut(
+  messageId: string,
+  recordKey: string,
+  bodyLength: number,
+  sourceRuntimeId?: string,
+): CultNetDocumentPutRawMessage {
   return {
     schemaVersion: "cultnet.document_put_raw.v0",
     messageId,
@@ -3251,13 +3256,23 @@ function notePut(messageId: string, recordKey: string, bodyLength: number): Cult
       storedAt: "2026-09-30T00:00:00.000Z",
       payloadEncoding: "messagepack",
       payload: encode({ noteId: recordKey, body: "x".repeat(bodyLength) }),
+      ...(sourceRuntimeId ? { sourceRuntimeId } : {}),
     },
   };
 }
 
-/** The encoded size of the reply that would serve this put's document alone. */
+/**
+ * The encoded size of the reply that would serve this put's document alone,
+ * under the shortest message id: the record as a snapshot serves it, which
+ * keeps no source fields.
+ */
 function servedAloneBytes(put: CultNetDocumentPutRawMessage): number {
-  return encode(servedBoundRegistry().createRawSnapshotResponseForPut(put, "0")).byteLength;
+  const { schemaId, recordKey, storedAt, payloadEncoding, payload } = put.document;
+  return encode({
+    schemaVersion: "cultnet.snapshot_response_raw.v0",
+    messageId: "0",
+    documents: [{ schemaId, recordKey, storedAt, payloadEncoding, payload }],
+  }).byteLength;
 }
 
 /** The body length whose served-alone reply is exactly `bytes`, with a guard. */
@@ -3372,7 +3387,8 @@ test("CultMesh TS RUDP document server refuses a put whose reply would overflow 
   const atBound = bodyLengthForReplyBytes("note:at", 8 * 1024);
   const overBound = bodyLengthForReplyBytes("note:ov", 8 * 1024 + 1);
   await withServedBoundRig(0x10203061, { maxFragmentBytes: 1024, maxPendingReliablePackets: 8 }, async (rig) => {
-    rig.peer.send(notePut("put-over", "note:ov", overBound));
+    // The puts carry a source the registry does not store, so only the served record is the right size.
+    rig.peer.send(notePut("put-over", "note:ov", overBound, "cultmesh-ts-served-bound-client"));
     const refusal = await waitForError(rig, "the over-bound put");
     assert.ok(refusal instanceof CultMeshRudpUnservableDocumentError, refusal.message);
     assert.equal(refusal.messageId, "put-over");
@@ -3384,7 +3400,7 @@ test("CultMesh TS RUDP document server refuses a put whose reply would overflow 
     assert.match(refusal.message, /8193 bytes in 9 fragments/);
     assert.deepEqual(rig.admitted, []);
 
-    rig.peer.send(notePut("put-at", "note:at", atBound));
+    rig.peer.send(notePut("put-at", "note:at", atBound, "cultmesh-ts-served-bound-client"));
     await waitForAdmission(rig, "note:at");
     assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
     assert.equal(rig.errors.length, 1);
@@ -3418,6 +3434,15 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts
     assert.ok(!(rig.errors[1] instanceof CultMeshRudpUnservableDocumentError));
     assert.match(rig.errors[1]!.message, /maxPayloadBytes is 4000/);
     assert.deepEqual(rig.admitted, ["note:at"]);
+
+    // Two servable documents make a reply over the limit: it is not sent, and onError hears why.
+    rig.peer.send(notePut("put-second", "note:a2", atBound));
+    await waitForAdmission(rig, "note:a2");
+    rig.peer.sendSnapshotRequest({ schemaVersion: "cultnet.snapshot_request.v0", messageId: "0", recordKeys: ["note:at", "note:a2"] });
+    const replyStartedAt = Date.now();
+    while (rig.errors.length < 3 && Date.now() - replyStartedAt < 3_000) await delay(5);
+    assert.equal(rig.errors.length, 3);
+    assert.match(rig.errors[2]!.message, /reply cultnet\.snapshot_response_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
   });
 });
 
