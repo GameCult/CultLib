@@ -3625,20 +3625,6 @@ namespace GameCult.Caching
                 records.Remove(entry.Key.Value);
             foreach (var entry in request.Upserts)
                 records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
-            if (ontoDisk)
-            {
-                // A record this cache holds, unchanged since the file was read, is written under its registered schema's id, as a
-                // whole-view write writes it: the file's entry that lists an older id for it is then not needed to publish it.
-                foreach (var record in disk.Records)
-                {
-                    if (records.TryGetValue(record.Key, out var carried) && ReferenceEquals(carried, record) &&
-                        Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt &&
-                        !string.Equals(known.Descriptor.SchemaId, record.SchemaId, StringComparison.Ordinal))
-                    {
-                        records[record.Key] = ToPersistedRecord(known, SerializePayload);
-                    }
-                }
-            }
 
             // Onto the file, only the batch's records are seen: the rest stay as they are, and the header they carry stays. An
             // unconditional commit writes this store's whole view, so what its records hold decides. A record this commit

@@ -25,7 +25,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     private readonly ConcurrentDictionary<string, bool> _dirtyKeys = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _deletedKeys = new(StringComparer.Ordinal);
     private readonly HashSet<string> _hydratedKeys = new(StringComparer.Ordinal);
-    private CultSchemaCatalogEntry[] _durableCatalog = Array.Empty<CultSchemaCatalogEntry>();
 
     public DirectoryMessagePackBackingStore(string manifestPath, string? recordDirectoryPath = null, bool readOnly = false)
         : base(readOnly)
@@ -64,7 +63,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         var reports = new List<CultSchemaMigrationReport>();
         var loaded = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
-        CultSchemaCatalogEntry[] catalog;
         for (var attempt = 1; ; attempt++)
         {
             loaded.Clear();
@@ -88,7 +86,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     reports);
                 if (lease != null || !ManifestMoved(manifestBytes))
                 {
-                    catalog = manifest.SchemaCatalog;
                     Trace($"indexed-pages loaded={loaded.Count}");
                     break;
                 }
@@ -123,7 +120,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Loaded?.Invoke(arrived, departed);
 
         // Adopted only once the cache admitted the load; a refused load leaves the store's durable view untouched.
-        _durableCatalog = catalog;
         foreach (var stored in departed)
             Entries.TryRemove(stored.Key.Value, out _);
         _hydratedKeys.RemoveWhere(key => !loaded.ContainsKey(key) && !Staged(key));
@@ -251,16 +247,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 currentIndex[key] = ToIndexRecord(stored);
         }
 
-        // A record this cache holds, unchanged since the manifest was read, is rewritten under its registered schema's id, as a dirty
-        // one is: the manifest entry that lists an older id for it is then not needed to publish it.
-        var restamped = currentIndex.Values
-            .Where(record => !_dirtyKeys.ContainsKey(record.Key) &&
-                             Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt &&
-                             !string.Equals(known.Descriptor.SchemaId, record.SchemaId, StringComparison.Ordinal))
-            .Select(record => record.Key)
-            .ToArray();
         var keysToWrite = _dirtyKeys.Keys
-            .Concat(restamped)
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
         foreach (var key in keysToWrite)
@@ -286,7 +273,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var targetCatalog = CultSchemaCatalogEntry.Derive(
                 currentIndex.Values,
                 Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
-                currentManifest.SchemaCatalog.Concat(_durableCatalog).ToArray())
+                currentManifest.SchemaCatalog)
             .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
             .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
             .ToArray();
@@ -303,7 +290,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
-        _durableCatalog = targetCatalog;
         _dirtyKeys.Clear();
         _deletedKeys.Clear();
         MarkFlushSucceeded();

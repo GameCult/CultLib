@@ -208,12 +208,44 @@ namespace GameCult.Caching.Tests
         [Test]
         public void EntriesThatTieAreTakenInOneFixedOrder()
         {
-            var one = Entry("x", "n", "h1", "x");
-            var two = Entry("x", "n", "h2", "x", "y");
+            // The content hash orders them against the order their compatible ids would give: h1 sorts first, its list sorts last.
+            var one = Entry("x", "n", "h2", "x");
+            var two = Entry("x", "n", "h1", "x", "y");
             foreach (var order in new[] { new[] { one, two }, new[] { two, one } })
             {
                 Assert.That(CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, order, Array.Empty<CultSchemaCatalogEntry>()).Single().ContentHash, Is.EqualTo("h1"));
                 Assert.That(CultSchemaCatalogEntry.Derive(new[] { Rec("a", "x") }, Array.Empty<CultSchemaCatalogEntry>(), order).Single().ContentHash, Is.EqualTo("h1"));
+            }
+        }
+
+        // A registered descriptor that owns an id keeps it against an arrived entry that owns it too and lists the id another
+        // record sits under, whichever of the two ids sorts first: the arrived entry's list is not merged in, so the record under
+        // the listed id is published by no chosen entry.
+        [TestCase("a", "b")]
+        [TestCase("b", "a")]
+        public void AnArrivedEntryThatOwnsARegisteredIdDoesNotReplaceTheDescriptorNorPublishWhatItLists(string ownId, string listedId)
+        {
+            var registered = new[] { Entry(ownId, "registered", "fresh", ownId) };
+            var arrived = new[] { Entry(ownId, "arrived", "stale", ownId, listedId) };
+            var records = new[] { Rec("k1", ownId), Rec("k2", listedId) };
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => CultSchemaCatalogEntry.Derive(records, registered, arrived))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo(listedId));
+            Assert.That(refusal.RecordKey, Is.EqualTo("k2"));
+        }
+
+        // Ids are taken in sorted order, so which entry survives, and so which id the refusal names, does not depend on the order
+        // the records arrive in.
+        [Test]
+        public void TheRefusalNamesTheSameIdWhateverOrderTheRecordsArriveIn()
+        {
+            var arrived = new[] { Entry("x", "n", "h1", "x", "y"), Entry("x", "n", "h2", "x", "z") };
+            foreach (var records in new[] { new[] { Rec("r1", "y"), Rec("r2", "z") }, new[] { Rec("r2", "z"), Rec("r1", "y") } })
+            {
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                    CultSchemaCatalogEntry.Derive(records, Array.Empty<CultSchemaCatalogEntry>(), arrived))!;
+                Assert.That(refusal.SchemaId, Is.EqualTo("y"));
+                Assert.That(refusal.RecordKey, Is.EqualTo("r1"));
             }
         }
 
@@ -255,8 +287,11 @@ namespace GameCult.Caching.Tests
             return path;
         }
 
+        // The cache holds the record d, but a commit onto the file writes only its batch: d stays as the file holds it, under an id
+        // only the file's entry lists, and the registered descriptor does not. No store writer restamps a record; the write is
+        // refused and the file left as it was.
         [Test]
-        public void ACommitOntoAFileWhoseEntryListsAnOlderIdLeavesAStoreThatReopens()
+        public void ACommitOntoAFileWhoseCachedRecordSitsUnderAnIdOnlyAnArrivedEntryListsIsRefusedAndTheFileLeftAsItWas()
         {
             var path = Seed("legacy-conditional.cc");
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
@@ -264,21 +299,50 @@ namespace GameCult.Caching.Tests
             manifest.Records.Single().SchemaId = "old.id";
             entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+            var bytes = CultDocumentMessagePackSerialization.SerializeSnapshot(manifest);
+            File.WriteAllBytes(path, bytes);
 
-            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            Assert.That(cache.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "the cache reads the record under the older id");
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
             {
-                Assert.That(cache.Commit(batch =>
-                {
-                    batch.Expect(new CultRecordKey("e"), null);
-                    batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
-                }), Is.True);
-            }
+                batch.Expect(new CultRecordKey("e"), null);
+                batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
+            }))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo("old.id"));
+            Assert.That(refusal.RecordKey, Is.EqualTo("d"));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
+        }
 
-            var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
-            using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
-            Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null, "the record kept under the older id stays readable");
+        // Another writer rewrites the record d under a different id, keeping its storedAt. A cache that read d earlier commits a
+        // record of its own onto the file: the other writer's d is not the cache's to rewrite, so it is left exactly as written.
+        [Test]
+        public void ACommitNeverRewritesARecordAnotherWriterChangedThatKeptItsStoredAt()
+        {
+            var path = Seed("lost-update.cc");
+            var other = Seed("lost-update-other.cc");
+            using (var cache = CultCacheMessagePack.Create(other, new CultCacheOpenOptions { Registry = Registry }))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "changed-by-other" }, new CultRecordKey("d")));
+            var otherPayload = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(other)).Records.Single().Payload;
+
+            using var reader = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            Assert.That(reader.Get<IdDeck>(new CultRecordKey("d"))!.Name, Is.EqualTo("d"));
+
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            var record = manifest.Records.Single();
+            record.SchemaId = "other.writer.id";
+            record.Payload = otherPayload;
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "other.writer.id" };
+            var bytes = CultDocumentMessagePackSerialization.SerializeSnapshot(manifest);
+            File.WriteAllBytes(path, bytes);
+
+            Assert.Throws<CultSchemaConflictException>(() => reader.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("e"), null);
+                batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
+            }));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "the other writer's record is on disk as it wrote it");
         }
 
         [Test]
@@ -320,10 +384,10 @@ namespace GameCult.Caching.Tests
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
         }
 
-        // The directory store derives its manifest the same way: a record kept under an older id, the entry naming an older schema,
-        // and a commit leaves a manifest that reads, with the registered entry.
+        // The directory store derives its manifest the same way and restamps nothing: a record kept under an older id only the
+        // manifest's entry lists is refused, and the manifest is left as it was.
         [Test]
-        public void ADirectoryRewriteWhoseEntryListsAnOlderIdLeavesAManifestThatReads()
+        public void ADirectoryRewriteWhoseKeptRecordSitsUnderAnIdOnlyTheManifestEntryListsIsRefusedAndTheManifestLeftAsItWas()
         {
             var path = DirectoryStore("legacy-dir.cc");
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
@@ -331,13 +395,18 @@ namespace GameCult.Caching.Tests
             entry.ContentHash = "stale";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "old.id" };
             manifest.Records.Single().SchemaId = "old.id";
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+            var bytes = CultDocumentMessagePackSerialization.SerializeSnapshot(manifest);
+            File.WriteAllBytes(path, bytes);
 
             using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+            {
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                    cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))))!;
+                Assert.That(refusal.SchemaId, Is.EqualTo("old.id"));
+                Assert.That(refusal.RecordKey, Is.EqualTo("d"));
+            }
 
-            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(rewritten.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
             using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true });
             Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
         }
