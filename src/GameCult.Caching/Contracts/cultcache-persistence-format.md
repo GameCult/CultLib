@@ -126,6 +126,12 @@ A writer keeps the same invariant: every record it writes carries a schema id th
 entry it writes publishes, as that entry's id or as one of its compatible ids. A cache stamps a
 record with its registered schema's id, whatever id the record arrived under.
 
+A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
+only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
+in catalog order). Two entries that share a `schemaId` are one schema seen by different writers: a
+writer that merges them writes one entry whose compatible ids are the union of theirs, whatever
+order they arrive in, so it lists every id any record it writes carries.
+
 This is not decorative paperwork. It is what allows another CultCache
 implementation to inspect an old store, resolve the schema for each record, and
 decide whether it can:
