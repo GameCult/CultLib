@@ -211,18 +211,90 @@ fn connect(
     anyhow::bail!("client connection timed out")
 }
 
-/// The encoded size of the snapshot response that carries `document` alone
-/// under a one-character message id, the shortest CultNet encodes: the
+/// The record as a server serves it: the record the peer sent, without the
+/// source provenance a peer reports about itself. Spelled out here rather than
+/// asked of the server, so a server that served another shape is caught.
+fn as_served(document: &CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
+    CultNetRawDocumentRecord {
+        source_runtime_id: None,
+        source_agent_id: None,
+        source_role: None,
+        tags: None,
+        ..document.clone()
+    }
+}
+
+/// `document` with every source provenance field filled, so its received form
+/// is larger than its served form.
+fn with_provenance(mut document: CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
+    document.source_runtime_id = Some("provenance-runtime-that-is-not-served".into());
+    document.source_agent_id = Some("provenance-agent".into());
+    document.source_role = Some("provenance-role".into());
+    document.tags = Some(vec!["provenance".into(), "tags".into()]);
+    document
+}
+
+/// The encoded size of the snapshot response that carries `document` alone, as
+/// served, under a one-character message id, the shortest CultNet encodes: the
 /// smallest response that could ever serve it.
 fn served_alone_bytes(document: &CultNetRawDocumentRecord) -> Result<usize> {
     Ok(encode_cultnet_message_to_vec(
         &CultNetMessage::SnapshotResponseRaw {
             message_id: "r".into(),
-            documents: vec![document.clone()],
+            documents: vec![as_served(document)],
         },
         CultNetWireContract::CultNetSchemaV0,
     )?
     .len())
+}
+
+/// A document keyed `key` whose served-alone response is exactly `bytes`.
+fn document_served_at(key: &str, bytes: usize) -> Result<CultNetRawDocumentRecord> {
+    let probe = bytes / 2;
+    let base = served_alone_bytes(&document(key, vec![7; probe]))?;
+    let fitted = document(key, vec![7; probe + bytes - base]);
+    assert_eq!(
+        served_alone_bytes(&fitted)?,
+        bytes,
+        "fixture: the served size is linear in the payload"
+    );
+    Ok(fitted)
+}
+
+/// Polls the server and client until the client receives a frame.
+fn serve_until_frame(
+    server: &mut Server,
+    client: &mut CultNetRudpSocketTransportConnection,
+) -> Result<Vec<u8>> {
+    for _ in 0..2_000 {
+        let outcome = server.poll_once()?;
+        assert!(
+            !matches!(outcome, CultMeshRudpPollOutcome::ApplicationRejected(_)),
+            "{outcome:?}"
+        );
+        if let Some(frame) = client.receive_once()? {
+            return Ok(frame.payload);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    anyhow::bail!("the client received no frame")
+}
+
+/// Polls the server until it returns a rejection or the sink holds `receipts`.
+fn poll_until_rejected_or_stored(
+    server: &mut Server,
+    sink: &Sink,
+    receipts: usize,
+) -> Result<Option<CultMeshRudpRejectionReason>> {
+    for _ in 0..5_000 {
+        if let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? {
+            return Ok(Some(rejection.reason));
+        }
+        if sink.0.lock().unwrap().receipts.len() >= receipts {
+            return Ok(None);
+        }
+    }
+    anyhow::bail!("the put was neither refused nor stored")
 }
 
 fn send(client: &mut CultNetRudpSocketTransportConnection, message: &CultNetMessage) -> Result<()> {
@@ -608,9 +680,13 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
         document: document("budget", vec![7; 64]),
     };
     let encoded = encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0)?;
-    let budget = encoded
-        .len()
-        .max(served_alone_bytes(&document("budget", vec![7; 64]))?);
+    // The put's frame is exactly both budgets, so the first put is admitted only
+    // if a charge equal to a limit fits it.
+    let budget = encoded.len();
+    assert!(
+        served_alone_bytes(&document("budget", vec![7; 64]))? <= budget,
+        "fixture: the snapshot limit must admit the put"
+    );
     let options = CultMeshRudpDocumentServerOptions {
         max_admitted_payload_bytes: budget,
         max_admitted_payload_bytes_per_session: budget,
@@ -671,16 +747,30 @@ fn payload_and_snapshot_output_budgets_fail_closed() -> Result<()> {
 
 /// A put is admitted only if some snapshot request could return it. One byte
 /// over the served bound is refused before the sink sees it; exactly at the
-/// bound is admitted, and a snapshot then serves it at exactly that size.
+/// bound is admitted, and a snapshot then serves it at exactly that size. The
+/// bound is the record as served: provenance that makes the received record
+/// larger than the bound neither refuses it nor reaches the snapshot.
 #[test]
 fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served() -> Result<()> {
-    let at_bound = document("fit", vec![7; 100]);
+    let at_bound = with_provenance(document("fit", vec![7; 100]));
     let over_bound = document("fit", vec![7; 101]);
     let limit = served_alone_bytes(&at_bound)?;
     assert_eq!(
         served_alone_bytes(&over_bound)?,
         limit + 1,
         "fixture: the two documents must straddle the bound by one byte"
+    );
+    let received_alone = encode_cultnet_message_to_vec(
+        &CultNetMessage::SnapshotResponseRaw {
+            message_id: "r".into(),
+            documents: vec![at_bound.clone()],
+        },
+        CultNetWireContract::CultNetSchemaV0,
+    )?
+    .len();
+    assert!(
+        received_alone > limit + 1,
+        "fixture: the at-bound put is over the bound in its received form"
     );
     let options = CultMeshRudpDocumentServerOptions {
         max_snapshot_response_bytes: limit,
@@ -715,6 +805,8 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
         CultMeshRudpRejectionReason::DocumentUnservable {
             response_bytes: limit + 1,
             max_snapshot_response_bytes: limit,
+            fragment_count: 1,
+            max_fragment_count: 1024,
         }
     );
     let sentence = rejection.reason.to_string();
@@ -753,7 +845,11 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
         .iter()
         .map(|receipt| receipt.document.clone())
         .collect();
-    assert_eq!(stored, vec![at_bound.clone()]);
+    assert_eq!(
+        stored,
+        vec![at_bound.clone()],
+        "the sink receives the record as it was sent"
+    );
     source.0.lock().unwrap().documents = stored;
 
     send(
@@ -783,8 +879,168 @@ fn a_put_the_server_could_never_serve_is_refused_and_one_at_the_bound_is_served(
         decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
         CultNetMessage::SnapshotResponseRaw {
             message_id: "r".into(),
-            documents: vec![at_bound],
+            documents: vec![as_served(&at_bound)],
         }
+    );
+    Ok(())
+}
+
+/// A put is admitted only if its served response fits the fragments one
+/// response may take: here eight of 100 bytes, the reliable queue, although the
+/// byte limit is far larger. Eight fragments are admitted and served; nine are
+/// refused, and so is Soul's 2000-byte probe, each naming its sizes.
+#[test]
+fn a_put_whose_response_would_overflow_the_reliable_queue_is_refused() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 100,
+        max_pending_reliable_packets_per_session: 8,
+        max_snapshot_response_bytes: 8192,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let source = Source::default();
+    let mut server = server(options, Clock::new(61_000), sink.clone(), source.clone())?;
+    let target = server.local_addr()?;
+    let unservable = |response_bytes, fragment_count| {
+        Some(CultMeshRudpRejectionReason::DocumentUnservable {
+            response_bytes,
+            max_snapshot_response_bytes: 8192,
+            fragment_count,
+            max_fragment_count: 8,
+        })
+    };
+
+    for (id, bytes, fragments) in [(131, 2000, 20), (132, 801, 9)] {
+        let mut refused = client(target, id)?;
+        connect(&mut server, &mut [&mut refused])?;
+        send(
+            &mut refused,
+            &CultNetMessage::DocumentPutRaw {
+                message_id: "put-over".into(),
+                document: document_served_at("queue", bytes)?,
+            },
+        )?;
+        let reason = poll_until_rejected_or_stored(&mut server, &sink, 1)?;
+        assert_eq!(reason, unservable(bytes, fragments));
+        let sentence = reason.unwrap().to_string();
+        assert!(
+            sentence.contains(&format!("{bytes} bytes in {fragments} fragments"))
+                && sentence.contains("8 fragments"),
+            "{sentence}"
+        );
+    }
+    assert!(sink.0.lock().unwrap().receipts.is_empty());
+
+    let at_bound = document_served_at("queue", 800)?;
+    let mut writer = client(target, 133)?;
+    connect(&mut server, &mut [&mut writer])?;
+    send(
+        &mut writer,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-at".into(),
+            document: at_bound.clone(),
+        },
+    )?;
+    assert_eq!(poll_until_rejected_or_stored(&mut server, &sink, 1)?, None);
+    source.0.lock().unwrap().documents = vec![at_bound.clone()];
+    send(
+        &mut writer,
+        &CultNetMessage::SnapshotRequest {
+            message_id: "r".into(),
+            schema_ids: None,
+            record_keys: None,
+        },
+    )?;
+    let served = serve_until_frame(&mut server, &mut writer)?;
+    assert_eq!(served.len(), 800);
+    assert_eq!(
+        decode_cultnet_message_from_slice(&served, CultNetWireContract::CultNetSchemaV0)?,
+        CultNetMessage::SnapshotResponseRaw {
+            message_id: "r".into(),
+            documents: vec![as_served(&at_bound)],
+        }
+    );
+    Ok(())
+}
+
+/// One message carries at most 65535 fragments, however deep the reliable
+/// queue: a response of 65536 one-byte fragments is refused, one of 65535 is not.
+#[test]
+fn a_put_whose_response_needs_more_than_65535_fragments_is_refused() -> Result<()> {
+    let options = CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 1,
+        max_pending_reliable_packets_per_session: 100_000,
+        max_snapshot_response_bytes: 70_000,
+        ..Default::default()
+    };
+    let sink = Sink::default();
+    let mut server = server(options, Clock::new(62_000), sink.clone(), Source::default())?;
+    let target = server.local_addr()?;
+
+    let mut refused = client(target, 141)?;
+    connect(&mut server, &mut [&mut refused])?;
+    send(
+        &mut refused,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-over".into(),
+            document: document_served_at("wide", 65_536)?,
+        },
+    )?;
+    assert_eq!(
+        poll_until_rejected_or_stored(&mut server, &sink, 1)?,
+        Some(CultMeshRudpRejectionReason::DocumentUnservable {
+            response_bytes: 65_536,
+            max_snapshot_response_bytes: 70_000,
+            fragment_count: 65_536,
+            max_fragment_count: 65_535,
+        })
+    );
+
+    let mut writer = client(target, 142)?;
+    connect(&mut server, &mut [&mut writer])?;
+    send(
+        &mut writer,
+        &CultNetMessage::DocumentPutRaw {
+            message_id: "put-at".into(),
+            document: document_served_at("wide", 65_535)?,
+        },
+    )?;
+    assert_eq!(poll_until_rejected_or_stored(&mut server, &sink, 1)?, None);
+    Ok(())
+}
+
+/// The limits must leave room for an empty snapshot response, the smallest the
+/// server sends; exactly enough room is accepted.
+#[test]
+fn options_that_cannot_carry_an_empty_snapshot_response_are_refused() -> Result<()> {
+    let empty = encode_cultnet_message_to_vec(
+        &CultNetMessage::SnapshotResponseRaw {
+            message_id: "r".into(),
+            documents: Vec::new(),
+        },
+        CultNetWireContract::CultNetSchemaV0,
+    )?
+    .len();
+    let build = |options: CultMeshRudpDocumentServerOptions| {
+        server(options, Clock::new(63_000), Sink::default(), Source::default()).map(|_| ())
+    };
+    let bytes = |max_snapshot_response_bytes| CultMeshRudpDocumentServerOptions {
+        max_snapshot_response_bytes,
+        ..Default::default()
+    };
+    let fragments = |max_pending_reliable_packets_per_session| CultMeshRudpDocumentServerOptions {
+        max_fragment_bytes: 1,
+        max_pending_reliable_packets_per_session,
+        ..Default::default()
+    };
+    build(bytes(empty))?;
+    let error = build(bytes(empty - 1)).unwrap_err().to_string();
+    assert!(error.contains("max_snapshot_response_bytes"), "{error}");
+    build(fragments(empty))?;
+    let error = build(fragments(empty - 1)).unwrap_err().to_string();
+    assert!(
+        error.contains("max_pending_reliable_packets_per_session"),
+        "{error}"
     );
     Ok(())
 }

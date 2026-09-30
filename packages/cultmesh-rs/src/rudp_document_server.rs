@@ -11,6 +11,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
+/// The most fragments one RUDP message can carry: its fragment count is a u16.
+const MAX_FRAGMENTS_PER_MESSAGE: usize = u16::MAX as usize;
 /// The shortest message id CultNet encodes: one character. A snapshot request
 /// can carry no shorter id, so no response to it can be smaller.
 const SHORTEST_MESSAGE_ID: &str = "0";
@@ -66,8 +68,11 @@ where
 
 /// Caller-owned catalog port for serving raw snapshot requests.
 ///
-/// The caller decides which records the requester may see. CultMesh preserves
+/// The caller decides which records the requester may see. CultMesh serves
 /// those records as raw CultNet documents and does not interpret their schemas.
+/// A served record carries no source provenance: the server clears
+/// `source_runtime_id`, `source_agent_id`, `source_role` and `tags` before it
+/// sizes or sends a response, as every CultMesh runtime's server does.
 pub trait CultMeshRudpSnapshotSource {
     fn raw_snapshot(
         &mut self,
@@ -142,7 +147,8 @@ pub struct CultMeshRudpDocumentServerOptions {
     pub max_admitted_payload_bytes: usize,
     pub max_admitted_payload_bytes_per_session: usize,
     /// The largest encoded snapshot response the server sends. It also bounds
-    /// puts: a document whose snapshot response alone would exceed it is
+    /// puts: a document whose snapshot response alone would exceed it, or would
+    /// take more fragments than one message or the reliable queue can hold, is
     /// refused with `DocumentUnservable`, since no request could return it.
     pub max_snapshot_response_bytes: usize,
     pub max_snapshot_documents: usize,
@@ -189,11 +195,16 @@ pub enum CultMeshRudpRejectionReason {
     /// The caller's sink refused the document. Carries the sink's error text.
     SinkRefused(String),
     /// The document could never be served: a snapshot response carrying it
-    /// alone, under the shortest message id CultNet allows, would exceed
-    /// `max_snapshot_response_bytes`. It was not offered to the sink.
+    /// alone, as served and under the shortest message id CultNet allows, would
+    /// exceed `max_snapshot_response_bytes`, or would take more than
+    /// `max_fragment_count` fragments of `max_fragment_bytes`: the lesser of
+    /// 65535 and `max_pending_reliable_packets_per_session`. It was not offered
+    /// to the sink.
     DocumentUnservable {
         response_bytes: usize,
         max_snapshot_response_bytes: usize,
+        fragment_count: usize,
+        max_fragment_count: usize,
     },
     /// The caller's snapshot source failed. Carries its error text.
     SnapshotSourceFailed(String),
@@ -220,9 +231,11 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::DocumentUnservable {
                 response_bytes,
                 max_snapshot_response_bytes,
+                fragment_count,
+                max_fragment_count,
             } => write!(
                 f,
-                "document can never be served: its snapshot response is {response_bytes} bytes; limit is {max_snapshot_response_bytes}"
+                "document can never be served: its snapshot response is {response_bytes} bytes in {fragment_count} fragments; limits are {max_snapshot_response_bytes} bytes and {max_fragment_count} fragments"
             ),
             Self::SnapshotTooManyDocuments {
                 documents,
@@ -557,11 +570,12 @@ where
                     }))
                 };
                 // Admit only what some snapshot request can return: the smallest
-                // response that could carry this document is the document alone
-                // under the shortest message id CultNet encodes, sized by the snapshot path's encoder.
+                // response that could carry this document is the record as served,
+                // alone, under the shortest message id CultNet encodes, sized by the
+                // snapshot path's encoder and fragmented as the snapshot path sends it.
                 let alone = CultNetMessage::SnapshotResponseRaw {
                     message_id: SHORTEST_MESSAGE_ID.into(),
-                    documents: vec![document],
+                    documents: vec![served_record(document.clone())],
                 };
                 let response_bytes = match encode_snapshot_response(&alone) {
                     Ok(payload) => payload.len(),
@@ -569,21 +583,24 @@ where
                         return reject(CultMeshRudpRejectionReason::ResponseEncodingFailed(error));
                     }
                 };
-                if response_bytes > self.options.max_snapshot_response_bytes {
+                let fragment_count = self.fragments_for(response_bytes);
+                let max_fragment_count = self.max_fragments_per_response();
+                if response_bytes > self.options.max_snapshot_response_bytes
+                    || fragment_count > max_fragment_count
+                {
                     return reject(CultMeshRudpRejectionReason::DocumentUnservable {
                         response_bytes,
                         max_snapshot_response_bytes: self.options.max_snapshot_response_bytes,
+                        fragment_count,
+                        max_fragment_count,
                     });
                 }
-                let CultNetMessage::SnapshotResponseRaw { mut documents, .. } = alone else {
-                    unreachable!("constructed as a snapshot response above");
-                };
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
                     message_id: message_id.clone(),
                     transport_sequence,
                     received_at_unix_millis: now_unix,
-                    document: documents.remove(0),
+                    document,
                 };
                 if let Err(error) = self.sink.accept_raw_document(receipt) {
                     return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
@@ -629,7 +646,7 @@ where
                 }
                 let response = CultNetMessage::SnapshotResponseRaw {
                     message_id: message_id.clone(),
-                    documents,
+                    documents: documents.into_iter().map(served_record).collect(),
                 };
                 let payload = match encode_snapshot_response(&response) {
                     Ok(payload) => payload,
@@ -711,6 +728,17 @@ where
         self.send_packet(key.remote_addr, &goodbye)
     }
 
+    /// The fragments `send_many` splits a response of `bytes` into.
+    fn fragments_for(&self, bytes: usize) -> usize {
+        bytes.div_ceil(self.options.max_fragment_bytes).max(1)
+    }
+
+    /// The most fragments one response can take: one message's fragment count,
+    /// and the reliable queue it must fit into whole.
+    fn max_fragments_per_response(&self) -> usize {
+        MAX_FRAGMENTS_PER_MESSAGE.min(self.options.max_pending_reliable_packets_per_session)
+    }
+
     fn payload_budget_allows(&self, key: CultMeshRudpSessionKey, bytes: usize) -> bool {
         let Some(session_bytes) = self
             .sessions
@@ -784,7 +812,38 @@ fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     if options.max_fragment_bytes == 0 {
         return Err(anyhow!("max_fragment_bytes must be greater than zero"));
     }
+    // The limits must leave room for the smallest response the server sends, an
+    // empty snapshot: a server that could answer nothing is misconfigured.
+    let empty = encode_snapshot_response(&CultNetMessage::SnapshotResponseRaw {
+        message_id: SHORTEST_MESSAGE_ID.into(),
+        documents: Vec::new(),
+    })
+    .map_err(|error| anyhow!(error))?
+    .len();
+    if empty > options.max_snapshot_response_bytes {
+        return Err(anyhow!(
+            "max_snapshot_response_bytes cannot hold an empty snapshot response"
+        ));
+    }
+    let max_fragments =
+        MAX_FRAGMENTS_PER_MESSAGE.min(options.max_pending_reliable_packets_per_session);
+    if empty.div_ceil(options.max_fragment_bytes) > max_fragments {
+        return Err(anyhow!(
+            "max_fragment_bytes and max_pending_reliable_packets_per_session cannot carry an empty snapshot response"
+        ));
+    }
     Ok(())
+}
+
+/// The record as the server serves it: without source provenance. What a peer
+/// says about its own runtime, agent, role and tags is receipt data for the
+/// sink, not part of the served document.
+fn served_record(mut document: CultNetRawDocumentRecord) -> CultNetRawDocumentRecord {
+    document.source_runtime_id = None;
+    document.source_agent_id = None;
+    document.source_role = None;
+    document.tags = None;
+    document
 }
 
 /// The one encoder for a snapshot response, shared by the snapshot path and by
