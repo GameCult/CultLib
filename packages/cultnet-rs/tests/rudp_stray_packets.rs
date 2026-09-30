@@ -30,9 +30,13 @@ fn socket() -> Result<UdpSocket> {
 }
 
 fn raw_session(connection_id: u32) -> CultNetRudpSession {
+    raw_session_from(connection_id, 1)
+}
+
+fn raw_session_from(connection_id: u32, initial_sequence: u32) -> CultNetRudpSession {
     CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id,
-        initial_sequence: 1,
+        initial_sequence,
         resend_delay_ms: 250,
         max_pending_reliable_packets: None,
     })
@@ -725,7 +729,7 @@ fn a_flush_fails_when_a_new_endpoint_replaces_the_peer_mid_wait() -> Result<()> 
     send_to(&peer_a, server_addr, &raw_session(CONNECTION_ID).create_connect(0, b"a".to_vec())?)?;
     let _ = server.receive_once()?;
     server.send_reliable("schema", b"for A".to_vec())?;
-    send_to(&peer_b, server_addr, &raw_session(CONNECTION_ID).create_connect(0, b"b".to_vec())?)?;
+    send_to(&peer_b, server_addr, &raw_session_from(CONNECTION_ID, 2).create_connect(0, b"b".to_vec())?)?;
 
     let error = server.flush_reliable(Duration::from_millis(300)).expect_err("A's write was forgotten");
     assert!(
