@@ -653,3 +653,22 @@ fn the_encoder_refuses_a_record_over_the_ceiling() {
     let error = encode_media_wire_record(&wrap(at + 1), provenance()).unwrap_err();
     assert!(error.to_string().contains("ceiling"), "{error}");
 }
+
+/// A record that arrives unfragmented is held to the same ceiling.
+#[test]
+fn a_session_refuses_an_unfragmented_media_packet_over_the_ceiling() {
+    let packets = connected_session()
+        .send_many(
+            "schema",
+            vec![0; GAMECULT_MEDIA_MAX_WIRE_BYTES + 1],
+            CultNetRudpSendOptions::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(packets.len(), 1, "sent whole");
+    let mut packet = packets[0].clone();
+    assert!(connected_session().receive(&packet, 0).is_ok());
+    packet.channel_id = GAMECULT_MEDIA_CHANNEL.to_string();
+    let error = connected_session().receive(&packet, 0).unwrap_err();
+    assert!(error.to_string().contains("max_payload_bytes"), "{error}");
+}
