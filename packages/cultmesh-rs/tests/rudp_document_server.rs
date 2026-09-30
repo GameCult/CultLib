@@ -1487,10 +1487,14 @@ impl RawPeer {
 
     /// Sends `message` reliably and in order; returns its sequences.
     fn send(&mut self, message: &CultNetMessage) -> Result<Vec<u32>> {
+        self.send_with(message, true)
+    }
+
+    fn send_with(&mut self, message: &CultNetMessage, reliable: bool) -> Result<Vec<u32>> {
         let payload = encode_cultnet_message_to_vec(message, CultNetWireContract::CultNetSchemaV0)?;
         let options = cultnet_rs::CultNetRudpSendOptions {
-            reliable: true,
-            ordered: true,
+            reliable,
+            ordered: reliable,
             sequenced: false,
             now_ms: 2,
             reliable_expire_after_ms: None,
@@ -2370,5 +2374,61 @@ fn an_unservable_put_is_never_offered_to_the_sink() -> Result<()> {
         CultMeshRudpRejectionReason::DocumentUnservable { .. }
     ));
     assert_eq!(sink.offered(), Vec::<String>::new());
+    Ok(())
+}
+
+/// A sink that holds each put's reply until it is offered the put `last`,
+/// then accepts every held reply and that one, inside the same poll.
+#[derive(Default)]
+struct AnswersOnLast(Vec<CultMeshRudpPutReply>);
+
+impl CultMeshRudpRawDocumentSink for AnswersOnLast {
+    fn accept_raw_document(
+        &mut self,
+        receipt: CultMeshRudpRawDocumentReceipt,
+        reply: CultMeshRudpPutReply,
+    ) {
+        self.0.push(reply);
+        if receipt.message_id == "last" {
+            self.0.drain(..).for_each(CultMeshRudpPutReply::accept);
+        }
+    }
+}
+
+/// A poll whose packet releases a withheld session sends exactly one
+/// acknowledgement. A reliable packet's own acknowledgement is that one; an
+/// unreliable packet has none, so the release sends it.
+#[test]
+fn a_release_inside_a_poll_sends_exactly_one_acknowledgement() -> Result<()> {
+    for reliable in [false, true] {
+        let mut server = CultMeshRudpDocumentServer::new(
+            UdpSocket::bind("127.0.0.1:0")?,
+            AnswersOnLast::default(),
+            Source::default(),
+            Clock::new(89_000),
+            Default::default(),
+        )?;
+        let mut peer = RawPeer::connect(&mut server, 102)?;
+        let first = peer.send(&put("first"))?;
+        poll_until_idle(&mut server)?;
+        assert_eq!(peer.drain(), Vec::new(), "fixture: the first put is held");
+
+        let last = peer.send_with(&put("last"), reliable)?;
+        assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+        let sent = peer.drain();
+        assert_eq!(sent.len(), 1, "reliable {reliable}: {sent:?}");
+        assert_eq!(sent[0].packet_type, cultnet_rs::CultNetRudpPacketType::Ack);
+        assert!(
+            first
+                .iter()
+                .all(|sequence| acknowledges(&sent[0], *sequence))
+        );
+        if reliable {
+            assert!(
+                last.iter()
+                    .all(|sequence| acknowledges(&sent[0], *sequence))
+            );
+        }
+    }
     Ok(())
 }
