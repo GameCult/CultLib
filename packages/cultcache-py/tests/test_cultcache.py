@@ -893,6 +893,37 @@ class CultCacheTests(unittest.TestCase):
                         self.assertNotIn(repr(value[0]), message)
                         self.assertIn(f"of {len(value[0])} bytes", message)
 
+    def test_single_file_record_refusal_names_only_a_string_key(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            for key, schema in ((["SECRET-IN-LIST"], "s"), (b"SECRET-BYTES", "s"), ("k", {"SECRET": 1})):
+                path.write_bytes(msgpack.packb(
+                    ["cultcache.store.v1", [], [[key, schema, "t", b"\x90", "extra"]]], use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertNotIn("SECRET", str(caught.exception))
+                self.assertIn("not a valid store", str(caught.exception))
+
+    # What a write does through a symbolic link today. R3 decides whether a write resolves
+    # the link or refuses it; this pins the current behaviour so that change is deliberate.
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_r3_decides_resolve_or_refuse_a_push_through_a_live_link_replaces_the_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            volume = Path(tmp) / "volume"
+            volume.mkdir()
+            target = volume / "store.cc"
+            envelope = CultCacheEnvelope(key="a", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z")
+            SingleFileMessagePackBackingStore(target).push(envelope)
+            before = target.read_bytes()
+            link = Path(tmp) / "store.cc"
+            link.symlink_to(target)
+            SingleFileMessagePackBackingStore(link).push(replace(envelope, key="b"))
+            self.assertFalse(link.is_symlink())
+            self.assertTrue(link.is_file())
+            self.assertEqual(target.read_bytes(), before)
+
     @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
     def test_a_dangling_symlink_at_a_store_path_is_an_os_error_and_nothing_is_written(self) -> None:
         for store_type in (SingleFileMessagePackBackingStore, JsonLinesBackingStore):

@@ -170,6 +170,14 @@ def _read_store(path: Path, read: Callable[[Path], _Contents]) -> _Contents | No
         return None
 
 
+def _describe_identity(value: Any) -> str:
+    """A record key or schema id as a refusal may show it: a string is an identity and is
+    named; anything else is described by its type, since the value is the store's."""
+    if isinstance(value, str):
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
 def _describe_header(header: str) -> str:
     """Echoes a header only in the shape cultcache.store.v<digits>; the bytes are the store's."""
     version = header[len(_STORE_FORMAT_PREFIX) + 1:] if header.startswith(_STORE_FORMAT_PREFIX + "v") else ""
@@ -204,7 +212,8 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
             raise ValueError("CultCache persisted records must be MessagePack arrays")
         if len(raw_record) > _PERSISTED_RECORD_SLOTS:
             raise ValueError(
-                f"CultCache record {raw_record[0]!r} (schema {raw_record[1]!r}) has {len(raw_record)} slots, more than "
+                f"CultCache record {_describe_identity(raw_record[0])} (schema {_describe_identity(raw_record[1])}) "
+                f"has {len(raw_record)} slots, more than "
                 f"the {_PERSISTED_RECORD_SLOTS} of a {STORE_FORMAT_VERSION} record, so this is not a valid store"
             )
         key, schema_id, stored_at, payload = raw_record
