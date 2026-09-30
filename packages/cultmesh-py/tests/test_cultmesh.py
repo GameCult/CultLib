@@ -4613,6 +4613,69 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(after["documents"], [])
         self.assertTrue(alive)
 
+    def test_cultmesh_local_server_refuses_a_put_its_store_cannot_take_and_serves_on(self) -> None:
+        # Well-formed puts the store refuses: a blank key, a payload that is not MessagePack, a
+        # payload its schema cannot decode, a global document under another key. Each is refused
+        # to the peer that sent it, over RUDP and over TCP; the RUDP thread lives, the TCP
+        # connection serves its next message, and other peers are served.
+        document = self._rudp_bound_note()
+        global_document = define_database_entry_type(
+            "mesh.rudp_global_note",
+            [("schema_version", 0), ("body", 1)],
+            schema_id="sha256:mesh-rudp-global",
+            schema_name="mesh.rudp_global_note",
+            schema_version="mesh.rudp_global_note.v1",
+            global_document=True,
+        )
+
+        def cases() -> list[dict[str, Any]]:
+            puts = []
+            for name, field_name, value in (
+                ("empty-key", "recordKey", ""),
+                ("blank-key", "recordKey", "   "),
+                ("garbage-payload", "payload", bytes([0xC1])),
+                ("int-payload", "payload", msgpack.packb(5)),
+            ):
+                put = self._rudp_note_put(document, name, "note:ok", 10)
+                put["document"][field_name] = value
+                puts.append(put)
+            puts.append(self._rudp_note_put(global_document, "global-wrong-key", "not-global", 10))
+            return puts
+
+        node = CultMesh.create_node(runtime_id="mesh-unstorable-put")
+        node.database.register_document(document)
+        node.database.register_document(global_document)
+        server = CultMesh.serve_node(node)
+        try:
+            rudp_refusals = [(put["messageId"], self._rudp_exchange(server, put)[0]) for put in cases()]
+            rudp_after, _ = self._rudp_exchange(server, hello(runtime_id="rudp-after").to_wire())
+            rudp_alive = server._rudp_thread is not None and server._rudp_thread.is_alive()
+
+            tcp_refusals = []
+            with CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).open_transport() as transport:
+                for put in cases():
+                    transport.send("schema", msgpack.packb(put, use_bin_type=True))
+                    tcp_refusals.append((put["messageId"], msgpack.unpackb(transport.receive().payload, raw=False)))
+                transport.send("schema", msgpack.packb(hello(runtime_id="same-connection").to_wire(), use_bin_type=True))
+                same_connection = msgpack.unpackb(transport.receive().payload, raw=False)
+            other_connection = CultMesh.create_client("127.0.0.1", server.port, timeout_seconds=4.0).request(
+                hello(runtime_id="other-connection").to_wire(), expected_schema_version="cultnet.hello.v0"
+            )
+        finally:
+            server.stop()
+        self.assertEqual(len(rudp_refusals), 5)
+        for message_id, refusal in rudp_refusals + tcp_refusals:
+            self.assertEqual(refusal["schemaVersion"], "cultnet.error.v0", message_id)
+            self.assertEqual(refusal["messageId"], message_id)
+            self.assertEqual(refusal["code"], "malformed_document_put", message_id)
+            self.assertNotIn("note:ok", refusal["error"], message_id)
+        self.assertEqual(len(tcp_refusals), 5)
+        self.assertEqual(rudp_after["schemaVersion"], "cultnet.hello.v0")
+        self.assertTrue(rudp_alive)
+        self.assertEqual(same_connection["schemaVersion"], "cultnet.hello.v0")
+        self.assertEqual(other_connection["schemaVersion"], "cultnet.hello.v0")
+        self.assertIsNone(node.database.get(document, "note:ok"))
+
     def test_cultmesh_local_server_refuses_options_that_could_answer_nothing(self) -> None:
         # The Rust document server's option rules: every limit is greater than zero, and the limits
         # leave room for an empty snapshot, the smallest response the server sends. One-byte

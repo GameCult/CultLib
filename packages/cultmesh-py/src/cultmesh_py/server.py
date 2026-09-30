@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
@@ -40,6 +41,8 @@ from cultnet_py.cultmesh_contracts import (
     CultMeshPeerCatalog,
     CultMeshVerseCatalog,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -430,7 +433,19 @@ class CultMeshLocalServer:
         unservable = self._unservable_put(message, over_rudp=over_rudp)
         if unservable is not None:
             return [unservable]
-        change = self.node.database.apply_raw_put_message(message)
+        try:
+            change = self.node.database.apply_raw_put_message(message)
+        except Exception as error:  # noqa: BLE001 - a put the store cannot take is that peer's refusal
+            # The store refused the put: a blank key, a payload its schema cannot decode, a global
+            # document under another key, or anything a document's own decoder or validator
+            # raises. It is refused to the peer that sent it; no thread and no other peer is
+            # affected. Neither the refusal nor the log quotes the error, which can quote the put.
+            _LOGGER.warning("CultMesh server refused a raw put the store could not take (%s).", type(error).__name__)
+            return [self._error_response(
+                "Raw put document could not be stored.",
+                message_id=str(message.get("messageId") or ""),
+                code="malformed_document_put",
+            )]
         if change is None:
             return [self._error_response(
                 "Raw put message did not apply to a registered document.",
