@@ -1421,10 +1421,21 @@ test("rudp session advances large fragment sets through a bounded reliable windo
 const FLOW_CONNECTION_ID = 0x464c4f57;
 const MIB = 1024 * 1024;
 
+function flowSession(initialSequence: number): CultNetRudpSession {
+  return new CultNetRudpSession({ connectionId: FLOW_CONNECTION_ID, initialSequence, resendDelayMs: 25 });
+}
+
+// A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's Connect, and the
+// sender's Connect is acknowledged, so nothing is pending on the sender.
+function connectedFlowPair(senderInitialSequence: number, receiverInitialSequence: number): [CultNetRudpSession, CultNetRudpSession] {
+  const sender = flowSession(senderInitialSequence);
+  const receiver = flowSession(receiverInitialSequence);
+  sender.receive(receiver.acceptConnect(sender.createConnect(0), 0), 0);
+  return [sender, receiver];
+}
+
 function connectedFlowSession(initialSequence: number): CultNetRudpSession {
-  const session = new CultNetRudpSession({ connectionId: FLOW_CONNECTION_ID, initialSequence, resendDelayMs: 25 });
-  session.receive({ packetType: "accept", connectionId: FLOW_CONNECTION_ID, sequence: 0, ack: 0, ackMask: 0, channelId: "control" });
-  return session;
+  return connectedFlowPair(initialSequence, 900)[0];
 }
 
 function flowSend(session: CultNetRudpSession, payloadBytes: number): CultNetRudpPacket[] {
@@ -1447,8 +1458,7 @@ function loseGAndFillTheSpan(session: CultNetRudpSession): CultNetRudpPacket {
 }
 
 test("a lost packet holds the sender 1023 sequences ahead and is still delivered", () => {
-  const sender = connectedFlowSession(1);
-  const receiver = connectedFlowSession(100);
+  const [sender, receiver] = connectedFlowPair(1, 100);
   const g = flowSend(sender, 1)[0]!;
   let admittedAfterG = 0;
   for (let index = 0; index < 4200; index++) {

@@ -882,12 +882,23 @@ class CultNetTests(unittest.TestCase):
     FLOW_CONNECTION_ID = 0x464C4F57
     MIB = 1024 * 1024
 
-    def _connected_flow_session(self, initial_sequence: int) -> CultNetRudpSession:
-        session = CultNetRudpSession(
+    def _flow_session(self, initial_sequence: int) -> CultNetRudpSession:
+        return CultNetRudpSession(
             CultNetRudpSessionOptions(connection_id=self.FLOW_CONNECTION_ID, initial_sequence=initial_sequence)
         )
-        session.receive(CultNetRudpPacket(CultNetRudpPacketType.ACCEPT, self.FLOW_CONNECTION_ID, 0, 0, 0, "control"))
-        return session
+
+    def _connected_flow_pair(
+        self, sender_initial_sequence: int, receiver_initial_sequence: int
+    ) -> tuple[CultNetRudpSession, CultNetRudpSession]:
+        """A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's
+        Connect, and the sender's Connect is acknowledged, so nothing is pending on the sender."""
+        sender = self._flow_session(sender_initial_sequence)
+        receiver = self._flow_session(receiver_initial_sequence)
+        sender.receive(receiver.accept_connect(sender.create_connect(0), 0), 0)
+        return sender, receiver
+
+    def _connected_flow_session(self, initial_sequence: int) -> CultNetRudpSession:
+        return self._connected_flow_pair(initial_sequence, 900)[0]
 
     @staticmethod
     def _flow_send(session: CultNetRudpSession, payload_bytes: int) -> tuple[CultNetRudpPacket, ...]:
@@ -904,8 +915,7 @@ class CultNetTests(unittest.TestCase):
         return g
 
     def test_cultnet_rudp_a_lost_packet_holds_the_sender_1023_sequences_ahead_and_is_still_delivered(self) -> None:
-        sender = self._connected_flow_session(1)
-        receiver = self._connected_flow_session(100)
+        sender, receiver = self._connected_flow_pair(1, 100)
         g = self._flow_send(sender, 1)[0]
         admitted_after_g = 0
         for _ in range(4200):

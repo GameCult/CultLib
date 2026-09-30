@@ -1145,17 +1145,25 @@ namespace GameCult.Networking.Tests
         // above the lowest unacked one and the payload above that sequence stays within 4 MiB.
         private const int Mib = 1024 * 1024;
 
-        private static CultNetRudpSession ConnectedFlowSession(uint initialSequence)
-        {
-            var session = new CultNetRudpSession(new CultNetRudpSessionOptions
+        private static CultNetRudpSession FlowSession(uint initialSequence) =>
+            new CultNetRudpSession(new CultNetRudpSessionOptions
             {
                 ConnectionId = 0x464c4f57,
                 InitialSequence = initialSequence,
                 ResendDelayMs = 25
             });
-            session.Receive(new CultNetRudpPacket { PacketType = CultNetRudpPacketType.Accept, ConnectionId = 0x464c4f57, Sequence = 0, ChannelId = "control" });
-            return session;
+
+        // A sender and a receiver that have shaken hands: the receiver's watermark is seeded by the sender's
+        // Connect, and the sender's Connect is acknowledged, so nothing is pending on the sender.
+        private static (CultNetRudpSession Sender, CultNetRudpSession Receiver) ConnectedFlowPair(uint senderInitialSequence, uint receiverInitialSequence)
+        {
+            var sender = FlowSession(senderInitialSequence);
+            var receiver = FlowSession(receiverInitialSequence);
+            sender.Receive(receiver.AcceptConnect(sender.CreateConnect(0), 0), 0);
+            return (sender, receiver);
         }
+
+        private static CultNetRudpSession ConnectedFlowSession(uint initialSequence) => ConnectedFlowPair(initialSequence, 900).Sender;
 
         private static IReadOnlyList<CultNetRudpPacket> FlowSend(CultNetRudpSession session, int payloadBytes) =>
             session.SendMany("state", new byte[payloadBytes], new CultNetRudpSendOptions { Reliable = true });
@@ -1177,8 +1185,7 @@ namespace GameCult.Networking.Tests
         [Test]
         public void RudpSession_ALostPacketHoldsTheSender1023SequencesAheadAndIsStillDelivered()
         {
-            var sender = ConnectedFlowSession(1);
-            var receiver = ConnectedFlowSession(100);
+            var (sender, receiver) = ConnectedFlowPair(1, 100);
             var g = FlowSend(sender, 1).Single();
             var admittedAfterG = 0;
             for (var index = 0; index < 4200; index++)

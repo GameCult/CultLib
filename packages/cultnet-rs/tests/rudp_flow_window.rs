@@ -8,32 +8,32 @@ use cultnet_rs::*;
 const CONNECTION_ID: u32 = 0x464c_4f57;
 const MIB: usize = 1024 * 1024;
 
-fn connected(initial_sequence: u32) -> Result<CultNetRudpSession> {
-    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+fn session(initial_sequence: u32) -> CultNetRudpSession {
+    CultNetRudpSession::new(CultNetRudpSessionOptions {
         connection_id: CONNECTION_ID,
-        initial_sequence,
+        initial_sequence: Some(initial_sequence),
         resend_delay_ms: 25,
         max_pending_reliable_packets: None,
-    });
-    session.receive(
-        &CultNetRudpPacket {
-            packet_type: CultNetRudpPacketType::Accept,
-            connection_id: CONNECTION_ID,
-            sequence: 0,
-            ack: 0,
-            ack_mask: 0,
-            channel_id: "control".into(),
-            reliable: false,
-            ordered: false,
-            sequenced: false,
-            fragment_id: 0,
-            fragment_index: 0,
-            fragment_count: 0,
-            payload: Vec::new(),
-        },
-        0,
-    )?;
-    Ok(session)
+    })
+}
+
+/// A sender and a receiver that have shaken hands: the receiver's watermark is
+/// seeded by the sender's Connect, and the sender's Connect is acknowledged, so
+/// nothing is pending on the sender.
+fn connected_pair(
+    sender_initial_sequence: u32,
+    receiver_initial_sequence: u32,
+) -> Result<(CultNetRudpSession, CultNetRudpSession)> {
+    let mut sender = session(sender_initial_sequence);
+    let mut receiver = session(receiver_initial_sequence);
+    let connect = sender.create_connect(0, Vec::new())?;
+    let accept = receiver.accept_connect(&connect, 0, Vec::new())?;
+    sender.receive(&accept, 0)?;
+    Ok((sender, receiver))
+}
+
+fn connected(initial_sequence: u32) -> Result<CultNetRudpSession> {
+    Ok(connected_pair(initial_sequence, 900)?.0)
 }
 
 fn reliable() -> CultNetRudpSendOptions {
@@ -84,8 +84,7 @@ fn lose_g_and_fill_the_span(session: &mut CultNetRudpSession) -> Result<CultNetR
 
 #[test]
 fn a_lost_packet_holds_the_sender_1023_sequences_ahead_and_is_still_delivered() -> Result<()> {
-    let mut sender = connected(1)?;
-    let mut receiver = connected(100)?;
+    let (mut sender, mut receiver) = connected_pair(1, 100)?;
     let g = send(&mut sender, 1)?.remove(0);
     // g is lost. Everything after it is delivered and acked, until the sender stops.
     let mut admitted_after_g = 0u32;
