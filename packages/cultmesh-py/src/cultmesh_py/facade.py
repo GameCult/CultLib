@@ -31,7 +31,7 @@ from .node import (
     CultMeshPublicationDocumentBinding,
     create_node,
 )
-from .server import CultMeshLocalServer
+from .server import CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES, CultMeshLocalServer
 from .session import CultMeshGameSession, CultMeshGameSessionOptions
 from .simulation import CultMeshSimulationFactCommitter
 from cultnet_py.cultmesh_contracts import (
@@ -404,6 +404,8 @@ class CultMesh:
         enable_rudp: bool = True,
         rudp_connection_id: int = 0x43554C54,
         rudp_resend_delay_ms: int = 25,
+        rudp_max_fragment_bytes: int = CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES,
+        rudp_max_pending_reliable_packets: int | None = None,
     ) -> CultMeshLocalServer:
         return CultMeshLocalServer(
             node=node,
@@ -418,6 +420,8 @@ class CultMesh:
             enable_rudp=enable_rudp,
             rudp_connection_id=rudp_connection_id,
             rudp_resend_delay_ms=rudp_resend_delay_ms,
+            rudp_max_fragment_bytes=rudp_max_fragment_bytes,
+            rudp_max_pending_reliable_packets=rudp_max_pending_reliable_packets,
         ).start()
 
     @staticmethod

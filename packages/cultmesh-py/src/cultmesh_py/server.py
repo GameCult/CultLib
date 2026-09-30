@@ -28,6 +28,11 @@ from .node import CultMeshNode
 # The shortest message id this server answers a snapshot request under. It takes a
 # request's messageId as given, an empty one included, so no response it sends is smaller.
 _SHORTEST_SERVED_MESSAGE_ID = ""
+# The most fragments one RUDP message can carry: its fragment count is a u16.
+_MAX_FRAGMENTS_PER_MESSAGE = 0xFFFF
+# Replies larger than one fragment are split into fragments of at most this many bytes,
+# as the Rust and TypeScript document servers do by default.
+CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES = 1200
 from cultnet_py.cultmesh_contracts import (
     PEER_EXCHANGE_REQUEST,
     VERSE_CATALOG_REQUEST,
@@ -72,17 +77,35 @@ class CultMeshLocalServer:
     enable_rudp: bool = True
     rudp_connection_id: int = 0x43554C54
     rudp_resend_delay_ms: int = 25
+    # RUDP replies are fragmented by rudp_max_fragment_bytes, and each peer's reliable queue
+    # holds at most rudp_max_pending_reliable_packets (None: only the 65535 fragments one
+    # message can carry). A put arriving over RUDP whose served reply could not fit them is
+    # refused as document_unservable.
+    rudp_max_fragment_bytes: int = CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES
+    rudp_max_pending_reliable_packets: int | None = None
     _socket: socket.socket | None = field(default=None, init=False, repr=False)
     _rudp_socket: socket.socket | None = field(default=None, init=False, repr=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _rudp_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _rudp_send_failures: int = field(default=0, init=False, repr=False)
+
+    @property
+    def rudp_send_failures(self) -> int:
+        """RUDP replies and datagrams that could not be sent to a peer. Each is that peer's
+        loss: a reliable packet already queued stays pending and is resent, and no other
+        peer is affected."""
+        return self._rudp_send_failures
 
     def __post_init__(self) -> None:
         if self.max_snapshot_documents is not None and self.max_snapshot_documents < 0:
             raise ValueError("max_snapshot_documents must be non-negative")
         if self.max_snapshot_bytes is not None and self.max_snapshot_bytes < 0:
             raise ValueError("max_snapshot_bytes must be non-negative")
+        if self.rudp_max_fragment_bytes <= 0:
+            raise ValueError("rudp_max_fragment_bytes must be greater than zero")
+        if self.rudp_max_pending_reliable_packets is not None and self.rudp_max_pending_reliable_packets <= 0:
+            raise ValueError("rudp_max_pending_reliable_packets must be greater than zero")
 
     def start(self) -> "CultMeshLocalServer":
         if self._socket is not None:
@@ -237,6 +260,7 @@ class CultMeshLocalServer:
                             CultNetRudpSessionOptions(
                                 connection_id=self.rudp_connection_id,
                                 resend_delay_ms=self.rudp_resend_delay_ms,
+                                max_pending_reliable_packets=self.rudp_max_pending_reliable_packets,
                             )
                         )
                     )
@@ -267,7 +291,7 @@ class CultMeshLocalServer:
                     continue
                 if not isinstance(message, dict):
                     continue
-                responses = self._handle_connection_message(message, peer.subscriptions)
+                responses = self._handle_connection_message(message, peer.subscriptions, over_rudp=True)
                 for response in responses:
                     self._send_rudp_schema_frame(
                         rudp_socket,
@@ -299,25 +323,40 @@ class CultMeshLocalServer:
         session: CultNetRudpSession,
         payload: bytes,
     ) -> None:
-        for packet in session.send_many(
-            "schema",
-            payload,
-            CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=_now_ms()),
-        ):
+        try:
+            packets = session.send_many(
+                "schema",
+                payload,
+                CultNetRudpSendOptions(reliable=True, ordered=True, now_ms=_now_ms()),
+                max_fragment_bytes=self.rudp_max_fragment_bytes,
+            )
+        except ValueError:
+            # The peer's reliable queue cannot take this reply now. It is that peer's loss,
+            # never the thread's.
+            self._rudp_send_failures += 1
+            return
+        for packet in packets:
             self._send_rudp_packet(rudp_socket, remote_addr, packet)
 
-    @staticmethod
     def _send_rudp_packet(
+        self,
         rudp_socket: socket.socket,
         remote_addr: tuple[str, int],
         packet: CultNetRudpPacket,
     ) -> None:
-        rudp_socket.sendto(encode_rudp_packet(packet), remote_addr)
+        # A datagram that cannot leave is that peer's lost datagram: counted, never raised
+        # (raising here ended the RUDP thread for every peer). A reliable one is resent.
+        try:
+            rudp_socket.sendto(encode_rudp_packet(packet), remote_addr)
+        except OSError:
+            self._rudp_send_failures += 1
 
     def _handle_connection_message(
         self,
         message: dict[str, Any],
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        over_rudp: bool = False,
     ) -> list[dict[str, Any]]:
         schema_version = message.get("schemaVersion")
         if schema_version == "cultnet.database_subscribe.v0":
@@ -341,7 +380,7 @@ class CultMeshLocalServer:
             subscriptions.pop(str(message.get("subscriptionId") or ""), None)
             return []
         if schema_version == "cultnet.document_put_raw.v0":
-            return self._handle_raw_put(message, subscriptions)
+            return self._handle_raw_put(message, subscriptions, over_rudp=over_rudp)
         if schema_version == "cultnet.document_delete.v0":
             return self._handle_raw_delete(message, subscriptions)
         if schema_version == "cultnet.simulation_observation.v0":
@@ -353,6 +392,8 @@ class CultMeshLocalServer:
         self,
         message: dict[str, Any],
         subscriptions: dict[str, _DatabaseSubscription],
+        *,
+        over_rudp: bool = False,
     ) -> list[dict[str, Any]]:
         document_record = message.get("document")
         if not isinstance(document_record, dict):
@@ -361,19 +402,9 @@ class CultMeshLocalServer:
                 message_id=str(message.get("messageId") or ""),
                 code="malformed_document_put",
             )]
-        if self.max_snapshot_bytes is not None:
-            alone = self.node.database.raw_put_served_alone(
-                message, message_id=_SHORTEST_SERVED_MESSAGE_ID
-            )
-            response_bytes = None if alone is None else _snapshot_response_bytes(alone)
-            if response_bytes is not None and response_bytes > self.max_snapshot_bytes:
-                return [self._error_response(
-                    f"Document can never be served: its snapshot response is {response_bytes} bytes; "
-                    f"limit is {self.max_snapshot_bytes}.",
-                    message_id=str(message.get("messageId") or ""),
-                    code="document_unservable",
-                    details={"responseBytes": response_bytes, "maxSnapshotBytes": self.max_snapshot_bytes},
-                )]
+        unservable = self._unservable_put(message, over_rudp=over_rudp)
+        if unservable is not None:
+            return [unservable]
         change = self.node.database.apply_raw_put_message(message)
         if change is None:
             return [self._error_response(
@@ -585,6 +616,42 @@ class CultMeshLocalServer:
                     details={"responseBytes": response_bytes, "maxSnapshotBytes": self.max_snapshot_bytes},
                 )
         return response
+
+    def _unservable_put(self, message: dict[str, Any], *, over_rudp: bool) -> dict[str, Any] | None:
+        """The refusal for a put this server could never serve, or None. The document alone,
+        as a snapshot would serve it under the shortest message id, must fit max_snapshot_bytes;
+        a put arriving over RUDP must also fit, as fragments of rudp_max_fragment_bytes, in one
+        message and the peer's reliable queue."""
+        if self.max_snapshot_bytes is None and not over_rudp:
+            return None
+        alone = self.node.database.raw_put_served_alone(message, message_id=_SHORTEST_SERVED_MESSAGE_ID)
+        if alone is None:
+            return None
+        response_bytes = _snapshot_response_bytes(alone)
+        details: dict[str, Any] = {"responseBytes": response_bytes, "maxSnapshotBytes": self.max_snapshot_bytes}
+        fits = self.max_snapshot_bytes is None or response_bytes <= self.max_snapshot_bytes
+        limits = f"limit is {self.max_snapshot_bytes}"
+        if over_rudp:
+            fragment_count = max(1, -(-response_bytes // self.rudp_max_fragment_bytes))
+            max_fragment_count = min(
+                _MAX_FRAGMENTS_PER_MESSAGE,
+                self.rudp_max_pending_reliable_packets or _MAX_FRAGMENTS_PER_MESSAGE,
+            )
+            details |= {"fragmentCount": fragment_count, "maxFragmentCount": max_fragment_count}
+            fits = fits and fragment_count <= max_fragment_count
+            limits = (
+                f"it takes {fragment_count} fragments; limits are "
+                f"{'unbounded' if self.max_snapshot_bytes is None else self.max_snapshot_bytes} bytes "
+                f"and {max_fragment_count} fragments"
+            )
+        if fits:
+            return None
+        return self._error_response(
+            f"Document can never be served: its snapshot response is {response_bytes} bytes; {limits}.",
+            message_id=str(message.get("messageId") or ""),
+            code="document_unservable",
+            details=details,
+        )
 
     @staticmethod
     def _error_response(

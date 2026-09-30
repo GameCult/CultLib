@@ -24,7 +24,7 @@ from .node import (
     CultMeshReactiveDocumentReconciliation,
     create_node,
 )
-from .server import CultMeshLocalServer
+from .server import CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES, CultMeshLocalServer
 from .session import (
     CultMeshGameSession,
     CultMeshGameSessionOptions,
@@ -79,6 +79,7 @@ __all__ = [
     "CultMeshReactiveDocumentReconciliation",
     "CultMeshGameSession",
     "CultMeshGameSessionOptions",
+    "CULTMESH_RUDP_DEFAULT_MAX_FRAGMENT_BYTES",
     "CultMeshLocalServer",
     "CultMeshPeerCard",
     "CultMeshPeerCatalog",
