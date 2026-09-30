@@ -3287,6 +3287,7 @@ async function withServedBoundRig(
   connectionId: number,
   serverLimits: { maxFragmentBytes?: number; maxPendingReliablePackets?: number; maxPayloadBytes?: number },
   body: (rig: ServedBoundRig) => Promise<void>,
+  handler: { echoReceipt?: boolean } = {},
 ): Promise<void> {
   const node = await CultMesh.startNode(
     join(await mkdtemp(join(tmpdir(), "cultmesh-ts-served-bound-")), "node.ccmp"),
@@ -3318,6 +3319,9 @@ async function withServedBoundRig(
           payload: encode(document.payload),
         },
       });
+      return handler.echoReceipt
+        ? { binding: defineCultNetDocumentBinding({ definition: noteDocument }), recordKey: document.recordKey, value: document.payload as { noteId: string; body: string } }
+        : undefined;
     },
     onError: (error) => errors.push(error),
   });
@@ -3407,12 +3411,10 @@ test("CultMesh TS RUDP document server refuses a put whose reply would overflow 
   });
 });
 
-test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts and inbound frames", async () => {
+test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and judges puts by what it would serve", async () => {
   const limit = 4_000;
   const atBound = bodyLengthForReplyBytes("note:at", limit);
   const overBound = bodyLengthForReplyBytes("note:ov", limit + 1);
-  // A put's own frame is only a few bytes under its reply, so a long message id would push an
-  // at-bound put over the inbound limit before admission is asked. Keep these ids short.
   await withServedBoundRig(0x10203062, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
     rig.peer.send(notePut("put-over", "note:ov", overBound));
     const refusal = await waitForError(rig, "the over-bound put");
@@ -3421,20 +3423,24 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts
     assert.equal(refusal.maxPayloadBytes, limit);
     assert.equal(refusal.fragmentCount, 4);
     assert.deepEqual(rig.admitted, []);
+    // The peer hears the refusal, and it names sizes, never the record.
+    assert.deepEqual(await waitForPeerErrors(rig, 1), [refusal.message]);
+    assert.ok(!refusal.message.includes("note:ov"), refusal.message);
 
-    rig.peer.send(notePut("put-at", "note:at", atBound));
+    // A put whose own frame is over the limit only by the provenance and message id it carries
+    // is served at the bound, so it is admitted and served.
+    const carried = notePut(`put-at-${"m".repeat(200)}`, "note:at", atBound, `runtime-${"r".repeat(200)}`);
+    assert.ok(encode(carried).byteLength > limit, "fixture: the put's frame is over the limit");
+    rig.peer.send(carried);
     await waitForAdmission(rig, "note:at");
     assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
     assert.equal(rig.errors.length, 1);
 
-    // A frame over the limit is refused on arrival and never offered as a put.
-    rig.peer.send(notePut("put-huge", "note:huge", 2 * limit));
-    await delay(50);
-    const startedAt = Date.now();
-    while (rig.errors.length < 2 && Date.now() - startedAt < 3_000) await delay(5);
-    assert.equal(rig.errors.length, 2);
-    assert.ok(!(rig.errors[1] instanceof CultMeshRudpUnservableDocumentError));
-    assert.match(rig.errors[1]!.message, /maxPayloadBytes is 4000/);
+    // A record key longer than the limit: the refusal is still small enough to reach the peer.
+    const longKey = `note:${"k".repeat(2 * limit)}`;
+    rig.peer.send(notePut("put-long-key", longKey, 10));
+    assert.equal((await waitForPeerErrors(rig, 2))[1], rig.errors[1]!.message);
+    assert.ok(rig.errors[1] instanceof CultMeshRudpUnservableDocumentError, rig.errors[1]!.message);
     assert.deepEqual(rig.admitted, ["note:at"]);
 
     // Two servable documents make a reply over the limit: it is not sent, and onError hears why.
@@ -3447,6 +3453,44 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies, puts
     assert.match(rig.errors[2]!.message, /reply cultnet\.snapshot_response_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
   });
 });
+
+test("CultMesh TS RUDP document server tells the peer when a stored put's receipt cannot be sent", async () => {
+  const limit = 4_000;
+  const small = bodyLengthForReplyBytes("note:small", 1_000);
+  const atBound = bodyLengthForReplyBytes("note:at", limit);
+  await withServedBoundRig(0x10203064, { maxFragmentBytes: 1024, maxPayloadBytes: limit }, async (rig) => {
+    rig.peer.send(notePut("put-small", "note:small", small));
+    await waitForAdmission(rig, "note:small");
+    const startedAt = Date.now();
+    while (!rig.messages.some(isDocumentPut) && Date.now() - startedAt < 3_000) await delay(5);
+    assert.ok(rig.messages.some(isDocumentPut), "a receipt that fits is sent");
+
+    // Served at the bound, the put is admitted and stored; its echoed receipt carries the
+    // server's provenance and so is over the limit. The peer hears that it is not coming.
+    rig.peer.send(notePut("put-at", "note:at", atBound));
+    await waitForAdmission(rig, "note:at");
+    const [refusal] = await waitForPeerErrors(rig, 1);
+    assert.match(refusal!, /stored a put but could not send its receipt/);
+    assert.equal(rig.errors.length, 1);
+    assert.match(rig.errors[0]!.message, /reply cultnet\.document_put_raw\.v0 is \d+ bytes; maxPayloadBytes is 4000/);
+    assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);
+  }, { echoReceipt: true });
+});
+
+function isDocumentPut(message: CultNetMessage): boolean {
+  return message.schemaVersion === "cultnet.document_put_raw.v0";
+}
+
+/** Waits until the peer has received `count` cultnet.error.v0 replies, and returns their text. */
+async function waitForPeerErrors(rig: ServedBoundRig, count: number): Promise<string[]> {
+  const errors = () => rig.messages
+    .filter((message) => message.schemaVersion === "cultnet.error.v0")
+    .map((message) => (message as { error: string }).error);
+  const startedAt = Date.now();
+  while (errors().length < count && Date.now() - startedAt < 3_000) await delay(5);
+  assert.equal(errors().length, count, `peer errors: ${errors().join("; ")}`);
+  return errors();
+}
 
 test("CultMesh TS RUDP document server reports a datagram that fails to leave", async () => {
   // Fragments larger than any UDP datagram: the reply's one packet cannot be sent.

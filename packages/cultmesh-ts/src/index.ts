@@ -4285,12 +4285,23 @@ export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDoc
  * Options for `CultMesh.createRudpDocumentServer`.
  *
  * The server fragments its replies by `maxFragmentBytes` (default
- * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES`) and refuses any
- * inbound frame or reply larger than `maxPayloadBytes`. A put whose snapshot
- * reply could never be sent within those limits, 65535 fragments and
+ * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES`) and sends no
+ * reply larger than `maxPayloadBytes`. A put is judged by what serving it
+ * would send, not by the size of its own frame: a put whose snapshot reply
+ * could never be sent within those limits, 65535 fragments and
  * `maxPendingReliablePackets`, is refused before `onDocumentPutRaw` sees it:
  * `onError` receives a `CultMeshRudpUnservableDocumentError` and the peer a
- * `cultnet.error.v0`. Every failed send reaches `onError`.
+ * `cultnet.error.v0`.
+ *
+ * That reply is sized as `documents` would store and serve the put's record.
+ * The judgement is exact only for an application whose `onDocumentPutRaw`
+ * stores the put through that registry (`applyRawDocumentPutMessage`) and
+ * whose `getCache` serves that store; a handler that stores another record
+ * is judged by the registry's record, not its own.
+ *
+ * A reply that cannot be sent, such as a receipt from `onDocumentPutRaw`
+ * larger than `maxPayloadBytes`, reaches `onError`, and the peer receives a
+ * `cultnet.error.v0` in its place. Every failed datagram send reaches `onError`.
  */
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
@@ -4330,8 +4341,10 @@ export class CultMeshRudpUnservableDocumentError extends Error {
     readonly fragmentCount: number,
     readonly maxFragmentCount: number,
   ) {
+    // The sentence names sizes only: it is sent to the peer, and a record key of
+    // any length would make the refusal itself too large to send.
     super(
-      `Document ${recordKey} can never be served: its snapshot reply is ${responseBytes} bytes in `
+      `Document can never be served: its snapshot reply is ${responseBytes} bytes in `
       + `${fragmentCount} fragments; limits are ${maxPayloadBytes ?? "unbounded"} bytes and `
       + `${maxFragmentCount} fragments.`,
     );
@@ -5884,13 +5897,6 @@ export class CultMesh {
           if (frame.channelId !== "schema") {
             continue;
           }
-          if (maxPayloadBytes !== undefined && frame.payload.byteLength > maxPayloadBytes) {
-            reportError(new Error(
-              `CultMesh RUDP document server refused a ${frame.payload.byteLength}-byte frame from `
-              + `${record.sessionId}; maxPayloadBytes is ${maxPayloadBytes}.`,
-            ));
-            continue;
-          }
           record.work = record.work
             .then(() => handleDocumentServerFrame(record, frame.payload))
             .catch(reportError);
@@ -5949,15 +5955,24 @@ export class CultMesh {
             }
             const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
             if (receipt) {
-              sendSchemaMessage(record, options.documents.createRawDocumentPutMessage(
-                receipt.binding, receipt.messageId ?? message.messageId, receipt.recordKey, receipt.value,
-                {
-                  sourceRuntimeId: receipt.sourceRuntimeId ?? runtimeId,
-                  sourceAgentId: receipt.sourceAgentId,
-                  sourceRole: receipt.sourceRole ?? "provider",
-                  tags: receipt.tags ?? ["receipt"],
-                },
-              ));
+              try {
+                sendSchemaMessage(record, options.documents.createRawDocumentPutMessage(
+                  receipt.binding, receipt.messageId ?? message.messageId, receipt.recordKey, receipt.value,
+                  {
+                    sourceRuntimeId: receipt.sourceRuntimeId ?? runtimeId,
+                    sourceAgentId: receipt.sourceAgentId,
+                    sourceRole: receipt.sourceRole ?? "provider",
+                    tags: receipt.tags ?? ["receipt"],
+                  },
+                ));
+              } catch (error) {
+                // The put is stored: the peer must hear that its receipt is not coming.
+                reportError(error);
+                sendSchemaMessage(record, {
+                  schemaVersion: "cultnet.error.v0",
+                  error: `CultMesh RUDP document server stored a put but could not send its receipt.`,
+                });
+              }
             }
           }
           return;
@@ -6058,8 +6073,9 @@ export class CultMesh {
      * Refuse a put whose document could never be served: the snapshot reply
      * carrying it alone, under the shortest message id CultNet parses, sized
      * as `sendSchemaMessage` would send it. The document is sized as the
-     * registry would store and serve it; a document the registry has no
-     * binding for is sized as received.
+     * registry would store and serve it, which is exact only when the
+     * application stores through the registry; a document the registry has
+     * no binding for is sized as received.
      */
     function unservablePut(message: CultNetMessage): CultMeshRudpUnservableDocumentError | undefined {
       if (message.schemaVersion !== "cultnet.document_put_raw.v0") return undefined;
