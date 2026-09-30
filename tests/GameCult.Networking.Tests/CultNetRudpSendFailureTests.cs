@@ -314,6 +314,42 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ASessionEndedByACallerAndThePollingThreadTogetherSaysGoodbyeOnce()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var ended = RecordDisconnects(server);
+                // The polling thread acknowledges X's frame outside the session's gate. Just before
+                // that ack goes out, a caller's send to X fails after its first fragment and ends the
+                // session; then the ack can never be sent either.
+                server.BeforeSend = (remote, packet) =>
+                {
+                    if (!remote.Equals(x.EndPoint) || packet.PacketType != CultNetRudpPacketType.Ack)
+                        return;
+                    server.BeforeSend = null;
+                    server.UnsendableAfter[x.EndPoint] = 1;
+                    var caller = new Thread(() =>
+                    {
+                        try { server.SendSchema(x.Server, new byte[3000]); }
+                        catch (SocketException) { }
+                    });
+                    caller.Start();
+                    caller.Join();
+                    server.UnsendableAfter[x.EndPoint] = 0;
+                };
+                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(ReliableFrame(x, "from-x")), listenerEndPoint);
+                server.ReceiveOnce();
+                server.PollResends();
+
+                var goodbyes = Drain(x.Socket).Where(p => p.PacketType == CultNetRudpPacketType.Disconnect).ToList();
+                Assert.That(goodbyes, Has.Count.EqualTo(1));
+                Assert.That(ended, Is.EqualTo(new[] { x.Server }));
+                Assert.That(IsUnsendableReason(x.Server.DisconnectReason), Is.True);
+            }
+        }
+
+        [Test]
         public void APermanentFailureInResendsEndsOnlyThatPeersSession()
         {
             var (server, _, x, y) = TwoPeers();

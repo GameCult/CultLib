@@ -3209,6 +3209,7 @@ namespace GameCult.Networking
         private SocketException? SendPacket(EndPoint remoteEndPoint, CultNetRudpPacket packet)
         {
             var wire = CultNetRudpPacketCodec.Encode(packet);
+            BeforeSend?.Invoke(remoteEndPoint, packet);
             try
             {
                 if (UnsendableAfter.TryGetValue(remoteEndPoint, out var remaining))
@@ -3245,6 +3246,9 @@ namespace GameCult.Networking
 
         // Peers whose next datagram after this many fails permanently, once.
         internal Dictionary<EndPoint, int> UnsendableAfter { get; } = new Dictionary<EndPoint, int>();
+
+        // Runs before each datagram is sent, to order another thread's work between two sends.
+        internal Action<EndPoint, CultNetRudpPacket>? BeforeSend { get; set; }
 
         private static string RemoteKey(EndPoint endpoint)
         {

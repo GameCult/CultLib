@@ -4868,6 +4868,37 @@ class CultMeshRudpSendFailureTests(unittest.TestCase):
         session.receive(accept, 0)
         return sock, session
 
+    def test_the_goodbye_for_a_refused_reliable_frame_does_not_acknowledge_it(self) -> None:
+        import dataclasses
+
+        from cultnet_py import CultNetRudpSendOptions, encode_rudp_packet
+
+        server = CultMesh.serve_node(CultMesh.create_node(runtime_id="mesh-server"))
+        try:
+            sock, session = self._raw_peer(server)
+            # A reliable fragment whose metadata the session refuses: fragment id 0 names no set.
+            # The session records its sequence before it refuses it.
+            (fragment,) = session.send_many("schema", b"x", CultNetRudpSendOptions(reliable=True, ordered=True))
+            refused = dataclasses.replace(fragment, fragment_id=0, fragment_index=0, fragment_count=2)
+            sock.sendto(encode_rudp_packet(refused), ("127.0.0.1", server.port))
+            goodbye = None
+            for _ in range(40):
+                try:
+                    wire, _ = sock.recvfrom(65535)
+                except TimeoutError:
+                    continue
+                packet = decode_rudp_packet(wire)
+                if packet.packet_type == CultNetRudpPacketType.DISCONNECT:
+                    goodbye = packet
+                    break
+            self.assertIsNotNone(goodbye)
+            self.assertEqual(goodbye.payload, b"session refused a packet")
+            distance = goodbye.ack - refused.sequence
+            acknowledged = distance == 0 or (0 < distance <= 32 and goodbye.ack_mask & (1 << (distance - 1)) != 0)
+            self.assertFalse(acknowledged, "the goodbye acknowledged the refused frame")
+        finally:
+            server.stop()
+
     def test_responses_after_one_that_can_never_be_sent_are_not_sent(self) -> None:
         from cultnet_py import CultNetRudpSendOptions, encode_rudp_packet
 

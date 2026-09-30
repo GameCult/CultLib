@@ -189,8 +189,9 @@ test("a packet the session refuses ends only that peer's session, and the peer i
     session.receive(arrived.find((packet) => packet.packetType === "accept")!, Date.now());
     y = await served.peer("y");
 
-    // A fragment whose metadata the session refuses: fragment id 0 names no set.
-    const [fragment] = session.sendMany("schema", new Uint8Array([1]), { reliable: false });
+    // A reliable fragment whose metadata the session refuses: fragment id 0 names no set.
+    // The session records its sequence before it refuses it.
+    const [fragment] = session.sendMany("schema", new Uint8Array([1]), { reliable: true, ordered: true });
     raw.send(
       encodeRudpPacket({ ...fragment!, fragmentId: 0, fragmentIndex: 0, fragmentCount: 2 }),
       served.server.bind.port,
@@ -199,6 +200,14 @@ test("a packet the session refuses ends only that peer's session, and the peer i
     await waitFor(() => arrived.some((packet) => packet.packetType === "disconnect"), "the goodbye");
     const goodbye = arrived.find((packet) => packet.packetType === "disconnect")!;
     assert.equal(Buffer.from(goodbye.payload ?? []).toString("utf8"), "session refused a packet");
+    // The goodbye's ack field does not acknowledge the refused frame, or the peer would
+    // count as delivered a frame that was never handled.
+    const acknowledged =
+      goodbye.ack === fragment!.sequence ||
+      (goodbye.ack > fragment!.sequence &&
+        goodbye.ack - fragment!.sequence <= 32 &&
+        (goodbye.ackMask & (1 << (goodbye.ack - fragment!.sequence - 1))) !== 0);
+    assert.equal(acknowledged, false, "the goodbye acknowledged the refused frame");
     assert.deepEqual(served.closed, [(raw.address() as { port: number }).port]);
 
     y.send(put("y-after"));
