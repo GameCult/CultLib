@@ -2607,18 +2607,20 @@ fn now_utc_second() -> String {
 }
 
 /// The catalog names each schema id once. An entry the file already holds is arrived, and its type is its schema's name;
-/// one the caller supplies is registered. Records of one tier under one id are one type; across tiers the registered type
-/// names the id, which is how a schema is renamed under a stable id.
+/// one the caller supplies is registered. Records of one tier under one id are one type. Across tiers a write may not
+/// retype what the file holds, unless the registered type owns the id (a registered type's id is its entry type): that is
+/// a rename under a stable id, and the registered type names the id.
 fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelope], format: &str) -> Result<PersistedStoreSnapshot> {
     let arrived: BTreeMap<(String, String), &CultCacheEnvelope> = disk.iter().map(|entry| (entry_id(entry), entry)).collect();
-    let mut schema_types = BTreeMap::<(String, bool), String>::new();
+    // Per schema id and tier: the type its records carry, and the key of the record that named it.
+    let mut schema_types = BTreeMap::<(String, bool), (String, String)>::new();
     for entry in entries {
         let schema_id = entry
             .schema_id
             .clone()
             .unwrap_or_else(|| entry.r#type.clone());
         let registered = arrived.get(&entry_id(entry)) != Some(&entry);
-        if let Some(existing_type) = schema_types.insert((schema_id.clone(), registered), entry.r#type.clone()) {
+        if let Some((existing_type, _)) = schema_types.insert((schema_id.clone(), registered), (entry.r#type.clone(), entry.key.clone())) {
             if existing_type != entry.r#type {
                 return Err(anyhow::Error::new(SchemaConflictError {
                     schema_id,
@@ -2630,9 +2632,18 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope], disk: &[CultCacheEnvelop
     }
 
     let mut named = BTreeMap::<String, String>::new();
-    for ((schema_id, registered), document_type) in schema_types {
-        if registered || !named.contains_key(&schema_id) {
+    for ((schema_id, registered), (document_type, key)) in schema_types {
+        if !registered {
             named.insert(schema_id, document_type);
+        } else if let Some(arrived_type) = named.insert(schema_id.clone(), document_type.clone())
+            && arrived_type != document_type
+            && schema_id != document_type
+        {
+            return Err(anyhow::Error::new(SchemaConflictError {
+                schema_id,
+                schema_names: vec![arrived_type, document_type],
+                record_key: key,
+            }));
         }
     }
     let catalog = named
@@ -4940,28 +4951,37 @@ mod tests {
         Ok(())
     }
 
-    // A schema renamed under a stable id: the registered type names the id, so a write onto a file whose entry carries the old name is
-    // not a conflict. Every record under the id, the file's and the write's, is then described by the new name.
+    // A schema renamed under a stable id: a registered type owns its id (its id is its entry type), so a write of it onto a file
+    // whose entry carries the old name is not a conflict. Every record under the id, the file's and the write's, is then described
+    // by the registered name. A write of another type under that id retypes what the file holds, and is refused.
     #[test]
     fn a_schema_renamed_under_a_stable_id_is_written_under_the_registered_name() -> Result<()> {
+        let envelope = |r#type: &str, schema_id: &str| CultCacheEnvelope {
+            key: "b".into(),
+            r#type: r#type.into(),
+            payload: b"two".to_vec(),
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: Some(schema_id.into()),
+        };
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.msgpack");
         store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
-        let mut store = SingleFileMessagePackBackingStore::new(&path);
-        store.push(&CultCacheEnvelope {
-            key: "b".into(),
-            r#type: "t.new".into(),
-            payload: b"two".to_vec(),
-            stored_at: "2026-09-30T00:00:00Z".into(),
-            schema_id: Some("t.s".into()),
-        })?;
+        SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.s", "t.s"))?;
 
         let mut envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
         envelopes.sort_by(|left, right| left.key.cmp(&right.key));
         assert_eq!(
             envelopes.iter().map(|entry| (entry.key.as_str(), entry.r#type.as_str())).collect::<Vec<_>>(),
-            vec![("a", "t.new"), ("b", "t.new")]
+            vec![("a", "t.s"), ("b", "t.s")]
         );
+
+        store_file(&path, &[("t.s", "t.old")], &[("a", "t.s", b"one".to_vec())])?;
+        let before = std::fs::read(&path)?;
+        let error = SingleFileMessagePackBackingStore::new(&path).push(&envelope("t.new", "t.s")).unwrap_err();
+        let conflict = error.downcast_ref::<SchemaConflictError>().unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(conflict.schema_id, "t.s");
+        assert_eq!(conflict.record_key, "b");
+        assert_eq!(std::fs::read(&path)?, before, "the file is left as it was");
         Ok(())
     }
 
