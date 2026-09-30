@@ -18,13 +18,22 @@ use std::path::Path;
 
 use cultnet_rs::{
     GameCultMediaVideoAccessUnitRecord, GameCultMediaWireRecord, MediaFecError, MediaFecPolicy,
-    protect_video_frame, recover_video_block,
+    MediaWireProvenance, protect_video_frame, recover_video_block,
 };
 use policy::{Profile, Scheduler};
 
 const POLICY: MediaFecPolicy = MediaFecPolicy::STANDARD;
 const SEED: u64 = 20_260_930;
 const FRAMES: u64 = 200;
+
+fn provenance() -> MediaWireProvenance<'static> {
+    MediaWireProvenance {
+        stored_at: "unix:1700000000000",
+        runtime_id: "raven-muninn-primary",
+        role: "muninn.media",
+        producer: "muninn",
+    }
+}
 
 fn frame(frame_id: u64, chunk_count: u16) -> Vec<GameCultMediaVideoAccessUnitRecord> {
     (0..chunk_count)
@@ -67,7 +76,7 @@ fn run(profile: &Profile, chunk_count: u16) -> Tally {
 
     for frame_id in 0..FRAMES {
         let original = frame(frame_id, chunk_count);
-        let records = protect_video_frame(&original, &POLICY).unwrap();
+        let records = protect_video_frame(&original, &POLICY, provenance()).unwrap();
         let survivors: Vec<GameCultMediaWireRecord> = records
             .into_iter()
             .filter(|_| !scheduler.decide(0).drop)

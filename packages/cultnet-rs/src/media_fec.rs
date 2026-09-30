@@ -15,10 +15,35 @@
 //! are repaired and any more are reported as [`MediaFecError::BeyondRepair`],
 //! never as wrong bytes. The construction is named on every parity record by
 //! [`MEDIA_FEC_SCHEME_RS_GF256_V1`] and backed by the `reed-solomon-erasure`
-//! crate. The library is not the contract: `tests/media_fec.rs` pins the parity
-//! bytes of a known input, so a library that changes the matrix fails there
-//! instead of on the wire, and a decoder in another runtime has a vector to
-//! meet.
+//! crate. The library is not the contract: the construction below is, and
+//! `tests/media_fec.rs` pins the parity bytes of known inputs, so a library that
+//! changes the matrix fails there instead of on the wire, and a decoder in
+//! another runtime has vectors to meet.
+//!
+//! # The `rs-gf256-v1` construction
+//!
+//! Enough to implement it in another runtime without this crate.
+//!
+//! * The field is GF(2^8) over the polynomial `x^8 + x^4 + x^3 + x^2 + 1`
+//!   (`0x11D`). Addition is XOR; multiplication is carry-less multiplication
+//!   reduced by `0x11D`.
+//! * For a block of `k` data shards and `m` parity shards, let `n = k + m`
+//!   (`n <= 256`) and build the `n x k` Vandermonde matrix `V` whose entry in
+//!   row `r`, column `c` is `r^c`, where the row number `r` (0 through
+//!   `n - 1`) is itself read as a field element and `0^0 = 1`. The evaluation
+//!   points are the integers 0 through `n - 1`, not powers of a generator.
+//! * The encoding matrix is `E = V * inverse(top)`, where `top` is the first
+//!   `k` rows of `V`. Its first `k` rows are the identity, so data shards are
+//!   sent unchanged; its last `m` rows generate parity.
+//! * Every shard of a block has the same length, `shard_payload_bytes`. A
+//!   shorter final video chunk is zero-padded to that length before encoding.
+//!   Byte `j` of parity shard `p` is the XOR over data shards `i` of
+//!   `E[k + p][i] * data[i][j]`.
+//! * Any `k` surviving shards recover the block: invert the `k x k` submatrix
+//!   of `E` for the surviving rows and multiply.
+//!
+//! The known-answer vectors in `tests/media_fec.rs` were checked against an
+//! independent implementation of exactly this text.
 //!
 //! # What a block is
 //!
@@ -31,9 +56,28 @@
 //! * Audio: `4` consecutive packets of one payload length, protected by `2`
 //!   parity shards.
 //!
-//! Every shard, data or parity, fits one datagram once wrapped for the wire
-//! ([`MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES`]), so parity never reintroduces the
-//! fragment amplification it exists to remove.
+//! # One datagram
+//!
+//! Every record the protect functions return, data or parity, fits one
+//! datagram once wrapped for the wire, so parity never reintroduces the
+//! fragment amplification it exists to remove. The protect functions enforce
+//! that against [`MediaFecPolicy::max_wire_bytes`]: they encode each record
+//! with the caller's provenance and refuse the block if any is larger.
+//! The default budget is [`MEDIA_FEC_MAX_WIRE_BYTES`], an IPv4 path with a
+//! 1500-byte MTU. Pass a smaller budget when the path carries less: IPv6 over
+//! 1500 leaves a UDP payload of 1452 bytes, and a WireGuard or Tailscale
+//! tunnel about 1252, so subtract the 41 bytes of RUDP header and channel name
+//! from the path's UDP payload limit.
+//!
+//! The budget is measured with the provenance given, so a producer whose
+//! `stored_at` or identifiers grow later must pass the widest it will use.
+//!
+//! # Audio playout
+//!
+//! A recovered audio packet has the block's latest `deadline_ticks`, so a
+//! packet recovered early in the block reports a deadline later than its own.
+//! Audio consumers must gate playout on `pts_ticks`, which recovery derives
+//! exactly, and use `deadline_ticks` only to give up on the block as a whole.
 //!
 //! # What this module does not own
 //!
@@ -51,8 +95,9 @@ use crate::media_stream_contracts::{
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
 };
 use crate::media_stream_wire::{
-    GAMECULT_MEDIA_CHANNEL, GameCultMediaWireRecord, validate_audio_parity_record,
-    validate_audio_record, validate_video_parity_record, validate_video_record,
+    GAMECULT_MEDIA_CHANNEL, GameCultMediaWireRecord, MediaWireProvenance,
+    encode_media_wire_record, validate_audio_parity_record, validate_audio_record,
+    validate_video_parity_record, validate_video_record,
 };
 use crate::rudp::RUDP_FIXED_HEADER_BYTES;
 
@@ -64,24 +109,15 @@ pub const MEDIA_FEC_SCHEME_RS_GF256_V1: &str = "rs-gf256-v1";
 /// The largest UDP payload an IPv4 datagram carries on a 1500-byte MTU.
 pub const MEDIA_IPV4_UDP_PAYLOAD_BYTES: usize = 1_472;
 
-/// The most a wrapped media record may occupy so that the RUDP header and the
-/// channel name still leave it in one datagram (1,431 bytes).
+/// The default datagram budget: the most a wrapped media record may occupy so
+/// that the RUDP header and the channel name still leave it in one IPv4
+/// datagram on a 1500-byte MTU (1,431 bytes).
 pub const MEDIA_FEC_MAX_WIRE_BYTES: usize =
     MEDIA_IPV4_UDP_PAYLOAD_BYTES - RUDP_FIXED_HEADER_BYTES - GAMECULT_MEDIA_CHANNEL.len();
 
-/// The largest shard payload the codec produces or accepts. What is left of
-/// [`MEDIA_FEC_MAX_WIRE_BYTES`] must hold the record's fields and its envelope,
-/// which repeats the stream and session identifiers three times over: a parity
-/// record wraps to 705 bytes around its payload when the stream id, session id
-/// and codec name are 32, 32 and 16 bytes and the frame id has 20 digits. This is the largest multiple of 16
-/// that fits with identifiers of that size; the test
-/// `every_record_at_the_maximum_shard_size_fits_one_datagram` measures it. A
-/// producer with longer identifiers must cut its chunks smaller.
-pub const MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES: usize = 720;
-
-/// A producer's choice of `(k, m)`. [`MediaFecPolicy::STANDARD`] is the ruled
-/// default; each record carries the `(k, m)` it was made with, so a decoder
-/// needs no policy.
+/// A producer's choice of `(k, m)` and datagram budget.
+/// [`MediaFecPolicy::STANDARD`] is the ruled default; each record carries the
+/// `(k, m)` it was made with, so a decoder needs no policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaFecPolicy {
     /// The most data chunks in one video block.
@@ -95,16 +131,21 @@ pub struct MediaFecPolicy {
     pub audio_data_shards: u16,
     /// Parity shards per audio block.
     pub audio_parity_shards: u16,
+    /// The most a wrapped record may occupy. The protect functions refuse a
+    /// block with any record over it. See the module docs for smaller paths.
+    pub max_wire_bytes: usize,
 }
 
 impl MediaFecPolicy {
-    /// Video `k <= 16` with `m = max(2, ceil(k / 4))`; audio 4+2.
+    /// Video `k <= 16` with `m = max(2, ceil(k / 4))`; audio 4+2; the IPv4
+    /// datagram budget.
     pub const STANDARD: Self = Self {
         video_max_block_data_shards: 16,
         video_min_parity_shards: 2,
         video_parity_divisor: 4,
         audio_data_shards: 4,
         audio_parity_shards: 2,
+        max_wire_bytes: MEDIA_FEC_MAX_WIRE_BYTES,
     };
 
     /// `m` for a video block of `data_shards` chunks.
@@ -230,6 +271,40 @@ fn from_anyhow(error: anyhow::Error) -> MediaFecError {
     MediaFecError::Invalid(error.to_string())
 }
 
+/// Refuses a record that would not fit one datagram once wrapped.
+fn fits_datagram(
+    record: &GameCultMediaWireRecord,
+    provenance: MediaWireProvenance<'_>,
+    policy: &MediaFecPolicy,
+) -> Result<(), MediaFecError> {
+    let wire = encode_media_wire_record(record, provenance).map_err(from_anyhow)?;
+    if wire.len() > policy.max_wire_bytes {
+        return Err(MediaFecError::invalid(format!(
+            "a {} record wraps to {} bytes, over the {}-byte datagram budget: cut chunks smaller or raise max_wire_bytes",
+            record.schema_id(),
+            wire.len(),
+            policy.max_wire_bytes
+        )));
+    }
+    Ok(())
+}
+
+/// Where slot `slot` of an audio block lands: its packet id and presentation
+/// time, or `None` if either overflows. The one place block arithmetic lives;
+/// the protect path, the wire validator and recovery all ask it.
+pub(crate) fn audio_slot(
+    base_packet_id: u64,
+    base_pts_ticks: i64,
+    packet_duration_ticks: u32,
+    slot: u64,
+) -> Option<(u64, i64)> {
+    let packet_id = base_packet_id.checked_add(slot)?;
+    let pts_ticks = i64::from(packet_duration_ticks)
+        .checked_mul(i64::try_from(slot).ok()?)?
+        .checked_add(base_pts_ticks)?;
+    Some((packet_id, pts_ticks))
+}
+
 // ---------------------------------------------------------------------------
 // Video
 // ---------------------------------------------------------------------------
@@ -247,10 +322,12 @@ fn from_anyhow(error: anyhow::Error) -> MediaFecError {
 /// Errors if `chunks` are not exactly one whole frame (mixed frames, a missing
 /// or repeated chunk index, disagreeing framing), if a chunk is not shard
 /// shaped (every chunk of a block but its last must be the same length, the
-/// last no longer), or if a chunk exceeds [`MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES`].
+/// last no longer), or if any resulting record, wrapped with `provenance`,
+/// exceeds `policy.max_wire_bytes`.
 pub fn protect_video_frame(
     chunks: &[GameCultMediaVideoAccessUnitRecord],
     policy: &MediaFecPolicy,
+    provenance: MediaWireProvenance<'_>,
 ) -> Result<Vec<GameCultMediaWireRecord>, MediaFecError> {
     policy.validate()?;
     let first = chunks
@@ -272,12 +349,6 @@ pub fn protect_video_frame(
             return Err(MediaFecError::invalid(
                 "a block never spans frames: chunks disagree on stream, session, frame or framing",
             ));
-        }
-        if chunk.payload.len() > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES {
-            return Err(MediaFecError::invalid(format!(
-                "chunk payload of {} bytes exceeds the {MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}-byte shard limit",
-                chunk.payload.len()
-            )));
         }
         if by_index.insert(chunk.chunk_index, chunk).is_some() {
             return Err(MediaFecError::invalid(format!(
@@ -347,7 +418,11 @@ pub fn protect_video_frame(
         lanes.push(interleave(data_records.collect(), parity_records));
         start += size;
     }
-    Ok(rotate(lanes))
+    let records = rotate(lanes);
+    for record in &records {
+        fits_datagram(record, provenance, policy)?;
+    }
+    Ok(records)
 }
 
 fn same_frame(a: &GameCultMediaVideoAccessUnitRecord, b: &GameCultMediaVideoAccessUnitRecord) -> bool {
@@ -508,9 +583,12 @@ fn same_block(a: &GameCultMediaVideoParityShardRecord, b: &GameCultMediaVideoPar
 /// Protects one block of audio packets: exactly `policy.audio_data_shards`
 /// packets with contiguous ids and presentation times, one payload length, and
 /// one codec and timebase. Returns the parity records in `parity_index` order.
+/// Errors if a parity record, wrapped with `provenance`, exceeds
+/// `policy.max_wire_bytes`; the packets are smaller than their parity.
 pub fn protect_audio_block(
     packets: &[GameCultMediaAudioPacketRecord],
     policy: &MediaFecPolicy,
+    provenance: MediaWireProvenance<'_>,
 ) -> Result<Vec<GameCultMediaAudioParityShardRecord>, MediaFecError> {
     policy.validate()?;
     if packets.len() != usize::from(policy.audio_data_shards) {
@@ -524,18 +602,15 @@ pub fn protect_audio_block(
     let shard_bytes = first.payload.len();
     for (index, packet) in packets.iter().enumerate() {
         validate_audio_record(packet).map_err(from_anyhow)?;
-        let expected_id = first.packet_id.checked_add(index as u64);
-        let expected_pts = i64::from(first.duration_ticks)
-            .checked_mul(index as i64)
-            .and_then(|offset| first.pts_ticks.checked_add(offset));
+        let expected =
+            audio_slot(first.packet_id, first.pts_ticks, first.duration_ticks, index as u64);
         if packet.stream_id != first.stream_id
             || packet.session_id != first.session_id
             || packet.codec != first.codec
             || packet.timebase_num != first.timebase_num
             || packet.timebase_den != first.timebase_den
             || packet.duration_ticks != first.duration_ticks
-            || Some(packet.packet_id) != expected_id
-            || Some(packet.pts_ticks) != expected_pts
+            || Some((packet.packet_id, packet.pts_ticks)) != expected
             || packet.payload.len() != shard_bytes
         {
             return Err(MediaFecError::invalid(
@@ -543,14 +618,10 @@ pub fn protect_audio_block(
             ));
         }
     }
-    if shard_bytes > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES {
-        return Err(MediaFecError::invalid(format!(
-            "audio payload of {shard_bytes} bytes exceeds the {MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}-byte shard limit"
-        )));
-    }
     let data: Vec<Vec<u8>> = packets.iter().map(|packet| packet.payload.clone()).collect();
     let deadline_ticks = packets.iter().map(|packet| packet.deadline_ticks).max().unwrap_or(0);
-    Ok(parity_shards(&data, usize::from(policy.audio_parity_shards))?
+    let parity: Vec<GameCultMediaAudioParityShardRecord> =
+        parity_shards(&data, usize::from(policy.audio_parity_shards))?
         .into_iter()
         .enumerate()
         .map(|(parity_index, payload)| GameCultMediaAudioParityShardRecord {
@@ -570,13 +641,20 @@ pub fn protect_audio_block(
             shard_payload_bytes: shard_bytes as u32,
             payload,
         })
-        .collect())
+        .collect();
+    // A parity record repeats every field of a packet and adds the scheme and
+    // the geometry, so it is the larger of the block's records: if it fits, the
+    // packets do.
+    for shard in &parity {
+        fits_datagram(&GameCultMediaWireRecord::AudioParity(shard.clone()), provenance, policy)?;
+    }
+    Ok(parity)
 }
 
 /// Rebuilds the packets an audio block lost, ordered by `packet_id`. A
 /// recovered packet takes its id and presentation time from the block's
-/// arithmetic and its deadline from the block's, the latest in the block.
-/// Errors as [`recover_video_block`] does.
+/// arithmetic and its deadline from the block's, the latest in the block:
+/// gate playout on `pts_ticks`, not `deadline_ticks`. Errors as [`recover_video_block`] does.
 pub fn recover_audio_block(
     parity: &[GameCultMediaAudioParityShardRecord],
     data: &[GameCultMediaAudioPacketRecord],
@@ -615,21 +693,30 @@ pub fn recover_audio_block(
 
     let missing: Vec<usize> = (0..k).filter(|&slot| shards[slot].is_none()).collect();
     let recovered = recover_data_shards(k, shards)?;
-    Ok(missing
+    missing
         .into_iter()
-        .map(|slot| GameCultMediaAudioPacketRecord {
-            stream_id: geometry.stream_id.clone(),
-            session_id: geometry.session_id.clone(),
-            packet_id: geometry.base_packet_id + slot as u64,
-            codec: geometry.codec.clone(),
-            pts_ticks: geometry.base_pts_ticks + i64::from(geometry.packet_duration_ticks) * slot as i64,
-            duration_ticks: geometry.packet_duration_ticks,
-            timebase_num: geometry.timebase_num,
-            timebase_den: geometry.timebase_den,
-            deadline_ticks: geometry.deadline_ticks,
-            payload: recovered[slot].clone(),
+        .map(|slot| {
+            let (packet_id, pts_ticks) = audio_slot(
+                geometry.base_packet_id,
+                geometry.base_pts_ticks,
+                geometry.packet_duration_ticks,
+                slot as u64,
+            )
+            .ok_or_else(|| MediaFecError::invalid("audio block runs past the packet id or pts range"))?;
+            Ok(GameCultMediaAudioPacketRecord {
+                stream_id: geometry.stream_id.clone(),
+                session_id: geometry.session_id.clone(),
+                packet_id,
+                codec: geometry.codec.clone(),
+                pts_ticks,
+                duration_ticks: geometry.packet_duration_ticks,
+                timebase_num: geometry.timebase_num,
+                timebase_den: geometry.timebase_den,
+                deadline_ticks: geometry.deadline_ticks,
+                payload: recovered[slot].clone(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 fn same_audio_block(a: &GameCultMediaAudioParityShardRecord, b: &GameCultMediaAudioParityShardRecord) -> bool {

@@ -342,10 +342,6 @@ fn a_malformed_video_parity_record_is_refused_with_its_reason() {
             r.shard_payload_bytes = 0;
             r.payload.clear();
         })),
-        ("shard_payload_bytes", Box::new(|r| {
-            r.shard_payload_bytes = 721;
-            r.payload = vec![0; 721];
-        })),
         ("last chunk length", Box::new(|r| r.last_chunk_payload_bytes = 0)),
         ("last chunk length", Box::new(|r| r.last_chunk_payload_bytes = 5)),
         ("declared shard length", Box::new(|r| r.payload.push(0))),
@@ -375,9 +371,10 @@ fn a_malformed_audio_parity_record_is_refused_with_its_reason() {
         ("stripe", Box::new(|r| r.data_shard_count = 255)),
         ("timing", Box::new(|r| r.packet_duration_ticks = 0)),
         ("base_pts_ticks", Box::new(|r| r.deadline_ticks = -1)),
-        ("shard_payload_bytes", Box::new(|r| {
-            r.shard_payload_bytes = 721;
-            r.payload = vec![0; 721];
+        ("packet id or pts range", Box::new(|r| r.base_packet_id = u64::MAX - 2)),
+        ("packet id or pts range", Box::new(|r| {
+            r.base_pts_ticks = i64::MAX - 960 * 3 + 1;
+            r.deadline_ticks = i64::MAX;
         })),
         ("declared shard length", Box::new(|r| { r.payload.pop(); })),
         ("codec", Box::new(|r| r.codec = String::new())),
@@ -392,22 +389,6 @@ fn a_malformed_audio_parity_record_is_refused_with_its_reason() {
         let error = decodes(GameCultMediaWireRecord::AudioParity(record)).unwrap_err();
         assert!(error.contains(expected), "expected {expected:?} in {error:?}");
     }
-}
-
-/// The shard limit is inclusive: a shard of exactly the largest size is
-/// admitted, one byte more is not.
-#[test]
-fn a_parity_shard_at_the_size_limit_is_admitted() {
-    use cultnet_rs::MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES as MAX;
-    let mut video = video_parity();
-    video.shard_payload_bytes = MAX as u32;
-    video.last_chunk_payload_bytes = MAX as u32;
-    video.payload = vec![0; MAX];
-    assert!(decodes(GameCultMediaWireRecord::VideoParity(video)).is_ok());
-    let mut audio = audio_parity();
-    audio.shard_payload_bytes = MAX as u32;
-    audio.payload = vec![0; MAX];
-    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok());
 }
 
 /// The 256-shard ceiling and the deadline floor are inclusive on the side that
@@ -429,4 +410,13 @@ fn records_on_the_edge_of_each_bound_are_admitted() {
     let mut audio = audio_parity();
     audio.deadline_ticks = audio.base_pts_ticks;
     assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "a deadline at the base pts");
+
+    let mut audio = audio_parity();
+    audio.base_packet_id = u64::MAX - 3;
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "the last packet id is u64::MAX");
+
+    let mut audio = audio_parity();
+    audio.base_pts_ticks = i64::MAX - 960 * 3;
+    audio.deadline_ticks = i64::MAX;
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "the last pts is i64::MAX");
 }

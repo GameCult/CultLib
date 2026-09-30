@@ -28,7 +28,7 @@ use crate::contracts::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding, CultNetWireContract,
     decode_cultnet_message_from_slice, encode_cultnet_message_to_vec,
 };
-use crate::media_fec::{MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES, MEDIA_FEC_SCHEME_RS_GF256_V1};
+use crate::media_fec::{MEDIA_FEC_SCHEME_RS_GF256_V1, audio_slot};
 use crate::media_stream_contracts::{
     GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA, GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
     GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA, GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
@@ -403,11 +403,9 @@ pub fn validate_video_parity_record(record: &GameCultMediaVideoParityShardRecord
             "video parity media record block exceeds 256 shards"
         ));
     }
-    if record.shard_payload_bytes == 0
-        || record.shard_payload_bytes as usize > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES
-    {
+    if record.shard_payload_bytes == 0 {
         return Err(anyhow!(
-            "video parity media record shard_payload_bytes must be in 1..={MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}"
+            "video parity media record shard_payload_bytes must be non-zero"
         ));
     }
     if record.last_chunk_payload_bytes == 0
@@ -454,11 +452,21 @@ pub fn validate_audio_parity_record(record: &GameCultMediaAudioParityShardRecord
     {
         return Err(anyhow!("audio parity media record stripe metadata is invalid"));
     }
-    if record.shard_payload_bytes == 0
-        || record.shard_payload_bytes as usize > MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES
+    if audio_slot(
+        record.base_packet_id,
+        record.base_pts_ticks,
+        record.packet_duration_ticks,
+        u64::from(record.data_shard_count) - 1,
+    )
+    .is_none()
     {
         return Err(anyhow!(
-            "audio parity media record shard_payload_bytes must be in 1..={MEDIA_FEC_MAX_SHARD_PAYLOAD_BYTES}"
+            "audio parity media record block runs past the packet id or pts range"
+        ));
+    }
+    if record.shard_payload_bytes == 0 {
+        return Err(anyhow!(
+            "audio parity media record shard_payload_bytes must be non-zero"
         ));
     }
     if record.payload.len() != record.shard_payload_bytes as usize {
