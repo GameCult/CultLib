@@ -192,6 +192,7 @@ namespace GameCult.Caching.Tests
             var path = DirectoryStore("merged.cc");
             var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
             var entry = manifest.SchemaCatalog.Single();
+            entry.ContentHash = "stale";
             manifest.Records.Single().SchemaId = "vectors.old.id";
             entry.CompatibleSchemaIds = new[] { entry.SchemaId, "vectors.old.id" };
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
