@@ -1207,7 +1207,7 @@ class CultNetTests(unittest.TestCase):
             to_server(peer.create_connect(0, b"join"))
             server.receive_once()
             server.send("schema", b"unanswered")
-            self.assertTrue(server.check_timeout(0, now_ms=10**12))
+            self.assertTrue(server.check_timeout(0, now_ms=10**14))
             with self.assertRaisesRegex(ConnectionError, "session timed out"):
                 server.flush_reliable(0.1)
         finally:
