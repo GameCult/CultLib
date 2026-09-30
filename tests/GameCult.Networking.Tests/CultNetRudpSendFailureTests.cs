@@ -313,6 +313,47 @@ namespace GameCult.Networking.Tests
             }
         }
 
+        // A send that fails after its first fragment ends the generation it began in, and only that
+        // one. Here X connects again while the send is under way, and the polling thread admits the
+        // new Connect before the fragment that can never be sent. The hook runs that poll inside the
+        // send so the order is fixed; in production it runs on the polling thread between the send
+        // and the failure's handling. The goodbye belonged to the ended generation, and the client
+        // must not hear it: it would believe itself disconnected while the listener holds it
+        // connected.
+        [Test]
+        public void ASendFailureAfterANewConnectReplacedThePeerSaysNoGoodbyeToTheNewSession()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var stale = x.Server;
+                Drain(x.Socket);
+                x.Session = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(x.Session.CreateConnect(0)), listenerEndPoint);
+
+                var fragments = 0;
+                server.BeforeSend = (remote, packet) =>
+                {
+                    if (!remote.Equals(x.EndPoint) || packet.PacketType != CultNetRudpPacketType.Data || ++fragments < 2)
+                        return;
+                    server.BeforeSend = null;
+                    server.ReceiveOnce();
+                    server.UnsendableAfter[x.EndPoint] = 0;
+                };
+                Assert.Throws<SocketException>(() => server.SendSchema(stale, new byte[3000]));
+                server.ReceiveOnce();
+
+                var packets = Drain(x.Socket);
+                Assert.That(packets.Select(p => p.PacketType), Has.None.EqualTo(CultNetRudpPacketType.Disconnect),
+                    "the ended generation's goodbye reached the session that replaced it");
+                x.Session.Receive(packets.Single(p => p.PacketType == CultNetRudpPacketType.Accept), 0);
+                Assert.That(x.Session.Connected, Is.True);
+                var replacing = server.Peers.Single(p => p.RemoteEndPoint.Equals(x.EndPoint));
+                Assert.That(replacing, Is.Not.SameAs(stale));
+                Assert.That(replacing.Connected, Is.True);
+            }
+        }
+
         [Test]
         public void ASessionEndedByACallerAndThePollingThreadTogetherSaysGoodbyeOnce()
         {

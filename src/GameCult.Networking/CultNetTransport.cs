@@ -2841,10 +2841,12 @@ namespace GameCult.Networking
             if (peer == null) throw new ArgumentNullException(nameof(peer));
             SocketException? unsendable = null;
             var failedIndex = 0;
+            long generation;
             lock (peer.SessionGate)
             {
                 var firstSequence = peer.Session.NextSequence;
                 var packets = peer.Session.SendMany(channelId, payload, ChannelSendOptions(channelId), _maxFragmentBytes);
+                generation = peer.Session.Generation;
                 unsendable = SendPackets(peer, packets, out failedIndex);
                 // A caller-directed send that can never succeed is the caller's error and queues
                 // nothing. Only when earlier fragments are already on the wire has the peer seen
@@ -2856,7 +2858,7 @@ namespace GameCult.Networking
             {
                 // The polling thread retires the peer; this thread only ends its session.
                 if (failedIndex > 0)
-                    EndUnsendableSession(peer, unsendable);
+                    EndUnsendableSession(peer, unsendable, generation);
                 throw unsendable;
             }
             _stats.FramesSent++;
@@ -2973,8 +2975,10 @@ namespace GameCult.Networking
                 {
                     var repeats = false;
                     SocketException? unsendableReply = null;
+                    long admittedGeneration;
                     lock (admitted.SessionGate)
                     {
+                        admittedGeneration = admitted.Session.Generation;
                         if (!admitted.Session.ConnectRepeats(packet))
                         {
                             admitted.Session.ResetPeerState();
@@ -2998,7 +3002,7 @@ namespace GameCult.Networking
                     if (repeats)
                     {
                         if (unsendableReply != null)
-                            EndUnsendablePeer(admitted, unsendableReply);
+                            EndUnsendablePeer(admitted, unsendableReply, admittedGeneration);
                         return true;
                     }
                 }
@@ -3044,6 +3048,7 @@ namespace GameCult.Networking
             CultNetRudpReceiveResult? outcome;
             CultNetRudpPacket? acknowledgement = null;
             SocketException? unsendable = null;
+            long existingGeneration = 0;
             lock (existingPeer.SessionGate)
             {
                 try
@@ -3065,6 +3070,7 @@ namespace GameCult.Networking
                 }
                 else
                 {
+                    existingGeneration = existingPeer.Session.Generation;
                     if (outcome.Reply != null)
                         unsendable = SendPacket(existingPeer.RemoteEndPoint, outcome.Reply);
                     unsendable ??= SendPackets(existingPeer, outcome.ReadyToSend, out _);
@@ -3107,7 +3113,7 @@ namespace GameCult.Networking
             if (acknowledgement != null && unsendable == null)
                 unsendable = SendPacket(existingPeer.RemoteEndPoint, acknowledgement);
             if (unsendable != null)
-                EndUnsendablePeer(existingPeer, unsendable);
+                EndUnsendablePeer(existingPeer, unsendable, existingGeneration);
 
             return true;
         }
@@ -3123,10 +3129,15 @@ namespace GameCult.Networking
             foreach (var peer in _peers.Values.ToArray())
             {
                 SocketException? unsendable;
+                long generation;
                 lock (peer.SessionGate)
-                    unsendable = SendPackets(peer, peer.Session.DueResends(NowMs()), out _);
+                {
+                    var due = peer.Session.DueResends(NowMs());
+                    generation = peer.Session.Generation;
+                    unsendable = SendPackets(peer, due, out _);
+                }
                 if (unsendable != null)
-                    EndUnsendablePeer(peer, unsendable);
+                    EndUnsendablePeer(peer, unsendable, generation);
             }
         }
 
@@ -3152,25 +3163,28 @@ namespace GameCult.Networking
         // An admitted peer owes a packet that can never be sent as built. Inside a poll that ends the
         // peer's session, never the poll: the peer is told, and PeerDisconnected carries a reason that
         // names the error.
-        private void EndUnsendablePeer(CultNetRudpSocketServerPeer peer, SocketException error)
+        private void EndUnsendablePeer(CultNetRudpSocketServerPeer peer, SocketException error, long generation)
         {
-            EndUnsendableSession(peer, error);
+            EndUnsendableSession(peer, error, generation);
             RetireUnsendablePeers();
         }
 
         // Ends the session and tells the peer, on whichever thread found the failure. The peer stays in
-        // _peers until the polling thread retires it.
-        private void EndUnsendableSession(CultNetRudpSocketServerPeer peer, SocketException error)
+        // _peers until the polling thread retires it. The failure belongs to the generation the thread
+        // read under the gate when it sent; if that generation has already ended (another thread
+        // ended it over its own failure, or a new Connect from the endpoint replaced it), there is
+        // nothing left to end, and a goodbye would reach the session that now owns the endpoint. The
+        // goodbye is built and sent under the gate, so no Connect is admitted between the two.
+        private void EndUnsendableSession(CultNetRudpSocketServerPeer peer, SocketException error, long generation)
         {
-            CultNetRudpPacket goodbye;
             lock (peer.SessionGate)
             {
-                if (peer.UnsendableReason != null)
+                if (peer.Session.Generation != generation)
                     return;
-                goodbye = peer.Session.EndUnsendable(error);
+                var goodbye = peer.Session.EndUnsendable(error);
                 peer.UnsendableReason = goodbye.Payload;
+                SendPacket(peer.RemoteEndPoint, goodbye);
             }
-            SendPacket(peer.RemoteEndPoint, goodbye);
             _unsendablePeers.Enqueue(peer);
         }
 
