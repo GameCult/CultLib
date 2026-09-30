@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
@@ -2682,6 +2683,11 @@ namespace GameCult.Networking
         /// Gets the last transport-level remote disconnect reason, if one was received.
         /// </summary>
         public byte[]? DisconnectReason { get; internal set; }
+
+        // The goodbye's reason once the session ended over a packet it could never send. Written
+        // under SessionGate by whichever thread's send found the failure; the polling thread reads
+        // it when it retires the peer.
+        internal byte[]? UnsendableReason { get; set; }
     }
 
     /// <summary>
@@ -2719,6 +2725,10 @@ namespace GameCult.Networking
         private readonly CultNetTransportStats _stats = new CultNetTransportStats();
         private readonly Dictionary<string, CultNetRudpSocketServerPeer> _peers = new Dictionary<string, CultNetRudpSocketServerPeer>(StringComparer.Ordinal);
         private readonly Queue<CultNetRudpSocketServerFrame> _deliveredFrames = new Queue<CultNetRudpSocketServerFrame>();
+        // Peers whose session ended over a packet it could never send, waiting for the polling thread
+        // to retire them. Only the polling thread changes _peers or raises PeerDisconnected; a send on
+        // a caller's thread ends the session and leaves the peer here.
+        private readonly ConcurrentQueue<CultNetRudpSocketServerPeer> _unsendablePeers = new ConcurrentQueue<CultNetRudpSocketServerPeer>();
         private bool _disposed;
 
         /// <summary>
@@ -2795,8 +2805,9 @@ namespace GameCult.Networking
             }
             if (unsendable != null)
             {
+                // The polling thread retires the peer; this thread only ends its session.
                 if (failedIndex > 0)
-                    EndUnsendablePeer(peer, unsendable);
+                    EndUnsendableSession(peer, unsendable);
                 throw unsendable;
             }
             _stats.FramesSent++;
@@ -2843,6 +2854,7 @@ namespace GameCult.Networking
         /// </summary>
         public bool TryReceiveOnce(out CultNetRudpSocketServerFrame? delivered)
         {
+            RetireUnsendablePeers();
             if (_deliveredFrames.Count > 0)
             {
                 delivered = _deliveredFrames.Dequeue();
@@ -3046,6 +3058,7 @@ namespace GameCult.Networking
         /// </summary>
         public void PollResends()
         {
+            RetireUnsendablePeers();
             if (_socket.Poll(0, SelectMode.SelectRead))
                 return;
             foreach (var peer in _peers.Values.ToArray())
@@ -3082,16 +3095,39 @@ namespace GameCult.Networking
         // names the error.
         private void EndUnsendablePeer(CultNetRudpSocketServerPeer peer, SocketException error)
         {
-            var key = RemoteKey(peer.RemoteEndPoint);
-            if (!_peers.TryGetValue(key, out var current) || !ReferenceEquals(current, peer))
-                return;
-            _peers.Remove(key);
+            EndUnsendableSession(peer, error);
+            RetireUnsendablePeers();
+        }
+
+        // Ends the session and tells the peer, on whichever thread found the failure. The peer stays in
+        // _peers until the polling thread retires it.
+        private void EndUnsendableSession(CultNetRudpSocketServerPeer peer, SocketException error)
+        {
             CultNetRudpPacket goodbye;
             lock (peer.SessionGate)
+            {
+                if (peer.UnsendableReason != null)
+                    return;
                 goodbye = peer.Session.EndUnsendable(error);
-            peer.DisconnectReason = goodbye.Payload;
+                peer.UnsendableReason = goodbye.Payload;
+            }
             SendPacket(peer.RemoteEndPoint, goodbye);
-            PeerDisconnected?.Invoke(peer);
+            _unsendablePeers.Enqueue(peer);
+        }
+
+        // Polling thread only. A peer a new Connect already replaced was reported then, and its key now
+        // names the peer that replaced it.
+        private void RetireUnsendablePeers()
+        {
+            while (_unsendablePeers.TryDequeue(out var peer))
+            {
+                var key = RemoteKey(peer.RemoteEndPoint);
+                if (!_peers.TryGetValue(key, out var current) || !ReferenceEquals(current, peer))
+                    continue;
+                _peers.Remove(key);
+                peer.DisconnectReason = peer.UnsendableReason;
+                PeerDisconnected?.Invoke(peer);
+            }
         }
 
         /// <inheritdoc />

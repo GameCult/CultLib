@@ -204,9 +204,70 @@ namespace GameCult.Networking.Tests
 
                 var error = Assert.Throws<SocketException>(() => server.SendSchema(x.Server, new byte[3000]))!;
                 Assert.That(CultNetRudpSession.IsPermanentSendError(error), Is.True);
+                // The send ends the session and tells the peer; it leaves the peer for the polling
+                // thread to retire, because only that thread changes the peer set.
+                Assert.That(x.Server.Connected, Is.False);
+                Assert.That(Drain(x.Socket).Last().PacketType, Is.EqualTo(CultNetRudpPacketType.Disconnect));
+                Assert.That(ended, Is.Empty);
+
+                server.ReceiveOnce();
                 Assert.That(server.Peers, Has.Count.EqualTo(1));
                 Assert.That(ended, Is.EqualTo(new[] { x.Server }));
                 Assert.That(IsUnsendableReason(x.Server.DisconnectReason), Is.True);
+            }
+        }
+
+        [Test]
+        public void APeerEndedByASendOnAnotherThreadIsRetiredByThePollingThread()
+        {
+            var (server, _, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var retiredOn = new List<int>();
+                server.PeerDisconnected += _ => retiredOn.Add(Environment.CurrentManagedThreadId);
+                server.UnsendableAfter[x.EndPoint] = 1;
+
+                SocketException? thrown = null;
+                var sender = new Thread(() =>
+                {
+                    try { server.SendSchema(x.Server, new byte[3000]); }
+                    catch (SocketException error) { thrown = error; }
+                });
+                sender.Start();
+                sender.Join();
+                Assert.That(thrown, Is.Not.Null);
+                Assert.That(server.Peers, Has.Count.EqualTo(2), "the sending thread leaves the peer set alone");
+
+                server.PollResends();
+                Assert.That(retiredOn, Is.EqualTo(new[] { Environment.CurrentManagedThreadId }));
+                Assert.That(server.Peers, Has.Count.EqualTo(1));
+            }
+        }
+
+        [Test]
+        public void ASendOnAPeerAlreadyReplacedLeavesThePeerThatReplacedIt()
+        {
+            var (server, listenerEndPoint, x, _) = TwoPeers(maxFragmentBytes: 1000);
+            using (server)
+            {
+                var stale = x.Server;
+                // X connects again as a new session: the listener replaces the peer it held.
+                var fresh = new CultNetRudpSession(new CultNetRudpSessionOptions { ConnectionId = ConnectionId });
+                x.Socket.SendTo(CultNetRudpPacketCodec.Encode(fresh.CreateConnect(0)), listenerEndPoint);
+                server.ReceiveOnce();
+                var replacing = server.Peers.Single(p => p.RemoteEndPoint.Equals(x.EndPoint));
+                Assert.That(replacing, Is.Not.SameAs(stale));
+                var ended = RecordDisconnects(server);
+
+                // A caller still holding the old peer sends through it, and that send fails after a
+                // fragment left.
+                server.UnsendableAfter[x.EndPoint] = 1;
+                Assert.Throws<SocketException>(() => server.SendSchema(stale, new byte[3000]));
+                server.ReceiveOnce();
+
+                Assert.That(server.Peers, Has.Member(replacing));
+                Assert.That(server.Peers, Has.Count.EqualTo(2));
+                Assert.That(ended, Is.Empty);
             }
         }
 
