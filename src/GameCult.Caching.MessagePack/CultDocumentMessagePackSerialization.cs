@@ -180,7 +180,8 @@ public static class CultDocumentMessagePackSerialization
     /// <summary>
     /// Reads a store file: exactly one complete MessagePack array of three slots (header, schema catalog, records), or an empty
     /// array, which is an empty store. A truncated file, bytes after the array, a value that is not an array, a first slot that
-    /// is not a header string, a store with fewer or more slots, or a body that does not decode are refused with
+    /// is not a header string, a store with fewer or more slots, a record whose schema the catalog does not publish, or a body
+    /// that does not decode are refused with
     /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
     /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
     /// </summary>
@@ -224,6 +225,7 @@ public static class CultDocumentMessagePackSerialization
                 snapshot.Records[index] = ReadPersistedRecord(ref reader);
             }
 
+            RequirePublishedSchemas(snapshot);
             return snapshot;
         }
         catch (CultStoreUnreadableException)
@@ -233,6 +235,25 @@ public static class CultDocumentMessagePackSerialization
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             throw new CultStoreUnreadableException(ex.Message, ex);
+        }
+    }
+
+    // A record whose schema the store's catalog does not publish cannot be read by any runtime that has only the file.
+    private static void RequirePublishedSchemas(CultPersistedStoreSnapshot snapshot)
+    {
+        var published = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in snapshot.SchemaCatalog)
+        {
+            published.Add(entry.SchemaId);
+            foreach (var compatible in entry.CompatibleSchemaIds)
+                published.Add(compatible);
+        }
+
+        var unpublished = snapshot.Records.FirstOrDefault(record => !published.Contains(record.SchemaId));
+        if (unpublished != null)
+        {
+            throw new CultStoreUnreadableException(
+                $"Record '{unpublished.Key}' names schema '{unpublished.SchemaId}', which the store's schema catalog does not publish.");
         }
     }
 

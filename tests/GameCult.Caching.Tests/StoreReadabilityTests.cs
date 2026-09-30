@@ -15,7 +15,7 @@ namespace GameCult.Caching.Tests
     public class StoreReadabilityTests
     {
         private const int CSharp = 1;
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck) });
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck), typeof(VectorItem) });
         private string _directory = "";
 
         [SetUp]
@@ -66,12 +66,7 @@ namespace GameCult.Caching.Tests
             var path = Path.Combine(_directory, "open.cc");
             File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), vector)));
 
-            using var cache = new CultCache();
-            void Open()
-            {
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
-                cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
-            }
+            void Open() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }).Dispose();
 
             if (reads)
                 Assert.DoesNotThrow(Open);
