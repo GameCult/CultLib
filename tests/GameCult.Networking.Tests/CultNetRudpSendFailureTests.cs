@@ -177,6 +177,23 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void ARefusedSendWithdrawsTheFragmentsTheWindowQueuedAsWell()
+        {
+            var (server, _, x, _) = TwoPeers(maxFragmentBytes: 1);
+            using (server)
+            {
+                var outstanding = x.Server.Session.OutstandingReliablePacketCount;
+                server.UnsendableAfter[x.EndPoint] = 0;
+
+                // 1,100 one-byte fragments: the flow window admits the first ones and queues the rest,
+                // and the first datagram can never be sent.
+                Assert.Throws<SocketException>(() => server.SendSchema(x.Server, new byte[1_100]));
+
+                Assert.That(x.Server.Session.OutstandingReliablePacketCount, Is.EqualTo(outstanding), "nothing of the refused send stays queued");
+            }
+        }
+
+        [Test]
         public void ASendThatFailsPermanentlyAfterAFragmentLeftEndsTheSession()
         {
             var (server, _, x, _) = TwoPeers(maxFragmentBytes: 1000);

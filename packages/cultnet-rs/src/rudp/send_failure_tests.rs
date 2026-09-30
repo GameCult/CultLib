@@ -414,3 +414,25 @@ fn a_peer_ended_in_the_resend_loop_is_sent_nothing_more_from_it() {
     assert_eq!(hub.stats().send_failures, 3);
     assert_eq!(hub.sessions().len(), 1);
 }
+
+#[test]
+fn a_refused_send_withdraws_the_fragments_the_window_queued_as_well() {
+    let (mut hub, _peer, session) = one_peer(Some(1));
+    let outstanding = hub.peers[&session.remote_addr]
+        .session
+        .outstanding_reliable_packet_count();
+    hub.unsendable_after.insert(session.remote_addr, 0);
+
+    // 1,100 one-byte fragments: the flow window admits the first ones and
+    // queues the rest, and the first datagram can never be sent.
+    hub.send(&session, "schema", vec![7; 1_100])
+        .expect_err("the first fragment can never be sent");
+
+    assert_eq!(
+        hub.peers[&session.remote_addr]
+            .session
+            .outstanding_reliable_packet_count(),
+        outstanding,
+        "nothing of the refused send stays queued"
+    );
+}
