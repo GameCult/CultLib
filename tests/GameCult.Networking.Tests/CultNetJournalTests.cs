@@ -1024,12 +1024,20 @@ namespace GameCult.Networking.Tests
         }
 
         // A change the log holds is published, however Dispose interleaves with the write: Dispose waits for a journal in
-        // flight (disposing the journal first) and publishes whatever the writer had logged and not yet published.
+        // flight (disposing the journal first) and publishes whatever the writer had logged and not yet published. The writer
+        // is held in an earlier cache observer, so Dispose finishes before the writer reaches the database's own observer.
         [Test]
         public async Task ADatabaseDisposedWhileAWriteIsInItsLogAppendStillPublishesWhatItLogged()
         {
             var store = new FlakyLogStore();
             var cache = new CultCache();
+            using var inObserver = new ManualResetEventSlim();
+            using var releaseObserver = new ManualResetEventSlim();
+            using var holdWriter = cache.Watch<object>().Subscribe(_ =>
+            {
+                inObserver.Set();
+                releaseObserver.Wait(TimeSpan.FromSeconds(10));
+            });
             var database = Database(cache, primary: true, store);
             var seen = Record(database);
             using var inAppend = new ManualResetEventSlim();
@@ -1045,8 +1053,10 @@ namespace GameCult.Networking.Tests
             var dispose = Task.Run(database.Dispose);
             await Task.Delay(300);
             release.Set();
-            await writer;
+            Assert.That(inObserver.Wait(TimeSpan.FromSeconds(10)), Is.True, "the writer left the gate and is held in the earlier observer");
             await dispose;
+            releaseObserver.Set();
+            await writer;
 
             Assert.That(Sequences(store), Is.EqualTo(new[] { 1L }), "the write was logged");
             Assert.That(seen, Is.EqualTo(new[] { One.Value }), "and published");
