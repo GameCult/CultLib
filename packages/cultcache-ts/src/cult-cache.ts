@@ -1,5 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 
+import { SchemaConflictError } from "./store-format";
 import type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,
@@ -149,7 +150,9 @@ export class CultCache {
   }
 
   readonly #definitions = new Map<string, RegisteredDefinition>();
+  // The definition that owns each schema id, and every definition listing an id as compatible, in registration order.
   readonly #schemaIdDefinitions = new Map<string, RegisteredDefinition>();
+  readonly #listingDefinitions = new Map<string, RegisteredDefinition[]>();
   readonly #schemaNameDefinitions = new Map<string, RegisteredDefinition>();
   #hydrated = emptyHydratedState();
   readonly #stores: CultCacheStoreRegistration[] = [];
@@ -525,9 +528,13 @@ export class CultCache {
   }
 
   #registerNow(definition: AnyCultCacheDocumentDefinition): void {
+    // Every registration refusal is a SchemaConflictError naming the new definition's schema id and both schema names.
+    const refuse = (holder: RegisteredDefinition, claimed: CultCacheSchemaCatalogEntry, what: string) =>
+      new SchemaConflictError(claimed.schemaId, [holder.catalogEntry.schemaName, claimed.schemaName], "",
+        `CultCache ${what} is already registered for type "${holder.definition.type}" and cannot also be claimed by type "${definition.type}".`);
     const existing = this.#definitions.get(definition.type);
     if (existing && existing.definition !== definition) {
-      throw new Error(`CultCache already has a different definition registered for type "${definition.type}".`);
+      throw refuse(existing, this.#createCatalogEntry(definition), `type "${definition.type}"`);
     }
 
     const registered: RegisteredDefinition = existing ?? {
@@ -547,25 +554,28 @@ export class CultCache {
       indexAccessors.set(indexName, this.#compileAccessor(definition.type, `index "${indexName}"`, accessor));
     }
 
-    const schemaIds = registered.catalogEntry.compatibleSchemaIds ?? [registered.catalogEntry.schemaId];
-    for (const schemaId of schemaIds) {
-      const existingBySchema = this.#schemaIdDefinitions.get(schemaId);
-      if (existingBySchema && existingBySchema !== registered) {
-        throw new Error(`CultCache schema id "${schemaId}" is already registered for type "${existingBySchema.definition.type}".`);
-      }
+    // One definition owns each schema id. Others may list it as compatible beside its owner: a record under the id resolves to
+    // its owner, and to a lister only when nothing owns it. Neither depends on the order definitions were registered in.
+    const ownId = registered.catalogEntry.schemaId;
+    const listed = (registered.catalogEntry.compatibleSchemaIds ?? []).filter((schemaId) => schemaId !== ownId);
+    const owner = this.#schemaIdDefinitions.get(ownId);
+    if (owner && owner !== registered) {
+      throw refuse(owner, registered.catalogEntry, `schema id "${ownId}"`);
     }
     const existingBySchemaName = this.#schemaNameDefinitions.get(registered.catalogEntry.schemaName);
     if (existingBySchemaName && existingBySchemaName !== registered) {
-      throw new Error(
-        `CultCache schema name "${registered.catalogEntry.schemaName}" is already registered for type "${existingBySchemaName.definition.type}".`,
-      );
+      throw refuse(existingBySchemaName, registered.catalogEntry, `schema name "${registered.catalogEntry.schemaName}"`);
     }
     const derived = this.#deriveTypeLookups(definition.type, nameAccessor, indexAccessors);
 
     // Every check and accessor has run; install.
     this.#definitions.set(definition.type, registered);
-    for (const schemaId of schemaIds) {
-      this.#schemaIdDefinitions.set(schemaId, registered);
+    this.#schemaIdDefinitions.set(ownId, registered);
+    for (const schemaId of listed) {
+      const listers = this.#listingDefinitions.get(schemaId) ?? [];
+      if (!listers.includes(registered)) {
+        this.#listingDefinitions.set(schemaId, [...listers, registered]);
+      }
     }
     this.#schemaNameDefinitions.set(registered.catalogEntry.schemaName, registered);
     this.#installAccessors(registered, nameAccessor, indexAccessors, derived);
@@ -808,7 +818,16 @@ export class CultCache {
 
   #resolveDefinitionForEnvelope(entry: CultCacheEnvelope): RegisteredDefinition | undefined {
     if (entry.schemaId) {
-      return this.#schemaIdDefinitions.get(entry.schemaId)
+      const listers = this.#listingDefinitions.get(entry.schemaId) ?? [];
+      const owner = this.#schemaIdDefinitions.get(entry.schemaId);
+      if (!owner && listers.length > 1) {
+        const types = listers.map((lister) => lister.definition.type).sort();
+        throw new SchemaConflictError(entry.schemaId, listers.map((lister) => lister.catalogEntry.schemaName).sort(), entry.key,
+          `CultCache schema id "${entry.schemaId}" of record "${entry.key}" is owned by no registered type and declared compatible by ` +
+          `several (${types.join(", ")}), so it resolves to none. Register the type that owns the id, or declare it on one type.`);
+      }
+      return owner
+        ?? listers[0]
         ?? this.#schemaNameDefinitions.get(entry.type)
         ?? this.#definitions.get(entry.type);
     }

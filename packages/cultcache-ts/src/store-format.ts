@@ -35,15 +35,16 @@ export function isStoreSnapshot(decoded: unknown): decoded is [StoreFormat, ...u
 /**
  * A write the catalog cannot describe: records of different types under one schema id, two arrived schemas that share an id and
  * disagree on the schema name, or a record no chosen entry publishes. Nothing is written. It names the id, the names involved and
- * a record key.
+ * a record key. A cache throws it too, with an empty record key, when a definition cannot register beside one it already holds,
+ * and when a record's schema id names no single registered definition.
  */
 export class SchemaConflictError extends Error {
   readonly schemaId: string;
   readonly schemaNames: string[];
   readonly recordKey: string;
 
-  constructor(schemaId: string, schemaNames: string[], recordKey: string) {
-    super(`Schema id "${schemaId}" cannot describe record "${recordKey}": ${schemaNames.map((name) => `"${name}"`).join(", ")}.`);
+  constructor(schemaId: string, schemaNames: string[], recordKey: string, message?: string) {
+    super(message ?? `Schema id "${schemaId}" cannot describe record "${recordKey}": ${schemaNames.map((name) => `"${name}"`).join(", ")}.`);
     this.name = "SchemaConflictError";
     this.schemaId = schemaId;
     this.schemaNames = schemaNames;

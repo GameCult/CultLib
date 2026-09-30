@@ -16,7 +16,7 @@ import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
-import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
+import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -2092,6 +2092,93 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
         );
         assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a file it cannot read`);
       }
+    }
+  }
+});
+
+// Owner beats lister: a definition that owns an id and one that lists it as compatible register together in either order. A record
+// under the id is the owner's, and a lister's only when nothing owns it; two listers and no owner name no single definition.
+const ownsId = defineDocumentType({ type: "tests.owns", schema: z.object({ name: z.string() }), schemaId: "id.owned", schemaName: "tests.owns" });
+const listsId = defineDocumentType({
+  type: "tests.lists",
+  schema: z.object({ name: z.string() }),
+  schemaId: "id.lister",
+  schemaName: "tests.lists",
+  compatibleSchemaIds: ["id.owned"],
+});
+const alsoListsId = defineDocumentType({
+  type: "tests.also-lists",
+  schema: z.object({ name: z.string() }),
+  schemaId: "id.also-lister",
+  schemaName: "tests.also-lists",
+  compatibleSchemaIds: ["id.owned"],
+});
+
+async function storeUnder(records: [string, string][]): Promise<string> {
+  const seed = CultCache.builder().withDocumentType(ownsId).build();
+  await seed.put(ownsId, "seed", { name: "n" });
+  const payload = seed.getRequiredEnvelope(ownsId, "seed").payload;
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-owner-lister-")), "store.msgpack");
+  const ids = [...new Set(records.map(([, schemaId]) => schemaId))];
+  await writeFile(file, encode(["cultcache.store.v1",
+    ids.map((schemaId) => [schemaId, schemaId, `${schemaId}.v1`, schemaId, "", [schemaId], []]),
+    records.map(([key, schemaId]) => [key, schemaId, "2026-09-30T00:00:00.0000000Z", payload])]));
+  return file;
+}
+
+async function openWith(file: string, ...definitions: AnyCultCacheDocumentDefinition[]): Promise<CultCache> {
+  let builder = CultCache.builder();
+  for (const definition of definitions) builder = builder.withDocumentType(definition);
+  const cache = builder.withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
+  await cache.pullAllBackingStores();
+  return cache;
+}
+
+test("a definition listing an id registers beside the one owning it in either order, and the owner wins", async () => {
+  const file = await storeUnder([["o", "id.owned"], ["l", "id.lister"]]);
+  for (const order of [[ownsId, listsId], [listsId, ownsId]]) {
+    const cache = await openWith(file, ...order);
+    assert.deepEqual(cache.getRequired(ownsId, "o"), { name: "n" });
+    assert.equal(cache.get(listsId, "o"), undefined);
+    assert.deepEqual(cache.getRequired(listsId, "l"), { name: "n" });
+  }
+  const listerOnly = await openWith(await storeUnder([["o", "id.owned"]]), listsId);
+  assert.deepEqual(listerOnly.getRequired(listsId, "o"), { name: "n" });
+});
+
+test("two definitions listing one id register, and a record under it needs its owner", async () => {
+  const file = await storeUnder([["k", "id.owned"]]);
+  for (const listers of [[listsId, alsoListsId], [alsoListsId, listsId]]) {
+    await assert.rejects(openWith(file, ...listers), (error: unknown) => {
+      assert.ok(error instanceof SchemaConflictError);
+      assert.equal(error.schemaId, "id.owned");
+      assert.equal(error.recordKey, "k");
+      assert.deepEqual(error.schemaNames, ["tests.also-lists", "tests.lists"]);
+      return true;
+    });
+    for (const order of [[...listers, ownsId], [ownsId, ...listers]]) {
+      assert.deepEqual((await openWith(file, ...order)).getRequired(ownsId, "k"), { name: "n" });
+    }
+  }
+});
+
+test("every registration refusal is a SchemaConflictError naming the id and both schema names", () => {
+  const sameId = defineDocumentType({ type: "tests.owns-too", schema: z.object({ name: z.string() }), schemaId: "id.owned", schemaName: "tests.owns-too" });
+  const sameName = defineDocumentType({ type: "tests.named-too", schema: z.object({ name: z.string() }), schemaId: "id.other", schemaName: "tests.owns" });
+  const sameType = defineDocumentType({ type: "tests.owns", schema: z.object({ name: z.string() }), schemaId: "id.third", schemaName: "tests.third" });
+  for (const [claimant, schemaId, names] of [
+    [sameId, "id.owned", ["tests.owns", "tests.owns-too"]],
+    [sameName, "id.other", ["tests.owns", "tests.owns"]],
+    [sameType, "id.third", ["tests.owns", "tests.third"]],
+  ] as const) {
+    for (const order of [[ownsId, claimant], [claimant, ownsId]]) {
+      assert.throws(() => CultCache.builder().withDocumentType(order[0]).withDocumentType(order[1]).build(), (error: unknown) => {
+        assert.ok(error instanceof SchemaConflictError, String(error));
+        const first = order[0] === ownsId;
+        assert.equal(error.schemaId, first ? schemaId : ownsId.schemaId);
+        assert.deepEqual(error.schemaNames, first ? names : [...names].reverse());
+        return true;
+      });
     }
   }
 });
