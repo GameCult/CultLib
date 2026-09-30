@@ -372,7 +372,7 @@ fn a_malformed_audio_parity_record_is_refused_with_its_reason() {
         ("stripe", Box::new(|r| r.data_shard_count = 0)),
         ("stripe", Box::new(|r| r.data_shard_count = 255)),
         ("timing", Box::new(|r| r.packet_duration_ticks = 0)),
-        ("base_pts_ticks", Box::new(|r| r.deadline_ticks = -1)),
+        ("last pts_ticks", Box::new(|r| r.deadline_ticks = -1)),
         ("packet id or pts range", Box::new(|r| r.base_packet_id = u64::MAX - 2)),
         ("packet id or pts range", Box::new(|r| {
             r.base_pts_ticks = i64::MAX - 960 * 3 + 1;
@@ -406,12 +406,13 @@ fn records_on_the_edge_of_each_bound_are_admitted() {
 
     let mut audio = audio_parity();
     audio.data_shard_count = 254;
+    audio.deadline_ticks = i64::MAX;
     audio.parity_shard_count = 2;
     assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "254 + 2 = 256 shards");
 
     let mut audio = audio_parity();
-    audio.deadline_ticks = audio.base_pts_ticks;
-    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "a deadline at the base pts");
+    audio.deadline_ticks = audio.base_pts_ticks + 3 * i64::from(audio.packet_duration_ticks);
+    assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "a deadline at the last pts");
 
     let mut audio = audio_parity();
     audio.base_packet_id = u64::MAX - 3;
@@ -427,7 +428,7 @@ fn records_on_the_edge_of_each_bound_are_admitted() {
 // The ceiling on one media record
 // ---------------------------------------------------------------------------
 
-fn audio_parity(payload_bytes: usize, deadline_ticks: i64) -> GameCultMediaAudioParityShardRecord {
+fn sized_audio_parity(payload_bytes: usize, deadline_ticks: i64) -> GameCultMediaAudioParityShardRecord {
     GameCultMediaAudioParityShardRecord {
         stream_id: "s".to_string(),
         session_id: "x".to_string(),
@@ -447,7 +448,7 @@ fn audio_parity(payload_bytes: usize, deadline_ticks: i64) -> GameCultMediaAudio
     }
 }
 
-fn video_parity(payload_bytes: usize) -> GameCultMediaVideoParityShardRecord {
+fn sized_video_parity(payload_bytes: usize) -> GameCultMediaVideoParityShardRecord {
     GameCultMediaVideoParityShardRecord {
         stream_id: "s".to_string(),
         session_id: "x".to_string(),
@@ -498,11 +499,11 @@ fn a_media_record_one_byte_over_the_ceiling_is_refused_at_decode() {
     let wraps: [(&str, Box<dyn Fn(usize) -> GameCultMediaWireRecord>); 2] = [
         (
             "audio parity",
-            Box::new(|payload| GameCultMediaWireRecord::AudioParity(audio_parity(payload, 300))),
+            Box::new(|payload| GameCultMediaWireRecord::AudioParity(sized_audio_parity(payload, 300))),
         ),
         (
             "video parity",
-            Box::new(|payload| GameCultMediaWireRecord::VideoParity(video_parity(payload))),
+            Box::new(|payload| GameCultMediaWireRecord::VideoParity(sized_video_parity(payload))),
         ),
     ];
     for (name, wrap) in &wraps {
@@ -524,7 +525,7 @@ fn a_media_record_one_byte_over_the_ceiling_is_refused_at_decode() {
 #[test]
 fn a_jumbo_frame_sized_record_is_accepted() {
     let wire = encode_media_wire_record(
-        &GameCultMediaWireRecord::AudioParity(audio_parity(8_800, 300)),
+        &GameCultMediaWireRecord::AudioParity(sized_audio_parity(8_800, 300)),
         provenance(),
     )
     .unwrap();
@@ -540,7 +541,7 @@ fn audio_parity_must_not_have_a_deadline_before_its_last_packets_pts() {
     // Four packets, 100 ticks each from 0: the last plays at 300.
     let decodes = |deadline_ticks: i64| {
         let wire = encode_media_wire_record(
-            &GameCultMediaWireRecord::AudioParity(audio_parity(8, deadline_ticks)),
+            &GameCultMediaWireRecord::AudioParity(sized_audio_parity(8, deadline_ticks)),
             provenance(),
         )
         .unwrap();
@@ -646,7 +647,7 @@ fn a_session_refuses_to_reassemble_more_than_the_ceiling_on_the_media_channel() 
 /// than the receiver dropping it.
 #[test]
 fn the_encoder_refuses_a_record_over_the_ceiling() {
-    let wrap = |payload: usize| GameCultMediaWireRecord::AudioParity(audio_parity(payload, 300));
+    let wrap = |payload: usize| GameCultMediaWireRecord::AudioParity(sized_audio_parity(payload, 300));
     let at = payload_for_wire_len(GAMECULT_MEDIA_MAX_WIRE_BYTES, &wrap);
     assert!(encode_media_wire_record(&wrap(at), provenance()).is_ok());
     let error = encode_media_wire_record(&wrap(at + 1), provenance()).unwrap_err();
