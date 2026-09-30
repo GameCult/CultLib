@@ -3722,8 +3722,8 @@ class CultMeshTests(unittest.TestCase):
 
     def test_cultmesh_daemon_refuses_a_snapshot_document_limit_of_zero_at_startup(self) -> None:
         # A limit of zero is a server that could answer no snapshot, which the Rust document
-        # server's options also refuse; the daemon passes the flag to the server, and exits
-        # naming the rule instead of serving. The limit's enforcement as a peer error is pinned
+        # server's options also refuse; the daemon passes the flag to the server, and exits with
+        # a usage error naming the rule instead of serving. The limit's enforcement as a peer error is pinned
         # in process by test_cultmesh_local_server_rejects_oversized_snapshot_responses.
         with tempfile.TemporaryDirectory() as temp:
             ready_path = Path(temp) / "ready.json"
@@ -3755,8 +3755,10 @@ class CultMeshTests(unittest.TestCase):
                 env=env,
                 timeout=30,
             )
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("max_snapshot_documents must be greater than zero", completed.stderr)
+            # A usage error from argparse: exit status 2, the rule named, no traceback.
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("error: max_snapshot_documents must be greater than zero", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
             self.assertFalse(ready_path.exists())
 
     def test_cultmesh_daemon_serves_opt_in_simulation_observations(self) -> None:
@@ -4719,6 +4721,16 @@ class CultMeshTests(unittest.TestCase):
         accepted(rudp_resend_delay_ms=1)
         self.assertIn("greater than zero", refused(rudp_max_fragment_bytes=0))
         self.assertIn("greater than zero", refused(rudp_max_pending_reliable_packets=0))
+        # The RUDP options configure only the RUDP server: without one, none of them is checked.
+        accepted(enable_rudp=False, rudp_max_fragment_bytes=1, rudp_max_pending_reliable_packets=16)
+        accepted(
+            enable_rudp=False,
+            rudp_max_fragment_bytes=0,
+            rudp_max_pending_reliable_packets=0,
+            rudp_resend_delay_ms=0,
+        )
+        self.assertIn("greater than zero", refused(enable_rudp=False, max_snapshot_documents=0))
+        self.assertIn("cannot hold an empty snapshot response", refused(enable_rudp=False, max_snapshot_bytes=empty - 1))
 
         # The configuration at the bound does answer: an empty snapshot in one-byte fragments,
         # exactly as many as the queue holds.

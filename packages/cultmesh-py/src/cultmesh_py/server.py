@@ -105,23 +105,25 @@ class CultMeshLocalServer:
         # The Rust document server's option rules (validate_options), for each option this
         # server shares with it: every limit is greater than zero, and the limits leave room for
         # the smallest response the server sends, an empty snapshot. A server that could answer
-        # nothing is misconfigured.
+        # nothing is misconfigured. The RUDP options are checked only when RUDP is served, as
+        # Rust checks them only for the RUDP server they configure.
         if self.max_snapshot_bytes is not None and self.max_snapshot_bytes <= 0:
             raise ValueError("max_snapshot_bytes must be greater than zero")
         if self.max_snapshot_documents is not None and self.max_snapshot_documents <= 0:
             raise ValueError("max_snapshot_documents must be greater than zero")
-        if self.rudp_resend_delay_ms <= 0:
-            raise ValueError("rudp_resend_delay_ms must be greater than zero")
-        if self.rudp_max_pending_reliable_packets is not None and self.rudp_max_pending_reliable_packets <= 0:
-            raise ValueError("rudp_max_pending_reliable_packets must be greater than zero")
-        if self.rudp_max_fragment_bytes <= 0:
-            raise ValueError("rudp_max_fragment_bytes must be greater than zero")
+        if self.enable_rudp:
+            if self.rudp_resend_delay_ms <= 0:
+                raise ValueError("rudp_resend_delay_ms must be greater than zero")
+            if self.rudp_max_pending_reliable_packets is not None and self.rudp_max_pending_reliable_packets <= 0:
+                raise ValueError("rudp_max_pending_reliable_packets must be greater than zero")
+            if self.rudp_max_fragment_bytes <= 0:
+                raise ValueError("rudp_max_fragment_bytes must be greater than zero")
         empty = _snapshot_response_bytes(
             CultNetRawSnapshotResponse(message_id=_SHORTEST_SERVED_MESSAGE_ID, documents=()).to_wire()
         )
         if self.max_snapshot_bytes is not None and empty > self.max_snapshot_bytes:
             raise ValueError("max_snapshot_bytes cannot hold an empty snapshot response")
-        if -(-empty // self.rudp_max_fragment_bytes) > self._max_rudp_reply_fragments():
+        if self.enable_rudp and -(-empty // self.rudp_max_fragment_bytes) > self._max_rudp_reply_fragments():
             raise ValueError(
                 "rudp_max_fragment_bytes and rudp_max_pending_reliable_packets cannot carry an empty "
                 "snapshot response"

@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stop = threading.Event()
     install_signal_handlers(stop)
-    server = start_server(args)
+    server = start_server(args, parser)
     try:
         ready = daemon_ready_document(server)
         publish_ready(ready, ready_file=args.ready_file)
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
+def start_server(args: argparse.Namespace, parser: argparse.ArgumentParser) -> CultMeshLocalServer:
     node = CultMesh.create_node(
         args.cache_file,
         runtime_id=args.runtime_id,
@@ -98,17 +98,21 @@ def start_server(args: argparse.Namespace) -> CultMeshLocalServer:
                 quorum_ratio=args.simulation_quorum_ratio,
             )
         )
-    server = CultMesh.serve_node(
-        node,
-        verse_catalog=verse_catalog,
-        peer_catalog=peer_catalog,
-        observation_hub=observation_hub,
-        host=args.host,
-        port=args.port,
-        display_name=args.display_name,
-        max_snapshot_documents=args.max_snapshot_documents,
-        max_snapshot_bytes=args.max_snapshot_bytes,
-    )
+    try:
+        server = CultMesh.serve_node(
+            node,
+            verse_catalog=verse_catalog,
+            peer_catalog=peer_catalog,
+            observation_hub=observation_hub,
+            host=args.host,
+            port=args.port,
+            display_name=args.display_name,
+            max_snapshot_documents=args.max_snapshot_documents,
+            max_snapshot_bytes=args.max_snapshot_bytes,
+        )
+    except ValueError as error:
+        # The server owns its option rules; a limit it refuses is a usage error, not a crash.
+        parser.error(str(error))
     advertise_self(server, verse_catalog, peer_catalog, args)
     return server
 
