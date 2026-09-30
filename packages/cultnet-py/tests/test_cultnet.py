@@ -1818,7 +1818,8 @@ class CultNetTests(unittest.TestCase):
                 return cache
 
             cache = open_cache()
-            apply_raw_document_record(cache, schema_document_map([document]), record)
+            applied = apply_raw_document_record(cache, schema_document_map([document]), record)
+            self.assertEqual(applied.schema_id, document.catalog_entry().schema_id)
             self.assertEqual(
                 cache.get_required_envelope(document, "policy:1").schema_id, document.catalog_entry().schema_id
             )

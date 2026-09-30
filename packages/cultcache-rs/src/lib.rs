@@ -379,7 +379,7 @@ impl StoreUnreadableError {
 
 impl std::fmt::Display for StoreUnreadableError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "failed to decode MessagePack {}: {:#}", self.path.display(), self.source)
+        write!(formatter, "failed to decode MessagePack {}", self.path.display())
     }
 }
 
@@ -2669,16 +2669,16 @@ fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     let snapshot: PersistedStoreSnapshot =
         rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
 
-    let catalog = snapshot
-        .1
-        .into_iter()
-        .flat_map(|entry| {
-            // A schema is published by its id or as a compatible id.
-            let published: Vec<String> = std::iter::once(entry.0).chain(entry.5).collect();
-            let name = entry.1;
-            published.into_iter().map(move |id| (id, name.clone()))
-        })
-        .collect::<BTreeMap<_, _>>();
+    // A schema id names the entry that has it as its own id; only an id no entry owns names the entry that lists it as compatible.
+    let mut catalog = BTreeMap::<String, String>::new();
+    for entry in &snapshot.1 {
+        catalog.entry(entry.0.clone()).or_insert_with(|| entry.1.clone());
+    }
+    for entry in &snapshot.1 {
+        for compatible in &entry.5 {
+            catalog.entry(compatible.clone()).or_insert_with(|| entry.1.clone());
+        }
+    }
     snapshot
         .2
         .into_iter()
@@ -4801,8 +4801,10 @@ mod tests {
                 if !reads {
                     let error = outcome.unwrap_err();
                     let typed = error.downcast_ref::<StoreUnreadableError>().unwrap_or_else(|| panic!("{what}: {error:#}"));
-                    let cause = std::error::Error::source(typed).unwrap_or_else(|| panic!("{what}: the cause is the source"));
-                    assert!(typed.to_string().contains(&cause.to_string()), "{what}: the message carries the cause: {typed}");
+                    let cause = std::error::Error::source(typed).unwrap_or_else(|| panic!("{what}: the cause is the source")).to_string();
+                    // The message is the error's own; the cause is printed once, by the chain.
+                    assert!(!typed.to_string().contains(&cause), "{what}: the message repeats the cause: {typed}");
+                    assert_eq!(format!("{error:#}").matches(&cause).count(), 1, "{what}: {error:#}");
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
                 } else if operation != "open" {
                     assert_eq!(store_header(&std::fs::read(&path)?)?.as_deref(), Some(header), "{what}");
@@ -4818,6 +4820,22 @@ mod tests {
         files.sort();
         listed.sort();
         assert_eq!(listed, files);
+        Ok(())
+    }
+
+    // An id one entry owns and a later entry lists as compatible names the entry that owns it.
+    #[test]
+    fn an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.msgpack");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/vectors/document-variants-c2a/readability/own-id-over-compatible-v3.bin"),
+            &path,
+        )?;
+        let envelopes = SingleFileMessagePackBackingStore::new(&path).pull_all()?;
+        assert_eq!(envelopes.len(), 2);
+        assert!(envelopes.iter().all(|envelope| envelope.r#type == "vectors.item"), "{envelopes:?}");
         Ok(())
     }
 

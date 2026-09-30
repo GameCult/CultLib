@@ -1344,6 +1344,61 @@ test("the store publishes a record's schema id even when the envelope's catalog 
   assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 1);
 });
 
+// Entries that share a schema id are one schema seen by different writers: the catalog written lists every id any of them lists,
+// whichever order the records arrive in.
+test("the store writer merges the compatible ids of entries that share a schema id, in either order", async () => {
+  const entry = (compatibleSchemaIds: string[]) => ({
+    schemaId: "tests.merge.x",
+    schemaName: "tests.merge",
+    schemaVersion: "tests.merge.v1",
+    contentHash: "tests.merge.x",
+    canonicalSchemaJson: "",
+    compatibleSchemaIds,
+    members: [],
+  });
+  const record = (key: string, schemaId: string, compatibleSchemaIds: string[]) => ({
+    key,
+    type: "tests.merge",
+    schemaId,
+    payload: encode({ key }),
+    storedAt: "2026-09-30T00:00:00.0000000Z",
+    catalogEntry: entry(compatibleSchemaIds),
+  });
+  const a = record("a", "tests.merge.x", ["tests.merge.x"]);
+  const b = record("b", "tests.merge.y", ["tests.merge.x", "tests.merge.y"]);
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-merge-"));
+
+  for (const [name, order] of [["ab", [a, b]], ["ba", [b, a]]] as const) {
+    const file = join(dir, `${name}.msgpack`);
+    await new SingleFileMessagePackBackingStore(file).pushAll([...order]);
+    const decoded = decode(await readFile(file)) as [string, unknown[][], unknown[][]];
+    assert.deepEqual(decoded[1].map((catalogEntry) => (catalogEntry[5] as string[]).slice().sort()), [["tests.merge.x", "tests.merge.y"]], name);
+    assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2, name);
+  }
+
+  // A put over a key of a file whose other record is stored under the wider entry's compatible id.
+  const file = join(dir, "push.msgpack");
+  await new SingleFileMessagePackBackingStore(file).pushAll([b]);
+  await new SingleFileMessagePackBackingStore(file).push(a);
+  assert.equal((await new SingleFileMessagePackBackingStore(file).pullAll()).length, 2);
+});
+
+test("an id an entry owns names that entry, not one that lists it as compatible", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-own-id-"));
+  const file = await copyVector(dir, join(c2aVectors, "readability", "own-id-over-compatible-v3.bin"), "own.msgpack");
+  const envelopes = await new SingleFileMessagePackBackingStore(file).pullAll();
+  assert.deepEqual(envelopes.map((envelope) => envelope.type), ["vectors.item", "vectors.item"]);
+  const inspection = inspectCultCacheBytes("own.msgpack", await readFile(file));
+  assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"]);
+});
+
+// The inspector reads what the reader reads: a record under an id its catalog lists only as compatible is inspected.
+test("CultCache inspector reads a record whose schema the catalog publishes only as a compatible id", async () => {
+  const bytes = await readFile(join(c2aVectors, "readability", "compatible-id-only-v3.bin"));
+  const inspection = inspectCultCacheBytes("compatible.msgpack", bytes);
+  assert.deepEqual(inspection.records.map((record) => record.schemaName), ["vectors.item", "vectors.item"]);
+});
+
 test("a record loaded under a compatible schema id is written back under the id its catalog entry carries", async () => {
   const file = join(await mkdtemp(join(tmpdir(), "cultcache-foreign-id-")), "store.msgpack");
   const payload = encode({ name: "old" });

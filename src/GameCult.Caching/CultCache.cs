@@ -28,6 +28,33 @@ namespace GameCult.Caching
         public string[] CompatibleSchemaIds { get; set; } = Array.Empty<string>();
 
         public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
+
+        // One entry per schema id, whatever order the candidates come in: entries that share an id are one schema seen by different
+        // writers, so the entry written lists every id any of them lists, and its other fields are the first's (or the last's).
+        internal static IEnumerable<CultSchemaCatalogEntry> MergeById(IEnumerable<CultSchemaCatalogEntry> entries, bool preferLast = false)
+        {
+            foreach (var group in entries.GroupBy(entry => entry.SchemaId, StringComparer.Ordinal))
+            {
+                var members = group.ToArray();
+                var chosen = preferLast ? members[^1] : members[0];
+                if (members.Length == 1)
+                {
+                    yield return chosen;
+                    continue;
+                }
+
+                yield return new CultSchemaCatalogEntry
+                {
+                    SchemaId = chosen.SchemaId,
+                    SchemaName = chosen.SchemaName,
+                    SchemaVersion = chosen.SchemaVersion,
+                    ContentHash = chosen.ContentHash,
+                    CanonicalSchemaJson = chosen.CanonicalSchemaJson,
+                    CompatibleSchemaIds = members.SelectMany(entry => entry.CompatibleSchemaIds).Distinct(StringComparer.Ordinal).ToArray(),
+                    Members = chosen.Members
+                };
+            }
+        }
     }
 
     public sealed class CultSchemaMemberCatalogEntry
@@ -3637,9 +3664,7 @@ namespace GameCult.Caching
             var snapshot = new CultPersistedStoreSnapshot
             {
                 FormatVersion = HeaderFor(holdsElementIds, existingHeader, wholeStore, directoryStore: false, holdsVariants: ordered.Any(record => record.Variant != null)),
-                SchemaCatalog = catalog
-                    .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
-                    .Select(group => group.First())
+                SchemaCatalog = CultSchemaCatalogEntry.MergeById(catalog)
                     // An entry stays while it publishes a schema id some record carries, as its own id or a compatible one.
                     .Where(entry => used.Contains(entry.SchemaId) || entry.CompatibleSchemaIds.Any(used.Contains))
                     .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)

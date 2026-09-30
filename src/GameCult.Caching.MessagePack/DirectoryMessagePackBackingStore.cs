@@ -251,11 +251,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 currentIndex[key] = ToIndexRecord(stored);
         }
 
-        var catalogCandidates = currentManifest.SchemaCatalog
-            .Concat(_durableCatalog)
-            .Concat(Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()))
-            .GroupBy(entry => entry.SchemaId, StringComparer.Ordinal)
-            .Select(group => group.Last())
+        var catalogCandidates = CultSchemaCatalogEntry.MergeById(
+                currentManifest.SchemaCatalog
+                    .Concat(_durableCatalog)
+                    .Concat(Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())),
+                preferLast: true)
             .ToArray();
         var usedSchemaIds = currentIndex.Values.Select(record => record.SchemaId).ToHashSet(StringComparer.Ordinal);
         var targetCatalog = catalogCandidates
@@ -464,8 +464,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         if (!string.Equals(snapshot.FormatVersion, IndexedFormatVersion, StringComparison.Ordinal) &&
             !string.Equals(snapshot.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException(
-                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.");
+            throw new CultStoreUnreadableException(
+                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
+                _manifestFile.FullName);
         }
 
         return snapshot;

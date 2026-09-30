@@ -68,11 +68,18 @@ function inspectV1Snapshot(filePath: string, fileSizeBytes: number, decoded: [St
   }
 
   const catalog = catalogRaw.map(decodeCatalogEntry);
+  // An id names the entry that owns it; only an id no entry owns names the entry that lists it as compatible.
   const catalogBySchemaId = new Map<string, InspectedCatalogEntry>();
   for (const entry of catalog) {
-    catalogBySchemaId.set(entry.schemaId, entry);
+    if (!catalogBySchemaId.has(entry.schemaId)) {
+      catalogBySchemaId.set(entry.schemaId, entry);
+    }
+  }
+  for (const entry of catalog) {
     for (const compatibleSchemaId of entry.compatibleSchemaIds) {
-      catalogBySchemaId.set(compatibleSchemaId, entry);
+      if (!catalogBySchemaId.has(compatibleSchemaId)) {
+        catalogBySchemaId.set(compatibleSchemaId, entry);
+      }
     }
   }
   const records = recordsRaw.map((record) => decodeV1Record(record, catalogBySchemaId));

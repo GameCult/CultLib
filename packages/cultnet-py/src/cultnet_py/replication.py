@@ -37,11 +37,9 @@ def apply_raw_document_record(
 ) -> CultNetAppliedRecord:
     wire = record.to_wire() if isinstance(record, CultNetRawDocumentRecord) else record
     schema_id = str(wire["schemaId"])
-    document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
-        documents_by_schema_id,
-        schema_id,
-        wire,
-    )
+    document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, wire)
+    # The record is applied, stamped and reported under the local schema id, as the cache stores it and a delete reports it.
+    resolved_schema_id = document.catalog_entry().schema_id
     envelope = raw_record_to_envelope(document, resolved_schema_id, wire)
     value = cache.put_envelope(document, envelope)
     return CultNetAppliedRecord(
@@ -82,11 +80,8 @@ def apply_raw_snapshot(
         if not isinstance(record, dict):
             continue
         schema_id = str(record["schemaId"])
-        document, resolved_schema_id = resolve_document_and_schema_id_for_raw_record(
-            documents_by_schema_id,
-            schema_id,
-            record,
-        )
+        document = resolve_document_for_raw_record(documents_by_schema_id, schema_id, record)
+        resolved_schema_id = document.catalog_entry().schema_id
         envelope = raw_record_to_envelope(document, resolved_schema_id, record)
         batch = batches.setdefault(document.type, (document, []))
         batch[1].append((resolved_schema_id, envelope))

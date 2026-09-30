@@ -127,6 +127,8 @@ namespace GameCult.Caching.Tests
         [TestCase("current-catalog-bad-canonical.msgpack")]
         [TestCase("current-catalog-bad-members.msgpack")]
         [TestCase("current-catalog-bad-compat.msgpack")]
+        [TestCase("current-catalog-bad-slot5-nil.msgpack")]
+        [TestCase("current-catalog-bad-slot5-int.msgpack")]
         public void SingleFileRefusesAMalformedCurrentCatalogEntry(string vector)
         {
             Assert.That(Refusal(vector), Is.Not.Empty);

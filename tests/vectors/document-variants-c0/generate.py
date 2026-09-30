@@ -18,6 +18,10 @@ at test time. Run: python generate.py  (needs msgpack).
                                   v1 header, plain records, and the first catalog entry of the current layout with one slot
                                   malformed (canonical schema json an int; members an int; a compatible id an int). Not the
                                   older layout, so CultMesh refuses them as CultCache does
+  current-catalog-bad-slot5-nil.msgpack
+  current-catalog-bad-slot5-int.msgpack
+                                  the same, with slot 5 (the compatible ids) nil or an integer: neither is a string, so neither is
+                                  the older layout
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
@@ -60,6 +64,8 @@ for name, entry in (
     ("current-catalog-bad-canonical", current[:4] + [5]),
     ("current-catalog-bad-members", current[:6] + [5]),
     ("current-catalog-bad-compat", current[:5] + [[7]] + current[6:]),
+    ("current-catalog-bad-slot5-nil", current[:5] + [None] + current[6:]),
+    ("current-catalog-bad-slot5-int", current[:5] + [7] + current[6:]),
 ):
     # One catalog entry and the records that use it: the older-layout reader takes an entry's slot 5 for a string, so a second
     # current-layout entry would make it refuse for that reason, not for the malformed slot under test.

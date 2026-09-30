@@ -239,9 +239,19 @@ function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheS
       compatibleSchemaIds: [schemaId],
       members: [],
     };
-    if (!catalog.has(published.schemaId)) {
-      catalog.set(published.schemaId, published);
-    }
+    // Entries that share an id are one schema seen by different writers: the entry written lists every id any of them lists.
+    const existing = catalog.get(published.schemaId);
+    catalog.set(
+      published.schemaId,
+      existing === undefined
+        ? published
+        : {
+            ...existing,
+            compatibleSchemaIds: [
+              ...new Set([...(existing.compatibleSchemaIds ?? [existing.schemaId]), ...(published.compatibleSchemaIds ?? [published.schemaId])]),
+            ],
+          },
+    );
   }
 
   return catalog;
@@ -337,12 +347,19 @@ function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
     throw new Error("CultCache v1 snapshot must contain a schema catalog and record array.");
   }
 
+  // A schema id names the entry that has it as its own id; only an id no entry owns names the entry that lists it as compatible.
+  const catalogEntries = catalogRaw.map(decodeCatalogEntry);
   const catalogBySchemaId = new Map<string, CultCacheSchemaCatalogEntry>();
-  for (const entry of catalogRaw) {
-    const catalogEntry = decodeCatalogEntry(entry);
-    catalogBySchemaId.set(catalogEntry.schemaId, catalogEntry);
+  for (const catalogEntry of catalogEntries) {
+    if (!catalogBySchemaId.has(catalogEntry.schemaId)) {
+      catalogBySchemaId.set(catalogEntry.schemaId, catalogEntry);
+    }
+  }
+  for (const catalogEntry of catalogEntries) {
     for (const compatibleSchemaId of catalogEntry.compatibleSchemaIds ?? []) {
-      catalogBySchemaId.set(compatibleSchemaId, catalogEntry);
+      if (!catalogBySchemaId.has(compatibleSchemaId)) {
+        catalogBySchemaId.set(compatibleSchemaId, catalogEntry);
+      }
     }
   }
 

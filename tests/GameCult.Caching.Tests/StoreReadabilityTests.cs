@@ -155,6 +155,67 @@ namespace GameCult.Caching.Tests
             Assert.That(rewritten.Records.Select(record => record.SchemaId), Does.Contain("vectors.old.id"));
         }
 
+        // An id one entry owns and a later entry lists as compatible names the entry that owns it.
+        [Test]
+        public void AnIdAnEntryOwnsNamesThatEntryNotOneThatListsItAsCompatible()
+        {
+            var path = Path.Combine(_directory, "own-id.cc");
+            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), "own-id-over-compatible-v3.bin")));
+
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            Assert.That(cache.Get<VectorItem>(new CultRecordKey("alpha")), Is.Not.Null, "the record read as the schema that owns its id");
+        }
+
+        // A directory rewrite where the entry that lists a kept record's id shares its own id with the schema being written keeps that
+        // id in the entry it writes, so the manifest still reads.
+        [Test]
+        public void ADirectoryRewriteMergesEntriesThatShareAnIdAndKeepsEveryIdTheyList()
+        {
+            var path = DirectoryStore("merged.cc");
+            var manifest = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = manifest.SchemaCatalog.Single();
+            manifest.Records.Single().SchemaId = "vectors.old.id";
+            entry.CompatibleSchemaIds = new[] { entry.SchemaId, "vectors.old.id" };
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(manifest));
+
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+
+            var rewritten = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(rewritten.SchemaCatalog.Single().CompatibleSchemaIds, Does.Contain("vectors.old.id"));
+        }
+
+        // Entries that share an id are merged whatever order they arrive in: every id any of them lists survives.
+        [Test]
+        public void EntriesThatShareAnIdMergeTheirCompatibleIdsInEitherOrder()
+        {
+            CultSchemaCatalogEntry Entry(params string[] compatible) => new()
+            {
+                SchemaId = "x", SchemaName = "n", SchemaVersion = "n.v1", ContentHash = "h", CompatibleSchemaIds = compatible
+            };
+            var plain = Entry("x");
+            var wide = Entry("x", "y");
+
+            foreach (var order in new[] { new[] { plain, wide }, new[] { wide, plain } })
+            foreach (var preferLast in new[] { false, true })
+            {
+                var merged = CultSchemaCatalogEntry.MergeById(order, preferLast).Single();
+                Assert.That(merged.CompatibleSchemaIds, Is.EquivalentTo(new[] { "x", "y" }));
+            }
+        }
+
+        // A directory manifest in a format the directory store does not read is refused with the typed exception, naming it.
+        [Test]
+        public void ADirectoryManifestInAnotherFormatIsRefusedNamingIt()
+        {
+            var path = Path.Combine(_directory, "wrong-format.cc");
+            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), "..", "v3-base.msgpack")));
+
+            Assert.That(
+                () => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }),
+                Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
+        }
+
         // A commit that lands onto the file as it is keeps the header the file carries: a store already v3 stays v3.
         [TestCase("../v3-base.msgpack", "cultcache.store.v3")]
         [TestCase("compatible-id-only-v3.bin", "cultcache.store.v3")]

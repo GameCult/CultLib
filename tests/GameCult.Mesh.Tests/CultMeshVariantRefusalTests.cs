@@ -61,6 +61,8 @@ public sealed class CultMeshVariantRefusalTests
     [TestCase("current-catalog-bad-canonical.msgpack")]
     [TestCase("current-catalog-bad-members.msgpack")]
     [TestCase("current-catalog-bad-compat.msgpack")]
+    [TestCase("current-catalog-bad-slot5-nil.msgpack")]
+    [TestCase("current-catalog-bad-slot5-int.msgpack")]
     public void ReadSingleFileDocument_RefusesAMalformedCurrentCatalogEntry(string vector)
     {
         Refusal(vector).Path.Should().Be(VectorPath(vector));

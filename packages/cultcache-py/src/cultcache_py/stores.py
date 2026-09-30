@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -172,7 +173,16 @@ def _encode_snapshot(envelopes: list[CultCacheEnvelope], format_version: str) ->
             if supplied is not None and (supplied.schema_id == schema_id or schema_id in supplied.compatible_schema_ids)
             else _default_catalog_entry(envelope)
         )
-        catalog_by_schema_id.setdefault(published.schema_id, published)
+        # Entries that share an id are one schema seen by different writers: the entry written lists every id any of them lists.
+        existing = catalog_by_schema_id.get(published.schema_id)
+        catalog_by_schema_id[published.schema_id] = (
+            published
+            if existing is None
+            else replace(
+                existing,
+                compatible_schema_ids=tuple(dict.fromkeys((*existing.compatible_schema_ids, *published.compatible_schema_ids))),
+            )
+        )
 
     catalog = [
         _encode_catalog_entry(entry)
@@ -200,12 +210,14 @@ def _decode_snapshot(decoded: Any) -> tuple[str, list[CultCacheEnvelope]] | None
     if not isinstance(decoded[1], list) or not isinstance(decoded[2], list):
         raise ValueError("CultCache v1 snapshot must contain a schema catalog and record array")
 
+    # An id names the entry that owns it; only an id no entry owns names the entry that lists it as compatible.
+    entries = [_decode_catalog_entry(raw_entry) for raw_entry in decoded[1]]
     catalog_by_schema_id: dict[str, CultCacheSchemaCatalogEntry] = {}
-    for raw_entry in decoded[1]:
-        entry = _decode_catalog_entry(raw_entry)
-        catalog_by_schema_id[entry.schema_id] = entry
+    for entry in entries:
+        catalog_by_schema_id.setdefault(entry.schema_id, entry)
+    for entry in entries:
         for compatible_schema_id in entry.compatible_schema_ids:
-            catalog_by_schema_id[compatible_schema_id] = entry
+            catalog_by_schema_id.setdefault(compatible_schema_id, entry)
 
     envelopes: list[CultCacheEnvelope] = []
     for raw_record in decoded[2]:

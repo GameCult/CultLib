@@ -315,6 +315,41 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual([entry[0] for entry in stored[1]], ["tests.store-publishes.record"])
             self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 1)
 
+    # Entries that share a schema id are one schema seen by different writers: the catalog written lists every id any of them lists,
+    # whichever order the records arrive in.
+    def test_the_store_writer_merges_the_compatible_ids_of_entries_that_share_a_schema_id_in_either_order(self) -> None:
+        import msgpack  # type: ignore
+        from cultcache_py import CultCacheSchemaCatalogEntry
+        from cultcache_py.stores import _encode_snapshot
+
+        def entry(compatible: tuple[str, ...]) -> CultCacheSchemaCatalogEntry:
+            return CultCacheSchemaCatalogEntry(
+                schema_id="tests.merge.x", schema_name="tests.merge", schema_version="tests.merge.v1",
+                content_hash="tests.merge.x", canonical_schema_json="", compatible_schema_ids=compatible, members=(),
+            )
+
+        def record(key: str, schema_id: str, compatible: tuple[str, ...]) -> CultCacheEnvelope:
+            return CultCacheEnvelope(
+                key=key, type="tests.merge", payload=msgpack.packb({"key": key}, use_bin_type=True),
+                stored_at="2026-09-30T00:00:00Z", schema_id=schema_id, catalog_entry=entry(compatible),
+            )
+
+        a = record("a", "tests.merge.x", ("tests.merge.x",))
+        b = record("b", "tests.merge.y", ("tests.merge.x", "tests.merge.y"))
+        for order in ([a, b], [b, a]):
+            catalog = _encode_snapshot(order, "cultcache.store.v1")[1]
+            self.assertEqual([sorted(entry[5]) for entry in catalog], [["tests.merge.x", "tests.merge.y"]])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.msgpack"
+            SingleFileMessagePackBackingStore(path).push_all([b])
+            SingleFileMessagePackBackingStore(path).push(a)
+            self.assertEqual(len(SingleFileMessagePackBackingStore(path).pull_all()), 2)
+
+    def test_an_id_an_entry_owns_names_that_entry_not_one_that_lists_it_as_compatible(self) -> None:
+        store = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "readability" / "own-id-over-compatible-v3.bin")
+        self.assertEqual([envelope.type for envelope in store.pull_all()], ["vectors.item", "vectors.item"])
+
     def test_a_record_loaded_under_a_compatible_schema_id_is_written_back_under_the_id_its_catalog_entry_carries(self) -> None:
         import msgpack  # type: ignore
 

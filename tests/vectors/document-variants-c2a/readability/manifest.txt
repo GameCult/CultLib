@@ -24,3 +24,4 @@ missing-schema-v3.bin refuses refuses  refuses  refuses
 variant-slot-v3.bin reads    refuses  refuses  refuses
 missing-schema-versioned-v3.bin refuses refuses refuses refuses
 compatible-id-only-v3.bin reads reads reads reads
+own-id-over-compatible-v3.bin reads reads reads reads
