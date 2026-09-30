@@ -390,7 +390,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
         message_id: id.into(),
         document: document("budget", vec![7; 64]),
     };
-    let encoded = encode_cultnet_message_to_vec(&put("first"), CultNetWireContract::CultNetSchemaV0)?;
+    let encoded = encode_cultnet_message_to_vec(&put("put-a"), CultNetWireContract::CultNetSchemaV0)?;
     let options = CultMeshRudpDocumentServerOptions {
         max_admitted_payload_bytes: encoded.len() * 2,
         max_admitted_payload_bytes_per_session: encoded.len(),
@@ -403,7 +403,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
     let twin = shared.try_clone()?;
     let mut first = client_on(shared, target, 94, 50)?;
     connect(&mut server, &mut [&mut first])?;
-    send(&mut first, &put("first"))?;
+    send(&mut first, &put("put-a"))?;
     for _ in 0..20 {
         server.poll_once()?;
     }
@@ -411,7 +411,7 @@ fn a_restarted_client_starts_with_a_fresh_payload_budget() -> Result<()> {
 
     let mut restarted = client_on(twin, target, 94, 7)?;
     connect(&mut server, &mut [&mut restarted])?;
-    send(&mut restarted, &put("second"))?;
+    send(&mut restarted, &put("put-b"))?;
     for _ in 0..20 {
         server.poll_once()?;
     }
