@@ -629,8 +629,8 @@ class CultCacheTests(unittest.TestCase):
                 self.assertIsNone(cache.get(first, "k"), schema_id)
 
     def _assert_second_claim_refused(self, first, second, schema_id: str) -> None:
-        """One document carries each schema id, owned or declared compatible, whichever order the documents register in: a
-        second claimant is refused, typed, naming both, and the cache keeps what it had."""
+        """A registration refusal is typed, names the id and both schema names and document types, and the cache keeps what it
+        had."""
         from cultcache_py import SchemaConflictError
 
         cache = CultCache()
@@ -641,27 +641,63 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(refused.exception.schema_names, [first.catalog_entry().schema_name, second.catalog_entry().schema_name])
         self.assertIn(first.type, str(refused.exception))
         self.assertIn(second.type, str(refused.exception))
-        with self.assertRaisesRegex(CultCacheError, "not registered"):
-            cache.put(second, "k", {"name": "k"})
+        if second is not first:
+            with self.assertRaisesRegex(CultCacheError, "not registered"):
+                cache.put(second, "k", {"name": "k"})
 
-    def test_a_document_listing_an_id_another_document_owns_is_refused_in_either_order(self) -> None:
+    def _pull(self, documents: list, catalog: list, records: list) -> CultCache:
+        tmp = tempfile.mkdtemp()
+        path = Path(tmp) / "store.msgpack"
+        self._store_of(path, catalog, records)
+        builder = CultCache.builder()
+        for document in documents:
+            builder = builder.register_document_type(document)
+        cache = builder.add_generic_store(SingleFileMessagePackBackingStore(path)).build()
+        cache.pull_all_backing_stores()
+        return cache
+
+    def test_a_document_listing_an_id_another_owns_registers_beside_it_in_either_order_and_the_owner_wins(self) -> None:
+        owner = define_database_entry_type("tests.owner", [("name", 0)], schema_id="id.owned", schema_name="tests.owner", schema_version="tests.owner.v1")
         lister = define_database_entry_type(
             "tests.lister", [("name", 0)], schema_id="id.lister", schema_name="tests.lister", schema_version="tests.lister.v1",
             compatible_schema_ids=["id.lister", "id.owned"],
         )
-        owner = define_database_entry_type("tests.owner", [("name", 0)], schema_id="id.owned", schema_name="tests.owner", schema_version="tests.owner.v1")
-        self._assert_second_claim_refused(lister, owner, "id.owned")
-        self._assert_second_claim_refused(owner, lister, "id.owned")
+        catalog = [
+            ["id.owned", "tests.owner", "tests.owner.v1", "h1", "", ["id.owned"], []],
+            ["id.lister", "tests.lister", "tests.lister.v1", "h2", "", ["id.lister", "id.owned"], []],
+        ]
+        records = [
+            ["o", "id.owned", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "o"})],
+            ["l", "id.lister", "2026-09-30T00:00:00Z", lister.encode_payload({"name": "l"})],
+        ]
+        for order in ([owner, lister], [lister, owner]):
+            cache = self._pull(order, catalog, records)
+            self.assertEqual(cache.get_required(owner, "o")["name"], "o")
+            self.assertIsNone(cache.get(lister, "o"))
+            self.assertEqual(cache.get_required(lister, "l")["name"], "l")
+        self.assertEqual(self._pull([lister], catalog, records[:1]).get_required(lister, "o")["name"], "o")
 
-    def test_two_documents_listing_one_compatible_id_are_refused_in_either_order(self) -> None:
+    def test_two_documents_listing_one_id_register_and_a_record_under_it_needs_an_owner(self) -> None:
+        from cultcache_py import SchemaConflictError
+
         a = define_database_entry_type(
             "tests.list-a", [("name", 0)], schema_id="id.a", schema_name="tests.list-a", compatible_schema_ids=["id.a", "id.shared"],
         )
         b = define_database_entry_type(
             "tests.list-b", [("name", 0)], schema_id="id.b", schema_name="tests.list-b", compatible_schema_ids=["id.b", "id.shared"],
         )
-        self._assert_second_claim_refused(a, b, "id.shared")
-        self._assert_second_claim_refused(b, a, "id.shared")
+        owner = define_database_entry_type("tests.shared", [("name", 0)], schema_id="id.shared", schema_name="tests.shared")
+        catalog = [["id.shared", "tests.shared", "tests.shared.v1", "h", "", ["id.shared"], []]]
+        records = [["k", "id.shared", "2026-09-30T00:00:00Z", owner.encode_payload({"name": "k"})]]
+        for listers in ([a, b], [b, a]):
+            with self.assertRaises(SchemaConflictError) as refused:
+                self._pull(listers, catalog, records)
+            self.assertEqual(refused.exception.schema_id, "id.shared")
+            self.assertEqual(refused.exception.record_key, "k")
+            self.assertEqual(refused.exception.schema_names, ["tests.list-a", "tests.list-b"])
+            for documents in ([*listers, owner], [owner, *listers]):
+                cache = self._pull(documents, catalog, records)
+                self.assertEqual(cache.get_required(owner, "k")["name"], "k")
 
     def test_two_documents_owning_one_schema_id_are_refused_in_either_order(self) -> None:
         # Each declares an older id and not its own, so the id they share is only ever their own.
@@ -669,6 +705,12 @@ class CultCacheTests(unittest.TestCase):
         b = define_database_entry_type("tests.own-b", [("name", 0)], schema_id="id.same", schema_name="tests.own-b", compatible_schema_ids=["id.b-older"])
         self._assert_second_claim_refused(a, b, "id.same")
         self._assert_second_claim_refused(b, a, "id.same")
+
+    def test_every_registration_refusal_is_a_schema_conflict(self) -> None:
+        first = define_database_entry_type("tests.named", [("name", 0)], schema_id="id.first", schema_name="tests.named")
+        same_name = define_database_entry_type("tests.renamed", [("name", 0)], schema_id="id.second", schema_name="tests.named")
+        self._assert_second_claim_refused(first, same_name, "id.second")
+        self._assert_second_claim_refused(first, first, "id.first")
 
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
