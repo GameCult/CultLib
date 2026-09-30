@@ -202,6 +202,26 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A refusal echoes a header only in the shape cultcache.store.v<digits>; any other is described by its length.
+        [TestCase("cultcache.store.v12", true)]
+        [TestCase("cultcache.store.SECRET-HEADER", false)]
+        [TestCase("cultcache.store.v12SECRET", false)]
+        [TestCase("cultcache.store.v", false)]
+        public void SingleFileRefusalEchoesAHeaderOnlyInTheKnownShape(string header, bool echoed)
+        {
+            var snapshot = new CultPersistedStoreSnapshot { FormatVersion = header };
+            var error = Assert.Throws<NotSupportedException>(() => CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot))!;
+            if (echoed)
+            {
+                Assert.That(error.Message, Does.Contain("format " + header + " is not"));
+            }
+            else
+            {
+                Assert.That(error.Message, Does.Not.Contain("SECRET").And.Not.Contain("format " + header + " is not"));
+                Assert.That(error.Message, Does.Contain($"of {header.Length} bytes"));
+            }
+        }
+
         [Test]
         public void V1StoreWrittenAtTheBaseCommitStillDecodesByteForByte()
         {
