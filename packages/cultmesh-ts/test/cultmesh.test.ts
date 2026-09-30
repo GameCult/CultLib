@@ -3074,6 +3074,24 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
   }
 });
 
+// What ships (F8): a node's reads and puts return the object its cache holds, not a copy, and the README says that object
+// belongs to the cache. The caller's own value is never the one held.
+test("CultMesh TS node reads and puts return the cache's own object", async () => {
+  const node = await CultMesh.startNode(
+    join(await mkdtemp(join(tmpdir(), "cultmesh-ts-held-object-")), "node.ccmp"),
+    { documents: [noteDocument] },
+  );
+  const written = { noteId: "note:held", body: "held" };
+  const put = await node.put(noteDocument, "note:held", written);
+  assert.notEqual(put, written);
+  assert.deepEqual(put, written);
+  assert.equal(node.get(noteDocument, "note:held"), put);
+  assert.equal(node.getRequired(noteDocument, "note:held"), put);
+  assert.equal(node.get(noteDocument, "note:held"), node.get(noteDocument, "note:held"));
+  written.body = "changed by the caller";
+  assert.equal(node.getRequired(noteDocument, "note:held").body, "held");
+});
+
 test("CultMesh TS syncs remote RUDP snapshots into a local node", async () => {
   const connectionId = 0x1020304a;
   const source = await CultMesh.startNode(

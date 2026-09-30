@@ -108,6 +108,20 @@ reactive.update(draft => {
 });
 ```
 
+`node.get`, `node.getRequired` and the value `node.put` resolves to return the
+object the node's cache holds, not a copy: two reads of one record return the
+same object. That object belongs to the cache and must not be mutated. Mutating
+it changes what later reads see without writing anything to the store. To
+change a document, build a new value (or use a writer) and put it:
+
+```ts
+const held = station.getRequired(stationStockDocument, "station:starbridge:stock");
+await station.put(stationStockDocument, "station:starbridge:stock", {
+  ...held,
+  availableMissiles: held.availableMissiles - 4,
+});
+```
+
 State pointers are the same kind of managed surface for UI and tools. They can
 advertise source documents, inherit a Verse route when bound, and resolve
 through that Verse without caller-side context plumbing:
