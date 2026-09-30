@@ -14,11 +14,11 @@
 //! the `k + m` shards recover the block (the code is MDS), so any `m` erasures
 //! are repaired and any more are reported as [`MediaFecError::BeyondRepair`],
 //! never as wrong bytes. The construction is named on every parity record by
-//! [`MEDIA_FEC_SCHEME_RS_GF256_V1`] and backed by the `reed-solomon-erasure`
-//! crate. The library is not the contract: the construction below is, and
-//! `tests/media_fec.rs` pins the parity bytes of known inputs, so a library that
-//! changes the matrix fails there instead of on the wire, and a decoder in
-//! another runtime has vectors to meet.
+//! [`MEDIA_FEC_SCHEME_RS_GF256_V1`] and implemented in this module, from the
+//! text below. The construction is the contract: `tests/media_fec.rs` and
+//! `tests/fixtures/media_fec_rs_gf256_v1.kat` pin the parity bytes of known
+//! inputs, so a change to the math fails there instead of on the wire, and a
+//! decoder in another runtime has vectors to meet.
 //!
 //! # The `rs-gf256-v1` construction
 //!
@@ -42,8 +42,10 @@
 //! * Any `k` surviving shards recover the block: invert the `k x k` submatrix
 //!   of `E` for the surviving rows and multiply.
 //!
-//! The known-answer vectors in `tests/media_fec.rs` were checked against an
-//! independent implementation of exactly this text.
+//! The known-answer vectors were produced by `reed-solomon-erasure` 6.0.0's
+//! `galois_8` field, which builds exactly this matrix, before this module
+//! replaced it; the smaller ones in `tests/media_fec.rs` were also checked
+//! against a second, independent implementation of this text.
 //!
 //! # What a block is
 //!
@@ -88,8 +90,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use reed_solomon_erasure::galois_8::ReedSolomon;
-
 use crate::media_stream_contracts::{
     GameCultMediaAudioPacketRecord, GameCultMediaAudioParityShardRecord,
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
@@ -102,8 +102,8 @@ use crate::media_stream_wire::{
 use crate::rudp::RUDP_FIXED_HEADER_BYTES;
 
 /// Names the construction on every parity record: systematic Reed-Solomon over
-/// GF(2^8), as built by `reed-solomon-erasure`'s `galois_8` field. A different
-/// matrix is a different scheme id.
+/// GF(2^8), as the module docs state it. A different matrix is a different
+/// scheme id.
 pub const MEDIA_FEC_SCHEME_RS_GF256_V1: &str = "rs-gf256-v1";
 
 /// The largest UDP payload an IPv4 datagram carries on a 1500-byte MTU.
@@ -237,40 +237,151 @@ impl fmt::Display for MediaFecError {
 impl std::error::Error for MediaFecError {}
 
 // ---------------------------------------------------------------------------
-// The code: equal-length shards in, equal-length shards out.
+// The code: rs-gf256-v1 exactly as the module docs state it. Equal-length
+// shards in, equal-length shards out; every caller has already bounded a block
+// to 1..=256 shards of one validated length, so nothing here allocates more
+// than the block's shards and three `k x k` matrices.
 // ---------------------------------------------------------------------------
 
-fn parity_shards(data: &[Vec<u8>], parity_count: usize) -> Result<Vec<Vec<u8>>, MediaFecError> {
-    let code = ReedSolomon::new(data.len(), parity_count)
-        .map_err(|error| MediaFecError::invalid(format!("{error:?}")))?;
-    let mut parity = vec![vec![0_u8; data[0].len()]; parity_count];
-    code.encode_sep(data, &mut parity)
-        .map_err(|error| MediaFecError::invalid(format!("{error:?}")))?;
-    Ok(parity)
+/// `x^8 + x^4 + x^3 + x^2 + 1`, the polynomial the field is reduced by.
+const FIELD_POLYNOMIAL: u16 = 0x11D;
+
+/// `EXP[i]` is `2^i`, written out over two periods so the sum of two logarithms
+/// indexes it without reduction; `LOG` is its inverse on the non-zero
+/// elements. `2` generates the multiplicative group of GF(2^8) under
+/// [`FIELD_POLYNOMIAL`], so the tables cover the field.
+const FIELD_TABLES: ([u8; 510], [u8; 256]) = {
+    let mut exp = [0_u8; 510];
+    let mut log = [0_u8; 256];
+    let mut power: u16 = 1;
+    let mut i = 0;
+    while i < 255 {
+        exp[i] = power as u8;
+        exp[i + 255] = power as u8;
+        log[power as usize] = i as u8;
+        power <<= 1;
+        if power & 0x100 != 0 {
+            power ^= FIELD_POLYNOMIAL;
+        }
+        i += 1;
+    }
+    (exp, log)
+};
+
+fn gf_mul(a: u8, b: u8) -> u8 {
+    let (exp, log) = &FIELD_TABLES;
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    exp[usize::from(log[usize::from(a)]) + usize::from(log[usize::from(b)])]
+}
+
+/// `1 / a` for non-zero `a`.
+fn gf_reciprocal(a: u8) -> u8 {
+    let (exp, log) = &FIELD_TABLES;
+    exp[255 - usize::from(log[usize::from(a)])]
+}
+
+/// Row `r` of the Vandermonde matrix `V`: `r^0, r^1, .., r^(k-1)`, the row
+/// number read as a field element, with `0^0 = 1`.
+fn vandermonde_row(r: usize, k: usize) -> Vec<u8> {
+    let point = r as u8;
+    let mut row = Vec::with_capacity(k);
+    let mut power = 1_u8;
+    for _ in 0..k {
+        row.push(power);
+        power = gf_mul(power, point);
+    }
+    row
+}
+
+/// The inverse of a square matrix, by Gauss-Jordan elimination.
+fn invert(mut matrix: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let n = matrix.len();
+    let mut inverse: Vec<Vec<u8>> =
+        (0..n).map(|r| (0..n).map(|c| u8::from(r == c)).collect()).collect();
+    for col in 0..n {
+        let pivot = (col..n)
+            .find(|&r| matrix[r][col] != 0)
+            .expect("rs-gf256-v1 only inverts matrices whose evaluation points are distinct");
+        matrix.swap(col, pivot);
+        inverse.swap(col, pivot);
+        let scale = gf_reciprocal(matrix[col][col]);
+        for c in 0..n {
+            matrix[col][c] = gf_mul(scale, matrix[col][c]);
+            inverse[col][c] = gf_mul(scale, inverse[col][c]);
+        }
+        let (pivot_row, pivot_inverse) = (matrix[col].clone(), inverse[col].clone());
+        for r in (0..n).filter(|&r| r != col) {
+            let factor = matrix[r][col];
+            for c in 0..n {
+                matrix[r][c] ^= gf_mul(factor, pivot_row[c]);
+                inverse[r][c] ^= gf_mul(factor, pivot_inverse[c]);
+            }
+        }
+    }
+    inverse
+}
+
+/// The given rows of the encoding matrix `E = V * inverse(top)` for a block of
+/// `k` data shards, where `top` is the first `k` rows of `V`.
+fn encoding_rows(k: usize, rows: impl Iterator<Item = usize>) -> Vec<Vec<u8>> {
+    let top_inverse = invert((0..k).map(|r| vandermonde_row(r, k)).collect());
+    rows.map(|r| {
+        let v = vandermonde_row(r, k);
+        (0..k)
+            .map(|c| (0..k).fold(0, |sum, i| sum ^ gf_mul(v[i], top_inverse[i][c])))
+            .collect()
+    })
+    .collect()
+}
+
+/// Byte `j` of the result is the sum over `i` of `coefficients[i] * shards[i][j]`.
+fn combine(coefficients: &[u8], shards: &[&[u8]], shard_bytes: usize) -> Vec<u8> {
+    let mut out = vec![0_u8; shard_bytes];
+    for (&coefficient, shard) in coefficients.iter().zip(shards) {
+        for (byte, &input) in out.iter_mut().zip(shard.iter()) {
+            *byte ^= gf_mul(coefficient, input);
+        }
+    }
+    out
+}
+
+/// The `parity_count` parity shards of `data`: rows `k..k + m` of `E`.
+fn parity_shards(data: &[Vec<u8>], parity_count: usize) -> Vec<Vec<u8>> {
+    let k = data.len();
+    let inputs: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
+    encoding_rows(k, k..k + parity_count)
+        .iter()
+        .map(|row| combine(row, &inputs, data[0].len()))
+        .collect()
 }
 
 /// `shards` holds the block's `k` data slots then `m` parity slots, `None` for
-/// each missing. Returns the `k` data shards.
+/// each missing. Returns the `k` data shards, recovered from the first `k`
+/// present shards through the inverse of their rows of `E`.
 fn recover_data_shards(
     data_shards: usize,
-    mut shards: Vec<Option<Vec<u8>>>,
+    shards: Vec<Option<Vec<u8>>>,
 ) -> Result<Vec<Vec<u8>>, MediaFecError> {
-    let parity_shards = shards.len() - data_shards;
-    let present = shards.iter().flatten().count();
-    if present < data_shards {
+    let present: Vec<usize> = (0..shards.len())
+        .filter(|&slot| shards[slot].is_some())
+        .take(data_shards)
+        .collect();
+    if present.len() < data_shards {
         return Err(MediaFecError::BeyondRepair {
-            shards_present: present,
+            shards_present: present.len(),
             shards_needed: data_shards,
         });
     }
-    let code = ReedSolomon::new(data_shards, parity_shards)
-        .map_err(|error| MediaFecError::invalid(format!("{error:?}")))?;
-    code.reconstruct_data(&mut shards)
-        .map_err(|error| MediaFecError::invalid(format!("{error:?}")))?;
-    Ok(shards
-        .into_iter()
-        .take(data_shards)
-        .map(|shard| shard.expect("reconstruct_data fills every data shard"))
+    let inputs: Vec<&[u8]> = present.iter().map(|&slot| shards[slot].as_deref().unwrap()).collect();
+    let shard_bytes = inputs[0].len();
+    let decode = invert(encoding_rows(data_shards, present.iter().copied()));
+    Ok((0..data_shards)
+        .map(|slot| match &shards[slot] {
+            Some(shard) => shard.clone(),
+            None => combine(&decode[slot], &inputs, shard_bytes),
+        })
         .collect())
 }
 
@@ -393,7 +504,7 @@ pub fn protect_video_frame(
             .map(|chunk| padded(&chunk.payload, shard_bytes))
             .collect();
         let parity_count = policy.video_parity_shards(size);
-        let parity = parity_shards(&data, usize::from(parity_count))?;
+        let parity = parity_shards(&data, usize::from(parity_count));
 
         let parity_records: Vec<GameCultMediaWireRecord> = parity
             .into_iter()
@@ -634,7 +745,7 @@ pub fn protect_audio_block(
     let data: Vec<Vec<u8>> = packets.iter().map(|packet| packet.payload.clone()).collect();
     let deadline_ticks = packets.iter().map(|packet| packet.deadline_ticks).max().unwrap_or(0);
     let parity: Vec<GameCultMediaAudioParityShardRecord> =
-        parity_shards(&data, usize::from(policy.audio_parity_shards))?
+        parity_shards(&data, usize::from(policy.audio_parity_shards))
         .into_iter()
         .enumerate()
         .map(|(parity_index, payload)| GameCultMediaAudioParityShardRecord {

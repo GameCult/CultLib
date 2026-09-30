@@ -1276,85 +1276,63 @@ fn every_rs_gf256_v1_known_erasure_pattern_recovers_the_data() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Known-answer generator: reed-solomon-erasure 6.0.0 is the reference that
-// produced `fixtures/media_fec_rs_gf256_v1.kat`. It runs once, before the
-// crate is replaced by the owned construction, and is deleted with the crate.
-// ---------------------------------------------------------------------------
-
-/// Erasure patterns of exactly `min(m, k)`-ish shards, each leaving at least
-/// one parity shard present and at least one data shard missing.
-fn kat_erasures(k: usize, m: usize) -> Vec<Vec<usize>> {
-    let mut patterns = Vec::new();
-    let d = m.min(k);
-    patterns.push((0..d).collect()); // data from the front
-    patterns.push((k - d..k).collect()); // data from the back
-    let spread = m.div_ceil(2).min(k);
-    let mut mixed: Vec<usize> = (0..spread).map(|s| s * k / spread).collect();
-    mixed.extend(k..k + (m - spread));
-    patterns.push(mixed); // data spread across the block, parity from the front
-    let mut one: Vec<usize> = vec![k / 2];
-    one.extend(k..k + (m - 1));
-    patterns.push(one); // one data shard, every parity shard but the last
-    patterns.sort();
-    patterns.dedup();
-    patterns
-}
-
+/// Seeded random geometries past the fixture's: any `e <= m` erasures, data
+/// and parity mixed, recover the data exactly, and `m + 1` are refused.
 #[test]
-#[ignore = "run once to write the rs-gf256-v1 fixture from the reference crate"]
-fn generate_rs_gf256_v1_known_answers() {
-    use reed_solomon_erasure::galois_8::ReedSolomon;
-    let mut cases: Vec<(usize, usize, usize, &str)> = Vec::new();
-    // Every standard video block geometry, k = 1..=16, m = max(2, ceil(k / 4)).
-    for k in 1..=16_u16 {
-        cases.push((usize::from(k), usize::from(STANDARD.video_parity_shards(k)), 37, "lcg"));
-    }
-    // Standard audio, 4 + 2, at 1 byte, an odd length and a full datagram.
-    cases.extend([(4, 2, 1, "lcg"), (4, 2, 37, "lcg"), (4, 2, 1300, "lcg")]);
-    // The widest standard video block at a full datagram, and a long shard.
-    cases.extend([(16, 4, 1300, "lcg"), (3, 2, 4000, "lcg")]);
-    // Degenerate data.
-    cases.extend([(4, 2, 16, "zero"), (16, 4, 16, "ff")]);
-    // The policy's edges: one shard each side, and 256 shards split every way.
-    cases.extend([
-        (1, 1, 1, "lcg"),
-        (1, 1, 9, "lcg"),
-        (2, 1, 5, "lcg"),
-        (255, 1, 1, "lcg"),
-        (255, 1, 3, "lcg"),
-        (1, 255, 1, "lcg"),
-        (1, 255, 4, "lcg"),
-        (2, 254, 2, "lcg"),
-        (128, 128, 1, "lcg"),
-        (128, 128, 4, "lcg"),
-        (200, 56, 2, "lcg"),
-        (250, 6, 5, "lcg"),
-    ]);
-
-    let mut out = String::new();
-    for (k, m, shard_bytes, fill) in cases {
-        let data = kat_data(k, m, shard_bytes, fill);
-        let code = ReedSolomon::new(k, m).unwrap();
-        let mut parity = vec![vec![0_u8; shard_bytes]; m];
-        code.encode_sep(&data, &mut parity).unwrap();
-        out.push_str(&format!("case {k} {m} {shard_bytes} {fill}\n"));
-        for (p, shard) in parity.iter().enumerate() {
-            out.push_str(&format!("parity {p} {}\n", hex(shard)));
+fn random_erasures_up_to_m_recover_exactly_and_m_plus_one_is_refused() {
+    let mut state = 0x9e37_79b9_u32;
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state as usize % bound
+    };
+    for trial in 0..300 {
+        let k = 1 + next(48);
+        let m = 1 + next(24);
+        let shard_bytes = 1 + next(40);
+        let mut packets = audio_run(k as u64, shard_bytes);
+        for (index, packet) in packets.iter_mut().enumerate() {
+            packet.payload = bytes((trial * 1_000 + index) as u32, shard_bytes);
         }
-        for pattern in kat_erasures(k, m) {
-            let mut shards: Vec<Option<Vec<u8>>> =
-                data.iter().chain(parity.iter()).cloned().map(Some).collect();
-            for &slot in &pattern {
-                shards[slot] = None;
+        let policy = MediaFecPolicy {
+            audio_data_shards: k as u16,
+            audio_parity_shards: m as u16,
+            ..STANDARD
+        };
+        let parity = protect_audio_block(&packets, &policy, provenance()).unwrap();
+        for erasures in [1 + next(m), m + 1] {
+            if erasures + 1 > k + m {
+                continue; // at least one parity shard must arrive to recover with
             }
-            code.reconstruct_data(&mut shards).unwrap();
-            for (i, shard) in shards.iter().take(k).enumerate() {
-                assert_eq!(shard.as_ref().unwrap(), &data[i], "k={k} m={m} {pattern:?}");
+            // A random erasure set that leaves at least one parity shard.
+            let mut slots: Vec<usize> = (0..k + m).collect();
+            let erased = loop {
+                for at in 0..slots.len() {
+                    let swap = at + next(slots.len() - at);
+                    slots.swap(at, swap);
+                }
+                let erased = slots[..erasures].to_vec();
+                if (k..k + m).any(|slot| !erased.contains(&slot)) {
+                    break erased;
+                }
+            };
+            let data: Vec<_> =
+                (0..k).filter(|slot| !erased.contains(slot)).map(|slot| packets[slot].clone()).collect();
+            let present: Vec<_> =
+                (0..m).filter(|slot| !erased.contains(&(k + slot))).map(|slot| parity[slot].clone()).collect();
+            let outcome = recover_audio_block(&present, &data);
+            let context = format!("trial {trial}: k={k} m={m} {shard_bytes} bytes erased {erased:?}");
+            if erasures <= m {
+                let mut all = data;
+                all.extend(outcome.unwrap_or_else(|error| panic!("{context}: {error}")));
+                all.sort_by_key(|packet| packet.packet_id);
+                let payloads: Vec<_> = all.iter().map(|packet| &packet.payload).collect();
+                let expected: Vec<_> = packets.iter().map(|packet| &packet.payload).collect();
+                assert_eq!(payloads, expected, "{context}");
+            } else {
+                assert!(matches!(outcome, Err(MediaFecError::BeyondRepair { .. })), "{context}: {outcome:?}");
             }
-            let list: Vec<String> = pattern.iter().map(usize::to_string).collect();
-            out.push_str(&format!("erase {}\n", list.join(",")));
         }
     }
-    println!("BEGIN-KAT\n{out}END-KAT");
 }
