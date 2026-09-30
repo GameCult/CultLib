@@ -93,6 +93,7 @@ registered ahead of these wins.
 | `float2x2`, `float3x3` | array of row vectors (row-major) | array of row objects |
 | `rect` | `[min, max]` of `float2` | `{"min":{..},"max":{..}}` |
 | `CultCellular` | `[nearest, edge, id]` | `{"nearest":{..},"edge":{..},"id":..}` |
+| `CultPhasor` | `[cos, sin]` of `float4` | `{"cos":{..},"sin":{..}}` |
 
 Floats are MessagePack float32 (`0xCA`), doubles float64 (`0xCB`), integers the
 shortest MessagePack integer.
