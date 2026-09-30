@@ -1,9 +1,10 @@
 use anyhow::Result;
 use cultmesh_rs::{
     CultMeshRudpApplicationOperation, CultMeshRudpDocumentServer,
-    CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome, CultMeshRudpRawDocumentReceipt,
-    CultMeshRudpRawDocumentSink, CultMeshRudpRejectionReason, CultMeshRudpServerClock,
-    CultMeshRudpSnapshotQuery, CultMeshRudpSnapshotSource,
+    CultMeshRudpDocumentServerOptions, CultMeshRudpPollOutcome, CultMeshRudpPutReply,
+    CultMeshRudpRawDocumentReceipt, CultMeshRudpRawDocumentSink, CultMeshRudpRejectionReason,
+    CultMeshRudpServerClock, CultMeshRudpSnapshotQuery, CultMeshRudpSnapshotSource,
+    UNANSWERED_PUT_REASON,
 };
 use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRawPayloadEncoding,
@@ -37,14 +38,19 @@ impl Sink {
 }
 
 impl CultMeshRudpRawDocumentSink for Sink {
-    fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
+    fn accept_raw_document(
+        &mut self,
+        receipt: CultMeshRudpRawDocumentReceipt,
+        reply: CultMeshRudpPutReply,
+    ) {
         let mut state = self.0.lock().unwrap();
         if state.failures_remaining > 0 {
             state.failures_remaining -= 1;
-            anyhow::bail!("injected sink failure CANARY-7f3a");
+            reply.refuse("injected sink failure CANARY-7f3a");
+            return;
         }
         state.receipts.push(receipt);
-        Ok(())
+        reply.accept();
     }
 }
 
@@ -115,7 +121,12 @@ impl CultMeshRudpSnapshotSource for StrippingSource {
         &mut self,
         query: &CultMeshRudpSnapshotQuery,
     ) -> Result<Vec<CultNetRawDocumentRecord>> {
-        Ok(self.inner.raw_snapshot(query)?.iter().map(stripped).collect())
+        Ok(self
+            .inner
+            .raw_snapshot(query)?
+            .iter()
+            .map(stripped)
+            .collect())
     }
 
     fn served_record(
@@ -241,8 +252,8 @@ fn client_on(
     })
 }
 
-fn connect<Q: CultMeshRudpSnapshotSource>(
-    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
+fn connect<S: CultMeshRudpRawDocumentSink, Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<S, Q, Clock>,
     clients: &mut [&mut CultNetRudpSocketTransportConnection],
 ) -> Result<()> {
     for client in &mut *clients {
@@ -1240,7 +1251,13 @@ fn options_that_cannot_carry_an_empty_snapshot_response_are_refused() -> Result<
     )?
     .len();
     let build = |options: CultMeshRudpDocumentServerOptions| {
-        server(options, Clock::new(63_000), Sink::default(), Source::default()).map(|_| ())
+        server(
+            options,
+            Clock::new(63_000),
+            Sink::default(),
+            Source::default(),
+        )
+        .map(|_| ())
     };
     let bytes = |max_snapshot_response_bytes| CultMeshRudpDocumentServerOptions {
         max_snapshot_response_bytes,
@@ -1397,6 +1414,8 @@ struct RawPeer {
     socket: UdpSocket,
     target: SocketAddr,
     session: cultnet_rs::CultNetRudpSession,
+    /// The Connect that started the session, for a test to repeat.
+    connect: cultnet_rs::CultNetRudpPacket,
 }
 
 impl RawPeer {
@@ -1406,26 +1425,58 @@ impl RawPeer {
     ) -> Result<Self> {
         let socket = UdpSocket::bind("127.0.0.1:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(50)))?;
-        let mut peer = Self {
+        let target = server.local_addr()?;
+        let (session, connect) = Self::handshake(&socket, target, server, connection_id, 100)?;
+        Ok(Self {
             socket,
-            target: server.local_addr()?,
-            session: cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
+            target,
+            session,
+            connect,
+        })
+    }
+
+    /// Connects again from the same address and connection id, starting a
+    /// new generation of the session.
+    fn reconnect<S: CultMeshRudpRawDocumentSink, Q: CultMeshRudpSnapshotSource>(
+        &mut self,
+        server: &mut CultMeshRudpDocumentServer<S, Q, Clock>,
+    ) -> Result<()> {
+        let connection_id = self.session.connection_id();
+        (self.session, self.connect) =
+            Self::handshake(&self.socket, self.target, server, connection_id, 5_000)?;
+        Ok(())
+    }
+
+    fn handshake<S: CultMeshRudpRawDocumentSink, Q: CultMeshRudpSnapshotSource>(
+        socket: &UdpSocket,
+        target: SocketAddr,
+        server: &mut CultMeshRudpDocumentServer<S, Q, Clock>,
+        connection_id: u32,
+        initial_sequence: u32,
+    ) -> Result<(
+        cultnet_rs::CultNetRudpSession,
+        cultnet_rs::CultNetRudpPacket,
+    )> {
+        let mut session =
+            cultnet_rs::CultNetRudpSession::new(cultnet_rs::CultNetRudpSessionOptions {
                 connection_id,
-                initial_sequence: Some(100),
+                initial_sequence: Some(initial_sequence),
                 resend_delay_ms: 10_000,
                 max_pending_reliable_packets: Some(64),
-            }),
-        };
-        let connect = peer.session.create_connect(0, Vec::new())?;
-        peer.send_packet(&connect)?;
+            });
+        let connect = session.create_connect(0, Vec::new())?;
+        socket.send_to(&cultnet_rs::encode_rudp_packet(&connect)?, target)?;
         server.poll_once()?;
-        let accept = peer.receive().expect("the server accepts the connect");
+        let mut wire = vec![0_u8; 65_535];
+        let (bytes, _) = socket.recv_from(&mut wire)?;
+        let accept = cultnet_rs::decode_rudp_packet(&wire[..bytes])?;
         assert_eq!(
             accept.packet_type,
-            cultnet_rs::CultNetRudpPacketType::Accept
+            cultnet_rs::CultNetRudpPacketType::Accept,
+            "the server accepts the connect"
         );
-        peer.session.receive(&accept, 1)?;
-        Ok(peer)
+        session.receive(&accept, 1)?;
+        Ok((session, connect))
     }
 
     fn send_packet(&self, packet: &cultnet_rs::CultNetRudpPacket) -> Result<()> {
@@ -1829,5 +1880,495 @@ fn a_closure_sink_sends_the_same_datagrams_as_before_replies_could_wait() -> Res
 ",
         )
     );
+    Ok(())
+}
+
+/// A sink that holds every put's reply for the test to answer.
+#[derive(Clone, Default)]
+struct HeldSink(Arc<Mutex<HeldState>>);
+
+#[derive(Default)]
+struct HeldState {
+    offered: Vec<String>,
+    replies: Vec<(String, CultMeshRudpPutReply)>,
+}
+
+impl CultMeshRudpRawDocumentSink for HeldSink {
+    fn accept_raw_document(
+        &mut self,
+        receipt: CultMeshRudpRawDocumentReceipt,
+        reply: CultMeshRudpPutReply,
+    ) {
+        let mut state = self.0.lock().unwrap();
+        state.offered.push(receipt.message_id.clone());
+        state.replies.push((receipt.message_id, reply));
+    }
+}
+
+impl HeldSink {
+    /// The message ids of the puts offered so far, in order.
+    fn offered(&self) -> Vec<String> {
+        self.0.lock().unwrap().offered.clone()
+    }
+
+    /// The held reply for the put `message_id`.
+    fn reply(&self, message_id: &str) -> CultMeshRudpPutReply {
+        let mut state = self.0.lock().unwrap();
+        let index = state
+            .replies
+            .iter()
+            .position(|(id, _)| id == message_id)
+            .expect("the put was offered and is unanswered");
+        state.replies.remove(index).1
+    }
+}
+
+type HeldServer = CultMeshRudpDocumentServer<HeldSink, Source, Clock>;
+
+fn held_server(sink: &HeldSink, clock: &Clock) -> Result<HeldServer> {
+    CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        sink.clone(),
+        Source::documents(vec![document("held", vec![1, 2, 3])]),
+        clock.clone(),
+        Default::default(),
+    )
+}
+
+fn put(message_id: &str) -> CultNetMessage {
+    CultNetMessage::DocumentPutRaw {
+        message_id: message_id.into(),
+        document: document(message_id, vec![4, 5, 6]),
+    }
+}
+
+fn snapshot_request(message_id: &str) -> CultNetMessage {
+    CultNetMessage::SnapshotRequest {
+        message_id: message_id.into(),
+        schema_ids: None,
+        record_keys: None,
+    }
+}
+
+/// Polls until the server has nothing left to read.
+fn poll_until_idle<S: CultMeshRudpRawDocumentSink>(
+    server: &mut CultMeshRudpDocumentServer<S, Source, Clock>,
+) -> Result<()> {
+    for _ in 0..100 {
+        match server.poll_once()? {
+            CultMeshRudpPollOutcome::Idle => return Ok(()),
+            CultMeshRudpPollOutcome::Handled => {}
+            rejected => panic!("polling must not reject: {rejected:?}"),
+        }
+    }
+    anyhow::bail!("the server never went idle")
+}
+
+/// The CultNet message a single-packet schema frame carries.
+fn schema_message(packet: &cultnet_rs::CultNetRudpPacket) -> Result<CultNetMessage> {
+    assert_eq!(packet.fragment_count, 0, "fixture: one packet per message");
+    decode_cultnet_message_from_slice(&packet.payload, CultNetWireContract::CultNetSchemaV0)
+}
+
+fn assert_acknowledges_none(packets: &[cultnet_rs::CultNetRudpPacket], sequences: &[u32]) {
+    for packet in packets {
+        assert!(
+            sequences
+                .iter()
+                .all(|sequence| !acknowledges(packet, *sequence)),
+            "{:?} acknowledges an unanswered put: ack {} mask {:#x}",
+            packet.packet_type,
+            packet.ack,
+            packet.ack_mask
+        );
+    }
+}
+
+/// While a put awaits its answer, its session is sent nothing new: no
+/// acknowledgement, no Pong, no snapshot response, across five resend
+/// intervals. A response built before the put still resends, carrying the
+/// acknowledgement fields it was built with. Once the put is accepted, the
+/// next poll acknowledges it, then answers the snapshot request that waited.
+#[test]
+fn a_held_put_is_acknowledged_only_after_it_is_accepted() -> Result<()> {
+    let clock = Clock::new(80_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut peer = RawPeer::connect(&mut server, 90)?;
+
+    // A response the peer never acknowledges, built before the put.
+    peer.send(&snapshot_request("before"))?;
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Handled);
+    let earlier: Vec<u32> = peer
+        .drain()
+        .iter()
+        .filter(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data)
+        .map(|packet| packet.sequence)
+        .collect();
+    assert_eq!(
+        earlier.len(),
+        1,
+        "fixture: the earlier response is one packet"
+    );
+
+    let held = peer.send(&put("held"))?;
+    poll_until_idle(&mut server)?;
+    assert_eq!(sink.offered(), vec!["held".to_string()]);
+    let mut seen = peer.drain();
+    for step in 1..=5 {
+        clock.set(80_000 + 50 * step);
+        let ping = peer.session.create_ping(b"alive".to_vec());
+        peer.send_packet(&ping)?;
+        if step == 3 {
+            peer.send(&snapshot_request("after"))?;
+        }
+        poll_until_idle(&mut server)?;
+        seen.extend(peer.drain());
+    }
+    assert_acknowledges_none(&seen, &held);
+    let kinds: Vec<_> = seen
+        .iter()
+        .map(|packet| (packet.packet_type, packet.sequence))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![(cultnet_rs::CultNetRudpPacketType::Data, earlier[0]); 5],
+        "only the earlier response's resends reach the peer"
+    );
+
+    sink.reply("held").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    let released = peer.drain();
+    assert_eq!(released.len(), 2, "{released:?}");
+    assert_eq!(
+        released[0].packet_type,
+        cultnet_rs::CultNetRudpPacketType::Ack
+    );
+    assert!(
+        held.iter()
+            .all(|sequence| acknowledges(&released[0], *sequence))
+    );
+    let CultNetMessage::SnapshotResponseRaw { message_id, .. } = schema_message(&released[1])?
+    else {
+        panic!(
+            "the waiting snapshot request is answered: {:?}",
+            released[1]
+        );
+    };
+    assert_eq!(message_id, "after");
+    Ok(())
+}
+
+/// A put awaiting its answer holds only its own session: another session's
+/// snapshot request is answered in the same polls.
+#[test]
+fn another_session_is_served_while_a_put_is_held() -> Result<()> {
+    let clock = Clock::new(81_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut holding = RawPeer::connect(&mut server, 91)?;
+    let mut reading = RawPeer::connect(&mut server, 92)?;
+    let held = holding.send(&put("held"))?;
+    poll_until_idle(&mut server)?;
+    let read = reading.send(&snapshot_request("read"))?;
+    poll_until_idle(&mut server)?;
+
+    let answered = reading.drain();
+    let response = answered
+        .iter()
+        .find(|packet| packet.packet_type == cultnet_rs::CultNetRudpPacketType::Data)
+        .expect("the other session is answered");
+    assert!(matches!(
+        schema_message(response)?,
+        CultNetMessage::SnapshotResponseRaw { .. }
+    ));
+    assert!(acknowledges(response, read[0]));
+    assert_acknowledges_none(&holding.drain(), &held);
+    Ok(())
+}
+
+/// A refused reply refuses the put: the poll returns the sink's reason, and
+/// the publisher gets the fixed refusal and a goodbye, and never an
+/// acknowledgement.
+#[test]
+fn a_refused_reply_refuses_the_put_and_acknowledges_nothing() -> Result<()> {
+    let clock = Clock::new(82_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut publisher = client(server.local_addr()?, 93)?;
+    connect(&mut server, &mut [&mut publisher])?;
+    let receipt = send_reliable(&mut publisher, &put("refused"))?;
+    for _ in 0..200 {
+        publisher.receive_once()?;
+        publisher.poll_resends()?;
+        server.poll_once()?;
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(sink.offered(), vec!["refused".to_string()]);
+    assert_eq!(
+        publisher.reliable_send_status(&receipt),
+        CultNetRudpReliableSendStatus::Pending,
+        "a held put is not acknowledged, however often it is resent"
+    );
+
+    sink.reply("refused")
+        .refuse("the store said no CANARY-7f3a");
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("the refusal is the next poll's outcome");
+    };
+    assert_eq!(
+        (rejection.operation, rejection.message_id, rejection.reason),
+        (
+            CultMeshRudpApplicationOperation::DocumentPutRaw,
+            "refused".to_string(),
+            CultMeshRudpRejectionReason::SinkRefused("the store said no CANARY-7f3a".into())
+        )
+    );
+    assert_eq!(
+        refusal_seen_by(&mut publisher, &receipt)?,
+        "the catalog refused the document"
+    );
+    assert_eq!(server.session_count(), 0);
+    Ok(())
+}
+
+/// A reply dropped unanswered refuses its put, over a reason of its own.
+#[test]
+fn a_dropped_reply_refuses_the_put() -> Result<()> {
+    let clock = Clock::new(83_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut peer = RawPeer::connect(&mut server, 94)?;
+    let held = peer.send(&put("dropped"))?;
+    poll_until_idle(&mut server)?;
+
+    drop(sink.reply("dropped"));
+    let CultMeshRudpPollOutcome::ApplicationRejected(rejection) = server.poll_once()? else {
+        panic!("a dropped reply refuses the put");
+    };
+    assert_eq!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::SinkRefused(UNANSWERED_PUT_REASON.into())
+    );
+    assert_eq!(UNANSWERED_PUT_REASON, "the put was not answered");
+    let sent = peer.drain();
+    assert_acknowledges_none(&sent, &held);
+    let kinds: Vec<_> = sent.iter().map(|packet| packet.packet_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            cultnet_rs::CultNetRudpPacketType::Data,
+            cultnet_rs::CultNetRudpPacketType::Disconnect
+        ]
+    );
+    assert_eq!(
+        schema_message(&sent[0])?,
+        CultNetMessage::Error {
+            error: "the catalog refused the document".into(),
+            code: None,
+            details: None,
+        }
+    );
+    Ok(())
+}
+
+/// Two pipelined puts are both offered at once, so one write can cover them.
+/// Answering the later first releases nothing; answering the earlier then
+/// releases one acknowledgement covering both. A later put's acknowledgement
+/// never leaves before an earlier one's.
+#[test]
+fn a_later_puts_answer_never_leaves_before_an_earlier_ones() -> Result<()> {
+    let clock = Clock::new(84_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut peer = RawPeer::connect(&mut server, 95)?;
+    let first = peer.send(&put("first"))?;
+    let second = peer.send(&put("second"))?;
+    poll_until_idle(&mut server)?;
+    assert_eq!(sink.offered(), vec!["first".to_string(), "second".into()]);
+
+    sink.reply("second").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    assert_eq!(
+        peer.drain(),
+        Vec::new(),
+        "the later answer releases nothing"
+    );
+
+    sink.reply("first").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    let released = peer.drain();
+    assert_eq!(released.len(), 1, "{released:?}");
+    assert_eq!(
+        released[0].packet_type,
+        cultnet_rs::CultNetRudpPacketType::Ack
+    );
+    for sequence in first.iter().chain(&second) {
+        assert!(acknowledges(&released[0], *sequence));
+    }
+    Ok(())
+}
+
+/// A put behind a snapshot request that waits on an earlier put is not
+/// offered until that request is answered, and the answer is not sent
+/// while the put is unanswered: it would acknowledge the put.
+#[test]
+fn a_put_behind_a_waiting_snapshot_request_is_acknowledged_only_once_accepted() -> Result<()> {
+    let clock = Clock::new(85_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut peer = RawPeer::connect(&mut server, 96)?;
+    let first = peer.send(&put("first"))?;
+    peer.send(&snapshot_request("between"))?;
+    let second = peer.send(&put("second"))?;
+    poll_until_idle(&mut server)?;
+    assert_eq!(
+        sink.offered(),
+        vec!["first".to_string()],
+        "the second put waits behind the snapshot request"
+    );
+
+    sink.reply("first").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    assert_eq!(sink.offered(), vec!["first".to_string(), "second".into()]);
+    assert_eq!(
+        peer.drain(),
+        Vec::new(),
+        "nothing is sent while the second put is unanswered"
+    );
+
+    sink.reply("second").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    let released = peer.drain();
+    assert_eq!(released.len(), 2, "{released:?}");
+    assert_eq!(
+        released[0].packet_type,
+        cultnet_rs::CultNetRudpPacketType::Ack
+    );
+    for sequence in first.iter().chain(&second) {
+        assert!(acknowledges(&released[0], *sequence));
+    }
+    let CultNetMessage::SnapshotResponseRaw { message_id, .. } = schema_message(&released[1])?
+    else {
+        panic!("the snapshot request is answered: {:?}", released[1]);
+    };
+    assert_eq!(message_id, "between");
+    Ok(())
+}
+
+/// A repeated Connect is answered with an acknowledgement built now, so while
+/// a put awaits its answer the repeat is answered with nothing.
+#[test]
+fn a_repeated_connect_is_not_answered_while_a_put_is_held() -> Result<()> {
+    let clock = Clock::new(86_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+    let mut peer = RawPeer::connect(&mut server, 97)?;
+    let held = peer.send(&put("held"))?;
+    poll_until_idle(&mut server)?;
+    peer.send_packet(&peer.connect)?;
+    poll_until_idle(&mut server)?;
+    assert_eq!(peer.drain(), Vec::new());
+
+    sink.reply("held").accept();
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    let released = peer.drain();
+    assert_eq!(released.len(), 1, "{released:?}");
+    assert!(
+        held.iter()
+            .all(|sequence| acknowledges(&released[0], *sequence))
+    );
+    Ok(())
+}
+
+/// When a session ends, the answers its puts still owe are discarded. A
+/// refusal owed by an earlier generation of the same address and connection
+/// id does not end the new one, and an acceptance owed by a session that
+/// disconnected or expired sends nothing.
+#[test]
+fn a_session_that_ends_discards_the_answers_it_is_owed() -> Result<()> {
+    let clock = Clock::new(87_000);
+    let sink = HeldSink::default();
+    let mut server = held_server(&sink, &clock)?;
+
+    // A new generation replaces the one holding the put.
+    let mut replaced = RawPeer::connect(&mut server, 98)?;
+    replaced.send(&put("replaced"))?;
+    poll_until_idle(&mut server)?;
+    replaced.reconnect(&mut server)?;
+    sink.reply("replaced").refuse("stale CANARY-7f3a");
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    assert_eq!(replaced.drain(), Vec::new());
+    let ping = replaced.session.create_ping(b"new".to_vec());
+    replaced.send_packet(&ping)?;
+    poll_until_idle(&mut server)?;
+    let answered = replaced.drain();
+    assert_eq!(
+        answered
+            .iter()
+            .map(|packet| packet.packet_type)
+            .collect::<Vec<_>>(),
+        vec![cultnet_rs::CultNetRudpPacketType::Pong],
+        "the new generation is served and is not withheld"
+    );
+
+    // The peer says goodbye while its put is held.
+    let mut departed = RawPeer::connect(&mut server, 99)?;
+    departed.send(&put("departed"))?;
+    poll_until_idle(&mut server)?;
+    let goodbye = departed.session.create_disconnect(Vec::new());
+    departed.send_packet(&goodbye)?;
+    poll_until_idle(&mut server)?;
+
+    // The session idles out while its put is held.
+    let mut expired = RawPeer::connect(&mut server, 100)?;
+    expired.send(&put("expired"))?;
+    poll_until_idle(&mut server)?;
+    clock.set(87_000 + 31_000);
+    poll_until_idle(&mut server)?;
+    assert_eq!(server.session_count(), 0);
+
+    sink.reply("departed").accept();
+    drop(sink.reply("expired"));
+    assert_eq!(server.poll_once()?, CultMeshRudpPollOutcome::Idle);
+    assert_eq!(departed.drain(), Vec::new());
+    assert_eq!(expired.drain(), Vec::new());
+    Ok(())
+}
+
+/// A put the server could never serve is refused before the sink sees it.
+#[test]
+fn an_unservable_put_is_never_offered_to_the_sink() -> Result<()> {
+    let clock = Clock::new(88_000);
+    let sink = HeldSink::default();
+    let mut server = CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        sink.clone(),
+        Source::default(),
+        clock,
+        CultMeshRudpDocumentServerOptions {
+            max_snapshot_response_bytes: 1_000,
+            ..Default::default()
+        },
+    )?;
+    let mut peer = RawPeer::connect(&mut server, 101)?;
+    peer.send(&CultNetMessage::DocumentPutRaw {
+        message_id: "big".into(),
+        document: document("big", vec![7; 2_000]),
+    })?;
+    // The put arrives in two fragments.
+    let mut rejection = None;
+    for _ in 0..10 {
+        if let CultMeshRudpPollOutcome::ApplicationRejected(found) = server.poll_once()? {
+            rejection = Some(found);
+            break;
+        }
+    }
+    let rejection = rejection.expect("the put can never be served");
+    assert!(matches!(
+        rejection.reason,
+        CultMeshRudpRejectionReason::DocumentUnservable { .. }
+    ));
+    assert_eq!(sink.offered(), Vec::<String>::new());
     Ok(())
 }

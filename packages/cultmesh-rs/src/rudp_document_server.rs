@@ -5,11 +5,10 @@ use cultnet_rs::{
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
     encode_rudp_packet, is_permanent_send_error, send_error_code,
 };
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
@@ -55,16 +54,85 @@ pub struct CultMeshRudpSnapshotQuery {
 }
 
 /// Caller-owned admission/persistence port for received raw documents.
+///
+/// The sink answers each put through its `reply`, at once or later, and from
+/// any thread. The server acknowledges a put to its publisher only once the
+/// sink has accepted it: "acknowledged" means the sink accepted. Until every
+/// put a session sent is answered, the server sends that session nothing new,
+/// only resends of what it sent before. A refused put ends its session with a
+/// refusal that acknowledges nothing.
+///
+/// A closure returning `Result<()>` is a sink that answers at once.
 pub trait CultMeshRudpRawDocumentSink {
-    fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()>;
+    fn accept_raw_document(
+        &mut self,
+        receipt: CultMeshRudpRawDocumentReceipt,
+        reply: CultMeshRudpPutReply,
+    );
 }
 
 impl<F> CultMeshRudpRawDocumentSink for F
 where
     F: FnMut(CultMeshRudpRawDocumentReceipt) -> Result<()>,
 {
-    fn accept_raw_document(&mut self, receipt: CultMeshRudpRawDocumentReceipt) -> Result<()> {
-        self(receipt)
+    fn accept_raw_document(
+        &mut self,
+        receipt: CultMeshRudpRawDocumentReceipt,
+        reply: CultMeshRudpPutReply,
+    ) {
+        match self(receipt) {
+            Ok(()) => reply.accept(),
+            Err(error) => reply.refuse(format!("{error:#}")),
+        }
+    }
+}
+
+/// The reason a put is refused when its reply is dropped unanswered.
+pub const UNANSWERED_PUT_REASON: &str = "the put was not answered";
+
+/// A sink's answer to one put, on its way to the server's next poll.
+struct PutAnswer {
+    put: u64,
+    refusal: Option<String>,
+}
+
+/// The answer a sink owes one put. Answer it with `accept` or `refuse`, now or
+/// later, from any thread; the server tells the publisher on its next poll.
+/// Dropping it unanswered refuses the put (`UNANSWERED_PUT_REASON`). An answer
+/// that reaches a server whose session for the put has ended is discarded.
+#[derive(Debug)]
+#[must_use = "a put whose reply is dropped unanswered is refused"]
+pub struct CultMeshRudpPutReply {
+    put: u64,
+    answers: Option<Sender<PutAnswer>>,
+}
+
+impl CultMeshRudpPutReply {
+    /// The put is admitted: its publisher is acknowledged.
+    pub fn accept(mut self) {
+        self.answer(None);
+    }
+
+    /// The put is refused. `reason` goes to the caller of `poll_once` as
+    /// `SinkRefused`; the publisher is sent only fixed text.
+    pub fn refuse(mut self, reason: impl std::fmt::Display) {
+        self.answer(Some(reason.to_string()));
+    }
+
+    fn answer(&mut self, refusal: Option<String>) {
+        if let Some(answers) = self.answers.take() {
+            // A server that is gone has nobody left to tell.
+            let _ = answers.send(PutAnswer {
+                put: self.put,
+                refusal,
+            });
+        }
+    }
+}
+
+impl Drop for CultMeshRudpPutReply {
+    fn drop(&mut self) {
+        self.answer(Some(UNANSWERED_PUT_REASON.into()));
     }
 }
 
@@ -346,6 +414,35 @@ struct SessionEntry {
     created_at_monotonic_millis: u64,
     last_activity_monotonic_millis: u64,
     admitted_payload_bytes: usize,
+    /// Puts offered to the sink and not yet answered.
+    pending_puts: BTreeSet<u64>,
+    /// Delivered messages not yet handled, in the order they arrived: a
+    /// snapshot request waits for every earlier put's answer, and everything
+    /// behind it waits for it.
+    waiting: VecDeque<(u32, CultNetMessage)>,
+    /// Snapshot responses built, charged and not yet sent, because a put that
+    /// arrived after their request is unanswered: message id and payload.
+    responses_owed: VecDeque<(String, Vec<u8>)>,
+}
+
+impl SessionEntry {
+    fn new(session: CultNetRudpSession, now: u64) -> Self {
+        Self {
+            session,
+            created_at_monotonic_millis: now,
+            last_activity_monotonic_millis: now,
+            admitted_payload_bytes: 0,
+            pending_puts: BTreeSet::new(),
+            waiting: VecDeque::new(),
+            responses_owed: VecDeque::new(),
+        }
+    }
+}
+
+/// A put offered to the sink, awaiting its answer.
+struct PendingPut {
+    session: CultMeshRudpSessionKey,
+    message_id: String,
 }
 
 /// A synchronous, multi-session CultNet RUDP raw-document server.
@@ -361,6 +458,14 @@ pub struct CultMeshRudpDocumentServer<S, Q, C> {
     options: CultMeshRudpDocumentServerOptions,
     packets_dropped: u64,
     send_failures: u64,
+    /// Where replies send their answers, and the sender each reply clones.
+    answers: Receiver<PutAnswer>,
+    answer_sender: Sender<PutAnswer>,
+    /// Answers taken off the channel and not yet handled, in arrival order.
+    answered: VecDeque<PutAnswer>,
+    /// The next put id; ids are never reused in the server's life.
+    next_put: u64,
+    pending: BTreeMap<u64, PendingPut>,
     /// Peers whose every datagram fails to send, standing in for an unroutable
     /// or full path that a loopback peer cannot be made to have.
     #[cfg(test)]
@@ -388,6 +493,7 @@ where
             anyhow!("CultMesh RUDP server requires a bound UDP socket: {error}")
         })?;
         socket.set_nonblocking(true)?;
+        let (answer_sender, answers) = channel();
         Ok(Self {
             socket,
             sessions: BTreeMap::new(),
@@ -397,6 +503,11 @@ where
             options,
             packets_dropped: 0,
             send_failures: 0,
+            answers,
+            answer_sender,
+            answered: VecDeque::new(),
+            next_put: 0,
+            pending: BTreeMap::new(),
             #[cfg(test)]
             failing_peers: BTreeSet::new(),
             #[cfg(test)]
@@ -441,7 +552,13 @@ where
     /// message. The rejection's own detail, which can quote a sink's or
     /// source's error, stays with the caller. Local socket and server-state
     /// failures remain errors.
+    ///
+    /// Sinks' answers are handled first: an accepted put is acknowledged, and
+    /// a refused one is returned as the poll's rejection, one per poll.
     pub fn poll_once(&mut self) -> Result<CultMeshRudpPollOutcome> {
+        if let Some(rejection) = self.serve_answered()? {
+            return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
+        }
         self.maintain()?;
         let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
         let (received, remote_addr) = match self.socket.recv_from(&mut wire) {
@@ -519,49 +636,44 @@ where
             }
         };
 
+        // The only reply `receive` returns is a Pong. Built now, it would
+        // acknowledge a put still awaiting its answer.
         let mut unsendable = match result.reply {
-            Some(reply) => self.send_packet(key.remote_addr, &reply)?,
-            None => None,
+            Some(reply) if !self.acknowledgement_withheld(key) => {
+                self.send_packet(key.remote_addr, &reply)?
+            }
+            _ => None,
         };
 
         if result.disconnected {
-            self.sessions.remove(&key);
+            self.remove_session(key);
             return Ok(CultMeshRudpPollOutcome::Handled);
         }
 
+        // A reliable packet is acknowledged below once nothing is withheld. An
+        // unreliable one is not, so if this poll releases a session that was
+        // withheld, the release acknowledges it.
+        let ack_release = !packet.reliable && self.acknowledgement_withheld(key);
+        let entry = self
+            .sessions
+            .get_mut(&key)
+            .expect("checked session must remain present");
         for frame in result.delivered {
             if frame.channel_id != "schema" {
                 continue;
             }
-            let message = match decode_cultnet_message_from_slice(
+            if let Ok(message) = decode_cultnet_message_from_slice(
                 &frame.payload,
                 CultNetWireContract::CultNetSchemaV0,
             ) {
-                Ok(message) => message,
-                Err(_) => continue,
-            };
-            if let Some(rejection) = self.deliver_application_message(
-                key,
-                frame.sequence,
-                message,
-                now_unix,
-                now_monotonic,
-            )? {
-                // The only reply `receive` returns is a Pong, which delivers no
-                // frame, so no earlier send of this poll can precede a rejection.
-                // A response that could not be sent ended its session where the
-                // send failed, over the real error.
-                if !matches!(
-                    rejection.reason,
-                    CultMeshRudpRejectionReason::ResponseSendFailed(_)
-                ) {
-                    self.end_session(key, SessionEnd::Rejected(rejection.reason.refusal_text()))?;
-                }
-                return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
+                entry.waiting.push_back((frame.sequence, message));
             }
         }
+        if let Some(rejection) = self.serve_session(key, now_unix, now_monotonic, ack_release)? {
+            return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
+        }
 
-        if packet.reliable && unsendable.is_none() {
+        if packet.reliable && unsendable.is_none() && !self.acknowledgement_withheld(key) {
             let ack = self
                 .sessions
                 .get_mut(&key)
@@ -581,12 +693,18 @@ where
         let now = self.clock.now_monotonic_millis();
         let idle_timeout_ms = duration_millis(self.options.session_idle_timeout);
         let lifetime_ms = duration_millis(self.options.session_max_lifetime);
-        let before = self.sessions.len();
-        self.sessions.retain(|_, entry| {
-            now.saturating_sub(entry.last_activity_monotonic_millis) <= idle_timeout_ms
-                && now.saturating_sub(entry.created_at_monotonic_millis) <= lifetime_ms
-        });
-        let expired = before - self.sessions.len();
+        let expired: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, entry)| {
+                now.saturating_sub(entry.last_activity_monotonic_millis) > idle_timeout_ms
+                    || now.saturating_sub(entry.created_at_monotonic_millis) > lifetime_ms
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in &expired {
+            self.remove_session(*key);
+        }
 
         let mut resends = Vec::new();
         for (key, entry) in &mut self.sessions {
@@ -604,7 +722,7 @@ where
             }
         }
         Ok(CultMeshRudpMaintenance {
-            sessions_expired: expired,
+            sessions_expired: expired.len(),
             packets_resent: resends.len(),
         })
     }
@@ -625,7 +743,7 @@ where
             .get(&key)
             .is_some_and(|entry| !entry.session.connect_repeats(packet))
         {
-            self.sessions.remove(&key);
+            self.remove_session(key);
         }
         let reply = match self.sessions.get_mut(&key) {
             Some(entry) => {
@@ -651,18 +769,15 @@ where
                     ),
                 });
                 let accept = session.accept_connect(packet, now, Vec::new())?;
-                self.sessions.insert(
-                    key,
-                    SessionEntry {
-                        session,
-                        created_at_monotonic_millis: now,
-                        last_activity_monotonic_millis: now,
-                        admitted_payload_bytes: 0,
-                    },
-                );
+                self.sessions.insert(key, SessionEntry::new(session, now));
                 accept
             }
         };
+        // A repeated Connect is answered with an acknowledgement built now,
+        // which would acknowledge a put still awaiting its answer.
+        if self.acknowledgement_withheld(key) {
+            return Ok(true);
+        }
         if let Some(error) = self.send_packet(key.remote_addr, &reply)? {
             self.end_session(key, SessionEnd::Unsendable(error))?;
             return Ok(false);
@@ -699,9 +814,9 @@ where
                 let served = match self.snapshot_source.served_record(&document) {
                     Ok(served) => served,
                     Err(error) => {
-                        return reject(CultMeshRudpRejectionReason::SnapshotSourceFailed(
-                            format!("{error:#}"),
-                        ));
+                        return reject(CultMeshRudpRejectionReason::SnapshotSourceFailed(format!(
+                            "{error:#}"
+                        )));
                     }
                 };
                 let alone = CultNetMessage::SnapshotResponseRaw {
@@ -726,18 +841,32 @@ where
                         max_fragment_count,
                     });
                 }
+                let put = self.next_put;
+                self.next_put += 1;
+                self.sessions
+                    .get_mut(&key)
+                    .ok_or_else(|| anyhow!("CultMesh RUDP session disappeared before a put"))?
+                    .pending_puts
+                    .insert(put);
+                self.pending.insert(
+                    put,
+                    PendingPut {
+                        session: key,
+                        message_id: message_id.clone(),
+                    },
+                );
                 let receipt = CultMeshRudpRawDocumentReceipt {
                     session: key,
-                    message_id: message_id.clone(),
+                    message_id,
                     transport_sequence,
                     received_at_unix_millis: now_unix,
                     document,
                 };
-                if let Err(error) = self.sink.accept_raw_document(receipt) {
-                    return reject(CultMeshRudpRejectionReason::SinkRefused(format!(
-                        "{error:#}"
-                    )));
-                }
+                let reply = CultMeshRudpPutReply {
+                    put,
+                    answers: Some(self.answer_sender.clone()),
+                };
+                self.sink.accept_raw_document(receipt, reply);
             }
             CultNetMessage::SnapshotRequest {
                 message_id,
@@ -809,53 +938,235 @@ where
                         reason: CultMeshRudpRejectionReason::PayloadBudgetFull,
                     }));
                 }
-                let payload_bytes = payload.len();
+                let withheld = self.acknowledgement_withheld(key);
                 let entry = self
                     .sessions
                     .get_mut(&key)
                     .ok_or_else(|| anyhow!("CultMesh RUDP session disappeared before response"))?;
-                let packets = match entry.session.send_many(
-                    "schema",
-                    payload,
-                    CultNetRudpSendOptions {
-                        reliable: true,
-                        ordered: true,
-                        sequenced: false,
-                        now_ms: now,
-                        reliable_expire_after_ms: None,
-                    },
-                    Some(self.options.max_fragment_bytes),
-                ) {
-                    Ok(packets) => packets,
-                    Err(error) => {
-                        return Ok(Some(CultMeshRudpApplicationRejection {
-                            session: key,
-                            operation: CultMeshRudpApplicationOperation::SnapshotRequest,
-                            message_id,
-                            reason: CultMeshRudpRejectionReason::ResponseQueueFailed(format!(
-                                "{error:#}"
-                            )),
-                        }));
-                    }
-                };
                 entry.admitted_payload_bytes =
-                    entry.admitted_payload_bytes.saturating_add(payload_bytes);
-                for packet in &packets {
-                    if let Some(error) = self.send_packet(key.remote_addr, packet)? {
-                        let code = send_error_code(&error);
-                        self.end_session(key, SessionEnd::Unsendable(error))?;
-                        return Ok(Some(CultMeshRudpApplicationRejection {
-                            session: key,
-                            operation: CultMeshRudpApplicationOperation::SnapshotRequest,
-                            message_id,
-                            reason: CultMeshRudpRejectionReason::ResponseSendFailed(code),
-                        }));
-                    }
+                    entry.admitted_payload_bytes.saturating_add(payload.len());
+                if withheld {
+                    entry.responses_owed.push_back((message_id, payload));
+                    return Ok(None);
                 }
+                return self.send_response(key, message_id, payload, now);
             }
             _ => {}
         }
         Ok(None)
+    }
+
+    /// Queues a charged snapshot response on its session and sends it.
+    fn send_response(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        message_id: String,
+        payload: Vec<u8>,
+        now: u64,
+    ) -> Result<Option<CultMeshRudpApplicationRejection>> {
+        let rejection = |message_id, reason| {
+            Ok(Some(CultMeshRudpApplicationRejection {
+                session: key,
+                operation: CultMeshRudpApplicationOperation::SnapshotRequest,
+                message_id,
+                reason,
+            }))
+        };
+        let entry = self
+            .sessions
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("CultMesh RUDP session disappeared before response"))?;
+        let packets = match entry.session.send_many(
+            "schema",
+            payload,
+            CultNetRudpSendOptions {
+                reliable: true,
+                ordered: true,
+                sequenced: false,
+                now_ms: now,
+                reliable_expire_after_ms: None,
+            },
+            Some(self.options.max_fragment_bytes),
+        ) {
+            Ok(packets) => packets,
+            Err(error) => {
+                return rejection(
+                    message_id,
+                    CultMeshRudpRejectionReason::ResponseQueueFailed(format!("{error:#}")),
+                );
+            }
+        };
+        for packet in &packets {
+            if let Some(error) = self.send_packet(key.remote_addr, packet)? {
+                let code = send_error_code(&error);
+                self.end_session(key, SessionEnd::Unsendable(error))?;
+                return rejection(
+                    message_id,
+                    CultMeshRudpRejectionReason::ResponseSendFailed(code),
+                );
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether the session may be sent nothing new: a put it sent awaits its
+    /// answer, offered to the sink or waiting behind a snapshot request. Every
+    /// packet built now carries acknowledgement fields covering every sequence
+    /// received, so it would acknowledge that put. Resends of packets built
+    /// earlier carry their own fields and still go. The one owner of the rule.
+    fn acknowledgement_withheld(&self, key: CultMeshRudpSessionKey) -> bool {
+        self.sessions.get(&key).is_some_and(|entry| {
+            !entry.pending_puts.is_empty()
+                || entry
+                    .waiting
+                    .iter()
+                    .any(|(_, message)| matches!(message, CultNetMessage::DocumentPutRaw { .. }))
+        })
+    }
+
+    /// Handles the sinks' answers that arrived since the last poll, session by
+    /// session, and returns the first refusal.
+    fn serve_answered(&mut self) -> Result<Option<CultMeshRudpApplicationRejection>> {
+        self.answered.extend(self.answers.try_iter());
+        let now_unix = self.clock.now_unix_millis();
+        let now = self.clock.now_monotonic_millis();
+        while let Some(key) = self
+            .answered
+            .iter()
+            .find_map(|answer| self.pending.get(&answer.put).map(|put| put.session))
+        {
+            // A session with an answer queued has a pending put: it is withheld.
+            if let Some(rejection) = self.serve_session(key, now_unix, now, true)? {
+                return Ok(Some(rejection));
+            }
+        }
+        // What is left answers puts whose sessions ended.
+        self.answered.clear();
+        Ok(None)
+    }
+
+    /// Takes the session's answers and handles its waiting messages in order,
+    /// until it waits on the sink or has nothing left. A put is offered at
+    /// once, even behind a put awaiting its answer; a snapshot request waits
+    /// for every earlier put's answer. When the session stops being withheld,
+    /// the responses owed to it are sent, after an acknowledgement if
+    /// `ack_owed`.
+    fn serve_session(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        now_unix: u64,
+        now: u64,
+        mut ack_owed: bool,
+    ) -> Result<Option<CultMeshRudpApplicationRejection>> {
+        loop {
+            if let Some(rejection) = self.take_answers(key)? {
+                return Ok(Some(rejection));
+            }
+            if !self.acknowledgement_withheld(key) {
+                if std::mem::take(&mut ack_owed) {
+                    let Some(entry) = self.sessions.get_mut(&key) else {
+                        return Ok(None);
+                    };
+                    let ack = entry.session.create_ack();
+                    if let Some(error) = self.send_packet(key.remote_addr, &ack)? {
+                        self.end_session(key, SessionEnd::Unsendable(error))?;
+                        return Ok(None);
+                    }
+                }
+                while let Some((message_id, payload)) = self
+                    .sessions
+                    .get_mut(&key)
+                    .and_then(|entry| entry.responses_owed.pop_front())
+                {
+                    if let Some(rejection) = self.send_response(key, message_id, payload, now)? {
+                        return self.reject(key, rejection);
+                    }
+                }
+            }
+            let Some(entry) = self.sessions.get_mut(&key) else {
+                return Ok(None);
+            };
+            let ready = match entry.waiting.front() {
+                None => false,
+                Some((_, CultNetMessage::SnapshotRequest { .. })) => entry.pending_puts.is_empty(),
+                Some(_) => true,
+            };
+            let Some((sequence, message)) = ready.then(|| entry.waiting.pop_front()).flatten()
+            else {
+                return Ok(None);
+            };
+            if let Some(rejection) =
+                self.deliver_application_message(key, sequence, message, now_unix, now)?
+            {
+                return self.reject(key, rejection);
+            }
+        }
+    }
+
+    /// Takes the session's answers off the queue. An accepted put stops being
+    /// pending; a refused one ends the session and is returned. Answers for
+    /// puts whose session ended are discarded; other sessions' stay queued.
+    fn take_answers(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+    ) -> Result<Option<CultMeshRudpApplicationRejection>> {
+        self.answered.extend(self.answers.try_iter());
+        let mut index = 0;
+        while index < self.answered.len() {
+            let put = self.answered[index].put;
+            match self.pending.get(&put) {
+                Some(pending) if pending.session != key => {
+                    index += 1;
+                    continue;
+                }
+                Some(_) => {}
+                None => {
+                    self.answered.remove(index);
+                    continue;
+                }
+            }
+            let answer = self.answered.remove(index).expect("indexed answer");
+            let pending = self.pending.remove(&put).expect("pending put");
+            if let Some(entry) = self.sessions.get_mut(&key) {
+                entry.pending_puts.remove(&put);
+            }
+            if let Some(reason) = answer.refusal {
+                let rejection = CultMeshRudpApplicationRejection {
+                    session: key,
+                    operation: CultMeshRudpApplicationOperation::DocumentPutRaw,
+                    message_id: pending.message_id,
+                    reason: CultMeshRudpRejectionReason::SinkRefused(reason),
+                };
+                return self.reject(key, rejection);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Ends the session over `rejection` and returns it. A response that could
+    /// not be sent ended its session where the send failed, over the real error.
+    fn reject(
+        &mut self,
+        key: CultMeshRudpSessionKey,
+        rejection: CultMeshRudpApplicationRejection,
+    ) -> Result<Option<CultMeshRudpApplicationRejection>> {
+        if !matches!(
+            rejection.reason,
+            CultMeshRudpRejectionReason::ResponseSendFailed(_)
+        ) {
+            self.end_session(key, SessionEnd::Rejected(rejection.reason.refusal_text()))?;
+        }
+        Ok(Some(rejection))
+    }
+
+    /// Removes a session and forgets its pending puts, so their answers are
+    /// discarded. Every removal goes through here.
+    fn remove_session(&mut self, key: CultMeshRudpSessionKey) -> Option<SessionEntry> {
+        let entry = self.sessions.remove(&key)?;
+        for put in &entry.pending_puts {
+            self.pending.remove(put);
+        }
+        Some(entry)
     }
 
     /// Ends a session before its peer is done with it, and says goodbye. It is
@@ -870,7 +1181,7 @@ where
     /// that can never be sent as built is not dropped: the goodbye names its
     /// error instead. A refusal that cannot be encoded is not sent.
     fn end_session(&mut self, key: CultMeshRudpSessionKey, end: SessionEnd) -> Result<()> {
-        let Some(mut entry) = self.sessions.remove(&key) else {
+        let Some(mut entry) = self.remove_session(key) else {
             return Ok(());
         };
         let (refusal, mut unsendable) = match end {
@@ -1068,7 +1379,6 @@ fn validate_options(options: &CultMeshRudpDocumentServerOptions) -> Result<()> {
     }
     Ok(())
 }
-
 
 /// The one encoder for a snapshot response, shared by the snapshot path and by
 /// put admission so the size a put is judged by is the size it would be served at.
