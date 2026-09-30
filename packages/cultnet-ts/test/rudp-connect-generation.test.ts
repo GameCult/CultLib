@@ -94,6 +94,29 @@ test("an Accept after a local disconnect does not reconnect the session", () => 
   assert.equal(client.connected, false, "a late Accept revived an ended session");
 });
 
+test("a reconnect forgets what the old server sent", () => {
+  const client = session(1);
+  const oldServer = session(500);
+  handshake(client, oldServer);
+  for (const name of ["d1", "d2", "d3"]) {
+    assert.deepEqual(names(client.receive(send(oldServer, name), 1)), [name]);
+  }
+
+  const newServer = session(501);
+  client.receive(newServer.acceptConnect(client.createConnect(2), 2), 2);
+  assert.deepEqual(names(client.receive(send(newServer, "fresh"), 3)), ["fresh"]);
+});
+
+test("an Accept for an abandoned Connect does not connect the session", () => {
+  const client = session(1);
+  const server = session(500);
+  const accept = server.acceptConnect(client.createConnect(0), 0);
+  client.createDisconnect(enc("never mind"));
+
+  client.receive(accept, 1);
+  assert.equal(client.connected, false, "an Accept revived an abandoned Connect");
+});
+
 test("a duplicate Accept does not reseed the watermark", () => {
   const client = session(1);
   const server = session(500);

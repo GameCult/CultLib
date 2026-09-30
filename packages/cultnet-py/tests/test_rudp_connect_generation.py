@@ -104,6 +104,24 @@ class CultNetRudpConnectGenerationTests(unittest.TestCase):
         client.receive(accept, 5)
         self.assertFalse(client.connected, "a late Accept revived an ended session")
 
+    def test_a_reconnect_forgets_what_the_old_server_sent(self) -> None:
+        client, old_server = session(1), session(500)
+        handshake(client, old_server)
+        for name in ("d1", "d2", "d3"):
+            self.assertEqual(names(client.receive(send(old_server, name), 1)), [name])
+
+        new_server = session(501)
+        client.receive(new_server.accept_connect(client.create_connect(2), 2), 2)
+        self.assertEqual(names(client.receive(send(new_server, "fresh"), 3)), ["fresh"])
+
+    def test_an_accept_for_an_abandoned_connect_does_not_connect_the_session(self) -> None:
+        client, server = session(1), session(500)
+        accept = server.accept_connect(client.create_connect(0), 0)
+        client.create_disconnect(b"never mind")
+
+        client.receive(accept, 1)
+        self.assertFalse(client.connected, "an Accept revived an abandoned Connect")
+
     def test_a_duplicate_accept_does_not_reseed_the_watermark(self) -> None:
         client, server = session(1), session(500)
         _, accept = handshake(client, server)

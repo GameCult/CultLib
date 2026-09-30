@@ -153,6 +153,32 @@ namespace GameCult.Networking.Tests
         }
 
         [Test]
+        public void AReconnectForgetsWhatTheOldServerSent()
+        {
+            var client = Session(1);
+            var oldServer = Session(500);
+            Handshake(client, oldServer);
+            foreach (var name in new[] { "d1", "d2", "d3" })
+                Assert.That(Names(client.Receive(Send(oldServer, name), 1)), Is.EqualTo(new[] { name }));
+
+            var newServer = Session(501);
+            client.Receive(newServer.AcceptConnect(client.CreateConnect(2), 2), 2);
+            Assert.That(Names(client.Receive(Send(newServer, "fresh"), 3)), Is.EqualTo(new[] { "fresh" }));
+        }
+
+        [Test]
+        public void AnAcceptForAnAbandonedConnectDoesNotConnectTheSession()
+        {
+            var client = Session(1);
+            var server = Session(500);
+            var accept = server.AcceptConnect(client.CreateConnect(0), 0);
+            client.CreateDisconnect(Encoding.UTF8.GetBytes("never mind"));
+
+            client.Receive(accept, 1);
+            Assert.That(client.Connected, Is.False, "an Accept revived an abandoned Connect");
+        }
+
+        [Test]
         public void ADuplicateAcceptDoesNotReseedTheWatermark()
         {
             var client = Session(1);

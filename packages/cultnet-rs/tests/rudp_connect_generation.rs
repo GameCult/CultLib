@@ -26,6 +26,10 @@ fn session(initial_sequence: u32) -> CultNetRudpSession {
     })
 }
 
+fn send(from: &mut CultNetRudpSession, text: &str) -> Result<CultNetRudpPacket> {
+    from.send("schema", text.as_bytes().to_vec(), ordered())
+}
+
 fn ordered() -> CultNetRudpSendOptions {
     CultNetRudpSendOptions {
         reliable: true,
@@ -171,6 +175,43 @@ fn an_accept_after_a_local_disconnect_does_not_reconnect_the_session() -> Result
 
     client.receive(&accept, 5)?;
     assert!(!client.connected(), "a late Accept revived an ended session");
+    Ok(())
+}
+
+/// A client that reconnects to a restarted server is not silenced by what it
+/// received from the old one: the new server's sequences may overlap the old
+/// ones, and none of them is a duplicate.
+#[test]
+fn a_reconnect_forgets_what_the_old_server_sent() -> Result<()> {
+    let mut client = session(1);
+    let mut old_server = session(500);
+    handshake(&mut client, &mut old_server)?;
+    for name in ["d1", "d2", "d3"] {
+        let packet = send(&mut old_server, name)?;
+        assert_eq!(names(&client.receive(&packet, 1)?.delivered), [name]);
+    }
+
+    let mut new_server = session(501);
+    let connect = client.create_connect(2, Vec::new())?;
+    let accept = new_server.accept_connect(&connect, 2, Vec::new())?;
+    client.receive(&accept, 2)?;
+    let fresh = send(&mut new_server, "fresh")?;
+    assert_eq!(names(&client.receive(&fresh, 3)?.delivered), ["fresh"]);
+    Ok(())
+}
+
+/// An Accept for a Connect that was abandoned before it was answered does not
+/// connect the session.
+#[test]
+fn an_accept_for_an_abandoned_connect_does_not_connect_the_session() -> Result<()> {
+    let mut client = session(1);
+    let mut server = session(500);
+    let connect = client.create_connect(0, Vec::new())?;
+    let accept = server.accept_connect(&connect, 0, Vec::new())?;
+    client.create_disconnect(b"never mind".to_vec());
+
+    client.receive(&accept, 1)?;
+    assert!(!client.connected(), "an Accept revived an abandoned Connect");
     Ok(())
 }
 
