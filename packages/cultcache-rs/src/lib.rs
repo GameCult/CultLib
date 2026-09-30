@@ -788,20 +788,17 @@ impl SingleFileMessagePackBackingStore {
         let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries)?)
             .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
-        let mut staged = OpenOptions::new()
+        let staged = OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&tmp_path)
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-        use std::io::Write;
-        staged
-            .write_all(&bytes)
-            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-        staged
-            .sync_all()
-            .with_context(|| format!("failed to sync {}", tmp_path.display()))?;
-        drop(staged);
-        replace_file_atomically(&tmp_path, &self.path)?;
+        // From here the staging file is this write's to remove: a write that fails
+        // for lack of space must not keep holding the space it failed on.
+        if let Err(error) = stage_and_replace(staged, &tmp_path, &bytes, &self.path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
         sync_parent_directory(&self.path)?;
         Ok(())
     }
@@ -2760,6 +2757,19 @@ fn temporary_path_for(path: &Path) -> PathBuf {
         .unwrap_or_else(|| "cultcache.cc".into());
     file_name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
     path.with_file_name(file_name)
+}
+
+/// Writes and syncs the staged snapshot, closes it, and renames it over `destination`.
+fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destination: &Path) -> Result<()> {
+    use std::io::Write;
+    staged
+        .write_all(bytes)
+        .with_context(|| format!("failed to write {}", staged_path.display()))?;
+    staged
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", staged_path.display()))?;
+    drop(staged);
+    replace_file_atomically(staged_path, destination)
 }
 
 fn remove_abandoned_staging_files(destination: &Path) -> Result<()> {
@@ -4840,6 +4850,48 @@ mod tests {
             assert!(io_error_in(&error).is_some(), "{error:#}");
             assert_eq!(unreadable_kind(&error), None, "{error:#}");
         }
+        Ok(())
+    }
+
+    /// Runs one write in a child process whose file-size limit is far below the
+    /// snapshot, with SIGXFSZ ignored so the write fails with EFBIG instead of
+    /// killing the child: a real mid-write failure after the staging file exists,
+    /// reached without permissions (the verification container runs as root).
+    #[cfg(unix)]
+    #[test]
+    fn a_write_that_fails_part_way_leaves_no_staging_file_and_keeps_the_store() -> Result<()> {
+        const CHILD_STORE: &str = "CULTCACHE_RS_FILE_SIZE_LIMITED_STORE";
+        if let Ok(path) = std::env::var(CHILD_STORE) {
+            let mut store = SingleFileMessagePackBackingStore::new(path);
+            let error = store
+                .push(&snapshot_envelope("large", &vec![7; 1 << 20]))
+                .unwrap_err();
+            let io = io_error_in(&error).expect("a size-limited write fails with an io::Error");
+            assert_eq!(io.kind(), std::io::ErrorKind::FileTooLarge, "{error:#}");
+            assert_eq!(unreadable_kind(&error), None, "{error:#}");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (store, before) = written_store(&path)?;
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' XFSZ; ulimit -f 64; exec \"$0\" --exact --test-threads=1 --quiet tests::a_write_that_fails_part_way_leaves_no_staging_file_and_keeps_the_store")
+            .arg(std::env::current_exe()?)
+            .env(CHILD_STORE, &path)
+            .status()?;
+        assert!(status.success(), "the size-limited child did not fail its write as expected: {status}");
+
+        let staging: Vec<_> = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|name| name.starts_with("store.cc.") && name.ends_with(".tmp"))
+            .collect();
+        assert_eq!(staging, Vec::<String>::new());
+        assert_eq!(fs::read(&path)?, before);
+        assert_eq!(store.pull_all()?.len(), 3);
         Ok(())
     }
 }
