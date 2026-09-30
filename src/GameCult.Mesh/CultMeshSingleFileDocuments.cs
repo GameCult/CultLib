@@ -271,7 +271,9 @@ namespace GameCult.Mesh
         }
 
         // Every refusal is a CultStoreUnreadableException. A store whose catalog entries are in the older layout is read by the
-        // same store reader with the older entry reader, so it is judged by the same framing, slot count and records.
+        // same store reader with the older entry reader, so it is judged by the same framing, slot count and records. Only a
+        // catalog entry the current layout cannot decode (a MessagePack or shape failure) sends it there; a store refused for its
+        // framing, its slot count or a record keeps that refusal.
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
@@ -282,7 +284,7 @@ namespace GameCult.Mesh
             {
                 snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
             }
-            catch (CultStoreUnreadableException)
+            catch (CultStoreUnreadableException ex) when (ex.InnerException is MessagePackSerializationException or InvalidOperationException)
             {
                 snapshot = CultDocumentMessagePackSerialization.ReadStore(bytes, ReadLegacySchemaCatalogEntry);
             }
