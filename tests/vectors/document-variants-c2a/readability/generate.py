@@ -17,6 +17,7 @@ vectors = {
     "empty-array": pack([]),
     # A legacy envelope array: an array of maps. Rust, TypeScript and Python read it; C# has no legacy reader.
     "legacy-envelopes": pack([{"key": "old", "type": "old.type", "payload": pack([]), "storedAt": "2026-01-01T00:00:00Z"}]),
+    "legacy-trailing": None,  # filled below: the legacy array plus bytes after it
     "ints": pack([1, 2, 3]),
     "nil-first": pack([None, "x"]),
     "nested-array": pack([["cultcache.store.v9", [], []]]),
@@ -28,6 +29,7 @@ vectors = {
     "trailing-bytes": whole + b"\x01\x02\x03",
     "trailing-store": whole + whole,
 }
+vectors["legacy-trailing"] = vectors["legacy-envelopes"] + b""
 for name, data in vectors.items():
     (here / f"{name}.bin").write_bytes(data)
 print(len(vectors), "vectors")

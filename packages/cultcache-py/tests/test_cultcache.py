@@ -913,7 +913,7 @@ class CultCacheTests(unittest.TestCase):
             for line in (root / "manifest.txt").read_text(encoding="utf-8").splitlines()
             if line and not line.startswith("#")
         ]
-        self.assertEqual(len(rows), 14)
+        self.assertEqual(len(rows), 15)
         envelopes = SingleFileMessagePackBackingStore(self._C2A_VECTORS / "v3-base.msgpack").pull_all()
         for vector, _, _, _, python in rows:
             content = (root / vector).read_bytes()

@@ -4858,7 +4858,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(rows, 14);
+        assert_eq!(rows, 15);
         Ok(())
     }
 

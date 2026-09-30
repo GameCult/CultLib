@@ -1590,7 +1590,7 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
     .split(/\r?\n/u)
     .filter((line) => line.length > 0 && !line.startsWith("#"))
     .map((line) => line.split(/\s+/u));
-  assert.equal(rows.length, 14);
+  assert.equal(rows.length, 15);
   const dir = await mkdtemp(join(tmpdir(), "cultcache-readability-"));
   const seed = await copyVector(dir, join(c2aVectors, "v3-base.msgpack"), "seed.msgpack");
   const envelopes = await new SingleFileMessagePackBackingStore(seed).pullAll();

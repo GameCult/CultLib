@@ -4,6 +4,7 @@
 zero-byte.bin       reads    reads    reads    reads
 empty-array.bin     reads    reads    reads    reads
 legacy-envelopes.bin refuses reads    reads    reads
+legacy-trailing.bin refuses refuses refuses refuses
 ints.bin            refuses  refuses  refuses  refuses
 nil-first.bin       refuses  refuses  refuses  refuses
 nested-array.bin    refuses  refuses  refuses  refuses
