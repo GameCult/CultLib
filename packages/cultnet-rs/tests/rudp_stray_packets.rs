@@ -745,7 +745,7 @@ fn a_repeated_connect_acknowledges_what_it_carries() -> Result<()> {
     let accept = server.accept_connect(&connect, 0, Vec::new())?;
     let mut repeat = connect.clone();
     repeat.ack = accept.sequence;
-    let reply = server.answer_repeated_connect(&repeat, 1)?;
+    let reply = server.accept_connect(&repeat, 1, Vec::new())?;
     assert_eq!(reply.packet_type, CultNetRudpPacketType::Ack);
     assert_eq!(server.outstanding_reliable_packet_count(), 0);
     Ok(())
