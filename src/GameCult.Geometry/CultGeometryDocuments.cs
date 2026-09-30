@@ -7,6 +7,10 @@ using GameCult.Caching;
 using MessagePack;
 using static GameCult.Geometry.CultGeometryDocuments;
 
+// The generator emits a resolver for these [MessagePackObject] documents; without this it would try to
+// generate a formatter for the CultRecordRef<T> reference members instead of using the cache's.
+[assembly: MessagePackKnownFormatter(typeof(CultRecordRefFormatter<>))]
+
 namespace GameCult.Geometry
 {
     /// <summary>
