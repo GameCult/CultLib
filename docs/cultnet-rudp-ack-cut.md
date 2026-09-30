@@ -1554,3 +1554,15 @@ Each question stands alone.
 `"schema"` and `"latest"` channel arms. Deleting either falls to the default and every test stays green. Pin their send
 flags on the wire the way the media arm is now pinned (raw peer socket), in whichever cut next touches channel
 profiles.
+
+**Rulings after the Cut 1/1b/1c Soul pass (Self, 2026-09-30):**
+- **Stale data after a reconnect.** A reliable sequence at or before the generation's seeded `R` (serial arithmetic
+  within the receive window) is a duplicate: acknowledged, not delivered. This is what §6/§8 already promised.
+- **Stale Connect (RFC 5961's challenge ACK).** A Connect whose sequence precedes the current generation's Connect
+  within the receive window is stale: it is answered with an Ack naming the current generation and does not reset.
+  A client whose Connect gets no Accept before its connect attempt times out starts a fresh attempt with a newly
+  drawn initial sequence, so a restarted client whose random sequence lands in that window still connects.
+- **Server mode.** A Connect from a different endpoint is never a repeat; the session predicate stays sequence-only.
+  (Hands' deviation 5 was rejected: pinned clients restarting on a new port were locked out.)
+- **The random default belongs to the session.** A session draws its own initial sequence when none is set, so one
+  options object reused across sessions or reconnects never repeats a sequence.
