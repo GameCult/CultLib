@@ -1143,9 +1143,8 @@ fn a_budget_at_the_media_record_ceiling_admits_large_shards_end_to_end() {
 }
 
 // ---------------------------------------------------------------------------
-// Known-answer generator: reed-solomon-erasure 6.0.0 is the reference that
-// produced `fixtures/media_fec_rs_gf256_v1.kat`. It runs once, before the
-// crate is replaced by the owned construction, and is deleted with the crate.
+// Known answers from the fixture: every standard geometry and the policy's
+// edges, byte for byte. The fixture's header states how its data is made.
 // ---------------------------------------------------------------------------
 
 /// The data of a fixture case, as the fixture's header defines it.
@@ -1159,6 +1158,129 @@ fn kat_data(k: usize, m: usize, shard_bytes: usize, fill: &str) -> Vec<Vec<u8>> 
         })
         .collect()
 }
+
+struct KatCase {
+    k: usize,
+    m: usize,
+    shard_bytes: usize,
+    fill: String,
+    parity: Vec<Vec<u8>>,
+    erasures: Vec<Vec<usize>>,
+}
+
+impl KatCase {
+    fn name(&self) -> String {
+        format!("k={} m={} {} bytes {}", self.k, self.m, self.shard_bytes, self.fill)
+    }
+
+    /// The case's data as an audio block: the codec path that takes any `(k, m)`.
+    fn packets(&self) -> Vec<GameCultMediaAudioPacketRecord> {
+        let mut packets = audio_run(self.k as u64, self.shard_bytes);
+        for (packet, data) in packets.iter_mut().zip(kat_data(self.k, self.m, self.shard_bytes, &self.fill)) {
+            packet.payload = data;
+        }
+        packets
+    }
+
+    fn policy(&self) -> MediaFecPolicy {
+        MediaFecPolicy {
+            audio_data_shards: self.k as u16,
+            audio_parity_shards: self.m as u16,
+            max_wire_bytes: GAMECULT_MEDIA_MAX_WIRE_BYTES,
+            ..STANDARD
+        }
+    }
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("fixture hex"))
+        .collect()
+}
+
+fn kat_cases() -> Vec<KatCase> {
+    let mut cases: Vec<KatCase> = Vec::new();
+    for line in include_str!("fixtures/media_fec_rs_gf256_v1.kat").lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [] => {}
+            [comment, ..] if comment.starts_with('#') => {}
+            ["case", k, m, shard_bytes, fill] => cases.push(KatCase {
+                k: k.parse().unwrap(),
+                m: m.parse().unwrap(),
+                shard_bytes: shard_bytes.parse().unwrap(),
+                fill: fill.to_string(),
+                parity: Vec::new(),
+                erasures: Vec::new(),
+            }),
+            ["parity", index, bytes] => {
+                let case = cases.last_mut().expect("parity follows a case");
+                assert_eq!(index.parse::<usize>().unwrap(), case.parity.len(), "{}", case.name());
+                case.parity.push(unhex(bytes));
+            }
+            ["erase", slots] => cases
+                .last_mut()
+                .expect("erase follows a case")
+                .erasures
+                .push(slots.split(',').map(|slot| slot.parse().unwrap()).collect()),
+            other => panic!("unreadable fixture line {other:?}"),
+        }
+    }
+    cases
+}
+
+/// Parity bytes of every fixture case, byte for byte. If these ever change,
+/// `rs-gf256-v1` changed meaning: bump the scheme id, do not edit the fixture.
+#[test]
+fn every_rs_gf256_v1_known_answer_parity_matches_byte_for_byte() {
+    let cases = kat_cases();
+    assert_eq!(cases.len(), 35, "the fixture's case count");
+    for case in &cases {
+        assert_eq!(case.parity.len(), case.m, "{}", case.name());
+        let parity = protect_audio_block(&case.packets(), &case.policy(), provenance())
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name()));
+        let produced: Vec<String> = parity.iter().map(|shard| hex(&shard.payload)).collect();
+        let expected: Vec<String> = case.parity.iter().map(|shard| hex(shard)).collect();
+        assert_eq!(produced, expected, "{}", case.name());
+    }
+}
+
+/// Every fixture erasure pattern, data and parity mixed, recovers exactly
+/// the erased data from the fixture's own parity bytes.
+#[test]
+fn every_rs_gf256_v1_known_erasure_pattern_recovers_the_data() {
+    for case in kat_cases() {
+        let packets = case.packets();
+        let mut parity = protect_audio_block(&packets, &case.policy(), provenance()).unwrap();
+        for (shard, bytes) in parity.iter_mut().zip(&case.parity) {
+            shard.payload = bytes.clone(); // decode from the fixture, not from the encoder
+        }
+        assert!(!case.erasures.is_empty(), "{}", case.name());
+        for erased in &case.erasures {
+            let data: Vec<_> =
+                (0..case.k).filter(|slot| !erased.contains(slot)).map(|slot| packets[slot].clone()).collect();
+            let present: Vec<_> = (0..case.m)
+                .filter(|slot| !erased.contains(&(case.k + slot)))
+                .map(|slot| parity[slot].clone())
+                .collect();
+            let recovered = recover_audio_block(&present, &data)
+                .unwrap_or_else(|error| panic!("{} erased {erased:?}: {error}", case.name()));
+            let lost: Vec<usize> = erased.iter().copied().filter(|&slot| slot < case.k).collect();
+            assert_eq!(recovered.len(), lost.len(), "{} erased {erased:?}", case.name());
+            for (packet, slot) in recovered.iter().zip(lost) {
+                assert_eq!(packet.packet_id, packets[slot].packet_id, "{} erased {erased:?}", case.name());
+                assert_eq!(packet.payload, packets[slot].payload, "{} erased {erased:?}", case.name());
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Known-answer generator: reed-solomon-erasure 6.0.0 is the reference that
+// produced `fixtures/media_fec_rs_gf256_v1.kat`. It runs once, before the
+// crate is replaced by the owned construction, and is deleted with the crate.
+// ---------------------------------------------------------------------------
 
 /// Erasure patterns of exactly `min(m, k)`-ish shards, each leaving at least
 /// one parity shard present and at least one data shard missing.
