@@ -559,7 +559,10 @@ dependency-level for most, read in detail for Aetheria and AetheriaEve).
 - **F-ID.3: stored C# hash ids.** Operator: "I have no idea". Self's default is to defer C2. C1 changes nothing on
   disk. C# keeps reading its own `sha256` ids. F2 already makes other runtimes keep C# records byte-for-byte. C2
   gets mapped only when a cross-runtime store read of a C# store is actually needed.
-- Next: Imagination maps C1 as a cut.
+- C1 is mapped (section "C1 cut: one schema id on the wire", below). **Operator, 2026-09-30: "Yes to both, defaults
+  are fine".** The per-binding wire-id override is deleted. A declared compatible id resolves on the wire, and the
+  owner beats a lister. All six defaults stand. Stonks is fixed in Stonks before C1 merges. Order: F2 Soul, then the
+  put-serve merge, then c2a merges main, then C1.0-C1.5.
 
 Probed at CultLib `hands/variants-c2a` 92d9e138. The probe ran on Yggdrasil in `ack1d-interop:2` from a scratch branch, which has since been deleted. Sources: `scratchpad/schema-identity-probe/`. Full output: `scratchpad/probe2.log` (store round trip, section 1), plus a wire rerun shown inline below. Every probe used one declared schema: the interop note, name `cultcache.interop-note`, version `cultcache.interop_note.v1`, with six members.
 
