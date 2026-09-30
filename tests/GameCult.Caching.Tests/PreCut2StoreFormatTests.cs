@@ -167,6 +167,61 @@ namespace GameCult.Caching.Tests
                 Throws.TypeOf<NotSupportedException>().With.Message.Contains("format version"));
         }
 
+        // Every runtime reads a store file the same way: a missing file is an empty store, an existing empty file is not
+        // a store (no CultCache writer leaves one), and an empty array carries no header, so it claims no format and is an
+        // empty store too.
+        [Test]
+        public async Task SingleFileRefusesAnEmptyFileAndOpensAMissingFileOrAnEmptyArrayAsEmpty()
+        {
+            var root = Path.Combine(Path.GetTempPath(), $"cultlib-empty-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(root);
+            try
+            {
+                var empty = Path.Combine(root, "empty.msgpack");
+                File.WriteAllBytes(empty, Array.Empty<byte>());
+                using (var cache = new CultCache())
+                {
+                    Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(empty)));
+                    Assert.That(cache.BackingStores, Is.Empty);
+                }
+                Assert.That(File.ReadAllBytes(empty), Is.Empty);
+
+                var emptyArray = Path.Combine(root, "empty-array.msgpack");
+                File.WriteAllBytes(emptyArray, new byte[] { 0x90 });
+                foreach (var path in new[] { Path.Combine(root, "missing.msgpack"), emptyArray })
+                {
+                    using var cache = new CultCache();
+                    cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                    await cache.PullAllBackingStoresAsync();
+                    Assert.That(cache.GetAll<PreCut2FixtureItem>(), Is.Empty, path);
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+            }
+        }
+
+        // A refusal echoes a header only in the shape cultcache.store.v<digits>; any other is described by its length.
+        [TestCase("cultcache.store.v12", true)]
+        [TestCase("cultcache.store.SECRET-HEADER", false)]
+        [TestCase("cultcache.store.v12SECRET", false)]
+        [TestCase("cultcache.store.v", false)]
+        public void SingleFileRefusalEchoesAHeaderOnlyInTheKnownShape(string header, bool echoed)
+        {
+            var snapshot = new CultPersistedStoreSnapshot { FormatVersion = header };
+            var error = Assert.Throws<NotSupportedException>(() => CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot))!;
+            if (echoed)
+            {
+                Assert.That(error.Message, Does.Contain("format " + header + " is not"));
+            }
+            else
+            {
+                Assert.That(error.Message, Does.Not.Contain("SECRET").And.Not.Contain("format " + header + " is not"));
+                Assert.That(error.Message, Does.Contain($"of {header.Length} bytes"));
+            }
+        }
+
         [Test]
         public void V1StoreWrittenAtTheBaseCommitStillDecodesByteForByte()
         {
