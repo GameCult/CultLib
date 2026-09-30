@@ -280,8 +280,8 @@ struct PersistedRecord(
 );
 
 impl<'de> serde::Deserialize<'de> for PersistedRecord {
-    /// Reads the four v1 slots and refuses a fifth, naming the record. A record with more
-    /// slots was written by a runtime that resolves document variants.
+    /// Reads the four v1 slots and refuses a fifth, naming the record. No runtime reads a
+    /// v1 store holding such a record, so the store is not a valid one.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
 
@@ -301,7 +301,7 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
                     seq.next_element()?.ok_or_else(|| A::Error::invalid_length(3, &self))?;
                 if seq.next_element::<IgnoredAny>()?.is_some() {
                     return Err(A::Error::custom(format!(
-                        "CultCache record {key:?} (schema {schema_id:?}) has more than 4 slots; this runtime reads 4. The store needs a runtime that resolves document variants."
+                        "CultCache record {key:?} (schema {schema_id:?}) has more than the 4 slots of a {STORE_FORMAT_V1} record, so this is not a valid store"
                     )));
                 }
                 Ok(PersistedRecord(key, schema_id, stored_at, payload.into_vec()))
@@ -312,11 +312,11 @@ impl<'de> serde::Deserialize<'de> for PersistedRecord {
     }
 }
 
+const STORE_FORMAT_V1: &str = "cultcache.store.v1";
+
 /// The store header string, or `None` when the bytes do not open with an array whose
 /// first slot is a string (the legacy envelope array starts with a map). Only the
 /// leading bytes are read, so a store cut short after its header still names its format.
-const STORE_FORMAT_V1: &str = "cultcache.store.v1";
-
 fn store_header(bytes: &[u8]) -> Option<String> {
     let mut offset = 0usize;
     if read_array_header(bytes, &mut offset)? == 0 {
@@ -736,14 +736,19 @@ impl SingleFileMessagePackBackingStore {
     }
 
     fn read_all_unlocked(&self) -> Result<Vec<CultCacheEnvelope>> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
-        }
-        let bytes = fs::read(&self.path)
-            .with_context(|| format!("failed to read {}", self.path.display()))?;
-        if bytes.is_empty() {
-            return Ok(Vec::new());
-        }
+        // Only a store that is not there is empty. A file that is there and empty is
+        // not a store (no writer leaves one), and any other failure to reach the file,
+        // such as a symlink loop, a file where a directory should be, or no permission,
+        // stays an io::Error: reading it as empty would let a writer replace a store it
+        // never saw.
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("failed to read {}", self.path.display())));
+            }
+        };
         let unreadable = |kind, detail: anyhow::Error| {
             // The decoder reports a short read as an io::Error, so its chain is kept as
             // text: an io::Error in the chain means the file itself could not be read.
@@ -757,9 +762,7 @@ impl SingleFileMessagePackBackingStore {
                 .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
             Some(header) if header.starts_with("cultcache.store.") => Err(unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
-                anyhow!(
-                    "CultCache store format {header:?} is not readable; this runtime reads {STORE_FORMAT_V1:?} only. The store needs a runtime that resolves document variants."
-                ),
+                anyhow!("its header is {header:?}; this runtime reads {STORE_FORMAT_V1:?} only"),
             )),
             _ => rmp_serde::from_slice(&bytes)
                 .context("failed to decode legacy CultCache envelope array")
@@ -1025,7 +1028,7 @@ fn unique_batch_ids(
 
 impl CacheBackingStore for SingleFileMessagePackBackingStore {
     fn pull_all(&self) -> Result<Vec<CultCacheEnvelope>> {
-        if !self.path.exists() && !self.lock_path().exists() {
+        if is_absent(&self.path)? && is_absent(&self.lock_path())? {
             return Ok(Vec::new());
         }
         self.with_shared_lock(|| self.read_all_unlocked())
@@ -2770,6 +2773,16 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
         .with_context(|| format!("failed to sync {}", staged_path.display()))?;
     drop(staged);
     replace_file_atomically(staged_path, destination)
+}
+
+/// True only when nothing is at `path`. A path that cannot be inspected (a symlink loop,
+/// a file where a directory should be, no permission) is an error, never absent.
+fn is_absent(path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(anyhow::Error::new(error).context(format!("failed to inspect {}", path.display()))),
+    }
 }
 
 fn remove_abandoned_staging_files(destination: &Path) -> Result<()> {
@@ -4906,6 +4919,154 @@ mod tests {
         assert_eq!(staging, Vec::<String>::new());
         assert_eq!(fs::read(&path)?, before);
         assert_eq!(store.pull_all()?.len(), 3);
+        Ok(())
+    }
+
+    /// Every read of a single-file store: the locked pull, the lock-free provider
+    /// snapshot, and the exchange a writer reads through.
+    fn every_read(store: &SingleFileMessagePackBackingStore) -> [Result<Vec<CultCacheEnvelope>>; 3] {
+        [
+            store.pull_all(),
+            store.pull_all_read_only_snapshot(),
+            store
+                .compare_exchange_snapshot(&[], &[snapshot_envelope("delta", b"4")])
+                .map(|_| Vec::new()),
+        ]
+    }
+
+    fn assert_io_failure_on_every_read(store: &SingleFileMessagePackBackingStore) {
+        for result in every_read(store) {
+            let error = result.expect_err("a store that cannot be reached must not read as empty");
+            let io = io_error_in(&error).expect("the failure to reach the store is an io::Error");
+            assert_ne!(io.kind(), std::io::ErrorKind::NotFound, "{error:#}");
+            assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
+    }
+
+    #[test]
+    fn only_a_missing_store_reads_as_empty() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        assert!(store.pull_all()?.is_empty());
+        assert!(store.pull_all_read_only_snapshot()?.is_empty());
+        assert!(store.compare_exchange_snapshot(&[], &[snapshot_envelope("delta", b"4")])?);
+
+        // A store whose lock file is gone is still a store, not an absent one.
+        fs::remove_file(store.lock_path())?;
+        assert_eq!(store.pull_all()?, vec![snapshot_envelope("delta", b"4")]);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_behind_a_symlink_loop_is_an_io_error_on_every_read() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        std::os::unix::fs::symlink(&path, &path)?;
+        assert_io_failure_on_every_read(&SingleFileMessagePackBackingStore::new(&path));
+        assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_store_under_a_file_instead_of_a_directory_is_an_io_error_on_every_read() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let parent = temp.path().join("body");
+        fs::write(&parent, b"not a directory")?;
+        assert_io_failure_on_every_read(&SingleFileMessagePackBackingStore::new(parent.join("store.cc")));
+        assert_eq!(fs::read(&parent)?, b"not a directory");
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_empty_file_is_undecodable_and_is_left_as_it_was() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        fs::write(&path, b"")?;
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for result in every_read(&store) {
+            let error = result.expect_err("no CultCache writer leaves an empty file, so it is not a store");
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::Undecodable), "{error:#}");
+            assert!(io_error_in(&error).is_none(), "{error:#}");
+        }
+        assert_eq!(fs::read(&path)?, b"");
+
+        // An empty array is the legacy envelope array with no envelopes: it has no
+        // header, so it claims no format, and it is an empty store.
+        fs::write(&path, [0x90])?;
+        assert!(store.pull_all()?.is_empty());
+        assert!(store.pull_all_read_only_snapshot()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_newer_store_is_named_once_its_header_string_is_complete() -> Result<()> {
+        let vector = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/document-variants-c0/unknown-header.msgpack"),
+        )?;
+        // One byte of array header, one of string header, then the 18-byte header string.
+        let header = "cultcache.store.v9";
+        let header_end = 2 + header.len();
+        assert_eq!(header_end, 20);
+        assert_eq!(&vector[2..header_end], header.as_bytes());
+
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let store = SingleFileMessagePackBackingStore::new(&path);
+        for length in 1..=vector.len() {
+            fs::write(&path, &vector[..length])?;
+            let error = store.pull_all().unwrap_err();
+            let expected = if length < header_end {
+                CultCacheStoreUnreadableKind::Undecodable
+            } else {
+                CultCacheStoreUnreadableKind::UnsupportedFormat
+            };
+            assert_eq!(unreadable_kind(&error), Some(expected), "cut to {length}: {error:#}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn refusals_say_what_was_found_without_blaming_variants() {
+        let unsupported = format!("{:#}", pull_vector("unknown-header.msgpack").unwrap_err());
+        assert!(unsupported.contains("\"cultcache.store.v9\""), "{unsupported}");
+        assert!(unsupported.contains("does not read"), "{unsupported}");
+        assert!(!unsupported.contains("variant"), "{unsupported}");
+
+        // The C# reference refuses the same bytes: a v1 store with a longer record is
+        // not a store any runtime reads, so no upgrade is suggested.
+        let invalid = format!("{:#}", pull_vector("extra-slot-full-payload.msgpack").unwrap_err());
+        assert!(invalid.contains("not a valid store"), "{invalid}");
+        assert!(!invalid.contains("variant"), "{invalid}");
+        assert!(!invalid.contains("runtime that"), "{invalid}");
+    }
+
+    /// The store path is a directory, so the staging file is written and synced and
+    /// then cannot be renamed over it: a failure after the write, reached without
+    /// permissions.
+    #[test]
+    fn a_write_that_fails_at_the_rename_leaves_no_staging_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        fs::create_dir(&path)?;
+        fs::write(path.join("kept"), b"kept")?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+
+        let error = store
+            .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("failed to atomically replace"), "{error:#}");
+
+        let staging: Vec<_> = fs::read_dir(temp.path())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|name| name.starts_with("store.cc.") && name.ends_with(".tmp"))
+            .collect();
+        assert_eq!(staging, Vec::<String>::new());
+        assert_eq!(fs::read(path.join("kept"))?, b"kept");
         Ok(())
     }
 }
