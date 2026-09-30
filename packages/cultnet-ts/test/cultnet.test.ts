@@ -1589,55 +1589,143 @@ test("rudp sequence-neutral acknowledgements interoperate with ordered receivers
   assert.deepEqual(receiver.receive(request).delivered.map(frame => Buffer.from(frame.payload).toString("utf8")), ["snapshot"]);
 });
 
-test("CultNet raw replication applies compatible foreign-schema snapshots", async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-foreign-schema-raw-"));
+// A replicated record whose schema id no binding declares is refused, whatever its payload parses as: the registry never
+// guesses a type from a payload's shape and never relabels a record it does not understand.
+test("CultNet raw replication refuses a record under a schema id no binding declares, whatever its shape", async () => {
+  const note = defineDocumentType({
+    type: "p5.note", schemaId: "p5.note.v1", schemaName: "p5.note", schema: z.object({ body: z.string() }),
+  });
+  // Registered first, and accepts every payload: shape routing would store the record under it.
+  const anything = defineDocumentType({ type: "p5.anything", schema: z.any() });
+  const registry = new CultNetDocumentRegistry([
+    defineCultNetDocumentBinding({ definition: anything }),
+    defineCultNetDocumentBinding({ definition: note }),
+  ]);
+  const origin = CultCache.builder().withDocumentType(note).build();
+  await origin.put(note, "k", { body: "from a peer" });
+  const snapshot = registry.createRawSnapshotResponse(origin, "p5");
+  assert.equal(snapshot.documents[0]?.schemaId, "p5.note.v1");
 
-  try {
-    const documentDefinition = defineDocumentType({
-      type: "cultnet.note",
-      schemaId: "cultnet.note.v1",
-      schemaName: "cultnet.note",
-      schemaVersion: "cultnet.note.v1",
-      schema: z.object({
-        schema_version: z.string(),
-        noteId: z.string(),
-        body: z.string(),
+  for (const schemaId of ["runtime.generated.p5.note.ui.99", "p5.note.v7", "p5.note"]) {
+    const target = CultCache.builder().withDocumentType(note).withDocumentType(anything).build();
+    await assert.rejects(
+      registry.applyRawSnapshotResponse(target, {
+        ...snapshot,
+        documents: snapshot.documents.map(document => ({ ...document, schemaId })),
       }),
-      name: "noteId",
-    });
-    const registry = new CultNetDocumentRegistry([
-      defineCultNetDocumentBinding({ definition: documentDefinition }),
-    ]);
-    const originCache = CultCache.builder()
-      .withDocumentType(documentDefinition)
-      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "origin.msgpack")))
-      .build();
-    const targetCache = CultCache.builder()
-      .withDocumentType(documentDefinition)
-      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "target.msgpack")))
-      .build();
-
-    await originCache.put(documentDefinition, "note:foreign-schema", {
-      schema_version: "cultnet.note.v1",
-      noteId: "note:foreign-schema",
-      body: "accepted by payload shape",
-    });
-    const rawSnapshot = registry.createRawSnapshotResponse(originCache, "foreign-schema-raw");
-    rawSnapshot.documents[0]!.schemaId = "runtime.generated.cultnet.note.ui.99";
-
-    await registry.applyRawSnapshotResponse(targetCache, rawSnapshot);
-
-    assert.equal(
-      targetCache.getRequired(documentDefinition, "note:foreign-schema").body,
-      "accepted by payload shape",
+      (error: unknown) => error instanceof Error
+        && error.message === `No CultNet document binding is registered for schema "${schemaId}".`,
     );
-    assert.equal(
-      targetCache.getRequiredEnvelope(documentDefinition, "note:foreign-schema").schemaId,
-      "cultnet.note.v1",
-    );
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    assert.deepEqual(target.snapshot(), [], `nothing was stored for ${schemaId}`);
   }
+});
+
+// The registry stamps and resolves a definition's schema id exactly as CultCache does, so a record a cache wrote is read
+// back as the type that wrote it on every peer.
+test("CultNet registry derives a definition's schema id as the cache does, and refuses what the cache refuses", async () => {
+  const shape = z.object({ body: z.string() });
+  const a = defineDocumentType({ type: "p1.a", schemaName: "p1.shared", schema: shape });
+  const b = defineDocumentType({ type: "p1.b", schemaId: "p1.shared", schemaName: "p1.b", schema: shape });
+  const fillers = [0, 1].map(index => defineCultNetDocumentBinding({
+    definition: defineDocumentType({ type: `p1.filler${index}`, schema: shape }),
+  }));
+
+  // The cache refuses B beside A: A's records carry "p1.shared".
+  await assert.rejects(CultCache.builder().withDocumentType(a).build().registerDocumentType(b), SchemaConflictError);
+  for (const [first, second] of [[a, b], [b, a]]) {
+    // Two bindings stand ahead of the holder, so a check that looks only at the first holder misses it.
+    const registry = new CultNetDocumentRegistry([...fillers, defineCultNetDocumentBinding({ definition: first })]);
+    assert.throws(() => registry.register(defineCultNetDocumentBinding({ definition: second })), (error: unknown) => {
+      assert.ok(error instanceof SchemaConflictError, String(error));
+      assert.equal(error.schemaId, "p1.shared");
+      return true;
+    });
+    assert.equal(registry.get(second.type), undefined);
+  }
+
+  const registry = new CultNetDocumentRegistry([...fillers, defineCultNetDocumentBinding({ definition: a })]);
+  const origin = CultCache.builder().withDocumentType(a).build();
+  await origin.put(a, "k", { body: "written by a" });
+  const stamped = origin.getRequiredEnvelope(a, "k").schemaId;
+  assert.equal(stamped, "p1.shared");
+  assert.equal(registry.createDocumentPutMessage(registry.get("p1.a")!, "m", "k", { body: "x" }).document.schemaId, stamped);
+  assert.equal(registry.createRawDocumentPutMessage(registry.get("p1.a")!, "m", "k", { body: "x" }).document.schemaId, stamped);
+  assert.equal(registry.getBySchemaId(stamped!)?.definition, a);
+
+  const peer = CultCache.builder().withDocumentType(a).build();
+  await registry.applyRawSnapshotResponse(peer, registry.createRawSnapshotResponse(origin, "p1"));
+  assert.deepEqual(peer.getRequired(a, "k"), { body: "written by a" });
+  assert.equal(peer.getRequiredEnvelope(a, "k").schemaId, stamped);
+});
+
+// An id nobody owns resolves to the one binding that lists it as compatible. Several listers and no owner resolve to
+// none, and the refusal does not depend on the order they were registered in. An owner beats every lister.
+test("CultNet registry refuses an unowned schema id that several bindings list, in any order", async () => {
+  const shape = z.object({ body: z.string() });
+  const first = defineDocumentType({ type: "p2.first", schemaId: "p2.first", compatibleSchemaIds: ["p2.old"], schema: shape });
+  const second = defineDocumentType({ type: "p2.second", schemaId: "p2.second", compatibleSchemaIds: ["p2.old"], schema: shape });
+  const owner = defineDocumentType({ type: "p2.owner", schemaId: "p2.old", schema: shape });
+  const bind = (definition: typeof first) => defineCultNetDocumentBinding({ definition });
+
+  for (const order of [[first, second], [second, first]]) {
+    const registry = new CultNetDocumentRegistry(order.map(bind));
+    assert.throws(() => registry.getBySchemaId("p2.old"), (error: unknown) => {
+      assert.ok(error instanceof SchemaConflictError, String(error));
+      assert.equal(error.schemaId, "p2.old");
+      assert.deepEqual(error.schemaNames, ["p2.first", "p2.second"]);
+      assert.ok(error.message.includes("(p2.first, p2.second)"), error.message);
+      return true;
+    });
+    const cache = CultCache.builder().withDocumentType(first).withDocumentType(second).build();
+    const origin = CultCache.builder().withDocumentType(first).build();
+    await origin.put(first, "k", { body: "old" });
+    const document = { ...registry.createRawSnapshotResponse(origin, "p2").documents[0]!, schemaId: "p2.old" };
+    await assert.rejects(
+      registry.applyRawDocumentPutMessage(cache, { schemaVersion: "cultnet.document_put_raw.v0", messageId: "p2", document }),
+      SchemaConflictError,
+    );
+    assert.deepEqual(cache.snapshot(), []);
+
+    for (const withOwner of [[...order, owner], [owner, ...order]]) {
+      assert.equal(new CultNetDocumentRegistry(withOwner.map(bind)).getBySchemaId("p2.old")?.definition, owner);
+    }
+  }
+  assert.equal(new CultNetDocumentRegistry([bind(first)]).getBySchemaId("p2.old")?.definition, first);
+});
+
+// A schema id is only ever an id a definition declares. A version string, a schema name, or an id that differs from a
+// declared one by its version suffix names nothing.
+test("CultNet registry resolves only declared schema ids, never a version, a name or an inferred version", async () => {
+  const note = defineDocumentType({
+    type: "p3.note",
+    schemaId: "p3.note.v1",
+    schemaName: "p3.note",
+    schemaVersion: "p4.note.v3",
+    schema: z.object({ body: z.string() }),
+  });
+  const registry = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: note })]);
+  const cache = CultCache.builder().withDocumentType(note).build();
+  await cache.put(note, "k", { body: "held" });
+
+  assert.equal(registry.getBySchemaId("p3.note.v1")?.definition, note);
+  for (const undeclared of ["p3.note.v7", "p4.note.v3", "p3.note"]) {
+    assert.equal(registry.getBySchemaId(undeclared), undefined, undeclared);
+    const filter = { schemaVersion: "cultnet.snapshot_request.v0" as const, messageId: "f", schemaIds: [undeclared] };
+    assert.deepEqual(registry.createSnapshotResponse(cache, "f", filter).documents, [], undeclared);
+    assert.deepEqual(registry.createRawSnapshotResponse(cache, "f", filter).documents, [], undeclared);
+    await assert.rejects(registry.applyDocumentPutMessage(cache, {
+      schemaVersion: "cultnet.document_put.v0",
+      messageId: "put",
+      document: { schemaId: undeclared, recordKey: "k", storedAt: "2026-09-30T00:00:00.000Z", payload: { body: "relabelled" } },
+    }), /No CultNet document binding/);
+    await assert.rejects(registry.applyDocumentDeleteMessage(cache, {
+      schemaVersion: "cultnet.document_delete.v0", messageId: "delete", schemaId: undeclared, recordKey: "k",
+    }), /No CultNet document binding/);
+    assert.deepEqual(cache.getRequired(note, "k"), { body: "held" });
+  }
+  const filter = { schemaVersion: "cultnet.snapshot_request.v0" as const, messageId: "f", schemaIds: ["p3.note.v1"] };
+  assert.equal(registry.createSnapshotResponse(cache, "f", filter).documents.length, 1);
+  assert.equal(registry.createRawSnapshotResponse(cache, "f", filter).documents.length, 1);
 });
 
 test("CultNet document registry binds one type per schema and refuses a second, typed", () => {
@@ -1656,7 +1744,13 @@ test("CultNet document registry binds one type per schema and refuses a second, 
     [sameType, "id.third", ["tests.note", "tests.third"]],
   ] as const) {
     for (const order of [[owner, claimant], [claimant, owner]]) {
-      const registry = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: order[0] })]);
+      // Two bindings are registered ahead of the holder, so a conflict loop that checks only the first holder fails.
+      const registry = new CultNetDocumentRegistry([
+        ...["tests.filler-a", "tests.filler-b"].map(type => defineCultNetDocumentBinding({
+          definition: defineDocumentType({ type, schema: noteShape }),
+        })),
+        defineCultNetDocumentBinding({ definition: order[0] }),
+      ]);
       assert.throws(() => registry.register(defineCultNetDocumentBinding({ definition: order[1] })), (error: unknown) => {
         assert.ok(error instanceof SchemaConflictError, String(error));
         const ownerFirst = order[0] === owner;
@@ -1679,113 +1773,6 @@ test("CultNet document registry binds one type per schema and refuses a second, 
   assert.equal(registry.get("tests.note")?.payloadSchemaVersion, "tests.note.v2");
   assert.equal(registry.getBySchemaId("id.note")?.definition, owner);
   assert.equal(registry.getBySchemaId("id.lister")?.definition, lister);
-});
-
-test("CultNet document registry filters snapshots by schema aliases", async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-alias-snapshot-"));
-
-  try {
-    const documentDefinition = defineDocumentType({
-      type: "cultnet.alias_note",
-      schemaId: "sha256:cultnet-alias-note",
-      schemaName: "cultnet.alias_note",
-      schemaVersion: "cultnet.alias_note.v1",
-      schema: z.object({
-        schema_version: z.string(),
-        noteId: z.string(),
-        body: z.string(),
-      }),
-      name: "noteId",
-    });
-    const registry = new CultNetDocumentRegistry([
-      defineCultNetDocumentBinding({ definition: documentDefinition }),
-    ]);
-    const cache = CultCache.builder()
-      .withDocumentType(documentDefinition)
-      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "alias.msgpack")))
-      .build();
-
-    await cache.put(documentDefinition, "note:alias", {
-      schema_version: "cultnet.alias_note.v1",
-      noteId: "note:alias",
-      body: "filtered by alias",
-    });
-
-    const typedSnapshot = registry.createSnapshotResponse(cache, "typed-alias", {
-      schemaVersion: "cultnet.snapshot_request.v0",
-      messageId: "typed-alias",
-      schemaIds: ["cultnet.alias_note.v1"],
-    });
-    const rawSnapshot = registry.createRawSnapshotResponse(cache, "raw-alias", {
-      schemaVersion: "cultnet.snapshot_request.v0",
-      messageId: "raw-alias",
-      schemaIds: ["cultnet.alias_note.v1"],
-    });
-
-    assert.equal(typedSnapshot.documents[0]?.schemaId, "sha256:cultnet-alias-note");
-    assert.equal(typedSnapshot.documents[0]?.recordKey, "note:alias");
-    assert.equal(rawSnapshot.documents[0]?.schemaId, "sha256:cultnet-alias-note");
-    assert.equal(rawSnapshot.documents[0]?.recordKey, "note:alias");
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("CultNet document registry applies typed put and delete messages by schema alias", async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "cultnetts-alias-typed-"));
-
-  try {
-    const documentDefinition = defineDocumentType({
-      type: "cultnet.typed_alias_note",
-      schemaId: "sha256:cultnet-typed-alias-note",
-      schemaName: "cultnet.typed_alias_note",
-      schemaVersion: "cultnet.typed_alias_note.v1",
-      schema: z.object({
-        schema_version: z.string(),
-        noteId: z.string(),
-        body: z.string(),
-      }),
-      name: "noteId",
-    });
-    const registry = new CultNetDocumentRegistry([
-      defineCultNetDocumentBinding({ definition: documentDefinition }),
-    ]);
-    const cache = CultCache.builder()
-      .withDocumentType(documentDefinition)
-      .withGenericStore(new SingleFileMessagePackBackingStore(join(tempDir, "typed-alias.msgpack")))
-      .build();
-
-    await registry.applyDocumentPutMessage(cache, {
-      schemaVersion: "cultnet.document_put.v0",
-      messageId: "typed-alias-put",
-      document: {
-        schemaId: "cultnet.typed_alias_note.v1",
-        recordKey: "note:typed-alias",
-        storedAt: "2026-06-27T00:00:00.000Z",
-        payload: {
-          schema_version: "cultnet.typed_alias_note.v1",
-          noteId: "note:typed-alias",
-          body: "typed alias applied",
-        },
-      },
-    });
-
-    assert.equal(
-      cache.getRequired(documentDefinition, "note:typed-alias").body,
-      "typed alias applied",
-    );
-    assert.equal(registry.getBySchemaId("cultnet.typed_alias_note.v1")?.definition.type, documentDefinition.type);
-
-    assert.equal(await registry.applyDocumentDeleteMessage(cache, {
-      schemaVersion: "cultnet.document_delete.v0",
-      messageId: "typed-alias-delete",
-      schemaId: "cultnet.typed_alias_note.v1",
-      recordKey: "note:typed-alias",
-    }), true);
-    assert.equal(cache.get(documentDefinition, "note:typed-alias"), undefined);
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
 });
 
 test("CultNet interop slot compatibility defaults missing trailing fields and rejects mismatched slots", () => {
