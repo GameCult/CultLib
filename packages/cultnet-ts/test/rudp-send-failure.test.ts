@@ -475,41 +475,46 @@ test("a caller's send larger than a UDP datagram throws and takes nothing from t
   }
 });
 
-test("a fragmented send larger than one UDP datagram is sent, because each datagram carries one fragment", async () => {
-  const serverSocket = await bindUdpSocket();
-  const clientSocket = await bindUdpSocket();
-  const connectionId = 0x10203095;
-  const server = new CultNetRudpSocketTransportConnection({
-    runtimeId: "rudp-server",
-    socket: serverSocket,
-    mode: "server",
-    connectionId,
-  });
-  const client = new CultNetRudpSocketTransportConnection({
-    runtimeId: "rudp-client",
-    socket: clientSocket,
-    mode: "client",
-    remoteHost: "127.0.0.1",
-    remotePort: udpPort(serverSocket),
-    connectionId,
-    maxFragmentBytes: 1024,
-  });
-  const frames: number[] = [];
-  server.on("frame", (frame: { payload: Uint8Array }) => frames.push(frame.payload.byteLength));
-  // Larger than any one datagram can carry, over IPv4 or IPv6; every fragment is 1,024 bytes.
-  const payloadBytes = 70_000;
-  try {
-    client.connect();
-    await waitFor(() => client.connected && server.connected, "the handshake");
+// The pre-check measures one fragment, the largest datagram a fragmented send makes. Fragments
+// of 1 KiB and of 40,000 bytes both leave a 70,000-byte send legal; the second size is large
+// enough that any small multiple of it would not be.
+for (const maxFragmentBytes of [1024, 40_000]) {
+  test(`a fragmented send larger than one UDP datagram is sent, because each datagram carries one fragment (${maxFragmentBytes}-byte fragments)`, async () => {
+    const serverSocket = await bindUdpSocket();
+    const clientSocket = await bindUdpSocket();
+    const connectionId = 0x10203095;
+    const server = new CultNetRudpSocketTransportConnection({
+      runtimeId: "rudp-server",
+      socket: serverSocket,
+      mode: "server",
+      connectionId,
+    });
+    const client = new CultNetRudpSocketTransportConnection({
+      runtimeId: "rudp-client",
+      socket: clientSocket,
+      mode: "client",
+      remoteHost: "127.0.0.1",
+      remotePort: udpPort(serverSocket),
+      connectionId,
+      maxFragmentBytes,
+    });
+    const frames: number[] = [];
+    server.on("frame", (frame: { payload: Uint8Array }) => frames.push(frame.payload.byteLength));
+    // Larger than any one datagram can carry, over IPv4 or IPv6.
+    const payloadBytes = 70_000;
+    try {
+      client.connect();
+      await waitFor(() => client.connected && server.connected, "the handshake");
 
-    assert.doesNotThrow(() => client.send("schema", new Uint8Array(payloadBytes)));
-    assert.equal(client.stats.framesSent, 1);
+      assert.doesNotThrow(() => client.send("schema", new Uint8Array(payloadBytes)));
+      assert.equal(client.stats.framesSent, 1);
 
-    await waitFor(() => frames.length === 1, "the reassembled frame");
-    assert.deepEqual(frames, [payloadBytes]);
-    assert.equal(client.connected, true);
-  } finally {
-    client.close();
-    server.close();
-  }
-});
+      await waitFor(() => frames.length === 1, "the reassembled frame");
+      assert.deepEqual(frames, [payloadBytes]);
+      assert.equal(client.connected, true);
+    } finally {
+      client.close();
+      server.close();
+    }
+  });
+}
