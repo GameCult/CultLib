@@ -910,13 +910,10 @@ namespace GameCult.Mesh
 
         /// <summary>Gets whether this handle can submit a client prediction for the underlying document value.</summary>
         bool CanSubmitPrediction { get; }
-
-        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
-        CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
 
     /// <summary>
-    /// Typed reactive document handle with schema-aware alias conversion.
+    /// Typed reactive document handle.
     /// </summary>
     public sealed class CultMeshDocumentHandle<TDocument> : ICultMeshDocumentHandle
         where TDocument : class
@@ -1117,39 +1114,6 @@ namespace GameCult.Mesh
             return ObserveAsync().ConfigureAwait(false).GetAwaiter().GetResult();
         }
 
-        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
-        public CultMeshDocumentHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
-        {
-            var aliasDescriptor = CultDocumentRegistry.Shared.GetRequired<TAlias>();
-            if (!string.Equals(Descriptor.SchemaName, aliasDescriptor.SchemaName, StringComparison.Ordinal) ||
-                !string.Equals(Descriptor.SchemaVersion, aliasDescriptor.SchemaVersion, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Document type {typeof(TAlias).FullName} uses schema '{aliasDescriptor.SchemaName}' " +
-                    $"version '{aliasDescriptor.SchemaVersion}', but handle '{DocumentId}' exposes " +
-                    $"schema '{SchemaName}' version '{SchemaVersion}'.");
-            }
-
-            var aliasFeed = new CultMeshLiveFeed<CultMeshDocumentQueryParameters, TAlias>(
-                DocumentId,
-                async (parameters, context) => ConvertDocument<TDocument, TAlias>(
-                    await Feed.SnapshotAsync(parameters, context).ConfigureAwait(false)),
-                (parameters, context) => Feed
-                    .Watch(parameters, context)
-                    .Select(ConvertDocument<TDocument, TAlias>),
-                Sources,
-                RouteHint);
-
-            Func<TAlias, Task>? replace = _replace == null
-                ? null
-                : value => _replace(ConvertDocument<TAlias, TDocument>(value));
-            Func<TAlias, Task>? submitPrediction = _submitPrediction == null
-                ? null
-                : value => _submitPrediction(ConvertDocument<TAlias, TDocument>(value));
-
-            return new CultMeshDocumentHandle<TAlias>(aliasFeed.Bind(Context), replace, submitPrediction);
-        }
-
         internal static TDocumentValue CloneDocument<TDocumentValue>(TDocumentValue document)
             where TDocumentValue : class
         {
@@ -1216,19 +1180,6 @@ namespace GameCult.Mesh
                 "field");
         }
 
-        internal static TTarget ConvertDocument<TSource, TTarget>(TSource document)
-            where TSource : class
-            where TTarget : class
-        {
-            if (document == null) throw new ArgumentNullException(nameof(document));
-            if (document is TTarget alreadyTyped)
-            {
-                return alreadyTyped;
-            }
-
-            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TSource));
-            return (TTarget)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TTarget), payload);
-        }
     }
 
     /// <summary>
@@ -1912,11 +1863,12 @@ namespace GameCult.Mesh
                 $"CultMesh document catalog does not expose a document for schema '{schema}'.");
         }
 
-        /// <summary>Looks up a typed document handle by CLR type or same-schema alias.</summary>
+        /// <summary>Looks up a typed document handle by CLR type.</summary>
         public bool TryGetDocument<TDocument>(
             out CultMeshDocumentHandle<TDocument> document)
             where TDocument : class
         {
+            // One type owns a schema, so the handle for TDocument's schema is the handle for TDocument.
             if (_documentsByType.TryGetValue(typeof(TDocument), out var untypedDocument) &&
                 untypedDocument is CultMeshDocumentHandle<TDocument> typedDocument)
             {
@@ -1924,25 +1876,11 @@ namespace GameCult.Mesh
                 return true;
             }
 
-            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            if (_documentsBySchema.TryGetValue(descriptor.SchemaVersion, out var schemaDocument) ||
-                _documentsBySchema.TryGetValue(descriptor.SchemaName, out schemaDocument!))
-            {
-                if (schemaDocument is CultMeshDocumentHandle<TDocument> schemaTypedDocument)
-                {
-                    document = schemaTypedDocument;
-                    return true;
-                }
-
-                document = schemaDocument.AsSchemaAlias<TDocument>();
-                return true;
-            }
-
             document = null!;
             return false;
         }
 
-        /// <summary>Looks up a typed document handle by CLR type or same-schema alias.</summary>
+        /// <summary>Looks up a typed document handle by CLR type.</summary>
         public CultMeshDocumentHandle<TDocument> Document<TDocument>()
             where TDocument : class
         {
@@ -1953,70 +1891,70 @@ namespace GameCult.Mesh
                 $"CultMesh document catalog does not expose a document for {typeof(TDocument).FullName}.");
         }
 
-        /// <summary>Reads one typed document snapshot by CLR type or same-schema alias.</summary>
+        /// <summary>Reads one typed document snapshot by CLR type.</summary>
         public Task<TDocument> LatestAsync<TDocument>()
             where TDocument : class
         {
             return Document<TDocument>().LatestAsync();
         }
 
-        /// <summary>Reads one typed document synchronously by CLR type or same-schema alias.</summary>
+        /// <summary>Reads one typed document synchronously by CLR type.</summary>
         public TDocument Latest<TDocument>()
             where TDocument : class
         {
             return Document<TDocument>().Latest();
         }
 
-        /// <summary>Gets whether one typed document can be replaced by CLR type or same-schema alias.</summary>
+        /// <summary>Gets whether one typed document can be replaced by CLR type.</summary>
         public bool CanReplace<TDocument>()
             where TDocument : class
         {
             return TryGetDocument<TDocument>(out var document) && document.CanReplace;
         }
 
-        /// <summary>Replaces one typed document by CLR type or same-schema alias.</summary>
+        /// <summary>Replaces one typed document by CLR type.</summary>
         public Task ReplaceAsync<TDocument>(TDocument value)
             where TDocument : class
         {
             return Document<TDocument>().ReplaceAsync(value);
         }
 
-        /// <summary>Gets whether one typed document can submit client predictions by CLR type or same-schema alias.</summary>
+        /// <summary>Gets whether one typed document can submit client predictions by CLR type.</summary>
         public bool CanSubmitPrediction<TDocument>()
             where TDocument : class
         {
             return TryGetDocument<TDocument>(out var document) && document.CanSubmitPrediction;
         }
 
-        /// <summary>Submits a client prediction for one typed document by CLR type or same-schema alias.</summary>
+        /// <summary>Submits a client prediction for one typed document by CLR type.</summary>
         public Task SubmitPredictionAsync<TDocument>(TDocument value)
             where TDocument : class
         {
             return Document<TDocument>().SubmitPredictionAsync(value);
         }
 
-        /// <summary>Gets an explicit authoritative writer by CLR type or same-schema alias.</summary>
+        /// <summary>Gets an explicit authoritative writer by CLR type.</summary>
         public CultMeshDocumentWriter<TDocument> AuthoritativeWriter<TDocument>()
             where TDocument : class
         {
             return Document<TDocument>().AuthoritativeWriter();
         }
 
-        /// <summary>Gets an explicit prediction writer by CLR type or same-schema alias.</summary>
+        /// <summary>Gets an explicit prediction writer by CLR type.</summary>
         public CultMeshDocumentWriter<TDocument> PredictionWriter<TDocument>()
             where TDocument : class
         {
             return Document<TDocument>().PredictionWriter();
         }
 
-        /// <summary>Watches one typed document by CLR type or same-schema alias.</summary>
+        /// <summary>Watches one typed document by CLR type.</summary>
         public Observable<TDocument> Watch<TDocument>()
             where TDocument : class
         {
             return Document<TDocument>().Watch();
         }
 
-        /// <summary>Subscribes to one typed document by CLR type or same-schema alias.</summary>
+        /// <summary>Subscribes to one typed document by CLR type.</summary>
         public IDisposable Watch<TDocument>(Action<TDocument> onNext)
             where TDocument : class
         {
@@ -2050,9 +1988,6 @@ namespace GameCult.Mesh
 
         /// <summary>Gets typed state sources this collection handle depends on, when known.</summary>
         IReadOnlyList<CultMeshProjectionSource> Sources { get; }
-
-        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
-        CultMeshCollectionHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class;
     }
 
     /// <summary>
@@ -2118,11 +2053,12 @@ namespace GameCult.Mesh
                 $"CultMesh collection catalog does not expose a collection for schema '{schema}'.");
         }
 
-        /// <summary>Looks up a typed collection handle by CLR type or same-schema alias.</summary>
+        /// <summary>Looks up a typed collection handle by CLR type.</summary>
         public bool TryGetCollection<TDocument>(
             out CultMeshCollectionHandle<TDocument> collection)
             where TDocument : class
         {
+            // One type owns a schema, so the handle for TDocument's schema is the handle for TDocument.
             if (_collectionsByType.TryGetValue(typeof(TDocument), out var untypedCollection) &&
                 untypedCollection is CultMeshCollectionHandle<TDocument> typedCollection)
             {
@@ -2130,26 +2066,11 @@ namespace GameCult.Mesh
                 return true;
             }
 
-            var descriptor = CultDocumentRegistry.Shared.GetRequired<TDocument>();
-            if (_collectionsBySchema.TryGetValue(descriptor.SchemaId, out var schemaCollection) ||
-                _collectionsBySchema.TryGetValue(descriptor.SchemaVersion, out schemaCollection!) ||
-                _collectionsBySchema.TryGetValue(descriptor.SchemaName, out schemaCollection!))
-            {
-                if (schemaCollection is CultMeshCollectionHandle<TDocument> schemaTypedCollection)
-                {
-                    collection = schemaTypedCollection;
-                    return true;
-                }
-
-                collection = schemaCollection.AsSchemaAlias<TDocument>();
-                return true;
-            }
-
             collection = null!;
             return false;
         }
 
-        /// <summary>Looks up a typed collection handle by CLR type or same-schema alias.</summary>
+        /// <summary>Looks up a typed collection handle by CLR type.</summary>
         public CultMeshCollectionHandle<TDocument> Collection<TDocument>()
             where TDocument : class
         {
@@ -2160,21 +2081,21 @@ namespace GameCult.Mesh
                 $"CultMesh collection catalog does not expose a collection for {typeof(TDocument).FullName}.");
         }
 
-        /// <summary>Reads one typed collection snapshot by CLR type or same-schema alias.</summary>
+        /// <summary>Reads one typed collection snapshot by CLR type.</summary>
         public Task<IReadOnlyList<TDocument>> LatestAsync<TDocument>()
             where TDocument : class
         {
             return Collection<TDocument>().LatestAsync();
         }
 
-        /// <summary>Watches one typed collection by CLR type or same-schema alias.</summary>
+        /// <summary>Watches one typed collection by CLR type.</summary>
         public Observable<CultMeshCollectionChange<TDocument>> WatchChanges<TDocument>()
             where TDocument : class
         {
             return Collection<TDocument>().WatchChanges();
         }
 
-        /// <summary>Subscribes to one typed collection by CLR type or same-schema alias.</summary>
+        /// <summary>Subscribes to one typed collection by CLR type.</summary>
         public IDisposable WatchChanges<TDocument>(Action<CultMeshCollectionChange<TDocument>> onNext)
             where TDocument : class
         {
@@ -2246,7 +2167,7 @@ namespace GameCult.Mesh
     }
 
     /// <summary>
-    /// Typed reactive collection handle with schema-aware alias conversion.
+    /// Typed reactive collection handle.
     /// </summary>
     public sealed class CultMeshCollectionHandle<TDocument> : ICultMeshCollectionHandle
         where TDocument : class
@@ -2312,49 +2233,6 @@ namespace GameCult.Mesh
         {
             if (onNext == null) throw new ArgumentNullException(nameof(onNext));
             return WatchChanges().Subscribe(onNext);
-        }
-
-        /// <summary>Creates a same-schema alias presentation for another CLR document type.</summary>
-        public CultMeshCollectionHandle<TAlias> AsSchemaAlias<TAlias>() where TAlias : class
-        {
-            var aliasDescriptor = CultDocumentRegistry.Shared.GetRequired<TAlias>();
-            if (!string.Equals(Descriptor.SchemaName, aliasDescriptor.SchemaName, StringComparison.Ordinal) ||
-                !string.Equals(Descriptor.SchemaVersion, aliasDescriptor.SchemaVersion, StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException(
-                    $"Document type {typeof(TAlias).FullName} uses schema '{aliasDescriptor.SchemaName}' " +
-                    $"version '{aliasDescriptor.SchemaVersion}', but collection '{CollectionId}' exposes " +
-                    $"schema '{SchemaName}' version '{SchemaVersion}'.");
-            }
-
-            return new CultMeshCollectionHandle<TAlias>(
-                CollectionId,
-                async () => (await LatestAsync().ConfigureAwait(false))
-                    .Select(ConvertDocument<TDocument, TAlias>)
-                    .ToArray(),
-                () => WatchChanges().Select(change => new CultMeshCollectionChange<TAlias>(
-                    change.Kind,
-                    change.Key,
-                    change.SchemaId,
-                    change.Document == null ? null : ConvertDocument<TDocument, TAlias>(change.Document),
-                    change.PreviousDocument == null ? null : ConvertDocument<TDocument, TAlias>(change.PreviousDocument),
-                    change.Message)),
-                Sources,
-                RouteHint);
-        }
-
-        private static TTarget ConvertDocument<TSource, TTarget>(TSource document)
-            where TSource : class
-            where TTarget : class
-        {
-            if (document == null) throw new ArgumentNullException(nameof(document));
-            if (document is TTarget alreadyTyped)
-            {
-                return alreadyTyped;
-            }
-
-            var payload = CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TSource));
-            return (TTarget)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TTarget), payload);
         }
     }
 

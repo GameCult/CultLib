@@ -979,11 +979,11 @@ namespace GameCult.Mesh
                 var canDeserializeWithBinding =
                     binding != null &&
                     typeof(TDocument).IsAssignableFrom(binding.DocumentType);
-                var canDeserializeAsSchemaAlias =
+                var canDeserializeByWireSchema =
                     CultNetSchemaAliasMatching.Matches(record.SchemaId, descriptor) ||
                     (binding != null && CultNetSchemaAliasMatching.Matches(binding.SchemaId, descriptor)) ||
                     CultNetDocumentRegistry.PayloadMatchesSchema(record.Payload, descriptor);
-                if (!canDeserializeWithBinding && !canDeserializeAsSchemaAlias)
+                if (!canDeserializeWithBinding && !canDeserializeByWireSchema)
                     continue;
 
                 if (!string.Equals(record.PayloadEncoding, "messagepack", StringComparison.Ordinal))

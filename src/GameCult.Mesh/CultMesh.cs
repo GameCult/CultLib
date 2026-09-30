@@ -2728,11 +2728,9 @@ namespace GameCult.Mesh
         // runtime does not recognize by any alias) its payload's own embedded schema stamp,
         // alias-matched against TDocument's descriptor. The parse step
         // (CultNetDocumentRegistry.TryReadSchemaVersion) is the one decode rule shared with
-        // DecodeSnapshotDocuments; the match itself stays a direct alias-match against the caller's
-        // own descriptor rather than a global "which registered type owns this schema string" lookup,
-        // because that lookup is ambiguous when two document types alias the same schema id (as
-        // MeshNoteDocument/MeshNoteAliasDocument do in tests/GameCult.Mesh.Tests). No re-filter of the
-        // server's answer by schema alone, and no fallback that returns a record under the wrong key.
+        // DecodeSnapshotDocuments; the match itself is a direct alias-match against the caller's own
+        // descriptor. No re-filter of the server's answer by schema alone, and no fallback that
+        // returns a record under the wrong key.
         private static TDocument ReadDocumentFromSnapshotResponse<TDocument>(
             CultNetSnapshotResponseRawMessage response,
             string schemaId,

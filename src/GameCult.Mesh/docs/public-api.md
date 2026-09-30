@@ -173,28 +173,22 @@ portable machinery that makes it feel native.
   the normal shard log. Callers can bind a projected live feed, a local
   `CultCache` record, a distributed `CultNetDatabase` record, or a
   `CultMeshNode` record through the same surface instead of walking transport
-  and projection layers themselves. Same-schema CLR aliases can be requested
-  directly from node/database/snapshot surfaces; CultMesh resolves the canonical
-  registered document by shared `[CultDocument(schemaName, schemaVersion)]`
-  identity and uses the shared CultCache MessagePack codec for
-  read/watch/replace/prediction conversion. `AsSchemaAlias<TAlias>()` remains
-  available when a caller already has a handle and wants to project it.
+  and projection layers themselves. One CLR type owns each
+  `[CultDocument(schemaName, schemaVersion)]` schema; the registry refuses a
+  second type for the same schema with `CultSchemaConflictException`.
 - `CultMeshDocumentCatalog` is the schema-aware lookup edge for a set of
-  document handles. It indexes handles by CLR document type, schema name, and
-  schema version, and resolves same-schema CLR aliases by delegating to
-  `CultMeshDocumentHandle<TDocument>.AsSchemaAlias<TAlias>()`. Domain facades
-  can expose `Document<T>()`, `DocumentBySchema(...)`, `LatestAsync<T>()`, and
-  `Watch<T>()` without owning schema dictionaries or alias serializers. Mutable
-  facades can also call `ReplaceAsync<T>(...)` or
-  `SubmitPredictionAsync<T>(...)` directly on the catalog when they only need
-  the schema-aliased operation and not the intermediate handle.
+  document handles. It indexes handles by CLR document type, schema id, schema
+  name, and schema version. Domain facades can expose `Document<T>()`,
+  `DocumentBySchema(...)`, `LatestAsync<T>()`, and `Watch<T>()` without owning
+  schema dictionaries. Mutable facades can also call `ReplaceAsync<T>(...)` or
+  `SubmitPredictionAsync<T>(...)` directly on the catalog when they do not need
+  the intermediate handle.
 - `CultMeshCollectionHandle<TDocument>` is the typed reactive edge for
   multi-record state. It exposes one `LatestAsync()` collection snapshot and a
   `WatchChanges()` stream while hiding whether the backing source is an
   in-process `CultCache`, a distributed `CultNetDatabase`, or a `CultMeshNode`.
   Collection handles can represent all records of a document type, a named
-  document view, or an indexed value view, and they support the same
-  same-schema CLR alias conversion as document handles.
+  document view, or an indexed value view.
 - `CultMeshCollectionCatalog` is the collection sibling of
   `CultMeshDocumentCatalog`. It indexes typed collection handles by CLR
   document type, schema id, schema name, and schema version, then exposes
@@ -258,19 +252,17 @@ var objects = await visibleObjects.ExecuteAsync(viewportRequest);
 await movePilot.InvokeAsync(moveRequest, idempotencyKey);
 ```
 
-A single typed document can be surfaced the same way. The caller asks for the
-typed view it wants; if that type is a same-schema alias of the registered
-canonical document, CultMesh still opens the correct backing record:
+A single typed document can be surfaced the same way:
 
 ```csharp
-var stockForUi = CultMesh.Document<StationStockUiDocument>(
+var stockHandle = CultMesh.Document<StationStockDocument>(
     node,
     new CultRecordKey("station:starbridge:stock"),
     verse);
 
-var stock = await stockForUi.LatestAsync();
-using var watch = stockForUi.Watch(RenderStock);
-await stockForUi.SetAsync(updatedStockFromUi);
+var stock = await stockHandle.LatestAsync();
+using var watch = stockHandle.Watch(RenderStock);
+await stockHandle.SetAsync(updatedStock);
 ```
 
 Projected or derived documents can use the same handle shape with explicit
@@ -291,8 +283,6 @@ var cockpit = CultMesh.Document(
 
 var current = await cockpit.LatestAsync();
 using var subscription = cockpit.Watch(next => RenderCockpit(next));
-
-var daemonAlias = cockpit.AsSchemaAlias<DaemonCockpitState>();
 ```
 
 Remote CultNet snapshots use the same document handle surface. The caller names
@@ -301,20 +291,18 @@ id, response filtering, raw MessagePack payload decode, route metadata, and
 polling watch fallback:
 
 ```csharp
-var remoteHealth = CultMesh.DocumentFromPeerSnapshot<DaemonHealthUiDocument>(
+var remoteHealth = CultMesh.DocumentFromPeerSnapshot<DaemonHealthDocument>(
     "cultnet://daemon.local:3075",
     "daemon:aetheria.health.v1",
     verse);
 
-var uiHealth = await remoteHealth.LatestAsync();
+var health = await remoteHealth.LatestAsync();
 ```
 
-Snapshot requests are record-key-first so same logical documents can still be
-read when another runtime generated a different schema id for a compatible
-schema alias. The decode path prefers exact schema id matches when present and
-falls back to the requested record key. Ask for the runtime-facing alias type
-directly; `AsSchemaAlias<TAlias>()` is for adapting handles that were already
-constructed elsewhere.
+Snapshot requests are record-key-first so the same logical document can still be
+read when another runtime generated a different schema id for it. The decode
+path prefers exact schema id matches when present and falls back to the
+requested record key.
 
 A domain facade can still collect existing handles into one schema-aware
 catalog when it is composing pre-built surfaces:
@@ -326,7 +314,7 @@ var documents = CultMesh.Documents(
     zoneContacts);
 
 var refit = await documents.LatestAsync<StationRefitDocument>();
-var uiDocking = documents.Document<CurrentDockingUiDocument>();
+var docking = documents.Document<CurrentDockingDocument>();
 var bySchema = documents.DocumentBySchema("gamecult.aetheria.station_refit.v1");
 ```
 
@@ -341,11 +329,9 @@ var allies = CultMesh.CollectionByIndex<PlayerShipDocument>(
 var currentAllies = await allies.LatestAsync();
 using var changes = allies.WatchChanges(change => UpdateRoster(change));
 
-var uiAllies = allies.AsSchemaAlias<PlayerShipUiDocument>();
-
 var collections = CultMesh.Collections(allies);
-var uiRoster = await collections.LatestAsync<PlayerShipUiDocument>();
-using var uiRosterChanges = collections.WatchChanges<PlayerShipUiDocument>(RenderRoster);
+var roster = await collections.LatestAsync<PlayerShipDocument>();
+using var rosterChanges = collections.WatchChanges<PlayerShipDocument>(RenderRoster);
 ```
 
 ```ts

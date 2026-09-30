@@ -696,7 +696,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task DocumentHandle_ExposesTypedSnapshotsAndSameSchemaAliases()
+    public async Task DocumentHandle_ExposesTypedSnapshotsAndWatches()
     {
         var subject = new Subject<MeshNoteDocument>();
         var route = new CultMeshRouteHint(CultMeshLocalityKind.SharedMemory, "co-located document slab");
@@ -733,17 +733,8 @@ public sealed class CultMeshStreamingTests
         snapshot.Text.Should().Be("primary");
         handle.Latest().Text.Should().Be("primary");
 
-        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
-        var aliasSnapshot = await alias.LatestAsync();
-        alias.Latest().Text.Should().Be("primary");
-        alias.DocumentId.Should().Be(handle.DocumentId);
-        alias.SchemaName.Should().Be(handle.SchemaName);
-        alias.SchemaVersion.Should().Be(handle.SchemaVersion);
-        aliasSnapshot.Text.Should().Be("primary");
-        aliasSnapshot.Revision.Should().Be(1);
-
-        MeshNoteAliasDocument observed = null!;
-        using var subscription = alias.Watch(value => observed = value);
+        MeshNoteDocument observed = null!;
+        using var subscription = handle.Watch(value => observed = value);
         subject.OnNext(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
@@ -790,28 +781,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public void DocumentHandle_RejectsAliasTypesWithDifferentSchemaIdentity()
-    {
-        var handle = CultMesh.Document(
-            "mesh.note.current",
-            CultMesh.Verse("starbridge", "unity-pilot"),
-            _ => Task.FromResult(new MeshNoteDocument
-            {
-                Schema = "tests.mesh_note.v1",
-                Text = "primary",
-                Revision = 1
-            }),
-            _ => new Subject<MeshNoteDocument>());
-
-        Action act = () => handle.AsSchemaAlias<MeshOtherDocument>();
-
-        act.Should()
-            .Throw<InvalidOperationException>()
-            .WithMessage("*tests.mesh_other*tests.mesh_note*");
-    }
-
-    [Test]
-    public async Task DocumentCatalog_IndexesHandlesByTypeAndSchemaAlias()
+    public async Task DocumentCatalog_IndexesHandlesByTypeAndSchema()
     {
         var current = new MeshNoteDocument
         {
@@ -836,15 +806,12 @@ public sealed class CultMeshStreamingTests
             .Should()
             .BeSameAs(handle);
 
-        catalog.TryGetDocument<MeshNoteAliasDocument>(out var alias).Should().BeTrue();
-        alias.DocumentId.Should().Be(handle.DocumentId);
-        alias.SchemaName.Should().Be(handle.SchemaName);
-        alias.SchemaVersion.Should().Be(handle.SchemaVersion);
+        catalog.TryGetDocument<MeshOtherDocument>(out _).Should().BeFalse();
 
-        var aliasSnapshot = await catalog.LatestAsync<MeshNoteAliasDocument>();
-        aliasSnapshot.Text.Should().Be("catalog-primary");
-        aliasSnapshot.Revision.Should().Be(3);
-        catalog.Latest<MeshNoteAliasDocument>().Text.Should().Be("catalog-primary");
+        var snapshot = await catalog.LatestAsync<MeshNoteDocument>();
+        snapshot.Text.Should().Be("catalog-primary");
+        snapshot.Revision.Should().Be(3);
+        catalog.Latest<MeshNoteDocument>().Text.Should().Be("catalog-primary");
     }
 
     [Test]
@@ -894,21 +861,18 @@ public sealed class CultMeshStreamingTests
             cache,
             key,
             CultMesh.Verse("starbridge", "unity-pilot"));
-        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
 
         handle.CanReplace.Should().BeTrue();
-        alias.CanReplace.Should().BeTrue();
         handle.CanSubmitPrediction.Should().BeFalse();
-        alias.CanSubmitPrediction.Should().BeFalse();
         handle.DocumentId.Should().Be(key.Value);
         handle.Sources.Should().ContainSingle().Which.SchemaId.Should().Be(handle.SchemaId);
 
-        var snapshot = await alias.LatestAsync();
+        var snapshot = await handle.LatestAsync();
         snapshot.Text.Should().Be("cache-initial");
 
-        MeshNoteAliasDocument observed = null!;
-        using var subscription = alias.Watch(value => observed = value);
-        await alias.ReplaceAsync(new MeshNoteAliasDocument
+        MeshNoteDocument observed = null!;
+        using var subscription = handle.Watch(value => observed = value);
+        await handle.ReplaceAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "cache-replaced",
@@ -920,8 +884,8 @@ public sealed class CultMeshStreamingTests
         observed.Revision.Should().Be(2);
 
         var catalog = CultMesh.Documents(handle);
-        catalog.CanReplace<MeshNoteAliasDocument>().Should().BeTrue();
-        await catalog.ReplaceAsync(new MeshNoteAliasDocument
+        catalog.CanReplace<MeshNoteDocument>().Should().BeTrue();
+        await catalog.ReplaceAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "cache-catalog-replaced",
@@ -929,7 +893,7 @@ public sealed class CultMeshStreamingTests
         });
         cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("cache-catalog-replaced");
 
-        Func<Task> act = () => alias.SubmitPredictionAsync(new MeshNoteAliasDocument
+        Func<Task> act = () => handle.SubmitPredictionAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "cache-predicted",
@@ -970,19 +934,17 @@ public sealed class CultMeshStreamingTests
             database,
             key,
             CultMesh.Verse("starbridge", "pilot-a"));
-        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
 
         handle.CanReplace.Should().BeFalse();
-        alias.CanReplace.Should().BeFalse();
-        alias.CanSubmitPrediction.Should().BeTrue();
+        handle.CanSubmitPrediction.Should().BeTrue();
         var catalog = CultMesh.Documents(handle);
-        catalog.CanSubmitPrediction<MeshNoteAliasDocument>().Should().BeTrue();
-        var predictionWriter = catalog.PredictionWriter<MeshNoteAliasDocument>();
+        catalog.CanSubmitPrediction<MeshNoteDocument>().Should().BeTrue();
+        var predictionWriter = catalog.PredictionWriter<MeshNoteDocument>();
         predictionWriter.Kind.Should().Be(CultMeshDocumentWriteKind.Prediction);
 
         MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
-        await predictionWriter.WriteAsync(new MeshNoteAliasDocument
+        await predictionWriter.WriteAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "predicted-thermal",
@@ -994,7 +956,7 @@ public sealed class CultMeshStreamingTests
         observed.Revision.Should().Be(5);
         (await handle.LatestAsync()).Text.Should().Be("predicted-thermal");
 
-        var updated = await alias.PredictionWriter().UpdateAsync(value => new MeshNoteAliasDocument
+        var updated = await handle.PredictionWriter().UpdateAsync(value => new MeshNoteDocument
         {
             Schema = value.Schema,
             Text = "updated-as-prediction",
@@ -1035,7 +997,7 @@ public sealed class CultMeshStreamingTests
             });
         var catalog = CultMesh.Documents(handle);
 
-        using var reactive = await catalog.PredictionWriter<MeshNoteAliasDocument>().ReactiveAsync(
+        using var reactive = await catalog.PredictionWriter<MeshNoteDocument>().ReactiveAsync(
             new CultMeshReactiveDocumentOptions
             {
                 FlushDelay = TimeSpan.FromMinutes(1)
@@ -1645,7 +1607,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task ReactiveDocument_SyncsSameSchemaAliasesAcrossRuntimeHandles()
+    public async Task ReactiveDocument_SyncsAcrossRuntimeHandles()
     {
         var cache = new CultCache();
         var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
@@ -1686,13 +1648,11 @@ public sealed class CultMeshStreamingTests
             database,
             key,
             CultMesh.Verse("starbridge", "commander-rts"));
-        var observedByCommander = new List<MeshNoteAliasDocument>();
-        using var commanderSubscription = commanderHandle
-            .AsSchemaAlias<MeshNoteAliasDocument>()
-            .Watch(observedByCommander.Add);
+        var observedByCommander = new List<MeshNoteDocument>();
+        using var commanderSubscription = commanderHandle.Watch(observedByCommander.Add);
         using var pilotReactive = await CultMesh
             .Documents(pilotHandle)
-            .PredictionWriter<MeshNoteAliasDocument>()
+            .PredictionWriter<MeshNoteDocument>()
             .ReactiveAsync(
                 new CultMeshReactiveDocumentOptions
                 {
@@ -1710,7 +1670,7 @@ public sealed class CultMeshStreamingTests
 
         commanderHandle.Context.RuntimeId.Should().Be("commander-rts");
         observedByCommander.Last().Revision.Should().Be(2);
-        (await commanderHandle.AsSchemaAlias<MeshNoteAliasDocument>().LatestAsync()).Text.Should().Be("pilot-predicted");
+        (await commanderHandle.LatestAsync()).Text.Should().Be("pilot-predicted");
     }
 
     [Test]
@@ -1755,12 +1715,9 @@ public sealed class CultMeshStreamingTests
             database,
             key,
             CultMesh.Verse("starbridge", "commander-rts"));
-        MeshNoteAliasDocument commanderSnapshot = null!;
-        using var commanderSubscription = commanderHandle
-            .AsSchemaAlias<MeshNoteAliasDocument>()
-            .Watch(value => commanderSnapshot = value);
+        MeshNoteDocument commanderSnapshot = null!;
+        using var commanderSubscription = commanderHandle.Watch(value => commanderSnapshot = value);
         using var pilotReactive = await pilotHandle
-            .AsSchemaAlias<MeshNoteAliasDocument>()
             .PredictionWriter()
             .ReactiveAsync(new CultMeshReactiveDocumentOptions
             {
@@ -1788,7 +1745,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task NodeDocument_OpensExplicitPredictionWriterForSameSchemaAlias()
+    public async Task NodeDocument_OpensExplicitPredictionWriter()
     {
         var schemaId = CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId;
         using var temp = new TemporaryDirectory();
@@ -1828,7 +1785,7 @@ public sealed class CultMeshStreamingTests
         }, new CultRecordHandle<MeshNoteDocument>(key));
 
         using var pilotReactive = await node
-            .Document<MeshNoteAliasDocument>(key, CultMesh.Verse("starbridge", "pilot-a"))
+            .Document<MeshNoteDocument>(key, CultMesh.Verse("starbridge", "pilot-a"))
             .PredictionWriter()
             .ReactiveAsync(new CultMeshReactiveDocumentOptions
             {
@@ -1851,7 +1808,7 @@ public sealed class CultMeshStreamingTests
         pilotReactive.Document.DocumentId.Should().Be(key.Value);
         pilotReactive.Document.Context.RuntimeId.Should().Be("pilot-a");
         node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("node-one-call-prediction");
-        (await commanderHandle.AsSchemaAlias<MeshNoteAliasDocument>().LatestAsync()).Revision.Should().Be(2);
+        (await commanderHandle.LatestAsync()).Revision.Should().Be(2);
     }
 
     [Test]
@@ -1897,8 +1854,8 @@ public sealed class CultMeshStreamingTests
                     DocumentRegistry = registry
                 }
         });
-        var handle = surface.SyncTo(node).Document<MeshNoteAliasDocument>(key.Value);
-        MeshNoteAliasDocument observed = null!;
+        var handle = surface.SyncTo(node).Document<MeshNoteDocument>(key.Value);
+        MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
@@ -1956,7 +1913,7 @@ public sealed class CultMeshStreamingTests
                        }
                    }))
         {
-            var stale = await surface.SyncTo(crashedRuntime).Document<MeshNoteAliasDocument>(key.Value).LatestAsync();
+            var stale = await surface.SyncTo(crashedRuntime).Document<MeshNoteDocument>(key.Value).LatestAsync();
             stale.Text.Should().Be("before-crash");
         }
 
@@ -1983,7 +1940,7 @@ public sealed class CultMeshStreamingTests
         var reconstructed = await surface
             .SyncTo(freshRuntime)
             .Documents(CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value))
-            .LatestAsync<MeshNoteAliasDocument>();
+            .LatestAsync<MeshNoteDocument>();
 
         reconstructed.Text.Should().Be("after-reboot-authority");
         reconstructed.Revision.Should().Be(4);
@@ -2034,7 +1991,7 @@ public sealed class CultMeshStreamingTests
             });
         var readOnlyHandle = surface
             .SyncTo(node)
-            .Document<MeshNoteAliasDocument>(key.Value);
+            .Document<MeshNoteDocument>(key.Value);
         readOnlyHandle.CanReplace.Should().BeFalse();
         readOnlyHandle.CanSubmitPrediction.Should().BeFalse();
 
@@ -2645,7 +2602,7 @@ public sealed class CultMeshStreamingTests
             .Register(CultNetDocumentBinding.ForDocument<MeshNoteDocument>(CultDocumentRegistry.Shared));
         var requests = new List<CultNetSnapshotRequestMessage>();
 
-        var handle = CultMesh.DocumentFromPublication<MeshNoteAliasDocument>(
+        var handle = CultMesh.DocumentFromPublication<MeshNoteDocument>(
             CultMeshDocumentPublicationSource.PeerSnapshot(
                 () => new MeshSnapshotSchemaClient(request =>
                 {
@@ -2666,16 +2623,16 @@ public sealed class CultMeshStreamingTests
 
         snapshot.Text.Should().Be("remote-snapshot");
         snapshot.Revision.Should().Be(9);
-        handle.DocumentType.Should().Be(typeof(MeshNoteAliasDocument));
+        handle.DocumentType.Should().Be(typeof(MeshNoteDocument));
         handle.RouteHint.Kind.Should().Be(CultMeshLocalityKind.Network);
         handle.Sources.Should().ContainSingle().Which.SourceId.Should().Be(key.Value);
         requests.Should().ContainSingle();
         requests[0].SchemaIds.Should().ContainSingle().Which
             .Should().Be(CultDocumentRegistry.Shared.GetRequired<MeshNoteDocument>().SchemaId);
         requests[0].RecordKeys.Should().ContainSingle().Which.Should().Be(key.Value);
-        (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("remote-snapshot");
+        (await catalog.LatestAsync<MeshNoteDocument>()).Text.Should().Be("remote-snapshot");
 
-        var aliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
+        var aliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "alias-schema",
@@ -2703,7 +2660,7 @@ public sealed class CultMeshStreamingTests
 
         (await aliasSchemaHandle.LatestAsync()).Text.Should().Be("record-key-fallback");
 
-        var mixedAliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
+        var mixedAliasSchemaHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "alias-schema-with-neighbor",
@@ -2749,7 +2706,7 @@ public sealed class CultMeshStreamingTests
         // The recordKey match is exact (ordinal), not case-insensitive. A case-variant key must not
         // win even when it appears first in the response.
         var caseVariantKey = key.Value.ToUpperInvariant();
-        var caseVariantKeyHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteAliasDocument>(
+        var caseVariantKeyHandle = CultMesh.DocumentFromPeerSnapshot<MeshNoteDocument>(
             _ => Task.FromResult(new CultNetSnapshotResponseRawMessage
             {
                 MessageId = "case-variant-key",
@@ -2862,7 +2819,7 @@ public sealed class CultMeshStreamingTests
                 CultMesh.PublicationDocument<MeshPublicationNoteDocument>(
                     firstKey,
                     documentId: "daemon:first"),
-                CultMesh.PublicationDocument<MeshNoteAliasDocument>(
+                CultMesh.PublicationDocument<MeshNoteDocument>(
                     secondKey,
                     documentId: "daemon:second",
                     source: CultMeshDocumentPublicationSource.SingleFile(secondPath))
@@ -2876,10 +2833,10 @@ public sealed class CultMeshStreamingTests
 
         catalog.Documents.Select(document => document.DocumentId).Should().Equal("daemon:first", "daemon:second");
         (await catalog.LatestAsync<MeshPublicationNoteDocument>()).Text.Should().Be("first source");
-        (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("second source");
+        (await catalog.LatestAsync<MeshNoteDocument>()).Text.Should().Be("second source");
         catalog.Document<MeshNoteDocument>().DocumentId.Should().Be("daemon:second");
         catalog.Document<MeshPublicationNoteDocument>().RouteHint.Description.Should().Be("publication catalog");
-        catalog.Document<MeshNoteAliasDocument>().Sources.Should().ContainSingle().Which.SourceId.Should().Be("daemon:second");
+        catalog.Document<MeshNoteDocument>().Sources.Should().ContainSingle().Which.SourceId.Should().Be("daemon:second");
     }
 
     [Test]
@@ -2923,7 +2880,7 @@ public sealed class CultMeshStreamingTests
                 CultMesh.PublicationDocument<MeshPublicationNoteDocument>(
                     firstKey,
                     documentId: "local:first"),
-                CultMesh.PublicationDocument<MeshNoteAliasDocument>(
+                CultMesh.PublicationDocument<MeshNoteDocument>(
                     secondKey,
                     documentId: "local:second",
                     source: CultMeshDocumentPublicationSource.SingleFile(secondPath))
@@ -2936,16 +2893,16 @@ public sealed class CultMeshStreamingTests
 
         catalog.Documents.Select(document => document.DocumentId).Should().Equal("local:first", "local:second");
         (await catalog.LatestAsync<MeshPublicationNoteDocument>()).Text.Should().Be("first synced source");
-        (await catalog.LatestAsync<MeshNoteAliasDocument>()).Text.Should().Be("second synced source");
+        (await catalog.LatestAsync<MeshNoteDocument>()).Text.Should().Be("second synced source");
         node.Cache.Get<MeshPublicationNoteDocument>(firstKey)!.Revision.Should().Be(31);
         (await node.Document<MeshNoteDocument>(secondKey, CultMesh.Verse("starbridge", "unity-sync-catalog"))
             .LatestAsync()).Text.Should().Be("second synced source");
-        (await node.Document<MeshNoteAliasDocument>(secondKey, CultMesh.Verse("starbridge", "unity-sync-catalog"))
+        (await node.Document<MeshNoteDocument>(secondKey, CultMesh.Verse("starbridge", "unity-sync-catalog"))
             .LatestAsync()).Revision.Should().Be(32);
     }
 
     [Test]
-    public async Task PublicationHelpers_SyncConfiguredPeerSourceIntoLocalNodeAlias()
+    public async Task PublicationHelpers_SyncConfiguredPeerSourceIntoLocalNode()
     {
         var sourceCache = new CultCache();
         var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
@@ -2974,7 +2931,7 @@ public sealed class CultMeshStreamingTests
                 }
             });
 
-        var synced = await CultMesh.SyncDocumentFromPublicationAsync<MeshNoteAliasDocument>(
+        var synced = await CultMesh.SyncDocumentFromPublicationAsync<MeshNoteDocument>(
             node,
             CultMeshDocumentPublicationSource.PeerSnapshot(
                 () => new MeshSnapshotSchemaClient(request =>
@@ -2990,12 +2947,12 @@ public sealed class CultMeshStreamingTests
                 MessageIdPrefix = "mesh-test-publication-sync",
                 PollInterval = TimeSpan.FromMilliseconds(10)
             });
-        var localAlias = await node.Document<MeshNoteAliasDocument>(key, verse).LatestAsync();
+        var local = await node.Document<MeshNoteDocument>(key, verse).LatestAsync();
 
         synced.Text.Should().Be("publication-synced");
         synced.Revision.Should().Be(51);
-        localAlias.Text.Should().Be("publication-synced");
-        localAlias.Revision.Should().Be(51);
+        local.Text.Should().Be("publication-synced");
+        local.Revision.Should().Be(51);
         requests.Should().ContainSingle().Which.RecordKeys.Should().Equal(key.Value);
     }
 
@@ -3102,7 +3059,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task SnapshotHelpers_DecodeSameSchemaAliasFromForeignSchemaId()
+    public async Task SnapshotHelpers_DecodeFromForeignSchemaId()
     {
         var key = new CultRecordKey("mesh-note:snapshot-alias-foreign-schema");
         var snapshot = new CultNetSnapshotResponseRawMessage
@@ -3128,7 +3085,7 @@ public sealed class CultMeshStreamingTests
             }
         };
 
-        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteAliasDocument>(
+        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteDocument>(
             "cultnet://foreign-schema.test:3075",
             new CultMeshSnapshotRequestOptions
             {
@@ -3172,9 +3129,9 @@ public sealed class CultMeshStreamingTests
         };
         var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(
             typeof(MeshNoteDocument),
-            typeof(MeshNoteAliasDocument));
+            typeof(MeshNoteDocument));
         var registry = CultMesh.CreateCultNetDocumentRegistry(
-            new[] { typeof(MeshNoteDocument), typeof(MeshNoteAliasDocument) },
+            new[] { typeof(MeshNoteDocument), typeof(MeshNoteDocument) },
             cacheRegistry);
         var endpoint = CultMesh.SnapshotEndpoint(
             "cultnet://foreign-schema.test:3075",
@@ -3205,7 +3162,7 @@ public sealed class CultMeshStreamingTests
                 }
             });
 
-        var synced = await endpoint.SyncDocumentAsync<MeshNoteAliasDocument>(node, key.Value);
+        var synced = await endpoint.SyncDocumentAsync<MeshNoteDocument>(node, key.Value);
 
         synced.Text.Should().Be("foreign-schema-synced");
         node.Cache.Get<MeshNoteDocument>(key)!.Text.Should().Be("foreign-schema-synced");
@@ -3213,7 +3170,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task SnapshotFacade_SyncsRemoteDocumentIntoLocalNodeWithSameSchemaAlias()
+    public async Task SnapshotFacade_SyncsRemoteDocumentIntoLocalNode()
     {
         var sourceCache = new CultCache();
         var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
@@ -3241,7 +3198,7 @@ public sealed class CultMeshStreamingTests
                 }
             });
 
-        var synced = await CultMesh.SyncDocumentFromPeerSnapshotAsync<MeshNoteAliasDocument>(
+        var synced = await CultMesh.SyncDocumentFromPeerSnapshotAsync<MeshNoteDocument>(
             node,
             () => new MeshSnapshotSchemaClient(request =>
             {
@@ -3255,12 +3212,12 @@ public sealed class CultMeshStreamingTests
                 DocumentRegistry = registry,
                 Context = CultMesh.Verse("starbridge", "unity-raven").Context
             });
-        var localAlias = await node.Document<MeshNoteAliasDocument>(key.Value, CultMesh.Verse("starbridge", "unity-raven"))
+        var local = await node.Document<MeshNoteDocument>(key.Value, CultMesh.Verse("starbridge", "unity-raven"))
             .LatestAsync();
 
         synced.Text.Should().Be("facade-synced");
         synced.Revision.Should().Be(46);
-        localAlias.Text.Should().Be("facade-synced");
+        local.Text.Should().Be("facade-synced");
         node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(46);
         requests.Should().ContainSingle().Which.RecordKeys.Should().Equal(key.Value);
     }
@@ -3300,9 +3257,9 @@ public sealed class CultMeshStreamingTests
         var sourceCache = new CultCache();
         var cacheRegistry = CultMesh.CreateCultCacheDocumentRegistry(
             typeof(MeshNoteDocument),
-            typeof(MeshNoteAliasDocument));
+            typeof(MeshNoteDocument));
         var networkRegistry = CultMesh.CreateCultNetDocumentRegistry(
-            new[] { typeof(MeshNoteDocument), typeof(MeshNoteAliasDocument) },
+            new[] { typeof(MeshNoteDocument), typeof(MeshNoteDocument) },
             cacheRegistry);
         var key = new CultRecordKey("mesh-note:registry-helper");
         await sourceCache.UpsertAsync(new MeshNoteDocument
@@ -3313,7 +3270,7 @@ public sealed class CultMeshStreamingTests
         }, new CultRecordHandle<MeshNoteDocument>(key));
         var endpoint = "cultnet://registry-helper.test:3077";
 
-        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteAliasDocument>(
+        var documents = await CultMesh.FetchSnapshotDocumentsAsync<MeshNoteDocument>(
             endpoint,
             new CultMeshSnapshotRequestOptions
             {
@@ -3324,15 +3281,15 @@ public sealed class CultMeshStreamingTests
             networkRegistry);
 
         var schemaId = cacheRegistry.GetRequired<MeshNoteDocument>().SchemaId;
-        cacheRegistry.GetRequired<MeshNoteAliasDocument>().SchemaId.Should().Be(schemaId);
+        cacheRegistry.GetRequired<MeshNoteDocument>().SchemaId.Should().Be(schemaId);
         networkRegistry.GetByDocumentType(typeof(MeshNoteDocument)).Should().NotBeNull();
-        networkRegistry.GetByDocumentType(typeof(MeshNoteAliasDocument)).Should().NotBeNull();
+        networkRegistry.GetByDocumentType(typeof(MeshNoteDocument)).Should().NotBeNull();
         networkRegistry.GetBySchemaId(schemaId)!.DocumentType.Should().Be(typeof(MeshNoteDocument));
         documents.Should().ContainSingle().Which.Text.Should().Be("registry-helper");
     }
 
     [Test]
-    public async Task SnapshotEndpoint_ProvidesTypedHandlesAndSchemaAliases()
+    public async Task SnapshotEndpoint_ProvidesTypedHandles()
     {
         var sourceCache = new CultCache();
         var registry = new CultNetDocumentRegistry(CultDocumentRegistry.Shared);
@@ -3364,7 +3321,7 @@ public sealed class CultMeshStreamingTests
                 }
             });
 
-        var fetchedAlias = await surface.FetchDocumentAsync<MeshNoteAliasDocument>(key.Value);
+        var fetched = await surface.FetchDocumentAsync<MeshNoteDocument>(key.Value);
         using var node = await CultMesh.CreateNodeAsync(
             Path.Combine(Path.GetTempPath(), $"cultmesh-snapshot-endpoint-{Guid.NewGuid():N}.ccmp"),
             new CultMeshNodeOptions
@@ -3379,12 +3336,12 @@ public sealed class CultMeshStreamingTests
                     DocumentRegistry = registry
                 }
             });
-        var syncedAlias = await surface.SyncDocumentAsync<MeshNoteAliasDocument>(node, key.Value);
-        var aliasHandle = surface.Document<MeshNoteAliasDocument>(key.Value);
-        var aliasLatest = await aliasHandle.LatestAsync();
+        var syncedDocument = await surface.SyncDocumentAsync<MeshNoteDocument>(node, key.Value);
+        var endpointHandle = surface.Document<MeshNoteDocument>(key.Value);
+        var endpointLatest = await endpointHandle.LatestAsync();
         var catalog = surface.Documents(
             CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value, "daemon:mesh-note:snapshot-endpoint"));
-        var catalogAlias = await catalog.LatestAsync<MeshNoteAliasDocument>();
+        var catalogLatest = await catalog.LatestAsync<MeshNoteDocument>();
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
@@ -3392,7 +3349,7 @@ public sealed class CultMeshStreamingTests
             Revision = 20
         }, new CultRecordHandle<MeshNoteDocument>(key));
         var syncedEndpoint = surface.SyncTo(node);
-        var syncedHandle = syncedEndpoint.Document<MeshNoteAliasDocument>(key.Value);
+        var syncedHandle = syncedEndpoint.Document<MeshNoteDocument>(key.Value);
         var syncedLatest = await syncedHandle.LatestAsync();
         await sourceCache.UpsertAsync(new MeshNoteDocument
         {
@@ -3402,16 +3359,16 @@ public sealed class CultMeshStreamingTests
         }, new CultRecordHandle<MeshNoteDocument>(key));
         var syncedCatalog = syncedEndpoint.Documents(
             CultMesh.SnapshotDocument<MeshNoteDocument>(key.Value));
-        var syncedCatalogAlias = await syncedCatalog.LatestAsync<MeshNoteAliasDocument>();
+        var syncedCatalogLatest = await syncedCatalog.LatestAsync<MeshNoteDocument>();
 
-        fetchedAlias.Text.Should().Be("snapshot-endpoint");
-        syncedAlias.Text.Should().Be("snapshot-endpoint");
-        aliasLatest.Revision.Should().Be(19);
+        fetched.Text.Should().Be("snapshot-endpoint");
+        syncedDocument.Text.Should().Be("snapshot-endpoint");
+        endpointLatest.Revision.Should().Be(19);
         catalog.Document<MeshNoteDocument>().DocumentId.Should().Be("daemon:mesh-note:snapshot-endpoint");
-        catalogAlias.Text.Should().Be("snapshot-endpoint");
+        catalogLatest.Text.Should().Be("snapshot-endpoint");
         syncedLatest.Text.Should().Be("snapshot-endpoint-synced");
         node.Cache.Get<MeshNoteDocument>(key)!.Revision.Should().Be(21);
-        syncedCatalogAlias.Text.Should().Be("snapshot-endpoint-catalog-synced");
+        syncedCatalogLatest.Text.Should().Be("snapshot-endpoint-catalog-synced");
         requests.Should().HaveCount(6);
         requests.Should().OnlyContain(request =>
             request.SchemaIds == null &&
@@ -3464,7 +3421,7 @@ public sealed class CultMeshStreamingTests
     }
 
     [Test]
-    public async Task CollectionHandle_SupportsSameSchemaAliases()
+    public async Task CollectionHandle_IsIndexedInItsCatalogByTypeAndSchema()
     {
         var cache = new CultCache();
         await cache.UpsertAsync(
@@ -3477,14 +3434,12 @@ public sealed class CultMeshStreamingTests
             new CultRecordHandle<MeshNoteDocument>(new CultRecordKey("mesh-note:collection")));
 
         var collection = CultMesh.Collection<MeshNoteDocument>(cache);
-        var alias = collection.AsSchemaAlias<MeshNoteAliasDocument>();
         var catalog = CultMesh.Collections(collection);
 
-        alias.CollectionId.Should().Be(collection.CollectionId);
-        alias.SchemaName.Should().Be(collection.SchemaName);
         catalog.Collections.Should().ContainSingle().Which.Should().BeSameAs(collection);
-        catalog.TryGetCollection<MeshNoteAliasDocument>(out var catalogAlias).Should().BeTrue();
-        catalogAlias.CollectionId.Should().Be(collection.CollectionId);
+        catalog.TryGetCollection<MeshNoteDocument>(out var byType).Should().BeTrue();
+        byType.Should().BeSameAs(collection);
+        catalog.TryGetCollection<MeshOtherDocument>(out _).Should().BeFalse();
         catalog.TryGetCollectionBySchema("tests.mesh_note.v1", out var byVersion).Should().BeTrue();
         byVersion.Should().BeSameAs(collection);
         catalog.CollectionBySchema("tests.mesh_note").Should().BeSameAs(collection);
@@ -3492,13 +3447,13 @@ public sealed class CultMeshStreamingTests
             .Should()
             .BeSameAs(collection);
 
-        var snapshot = await alias.LatestAsync();
+        var snapshot = await collection.LatestAsync();
         snapshot.Should().ContainSingle().Which.Text.Should().Be("collection-alias");
-        var catalogSnapshot = await catalog.LatestAsync<MeshNoteAliasDocument>();
+        var catalogSnapshot = await catalog.LatestAsync<MeshNoteDocument>();
         catalogSnapshot.Should().ContainSingle().Which.Revision.Should().Be(4);
 
-        CultMeshCollectionChange<MeshNoteAliasDocument> observed = null!;
-        using var subscription = catalog.WatchChanges<MeshNoteAliasDocument>(change => observed = change);
+        CultMeshCollectionChange<MeshNoteDocument> observed = null!;
+        using var subscription = catalog.WatchChanges<MeshNoteDocument>(change => observed = change);
         await cache.UpsertAsync(
             new MeshNoteDocument
             {
@@ -3543,11 +3498,10 @@ public sealed class CultMeshStreamingTests
             node,
             key,
             CultMesh.Verse("starbridge", "unity-pilot"));
-        var alias = handle.AsSchemaAlias<MeshNoteAliasDocument>();
 
         MeshNoteDocument observed = null!;
         using var subscription = handle.Watch(value => observed = value);
-        await alias.ReplaceAsync(new MeshNoteAliasDocument
+        await handle.ReplaceAsync(new MeshNoteDocument
         {
             Schema = "tests.mesh_note.v1",
             Text = "node-replaced",
@@ -3974,20 +3928,6 @@ public sealed class CultMeshStreamingTests
     [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]
     [MessagePackObject(AllowPrivate = true)]
     internal sealed class MeshNoteDocument
-    {
-        [Key(0)]
-        public string Schema { get; set; } = string.Empty;
-
-        [Key(1)]
-        public string Text { get; set; } = string.Empty;
-
-        [Key(2)]
-        public int Revision { get; set; }
-    }
-
-    [CultDocument("tests.mesh_note", "tests.mesh_note.v1")]
-    [MessagePackObject(AllowPrivate = true)]
-    internal sealed class MeshNoteAliasDocument
     {
         [Key(0)]
         public string Schema { get; set; } = string.Empty;
