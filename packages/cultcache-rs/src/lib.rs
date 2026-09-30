@@ -5498,43 +5498,58 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    enum Choice {
+        Only,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct SkippedChoice {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choice: Option<Choice>,
+        text: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, DatabaseEntry)]
+    #[cultcache(type = "skipped-choice")]
+    struct ChoiceNote {
+        #[cultcache(key = 0)]
+        value: SkippedChoice,
+    }
+
     #[test]
     fn a_document_decode_refusal_names_the_entry_and_never_a_stored_value() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
-        // [theme, retries] with a string where the u32 goes: serde's own message would
-        // quote the string.
-        let mut payload = vec![0x92, 0xa1, b't', 0xab];
-        payload.extend_from_slice(b"SECRET-DOC!");
+        // A compact SkippedChoice with no choice is [text], so decoding it reads the text
+        // where the enum goes, and serde's own message would quote it as an unknown variant.
+        let secret = ChoiceNote {
+            value: SkippedChoice {
+                choice: None,
+                text: "SECRET-CHOICE".into(),
+            },
+        };
+        let mut payload = vec![0x91, 0x91, 0xad];
+        payload.extend_from_slice(b"SECRET-CHOICE");
         let malformed = CultCacheEnvelope {
             key: "k".into(),
-            r#type: <Settings as DatabaseEntry>::TYPE.into(),
+            r#type: <ChoiceNote as DatabaseEntry>::TYPE.into(),
             payload,
             stored_at: "2026-09-30T00:00:00Z".into(),
             schema_id: None,
         };
         SingleFileMessagePackBackingStore::new(&path).push(&malformed)?;
         let mut cache = CultCache::new();
-        cache.register_entry_type::<Settings>()?;
-        cache.register_entry_type::<NestedNote>()?;
+        cache.register_entry_type::<ChoiceNote>()?;
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
         cache.pull_all_backing_stores()?;
 
-        // A compact nested value skips its absent `count`, so decoding it back reads the
-        // symbol string where the count goes.
-        let nested = NestedNote {
-            value: NestedOptionalValue {
-                label: "l".into(),
-                count: None,
-                symbol: Some("SECRET-NESTED".into()),
-            },
-        };
         let refusals = [
-            ("get", cache.get::<Settings>("k").unwrap_err()),
-            ("get_all", cache.get_all::<Settings>().unwrap_err()),
-            ("get_all_with_keys", cache.get_all_with_keys::<Settings>().unwrap_err()),
-            ("put_envelope", cache.put_envelope::<Settings>(malformed.clone()).unwrap_err()),
-            ("prepare_entry", cache.prepare_entry("compact", &nested).unwrap_err()),
+            ("get", cache.get::<ChoiceNote>("k").unwrap_err()),
+            ("get_all", cache.get_all::<ChoiceNote>().unwrap_err()),
+            ("get_all_with_keys", cache.get_all_with_keys::<ChoiceNote>().unwrap_err()),
+            ("put_envelope", cache.put_envelope::<ChoiceNote>(malformed.clone()).unwrap_err()),
+            ("prepare_entry", cache.prepare_entry("compact", &secret).unwrap_err()),
         ];
         for (path, error) in refusals {
             let text = format!("{error:#}");
