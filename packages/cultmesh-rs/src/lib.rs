@@ -822,7 +822,11 @@ pub fn request_raw_snapshot_from_rudp_catalog(
                     }
                     cultnet_rs::CultNetMessage::Error { error, .. } => {
                         let _ = client.disconnect(b"snapshot-error".to_vec());
-                        anyhow::bail!("CultMesh RUDP snapshot failed: {error}");
+                        anyhow::bail!(
+                            "CultMesh RUDP catalog {} refused the snapshot{}",
+                            options.target,
+                            recognised_refusal(error)
+                        );
                     }
                     _ => {}
                 }
@@ -856,6 +860,17 @@ pub fn request_raw_snapshot_from_rudp_catalog(
     )
 }
 
+/// A catalog's refusal text, quoted (`": text"`) only when it is one of the
+/// fixed refusals a CultMesh catalog sends; any other text could carry
+/// anything, so it is left out.
+fn recognised_refusal(text: &str) -> String {
+    if REFUSAL_TEXTS.contains(&text) {
+        format!(": {text}")
+    } else {
+        String::new()
+    }
+}
+
 fn unix_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -866,9 +881,12 @@ fn unix_millis() -> u128 {
 /// Publish one raw CultNet schema message to a RUDP catalog.
 ///
 /// Each call owns a fresh connection epoch and returns only after the catalog
-/// acknowledges reliable application admission. A catalog that refuses the
-/// message answers with a `cultnet.error.v0`, returned as an error that names
-/// the refusal when it is one of the fixed texts a CultMesh catalog sends.
+/// acknowledges reliable application admission. Against a Rust CultMesh
+/// catalog, which never acknowledges a message it refuses, a refusal is
+/// returned as an error, naming the refusal when it is one of the fixed texts
+/// such a catalog sends. A catalog that acknowledges a message on receipt and
+/// refuses it afterwards (the TypeScript document server does) is reported as
+/// having admitted it: the acknowledgement arrives first.
 pub fn publish_cultnet_message_to_rudp_catalog(
     message: &cultnet_rs::CultNetMessage,
     options: CultMeshRudpDocumentPublishOptions,
@@ -898,15 +916,11 @@ pub fn publish_cultnet_message_to_rudp_catalog(
                     )
                 {
                     let _ = client.disconnect(b"document-refused".to_vec());
-                    // The catalog's text is quoted only when it is one of the
-                    // fixed refusals: any other text could carry anything.
-                    if REFUSAL_TEXTS.contains(&error.as_str()) {
-                        anyhow::bail!(
-                            "CultMesh RUDP catalog {} refused the put: {error}",
-                            options.target
-                        );
-                    }
-                    anyhow::bail!("CultMesh RUDP catalog {} refused the put", options.target);
+                    anyhow::bail!(
+                        "CultMesh RUDP catalog {} refused the put{}",
+                        options.target,
+                        recognised_refusal(&error)
+                    );
                 }
             }
         }
@@ -1363,27 +1377,24 @@ mod tests {
         Ok(())
     }
 
-    /// A catalog's refusal text is quoted only when it is one of the fixed
-    /// refusals a CultMesh catalog sends. Any other text, which could carry
-    /// anything, stays out of the publisher's error.
-    #[test]
-    fn a_publisher_never_quotes_a_refusal_it_does_not_recognise() -> Result<()> {
+    /// A catalog that answers every message with a refusal of its own wording,
+    /// never acknowledging it. Stops when the flag is set.
+    fn refusing_catalog(
+        text: &'static str,
+    ) -> Result<(
+        SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread::JoinHandle<Result<()>>,
+    )> {
         use cultnet_rs::{
             CultNetRudpPacketType, CultNetRudpSendOptions, CultNetRudpSession,
             CultNetRudpSessionOptions, decode_rudp_packet, encode_rudp_packet,
         };
-        let temp = tempfile::tempdir()?;
-        let node = CultMesh::create_node(
-            temp.path().join("cultmesh.cc"),
-            TestDocuments,
-            Default::default(),
-        )?;
         let socket = UdpSocket::bind("127.0.0.1:0")?;
         socket.set_read_timeout(Some(Duration::from_millis(5)))?;
         let target = socket.local_addr()?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let catalog_stop = stop.clone();
-        // A catalog that answers any put with a refusal of its own wording.
         let catalog = thread::spawn(move || -> Result<()> {
             let mut session: Option<CultNetRudpSession> = None;
             let mut wire = vec![0_u8; 65_535];
@@ -1412,10 +1423,10 @@ mod tests {
                 let Ok(received) = session.receive(&packet, 1) else {
                     continue;
                 };
-                for _put in received.delivered {
+                for _message in received.delivered {
                     let refusal = encode_cultnet_message_to_vec(
                         &cultnet_rs::CultNetMessage::Error {
-                            error: "no such tenant: CANARY-7f3a".into(),
+                            error: text.into(),
                             code: None,
                             details: None,
                         },
@@ -1435,7 +1446,21 @@ mod tests {
             }
             Ok(())
         });
+        Ok((target, stop, catalog))
+    }
 
+    /// A catalog's refusal text is quoted only when it is one of the fixed
+    /// refusals a CultMesh catalog sends. Any other text, which could carry
+    /// anything, stays out of the publisher's error.
+    #[test]
+    fn a_publisher_never_quotes_a_refusal_it_does_not_recognise() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let node = CultMesh::create_node(
+            temp.path().join("cultmesh.cc"),
+            TestDocuments,
+            Default::default(),
+        )?;
+        let (target, stop, catalog) = refusing_catalog("no such tenant: CANARY-7f3a")?;
         let error = node
             .publish_document_to_rudp_catalog(
                 "note",
@@ -1458,6 +1483,35 @@ mod tests {
             error.to_string(),
             format!("CultMesh RUDP catalog {target} refused the put")
         );
+        Ok(())
+    }
+
+    /// The snapshot client filters a catalog's refusal the same way: a fixed
+    /// refusal is named, any other text is left out.
+    #[test]
+    fn a_snapshot_client_quotes_only_a_refusal_it_recognises() -> Result<()> {
+        for (text, expected) in [
+            ("no such tenant: CANARY-7f3a", ""),
+            ("the snapshot source failed", ": the snapshot source failed"),
+        ] {
+            let (target, stop, catalog) = refusing_catalog(text)?;
+            let error = request_raw_snapshot_from_rudp_catalog(CultMeshRudpSnapshotOptions {
+                target,
+                message_id: "refused".into(),
+                connect_timeout: Duration::from_secs(2),
+                response_timeout: Duration::from_secs(10),
+                poll_interval: Duration::from_millis(2),
+                resend_delay_ms: 5,
+                ..CultMeshRudpSnapshotOptions::default()
+            })
+            .expect_err("a refused snapshot must fail");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            catalog.join().expect("catalog thread should not panic")?;
+            assert_eq!(
+                error.to_string(),
+                format!("CultMesh RUDP catalog {target} refused the snapshot{expected}")
+            );
+        }
         Ok(())
     }
 
