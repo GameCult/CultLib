@@ -501,6 +501,32 @@ namespace GameCult.Networking
     }
 
     /// <summary>
+    /// Raised when a database write names a schema and key that no configured shard owns. Nothing was cached.
+    /// </summary>
+    public sealed class CultNetUnownedSchemaException : InvalidOperationException
+    {
+        /// <summary>
+        /// Creates an unowned schema exception.
+        /// </summary>
+        public CultNetUnownedSchemaException(string schemaId, CultRecordKey key)
+            : base($"No shard owns schema '{schemaId}' key '{key.Value}'; the write was refused.")
+        {
+            SchemaId = schemaId;
+            Key = key;
+        }
+
+        /// <summary>
+        /// Gets the schema that no shard owns.
+        /// </summary>
+        public string SchemaId { get; }
+
+        /// <summary>
+        /// Gets the key of the refused write.
+        /// </summary>
+        public CultRecordKey Key { get; }
+    }
+
+    /// <summary>
     /// Raised to the writer when a shard primary committed changes and could not log them. The commits stand and the
     /// changes were published; each shard's log burned the sequences in <see cref="Burned"/> and compacted past them,
     /// so every replica behind one resynchronizes from a snapshot. A single journal call raises one of these carrying
@@ -931,8 +957,7 @@ namespace GameCult.Networking
             if (document == null) throw new ArgumentNullException(nameof(document));
 
             var descriptor = _cache.Registry.GetRequired(document.GetType());
-            var shard = ResolveShardInternal(descriptor, key);
-            EnsurePrimary(shard, descriptor.SchemaId, key);
+            EnsurePrimary(OwningShard(descriptor, key), descriptor.SchemaId, key);
 
             return await _cache.UpsertAsync(document, new CultRecordHandle<T>(key)).ConfigureAwait(false);
         }
@@ -968,8 +993,7 @@ namespace GameCult.Networking
         {
             ThrowIfDisposed();
             var descriptor = _cache.Registry.GetRequired<T>();
-            var shard = ResolveShardInternal(descriptor, key);
-            EnsurePrimary(shard, descriptor.SchemaId, key);
+            EnsurePrimary(OwningShard(descriptor, key), descriptor.SchemaId, key);
 
             _cache.Remove(new CultRecordHandle<T>(key));
             return Task.CompletedTask;
@@ -1907,6 +1931,12 @@ namespace GameCult.Networking
         {
             return _shards.FirstOrDefault(shard => shard.Matches(descriptor, key)) ?? _shards[0];
         }
+
+        // The shard that owns the schema and key, for a write that carries no door and so cannot be placed by the wire message:
+        // a write no shard owns would be cached and never logged, so it is refused.
+        private CultNetShardDescriptor OwningShard(CultDocumentDescriptor descriptor, CultRecordKey key) =>
+            _shards.FirstOrDefault(shard => shard.Matches(descriptor, key))
+            ?? throw new CultNetUnownedSchemaException(descriptor.SchemaId, key);
 
         private static void EnsurePrimary(CultNetShardDescriptor shard, string schemaId, CultRecordKey key, long? expectedEpoch = null)
         {

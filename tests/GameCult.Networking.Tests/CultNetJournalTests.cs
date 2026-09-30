@@ -627,17 +627,25 @@ namespace GameCult.Networking.Tests
             Assert.That(database.GetMutationLog(ShardId).Select(entry => entry.Key.Value), Is.EqualTo(new[] { One.Value }));
         }
 
-        // A door chose its shard, by the fallback when none matches; the journal honours it. A plain PutAsync carries no
-        // door, so an unowned schema written through it is cached and not logged.
+        // The database is the sharded write door: a write it cannot place in a shard is refused before anything is cached.
+        // (An authoritative wire put carries a door that names its shard, and keeps the fallback shard.)
         [Test]
-        public async Task AnAuthoritativePutOfASchemaNoShardOwnsIsLoggedInTheFallbackShardButAPlainPutIsNot()
+        public async Task ADatabaseWriteOfASchemaNoShardOwnsIsRefusedNamingTheSchemaAndAnAuthoritativePutKeepsTheFallbackShard()
         {
             var store = new FlakyLogStore();
             var cache = new CultCache();
             var database = Database(cache, primary: true, store);
             var shard = database.Shards[0];
+            var unowned = cache.Registry.GetRequired<MeshQuickstartNote>().SchemaId;
+            var plainKey = new CultRecordKey("unrelated:plain");
 
-            await database.PutAsync(new CultRecordKey("unrelated:plain"), new MeshQuickstartNote { NoteId = "p", Body = "plain" });
+            var put = Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () =>
+                await database.PutAsync(plainKey, new MeshQuickstartNote { NoteId = "p", Body = "plain" }))!;
+            Assert.That(put.SchemaId, Is.EqualTo(unowned));
+            Assert.That(put.Message, Does.Contain(unowned));
+            Assert.That(put, Is.InstanceOf<InvalidOperationException>(), "a refused write reads as one");
+            Assert.That(cache.Get<MeshQuickstartNote>(plainKey), Is.Null, "nothing was cached");
+            Assert.ThrowsAsync<CultNetUnownedSchemaException>(async () => await database.DeleteAsync<MeshQuickstartNote>(plainKey));
             Assert.That(Sequences(store), Is.Empty);
 
             var message = database.Documents.CreateRawDocumentPutMessage("door", new CultRecordHandle<MeshQuickstartNote>(new CultRecordKey("unrelated:door")), new MeshQuickstartNote { NoteId = "d", Body = "door" });
