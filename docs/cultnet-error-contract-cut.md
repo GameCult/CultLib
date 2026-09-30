@@ -153,6 +153,14 @@ Other findings, from reading source at `8fc74c70`:
 
 ## 3. Operator questions
 
+**Rulings (operator, 2026-09-30):** "Q1: B / Q2: B / Q3: A / Q8: A".
+- **Q1:** closed for emitters, open for readers. An unknown code decodes to a typed `Other`.
+- **Q2:** per-code details.
+- **Q3:** a nullable top-level `messageId`.
+- **Q8:** v0 is corrected in place, with the semver bumps the policy requires.
+- Q4-Q7 are still open.
+- Cut 1 waits for `hands/cultmesh-put-serve-bound` to merge.
+
 ### Q1. What does a reader do with an error code it does not know?
 
 Today Rust and TypeScript refuse the whole message. The probes above show the result: the peer's error text
