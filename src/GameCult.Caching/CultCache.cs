@@ -689,29 +689,16 @@ namespace GameCult.Caching
             if (indexes.ByType.TryGetValue(descriptor.DocumentType, out var registered))
                 return registered;
 
+            // One type owns a schema, whatever its declaration. Its id hashes the schema's name, version and members, so a second
+            // type of the same name and version is refused here whether or not it hashes alike. Other types may list the id as
+            // compatible beside its owner, as a v2 class does that keeps v1's class registered: a record under the id resolves to
+            // its owner, and to a lister only when nothing owns it. Neither depends on the order types were registered in.
             indexes.BySchemaName.TryGetValue(descriptor.SchemaName, out var schemaNameVersions);
             var schemaVersionOwner = schemaNameVersions?.FirstOrDefault(candidate =>
                 string.Equals(candidate.SchemaVersion, descriptor.SchemaVersion, StringComparison.Ordinal));
             if (schemaVersionOwner != null)
-            {
-                if (IsExactWireAlias(schemaVersionOwner, descriptor))
-                {
-                    indexes.ByType[descriptor.DocumentType] = descriptor;
-                    return descriptor;
-                }
+                throw SchemaClaimedTwice(schemaVersionOwner, descriptor);
 
-                if (string.Equals(schemaVersionOwner.SchemaId, descriptor.SchemaId, StringComparison.Ordinal))
-                    throw SchemaIdClaimedTwice(descriptor.SchemaId, schemaVersionOwner, descriptor);
-                throw DuplicateSchemaRegistration(
-                    $"schema name '{descriptor.SchemaName}' version '{descriptor.SchemaVersion}'",
-                    schemaVersionOwner.DocumentType,
-                    descriptor.DocumentType);
-            }
-
-            // A schema id hashes the schema's name and version, so the one other type that could own this id is the one refused or
-            // aliased above. Other types may list the id as compatible beside its owner, as a v2 class does that keeps v1's class
-            // registered: a record under the id resolves to its owner, and to a lister only when nothing owns it. Neither depends on
-            // the order types were registered in.
             indexes.ByType[descriptor.DocumentType] = descriptor;
             indexes.BySchemaId[descriptor.SchemaId] = descriptor;
             foreach (var compatibleSchemaId in descriptor.CompatibleSchemaIds)
@@ -724,38 +711,16 @@ namespace GameCult.Caching
             return descriptor;
         }
 
-        // An alias is the same schema in every respect a store sees, including the ids it declares compatible: a type whose
-        // declaration differed would have it dropped by whichever registered second.
-        private static bool IsExactWireAlias(
-            CultDocumentDescriptor canonical,
-            CultDocumentDescriptor candidate) =>
-            string.Equals(canonical.SchemaName, candidate.SchemaName, StringComparison.Ordinal) &&
-            string.Equals(canonical.SchemaVersion, candidate.SchemaVersion, StringComparison.Ordinal) &&
-            string.Equals(canonical.SchemaId, candidate.SchemaId, StringComparison.Ordinal) &&
-            string.Equals(canonical.ContentHash, candidate.ContentHash, StringComparison.Ordinal) &&
-            string.Equals(canonical.CanonicalSchemaJson, candidate.CanonicalSchemaJson, StringComparison.Ordinal) &&
-            canonical.CompatibleSchemaIds.SequenceEqual(candidate.CompatibleSchemaIds, StringComparer.Ordinal);
-
-        private static CultSchemaConflictException SchemaIdClaimedTwice(
-            string schemaId,
+        private static CultSchemaConflictException SchemaClaimedTwice(
             CultDocumentDescriptor existing,
             CultDocumentDescriptor claimed) =>
             new(
-                $"CultCache schema id '{schemaId}' is already carried by CLR type '{existing.DocumentType.FullName}' " +
-                $"(schema '{existing.SchemaName}') and cannot also be claimed by '{claimed.DocumentType.FullName}' " +
-                $"(schema '{claimed.SchemaName}'). A schema id is owned by one registered type; others may only declare it compatible.",
-                schemaId,
+                $"CultCache schema '{claimed.SchemaName}' version '{claimed.SchemaVersion}' is already registered to CLR type " +
+                $"'{existing.DocumentType.FullName}' and cannot also be claimed by '{claimed.DocumentType.FullName}'. " +
+                "A schema is owned by one registered type; others may only declare its id compatible.",
+                claimed.SchemaId,
                 new[] { existing.SchemaName, claimed.SchemaName },
                 string.Empty);
-
-        private static InvalidOperationException DuplicateSchemaRegistration(
-            string identity,
-            Type existingType,
-            Type claimedType) =>
-            new(
-                $"CultCache {identity} is already registered to CLR type " +
-                $"'{existingType.FullName}' and cannot also be claimed by '{claimedType.FullName}'. " +
-                "Schema compatibility must be declared through explicit persisted-schema alias metadata.");
 
         private sealed class RegistryIndexes
         {

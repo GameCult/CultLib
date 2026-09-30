@@ -34,28 +34,6 @@ public sealed class CultDocumentRegistryTests
     }
 
     [Test]
-    public void ExactWireCompatibleAliasRegistersByTypeWithOneCanonicalSchemaDescriptor()
-    {
-        var registry = new CultDocumentRegistry();
-        var firstType = Emit("alias_owner", "tests.registry.alias", "v1");
-        var aliasType = Emit("alias_claimant", "tests.registry.alias", "v1");
-
-        var canonical = registry.GetRequired(firstType);
-        var alias = registry.GetRequired(aliasType);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(alias.DocumentType, Is.EqualTo(aliasType));
-            Assert.That(alias.SchemaId, Is.EqualTo(canonical.SchemaId));
-            Assert.That(registry.GetRequired(aliasType), Is.SameAs(alias));
-            Assert.That(registry.GetRequiredBySchemaId(canonical.SchemaId), Is.SameAs(canonical));
-            Assert.That(
-                registry.AllDescriptors.Count(descriptor => descriptor.SchemaId == canonical.SchemaId),
-                Is.EqualTo(2));
-        });
-    }
-
-    [Test]
     public void DifferentVersionsSharingSchemaNameRegisterWithoutReflectionOrderSelection()
     {
         var registry = new CultDocumentRegistry();
@@ -86,28 +64,6 @@ public sealed class CultDocumentRegistryTests
     }
 
     [Test]
-    public void IncompatibleTypesClaimingSameSchemaNameAndVersionFailBeforeMutation()
-    {
-        var registry = new CultDocumentRegistry();
-        var firstType = Emit("layout_owner", "tests.registry.layout_collision", "v1");
-        var secondType = Emit(
-            "layout_claimant",
-            "tests.registry.layout_collision",
-            "v1",
-            new[] { new Field("Value", typeof(string), 0) });
-        var first = registry.GetRequired(firstType);
-
-        Assert.That(
-            () => registry.GetRequired(secondType),
-            Throws.TypeOf<InvalidOperationException>()
-                .With.Message.Contains("schema name 'tests.registry.layout_collision' version 'v1'")
-                .And.Message.Contains(firstType.FullName)
-                .And.Message.Contains(secondType.FullName));
-        Assert.That(registry.GetRequiredBySchemaId(first.SchemaId), Is.SameAs(first));
-        Assert.That(registry.AllDescriptors.Any(descriptor => descriptor.DocumentType == secondType), Is.False);
-    }
-
-    [Test]
     public void ConcurrentRefreshAndReadsObserveCompleteRegistrySnapshots()
     {
         var registry = new CultDocumentRegistry();
@@ -122,10 +78,10 @@ public sealed class CultDocumentRegistryTests
         });
     }
 
-    // A second type owning a schema id is refused, typed, naming both, whichever order the two register in, and the registry
-    // keeps what it had.
-    private static void AssertSecondClaimRefused(Type first, Type second, string schemaId)
+    // A second type for one schema is refused, typed, naming both and the claimed id, and the registry keeps what it had.
+    private static void AssertSecondClaimRefused(Type first, Type second)
     {
+        var schemaId = CultDocumentRegistry.ForTypes(new[] { second }).GetRequired(second).SchemaId;
         var refusal = Assert.Throws<CultSchemaConflictException>(() => CultDocumentRegistry.ForTypes(new[] { first, second }))!;
         Assert.Multiple(() =>
         {
@@ -191,26 +147,25 @@ public sealed class CultDocumentRegistryTests
         Assert.That(CultDocumentRegistry.ForTypes(listers.Prepend(owner)).ResolvePersistedSchema(sharedId, catalog).DocumentType, Is.EqualTo(owner));
     }
 
-    // The same schema declaring different compatible ids is not an alias: whichever registered second would lose its declaration.
-    [TestCase(false)]
-    [TestCase(true)]
-    public void TheSameSchemaWithADifferentDeclarationIsNotAnAlias(bool reversed)
+    // One type per schema, in every runtime: a second type of the same schema name and version is refused whichever registers
+    // first, whether it is identical to the first, declares different compatible ids, or has different members.
+    [TestCase("identical", false)]
+    [TestCase("identical", true)]
+    [TestCase("declaration", false)]
+    [TestCase("declaration", true)]
+    [TestCase("members", false)]
+    [TestCase("members", true)]
+    public void ASecondTypeForOneSchemaIsRefused(string difference, bool reversed)
     {
-        var bare = Emit("bare", "tests.registry.declared_alias", "v1");
-        var declaring = Emit("declaring", "tests.registry.declared_alias", "v1", compatibleSchemaIds: new[] { "tests.registry.older" });
-        var schemaId = CultDocumentRegistry.ForTypes(new[] { bare }).GetRequired(bare).SchemaId;
+        var schemaName = $"tests.registry.claimed_twice_{difference}";
+        var first = Emit($"first_{difference}", schemaName, "v1");
+        var second = difference switch
+        {
+            "identical" => Emit($"second_{difference}", schemaName, "v1"),
+            "declaration" => Emit($"second_{difference}", schemaName, "v1", compatibleSchemaIds: new[] { "tests.registry.older" }),
+            _ => Emit($"second_{difference}", schemaName, "v1", new[] { new Field("Value", typeof(string), 0) }),
+        };
 
-        AssertSecondClaimRefused(reversed ? declaring : bare, reversed ? bare : declaring, schemaId);
-    }
-
-    [Test]
-    public void TheSameSchemaWithTheSameDeclarationIsAnAlias()
-    {
-        var first = Emit("declaring_first", "tests.registry.same_declaration", "v1", compatibleSchemaIds: new[] { "tests.registry.same_older" });
-        var second = Emit("declaring_second", "tests.registry.same_declaration", "v1", compatibleSchemaIds: new[] { "tests.registry.same_older" });
-
-        var registry = CultDocumentRegistry.ForTypes(new[] { first, second });
-
-        Assert.That(registry.GetRequired(second).SchemaId, Is.EqualTo(registry.GetRequired(first).SchemaId));
+        AssertSecondClaimRefused(reversed ? second : first, reversed ? first : second);
     }
 }

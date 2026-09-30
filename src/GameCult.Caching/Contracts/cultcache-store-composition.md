@@ -71,9 +71,8 @@ which route wrote it.
   after subscribing with a `Sequence` at or below the read is already in the
   document and is dropped. CultMesh cache-record mirrors (`ObserveAsync`,
   `ReactiveAsync`, and `RefreshAsync` on both) do this.
-- Not stale-protected: schema-alias handles (`AsSchemaAlias`) get no
-  `Sequence`; removals do not advance a mirror's applied `Sequence`, and the
-  mirrors do not surface removals.
+- Not stale-protected: removals do not advance a mirror's applied `Sequence`,
+  and the mirrors do not surface removals.
 - `AddJournal` registers an ordered admission journal, for audit, replication or
   a derived index. The cache calls each journal under its gate, right after an
   admission is applied and before that admission is published, once per
