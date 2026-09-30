@@ -262,7 +262,7 @@ fn serve(config: PeerConfig) -> Result<()> {
     cache.put(&note.document_id, &note)?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    register_capability_bindings(&mut document_registry, &schema_registration.schema_id);
+    register_capability_bindings(&mut document_registry, &schema_registration.schema_id)?;
 
     let cache = Arc::new(Mutex::new(cache));
     let document_registry = Arc::new(document_registry);
@@ -384,7 +384,7 @@ fn dial(config: DialConfig) -> Result<()> {
     cache.pull_all_backing_stores()?;
 
     let mut document_registry = CultNetDocumentRegistry::new();
-    register_capability_bindings(&mut document_registry, &schema_registration.schema_id);
+    register_capability_bindings(&mut document_registry, &schema_registration.schema_id)?;
 
     let transport_name = if config.target_rudp_port.is_some() {
         "rudp"
@@ -1227,38 +1227,39 @@ fn register_capability_entry_types(cache: &mut CultCache) -> Result<()> {
 fn register_capability_bindings(
     document_registry: &mut CultNetDocumentRegistry,
     note_schema_id: &str,
-) {
+) -> Result<()> {
     document_registry
         .register(CultNetDocumentBinding::for_entry_with_schema_id::<
             CultNetInteropNote,
         >(
             note_schema_id.to_string(),
             INTEROP_SCHEMA_VERSION.to_string(),
-        ))
+        ))?
         .register(CultNetDocumentBinding::for_entry_with_schema_id::<
             CultNetInteropMutationIntent,
         >(
             MUTATION_INTENT_SCHEMA_ID.to_string(),
             MUTATION_INTENT_SCHEMA_VERSION.to_string(),
-        ))
+        ))?
         .register(CultNetDocumentBinding::for_entry_with_schema_id::<
             CultNetInteropMutationReceipt,
         >(
             MUTATION_RECEIPT_SCHEMA_ID.to_string(),
             MUTATION_RECEIPT_SCHEMA_VERSION.to_string(),
-        ))
+        ))?
         .register(CultNetDocumentBinding::for_entry_with_schema_id::<
             CultNetInteropFireCommand,
         >(
             FIRE_COMMAND_SCHEMA_ID.to_string(),
             FIRE_COMMAND_SCHEMA_VERSION.to_string(),
-        ))
+        ))?
         .register(CultNetDocumentBinding::for_entry_with_schema_id::<
             CultNetInteropFireReceipt,
         >(
             FIRE_RECEIPT_SCHEMA_ID.to_string(),
             FIRE_RECEIPT_SCHEMA_VERSION.to_string(),
-        ));
+        ))?;
+    Ok(())
 }
 
 fn interaction_contracts() -> Vec<CultNetDocumentMutationContract> {

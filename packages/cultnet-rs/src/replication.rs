@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use cultcache_rs::CultCache;
 use cultcache_rs::CultCacheEnvelope;
 use cultcache_rs::DatabaseEntry;
+use cultcache_rs::SchemaConflictError;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -129,12 +130,31 @@ impl CultNetDocumentRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, binding: CultNetDocumentBinding) -> &mut Self {
+    /// Binds `binding`. One binding owns a document type and a schema id: a binding claiming a type or a schema id
+    /// another binding already holds is refused with [`SchemaConflictError`], naming the new binding's schema id and
+    /// both document types, and nothing is bound. Binding a type to the schema id it already holds replaces that binding.
+    pub fn register(&mut self, binding: CultNetDocumentBinding) -> Result<&mut Self> {
+        let holder = self
+            .bindings_by_type
+            .get(&binding.document_type)
+            .filter(|held| held.schema_id != binding.schema_id)
+            .or_else(|| {
+                self.bindings_by_schema_id
+                    .get(&binding.schema_id)
+                    .filter(|held| held.document_type != binding.document_type)
+            });
+        if let Some(holder) = holder {
+            return Err(anyhow::Error::new(SchemaConflictError {
+                schema_id: binding.schema_id.clone(),
+                schema_names: vec![holder.document_type.clone(), binding.document_type.clone()],
+                record_key: String::new(),
+            }));
+        }
         self.bindings_by_schema_id
             .insert(binding.schema_id.clone(), binding.clone());
         self.bindings_by_type
             .insert(binding.document_type.clone(), binding);
-        self
+        Ok(self)
     }
 
     pub fn binding(&self, document_type: &str) -> Option<&CultNetDocumentBinding> {

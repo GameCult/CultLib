@@ -1930,7 +1930,7 @@ fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()>
             "ghostlight.agent_state.v0".to_string(),
         )
         .with_mutation_contract(contract.clone()),
-    );
+    )?;
 
     assert_eq!(registry.mutation_contracts(), vec![contract]);
     Ok(())
@@ -1950,7 +1950,7 @@ fn document_registry_replicates_typed_cultcache_state() -> Result<()> {
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry::<
         GhostlightAgentStateFixture,
-    >("ghostlight.agent_state.v0".to_string()));
+    >("ghostlight.agent_state.v0".to_string()))?;
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
@@ -2007,7 +2007,7 @@ fn raw_snapshot_replication_preserves_messagepack_payload_bytes() -> Result<()> 
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry::<
         GhostlightAgentStateFixture,
-    >("ghostlight.agent_state.v0".to_string()));
+    >("ghostlight.agent_state.v0".to_string()))?;
 
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
@@ -2053,7 +2053,7 @@ fn serve_read_only_raw_snapshot_omitted_v0_schema_list_is_no_filter_present_empt
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
         GhostlightAgentStateFixture,
-    >("ghostlight.agent-state".to_string(), None));
+    >("ghostlight.agent-state".to_string(), None))?;
 
     let mut policy = CultNetReadOnlySnapshotPolicy::new();
     policy.allow("ghostlight.agent-state", "row-1")?;
@@ -2147,7 +2147,7 @@ fn serve_read_only_raw_snapshot_keeps_the_requested_record_key_order() -> Result
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
         GhostlightAgentStateFixture,
-    >("ghostlight.agent-state".to_string(), None));
+    >("ghostlight.agent-state".to_string(), None))?;
 
     let mut policy = CultNetReadOnlySnapshotPolicy::new();
     policy.allow("ghostlight.agent-state", "row-1")?;
@@ -2207,10 +2207,64 @@ fn serve_read_only_raw_snapshot_keeps_the_requested_record_key_order() -> Result
 }
 
 #[test]
-fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
+fn document_registry_binds_one_type_per_schema_id_and_refuses_a_second_typed() -> Result<()> {
+    let canonical = |schema_id: &str| {
+        CultNetDocumentBinding::for_entry_with_schema_id::<GhostlightAgentStateFixture>(schema_id.to_string(), None)
+    };
+    let ui = |schema_id: &str| {
+        CultNetDocumentBinding::for_entry_with_schema_id::<GhostlightAgentStateUiFixture>(schema_id.to_string(), None)
+    };
+    let canonical_type = GhostlightAgentStateFixture::TYPE.to_string();
+    let ui_type = GhostlightAgentStateUiFixture::TYPE.to_string();
+
+    // Another type for a held schema id, and a held type for another schema id, in both registration orders.
+    let cases = [
+        (canonical("id.agent"), ui("id.agent"), "id.agent", [&canonical_type, &ui_type]),
+        (ui("id.agent"), canonical("id.agent"), "id.agent", [&ui_type, &canonical_type]),
+        (canonical("id.agent"), canonical("id.other"), "id.other", [&canonical_type, &canonical_type]),
+        (canonical("id.other"), canonical("id.agent"), "id.agent", [&canonical_type, &canonical_type]),
+    ];
+    for (first, second, schema_id, names) in cases {
+        let mut registry = CultNetDocumentRegistry::new();
+        registry.register(first.clone())?;
+        let error = registry.register(second.clone()).err().expect("a second claimant is refused");
+        let conflict = error
+            .downcast_ref::<cultcache_rs::SchemaConflictError>()
+            .unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(conflict.schema_id, schema_id);
+        assert_eq!(conflict.schema_names, names.map(|name| name.clone()).to_vec());
+        assert_eq!(conflict.record_key, "");
+        assert!(error.to_string().contains(schema_id), "{error:#}");
+        // The refused binding left nothing behind: the first binding still answers for its type and its schema id.
+        assert_eq!(registry.binding(&first.document_type).map(|held| held.schema_id.as_str()), Some(first.schema_id.as_str()));
+        assert_eq!(
+            registry.binding_by_schema_id(&first.schema_id).map(|held| held.document_type.as_str()),
+            Some(first.document_type.as_str())
+        );
+        if second.schema_id != first.schema_id {
+            assert!(registry.binding_by_schema_id(&second.schema_id).is_none());
+        }
+    }
+
+    // A type bound again to the schema id it holds replaces its binding.
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(canonical("id.agent"))?;
+    registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<GhostlightAgentStateFixture>(
+        "id.agent".to_string(),
+        Some("ghostlight.agent_state.v2".to_string()),
+    ))?;
+    assert_eq!(
+        registry.binding(&canonical_type).and_then(|held| held.payload_schema_version.as_deref()),
+        Some("ghostlight.agent_state.v2")
+    );
+    Ok(())
+}
+
+#[test]
+fn raw_snapshot_replication_hydrates_the_receivers_own_type_for_the_schema() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let origin_store = temp.path().join("origin-alias.msgpack");
-    let target_store = temp.path().join("target-alias.msgpack");
+    let origin_store = temp.path().join("origin.msgpack");
+    let target_store = temp.path().join("target.msgpack");
     let canonical = GhostlightAgentStateFixture {
         schema_version: "ghostlight.agent_state.v0".to_string(),
         agent_id: "epiphany.persona".to_string(),
@@ -2223,7 +2277,7 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
     >(
         "ghostlight.agent_state.v0".to_string(),
         "ghostlight.agent_state.v0".to_string(),
-    ));
+    ))?;
     let mut origin = CultCache::new();
     origin.register_entry_type::<GhostlightAgentStateFixture>()?;
     origin.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&origin_store))?;
@@ -2231,24 +2285,24 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
     origin.put("epiphany.persona", &canonical)?;
     let raw_snapshot = origin_registry.create_raw_snapshot_response(
         &origin,
-        "raw-snapshot-alias",
+        "raw-snapshot-receiver-type",
         Some(&["ghostlight.agent_state.v0".to_string()]),
         Some(&["epiphany.persona".to_string()]),
     )?;
 
-    let mut alias_registry = CultNetDocumentRegistry::new();
-    alias_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
+    let mut target_registry = CultNetDocumentRegistry::new();
+    target_registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
         GhostlightAgentStateUiFixture,
     >(
         "ghostlight.agent_state.v0".to_string(),
         "ghostlight.agent_state.v0".to_string(),
-    ));
+    ))?;
     let mut target = CultCache::new();
     target.register_entry_type::<GhostlightAgentStateUiFixture>()?;
     target.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&target_store))?;
     target.pull_all_backing_stores()?;
 
-    let applied = alias_registry
+    let applied = target_registry
         .sync_raw_document_from_snapshot_response::<GhostlightAgentStateUiFixture>(
             &mut target,
             &raw_snapshot,
@@ -2271,16 +2325,16 @@ fn raw_snapshot_replication_hydrates_same_schema_rust_aliases() -> Result<()> {
 }
 
 #[test]
-fn reactive_document_coalesces_direct_same_schema_alias_member_writes() -> Result<()> {
+fn reactive_document_coalesces_direct_member_writes() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let target_store = temp.path().join("target-reactive-alias.msgpack");
+    let target_store = temp.path().join("target-reactive.msgpack");
     let mut registry = CultNetDocumentRegistry::new();
     registry.register(CultNetDocumentBinding::for_entry_with_schema_id::<
         GhostlightReactiveNoteUiFixture,
     >(
         "ghostlight.reactive_note.v0".to_string(),
         "ghostlight.reactive_note.v0".to_string(),
-    ));
+    ))?;
     let cache = Arc::new(Mutex::new(CultCache::new()));
     {
         let mut cache = cache.lock().expect("cache mutex");
@@ -2345,7 +2399,7 @@ fn reactive_document_tracks_canonical_reconciliation_delta() -> Result<()> {
     >(
         "ghostlight.reactive_note.v0".to_string(),
         "ghostlight.reactive_note.v0".to_string(),
-    ));
+    ))?;
     let cache = Arc::new(Mutex::new(CultCache::new()));
     {
         let mut cache = cache.lock().expect("cache mutex");
