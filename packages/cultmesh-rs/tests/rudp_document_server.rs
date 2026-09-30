@@ -241,8 +241,8 @@ fn client_on(
     })
 }
 
-fn connect(
-    server: &mut Server,
+fn connect<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
     clients: &mut [&mut CultNetRudpSocketTransportConnection],
 ) -> Result<()> {
     for client in &mut *clients {
