@@ -926,6 +926,9 @@ namespace GameCult.Networking
         // When the unanswered Connect first went out; DueResends abandons it for a fresh attempt once
         // ConnectAttemptMs has passed.
         private long _connectStartedAtMs;
+        // The payload of the Connect this side sent, kept so a fresh attempt can always be built
+        // whatever became of the pending packet.
+        private byte[] _connectPayload = Array.Empty<byte>();
         private long? _lastReceivedAtMs;
         private uint? _highestReceivedSequence;
         private readonly HashSet<uint> _receivedSequences = new HashSet<uint>();
@@ -952,27 +955,23 @@ namespace GameCult.Networking
             ValidateLimits(options.InitialSequence, options.MaxPendingReliablePackets);
 
             ConnectionId = options.ConnectionId;
-            _nextSequence = options.InitialSequence ?? DrawSequence(1);
+            _nextSequence = options.InitialSequence ?? DrawSequence();
             ResendDelayMs = options.ResendDelayMs;
             _maxPendingReliablePackets = options.MaxPendingReliablePackets;
         }
 
         /// <summary>
-        /// A sequence drawn from a secure source in [<paramref name="floor"/>, 2^31). The Connect's
-        /// sequence is what tells a peer whether a Connect repeats one it already accepted or starts a
-        /// new session, so two sessions must not share one by default. A floor above the range draws
-        /// nothing new: the caller keeps its own sequence.
+        /// A sequence drawn from a secure source in [1, 2^31). The Connect's sequence is what tells a
+        /// peer whether a Connect repeats one it already accepted or starts a new session, so two
+        /// sessions must not share one by default.
         /// </summary>
-        private static uint DrawSequence(uint floor)
+        private static uint DrawSequence()
         {
-            floor = Math.Max(1u, floor);
             const uint ceiling = 1u << 31;
-            if (floor >= ceiling)
-                return floor;
             var bytes = new byte[4];
             using (var random = System.Security.Cryptography.RandomNumberGenerator.Create())
                 random.GetBytes(bytes);
-            return floor + BitConverter.ToUInt32(bytes, 0) % (ceiling - floor);
+            return 1u + BitConverter.ToUInt32(bytes, 0) % (ceiling - 1u);
         }
 
         // Whether `sequence` is at or before `mark` in serial order, within the receive window. The
@@ -1061,6 +1060,7 @@ namespace GameCult.Networking
             _connectSequence = packet.Sequence;
             _awaitingAccept = true;
             _connectStartedAtMs = nowMs;
+            _connectPayload = packet.Payload ?? Array.Empty<byte>();
             TrackReliable(packet, nowMs);
             return packet;
         }
@@ -1249,7 +1249,11 @@ namespace GameCult.Networking
             {
                 return new CultNetRudpReceiveResult();
             }
-            ApplyAcknowledgements(packet);
+            // While this side's Connect awaits its Accept, only the Accept it honours retires it: an Ack
+            // that names the Connect (a server's reply to a repeat or a stale copy) says the server did
+            // not start a session.
+            if (honoursAccept || !_awaitingAccept)
+                ApplyAcknowledgements(packet);
             var readyToSend = PromoteQueuedReliable(nowMs);
             _lastReceivedAtMs = nowMs;
 
@@ -1661,23 +1665,20 @@ namespace GameCult.Networking
         }
 
         // A Connect unanswered for ConnectAttemptMs is replaced, not retransmitted further, by a Connect
-        // with a newly drawn sequence and the same payload. Nothing was ever sent in an unanswered
-        // generation, so no sequence issued so far is owed; the draw stays above them, so a frame the
-        // peer still remembers from an earlier generation of this session stays at or before the new
-        // Connect.
+        // with the same payload and the abandoned sequence plus the receive window less one. Nothing
+        // was ever sent in an unanswered generation, so no sequence issued so far is owed. The jump
+        // keeps a late copy of the abandoned Connect inside the new one's stale window, so a server
+        // that took the new Connect answers the copy with an Ack instead of restarting; and it leaves
+        // the stale window of whatever generation the server holds, unless that generation sits
+        // exactly at the jump, and then the next attempt leaves it. The first Connect of a session is
+        // the only one drawn at random.
         private CultNetRudpPacket? AbandonUnansweredConnect(long nowMs)
         {
-            if (!_awaitingAccept || nowMs - _connectStartedAtMs < ConnectAttemptMs)
+            if (!_awaitingAccept || nowMs - _connectStartedAtMs < ConnectAttemptMs || !_connectSequence.HasValue)
                 return null;
-            byte[] payload;
-            lock (_pendingReliableGate)
-            {
-                if (!_connectSequence.HasValue || !_pendingReliable.TryGetValue(_connectSequence.Value, out var pending))
-                    return null;
-                payload = pending.Packet.Payload ?? Array.Empty<byte>();
-            }
-            _nextSequence = DrawSequence(_nextSequence);
-            return CreateConnect(nowMs, payload);
+            var jumped = (ulong)_connectSequence.Value + ReceivedSequenceWindow - 1;
+            _nextSequence = (uint)Math.Min(jumped, uint.MaxValue - 1);
+            return CreateConnect(nowMs, _connectPayload);
         }
 
         // The handshake's one act on the watermark: the peer's Connect or Accept is the first sequence

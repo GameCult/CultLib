@@ -583,6 +583,136 @@ namespace GameCult.Networking.Tests
             Assert.That(Encoding.UTF8.GetString(server.ReceiveOnce()!.Payload), Is.EqualTo("after"));
         }
 
+        // Ack Cut 1d, batch 2: the connect-attempt timeout.
+
+        /// <summary>
+        /// A server that keeps a session answers a client's repeated or stale Connect with an Ack that
+        /// may name the client's pending Connect. That Ack says no session started: only an Accept the
+        /// client honours retires its Connect, so the attempt still times out and is replaced.
+        /// </summary>
+        [Test]
+        public void AnAckNamingThePendingConnectDoesNotRetireIt()
+        {
+            var server = Session(500);
+            var old = Session(1);
+            var oldAccept = server.AcceptConnect(old.CreateConnect(0), 0);
+            old.Receive(oldAccept, 0);
+            server.Receive(old.CreateAckForReceived(oldAccept.Sequence), 0);
+
+            var restarted = Session(1);
+            var first = restarted.CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            var reply = server.AcceptConnect(first, 1);
+            Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
+            Assert.That(NamesSequence(reply, first.Sequence), Is.True, "the Ack must name the pending Connect for this test to bite");
+            restarted.Receive(reply, 1);
+            Assert.That(restarted.Connected, Is.False);
+            Assert.That(restarted.PendingReliableSequences, Is.EqualTo(new[] { first.Sequence }), "an Ack retired the Connect");
+
+            var fresh = restarted.DueResends(3_000);
+            Assert.That(fresh, Has.Count.EqualTo(1), "the client waits for ever with nothing to resend");
+            Assert.That(Encoding.UTF8.GetString(fresh[0].Payload), Is.EqualTo("join"));
+            var accept = server.AcceptConnect(fresh[0], 3_000);
+            Assert.That(accept.PacketType, Is.EqualTo(CultNetRudpPacketType.Accept));
+            restarted.Receive(accept, 3_000);
+            Assert.That(restarted.Connected, Is.True);
+        }
+
+        [Test]
+        public void ALateCopyOfAnAbandonedConnectIsStaleOnceItsReplacementIsAccepted()
+        {
+            var server = Session(500);
+            var client = Session(10);
+            var abandoned = client.CreateConnect(0);
+            var fresh = client.DueResends(3_000);
+            Assert.That(fresh, Has.Count.EqualTo(1));
+            Assert.That(fresh[0].Sequence, Is.EqualTo(abandoned.Sequence + 4_095));
+            var accept = server.AcceptConnect(fresh[0], 3_001);
+            client.Receive(accept, 3_002);
+            server.Receive(client.CreateAckForReceived(accept.Sequence), 3_002);
+            Assert.That(client.Connected, Is.True);
+            var a = Send(client, "a");
+            Assert.That(Names(server.Receive(a, 3_003)), Is.EqualTo(new[] { "a" }));
+            client.Receive(server.CreateAckForReceived(a.Sequence), 3_003);
+
+            Assert.That(server.ConnectRepeats(abandoned), Is.True, "the late copy would restart the server");
+            var reply = server.AcceptConnect(abandoned, 3_004);
+            Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
+            client.Receive(reply, 3_005);
+            Assert.That(client.Connected, Is.True);
+            Assert.That(Names(server.Receive(Send(client, "b"), 3_006)), Is.EqualTo(new[] { "b" }));
+        }
+
+        [Test]
+        public void AServerSittingAtTheJumpIsLeftByTheNextAttempt()
+        {
+            var server = Session(500);
+            var old = Session(5_095);
+            var oldAccept = server.AcceptConnect(old.CreateConnect(0), 0);
+            old.Receive(oldAccept, 0);
+            server.Receive(old.CreateAckForReceived(oldAccept.Sequence), 0);
+
+            var restarted = Session(1_000);
+            var first = restarted.CreateConnect(0, Encoding.UTF8.GetBytes("join"));
+            restarted.Receive(server.AcceptConnect(first, 1), 1);
+            Assert.That(restarted.Connected, Is.False);
+
+            var second = restarted.DueResends(3_000)[0];
+            Assert.That(second.Sequence, Is.EqualTo(5_095u), "the jump lands on the server's generation");
+            var reply = server.AcceptConnect(second, 3_001);
+            Assert.That(reply.PacketType, Is.EqualTo(CultNetRudpPacketType.Ack));
+            restarted.Receive(reply, 3_001);
+            Assert.That(restarted.Connected, Is.False);
+
+            var third = restarted.DueResends(6_000)[0];
+            Assert.That(third.Sequence, Is.EqualTo(5_095u + 4_095u));
+            var accept = server.AcceptConnect(third, 6_001);
+            Assert.That(accept.PacketType, Is.EqualTo(CultNetRudpPacketType.Accept));
+            restarted.Receive(accept, 6_001);
+            Assert.That(restarted.Connected, Is.True);
+        }
+
+        /// <summary>
+        /// A pinned client that restarts on the same address is a repeat by sequence, so the listener
+        /// answers with an Ack; the client's attempt times out, and the fresh Connect (another
+        /// sequence) starts a new generation the listener admits.
+        /// </summary>
+        [Test]
+        public void TheListenerAdmitsAPinnedClientThatRestartsOnTheSameAddress()
+        {
+            using var serverSocket = Bind();
+            using var peerSocket = Bind();
+            using var server = new CultNetRudpSocketTransportServer(new CultNetRudpSocketTransportServerOptions
+            {
+                RuntimeId = "csharp-rudp-listener",
+                Socket = serverSocket,
+                ConnectionId = ConnectionId
+            });
+            var serverEndPoint = serverSocket.LocalEndPoint!;
+            void ToServer(CultNetRudpPacket packet) => peerSocket.SendTo(CultNetRudpPacketCodec.Encode(packet), serverEndPoint);
+
+            var first = Session(1);
+            ToServer(first.CreateConnect(0, Encoding.UTF8.GetBytes("join")));
+            server.ReceiveOnce();
+            var accept = Drain(peerSocket).First(p => p.PacketType == CultNetRudpPacketType.Accept);
+            first.Receive(accept, 0);
+            ToServer(first.CreateAckForReceived(accept.Sequence));
+            server.ReceiveOnce();
+            Drain(peerSocket);
+
+            var restarted = Session(1);
+            ToServer(restarted.CreateConnect(0, Encoding.UTF8.GetBytes("join")));
+            server.ReceiveOnce();
+            foreach (var packet in Drain(peerSocket))
+                restarted.Receive(packet, 1);
+            Assert.That(restarted.Connected, Is.False);
+
+            ToServer(restarted.DueResends(3_000)[0]);
+            server.ReceiveOnce();
+            foreach (var packet in Drain(peerSocket))
+                restarted.Receive(packet, 3_001);
+            Assert.That(restarted.Connected, Is.True, "the restarted pinned client was never admitted");
+        }
+
         // Transports.
 
         [Test]
