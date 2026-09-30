@@ -24,6 +24,13 @@ Found by the put-serve Hands (batch 3, `38000efa`, 2026-09-30); they belong to t
 - **New Rust refusal frame.** The put-serve branch adds a Rust refusal frame, `cultnet.error.v0` carrying the
   reason text with no code and no details, sent before the goodbye and acknowledging nothing. Cut 1 gives it a
   code.
+- Found by the put-serve Soul (merge verdict, 2026-09-30):
+  - A store `OSError(ENOSPC)` in Python is refused as `malformed_document_put`, with the text "Raw put document could
+    not be stored." That is a server fault reported as the peer's fault.
+  - Over RUDP, Python's `document_unservable` details add `fragmentCount` and `maxFragmentCount`, and send
+    `maxSnapshotBytes: null` when it is unbounded. The map specifies `{responseBytes, maxSnapshotBytes}`.
+  - `response_unqueueable` (Python, P3) is a new code outside the closed list.
+  - A TS peer cannot tell "stored, receipt lost" from "refused" (put-serve Soul F4, pass 3).
 
 Map branch: `main`.
 
