@@ -3791,10 +3791,7 @@ namespace GameCult.Caching
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
             if (view != null)
-            {
-                view.LaidBack.ExceptWith(replaced);
                 WroteWholeView(records.Values, view.LaidBack);
-            }
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
         }

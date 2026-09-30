@@ -239,6 +239,35 @@ namespace GameCult.Caching.Tests
             Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "d", "w" }));
         }
 
+        // A directory load without a lease that a writer's commit forces to retry lists each foreign record once, from the manifest
+        // the retry read.
+        [Test]
+        public void ARetriedDirectoryLoadListsEachForeignRecordOnce()
+        {
+            var path = Seeded("retried.cc", directory: true);
+            var store = new DirectoryMessagePackBackingStore(path);
+            using var cache = new CultCache(DeckOnly);
+            cache.AddBackingStore(store);
+            File.Delete(Path.Combine(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path), ".commit.lock"));
+            var commits = 0;
+            // The writer is another cache, so it commits from another thread; it commits once, under the first unleased read.
+            store.UnleasedManifestRead = () =>
+            {
+                if (commits++ > 0)
+                    return;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    using var writer = Open(path, Full, directory: true);
+                    writer.Commit(batch => batch.Upsert(Deck, DeckOf("e"), E));
+                }).GetAwaiter().GetResult();
+            };
+
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(cache.Get(E), Is.Not.Null, "the load retried and read the writer's generation");
+            Assert.That(store.ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+        }
+
         // The file decides what is carried, not what this cache loaded: a foreign record another writer added since is kept too.
         [TestCase(false)]
         [TestCase(true)]
@@ -295,8 +324,60 @@ namespace GameCult.Caching.Tests
             entry.ContentHash = OtherRuntimeId;
             entry.CompatibleSchemaIds = new[] { OtherRuntimeId };
             snapshot.Records.Single().SchemaId = OtherRuntimeId;
+            // An older entry that also lists the id, first in the catalog: the entry that owns the id is the one that publishes it.
+            snapshot.SchemaCatalog = new[]
+            {
+                new CultSchemaCatalogEntry
+                {
+                    SchemaId = "decoy.older", SchemaName = "tests.decoy", SchemaVersion = "tests.decoy.v1", ContentHash = "decoy.older",
+                    CompatibleSchemaIds = new[] { "decoy.older", OtherRuntimeId }
+                },
+                entry
+            };
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
             return path;
+        }
+
+        // The record and the entry that described it when it loaded travel together: another writer re-describing the id since
+        // does not change what a whole view lays back.
+        [Test]
+        public void AWholeViewLaysBackTheCatalogEntryItLoadedWhateverTheFileSaysNow([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = OtherRuntimeStore("redescribed.cc");
+            var loaded = CatalogEntryBytes(path, OtherRuntimeId);
+            using var cache = Open(path, DeckOnly, directory: false);
+            var snapshot = Read(path);
+            snapshot.SchemaCatalog.Single(entry => entry.SchemaId == OtherRuntimeId).SchemaVersion = "tests.foreign_deck.redescribed";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            Land(cache, write, E, DeckOf("e"));
+
+            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(loaded));
+        }
+
+        // A store whose file is gone holds nothing, foreign records included.
+        [Test]
+        public void AStoreWhoseFileIsGoneListsNoForeignRecords()
+        {
+            var path = Seeded("gone.cc", directory: false);
+            using var cache = Open(path, DeckOnly, directory: false);
+            File.Delete(path);
+
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(StoreOf(cache).ForeignRecords, Is.Empty);
+        }
+
+        // The registry's public resolution still refuses an id no registered type claims, naming the schema and the id: only a store
+        // carries such a record.
+        [Test]
+        public void ResolvingAnUnclaimedIdThroughTheRegistryRefusesByName()
+        {
+            var entry = Full.GetRequired(Widget).ToCatalogEntry();
+
+            var refusal = Assert.Throws<InvalidOperationException>(() => DeckOnly.ResolvePersistedSchema(WidgetId, new[] { entry }))!;
+
+            Assert.That(refusal.Message, Does.Contain("tests.foreign_widget").And.Contain(WidgetId));
         }
 
         private static byte[] CatalogEntryBytes(string path, string schemaId) =>
