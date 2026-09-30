@@ -42,9 +42,10 @@ write("extra-slot-full-payload.msgpack",
       [header, catalog, [anvil + [["item:bellows", []]]] + records[1:]])
 variant = ["item:anvil-big", anvil[1], anvil[2], b"", ["item:anvil", [[0, [[1, ""]], "", 99]]]]
 write("variant-v2.msgpack", ["cultcache.store.v2", catalog, records + [variant]])
-legacy_entry = [catalog[0][0], catalog[0][1], catalog[0][2], catalog[0][4], None, catalog[0][3], []]
+legacy = lambda entry: [entry[0], entry[1], entry[2], entry[4], None, entry[3], []]
+legacy_entry = legacy(catalog[0])
 write("legacy-catalog-extra-slot.msgpack",
       [header, [legacy_entry], [anvil + [["item:bellows", []]]]])
-write("legacy-catalog-plain.msgpack", [header, [legacy_entry], records])
+write("legacy-catalog-plain.msgpack", [header, [legacy(entry) for entry in catalog], records])
 (here / "legacy-catalog-trailing.msgpack").write_bytes(
-    msgpack.packb([header, [legacy_entry], records], use_bin_type=True) + b"\x01\x02\x03")
+    msgpack.packb([header, [legacy(entry) for entry in catalog], records], use_bin_type=True) + b"\x01\x02\x03")

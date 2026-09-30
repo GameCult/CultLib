@@ -20,5 +20,5 @@ bad-body-v3.bin     refuses  refuses  refuses  refuses
 header-only-v1.bin  refuses  refuses  refuses  refuses
 header-only-v3.bin  refuses  refuses  refuses  refuses
 extra-top-slot.bin  refuses  refuses  refuses  refuses
-missing-schema-v3.bin reads  refuses  refuses  refuses
+missing-schema-v3.bin refuses refuses  refuses  refuses
 variant-slot-v3.bin reads    refuses  refuses  refuses
