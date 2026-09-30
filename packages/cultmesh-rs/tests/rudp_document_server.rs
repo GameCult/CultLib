@@ -53,10 +53,6 @@ struct SourceState {
     documents: Vec<CultNetRawDocumentRecord>,
     failures_remaining: usize,
     calls: usize,
-    /// Serves records without source provenance, and says so to admission.
-    strips_provenance: bool,
-    /// Refuses to say what it would serve.
-    served_record_fails: bool,
 }
 
 #[derive(Clone, Default)]
@@ -74,13 +70,6 @@ impl Source {
         Self(Arc::new(Mutex::new(SourceState {
             documents,
             failures_remaining: 1,
-            ..Default::default()
-        })))
-    }
-
-    fn stripping() -> Self {
-        Self(Arc::new(Mutex::new(SourceState {
-            strips_provenance: true,
             ..Default::default()
         })))
     }
@@ -108,28 +97,50 @@ impl CultMeshRudpSnapshotSource for Source {
             state.failures_remaining -= 1;
             anyhow::bail!("injected source failure");
         }
-        let documents = state.documents.clone();
-        Ok(if state.strips_provenance {
-            documents.iter().map(stripped).collect()
-        } else {
-            documents
-        })
+        Ok(state.documents.clone())
+    }
+}
+
+/// A source that serves `Source`'s records without source provenance, and says
+/// so to admission through `served_record`. `Source` keeps the default.
+#[derive(Clone, Default)]
+struct StrippingSource {
+    inner: Source,
+    /// Refuses to say what it would serve.
+    served_record_fails: bool,
+}
+
+impl CultMeshRudpSnapshotSource for StrippingSource {
+    fn raw_snapshot(
+        &mut self,
+        query: &CultMeshRudpSnapshotQuery,
+    ) -> Result<Vec<CultNetRawDocumentRecord>> {
+        Ok(self.inner.raw_snapshot(query)?.iter().map(stripped).collect())
     }
 
     fn served_record(
         &mut self,
         document: &CultNetRawDocumentRecord,
     ) -> Result<CultNetRawDocumentRecord> {
-        let state = self.0.lock().unwrap();
-        if state.served_record_fails {
+        if self.served_record_fails {
             anyhow::bail!("injected served-record failure");
         }
-        Ok(if state.strips_provenance {
-            stripped(document)
-        } else {
-            document.clone()
-        })
+        Ok(stripped(document))
     }
+}
+
+fn stripping_server(
+    options: CultMeshRudpDocumentServerOptions,
+    sink: Sink,
+    source: StrippingSource,
+) -> Result<CultMeshRudpDocumentServer<Sink, StrippingSource, Clock>> {
+    CultMeshRudpDocumentServer::new(
+        UdpSocket::bind("127.0.0.1:0")?,
+        sink,
+        source,
+        Clock::new(64_000),
+        options,
+    )
 }
 
 #[derive(Clone)]
@@ -281,8 +292,8 @@ fn document_served_at(key: &str, bytes: usize) -> Result<CultNetRawDocumentRecor
 }
 
 /// Polls the server and client until the client receives a frame.
-fn serve_until_frame(
-    server: &mut Server,
+fn serve_until_frame<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
     client: &mut CultNetRudpSocketTransportConnection,
 ) -> Result<Vec<u8>> {
     for _ in 0..2_000 {
@@ -301,8 +312,8 @@ fn serve_until_frame(
 
 /// Polls the server, and the client so its sends progress, until the server
 /// returns a rejection or the sink holds `receipts`.
-fn poll_until_rejected_or_stored(
-    server: &mut Server,
+fn poll_until_rejected_or_stored<Q: CultMeshRudpSnapshotSource>(
+    server: &mut CultMeshRudpDocumentServer<Sink, Q, Clock>,
     client: &mut CultNetRudpSocketTransportConnection,
     sink: &Sink,
     receipts: usize,
@@ -925,8 +936,8 @@ fn a_put_is_sized_as_its_source_would_serve_it() -> Result<()> {
         ..Default::default()
     };
     let sink = Sink::default();
-    let source = Source::stripping();
-    let mut server = server(options, Clock::new(64_000), sink.clone(), source.clone())?;
+    let source = StrippingSource::default();
+    let mut server = stripping_server(options, sink.clone(), source.clone())?;
     let target = server.local_addr()?;
 
     let mut refused = client(target, 151)?;
@@ -966,7 +977,7 @@ fn a_put_is_sized_as_its_source_would_serve_it() -> Result<()> {
         at_bound,
         "the sink receives the record as it was sent"
     );
-    source.0.lock().unwrap().documents = vec![at_bound.clone()];
+    source.inner.0.lock().unwrap().documents = vec![at_bound.clone()];
     send(
         &mut writer,
         &CultNetMessage::SnapshotRequest {
@@ -991,9 +1002,11 @@ fn a_put_is_sized_as_its_source_would_serve_it() -> Result<()> {
 #[test]
 fn a_put_whose_served_record_the_source_cannot_give_is_refused() -> Result<()> {
     let sink = Sink::default();
-    let source = Source::default();
-    source.0.lock().unwrap().served_record_fails = true;
-    let mut server = server(Default::default(), Clock::new(65_000), sink.clone(), source)?;
+    let source = StrippingSource {
+        served_record_fails: true,
+        ..Default::default()
+    };
+    let mut server = stripping_server(Default::default(), sink.clone(), source)?;
     let mut refused = client(server.local_addr()?, 161)?;
     connect(&mut server, &mut [&mut refused])?;
     send(
