@@ -337,11 +337,25 @@ fn encoding_rows(k: usize, rows: impl Iterator<Item = usize>) -> Vec<Vec<u8>> {
 }
 
 /// Byte `j` of the result is the sum over `i` of `coefficients[i] * shards[i][j]`.
+///
+/// The hot loop of both encode and recovery: each coefficient's 256 products
+/// are tabulated once, so a shard byte costs one lookup and one XOR.
 fn combine(coefficients: &[u8], shards: &[&[u8]], shard_bytes: usize) -> Vec<u8> {
     let mut out = vec![0_u8; shard_bytes];
     for (&coefficient, shard) in coefficients.iter().zip(shards) {
-        for (byte, &input) in out.iter_mut().zip(shard.iter()) {
-            *byte ^= gf_mul(coefficient, input);
+        match coefficient {
+            0 => {}
+            1 => {
+                for (byte, &input) in out.iter_mut().zip(shard.iter()) {
+                    *byte ^= input;
+                }
+            }
+            _ => {
+                let products: [u8; 256] = std::array::from_fn(|x| gf_mul(coefficient, x as u8));
+                for (byte, &input) in out.iter_mut().zip(shard.iter()) {
+                    *byte ^= products[usize::from(input)];
+                }
+            }
         }
     }
     out
