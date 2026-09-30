@@ -436,3 +436,67 @@ fn a_refused_send_withdraws_the_fragments_the_window_queued_as_well() {
         "nothing of the refused send stays queued"
     );
 }
+
+fn receive_frame(
+    peer: &mut CultNetRudpSocketTransportConnection,
+    hub: &mut CultNetRudpServerHub,
+) -> Option<Vec<u8>> {
+    for _ in 0..600 {
+        if let Some(frame) = peer.receive_once().unwrap() {
+            return Some(frame.payload);
+        }
+        let _ = hub.receive_event_once().unwrap();
+        hub.poll_resends().unwrap();
+    }
+    None
+}
+
+/// Wherever in a fragmented send the datagram that can never be sent falls, the
+/// peer never delivers a frame built from it. At the first fragment nothing left,
+/// the send is withdrawn, and the next send is delivered whole; later, the peer has
+/// seen part of it, and the session ends with nothing delivered.
+#[test]
+fn a_send_refused_at_any_fragment_delivers_nothing_of_it() {
+    for fragments in [5_usize, 40] {
+        for failed in 0..fragments {
+            let (mut hub, mut peer, session) = one_peer(Some(1000));
+            hub.send(&session, "schema", b"warm".to_vec()).unwrap();
+            assert_eq!(receive_frame(&mut peer, &mut hub).as_deref(), Some(&b"warm"[..]));
+            let refused: Vec<u8> = (0..fragments * 1000).map(|i| (i % 251) as u8).collect();
+            hub.unsendable_after.insert(session.remote_addr, failed);
+            let result = hub.send(&session, "schema", refused);
+            if hub.unsendable_after.remove(&session.remote_addr).is_some() {
+                // The flow window queued that fragment rather than sending it now.
+                assert!(result.is_ok(), "{fragments}/{failed}: not reached, yet refused");
+                continue;
+            }
+            assert!(result.is_err(), "{fragments}/{failed}");
+            if failed == 0 {
+                assert_eq!(hub.sessions().len(), 1, "{fragments}/{failed}");
+                let next: Vec<u8> = (0..fragments * 1000).map(|i| ((i % 13) + 100) as u8).collect();
+                hub.send(&session, "schema", next.clone()).unwrap();
+                let delivered = receive_frame(&mut peer, &mut hub).expect("the next send arrives");
+                assert!(delivered == next, "{fragments}/{failed}: delivered something else");
+                for _ in 0..30 {
+                    if let Some(frame) = peer.receive_once().unwrap() {
+                        panic!("{fragments}/{failed}: a stray frame of {} bytes", frame.payload.len());
+                    }
+                    let _ = hub.receive_event_once().unwrap();
+                    hub.poll_resends().unwrap();
+                }
+            } else {
+                assert!(hub.sessions().is_empty(), "{fragments}/{failed}");
+                for _ in 0..30 {
+                    match peer.receive_once() {
+                        Ok(Some(frame)) => panic!(
+                            "{fragments}/{failed}: the peer delivered {} bytes",
+                            frame.payload.len()
+                        ),
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
+}

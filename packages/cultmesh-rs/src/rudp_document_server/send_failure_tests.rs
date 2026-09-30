@@ -366,3 +366,81 @@ fn a_session_ended_in_the_resend_loop_is_sent_nothing_more_from_it() {
     assert_eq!(server.send_failures() - before, 1);
     assert_eq!(server.session_count(), 1);
 }
+
+#[test]
+fn no_ack_follows_a_reply_that_can_never_be_sent() {
+    let (mut server, _clock, _received, _x, _y) = two_peers();
+    let target = server.local_addr().unwrap();
+    // A peer driven packet by packet: a client never sends a reliable Ping, but a
+    // peer may, and the server both answers it and acknowledges it.
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    let addr = socket.local_addr().unwrap();
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 7,
+        ..Default::default()
+    });
+    let connect = session.create_connect(0, Vec::new()).unwrap();
+    socket
+        .send_to(&encode_rudp_packet(&connect).unwrap(), target)
+        .unwrap();
+    let mut wire = vec![0_u8; MAX_UDP_DATAGRAM_BYTES];
+    for _ in 0..10 {
+        server.poll_once().unwrap();
+    }
+    let (read, _) = socket.recv_from(&mut wire).unwrap();
+    let accept = decode_rudp_packet(&wire[..read]).unwrap();
+    assert_eq!(accept.packet_type, CultNetRudpPacketType::Accept);
+    session.receive(&accept, 0).unwrap();
+    assert_eq!(server.session_count(), 3);
+
+    let mut ping = session.create_ping(b"p".to_vec());
+    ping.reliable = true;
+    ping.sequence = connect.sequence.wrapping_add(1);
+    // The Pong can never be sent; the ack after it could.
+    server.unsendable_after.insert(addr, 0);
+    socket
+        .send_to(&encode_rudp_packet(&ping).unwrap(), target)
+        .unwrap();
+    for _ in 0..10 {
+        server.poll_once().unwrap();
+    }
+
+    // The session ends over the Pong: the peer gets its goodbye and nothing else.
+    assert_eq!(server.session_count(), 2);
+    let mut arrived = Vec::new();
+    while let Ok((read, _)) = socket.recv_from(&mut wire) {
+        arrived.push(decode_rudp_packet(&wire[..read]).unwrap());
+    }
+    assert_eq!(arrived.len(), 1, "{arrived:?}");
+    assert_eq!(arrived[0].packet_type, CultNetRudpPacketType::Disconnect);
+    assert!(is_unsendable_reason(&arrived[0].payload));
+}
+
+/// Windows reports an ICMP port-unreachable for an earlier datagram as
+/// `ConnectionReset` on the next receive. It names no datagram of this poll, so
+/// the poll is idle and the server goes on serving. Only Windows reports it, so
+/// only a Windows run can see the rule break.
+#[cfg(windows)]
+#[test]
+fn a_reset_reported_by_a_receive_is_idle_not_an_error() {
+    let (mut server, _clock, received, (mut x, _), (mut y, _)) = two_peers();
+    // X asks for a snapshot and goes away before the answer.
+    send(&mut x, &snapshot("x-snapshot"));
+    drop(x);
+    for _ in 0..20 {
+        server
+            .poll_once()
+            .expect("a reset from X's closed port is not an error");
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    send(&mut y, &put("y-put"));
+    for _ in 0..20 {
+        server.poll_once().unwrap();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(received.lock().unwrap().as_slice(), ["y-put"]);
+}
