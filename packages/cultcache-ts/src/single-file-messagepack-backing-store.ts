@@ -97,9 +97,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async push(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
       const existing = await this.pullAll();
-      const filtered = existing.filter(
-        (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
-      );
+      const filtered = existing.filter((candidate) => !isSameRecord(candidate, entry));
       filtered.push(entry);
       await this.#writeAll(filtered);
     });
@@ -108,9 +106,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async delete(entry: CultCacheEnvelope): Promise<void> {
     await this.#enqueue(async () => {
       const existing = await this.pullAll();
-      const filtered = existing.filter(
-        (candidate) => !(candidate.type === entry.type && candidate.key === entry.key),
-      );
+      const filtered = existing.filter((candidate) => !isSameRecord(candidate, entry));
       await this.#writeAll(filtered);
     });
   }
@@ -268,6 +264,26 @@ function catalogEntriesFor(entries: CultCacheEnvelope[]): Map<string, CultCacheS
 
 function schemaIdForEnvelope(entry: CultCacheEnvelope): string {
   return entry.schemaId ?? entry.type;
+}
+
+/**
+ * A record is its schema and its key. An envelope's `type` is a label, not the schema: a record
+ * read back carries its catalog entry's schema name, while one being written carries its
+ * definition's type, and the two differ whenever a definition names its schema. So a stored record
+ * is the one being written or deleted when the keys match and the stored record names the written
+ * envelope's schema the way the cache resolves a persisted record to a definition: by a schema id
+ * the written envelope answers to (its own and every id its catalog entry declares compatible),
+ * else by its schema name, else by its type.
+ */
+function isSameRecord(stored: CultCacheEnvelope, written: CultCacheEnvelope): boolean {
+  if (stored.key !== written.key) {
+    return false;
+  }
+
+  const writtenSchemaIds = [schemaIdForEnvelope(written), ...(written.catalogEntry?.compatibleSchemaIds ?? [])];
+  return writtenSchemaIds.some((schemaId) => schemaId === stored.schemaId)
+    || stored.type === written.catalogEntry?.schemaName
+    || stored.type === written.type;
 }
 
 function encodeCatalogEntry(entry: CultCacheSchemaCatalogEntry): unknown[] {
