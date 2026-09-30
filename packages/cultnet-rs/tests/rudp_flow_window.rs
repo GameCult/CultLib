@@ -191,6 +191,8 @@ fn acknowledged_bytes_above_a_lost_packet_still_count_against_4_mib() -> Result<
     // g arrives: nothing is held behind a gap any more, and the queue drains.
     let promoted = sender.receive(&ack_for(g.sequence), 2)?.ready_to_send;
     assert_eq!(sequences(&promoted), vec![g.sequence + 5]);
+    // The bytes above the old gap no longer count: another MiB fits.
+    assert_eq!(sequences(&send(&mut sender, MIB)?), vec![g.sequence + 6]);
     Ok(())
 }
 

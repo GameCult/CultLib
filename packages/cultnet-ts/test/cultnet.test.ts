@@ -1539,6 +1539,8 @@ test("acknowledged bytes above a lost packet still count against 4 MiB", () => {
 
   // g arrives: nothing is held behind a gap any more, and the queue drains.
   assert.deepEqual(sequencesOf(sender.receive(flowAck(g.sequence), 2).readyToSend ?? []), [g.sequence + 5]);
+  // The bytes above the old gap no longer count: another MiB fits.
+  assert.deepEqual(sequencesOf(flowSend(sender, MIB)), [g.sequence + 6]);
 });
 
 test("acknowledged bytes count against the lowest unacked sequence as it advances", () => {

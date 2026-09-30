@@ -996,6 +996,8 @@ class CultNetTests(unittest.TestCase):
         # g arrives: nothing is held behind a gap any more, and the queue drains.
         promoted = sender.receive(self._flow_ack(g.sequence), 2).ready_to_send
         self.assertEqual([p.sequence for p in promoted], [g.sequence + 5])
+        # The bytes above the old gap no longer count: another MiB fits.
+        self.assertEqual([p.sequence for p in self._flow_send(sender, self.MIB)], [g.sequence + 6])
 
     def test_cultnet_rudp_acknowledged_bytes_count_against_the_lowest_unacked_sequence_as_it_advances(self) -> None:
         sender = self._connected_flow_session(1)

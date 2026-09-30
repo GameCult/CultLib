@@ -1087,8 +1087,10 @@ impl CultNetRudpSession {
             .retain(|_, pending| pending.expires_at_ms.is_none_or(|at| now_ms <= at));
         self.queued_reliable
             .retain(|(_, expires_at_ms)| expires_at_ms.is_none_or(|at| now_ms <= at));
-        self.forget_acked_below_lowest();
         let after = self.pending_reliable.len() + self.queued_reliable.len();
+        if after != before {
+            self.forget_acked_below_lowest();
+        }
         self.reliable_packets_expired = self
             .reliable_packets_expired
             .saturating_add((before - after) as u64);

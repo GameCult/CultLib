@@ -1284,6 +1284,8 @@ namespace GameCult.Networking.Tests
             // g arrives: nothing is held behind a gap any more, and the queue drains.
             var promoted = sender.Receive(FlowAck(g.Sequence), 2).ReadyToSend;
             Assert.That(promoted.Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 5 }));
+            // The bytes above the old gap no longer count: another MiB fits.
+            Assert.That(FlowSend(sender, Mib).Select(packet => packet.Sequence), Is.EqualTo(new[] { g.Sequence + 6 }));
         }
 
         [Test]
