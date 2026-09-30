@@ -135,7 +135,7 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
     body: "catalog-updated",
   });
   assert.equal(
-    (await catalog.latest<Note>(noteDocument, "browser-client")).body,
+    (await catalog.latest(noteDocument, "browser-client")).body,
     "catalog-updated",
   );
   // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
@@ -148,6 +148,41 @@ test("CultMesh TS document handles hide local cache plumbing behind typed reacti
   }));
   assert.equal(incremented.body, "catalog-updated:updated-through-bound-set");
   assert.equal((await document.latest()).body, "catalog-updated:updated-through-bound-set");
+});
+
+test("CultMesh TS catalogs infer a lookup's value type from its document definition", async () => {
+  const documents = CultMesh.documents(CultMesh.document("note:typed", noteDocument, async () => ({ noteId: "note:typed", body: "typed" })));
+  const collections = CultMesh.collections(CultMesh.collection("notes:typed", noteDocument, async () => [{ noteId: "note:typed", body: "typed" }]));
+  const inferred: Note = await documents.latest(noteDocument);
+  const inferredRows: readonly Note[] = await collections.latest(noteDocument);
+  assert.equal(inferred.body, "typed");
+  assert.equal(inferredRows[0]?.body, "typed");
+  // @ts-expect-error a definition names its value type: body is a string
+  const wrong: number = (await documents.latest(noteDocument)).body;
+  // @ts-expect-error a collection lookup infers its rows the same way
+  const wrongRows: readonly number[] = await collections.latest(noteDocument);
+  // @ts-expect-error a bare schema descriptor yields unknown
+  void (await documents.latest({ schemaId: "cultmesh.note.v0" })).body;
+  const explicit: { body: string } = await documents.latest<{ body: string }>({ schemaId: "cultmesh.note.v0" });
+  assert.equal(explicit.body, "typed");
+  void wrong;
+  void wrongRows;
+
+  // Writes are checked against the definition's value type. Never called: the handle is read-only.
+  const typeOnly = () => {
+    // @ts-expect-error replace checks the value against the definition
+    void documents.replace(noteDocument, { noteId: "note:typed", body: 1 });
+    // @ts-expect-error so does a prediction, with a context
+    void documents.submitPrediction(noteDocument, "local", { noteId: "note:typed" });
+    documents.watch(noteDocument, value => {
+      // @ts-expect-error a watched value is the definition's value
+      const n: number = value.body;
+      void n;
+    });
+    // @ts-expect-error a writer writes the definition's value
+    void documents.authoritativeWriter(noteDocument).write({ noteId: 1, body: "x" });
+  };
+  void typeOnly;
 });
 
 test("CultMesh TS document handles submit predictions through configured authority hooks", async () => {
@@ -941,7 +976,7 @@ test("CultMesh TS binds publication document catalogs from source resolvers", as
     ["daemon:first", "daemon:second"],
   );
   assert.equal(
-    (await catalog.document<Note>(noteDocument).latest()).body,
+    (await catalog.document(noteDocument).latest()).body,
     "second source",
   );
   assert.equal(catalog.document(noteDocument).routeHint.description, "publication catalog");
@@ -1117,7 +1152,7 @@ test("CultMesh TS collection handles expose typed snapshots and reset watches", 
 
   const catalog = CultMesh.collections(collection);
   assert.deepEqual(
-    (await catalog.latest<Note>(noteDocument, "local")).map(note => note.body).sort(),
+    (await catalog.latest(noteDocument, "local")).map(note => note.body).sort(),
     ["alpha", "bravo"],
   );
   // A typed lookup is answered by its own type's handle; a handle of another type for the same schema is not it.
