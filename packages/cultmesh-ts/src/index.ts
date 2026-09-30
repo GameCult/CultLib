@@ -14,6 +14,7 @@ import {
   CultNetRudpSession,
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
+  rudpClientBindHost,
   CultNetSchemaCatalog,
   CultNetShardCatalog,
   cultNetBuiltinSchemaRegistry,
@@ -4330,6 +4331,11 @@ export interface CultMeshRudpEndpoint {
 }
 
 export interface CultMeshRudpSocketOptions {
+  /**
+   * Local address to bind. Unset, a server binds loopback, and a client binds
+   * loopback for a loopback endpoint and the unspecified address of the
+   * endpoint's family otherwise, so it can reach a remote host.
+   */
   bindHost?: string;
   bindPort?: number;
   socket?: Socket;
@@ -6135,7 +6141,7 @@ export class CultMesh {
     options: CultMeshRudpSocketOptions = {},
   ): Promise<CultNetRudpSocketTransportConnection> {
     requireNonEmpty(runtimeId, "runtimeId");
-    const socket = options.socket ?? (await bindRudpSocket(options));
+    const socket = options.socket ?? (await bindRudpSocket(options.bindHost ?? "127.0.0.1", options));
     return new CultNetRudpSocketTransportConnection({
       runtimeId,
       socket,
@@ -6161,7 +6167,10 @@ export class CultMesh {
     requireNonEmpty(runtimeId, "runtimeId");
     const parsedEndpoint =
       typeof endpoint === "string" ? CultMesh.parseRudpEndpoint(endpoint) : endpoint;
-    const socket = options.socket ?? (await bindRudpSocket(options));
+    const socket = options.socket ?? (await bindRudpSocket(
+      options.bindHost ?? (await rudpClientBindHost(parsedEndpoint.host)),
+      options,
+    ));
     return new CultNetRudpSocketTransportConnection({
       runtimeId,
       socket,
@@ -6586,9 +6595,8 @@ function toUint8Array(value: unknown): Uint8Array {
   throw new Error("CultNet raw document payload was not binary.");
 }
 
-async function bindRudpSocket(options: CultMeshRudpSocketOptions): Promise<Socket> {
-  const socket = createSocket("udp4");
-  const host = options.bindHost ?? "127.0.0.1";
+async function bindRudpSocket(host: string, options: CultMeshRudpSocketOptions): Promise<Socket> {
+  const socket = createSocket(host.includes(":") ? "udp6" : "udp4");
   const port = options.bindPort ?? 0;
   await new Promise<void>((resolve, reject) => {
     socket.once("error", reject);
