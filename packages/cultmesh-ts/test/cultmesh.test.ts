@@ -1146,19 +1146,21 @@ test("CultMesh TS syncs configured publication catalogs into a local node", asyn
     bindings,
   );
 
+  // Two documents of one type, each addressed by its own id whatever order the catalog lists them in.
   assert.deepEqual(
-    catalog.documents.map(document => document.documentId),
+    catalog.documents.map(document => document.documentId).sort(),
     ["local:first", "local:second"],
   );
-  const [firstSynced, secondSynced] = catalog.documents;
-  assert.equal((await firstSynced!.latest()).body, "first synced publication");
-  assert.equal((await secondSynced!.latest()).body, "second synced publication");
-  assert.equal(secondSynced!.routeHint.description, "publication sync catalog");
+  const secondSynced = catalog.documentById<Note>("local:second");
+  assert.equal((await catalog.documentById<Note>("local:first").latest()).body, "first synced publication");
+  assert.equal((await secondSynced.latest()).body, "second synced publication");
+  assert.equal(secondSynced.documentId, "local:second");
+  assert.equal(secondSynced.routeHint.description, "publication sync catalog");
   assert.equal(target.getRequired(noteDocument, "note:second-sync").body, "second synced publication");
-  assert.equal(
-    (await facadeCatalog.documents[1]!.latest()).body,
-    "second synced publication",
-  );
+  assert.equal((await facadeCatalog.documentById<Note>("local:second").latest()).body, "second synced publication");
+  assert.equal((await facadeCatalog.documentById<Note>("local:first").latest()).body, "first synced publication");
+  assert.equal(catalog.tryDocumentById("note:second-sync"), undefined);
+  assert.throws(() => catalog.documentById("local:third"), /no document with id 'local:third'/);
 });
 
 test("CultMesh TS document catalogs resolve semantic schema versions passed as schema ids", async () => {

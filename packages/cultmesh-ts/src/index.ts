@@ -1491,6 +1491,20 @@ export class CultMeshDocumentCatalog {
     return this;
   }
 
+  // A catalog may hold several documents of one type, one per document id. A lookup by schema answers with one of them;
+  // a lookup by document id addresses each.
+  public tryDocumentById<TDocument = unknown>(documentId: string): CultMeshDocumentHandle<TDocument> | undefined {
+    return this.#byDocumentId.get(documentId);
+  }
+
+  public documentById<TDocument = unknown>(documentId: string): CultMeshDocumentHandle<TDocument> {
+    const document = this.tryDocumentById<TDocument>(documentId);
+    if (!document) {
+      throw new Error(`Document catalog has no document with id '${documentId}'.`);
+    }
+    return document;
+  }
+
   public tryDocument<TDocument = never, TSchema extends CultMeshDocumentSchemaDescriptor = CultMeshDocumentSchemaDescriptor>(
     schema: TSchema,
   ): CultMeshDocumentHandle<CultMeshCatalogValue<TDocument, TSchema>> | undefined {
