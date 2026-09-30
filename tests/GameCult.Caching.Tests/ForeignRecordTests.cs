@@ -280,6 +280,64 @@ namespace GameCult.Caching.Tests
             Assert.That(Read(path).FormatVersion, Is.EqualTo(carriesForeign ? CultPersistedStoreSnapshot.FormatV3 : CultPersistedStoreSnapshot.FormatV1));
         }
 
+        private const string OtherRuntimeId = "other.runtime.deck";
+
+        // A deck another runtime wrote under its own id for the deck's schema. This build reads it through the catalog's schema name,
+        // but does not own the id.
+        private string OtherRuntimeStore(string name)
+        {
+            var path = PathOf(name);
+            using (var cache = Open(path, DeckOnly, directory: false))
+                cache.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var snapshot = Read(path);
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = OtherRuntimeId;
+            entry.ContentHash = OtherRuntimeId;
+            entry.CompatibleSchemaIds = new[] { OtherRuntimeId };
+            snapshot.Records.Single().SchemaId = OtherRuntimeId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            return path;
+        }
+
+        private static byte[] CatalogEntryBytes(string path, string schemaId) =>
+            CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+            {
+                SchemaCatalog = Read(path).SchemaCatalog.Where(entry => entry.SchemaId == schemaId).ToArray()
+            });
+
+        // Records and catalog entries a runtime does not own survive its writes: a write of another record lays the record back with
+        // its id, storedAt, bytes and catalog entry as they were stored.
+        [Test]
+        public void AWriteOfAnotherRecordLaysBackARecordUnderAnIdThisBuildDoesNotOwn([Values] Write write)
+        {
+            var path = OtherRuntimeStore("other-runtime.cc");
+            var before = Stored(path, D);
+            var entry = CatalogEntryBytes(path, OtherRuntimeId);
+
+            using (var cache = Open(path, DeckOnly, directory: false))
+            {
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("d"), "this build reads it");
+                Land(cache, write, E, DeckOf("e"));
+            }
+
+            Assert.That(Stored(path, D), Is.EqualTo(before));
+            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(entry));
+        }
+
+        // A write of the record itself stores what the cache holds, under the type's own id.
+        [Test]
+        public void AWriteOfTheRecordItselfStoresItUnderTheTypesOwnId([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = OtherRuntimeStore("rewritten.cc");
+
+            using (var cache = Open(path, DeckOnly, directory: false))
+                Land(cache, write, D, DeckOf("changed"));
+
+            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(DeckOnly.GetRequired(Deck).SchemaId));
+            using var reopened = Open(path, DeckOnly, directory: false);
+            Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("changed"));
+        }
+
         // A commit onto the file that involves a variant is judged on the set the file will hold. A foreign record is not decoded
         // for that judgement, so it neither fails the commit nor joins the set.
         [Test]

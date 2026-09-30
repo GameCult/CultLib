@@ -461,42 +461,42 @@ namespace GameCult.Caching.Tests
             batch.Upsert(RollV2, New(RollV2, ("Name", "y"), ("Extra", "derived-from-" + Extra(held))), RollY);
         });
 
-        // v1 reads v2's record through the entry that lists v1's id, and its whole-view commit writes it back under v1's id without
-        // the member v1 lacks: a new store of k, under a later storedAt. A v2 cache that loaded the record before that holds a
-        // condition on bytes that are gone: the condition fails, and nothing derived from the lost member lands. Pulling then shows
-        // the record as v1 left it, and a condition on that holds.
-        [TestCase(false)]
-        [TestCase(true)]
-        public void AWholeViewRewriteByAnOlderVersionFailsANewerVersionsCondition(bool unchangedOnly)
+        // v1 reads v2's record through the entry that lists v1's id: an id v1 does not own. Its whole-view write lays k back exactly
+        // as v2 stored it, the member v1 lacks included, under v2's id and storedAt, so a v2 cache's condition on k still holds and
+        // what it derives from that member lands.
+        [Test]
+        public void AWholeViewWriteByAnOlderVersionLeavesANewerRecordAsStored([Values] bool unchangedOnly, [Values] bool viaFlush)
         {
             WriteImportant();
-            var written = Read(RollPath).Records.Single();
+            var written = Read(RollPath);
 
             using var newer = OpenRoll(RollV2);
             var current = newer.Get(RollK)!;
-            WholeViewWrite(RollV1, viaFlush: false);
+            WholeViewWrite(RollV1, viaFlush);
 
-            var rewritten = Read(RollPath).Records.Single();
-            Assert.That(rewritten.SchemaId, Is.EqualTo(RollV1Id), "v1 rewrote k under its id");
-            Assert.That(rewritten.Payload, Is.Not.EqualTo(written.Payload), "and without Extra");
-            Assert.That(string.CompareOrdinal(rewritten.StoredAt, written.StoredAt), Is.GreaterThan(0), "a new store of k, so a later storedAt");
+            var rewritten = Read(RollPath);
+            var record = rewritten.Records.Single();
+            Assert.That((record.SchemaId, record.StoredAt, record.Payload), Is.EqualTo((written.Records.Single().SchemaId, written.Records.Single().StoredAt, written.Records.Single().Payload)));
+            Assert.That(CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot { SchemaCatalog = rewritten.SchemaCatalog }),
+                Is.EqualTo(CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot { SchemaCatalog = written.SchemaCatalog })),
+                "v2's catalog entry is written as v2 wrote it");
 
-            Assert.That(Derive(newer, current, unchangedOnly), Is.EqualTo(CultCommitOutcome.Mismatch));
-            using (var reopened = OpenRoll(RollV2))
-            {
-                Assert.That(reopened.Get(RollY), Is.Null, "nothing derived from the shed member landed");
-                Assert.That(Extra(reopened.Get(RollK)), Is.Empty);
-            }
-
-            newer.PullAllBackingStoresAsync().GetAwaiter().GetResult();
-            var pulled = newer.Get(RollK)!;
-            Assert.That(Extra(pulled), Is.Empty, "a pull replaces the record v1 rewrote");
-            Assert.That(Derive(newer, pulled, unchangedOnly), Is.EqualTo(CultCommitOutcome.Committed));
+            Assert.That(Derive(newer, current, unchangedOnly), Is.EqualTo(CultCommitOutcome.Committed));
+            using var reopened = OpenRoll(RollV2);
+            Assert.That(Extra(reopened.Get(RollK)), Is.EqualTo("important"));
+            Assert.That(Extra(reopened.Get(RollY)), Is.EqualTo("derived-from-important"));
         }
 
-        // A-B-A: v1 sheds Extra from k, then another v2 cache (a restart is enough) loads k under v1's id and writes its whole view,
-        // putting k back under v2's id: the id the first v2 cache loaded k under, with bytes that no longer hold Extra. That cache's
-        // condition must still fail, through commits and through plain flushes alike.
+        // v1 writes k itself: a write of the record, so it stores what v1 holds, under v1's id and without the member v1 lacks.
+        private void OlderWritesK()
+        {
+            using var older = OpenRoll(RollV1);
+            older.Commit(batch => batch.Upsert(RollV1, older.Get(RollK)!, RollK));
+        }
+
+        // A-B-A: v1 writes k and sheds Extra, then another v2 cache (a restart is enough) loads k under v1's id and writes its whole
+        // view, putting k back under v2's id: the id the first v2 cache loaded k under, with bytes that no longer hold Extra. That
+        // cache's condition must still fail, through commits and through plain flushes alike.
         [TestCase(false, false)]
         [TestCase(true, false)]
         [TestCase(false, true)]
@@ -508,7 +508,8 @@ namespace GameCult.Caching.Tests
             using var held = OpenRoll(RollV2);
             var current = held.Get(RollK)!;
 
-            WholeViewWrite(RollV1, viaFlush);
+            OlderWritesK();
+            Assert.That(Read(RollPath).Records.Single().SchemaId, Is.EqualTo(RollV1Id), "v1 wrote k under its id");
             WholeViewWrite(RollV2, viaFlush);
             var restored = Read(RollPath).Records.Single();
             Assert.That(restored.SchemaId, Is.EqualTo(written.SchemaId), "the second v2 cache put k back under v2's id");
@@ -526,7 +527,7 @@ namespace GameCult.Caching.Tests
         public void AFlushRestampsTheRecordItReencodesInTheCacheThatFlushed()
         {
             WriteImportant();
-            WholeViewWrite(RollV1, viaFlush: true);
+            OlderWritesK();
             var shed = Read(RollPath).Records.Single();
             Assert.That(shed.SchemaId, Is.EqualTo(RollV1Id));
 

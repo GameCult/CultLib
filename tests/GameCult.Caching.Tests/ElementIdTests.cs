@@ -212,6 +212,31 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.MintElementIds(), Is.EqualTo(0));
         }
 
+        // A record from before ids, under another runtime's id for the same schema, is laid back by a whole-view write exactly as it
+        // was stored. The ids it minted at load are still in memory only, so MintElementIds still rewrites it, under the type's own id.
+        [Test]
+        public void AWholeViewWriteLeavesTheLoadMintedIdsOfARecordItLaysBackInMemoryOnly()
+        {
+            var path = PathOf("unowned-pre-id.cc");
+            WritePreIdStore(path, null, ("old", "o", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var ownId = snapshot.Records.Single().SchemaId;
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = "other.runtime.deck";
+            entry.CompatibleSchemaIds = new[] { "other.runtime.deck" };
+            snapshot.Records.Single().SchemaId = "other.runtime.deck";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var stored = DiskRecord(path, "old");
+
+            using var cache = Open(path);
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var laidBack = DiskRecord(path, "old");
+            Assert.That((laidBack.SchemaId, laidBack.StoredAt, laidBack.Payload), Is.EqualTo((stored.SchemaId, stored.StoredAt, stored.Payload)));
+            Assert.That(cache.MintElementIds(), Is.EqualTo(1), "its ids are still in memory only");
+            Assert.That(DiskRecord(path, "old").SchemaId, Is.EqualTo(ownId), "a write of the record stores it under the type's own id");
+        }
+
         // A whole-view write that persists the ids a record minted at load stores other bytes under the same id: a new store of
         // the record, so it takes a later storedAt, and the cache that wrote it holds that storedAt. A record it stores exactly as
         // the file holds it keeps its own.

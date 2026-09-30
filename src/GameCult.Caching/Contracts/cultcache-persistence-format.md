@@ -124,8 +124,8 @@ the payload's first field says. The catalog is the store's own description of it
 
 A writer keeps the same invariant: every record it writes carries a schema id that some catalog
 entry it writes publishes, as that entry's id or as one of its compatible ids. A cache stamps a
-record with its registered schema's id, whatever id the record arrived under, when it loads the
-record and when it puts one. The cache is the only owner of that stamp: a store writer never
+record it puts with its registered schema's id, and a record it loads under an id its type owns or
+declares compatible (see below for one it does not). The cache is the only owner of that stamp: a store writer never
 changes the identity of a record it did not receive from its caller, so a record another writer
 changed since this cache read it is written back as that writer left it.
 
@@ -141,6 +141,15 @@ the id, else one that lists it as compatible. The name the catalog entry carries
 names a local type only when no local type has the id, for a store written by a runtime whose
 schema ids this one cannot know (a Rust type's schema id is its entry type). A schema renamed under
 a stable id therefore opens in every runtime that holds the id.
+
+Records and catalog entries a runtime does not own survive its writes. A record a cache resolved
+through the catalog's schema name, or through an entry pointing at a local id, is readable, but its
+id is not one its type owns or declares compatible: a write of another record, a whole-view write
+included, lays it back with its id, storedAt, bytes and catalog entry exactly as they were stored.
+Only a write of that record itself stores it under the type's own id. A writer that describes
+schema ids itself (Rust, whose catalog entries are derived from its entry types) lays back the entry
+the file holds for an id it rewrites, and describes an id only when the file has no entry for it or
+when its registered type owns the id under another name (a rename).
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
