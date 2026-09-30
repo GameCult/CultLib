@@ -3,7 +3,7 @@ use cultnet_rs::{
     CultNetMessage, CultNetRawDocumentRecord, CultNetRudpPacket, CultNetRudpPacketType,
     CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions, CultNetWireContract,
     decode_cultnet_message_from_slice, decode_rudp_packet, encode_cultnet_message_to_vec,
-    encode_rudp_packet, is_permanent_send_error,
+    encode_rudp_packet, is_permanent_send_error, send_error_code,
 };
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -237,9 +237,10 @@ pub enum CultMeshRudpRejectionReason {
     /// The session could not queue the response. Carries the session's error text.
     ResponseQueueFailed(String),
     /// A packet of the response can never be sent to the peer as built
-    /// (`is_permanent_send_error`). The session ends with a goodbye naming the
-    /// error, and no refusal: the server knows the peer cannot be reached.
-    ResponseSendFailed(std::io::ErrorKind),
+    /// (`is_permanent_send_error`). Carries the failure's fixed name
+    /// (`send_error_code`). The session has ended with a goodbye carrying the
+    /// same name, and no refusal: the server knows the peer cannot be reached.
+    ResponseSendFailed(&'static str),
 }
 
 impl std::fmt::Display for CultMeshRudpRejectionReason {
@@ -276,8 +277,8 @@ impl std::fmt::Display for CultMeshRudpRejectionReason {
             Self::ResponseQueueFailed(error) => {
                 write!(f, "snapshot response could not be queued: {error}")
             }
-            Self::ResponseSendFailed(kind) => {
-                write!(f, "snapshot response could not be sent: {kind}")
+            Self::ResponseSendFailed(code) => {
+                write!(f, "snapshot response could not be sent: {code}")
             }
         }
     }
@@ -548,13 +549,14 @@ where
             )? {
                 // The only reply `receive` returns is a Pong, which delivers no
                 // frame, so no earlier send of this poll can precede a rejection.
-                let end = match &rejection.reason {
-                    CultMeshRudpRejectionReason::ResponseSendFailed(kind) => {
-                        SessionEnd::Unsendable(std::io::Error::from(*kind))
-                    }
-                    reason => SessionEnd::Rejected(reason.refusal_text()),
-                };
-                self.end_session(key, end)?;
+                // A response that could not be sent ended its session where the
+                // send failed, over the real error.
+                if !matches!(
+                    rejection.reason,
+                    CultMeshRudpRejectionReason::ResponseSendFailed(_)
+                ) {
+                    self.end_session(key, SessionEnd::Rejected(rejection.reason.refusal_text()))?;
+                }
                 return Ok(CultMeshRudpPollOutcome::ApplicationRejected(rejection));
             }
         }
@@ -840,11 +842,13 @@ where
                     entry.admitted_payload_bytes.saturating_add(payload_bytes);
                 for packet in &packets {
                     if let Some(error) = self.send_packet(key.remote_addr, packet)? {
+                        let code = send_error_code(&error);
+                        self.end_session(key, SessionEnd::Unsendable(error))?;
                         return Ok(Some(CultMeshRudpApplicationRejection {
                             session: key,
                             operation: CultMeshRudpApplicationOperation::SnapshotRequest,
                             message_id,
-                            reason: CultMeshRudpRejectionReason::ResponseSendFailed(error.kind()),
+                            reason: CultMeshRudpRejectionReason::ResponseSendFailed(code),
                         }));
                     }
                 }

@@ -472,10 +472,16 @@ impl CultNetRudpSession {
     /// built (see `is_permanent_send_error`). Resending it would fail forever,
     /// and dropping it would leave a reliable sequence the peer waits on for
     /// good, so the session cannot be kept. Returns the goodbye for the peer;
-    /// its reason names the error.
+    /// its reason names the failure by its fixed name (`send_error_code`).
     pub fn end_unsendable_session(&mut self, error: &std::io::Error) -> CultNetRudpPacket {
         self.reset_peer_state();
-        self.create_disconnect(format!("{RUDP_UNSENDABLE_PACKET_REASON}: {error}").into_bytes())
+        self.create_disconnect(
+            format!(
+                "{RUDP_UNSENDABLE_PACKET_REASON}: {}",
+                send_error_code(error)
+            )
+            .into_bytes(),
+        )
     }
 
     /// Undoes a send that never reached the wire: every packet it created at
@@ -2599,7 +2605,7 @@ where
 const RUDP_REFUSED_PACKET_REASON: &[u8] = b"session refused a packet";
 const SESSION_TIMED_OUT_REASON: &[u8] = b"session timed out";
 /// Prefix of the goodbye reason for a session that owed a packet which can
-/// never be sent; the error's own description follows it.
+/// never be sent; the failure's fixed name (`send_error_code`) follows it.
 const RUDP_UNSENDABLE_PACKET_REASON: &str = "packet could not be sent";
 
 /// Whether a failed `send_to` can never succeed for the datagram as built, so
@@ -2610,37 +2616,59 @@ const RUDP_UNSENDABLE_PACKET_REASON: &str = "packet could not be sent";
 /// call) is a property of the path or the moment and may pass, so it is a lost
 /// datagram, not a reason to end a session.
 pub fn is_permanent_send_error(error: &std::io::Error) -> bool {
-    // `EMSGSIZE` and `EAFNOSUPPORT`, or their Winsock equivalents.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    const PERMANENT_OS_ERRORS: [i32; 2] = [90, 97];
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly"
-    ))]
-    const PERMANENT_OS_ERRORS: [i32; 2] = [40, 47];
-    #[cfg(windows)]
-    const PERMANENT_OS_ERRORS: [i32; 2] = [10040, 10047];
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly",
-        windows
-    )))]
-    const PERMANENT_OS_ERRORS: [i32; 0] = [];
+    send_error_code(error) != UNKNOWN_SEND_ERROR
+}
+
+const UNKNOWN_SEND_ERROR: &str = "UNKNOWN";
+
+// `EMSGSIZE` and `EAFNOSUPPORT`, or their Winsock equivalents.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const PERMANENT_OS_ERRORS: Option<(i32, i32)> = Some((90, 97));
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+const PERMANENT_OS_ERRORS: Option<(i32, i32)> = Some((40, 47));
+#[cfg(windows)]
+const PERMANENT_OS_ERRORS: Option<(i32, i32)> = Some((10040, 10047));
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly",
+    windows
+)))]
+const PERMANENT_OS_ERRORS: Option<(i32, i32)> = None;
+
+/// The fixed name of a failed send's cause: `EMSGSIZE`, `EINVAL` or
+/// `EAFNOSUPPORT` for a failure that can never pass
+/// (`is_permanent_send_error`), `UNKNOWN` for anything else. An unsendable
+/// session's goodbye carries this name, never the error's own text, which is
+/// the platform's wording and can differ by the packet that failed.
+pub fn send_error_code(error: &std::io::Error) -> &'static str {
+    if let (Some(code), Some((message_size, address_family))) =
+        (error.raw_os_error(), PERMANENT_OS_ERRORS)
+    {
+        if code == message_size {
+            return "EMSGSIZE";
+        }
+        if code == address_family {
+            return "EAFNOSUPPORT";
+        }
+    }
     // `InvalidInput` is `EINVAL` and `WSAEINVAL`.
-    error.kind() == ErrorKind::InvalidInput
-        || error
-            .raw_os_error()
-            .is_some_and(|code| PERMANENT_OS_ERRORS.contains(&code))
+    if error.kind() == ErrorKind::InvalidInput {
+        return "EINVAL";
+    }
+    UNKNOWN_SEND_ERROR
 }
 
 /// A session cannot admit a Connect when its sequence space starts exhausted or

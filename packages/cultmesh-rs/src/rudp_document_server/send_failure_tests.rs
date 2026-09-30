@@ -282,7 +282,7 @@ fn a_permanent_failure_sending_a_snapshot_response_rejects_it_and_sends_no_refus
     assert_eq!(rejection.message_id, "x-snapshot");
     assert_eq!(
         rejection.reason,
-        CultMeshRudpRejectionReason::ResponseSendFailed(ErrorKind::InvalidInput)
+        CultMeshRudpRejectionReason::ResponseSendFailed("EINVAL")
     );
     assert_eq!(server.session_count(), 1);
     // The server knows X cannot be reached: X is sent no refusal, only the
@@ -303,9 +303,11 @@ fn a_permanent_failure_sending_a_snapshot_response_rejects_it_and_sends_no_refus
         frames.is_empty(),
         "no refusal is sent to an unreachable peer: {frames:?}"
     );
-    assert!(is_unsendable_reason(
-        &reason.expect("the client was told the session ended")
-    ));
+    // The goodbye names the failure by its fixed name, never the error's text.
+    assert_eq!(
+        reason.expect("the client was told the session ended"),
+        b"packet could not be sent: EINVAL"
+    );
 }
 
 #[test]
