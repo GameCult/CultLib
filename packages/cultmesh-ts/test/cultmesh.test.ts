@@ -211,6 +211,8 @@ test("CultMesh TS catalogs hold one type per schema and refuse a second, typed",
         assert.throws(() => catalog.add(kind.handle(second, "doc:second") as any), (error: unknown) => {
           assert.ok(error instanceof SchemaConflictError, String(error));
           assert.equal(error.schemaId, second.schemaId);
+          assert.deepEqual(error.schemaNames, ["cultmesh.note", "cultmesh.note"]);
+          assert.ok(error.message.includes(`type "${second.type}"`) && error.message.includes(`type "${first.type}"`), error.message);
           assert.equal(error.recordKey, "");
           return true;
         });
@@ -227,6 +229,40 @@ test("CultMesh TS catalogs hold one type per schema and refuse a second, typed",
     catalog.add(kind.handle({ schemaId: "cultmesh.note.v0" }, "doc:untyped") as any);
     assert.equal(kind.find(catalog, noteDocument), "doc:held");
   }
+});
+
+test("CultMesh TS catalog writes take (value, options) or (context, value)", async () => {
+  const writes: string[] = [];
+  let current = { noteId: "note:writes", body: "initial" };
+  const record = (kind: string) => async (context: { runtimeId: string }, value: Note) => {
+    writes.push(`${kind}:${context.runtimeId}:${value.body}`);
+    current = value;
+  };
+  const catalog = CultMesh.documents(CultMesh.document("note:writes", noteDocument, async () => current, {
+    replaceDocument: record("replace"),
+    submitPrediction: record("predict"),
+  }));
+  const note = (body: string) => ({ noteId: "note:writes", body });
+
+  await catalog.replace(noteDocument, note("r1"));
+  await catalog.replace(noteDocument, note("r2"), {});
+  await catalog.replace(noteDocument, note("r3"), { context: "pilot-a" });
+  await catalog.replace(noteDocument, "pilot-b", note("r4"));
+  await catalog.replace(noteDocument, CultMesh.queryContext("pilot-c"), note("r5"));
+  await catalog.submitPrediction(noteDocument, note("p1"));
+  await catalog.submitPrediction(noteDocument, note("p2"), { context: "pilot-a" });
+  await catalog.submitPrediction(noteDocument, "pilot-b", note("p3"));
+
+  assert.deepEqual(writes, [
+    "replace:local:r1",
+    "replace:local:r2",
+    "replace:pilot-a:r3",
+    "replace:pilot-b:r4",
+    "replace:pilot-c:r5",
+    "predict:local:p1",
+    "predict:pilot-a:p2",
+    "predict:pilot-b:p3",
+  ]);
 });
 
 test("CultMesh TS document handles submit predictions through configured authority hooks", async () => {
