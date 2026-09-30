@@ -813,4 +813,16 @@ Recorded, not forked:
   a gap (`ApplyShardSnapshotResponseAsync` `:675-736`). It predates this campaign.
 - **AetheriaEve `Program.cs:3722`.** It reads a committed write's `InvalidOperationException` as a denial. Under
   Q-P5 A, Cut 4's log failures cannot reach it. Observer and `OnUpdate` exceptions still can, so the Cuts 1-2
-  recording stands.
+  recording stands.- **Cut 4 Soul, recorded 2026-09-30 (Self), not fixed in Cut 4:**
+  - **File log store is not crash-safe (hard prerequisite).** `CultNetFileShardMutationLogStore.Append` and
+    `CompactThrough` use `File.WriteAllBytes` (truncate, rewrite, no temp+rename, no fsync). A failure mid-write
+    truncates the log; every later append burns a sequence and a restart cannot construct the database. It also
+    rewrites the whole file per append, which Cut 4 now does under the cache gate (2.2 ms per write at 100
+    entries, 33 ms at 950, a 2.49 s stall). An atomic, append-only store must land before any live daemon
+    enables durable shard logs. Today only AetheriaEve's offline tools do; the live Aetheria daemon passes
+    `enableDurableShardLogs: false`.
+  - **A slow log append blocks cache readers** (`CultCache.Get` takes the gate). Accepted with a note in the
+    store's XML doc.
+  - **Crash between the store write and the log append** leaves the log lagging the store, and nothing detects
+    it; a restarted primary reuses that sequence (A2's divergence reached by a plain kill). The spec called this
+    lag detectable; for a crash it is not.
