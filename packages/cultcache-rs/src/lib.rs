@@ -346,6 +346,12 @@ fn describe_undecodable(error: &anyhow::Error) -> String {
     parts.join(": ")
 }
 
+/// A decoder failure as an error that keeps only its kind. Every decode of stored bytes
+/// goes through this or [`describe_undecodable`], so no error text quotes a stored value.
+fn opaque_decode_error(error: rmp_serde::decode::Error) -> anyhow::Error {
+    anyhow!(describe_decode_error(&error))
+}
+
 fn describe_decode_error(error: &rmp_serde::decode::Error) -> String {
     use rmp_serde::decode::Error;
     match error {
@@ -427,6 +433,10 @@ pub struct CultCacheStoreWriteFailed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CultCacheStoreWriteFailedKind {
+    /// The entries cannot be stored as a snapshot, for example two document types
+    /// claim one schema id. Nothing was written, and retrying the same entries fails
+    /// the same way: this is a refusal, not an I/O failure.
+    Rejected,
     /// The write failed before the store file was replaced (creating, writing or
     /// syncing the staging file, or renaming it): the file holds what it held before.
     NotReplaced,
@@ -438,6 +448,9 @@ pub enum CultCacheStoreWriteFailedKind {
 impl std::fmt::Display for CultCacheStoreWriteFailed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self.kind {
+            CultCacheStoreWriteFailedKind::Rejected => {
+                write!(formatter, "CultCache store {} refused a snapshot it cannot store", self.path.display())
+            }
             CultCacheStoreWriteFailedKind::NotReplaced => {
                 write!(formatter, "CultCache store {} was not replaced", self.path.display())
             }
@@ -528,10 +541,12 @@ impl SingleFileMessagePackBackingStore {
     /// either file. Writers using the sibling lock cannot replace the snapshot
     /// until `action` returns.
     ///
-    /// Releasing the lock is RAII cleanup. A release failure therefore cannot
-    /// rewrite the completed action's result; consumers that need to observe
-    /// that cleanup failure can use
-    /// [`Self::with_read_only_shared_snapshot_and_unlock_diagnostic`].
+    /// Releasing the lock is RAII cleanup, under the same policy as every lock in
+    /// this crate (see `release_lock`): a release failure cannot rewrite the
+    /// completed action's result. This path alone also offers an observer for that
+    /// failure, [`Self::with_read_only_shared_snapshot_and_unlock_diagnostic`],
+    /// because a provider crossing may need to report it; the locked read and write
+    /// paths discard it.
     pub fn with_read_only_shared_snapshot<T>(
         &self,
         action: impl FnOnce(Vec<CultCacheEnvelope>) -> Result<T>,
@@ -880,7 +895,10 @@ impl SingleFileMessagePackBackingStore {
             path: self.path.clone(),
             kind,
         };
-        self.replace_unlocked(entries)
+        let bytes = encode_store_snapshot(entries)
+            .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
+            .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::Rejected)))?;
+        self.replace_unlocked(&bytes)
             .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::NotReplaced)))?;
         sync_parent_directory(&self.path)
             .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::ReplacedNotDurable)))
@@ -888,14 +906,12 @@ impl SingleFileMessagePackBackingStore {
 
     /// Everything up to and including the rename over the store file. On failure the
     /// store file is as it was.
-    fn replace_unlocked(&self, entries: &[CultCacheEnvelope]) -> Result<()> {
+    fn replace_unlocked(&self, bytes: &[u8]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         remove_abandoned_staging_files(&self.path)?;
-        let bytes = rmp_serde::to_vec(&encode_store_snapshot(entries)?)
-            .context("failed to encode MessagePack")?;
         let tmp_path = temporary_path_for(&self.path);
         let staged = OpenOptions::new()
             .create_new(true)
@@ -904,7 +920,7 @@ impl SingleFileMessagePackBackingStore {
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
         // From here the staging file is this write's to remove: a write that fails
         // for lack of space must not keep holding the space it failed on.
-        if let Err(error) = stage_and_replace(staged, &tmp_path, &bytes, &self.path) {
+        if let Err(error) = stage_and_replace(staged, &tmp_path, bytes, &self.path) {
             let _ = fs::remove_file(&tmp_path);
             return Err(error);
         }
@@ -2009,7 +2025,9 @@ fn read_redb_entry(
     table
         .get(key.as_slice())?
         .map(|value| {
-            rmp_serde::from_slice(value.value()).context("failed to decode redb CultCache envelope")
+            rmp_serde::from_slice(value.value())
+                .map_err(opaque_decode_error)
+                .context("failed to decode redb CultCache envelope")
         })
         .transpose()
 }
@@ -2031,7 +2049,9 @@ fn read_all_redb(
         .iter()?
         .map(|row| {
             let (_, value) = row?;
-            rmp_serde::from_slice(value.value()).context("failed to decode redb CultCache envelope")
+            rmp_serde::from_slice(value.value())
+                .map_err(opaque_decode_error)
+                .context("failed to decode redb CultCache envelope")
         })
         .collect::<Result<Vec<_>>>()?;
     entries.sort_by_key(entry_id);
@@ -2262,7 +2282,7 @@ impl CultCache {
         let Some(entry) = self.entries.get(&entry_id_parts(T::TYPE, key)) else {
             return Ok(None);
         };
-        let payload = rmp_serde::from_slice(&entry.payload).with_context(|| {
+        let payload = rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
             format!(
                 "failed to decode CultCache entry {:?} at key {:?} as {}",
                 T::TYPE,
@@ -2295,7 +2315,7 @@ impl CultCache {
             if entry.r#type != T::TYPE {
                 continue;
             }
-            values.push(rmp_serde::from_slice(&entry.payload).with_context(|| {
+            values.push(rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
                 format!(
                     "failed to decode CultCache entry {:?} at key {:?} as {}",
                     T::TYPE,
@@ -2316,7 +2336,7 @@ impl CultCache {
             }
             values.push((
                 entry.key.clone(),
-                rmp_serde::from_slice(&entry.payload).with_context(|| {
+                rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
                     format!(
                         "failed to decode CultCache entry {:?} at key {:?} as {}",
                         T::TYPE,
@@ -2398,7 +2418,7 @@ impl CultCache {
         key: String,
         payload: Vec<u8>,
     ) -> Result<(CultCacheEnvelope, T)> {
-        let parsed: T = rmp_serde::from_slice(&payload).with_context(|| {
+        let parsed: T = rmp_serde::from_slice(&payload).map_err(opaque_decode_error).with_context(|| {
             format!(
                 "failed to validate CultCache entry {:?} at key {:?} as {}",
                 T::TYPE,
@@ -2534,7 +2554,7 @@ impl CultCache {
             ));
         }
 
-        rmp_serde::from_slice(&entry.payload).with_context(|| {
+        rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
             format!(
                 "failed to validate CultCache envelope {:?} at key {:?} as {}",
                 T::TYPE,
@@ -2868,9 +2888,16 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
     replace_file_atomically(staged_path, destination)
 }
 
-/// Releases a lock taken around `result`'s action and returns that result. Closing the
-/// lock file releases the lock whether or not the explicit unlock succeeds, so an unlock
-/// failure never replaces the action's result: a write that landed is reported as landed.
+/// Releases a lock taken around `result`'s action and returns that result.
+///
+/// The policy for every lock in this crate: an unlock failure never replaces the action's
+/// result, so a write that landed is reported as landed. The failure is discarded here
+/// because these paths have no observer; the read-only snapshot, whose API offers one,
+/// hands it to [`SingleFileMessagePackBackingStore::with_read_only_shared_snapshot_and_unlock_diagnostic`].
+///
+/// Dropping `lock` closes this descriptor, which releases the lock only when no other
+/// descriptor shares its open file description. A child forked without exec holds such a
+/// duplicate, and the lock then stays held until the child closes it or exits.
 fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
     let _unlock_failure_released_by_close =
         injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
@@ -3185,6 +3212,8 @@ mod tests {
         store.push(&released)?;
 
         let writer_path = store_path.clone();
+        let gate_path = store_path.clone();
+        let gate_released = released.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let (finished_tx, finished_rx) = mpsc::channel();
         store.with_read_only_shared_snapshot(|captured| {
@@ -3199,15 +3228,21 @@ mod tests {
                 writer.push(&engaged).unwrap();
                 finished_tx.send(()).unwrap();
             });
-            started_rx.recv_timeout(Duration::from_secs(1))?;
+            started_rx.recv_timeout(Duration::from_secs(30))?;
             assert!(
                 finished_rx
                     .recv_timeout(Duration::from_millis(100))
                     .is_err()
             );
+            // The writer is still waiting on the gate: the file on disk is untouched.
+            assert_eq!(
+                SingleFileMessagePackBackingStore::new(&gate_path).pull_all_read_only_snapshot()?,
+                vec![gate_released.clone()]
+            );
             Ok(())
         })?;
-        finished_rx.recv_timeout(Duration::from_secs(1))?;
+        // The writer fsyncs twice once the gate opens; under IO pressure that is slow.
+        finished_rx.recv_timeout(Duration::from_secs(60))?;
         assert_eq!(store.pull_all()?[0].payload, b"engaged");
         Ok(())
     }
@@ -5393,6 +5428,139 @@ mod tests {
         let mut keyed = RedbMessagePackBackingStore::new(temp.path().join("keyed.redb"))?;
         with_write_fault(WriteStep::Unlock, || keyed.push(&pushed))?;
         assert_eq!(keyed.pull_all()?, vec![pushed]);
+        Ok(())
+    }
+
+    // What a write does through a symbolic link today. R3 decides whether a write
+    // resolves the link or refuses it; until then these pin the current behaviour so the
+    // change is deliberate. Reads refuse a dangling link (see the test above).
+    #[cfg(unix)]
+    #[test]
+    fn r3_decides_resolve_or_refuse_a_push_through_a_live_link_replaces_the_link() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let target = volume.join("store.cc");
+        SingleFileMessagePackBackingStore::new(&target).push(&snapshot_envelope("a", b"1"))?;
+        let before = fs::read(&target)?;
+        let link = temp.path().join("store.cc");
+        std::os::unix::fs::symlink(&target, &link)?;
+
+        SingleFileMessagePackBackingStore::new(&link).push(&snapshot_envelope("b", b"2"))?;
+        assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
+        assert_eq!(fs::read(&target)?, before, "the store the link pointed to is unchanged");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r3_decides_resolve_or_refuse_a_push_all_through_a_dangling_link_replaces_the_link() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let volume = temp.path().join("volume");
+        fs::create_dir(&volume)?;
+        let link = temp.path().join("store.cc");
+        std::os::unix::fs::symlink(volume.join("store.cc"), &link)?;
+
+        SingleFileMessagePackBackingStore::new(&link).push_all(&[snapshot_envelope("a", b"1")], PushAllOptions::default())?;
+        assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
+        assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
+        Ok(())
+    }
+
+    #[test]
+    fn a_keyed_store_refusal_never_echoes_a_stored_value() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("keyed.redb");
+        let envelope = snapshot_envelope("k", b"1");
+        RedbMessagePackBackingStore::new(&path)?.push(&envelope)?;
+        {
+            let database = redb::Database::create(&path)?;
+            let write = database.begin_write()?;
+            {
+                let mut table = write.open_table(REDB_ENVELOPES)?;
+                let keys: Vec<Vec<u8>> = table
+                    .iter()?
+                    .map(|row| row.map(|(key, _)| key.value().to_vec()))
+                    .collect::<std::result::Result<_, _>>()?;
+                let mut value = vec![0xab];
+                value.extend_from_slice(b"SECRET-REDB");
+                for key in keys {
+                    table.insert(key.as_slice(), value.as_slice())?;
+                }
+            }
+            write.commit()?;
+        }
+        let store = RedbMessagePackBackingStore::new(&path)?;
+        for error in [store.pull_all().unwrap_err(), store.compare_and_swap_entry(&envelope, snapshot_envelope("k", b"2")).unwrap_err()] {
+            assert!(format!("{error:#}").contains("failed to decode redb CultCache envelope"), "{error:#}");
+            assert!(!format!("{error:#}").contains("SECRET"), "{error:#}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_document_decode_refusal_names_the_entry_and_never_a_stored_value() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        // [theme, retries] with a string where the u32 goes: serde's own message would
+        // quote the string.
+        let mut payload = vec![0x92, 0xa1, b't', 0xab];
+        payload.extend_from_slice(b"SECRET-DOC!");
+        let malformed = CultCacheEnvelope {
+            key: "k".into(),
+            r#type: <Settings as DatabaseEntry>::TYPE.into(),
+            payload,
+            stored_at: "2026-09-30T00:00:00Z".into(),
+            schema_id: None,
+        };
+        SingleFileMessagePackBackingStore::new(&path).push(&malformed)?;
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<Settings>()?;
+        cache.register_entry_type::<NestedNote>()?;
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path))?;
+        cache.pull_all_backing_stores()?;
+
+        // A compact nested value skips its absent `count`, so decoding it back reads the
+        // symbol string where the count goes.
+        let nested = NestedNote {
+            value: NestedOptionalValue {
+                label: "l".into(),
+                count: None,
+                symbol: Some("SECRET-NESTED".into()),
+            },
+        };
+        let refusals = [
+            ("get", cache.get::<Settings>("k").unwrap_err()),
+            ("get_all", cache.get_all::<Settings>().unwrap_err()),
+            ("get_all_with_keys", cache.get_all_with_keys::<Settings>().unwrap_err()),
+            ("put_envelope", cache.put_envelope::<Settings>(malformed.clone()).unwrap_err()),
+            ("prepare_entry", cache.prepare_entry("compact", &nested).unwrap_err()),
+        ];
+        for (path, error) in refusals {
+            let text = format!("{error:#}");
+            assert!(!text.contains("SECRET"), "{path}: {text}");
+            assert!(text.contains("CultCache"), "{path}: {text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_the_store_cannot_hold_is_rejected_before_any_write() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (store, before) = written_store(&path)?;
+        let mut first = snapshot_envelope("x", b"1");
+        first.schema_id = Some("shared".into());
+        let mut second = snapshot_envelope("y", b"2");
+        second.r#type = "other".into();
+        second.schema_id = Some("shared".into());
+        let error = store
+            .compare_exchange_snapshot(&store.pull_all()?, &[first, second])
+            .unwrap_err();
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::Rejected), "{error:#}");
+        assert!(error.to_string().contains("refused a snapshot it cannot store"), "{error}");
+        assert!(io_error_in(&error).is_none(), "{error:#}");
+        assert_eq!(fs::read(&path)?, before);
         Ok(())
     }
 }

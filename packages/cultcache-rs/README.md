@@ -321,7 +321,10 @@ an empty store. Any other failure to reach it, such as a symlink loop, a file
 where a parent directory should be, or a missing permission, is an I/O error.
 A store file that exists and holds zero bytes is `Undecodable`: no CultCache
 writer leaves one. A symbolic link whose target is gone is not a missing store:
-reading it is an I/O error, so no write replaces the link. A refusal names no
+reading it is an I/O error, so a read-then-write (`push`, `delete`, the exchanges)
+fails before writing. Writes do not yet follow links: a write through a live link,
+and a `push_all` through a dangling one, replace the link with a regular file and
+leave its target alone. A refusal names no
 value read from the file; it names a record only by its key and schema id, and
 a header only when it has the shape `cultcache.store.v<digits>`.
 
@@ -332,7 +335,10 @@ use cultcache_rs::{CultCacheStoreWriteFailed, CultCacheStoreWriteFailedKind};
 
 fn outcome(error: &anyhow::Error) {
     match error.downcast_ref::<CultCacheStoreWriteFailed>().map(|failed| failed.kind) {
-        // Staging, fsync or rename failed: the store file holds what it held before.
+        // The entries cannot be stored; retrying them fails the same way.
+        Some(CultCacheStoreWriteFailedKind::Rejected) => {}
+        // Staging, fsync or rename failed: the store file holds what it held before,
+        // and a retry may succeed once the fault (a full disk, say) clears.
         Some(CultCacheStoreWriteFailedKind::NotReplaced) => {}
         // The rename landed and the directory sync failed: the new snapshot is in
         // place but may not survive a crash.
