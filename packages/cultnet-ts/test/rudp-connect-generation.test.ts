@@ -2,7 +2,15 @@
 // the handshake alone seeds the watermark that orders delivery.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CultNetRudpSession, randomInitialSequence, type CultNetRudpPacket } from "../src";
+import { createSocket, type Socket } from "node:dgram";
+import { once } from "node:events";
+import {
+  CultNetRudpSession,
+  CultNetRudpSocketTransportConnection,
+  decodeRudpPacket,
+  encodeRudpPacket,
+  type CultNetRudpPacket,
+} from "../src";
 
 const connectionId = 0x10203080;
 const enc = (text: string) => new TextEncoder().encode(text);
@@ -197,10 +205,214 @@ test("a peer Disconnect does not forget what the peer sent", () => {
   assert.deepEqual(server.receive(s2, 4).delivered, [], "the Disconnect forgot what was received");
 });
 
-test("default initial sequences are drawn at random from one to two to the thirty first", () => {
-  const draws = new Set(Array.from({ length: 64 }, () => randomInitialSequence()));
-  assert.ok(draws.size > 32, `does not draw at random: ${[...draws]}`);
-  assert.ok([...draws].every((value) => value >= 1 && value < 2 ** 31), `left [1, 2^31): ${[...draws]}`);
-  const firsts = new Set(Array.from({ length: 64 }, () => new CultNetRudpSession({ connectionId }).createConnect(0).sequence));
+test("sessions from one options object each draw their own initial sequence from one to two to the thirty first", () => {
+  const options = { connectionId };
+  const firsts = new Set(Array.from({ length: 64 }, () => new CultNetRudpSession(options).createConnect(0).sequence));
   assert.ok(firsts.size > 32, `a default session does not draw its own sequence: ${[...firsts]}`);
+  assert.ok([...firsts].every((value) => value >= 1 && value < 2 ** 31), `left [1, 2^31): ${[...firsts]}`);
+});
+
+// Ack Cut 1d: a frame from an earlier generation is a duplicate, a delayed
+// Connect from an earlier attempt is stale, a Connect from a new endpoint is a
+// new client.
+
+const namesSequence = (ack: CultNetRudpPacket, sequence: number) =>
+  ack.ack === sequence
+  || Array.from({ length: 32 }, (_, bit) => bit).some(
+    (bit) => (ack.ackMask & (1 << bit)) !== 0 && ack.ack - bit - 1 === sequence,
+  );
+
+test("a frame from the client's earlier generation is acknowledged, not delivered again", () => {
+  const client = session(10);
+  const server = session(500);
+  handshake(client, server);
+  const old = send(client, "old");
+  assert.deepEqual(names(server.receive(old, 1)), ["old"]);
+
+  const connect = client.createConnect(2);
+  client.receive(server.acceptConnect(connect, 2), 2);
+  assert.ok(old.sequence < connect.sequence);
+  assert.deepEqual(server.receive(old, 3).delivered, [], "an earlier generation's frame was delivered again");
+  assert.ok(namesSequence(server.createAckForReceived(old.sequence), old.sequence), "the duplicate was not acknowledged");
+  assert.deepEqual(names(server.receive(send(client, "fresh"), 4)), ["fresh"]);
+});
+
+test("a frame from the server's earlier generation is acknowledged, not delivered again", () => {
+  const client = session(10);
+  const server = session(500);
+  handshake(client, server);
+  const old = send(server, "old");
+  assert.deepEqual(names(client.receive(old, 1)), ["old"]);
+
+  client.receive(server.acceptConnect(client.createConnect(2), 2), 2);
+  assert.deepEqual(client.receive(old, 3).delivered, [], "an earlier generation's frame was delivered again");
+  assert.ok(namesSequence(client.createAckForReceived(old.sequence), old.sequence));
+  assert.deepEqual(names(client.receive(send(server, "fresh"), 4)), ["fresh"]);
+});
+
+test("a duplicate below the receive window is acknowledged by name", () => {
+  const client = session(10);
+  const server = session(500);
+  handshake(client, server);
+  const first = send(client, "first");
+  assert.deepEqual(names(server.receive(first, 1)), ["first"]);
+  for (let index = 0; index < 4_200; index += 1) {
+    server.receive(send(client, "x"), 1);
+    client.receive(server.createAck(), 1);
+  }
+  assert.deepEqual(server.receive(first, 2).delivered, []);
+  assert.equal(server.createAckForReceived(first.sequence).ack, first.sequence, "a duplicate below the window was not acknowledged by name");
+});
+
+test("a delayed Connect from an earlier attempt does not strand the client", () => {
+  const client = session(10);
+  const server = session(500);
+  const earlier = client.createConnect(0);
+  const retried = client.createConnect(300);
+  const accept = server.acceptConnect(retried, 301);
+  client.receive(accept, 302);
+  server.receive(client.createAckForReceived(accept.sequence), 302);
+  assert.ok(client.connected);
+  const a = send(client, "a");
+  assert.deepEqual(names(server.receive(a, 303)), ["a"]);
+  client.receive(server.createAckForReceived(a.sequence), 303);
+
+  assert.equal(server.connectRepeats(earlier), true, "the delayed Connect starts nothing");
+  const reply = server.acceptConnect(earlier, 304);
+  assert.equal(reply.packetType, "ack");
+  client.receive(reply, 305);
+  assert.ok(client.connected);
+
+  const b = send(client, "b");
+  assert.deepEqual(names(server.receive(b, 306)), ["b"], "the delayed Connect reset the server");
+  client.receive(server.createAckForReceived(b.sequence), 307);
+  assert.ok(!client.pendingReliableSequences.includes(b.sequence));
+});
+
+test("a repeated Connect refreshes liveness and a stale one does not", () => {
+  const client = session(10);
+  const server = session(500);
+  const earlier = client.createConnect(0);
+  const current = client.createConnect(1);
+  server.acceptConnect(current, 0);
+
+  server.acceptConnect(current, 900);
+  assert.equal(server.checkTimeout(1_000, 500), false, "a repeated Connect did not refresh liveness");
+
+  server.acceptConnect(earlier, 1_400);
+  assert.equal(server.checkTimeout(1_600, 500), true, "a stale Connect refreshed liveness");
+});
+
+test("stale Connects are recognised by serial arithmetic", () => {
+  const server = session(500);
+  server.acceptConnect(session(3).createConnect(0), 0);
+  const connect = (sequence: number) => session(sequence).createConnect(0);
+  assert.equal(server.connectRepeats(connect(2 ** 32 - 2)), true, "just before the wrap");
+  assert.equal(server.connectRepeats(connect(4)), false, "just after");
+  assert.equal(server.connectRepeats(connect(3 + 4_096)), false, "far after");
+  assert.equal(server.connectRepeats(connect(2 ** 32 - 4_092)), true, "the window's edge");
+  assert.equal(server.connectRepeats(connect(2 ** 32 - 4_093)), false, "past the window");
+});
+
+test("a restarted client whose first sequence is stale connects after redrawing", () => {
+  const server = session(500);
+  const old = session(1_000);
+  const oldAccept = server.acceptConnect(old.createConnect(0), 0);
+  old.receive(oldAccept, 0);
+
+  const restarted = session(900);
+  const first = restarted.createConnect(0, enc("join"));
+  // The old client has not acknowledged its Accept yet, so that is the reply:
+  // it names the old Connect, not this one.
+  const early = server.acceptConnect(first, 1);
+  assert.equal(early.packetType, "accept");
+  restarted.receive(early, 1);
+  assert.equal(restarted.connected, false, "an Accept for another Connect connected the client");
+  server.receive(old.createAckForReceived(oldAccept.sequence), 1);
+  const reply = server.acceptConnect(first, 2);
+  assert.equal(reply.packetType, "ack");
+  restarted.receive(reply, 2);
+  assert.equal(restarted.connected, false);
+
+  const retransmitted = restarted.dueResends(1_000);
+  assert.equal(retransmitted.length, 1);
+  assert.equal(retransmitted[0]!.sequence, first.sequence, "the attempt is still young");
+
+  const fresh = restarted.dueResends(3_500);
+  assert.equal(fresh.length, 1);
+  assert.equal(fresh[0]!.packetType, "connect");
+  assert.notEqual(fresh[0]!.sequence, first.sequence, "the same Connect was retransmitted for ever");
+  assert.equal(dec(fresh[0]!.payload ?? new Uint8Array()), "join", "the fresh attempt lost the Connect payload");
+
+  const accept = server.acceptConnect(fresh[0]!, 3_500);
+  assert.equal(accept.packetType, "accept");
+  restarted.receive(accept, 3_500);
+  assert.ok(restarted.connected);
+  assert.deepEqual(names(server.receive(send(restarted, "hello"), 3_501)), ["hello"]);
+});
+
+test("an answered Connect is never replaced by the attempt timeout", () => {
+  const client = session(10);
+  const server = session(500);
+  const { connect } = handshake(client, server);
+  const resent = client.dueResends(60_000);
+  assert.ok(resent.every((packet) => packet.packetType !== "connect" || packet.sequence === connect.sequence), "a connected client started a new attempt");
+  assert.ok(client.connected);
+});
+
+async function bind(): Promise<Socket> {
+  const socket = createSocket("udp4");
+  socket.bind(0, "127.0.0.1");
+  await once(socket, "listening");
+  return socket;
+}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("server mode admits a pinned client that restarts on a new port", async () => {
+  const serverSocket = await bind();
+  const a = await bind();
+  const b = await bind();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "srv", socket: serverSocket, mode: "server", connectionId, resendPollMs: 20, resendDelayMs: 20,
+  });
+  const frames: string[] = [];
+  server.on("frame", (frame: { payload: Uint8Array }) => frames.push(dec(frame.payload)));
+  const port = (serverSocket.address() as { port: number }).port;
+  const atA: CultNetRudpPacket[] = [];
+  const atB: CultNetRudpPacket[] = [];
+  a.on("message", (wire) => atA.push(decodeRudpPacket(wire)));
+  b.on("message", (wire) => atB.push(decodeRudpPacket(wire)));
+  try {
+    const first = session(1);
+    a.send(encodeRudpPacket(first.createConnect(0, enc("join"))), port, "127.0.0.1");
+    await sleep(100);
+    const accept = atA.find((packet) => packet.packetType === "accept");
+    assert.ok(accept);
+    first.receive(accept, 0);
+    a.send(encodeRudpPacket(first.createAckForReceived(accept.sequence)), port, "127.0.0.1");
+    a.send(encodeRudpPacket(send(first, "hello")), port, "127.0.0.1");
+    await sleep(100);
+    assert.deepEqual(frames, ["hello"]);
+
+    const second = session(1); // the process restarted on a new port, pinned
+    b.send(encodeRudpPacket(second.createConnect(0, enc("join"))), port, "127.0.0.1");
+    await sleep(100);
+    const acceptB = atB.find((packet) => packet.packetType === "accept");
+    assert.ok(acceptB, `the restarted client on a new port was not admitted: ${JSON.stringify(atB.map((packet) => packet.packetType))}`);
+    second.receive(acceptB, 1);
+    assert.ok(second.connected);
+    b.send(encodeRudpPacket(send(second, "after")), port, "127.0.0.1");
+    await sleep(100);
+    assert.deepEqual(frames, ["hello", "after"]);
+  } finally {
+    server.close();
+    a.close();
+    b.close();
+  }
+});
+
+test("an accepted peer that goes silent times out", () => {
+  const server = session(500);
+  server.acceptConnect(session(10).createConnect(0), 0);
+  assert.equal(server.checkTimeout(100_000, 1_000), true);
 });

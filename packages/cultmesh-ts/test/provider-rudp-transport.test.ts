@@ -338,7 +338,7 @@ test("a client restarted on the same address with the same Connect payload repla
     socket.send(encodeRudpPacket(packet), server.bind.port, "127.0.0.1");
   const evidence = Buffer.from("same connect payload");
   try {
-    const first = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+    const first = new CultNetRudpSession({ connectionId, initialSequence: 50_000 });
     const connect = first.createConnect(Date.now(), evidence);
     toServer(connect);
     await waitFor(() => received.some(packet => packet.packetType === "accept"), "the first Accept");

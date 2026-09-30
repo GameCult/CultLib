@@ -2593,7 +2593,7 @@ test("server-mode transport admits a restarted client and keeps its session when
     peerSocket.send(encodeRudpPacket(packet), udpPort(serverSocket), "127.0.0.1");
   const reliable = { reliable: true, ordered: true };
   try {
-    const first = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+    const first = new CultNetRudpSession({ connectionId, initialSequence: 50_000 });
     const connect = first.createConnect(0, Buffer.from("same"));
     toServer(connect);
     await waitFor(() => received.some((p) => p.packetType === "accept"), "the first Accept");
@@ -2641,7 +2641,7 @@ test("RUDP operation service admits a restarted client on the same address", asy
   const connectionId = 0x43554c54;
   const port = Number(new URL(server.endpoint).port);
   const socket = await bindUdpSocket();
-  let session = new CultNetRudpSession({ connectionId, initialSequence: 50 });
+  let session = new CultNetRudpSession({ connectionId, initialSequence: 50_000 });
   const answered: string[] = [];
   socket.on("message", (wire) => {
     const packet = decodeRudpPacket(wire);

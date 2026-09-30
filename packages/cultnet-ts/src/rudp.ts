@@ -19,13 +19,28 @@ const RUDP_FIXED_HEADER_BYTES = 36;
 const MAX_CHANNEL_ID_BYTES = 255;
 export const CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS = 32;
 const RUDP_RECEIVED_SEQUENCE_WINDOW = 4_096;
+/// How long a client keeps retransmitting a Connect nobody answered before it
+/// abandons that attempt for a fresh one. A Connect the server answers with an
+/// Ack, never an Accept, is one the server judged stale (see `acceptConnect`);
+/// retransmitting the same sequence would never change its mind.
+const RUDP_CONNECT_ATTEMPT_MS = 3_000;
 
-/// A fresh default initial sequence, drawn from a secure source in [1, 2^31).
-/// The Connect's sequence is what tells a peer whether a Connect repeats one it
-/// already accepted or starts a new session, so two sessions must not share one
-/// by default.
-export function randomInitialSequence(): number {
-  return randomInt(1, 2 ** 31);
+/// A sequence drawn from a secure source in [floor, 2^31). The Connect's
+/// sequence is what tells a peer whether a Connect repeats one it already
+/// accepted or starts a new session, so two sessions must not share one by
+/// default. A floor above the range draws nothing new: the caller keeps its own
+/// sequence.
+function drawSequence(floor: number): number {
+  const low = Math.max(1, floor);
+  return low >= 2 ** 31 ? low : randomInt(low, 2 ** 31);
+}
+
+/// Whether `sequence` is at or before `mark` in serial order, within the
+/// receive window. The compare is modular, so it holds across the wrap of the
+/// 32-bit space; a sequence further back than the window is the duplicate
+/// test's below-window clause, and one ahead of the mark is never before it.
+function atOrBefore(sequence: number, mark: number): boolean {
+  return ((mark - sequence) >>> 0) < RUDP_RECEIVED_SEQUENCE_WINDOW;
 }
 
 function packetAcknowledges(packet: CultNetRudpPacket, sequence: number): boolean {
@@ -174,6 +189,9 @@ export class CultNetRudpSession {
   #connectSequence: number | undefined;
   /// A Connect this side sent is unanswered. Only then is an Accept honoured.
   #awaitingAccept = false;
+  /// When the unanswered Connect first went out; `dueResends` abandons it for a
+  /// fresh attempt once `RUDP_CONNECT_ATTEMPT_MS` has passed.
+  #connectStartedAtMs = 0;
   readonly #maxPendingReliablePackets: number | undefined;
   #lastReceivedAtMs: number | undefined;
   #highestReceivedSequence: number | undefined;
@@ -200,7 +218,7 @@ export class CultNetRudpSession {
 
   constructor(options: CultNetRudpSessionOptions) {
     this.connectionId = toUint32(options.connectionId, "connectionId");
-    this.#nextSequence = toUint32(options.initialSequence ?? randomInitialSequence(), "initialSequence");
+    this.#nextSequence = toUint32(options.initialSequence ?? drawSequence(1), "initialSequence");
     if (this.#nextSequence === 0xffff_ffff) {
       throw new Error("RUDP initialSequence must leave room for a reliable packet.");
     }
@@ -298,32 +316,57 @@ export class CultNetRudpSession {
     });
     this.#connectSequence = packet.sequence;
     this.#awaitingAccept = true;
+    this.#connectStartedAtMs = nowMs;
     this.#trackReliable(packet, nowMs);
     return packet;
   }
 
-  /// Whether `packet` is a retransmit of the Connect that started this session's
-  /// current generation: the session is connected and the Connect carries that
-  /// Connect's sequence. Servers that keep one session per peer ask this to tell
-  /// a repeat from a new session; anything else that reaches `acceptConnect`
-  /// starts a new generation.
+  /// Whether `packet` is a Connect this session's current generation already
+  /// owns: a retransmit of the Connect that started it (the session is
+  /// connected and the sequence is that Connect's), or a stale copy of an
+  /// earlier attempt by the same client (a sequence before it, within the
+  /// receive window). Servers that keep one session per peer ask this to tell a
+  /// Connect that starts a new session from one that does not; anything else
+  /// that reaches `acceptConnect` starts a new generation.
   connectRepeats(packet: CultNetRudpPacket): boolean {
     return packet.packetType === "connect"
       && this.#connected
-      && this.#connectSequence === packet.sequence;
+      && this.#connectSequence !== undefined
+      && (this.#connectSequence === packet.sequence
+        || this.#connectIsStale(packet.sequence, this.#connectSequence));
   }
 
+  /// A Connect that precedes the current generation's within the receive window
+  /// is the client's earlier attempt, delayed in the network: a client that
+  /// retried never sends a lower sequence again. Restarting on it would strand
+  /// the client, which honours only the Accept for its newest Connect. The rule
+  /// is TCP's answer to a delayed SYN (RFC 5961's challenge ACK): keep the
+  /// connection and answer with an Ack. A restarted client whose random initial
+  /// sequence lands in this window is answered the same way and abandons the
+  /// attempt for a fresh draw (`RUDP_CONNECT_ATTEMPT_MS`).
+  #connectIsStale(sequence: number, current: number): boolean {
+    return sequence !== current && atOrBefore(sequence, current);
+  }
+
+  /// Answers a Connect. A repeat of the accepted one queues nothing, so a
+  /// Connect storm cannot grow the reliable queue: the reply is the Accept
+  /// still awaiting acknowledgement, or an Ack once it was acknowledged. A
+  /// stale copy of an earlier attempt gets the same reply and changes nothing
+  /// else: it is not evidence the peer is alive. Any other Connect ends the
+  /// current generation, forgets the peer and accepts a new one.
   acceptConnect(packet: CultNetRudpPacket, nowMs = 0, payload = new Uint8Array()): CultNetRudpPacket {
     this.#requireConnection(packet);
     if (packet.packetType !== "connect") {
       throw new Error(`Expected RUDP connect packet, got ${packet.packetType}.`);
     }
 
-    // A repeat of the accepted Connect queues nothing, so a Connect storm cannot
-    // grow the reliable queue. Any other Connect ends the current generation,
-    // forgets the peer and accepts a new one.
     if (this.connectRepeats(packet)) {
-      return this.#answerRepeatedConnect(packet, nowMs);
+      if (this.#connectSequence === packet.sequence) {
+        this.#applyAcknowledgements(packet);
+        this.#rememberReceived(packet.sequence);
+        this.#lastReceivedAtMs = nowMs;
+      }
+      return this.#pendingAcceptForResend(nowMs) ?? this.createAck();
     }
     this.resetPeerState();
     this.#ensureReliableCapacity(1);
@@ -343,16 +386,12 @@ export class CultNetRudpSession {
     return response;
   }
 
-  /// The reply to a repeated Connect is the Accept still awaiting
-  /// acknowledgement, or an Ack once it was acknowledged.
-  #answerRepeatedConnect(packet: CultNetRudpPacket, nowMs: number): CultNetRudpPacket {
-    this.#applyAcknowledgements(packet);
-    this.#rememberReceived(packet.sequence);
-    this.#lastReceivedAtMs = nowMs;
+  /// The Accept still awaiting acknowledgement, resent.
+  #pendingAcceptForResend(nowMs: number): CultNetRudpPacket | undefined {
     const pendingAccept = [...this.#pendingReliable.values()]
       .find(pending => pending.packet.packetType === "accept");
     if (!pendingAccept) {
-      return this.createAck();
+      return undefined;
     }
     pendingAccept.lastSentAtMs = nowMs;
     return {
@@ -503,11 +542,7 @@ export class CultNetRudpSession {
       return { delivered: [], readyToSend };
     }
 
-    const isDuplicate = (packet.reliable ?? false)
-      && (this.#receivedSequences.has(packet.sequence)
-        || (this.#highestReceivedSequence !== undefined
-          && packet.sequence < this.#highestReceivedSequence
-          && this.#highestReceivedSequence - packet.sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW));
+    const isDuplicate = (packet.reliable ?? false) && this.#wasReceived(packet.sequence);
     if (packet.reliable ?? false) this.#rememberReceived(packet.sequence);
     if (isDuplicate) {
       return { delivered: [], readyToSend };
@@ -616,6 +651,10 @@ export class CultNetRudpSession {
   }
 
   dueResends(nowMs: number): CultNetRudpPacket[] {
+    const fresh = this.#abandonUnansweredConnect(nowMs);
+    if (fresh) {
+      return [fresh];
+    }
     const due: CultNetRudpPacket[] = [];
     for (const pending of this.#pendingReliable.values()) {
       if (nowMs - pending.lastSentAtMs >= this.resendDelayMs) {
@@ -624,6 +663,27 @@ export class CultNetRudpSession {
       }
     }
     return due.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  /// A Connect unanswered for `RUDP_CONNECT_ATTEMPT_MS` is replaced, not
+  /// retransmitted further, by a Connect with a newly drawn sequence and the
+  /// same payload. Nothing was ever sent in an unanswered generation, so no
+  /// sequence issued so far is owed; the draw stays above them, so a frame the
+  /// peer still remembers from an earlier generation of this session stays at or
+  /// before the new Connect.
+  #abandonUnansweredConnect(nowMs: number): CultNetRudpPacket | undefined {
+    if (!this.#awaitingAccept || nowMs - this.#connectStartedAtMs < RUDP_CONNECT_ATTEMPT_MS) {
+      return undefined;
+    }
+    const pending = this.#connectSequence === undefined
+      ? undefined
+      : this.#pendingReliable.get(this.#connectSequence);
+    if (!pending) {
+      return undefined;
+    }
+    const payload = new Uint8Array(pending.packet.payload ?? []);
+    this.#nextSequence = drawSequence(this.#nextSequence);
+    return this.createConnect(nowMs, payload);
   }
 
   #createPacket(packet: {
@@ -713,13 +773,18 @@ export class CultNetRudpSession {
     this.#rememberReceived(sequence);
   }
 
-  /// True for a sequence in the window that was received, and for one below the
-  /// window, which `receive` treats as a duplicate of something received.
+  /// The one duplicate test: true for a sequence in the window that was
+  /// received, for one below the window, and for one at or before the
+  /// watermark. The watermark starts at the handshake's seed, so a frame the
+  /// peer sent in an earlier generation (every sequence it issued is below the
+  /// Connect that began this one) is a duplicate of something already delivered
+  /// and is acknowledged, never delivered again.
   #wasReceived(sequence: number): boolean {
     return this.#receivedSequences.has(sequence)
       || (this.#highestReceivedSequence !== undefined
         && sequence < this.#highestReceivedSequence
-        && this.#highestReceivedSequence - sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW);
+        && this.#highestReceivedSequence - sequence >= RUDP_RECEIVED_SEQUENCE_WINDOW)
+      || (this.#receivedThrough !== undefined && atOrBefore(sequence, this.#receivedThrough));
   }
 
   #rememberReceived(sequence: number): void {
@@ -1064,6 +1129,10 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       return;
     }
 
+    // A Connect from another endpoint is a new client, whatever sequence it
+    // carries: the endpoint moves and the Connect starts a new generation. Only
+    // a Connect from the peer's own endpoint can be its repeat.
+    let connectFromNewEndpoint = false;
     if (!this.#remoteHost || this.#remotePort === undefined) {
       if (this.#mode === "server" && packet.packetType !== "connect") {
         this.#stats.packetsDropped += 1;
@@ -1075,6 +1144,7 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       if (this.#mode === "server" && packet.packetType === "connect") {
         this.#remoteHost = remote.address;
         this.#remotePort = remote.port;
+        connectFromNewEndpoint = true;
       } else {
         this.#stats.packetsDropped += 1;
         return;
@@ -1086,8 +1156,11 @@ export class CultNetRudpSocketTransportConnection extends EventEmitter implement
       // repeat is answered with the Accept owed, anything else replaces the
       // peer and the old session's writes die with it. A timed-out session
       // already ended its generation; any other predecessor ends here.
-      if (!this.#session.connectRepeats(packet) && !this.#session.ended) {
+      if ((connectFromNewEndpoint || !this.#session.connectRepeats(packet)) && !this.#session.ended) {
         this.#endedReason = Buffer.from("replaced by a new Connect", "utf8");
+      }
+      if (connectFromNewEndpoint) {
+        this.#session.resetPeerState();
       }
       let accept: CultNetRudpPacket;
       try {
