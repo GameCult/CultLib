@@ -204,11 +204,12 @@ export type CultMeshCollectionWatcher<TDocument> = (
 
 /**
  * The value type a catalog lookup yields. An explicit type argument wins; otherwise a CultCache document definition
- * names its own value type, and a bare schema descriptor yields `unknown`.
+ * names its own value type, and a bare schema descriptor yields `unknown`. The value type is never inferred from a
+ * value or an expected result, so a wrong value is an error rather than a new type.
  */
 export type CultMeshCatalogValue<TDocument, TSchema> = [TDocument] extends [never]
   ? TSchema extends AnyCultCacheDocumentDefinition ? CultCacheDocumentValue<TSchema> : unknown
-  : TDocument;
+  : NoInfer<TDocument>;
 
 export interface CultMeshDocumentSchemaDescriptor {
   readonly type?: string;
