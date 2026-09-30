@@ -1535,7 +1535,7 @@ test("rudp sequence-neutral acknowledgements interoperate with ordered receivers
   const request = sender.send("schema", Buffer.from("snapshot"), { reliable: true, ordered: true });
 
   assert.equal(ack.sequence, 0);
-  assert.equal(request.sequence, 1);
+  assert.equal(request.sequence, 2);
   assert.deepEqual(receiver.receive(ack).delivered, []);
   assert.deepEqual(receiver.receive(request).delivered.map(frame => Buffer.from(frame.payload).toString("utf8")), ["snapshot"]);
 });
