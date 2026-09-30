@@ -1765,3 +1765,11 @@ test("a store replaces and deletes a record written by an envelope that carries 
   await store.delete(raw(0x02));
   assert.deepEqual(await recordsOnDisk(file), []);
 });
+
+test("an envelope with no catalog entry replaces a record stored under another schema id that carries its label", async () => {
+  const file = join(await mkdtemp(join(tmpdir(), "cultcache-identity-")), "store.cc");
+  const store = new SingleFileMessagePackBackingStore(file);
+  await store.push(identityEnvelope("k", "label-x", "id-x", "t"));
+  await store.push({ key: "k", type: "t", payload: Uint8Array.of(0x02), storedAt: "2026-09-30T00:00:00Z" });
+  assert.deepEqual(await recordsOnDisk(file), [["k", "t"]]);
+});
