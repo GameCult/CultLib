@@ -81,16 +81,20 @@ export async function startCultNetOperationServer(
   let packetsDropped = 0;
   let sendFailures = 0;
   const sendPacket: SendPacket = (key, peer, packet) => {
+    const generation = peer.session.generation;
     sendRudpDatagram(socket, encodeRudpPacket(packet), peer.remote.port, peer.remote.address, (error) => {
       if (!isPermanentSendError(error)) {
         sendFailures += 1;
         return;
       }
-      if (peer.unsendable) return;
+      // A failure reported after the generation that sent the datagram ended is owed by
+      // nothing: that generation's end already told the peer, and a client that connected
+      // again from the endpoint owns it now. A live generation is the one in `sessions`.
+      if (peer.session.generation !== generation) return;
       // The datagram can never be sent as built: the session that owes it ends, never
       // the server, and the peer is told.
       peer.unsendable = true;
-      if (sessions.get(key) === peer) sessions.delete(key);
+      sessions.delete(key);
       const goodbye = encodeRudpPacket(peer.session.endUnsendableSession(error));
       sendRudpDatagram(socket, goodbye, peer.remote.port, peer.remote.address, () => {});
     });
@@ -99,7 +103,7 @@ export async function startCultNetOperationServer(
     // What a datagram carries is the sender's business: a rejection here must
     // drop and count the packet, never become an unhandled rejection that ends
     // the process.
-    handleServerDatagram(sessions, connectionId, options, wire, remote, sendPacket).then(
+    handleServerDatagram(sessions, connectionId, options, wire, remote, socket, sendPacket).then(
       admitted => { if (!admitted) packetsDropped += 1; },
       () => { packetsDropped += 1; },
     );
@@ -180,6 +184,7 @@ async function handleServerDatagram(
   options: CultNetOperationServerOptions,
   wire: Buffer,
   remote: RemoteInfo,
+  socket: Socket,
   sendPacket: SendPacket,
 ): Promise<boolean> {
   let packet: CultNetRudpPacket;
@@ -217,7 +222,7 @@ async function handleServerDatagram(
   try {
     result = peer.session.receive(packet, Date.now());
   } catch {
-    endSession(sessions, key, peer, sendPacket);
+    endSession(sessions, key, peer, socket);
     return false;
   }
   if (result.reply) sendPacket(key, peer, result.reply);
@@ -256,7 +261,7 @@ async function handleServerDatagram(
       if (peer.session.generation !== generation) return true;
       // The session recorded this request's sequence, so keeping it would
       // acknowledge the retransmit of a request that was never handled.
-      endSession(sessions, key, peer, sendPacket);
+      endSession(sessions, key, peer, socket);
       return false;
     }
   }
@@ -269,17 +274,19 @@ async function handleServerDatagram(
 /**
  * Ends a session that took a packet it could not serve, and tells the peer. The
  * reset comes first, or the goodbye's ack field would acknowledge the very
- * packet that was refused. A session already replaced under the same key is left.
+ * packet that was refused. The goodbye is best-effort: the session ends whether
+ * or not the peer hears it.
  */
 function endSession(
   sessions: Map<string, RemoteSession>,
   key: string,
   peer: RemoteSession,
-  sendPacket: SendPacket,
+  socket: Socket,
 ): void {
-  if (sessions.get(key) === peer) sessions.delete(key);
+  sessions.delete(key);
   peer.session.resetPeerState();
-  sendPacket(key, peer, peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+  const goodbye = encodeRudpPacket(peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+  sendRudpDatagram(socket, goodbye, peer.remote.port, peer.remote.address, () => {});
 }
 
 function parseRudpEndpoint(endpoint: string): { host: string; port: number } {

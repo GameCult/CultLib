@@ -6,13 +6,17 @@
 import assert from "node:assert/strict";
 import dgram, { type RemoteInfo, type Socket } from "node:dgram";
 import test from "node:test";
+import { encode } from "@msgpack/msgpack";
 import {
   CultNetRudpSession,
   CultNetRudpSocketTransportConnection,
+  decodeRudpPacket,
+  encodeCultNetMessageForWire,
   encodeRudpPacket,
   invokeCultNetOperation,
   isPermanentSendError,
   startCultNetOperationServer,
+  type CultNetOperationRequestMessage,
   type CultNetOperationResponseMessage,
 } from "../src";
 
@@ -289,5 +293,143 @@ test("an operation call the network refuses rejects with a timeout and does not 
     assert.deepEqual(uncaught.errors, []);
   } finally {
     uncaught.stop();
+  }
+});
+
+// A send's failure can be reported after the generation that sent it ended: the client
+// connected again from the same endpoint in the meantime. That failure is owed by nothing;
+// it may not end the generation that replaced it or say goodbye to the endpoint.
+
+/** Makes the next send to `port` fail as can never pass as built, reported `delayMs` later. */
+function failNextSendLate(socket: Socket, port: number, delayMs: number): { arm: () => void } {
+  let armed = false;
+  const send = socket.send.bind(socket) as (...args: unknown[]) => void;
+  Object.assign(socket, {
+    send: (message: Uint8Array, toPort: number, address: string, callback?: (error: Error | null) => void) => {
+      if (toPort !== port || !armed) {
+        send(message, toPort, address, callback);
+        return;
+      }
+      armed = false;
+      setTimeout(() => callback?.(Object.assign(new Error("late"), { code: "EMSGSIZE" })), delayMs);
+    },
+  });
+  return { arm: () => { armed = true; } };
+}
+
+/** A client driven packet by packet from one socket, so it can connect again from the same endpoint. */
+async function rawClient(serverPort: number, connectionId: number) {
+  const socket = await bindUdpSocket();
+  const received: ReturnType<typeof decodeRudpPacket>[] = [];
+  socket.on("message", (wire) => received.push(decodeRudpPacket(wire)));
+  const toServer = (packet: Parameters<typeof encodeRudpPacket>[0]) => socket.send(encodeRudpPacket(packet), serverPort, "127.0.0.1");
+  const connect = async (initialSequence: number) => {
+    const session = new CultNetRudpSession({ connectionId, initialSequence });
+    received.length = 0;
+    toServer(session.createConnect(Date.now()));
+    await waitFor(() => received.some((packet) => packet.packetType === "accept"), "the Accept");
+    const accept = received.find((packet) => packet.packetType === "accept")!;
+    session.receive(accept, Date.now());
+    toServer(session.createAckForReceived(accept.sequence));
+    return session;
+  };
+  return { socket, received, toServer, connect };
+}
+
+test("a transport ignores a send failure reported after the generation that sent it ended", async () => {
+  const serverSocket = await bindUdpSocket();
+  const connectionId = 0x10203096;
+  const uncaught = watchUncaught();
+  const server = new CultNetRudpSocketTransportConnection({
+    runtimeId: "rudp-server",
+    socket: serverSocket,
+    mode: "server",
+    connectionId,
+    resendPollMs: 1_000,
+  });
+  const reasons: string[] = [];
+  server.on("disconnect", ({ reason }: { reason: Uint8Array }) => reasons.push(Buffer.from(reason).toString("utf8")));
+  const client = await rawClient(udpPort(serverSocket), connectionId);
+  const late = failNextSendLate(serverSocket, udpPort(client.socket), 150);
+  try {
+    await client.connect(10);
+    late.arm();
+    server.send("schema", Buffer.from("old", "utf8"));
+    await client.connect(5_000);
+    await sleep(250);
+
+    assert.deepEqual(reasons, []);
+    assert.equal(server.connected, true);
+    assert.deepEqual(client.received.filter((packet) => packet.packetType === "disconnect"), []);
+    assert.deepEqual(uncaught.errors, []);
+  } finally {
+    uncaught.stop();
+    client.socket.close();
+    server.close();
+  }
+});
+
+test("an operation server ignores a send failure reported after the generation that sent it ended", async () => {
+  const connectionId = 0x43554c54;
+  const createSocket = dgram.createSocket;
+  let serverSocket: Socket | undefined;
+  Object.assign(dgram, {
+    createSocket: (...args: Parameters<typeof dgram.createSocket>) => {
+      serverSocket = createSocket(...args);
+      return serverSocket;
+    },
+  });
+  const server = await startCultNetOperationServer({
+    runtimeId: "operations",
+    handler: (request): CultNetOperationResponseMessage => ({
+      schemaVersion: "cultnet.operation_response.v0",
+      messageId: request.messageId,
+      serviceId: request.serviceId,
+      operation: request.operation,
+      status: "ok",
+      payloadSchema: request.payloadSchema,
+      payloadEncoding: request.payloadEncoding,
+      payload: request.payload,
+      diagnostics: [],
+      sourceRuntimeId: "operations",
+    }),
+  }).finally(() => Object.assign(dgram, { createSocket }));
+  const client = await rawClient(Number(new URL(server.endpoint).port), connectionId);
+  const late = failNextSendLate(serverSocket!, udpPort(client.socket), 150);
+  const request = (session: CultNetRudpSession, messageId: string) => session.sendMany("schema", encode(encodeCultNetMessageForWire({
+    schemaVersion: "cultnet.operation_request.v0",
+    messageId,
+    serviceId: "service",
+    operation: "operation",
+    payloadSchema: "payload",
+    payloadEncoding: "messagepack",
+    payload: new Uint8Array(),
+    diagnostics: [],
+    sourceRuntimeId: "caller",
+  } satisfies CultNetOperationRequestMessage, "cultnet.schema.v0")), { reliable: true, ordered: true, nowMs: Date.now() });
+  try {
+    const old = await client.connect(10);
+    // The response to this request is the next send, and it fails after the client reconnected.
+    late.arm();
+    for (const packet of request(old, "old")) client.toServer(packet);
+    const renewed = await client.connect(5_000);
+    await sleep(250);
+    assert.deepEqual(client.received.filter((packet) => packet.packetType === "disconnect"), []);
+    assert.equal(server.sendFailures, 0);
+
+    // The session that replaced it is still served.
+    let read = client.received.length;
+    let answered = 0;
+    for (const packet of request(renewed, "after")) client.toServer(packet);
+    await waitFor(() => {
+      for (; read < client.received.length; read += 1) {
+        const packet = client.received[read]!;
+        if (packet.packetType === "data") answered += renewed.receive(packet, Date.now()).delivered.length;
+      }
+      return answered > 0;
+    }, "the renewed session's response");
+  } finally {
+    client.socket.close();
+    await server.close();
   }
 });
