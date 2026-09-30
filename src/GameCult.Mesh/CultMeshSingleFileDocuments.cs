@@ -270,6 +270,8 @@ namespace GameCult.Mesh
             WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
+        // Every refusal is a CultStoreUnreadableException. A store whose catalog entries are in the older layout is read by the
+        // same store reader with the older entry reader, so it is judged by the same framing, slot count and records.
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
@@ -280,43 +282,12 @@ namespace GameCult.Mesh
             {
                 snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
             }
-            catch (Exception ex) when (ex is MessagePackSerializationException or InvalidOperationException)
+            catch (CultStoreUnreadableException)
             {
-                snapshot = ReadLegacySingleFileSnapshot(bytes);
+                snapshot = CultDocumentMessagePackSerialization.ReadStore(bytes, ReadLegacySchemaCatalogEntry);
             }
 
             CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-            return snapshot;
-        }
-
-        private static CultPersistedStoreSnapshot ReadLegacySingleFileSnapshot(byte[] bytes)
-        {
-            var reader = new MessagePackReader(bytes);
-            var fieldCount = reader.ReadArrayHeader();
-            var snapshot = new CultPersistedStoreSnapshot();
-            if (fieldCount > 0)
-                snapshot.FormatVersion = reader.ReadString()
-                    ?? throw new NotSupportedException("Store snapshot declares no format version.");
-
-            if (fieldCount > 1)
-            {
-                var catalogCount = reader.ReadArrayHeader();
-                snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
-                for (var index = 0; index < catalogCount; index++)
-                    snapshot.SchemaCatalog[index] = ReadLegacySchemaCatalogEntry(ref reader);
-            }
-
-            if (fieldCount > 2)
-            {
-                var recordCount = reader.ReadArrayHeader();
-                snapshot.Records = new CultPersistedRecord[recordCount];
-                for (var index = 0; index < recordCount; index++)
-                    snapshot.Records[index] = CultDocumentMessagePackSerialization.ReadPersistedRecord(ref reader);
-            }
-
-            for (var index = 3; index < fieldCount; index++)
-                reader.Skip();
-
             return snapshot;
         }
 

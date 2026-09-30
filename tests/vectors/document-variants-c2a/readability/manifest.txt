@@ -15,3 +15,10 @@ map.bin             refuses  refuses  refuses  refuses
 truncated.bin       refuses  refuses  refuses  refuses
 trailing-bytes.bin  refuses  refuses  refuses  refuses
 trailing-store.bin  refuses  refuses  refuses  refuses
+bad-body-v1.bin     refuses  refuses  refuses  refuses
+bad-body-v3.bin     refuses  refuses  refuses  refuses
+header-only-v1.bin  refuses  refuses  refuses  refuses
+header-only-v3.bin  refuses  refuses  refuses  refuses
+extra-top-slot.bin  refuses  refuses  refuses  refuses
+missing-schema-v3.bin reads  refuses  refuses  refuses
+variant-slot-v3.bin reads    refuses  refuses  refuses

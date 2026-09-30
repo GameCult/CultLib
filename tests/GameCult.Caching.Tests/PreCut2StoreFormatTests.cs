@@ -108,7 +108,7 @@ namespace GameCult.Caching.Tests
                 using var cache = new CultCache();
                 var error = Assert.Catch(() => cache.AddBackingStore(new SingleFileMessagePackBackingStore(file)));
                 Assert.That(error, Is.Not.Null);
-                Assert.That(error!.ToString(), Does.Contain(nameof(NotSupportedException)));
+                Assert.That(error, Is.TypeOf<CultStoreUnreadableException>());
                 return error.ToString();
             }
             finally
@@ -164,7 +164,7 @@ namespace GameCult.Caching.Tests
             var bytes = new byte[] { 0x93, 0xc0, 0x90, 0x90 };
 
             Assert.That(() => CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes),
-                Throws.TypeOf<NotSupportedException>().With.Message.Contains("format version"));
+                Throws.TypeOf<CultStoreUnreadableException>().With.Message.Contains("format version"));
         }
 
         [Test]

@@ -76,7 +76,7 @@ namespace GameCult.Caching.Tests
             if (reads)
                 Assert.DoesNotThrow(Open);
             else
-                Assert.That(Open, Throws.Exception);
+                Assert.That(Open, Throws.TypeOf<CultStoreUnreadableException>());
         }
 
         [TestCaseSource(nameof(Vectors))]
@@ -91,11 +91,12 @@ namespace GameCult.Caching.Tests
             if (reads)
             {
                 store.PushAll();
-                Assert.That(Header(path), Does.StartWith("cultcache.store.v"), "the file is a store this runtime wrote");
+                // A whole-store flush writes what the store holds: one deck with no element ids is v1, whatever the file was.
+                Assert.That(Header(path), Is.EqualTo("cultcache.store.v1"));
                 return;
             }
 
-            Assert.That(() => store.PushAll(), Throws.Exception);
+            Assert.That(() => store.PushAll(), Throws.TypeOf<CultStoreUnreadableException>());
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
         }
 
@@ -110,12 +111,48 @@ namespace GameCult.Caching.Tests
             if (reads)
             {
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
-                Assert.That(Header(path), Does.StartWith("cultcache.store.v"), "the file is a store this runtime wrote");
+                Assert.That(Header(path), Is.EqualTo("cultcache.store.v1"), "an unconditional commit writes the store's whole view, which holds no element id");
                 return;
             }
 
-            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.Exception);
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<CultStoreUnreadableException>());
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a file this runtime cannot read was rewritten");
+        }
+
+        // A commit that lands onto the file as it is keeps the header the file carries: a store already v3 stays v3.
+        [TestCase("../v3-base.msgpack", "cultcache.store.v3")]
+        [TestCase("zero-byte.bin", "cultcache.store.v1")]
+        [TestCase("empty-array.bin", "cultcache.store.v1")]
+        public void AConditionalCommitOntoAReadableFileKeepsItsHeader(string vector, string header)
+        {
+            var path = Seed("conditional.cc");
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            File.WriteAllBytes(path, File.ReadAllBytes(Path.Combine(VectorRoot(), vector)));
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(new CultRecordKey("e"), null);
+                batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"));
+            }), Is.True);
+            Assert.That(Header(path), Is.EqualTo(header));
+        }
+
+        // Every runtime's tests walk the manifest, so a vector without a row would go untested.
+        [Test]
+        public void EveryVectorInTheFolderHasAManifestRow()
+        {
+            var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal);
+            var files = Directory.GetFiles(VectorRoot(), "*.bin").Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal);
+            Assert.That(rows, Is.EqualTo(files));
+        }
+
+        // The refusal carries what the reader choked on.
+        [Test]
+        public void ARefusalKeepsItsCauseAsTheInnerException()
+        {
+            var error = Assert.Throws<CultStoreUnreadableException>(() =>
+                CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(Path.Combine(VectorRoot(), "truncated.bin"))))!;
+            Assert.That(error.InnerException, Is.Not.Null);
         }
 
         // The record type of the shared valid store (v3-base.msgpack: alpha and beta), so a cache can open it.

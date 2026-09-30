@@ -1294,7 +1294,7 @@ namespace GameCult.Caching.Tests
         public void AVariantRecordUnderAV1HeaderIsRefusedNamingTheRecord()
         {
             var path = WriteStore(CultPersistedStoreSnapshot.FormatV1, PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base"));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("cultcache.store.v2"));
         }
 
@@ -1302,7 +1302,7 @@ namespace GameCult.Caching.Tests
         public void AVariantRecordWithAPayloadIsRefusedNamingTheRecord()
         {
             var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", payload: new byte[] { 0x90 }));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("payload"));
         }
 
@@ -1310,7 +1310,7 @@ namespace GameCult.Caching.Tests
         public void AnOverrideWithAnUnknownOpIsRefusedNamingTheRecord()
         {
             var path = WriteStore(PlainGear("hand-base"), VariantGearRecord("hand-variant", "hand-base", op: (CultOverrideOp)7));
-            var error = Assert.Throws<NotSupportedException>(() => Open(path).Dispose())!;
+            var error = Assert.Throws<CultStoreUnreadableException>(() => Open(path).Dispose())!;
             Assert.That(error.Message, Does.Contain("hand-variant").And.Contain("op 7"));
         }
 

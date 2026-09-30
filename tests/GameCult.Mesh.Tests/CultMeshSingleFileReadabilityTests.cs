@@ -77,8 +77,16 @@ public sealed class CultMeshSingleFileReadabilityTests
                 continue;
             }
 
-            Assert.That(() => write(path), Throws.Exception, name);
+            Assert.That(() => write(path), Throws.TypeOf<CultStoreUnreadableException>(), name);
             File.ReadAllBytes(path).Should().Equal(bytes, name + " rewrote a file this runtime cannot read");
         }
+    }
+
+    [Test]
+    public void EveryVectorInTheFolderHasAManifestRow()
+    {
+        var rows = Vectors().Select(row => (string)row.Arguments[0]).Where(name => !name.StartsWith("..", StringComparison.Ordinal)).OrderBy(name => name, StringComparer.Ordinal);
+        var files = Directory.GetFiles(VectorRoot(), "*.bin").Select(Path.GetFileName).OrderBy(name => name, StringComparer.Ordinal);
+        rows.Should().Equal(files);
     }
 }

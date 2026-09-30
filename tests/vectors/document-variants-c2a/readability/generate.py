@@ -11,6 +11,7 @@ import msgpack
 here = pathlib.Path(__file__).resolve().parent
 whole = (here.parent / "v3-base.msgpack").read_bytes()
 pack = lambda value: msgpack.packb(value, use_bin_type=True)
+base = msgpack.unpackb(whole, raw=False)
 
 vectors = {
     "zero-byte": b"",
@@ -28,8 +29,20 @@ vectors = {
     "truncated": whole[:-1],
     "trailing-bytes": whole + b"\x01\x02\x03",
     "trailing-store": whole + whole,
+    # A header and a body of the wrong shape, for both readable headers.
+    "bad-body-v1": pack(["cultcache.store.v1", 5, 6]),
+    "bad-body-v3": pack(["cultcache.store.v3", 5, 6]),
+    # A header and nothing else: not a store, whatever the header says.
+    "header-only-v1": pack(["cultcache.store.v1"]),
+    "header-only-v3": pack(["cultcache.store.v3"]),
+    # v3-base with its schema catalog emptied: every record names a schema the store does not publish.
+    "missing-schema-v3": pack([base[0], [], base[2]]),
+    # v3-base plus a variant of alpha: a fifth record slot, [baseKey, overrides[]], over an empty payload. Only C# reads it.
+    "variant-slot-v3": pack([base[0], base[1], base[2] + [["gamma"] + base[2][0][1:3] + [b"", ["alpha", []]]]]),
+    # v3-base with a fourth top-level slot after the records.
+    "extra-top-slot": pack(base + [0]),
 }
-vectors["legacy-trailing"] = vectors["legacy-envelopes"] + b""
+vectors["legacy-trailing"] = vectors["legacy-envelopes"] + b"\x01\x02\x03"
 for name, data in vectors.items():
     (here / f"{name}.bin").write_bytes(data)
 print(len(vectors), "vectors")

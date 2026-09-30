@@ -230,14 +230,20 @@ rest, so a file already declared `v3` stays `v3` when it merges onto it. A direc
 store's manifest says `cultcache.store.v5.directory-content-addressed-pages` under the
 same rule, and `v4` otherwise.
 
-A single-file store is exactly one MessagePack array. Every runtime refuses a file that is
-truncated, has bytes after the array (a second store appended included), is not an array, or
-whose first slot is not a header it reads; it refuses these on open and on rewrite alike. A
-zero-byte file is an empty store. A flush or a commit replaces a file only when the
+A single-file store is exactly one MessagePack array of three slots: the header, the schema
+catalog and the records. Every runtime refuses a file that is truncated, has bytes after the
+array (a second store appended included), is not an array, has fewer or more than three slots
+(a header alone included), whose first slot is not a header it reads, or whose catalog or
+records it cannot decode (a record with more slots than its header allows, a variant record
+it does not read). A runtime never skips a slot it does not understand. It refuses on open
+and on rewrite alike, because the rewrite asks the same full reader as the open. A zero-byte
+file and an empty array are an empty store. A flush or a commit replaces a file only when the
 runtime's own reader opens it, so one verdict covers open, flush and commit, and a file the
-runtime cannot read is left as it is. Rust, TypeScript and Python also open the legacy
-envelope array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# has
-no legacy reader and refuses it. The shared byte vectors and each runtime's verdict are
+runtime cannot read is left as it is. Each runtime refuses with one typed error:
+`CultStoreUnreadableException` (C#), `StoreUnreadableError` (Rust, TypeScript, Python), with
+the underlying cause attached. Rust, TypeScript and Python also open the legacy envelope
+array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# has no legacy
+reader and refuses it. The shared byte vectors and each runtime's verdict are
 `tests/vectors/document-variants-c2a/readability/manifest.txt`.
 
 ## Variant Records

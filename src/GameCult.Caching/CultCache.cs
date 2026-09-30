@@ -3419,8 +3419,9 @@ namespace GameCult.Caching
 
         /// <summary>
         /// This store's one reader of a non-empty store file, and so its one verdict on whether the file may be replaced: open,
-        /// flush and commit all ask it. It must throw for anything that is not exactly one store this runtime reads (a
-        /// truncated file, bytes after the store, a format it does not know), so a rewrite never overwrites a file it cannot see.
+        /// flush and commit all ask it. It must throw <see cref="CultStoreUnreadableException"/> for anything that is not exactly one
+        /// store this runtime reads (a truncated file, bytes after the store, a missing or extra slot, a format or record it does
+        /// not know), so a rewrite never overwrites a file it cannot see.
         /// </summary>
         protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
 

@@ -178,49 +178,62 @@ public static class CultDocumentMessagePackSerialization
     }
 
     /// <summary>
-    /// Reads a store file: exactly one complete MessagePack array. A truncated file, bytes after the array, a value that is not
-    /// an array, or a first slot that is not a header string are refused, so a reader never takes part of a file for the whole.
-    /// The rewriting paths use this same reader as their verdict on whether a file may be replaced.
+    /// Reads a store file: exactly one complete MessagePack array of three slots (header, schema catalog, records), or an empty
+    /// array, which is an empty store. A truncated file, bytes after the array, a value that is not an array, a first slot that
+    /// is not a header string, a store with fewer or more slots, or a body that does not decode are refused with
+    /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
+    /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
     /// </summary>
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) => ReadStore(payload, ReadSchemaCatalogEntry);
+
+    internal delegate CultSchemaCatalogEntry CatalogEntryReader(ref MessagePackReader reader);
+
+    // The one store reader. A caller with an older catalog layout supplies its own entry reader; the framing, the slot count
+    // and the records are judged here, once.
+    internal static CultPersistedStoreSnapshot ReadStore(byte[] payload, CatalogEntryReader readCatalogEntry)
     {
-        RequireOneArray(payload);
-        var reader = new MessagePackReader(payload);
-        var fieldCount = reader.ReadArrayHeader();
-        var snapshot = new CultPersistedStoreSnapshot();
-
-        if (fieldCount > 0)
+        try
         {
+            RequireOneArray(payload);
+            var reader = new MessagePackReader(payload);
+            var fieldCount = reader.ReadArrayHeader();
+            if (fieldCount != 0 && fieldCount != StoreSnapshotFieldCount)
+            {
+                throw new CultStoreUnreadableException(
+                    $"The store has {fieldCount} top-level slots; this runtime reads {StoreSnapshotFieldCount} (header, schema catalog, records) or none.");
+            }
+
+            var snapshot = new CultPersistedStoreSnapshot();
+            if (fieldCount == 0)
+                return snapshot;
+
             snapshot.FormatVersion = reader.ReadString()
-                ?? throw new NotSupportedException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
-        }
+                ?? throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
 
-        if (fieldCount > 1)
-        {
             var catalogCount = reader.ReadArrayHeader();
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
             for (var index = 0; index < catalogCount; index++)
             {
-                snapshot.SchemaCatalog[index] = ReadSchemaCatalogEntry(ref reader);
+                snapshot.SchemaCatalog[index] = readCatalogEntry(ref reader);
             }
-        }
 
-        if (fieldCount > 2)
-        {
             var recordCount = reader.ReadArrayHeader();
             snapshot.Records = new CultPersistedRecord[recordCount];
             for (var index = 0; index < recordCount; index++)
             {
                 snapshot.Records[index] = ReadPersistedRecord(ref reader);
             }
-        }
 
-        for (var index = StoreSnapshotFieldCount; index < fieldCount; index++)
+            return snapshot;
+        }
+        catch (CultStoreUnreadableException)
         {
-            reader.Skip();
+            throw;
         }
-
-        return snapshot;
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            throw new CultStoreUnreadableException(ex.Message, ex);
+        }
     }
 
     private static void RequireOneArray(byte[] bytes)
@@ -229,16 +242,16 @@ public static class CultDocumentMessagePackSerialization
         try
         {
             if (whole.NextMessagePackType != MessagePackType.Array)
-                throw new NotSupportedException($"The store is a MessagePack {whole.NextMessagePackType}, not an array.");
+                throw new CultStoreUnreadableException($"The store is a MessagePack {whole.NextMessagePackType}, not an array.");
             whole.Skip();
         }
         catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
         {
-            throw new NotSupportedException("The store is not one complete MessagePack array.", ex);
+            throw new CultStoreUnreadableException("The store is not one complete MessagePack array.", ex);
         }
 
         if (!whole.End)
-            throw new NotSupportedException("The store has bytes after its MessagePack array.");
+            throw new CultStoreUnreadableException("The store has bytes after its MessagePack array.");
     }
 
     /// <summary>Refuses a single-file snapshot this runtime cannot read, naming the format or record it found.</summary>
@@ -249,7 +262,7 @@ public static class CultDocumentMessagePackSerialization
             !string.Equals(version, CultPersistedStoreSnapshot.FormatV2, StringComparison.Ordinal) &&
             !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
         {
-            throw new NotSupportedException(
+            throw new CultStoreUnreadableException(
                 $"Store format {version} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
         }
 
@@ -259,7 +272,7 @@ public static class CultDocumentMessagePackSerialization
             var variant = snapshot.Records.FirstOrDefault(record => record.Variant != null);
             if (variant != null)
             {
-                throw new NotSupportedException(
+                throw new CultStoreUnreadableException(
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
         }

@@ -23,8 +23,8 @@ public sealed class CultMeshVariantRefusalTests
         throw new FileNotFoundException($"Shared vector {name} not found above {TestContext.CurrentContext.TestDirectory}.");
     }
 
-    private static NotSupportedException Refusal(string vector) =>
-        Assert.Throws<NotSupportedException>(() =>
+    private static CultStoreUnreadableException Refusal(string vector) =>
+        Assert.Throws<CultStoreUnreadableException>(() =>
             CultMesh.ReadSingleFileDocumentPayload(VectorPath(vector), new CultRecordKey("item:bellows"), ItemSchemaId))!;
 
     [Test]
@@ -43,6 +43,17 @@ public sealed class CultMeshVariantRefusalTests
     {
         var message = Refusal("legacy-catalog-extra-slot.msgpack").Message;
         message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
+    }
+
+    // The older catalog layout is read by the same store reader, so it is held to one array too: the same store with bytes after it
+    // is refused, and only the bytes make the difference.
+    [Test]
+    public void ReadSingleFileDocument_ReadsTheLegacyCatalogLayoutButNotWithBytesAfterIt()
+    {
+        CultMesh.ReadSingleFileDocumentPayload(VectorPath("legacy-catalog-plain.msgpack"), new CultRecordKey("item:bellows"), ItemSchemaId)
+            .Should().NotBeEmpty();
+
+        Refusal("legacy-catalog-trailing.msgpack").Message.Should().Contain("after its MessagePack array");
     }
 
     // Q6: CultMesh does not resolve variants. It refuses a variant key naming it and its base, and still reads the plain

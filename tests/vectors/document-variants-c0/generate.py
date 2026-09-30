@@ -8,6 +8,10 @@ at test time. Run: python generate.py  (needs msgpack).
                                   v1 header, catalog entry in the older layout (contentHash at slot
                                   5), so CultMesh's legacy snapshot reader takes it, plus the
                                   extra-slot record
+  legacy-catalog-plain.msgpack    v1 header, the older-layout catalog entry, the plain v1 records: a store CultMesh's
+                                  legacy reader accepts
+  legacy-catalog-trailing.msgpack legacy-catalog-plain plus three bytes after the array: one array is
+                                  required of the legacy layout too
   v1-base.msgpack                 NOT generated here: written once by the Python runtime at CultLib
                                   69a21bb (SingleFileMessagePackBackingStore.push of alpha and
                                   beta, type vectors.item, before any C0 code existed)
@@ -41,3 +45,6 @@ write("variant-v2.msgpack", ["cultcache.store.v2", catalog, records + [variant]]
 legacy_entry = [catalog[0][0], catalog[0][1], catalog[0][2], catalog[0][4], None, catalog[0][3], []]
 write("legacy-catalog-extra-slot.msgpack",
       [header, [legacy_entry], [anvil + [["item:bellows", []]]]])
+write("legacy-catalog-plain.msgpack", [header, [legacy_entry], records])
+(here / "legacy-catalog-trailing.msgpack").write_bytes(
+    msgpack.packb([header, [legacy_entry], records], use_bin_type=True) + b"\x01\x02\x03")
