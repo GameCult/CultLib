@@ -95,7 +95,7 @@ use crate::media_stream_contracts::{
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
 };
 use crate::media_stream_wire::{
-    GAMECULT_MEDIA_CHANNEL, GameCultMediaWireRecord, MediaWireProvenance,
+    GAMECULT_MEDIA_CHANNEL, GAMECULT_MEDIA_MAX_WIRE_BYTES, GameCultMediaWireRecord, MediaWireProvenance,
     encode_media_wire_record, validate_audio_parity_record, validate_audio_record,
     validate_video_parity_record, validate_video_record,
 };
@@ -118,6 +118,13 @@ pub const MEDIA_FEC_MAX_WIRE_BYTES: usize =
 /// A producer's choice of `(k, m)` and datagram budget.
 /// [`MediaFecPolicy::STANDARD`] is the ruled default; each record carries the
 /// `(k, m)` it was made with, so a decoder needs no policy.
+///
+/// Build one by overriding fields of the default, `MediaFecPolicy {
+/// max_wire_bytes: 1_211, ..MediaFecPolicy::STANDARD }`, not by naming every
+/// field: a field added later then cannot break, or silently mis-set, the
+/// caller. `max_wire_bytes` may not exceed
+/// [`GAMECULT_MEDIA_MAX_WIRE_BYTES`], the ceiling a decoder holds every record
+/// to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaFecPolicy {
     /// The most data chunks in one video block.
@@ -182,6 +189,12 @@ impl MediaFecPolicy {
             || usize::from(self.audio_data_shards) + usize::from(self.audio_parity_shards) > 256
         {
             return Err(MediaFecError::invalid("media FEC policy exceeds 256 shards per block"));
+        }
+        if self.max_wire_bytes > GAMECULT_MEDIA_MAX_WIRE_BYTES {
+            return Err(MediaFecError::invalid(format!(
+                "media FEC policy max_wire_bytes {} exceeds the {GAMECULT_MEDIA_MAX_WIRE_BYTES}-byte media record ceiling",
+                self.max_wire_bytes
+            )));
         }
         Ok(())
     }

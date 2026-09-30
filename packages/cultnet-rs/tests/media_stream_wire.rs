@@ -2,6 +2,8 @@
 //! nothing on the wire.
 
 use cultnet_rs::{
+    CultNetRudpDeliveredFrame, CultNetRudpSendOptions, CultNetRudpSession, CultNetRudpSessionOptions,
+    GAMECULT_MEDIA_MAX_WIRE_BYTES, RudpTransportProfileOptions, create_rudp_transport_profile,
     GAMECULT_MEDIA_CHANNEL, GameCultMediaAudioPacketRecord, GameCultMediaAudioParityShardRecord,
     GameCultMediaReceiverFeedbackRecord,
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
@@ -419,4 +421,221 @@ fn records_on_the_edge_of_each_bound_are_admitted() {
     audio.base_pts_ticks = i64::MAX - 960 * 3;
     audio.deadline_ticks = i64::MAX;
     assert!(decodes(GameCultMediaWireRecord::AudioParity(audio)).is_ok(), "the last pts is i64::MAX");
+}
+
+// ---------------------------------------------------------------------------
+// The ceiling on one media record
+// ---------------------------------------------------------------------------
+
+fn audio_parity(payload_bytes: usize, deadline_ticks: i64) -> GameCultMediaAudioParityShardRecord {
+    GameCultMediaAudioParityShardRecord {
+        stream_id: "s".to_string(),
+        session_id: "x".to_string(),
+        codec: "opus".to_string(),
+        fec_scheme: "rs-gf256-v1".to_string(),
+        base_packet_id: 8,
+        base_pts_ticks: 0,
+        packet_duration_ticks: 100,
+        timebase_num: 1,
+        timebase_den: 48_000,
+        deadline_ticks,
+        data_shard_count: 4,
+        parity_index: 0,
+        parity_shard_count: 2,
+        shard_payload_bytes: payload_bytes as u32,
+        payload: vec![7; payload_bytes],
+    }
+}
+
+fn video_parity(payload_bytes: usize) -> GameCultMediaVideoParityShardRecord {
+    GameCultMediaVideoParityShardRecord {
+        stream_id: "s".to_string(),
+        session_id: "x".to_string(),
+        frame_id: 1,
+        codec: "h264".to_string(),
+        pts_ticks: 0,
+        duration_ticks: 1,
+        timebase_num: 1,
+        timebase_den: 90_000,
+        keyframe: false,
+        dependency_frame_id: Some(0),
+        deadline_ticks: 1,
+        chunk_count: 4,
+        fec_scheme: "rs-gf256-v1".to_string(),
+        block_index: 0,
+        block_count: 1,
+        block_data_start: 0,
+        block_data_count: 4,
+        parity_index: 1,
+        parity_count: 2,
+        shard_payload_bytes: payload_bytes as u32,
+        last_chunk_payload_bytes: 2,
+        payload: vec![7; payload_bytes],
+    }
+}
+
+fn wire_len(record: &GameCultMediaWireRecord) -> usize {
+    encode_media_wire_record(record, provenance()).unwrap().len()
+}
+
+/// The payload length whose wrapped record is exactly `wire_bytes` long, found
+/// from the record's own linear growth in its payload.
+fn payload_for_wire_len(
+    wire_bytes: usize,
+    wrap: &dyn Fn(usize) -> GameCultMediaWireRecord,
+) -> usize {
+    let probe = 1_000;
+    let payload = probe + wire_bytes - wire_len(&wrap(probe));
+    assert_eq!(wire_len(&wrap(payload)), wire_bytes, "the record grows one byte per payload byte here");
+    payload
+}
+
+/// RUDP would reassemble a 16 MiB record, and recovery work scales with the
+/// shard length, so the decoder holds every record to one ceiling.
+#[test]
+fn a_media_record_one_byte_over_the_ceiling_is_refused_at_decode() {
+    let ceiling = GAMECULT_MEDIA_MAX_WIRE_BYTES;
+    let wraps: [(&str, Box<dyn Fn(usize) -> GameCultMediaWireRecord>); 2] = [
+        (
+            "audio parity",
+            Box::new(|payload| GameCultMediaWireRecord::AudioParity(audio_parity(payload, 300))),
+        ),
+        (
+            "video parity",
+            Box::new(|payload| GameCultMediaWireRecord::VideoParity(video_parity(payload))),
+        ),
+    ];
+    for (name, wrap) in &wraps {
+        let at = payload_for_wire_len(ceiling, wrap.as_ref());
+        let wire = encode_media_wire_record(&wrap(at), provenance()).unwrap();
+        assert_eq!(wire.len(), ceiling);
+        decode_media_wire_record(&wire)
+            .unwrap_or_else(|error| panic!("{name} at the ceiling is refused: {error}"));
+
+        let over = encode_media_wire_record(&wrap(at + 1), provenance()).unwrap();
+        assert_eq!(over.len(), ceiling + 1);
+        let error = decode_media_wire_record(&over).unwrap_err();
+        assert!(error.to_string().contains("ceiling"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn a_jumbo_frame_sized_record_is_accepted() {
+    let wire = encode_media_wire_record(
+        &GameCultMediaWireRecord::AudioParity(audio_parity(8_800, 300)),
+        provenance(),
+    )
+    .unwrap();
+    assert!(wire.len() > 8_800 && wire.len() < GAMECULT_MEDIA_MAX_WIRE_BYTES);
+    decode_media_wire_record(&wire).expect("a jumbo-frame record decodes");
+}
+
+/// Recovery hands every recovered packet the block's deadline, so a parity
+/// whose deadline precedes the last packet's pts would recover a packet that
+/// fails `validate_audio_record`.
+#[test]
+fn audio_parity_must_not_have_a_deadline_before_its_last_packets_pts() {
+    // Four packets, 100 ticks each from 0: the last plays at 300.
+    let decodes = |deadline_ticks: i64| {
+        let wire = encode_media_wire_record(
+            &GameCultMediaWireRecord::AudioParity(audio_parity(8, deadline_ticks)),
+            provenance(),
+        )
+        .unwrap();
+        decode_media_wire_record(&wire)
+    };
+    assert!(decodes(300).is_ok());
+    assert!(decodes(301).is_ok());
+    let error = decodes(299).unwrap_err();
+    assert!(error.to_string().contains("last pts_ticks"), "{error}");
+    let error = decodes(0).unwrap_err();
+    assert!(error.to_string().contains("last pts_ticks"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// The media channel's own payload cap
+// ---------------------------------------------------------------------------
+
+fn connected_session() -> CultNetRudpSession {
+    let mut session = CultNetRudpSession::new(CultNetRudpSessionOptions {
+        connection_id: 9,
+        ..CultNetRudpSessionOptions::default()
+    });
+    session.assume_connected(0);
+    session
+}
+
+const FRAGMENT_BYTES: usize = 16 * 1024;
+
+fn media_payload_limit(session_limit: Option<u32>) -> Option<u32> {
+    let profile = create_rudp_transport_profile(
+        "raven",
+        RudpTransportProfileOptions {
+            max_payload_bytes: session_limit,
+            ..RudpTransportProfileOptions::default()
+        },
+    );
+    profile.transports[0]
+        .channels
+        .iter()
+        .find(|channel| channel.channel_id == GAMECULT_MEDIA_CHANNEL)
+        .expect("the profile advertises the media channel")
+        .max_payload_bytes
+}
+
+#[test]
+fn the_media_channel_advertises_the_ceiling_or_a_tighter_session_cap() {
+    let ceiling = GAMECULT_MEDIA_MAX_WIRE_BYTES as u32;
+    assert_eq!(media_payload_limit(None), Some(ceiling));
+    assert_eq!(media_payload_limit(Some(16 * 1024 * 1024)), Some(ceiling));
+    assert_eq!(media_payload_limit(Some(4_096)), Some(4_096));
+}
+
+#[test]
+fn a_session_refuses_to_send_more_than_the_ceiling_on_the_media_channel_only() {
+    let ceiling = GAMECULT_MEDIA_MAX_WIRE_BYTES;
+    let send = |channel: &str, payload: usize| {
+        connected_session().send_many(
+            channel,
+            vec![0; payload],
+            CultNetRudpSendOptions::default(),
+            Some(FRAGMENT_BYTES),
+        )
+    };
+    assert!(send(GAMECULT_MEDIA_CHANNEL, ceiling).is_ok());
+    let error = send(GAMECULT_MEDIA_CHANNEL, ceiling + 1).unwrap_err();
+    assert!(error.to_string().contains("max_payload_bytes"), "{error}");
+    assert!(send("schema", ceiling + 1).is_ok(), "other channels keep the session cap");
+}
+
+/// Reassembly is where memory is spent, so the receiver enforces the ceiling
+/// itself, not only the sender.
+#[test]
+fn a_session_refuses_to_reassemble_more_than_the_ceiling_on_the_media_channel() {
+    let ceiling = GAMECULT_MEDIA_MAX_WIRE_BYTES;
+    let packets = connected_session()
+        .send_many(
+            "schema",
+            vec![0; ceiling + 1],
+            CultNetRudpSendOptions::default(),
+            Some(FRAGMENT_BYTES),
+        )
+        .unwrap();
+    assert!(packets.len() > 1);
+
+    let deliver = |channel: &str| -> anyhow::Result<Vec<CultNetRudpDeliveredFrame>> {
+        let mut receiver = connected_session();
+        let mut delivered = Vec::new();
+        for packet in &packets {
+            let mut packet = packet.clone();
+            packet.channel_id = channel.to_string();
+            delivered.extend(receiver.receive(&packet, 0)?.delivered);
+        }
+        Ok(delivered)
+    };
+    let frames = deliver("schema").expect("the same fragments reassemble on another channel");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].payload.len(), ceiling + 1);
+    let error = deliver(GAMECULT_MEDIA_CHANNEL).unwrap_err();
+    assert!(error.to_string().contains("max_payload_bytes"), "{error}");
 }

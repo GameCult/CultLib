@@ -42,6 +42,19 @@ use crate::media_stream_contracts::{
 /// choice per session; stale media is dropped, not retransmitted.
 pub const GAMECULT_MEDIA_CHANNEL: &str = "media";
 
+/// The largest wrapped media record the decoder accepts, and the most the RUDP
+/// `media` channel reassembles: 64 KiB.
+///
+/// It is the bound a receiver holds a peer to. A parity shard's length is
+/// whatever its producer's [`MediaFecPolicy::max_wire_bytes`](crate::MediaFecPolicy::max_wire_bytes) allowed, and
+/// recovery work grows with the square of the block size times that length, so
+/// without a ceiling one hostile record could name any length RUDP would
+/// reassemble (16 MiB). 64 KiB is one maximum UDP datagram: it covers every
+/// path MTU in use, jumbo frames (9,000 bytes) with a wide margin, and a
+/// record is still one message rather than a stream. A policy may not ask for
+/// more; see [`MediaFecPolicy`](crate::MediaFecPolicy).
+pub const GAMECULT_MEDIA_MAX_WIRE_BYTES: usize = 64 * 1024;
+
 /// One media record on its way somewhere.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GameCultMediaWireRecord {
@@ -174,6 +187,12 @@ pub fn encode_media_wire_record(
 
 /// Unwraps a media record from the wire.
 pub fn decode_media_wire_record(payload: &[u8]) -> Result<GameCultMediaWireRecord> {
+    if payload.len() > GAMECULT_MEDIA_MAX_WIRE_BYTES {
+        return Err(anyhow!(
+            "media record is {} bytes, over the {GAMECULT_MEDIA_MAX_WIRE_BYTES}-byte ceiling",
+            payload.len()
+        ));
+    }
     let message = decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0)?;
     let CultNetMessage::DocumentPutRaw { document, .. } = message else {
         return Err(anyhow!("expected cultnet.document_put_raw.v0"));
@@ -434,11 +453,6 @@ pub fn validate_audio_parity_record(record: &GameCultMediaAudioParityShardRecord
             "audio parity media record timing metadata must be non-zero"
         ));
     }
-    if record.deadline_ticks < record.base_pts_ticks {
-        return Err(anyhow!(
-            "audio parity media record deadline_ticks must not precede base_pts_ticks"
-        ));
-    }
     if record.fec_scheme != MEDIA_FEC_SCHEME_RS_GF256_V1 {
         return Err(anyhow!(
             "audio parity media record fec_scheme {:?} is not supported",
@@ -452,16 +466,22 @@ pub fn validate_audio_parity_record(record: &GameCultMediaAudioParityShardRecord
     {
         return Err(anyhow!("audio parity media record stripe metadata is invalid"));
     }
-    if audio_slot(
+    let Some((_, last_pts_ticks)) = audio_slot(
         record.base_packet_id,
         record.base_pts_ticks,
         record.packet_duration_ticks,
         u64::from(record.data_shard_count) - 1,
-    )
-    .is_none()
-    {
+    ) else {
         return Err(anyhow!(
             "audio parity media record block runs past the packet id or pts range"
+        ));
+    };
+    // Recovery gives every recovered packet the block's deadline, so it must
+    // not precede the last packet's pts or a recovered packet would fail
+    // `validate_audio_record`.
+    if record.deadline_ticks < last_pts_ticks {
+        return Err(anyhow!(
+            "audio parity media record deadline_ticks must not precede the block's last pts_ticks"
         ));
     }
     if record.shard_payload_bytes == 0 {

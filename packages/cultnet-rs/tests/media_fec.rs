@@ -8,7 +8,7 @@
 use cultnet_rs::{
     GameCultMediaAudioPacketRecord, GameCultMediaAudioParityShardRecord,
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
-    GameCultMediaWireRecord, MEDIA_FEC_MAX_WIRE_BYTES,
+    GAMECULT_MEDIA_MAX_WIRE_BYTES, GameCultMediaWireRecord, MEDIA_FEC_MAX_WIRE_BYTES,
     MEDIA_FEC_SCHEME_RS_GF256_V1, MediaFecError, MediaFecPolicy, MediaWireProvenance,
     decode_media_wire_record, encode_media_wire_record, protect_audio_block, protect_video_frame,
     recover_audio_block, recover_video_block,
@@ -1051,4 +1051,93 @@ fn the_worst_burst_that_always_recovers_is_blocks_times_the_smallest_m() {
             sizes.len()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The ceiling, and what the audio budget check relies on
+// ---------------------------------------------------------------------------
+
+/// Only the parity is measured against the budget, on the claim that it is the
+/// largest record of an audio block. It carries every field a packet does plus
+/// the stripe geometry, so this holds across the id, pts, duration and deadline
+/// widths that vary the encoding.
+#[test]
+fn an_audio_parity_record_is_larger_on_the_wire_than_every_packet_it_protects() {
+    let bases: [u64; 8] = [0, 0x7c, 0xfc, 0xfffc, 0xffff_fffc, 99_997, u64::MAX - 3, 1];
+    let starts: [i64; 7] = [i64::MIN, -1, 0, 125, 65_530, 4_294_967_290, i64::MAX - 3 * 4_000_000_000];
+    let durations: [u32; 5] = [1, 120, 960, 65_535, 4_000_000_000];
+    for base in bases {
+        for start in starts {
+            for duration in durations {
+                for wide_deadline in [false, true] {
+                    let mut packets = audio_block(base, 40);
+                    for (index, packet) in packets.iter_mut().enumerate() {
+                        packet.pts_ticks = start + i64::from(duration) * index as i64;
+                        packet.duration_ticks = duration;
+                        packet.deadline_ticks = if wide_deadline { i64::MAX } else { packet.pts_ticks };
+                    }
+                    let parity = protect_audio_block(&packets, &STANDARD, provenance()).unwrap();
+                    let parity_len = wire_len(&GameCultMediaWireRecord::AudioParity(parity[0].clone()), provenance());
+                    for packet in &packets {
+                        let packet_len = wire_len(&GameCultMediaWireRecord::Audio(packet.clone()), provenance());
+                        assert!(
+                            packet_len < parity_len,
+                            "base {base} start {start} duration {duration}: packet {packet_len} >= parity {parity_len}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A parity whose deadline precedes its last packet's pts would recover a packet
+/// that fails `validate_audio_record`. Recovery refuses it, and so does the wire.
+#[test]
+fn audio_parity_with_a_deadline_before_its_last_packet_recovers_nothing() {
+    let packets = audio_block(10, 8);
+    let mut parity = protect_audio_block(&packets, &STANDARD, provenance()).unwrap();
+    for shard in &mut parity {
+        shard.deadline_ticks = shard.base_pts_ticks;
+    }
+    let error = recover_audio_block(&parity, &packets[..2]).unwrap_err();
+    assert!(is_invalid_mentioning(&error, "last pts_ticks"), "{error}");
+    let wire = encode_media_wire_record(
+        &GameCultMediaWireRecord::AudioParity(parity[0].clone()),
+        provenance(),
+    )
+    .unwrap();
+    assert!(decode_media_wire_record(&wire).is_err());
+}
+
+/// The datagram budget is the producer's, but no budget may promise a record the
+/// decoder would refuse.
+#[test]
+fn a_datagram_budget_over_the_media_record_ceiling_is_refused() {
+    let over = MediaFecPolicy { max_wire_bytes: GAMECULT_MEDIA_MAX_WIRE_BYTES + 1, ..STANDARD };
+    let error = protect_audio_block(&audio_block(1, 100), &over, provenance()).unwrap_err();
+    assert!(is_invalid_mentioning(&error, "ceiling"), "{error}");
+    let error = protect_video_frame(&frame(2, 3, 100, 100), &over, provenance()).unwrap_err();
+    assert!(is_invalid_mentioning(&error, "ceiling"), "{error}");
+}
+
+/// A budget at the ceiling admits shards up to it, and the decoder accepts
+/// what the policy admitted.
+#[test]
+fn a_budget_at_the_media_record_ceiling_admits_large_shards_end_to_end() {
+    let at_ceiling = MediaFecPolicy { max_wire_bytes: GAMECULT_MEDIA_MAX_WIRE_BYTES, ..STANDARD };
+    let records =
+        protect_video_frame(&frame(2, 3, 60_000, 60_000), &at_ceiling, provenance()).unwrap();
+    for record in &records {
+        let wire = encode_media_wire_record(record, provenance()).unwrap();
+        assert!(wire.len() <= GAMECULT_MEDIA_MAX_WIRE_BYTES);
+        decode_media_wire_record(&wire).unwrap();
+    }
+    let parity = protect_audio_block(&audio_block(1, 60_000), &at_ceiling, provenance()).unwrap();
+    let wire = encode_media_wire_record(
+        &GameCultMediaWireRecord::AudioParity(parity[0].clone()),
+        provenance(),
+    )
+    .unwrap();
+    decode_media_wire_record(&wire).unwrap();
 }
