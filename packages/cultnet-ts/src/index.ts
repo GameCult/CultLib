@@ -106,6 +106,7 @@ export {
   createRudpTransportProfile,
   decodeRudpPacket,
   encodeRudpPacket,
+  randomInitialSequence,
   CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS,
   CultNetRudpReconnectLoop,
   CultNetRudpSession,
