@@ -24,6 +24,10 @@ vectors = {
     "nested-array": pack([["cultcache.store.v9", [], []]]),
     "string-first": pack(["hello", 1]),
     "header-v9": pack(["cultcache.store.v9", [], []]),
+    # A header stored as MessagePack bin, not str: every runtime refuses it as unreadable, never reads or names it.
+    "bin-header-v1": pack([b"cultcache.store.v1", [], []]),
+    "bin-header-v3": pack([b"cultcache.store.v3", [], []]),
+    "bin-header-v9": pack([b"cultcache.store.v9", [], []]),
     "scalar": b"\x01",
     "map": b"\x80",
     "truncated": whole[:-1],

@@ -374,103 +374,71 @@ fn describe_decode_error(error: &rmp_serde::decode::Error) -> String {
     .to_string()
 }
 
-/// The store header string, `None` when the first slot is not a string (a legacy envelope array candidate), and an error
-/// for bytes that are not exactly one complete MessagePack array: a truncated store or bytes after the array are refused,
-/// never taken for a legacy file. One pass reads the first slot and walks the rest to prove the file whole.
-fn store_header(bytes: &[u8]) -> Result<Option<String>> {
+/// What one pass over a file's bytes learned about its header. `first` is the leading slot when it is a MessagePack
+/// string (`str`, never `bin`, as in every other runtime), and `None` when the bytes do not open with an array whose first
+/// slot is a string (a legacy envelope array candidate). `whole` is the proof that the bytes are exactly one complete
+/// MessagePack array: a truncated store or bytes after the array fail it, and are never taken for a legacy file. A store cut
+/// short after its header string still names its format, so `first` survives a failed `whole` and a newer store is refused
+/// as unsupported, not as damaged.
+struct StoreHeader {
+    first: Option<String>,
+    whole: Result<()>,
+}
+
+/// The one reader of a store file's header. Nothing else classifies leading bytes.
+fn store_header(bytes: &[u8]) -> StoreHeader {
+    /// A string slot and only a string: MessagePack `bin` is not a header.
+    fn text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<String, D::Error> {
+        struct TextVisitor;
+        impl serde::de::Visitor<'_> for TextVisitor {
+            type Value = String;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a MessagePack string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<String, E> {
+                Ok(value.to_string())
+            }
+        }
+        deserializer.deserialize_any(TextVisitor)
+    }
+
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum FirstSlot {
-        Text(String),
+        Text(#[serde(deserialize_with = "text")] String),
         Other(serde::de::IgnoredAny),
     }
 
-    struct Header(Option<String>);
-    impl<'de> serde::Deserialize<'de> for Header {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-            struct HeaderVisitor;
-            impl<'de> serde::de::Visitor<'de> for HeaderVisitor {
-                type Value = Header;
+    struct HeaderVisitor<'a>(&'a mut Option<String>);
+    impl<'de> serde::de::Visitor<'de> for HeaderVisitor<'_> {
+        type Value = ();
 
-                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    formatter.write_str("an array whose first slot may be the store header")
-                }
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an array whose first slot may be the store header")
+        }
 
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Header, A::Error> {
-                    let first = seq.next_element::<FirstSlot>()?;
-                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-                    Ok(Header(match first {
-                        Some(FirstSlot::Text(header)) => Some(header),
-                        _ => None,
-                    }))
-                }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<(), A::Error> {
+            if let Some(FirstSlot::Text(header)) = seq.next_element::<FirstSlot>()? {
+                *self.0 = Some(header);
             }
-            deserializer.deserialize_seq(HeaderVisitor)
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(())
         }
     }
+
+    let mut first = None;
     let mut cursor = std::io::Cursor::new(bytes);
-    let header = <Header as serde::Deserialize>::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor))
-        .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))?;
+    let walked = serde::Deserializer::deserialize_seq(&mut rmp_serde::Deserializer::new(&mut cursor), HeaderVisitor(&mut first));
     let after = bytes.len() - cursor.position() as usize;
-    ensure!(after == 0, "the store has {after} bytes after its MessagePack array");
-    Ok(header.0)
-}
-
-/// The header string read from the leading bytes alone, or `None` when they do not open with an array whose first slot is a
-/// string. A store cut short after its header still names its format, so a newer store is refused as unsupported, not as
-/// damaged. [`store_header`] is the proof that a readable store is whole.
-fn leading_header(bytes: &[u8]) -> Option<String> {
-    let mut offset = 0usize;
-    if read_array_header(bytes, &mut offset)? == 0 {
-        return None;
-    }
-    read_string(bytes, &mut offset)
-}
-
-fn read_array_header(payload: &[u8], offset: &mut usize) -> Option<u32> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    match marker {
-        0x90..=0x9f => Some((marker & 0x0f) as u32),
-        0xdc => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            Some(u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
-        }
-        0xdd => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
-        _ => None,
-    }
-}
-
-fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
-    let marker = *payload.get(*offset)?;
-    *offset += 1;
-    let length = match marker {
-        0xa0..=0xbf => (marker & 0x1f) as usize,
-        0xd9 => {
-            let length = *payload.get(*offset)? as usize;
-            *offset += 1;
-            length
-        }
-        0xda => {
-            let bytes = payload.get(*offset..(*offset + 2))?;
-            *offset += 2;
-            u16::from_be_bytes([bytes[0], bytes[1]]) as usize
-        }
-        0xdb => {
-            let bytes = payload.get(*offset..(*offset + 4))?;
-            *offset += 4;
-            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
-        }
-        _ => return None,
-    };
-
-    let bytes = payload.get(*offset..(*offset + length))?;
-    std::str::from_utf8(bytes).ok().map(str::to_string)
+    let whole = walked
+        .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))
+        .and_then(|()| {
+            ensure!(after == 0, "the store has {after} bytes after its MessagePack array");
+            Ok(())
+        });
+    StoreHeader { first, whole }
 }
 
 /// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
@@ -982,7 +950,8 @@ impl SingleFileMessagePackBackingStore {
                 kind,
             })
         };
-        match leading_header(&bytes) {
+        let head = store_header(&bytes);
+        match head.first {
             Some(header) if header.starts_with("cultcache.store.") && readable_store_format(&header).is_none() => Err(unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
                 anyhow!(
@@ -990,7 +959,10 @@ impl SingleFileMessagePackBackingStore {
                     describe_header(&header)
                 ),
             )),
-            _ => decode_store_file(&bytes).map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
+            first => head
+                .whole
+                .and_then(|()| decode_store_file(&bytes, first.as_deref()))
+                .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
         }
     }
 
@@ -2915,12 +2887,13 @@ fn readable_store_format(header: &str) -> Option<&'static str> {
     }
 }
 
-/// One store file's bytes, decoded whole: the header it carries (the one a rewrite keeps) and its envelopes. An array whose
-/// first slot is not a store header is the legacy envelope array.
-fn decode_store_file(bytes: &[u8]) -> Result<DiskStore> {
-    match store_header(bytes)? {
+/// One store file's bytes, decoded: the header it carries (the one a rewrite keeps) and its envelopes. `header` is
+/// [`store_header`]'s first slot and the bytes are already proven one complete array. An array whose first slot is not a
+/// store header is the legacy envelope array.
+fn decode_store_file(bytes: &[u8], header: Option<&str>) -> Result<DiskStore> {
+    match header {
         Some(header) => {
-            let format = readable_store_format(&header)
+            let format = readable_store_format(header)
                 .ok_or_else(|| anyhow!("the first slot is not a store header this runtime reads"))?;
             let (envelopes, catalog) = decode_store_snapshot(bytes)?;
             Ok(DiskStore { format, envelopes, catalog })
@@ -3034,7 +3007,9 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
         .and_then(|()| staged.sync_all())
         .with_context(|| format!("failed to sync {}", staged_path.display()))?;
     drop(staged);
-    replace_file_atomically(staged_path, destination)
+    injected_write_fault(WriteStep::Rename)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| replace_file_atomically(staged_path, destination))
 }
 
 /// Releases a lock taken around `result`'s action and returns that result.
@@ -3226,6 +3201,7 @@ fn sync_parent_directory(path: &Path) -> Result<()> {
 #[allow(dead_code)]
 enum WriteStep {
     StagingSync,
+    Rename,
     DirectorySync,
     Unlock,
 }
@@ -5087,7 +5063,7 @@ mod tests {
         let keys: Vec<_> = envelopes.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(keys, vec!["alpha", "beta"]);
         store.push(&envelopes[0])?;
-        Ok(store_header(&std::fs::read(&path)?)?.expect("a store header"))
+        Ok(store_header(&std::fs::read(&path)?).first.expect("a store header"))
     }
 
     #[test]
@@ -5183,7 +5159,7 @@ mod tests {
                     assert!(io_error_in(&error).is_none(), "{what}: a refusal is not an I/O failure: {error:#}");
                     assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a file it cannot read");
                 } else if operation != "open" {
-                    assert_eq!(store_header(&std::fs::read(&path)?)?.as_deref(), Some(header), "{what}");
+                    assert_eq!(store_header(&std::fs::read(&path)?).first.as_deref(), Some(header), "{what}");
                     assert!(store.pull_all()?.iter().any(|entry| entry.key == "x"), "{what}");
                 }
             }
@@ -5809,6 +5785,8 @@ mod tests {
             ("cultcache.store.SECRET-HEADER", false),
             ("cultcache.store.v12SECRET", false),
             ("cultcache.store.v", false),
+            // Digits are ASCII only: Arabic-Indic digits are not the known shape.
+            ("cultcache.store.v١٢", false),
         ] {
             let mut bytes = vec![0x93];
             bytes.extend(fixstr(header));
@@ -5817,6 +5795,9 @@ mod tests {
             let error = store.pull_all().unwrap_err();
             let text = format!("{error:#}");
             assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{text}");
+            // The refusal names every format this runtime reads.
+            assert!(text.contains("\"cultcache.store.v1\""), "{text}");
+            assert!(text.contains("\"cultcache.store.v3\""), "{text}");
             if echoed {
                 assert!(text.contains(&format!("\"{header}\"")), "{text}");
             } else {
@@ -5844,6 +5825,21 @@ mod tests {
             let error = result.expect_err("a dangling link must not read as an empty store");
             assert!(io_error_in(&error).is_some(), "{error:#}");
             assert_eq!(unreadable_kind(&error), None, "{error:#}");
+        }
+        // Every merging writer refuses on its own read, so none can replace the link.
+        let mut writer = SingleFileMessagePackBackingStore::new(&path);
+        let delta = snapshot_envelope("delta", b"4");
+        let writes = [
+            writer.push(&delta),
+            writer.delete(&delta),
+            writer.insert_entry_if_absent(delta.clone()).map(|_| ()),
+            writer.compare_and_swap_batch(&[], vec![delta.clone()]).map(|_| ()),
+            writer.append_if_snapshot_unchanged(&[], vec![delta.clone()]).map(|_| ()),
+        ];
+        for (index, result) in writes.into_iter().enumerate() {
+            let error = result.expect_err("a merging write through a dangling link must refuse");
+            assert!(io_error_in(&error).is_some(), "write {index}: {error:#}");
+            assert_eq!(write_failure_kind(&error), None, "write {index}: {error:#}");
         }
         assert!(fs::symlink_metadata(&path)?.file_type().is_symlink());
         assert!(!target.exists());
@@ -5889,6 +5885,34 @@ mod tests {
             .unwrap_err();
         assert!(io_error_in(&error).is_some() && write_failure_kind(&error).is_none(), "{error:#}");
         assert!(fs::metadata(&blocked)?.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn a_write_whose_rename_fails_is_not_replaced_and_leaves_no_staging_file() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        let (mut store, before) = written_store(&path)?;
+        let replacement = [snapshot_envelope("delta", b"4")];
+
+        let error = with_write_fault(WriteStep::Rename, || {
+            store.compare_exchange_snapshot(&store.pull_all().unwrap(), &replacement)
+        })
+        .expect_err("a rename that failed is not a write that landed");
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(io_error_in(&error).is_some(), "{error:#}");
+        assert_eq!(fs::read(&path)?, before, "the store is as it was");
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain: no staging file");
+
+        let error = with_write_fault(WriteStep::Rename, || store.push(&replacement[0]))
+            .expect_err("a push whose rename failed is not a push that landed");
+        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert_eq!(fs::read(&path)?, before);
+        assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain: no staging file");
+
+        // The failure left nothing behind that stops the next write.
+        store.push(&replacement[0])?;
+        assert!(store.pull_all()?.contains(&replacement[0]));
         Ok(())
     }
 
