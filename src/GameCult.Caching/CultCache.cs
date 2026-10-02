@@ -4013,13 +4013,13 @@ namespace GameCult.Caching
         {
             FileInfo.Refresh();
             // Only nothing at the path is an empty store. A link whose target is gone is a store that cannot be reached.
-            if (!FileInfo.Exists && FileInfo.LinkTarget == null)
+            if (!FileInfo.Exists && !PathIsALink())
                 return null;
             try
             {
                 return ReadAllBytesShared(FileInfo.FullName);
             }
-            catch (FileNotFoundException ex) when (FileInfo.LinkTarget != null)
+            catch (FileNotFoundException ex) when (PathIsALink())
             {
                 throw new IOException("The store path is a link whose target cannot be reached.", ex);
             }
@@ -4027,6 +4027,15 @@ namespace GameCult.Caching
             {
                 return null;
             }
+        }
+
+        // Something is at the path even when the path cannot be opened: a link keeps the reparse-point attribute whether or not its
+        // target is there. A path with nothing at it reports no attributes at all (-1).
+        private bool PathIsALink()
+        {
+            FileInfo.Refresh();
+            var attributes = FileInfo.Attributes;
+            return (int)attributes != -1 && (attributes & FileAttributes.ReparsePoint) != 0;
         }
 
         private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IReadOnlyCollection<CultSchemaCatalogEntry> registered, IReadOnlyCollection<CultSchemaCatalogEntry> arrived, bool holdsElementIds, string? existingHeader, bool wholeStore)
