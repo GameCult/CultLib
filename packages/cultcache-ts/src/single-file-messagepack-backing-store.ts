@@ -163,7 +163,15 @@ export function readSingleFileStore(path: string): SingleFileStoreRead {
   }
 }
 
-function readStoreBytes(path: string): Uint8Array | undefined {
+/**
+ * The bytes at `path`, or undefined when nothing is there. Nothing is there only when both looks agree: the read found no
+ * file and the follow-up lstat found no entry. Every other outcome is an error, because the path may have changed
+ * between the two calls (a link in a parent swapped for a file, a store created or removed): an lstat failure other than
+ * ENOENT is thrown as it is, and an entry the lstat does find, a dangling link or one that appeared since the read, is
+ * thrown with code ENOENT rather than read as an empty store. `lstat` is a seam so a test can stage the second look;
+ * this module exports the function for that test, and the package index does not.
+ */
+export function readStoreBytes(path: string, lstat: (path: string) => { isSymbolicLink(): boolean } = lstatSync): Uint8Array | undefined {
   try {
     return readFileSync(path);
   } catch (error) {
@@ -172,8 +180,9 @@ function readStoreBytes(path: string): Uint8Array | undefined {
     }
   }
 
+  let entry: { isSymbolicLink(): boolean };
   try {
-    lstatSync(path);
+    entry = lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;
@@ -182,7 +191,8 @@ function readStoreBytes(path: string): Uint8Array | undefined {
     throw error;
   }
 
-  throw Object.assign(new Error(`CultCache store ${path} is a symbolic link whose target does not exist.`), { code: "ENOENT" });
+  const what = entry.isSymbolicLink() ? "is a symbolic link whose target does not exist" : "appeared while it was being read";
+  throw Object.assign(new Error(`CultCache store ${path} ${what}.`), { code: "ENOENT" });
 }
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {

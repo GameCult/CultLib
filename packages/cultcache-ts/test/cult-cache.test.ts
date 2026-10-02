@@ -14,7 +14,7 @@ import { z } from "zod";
 import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
 import { defineDocumentRegistry, defineDocumentType } from "../src/document";
-import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
+import { SingleFileMessagePackBackingStore, readStoreBytes } from "../src/single-file-messagepack-backing-store";
 import { SchemaConflictError, StoreUnreadableError } from "../src/store-format";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
@@ -2153,6 +2153,29 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   assert.deepEqual(await readdir(volume), []);
 });
 
+// The second look of the read, staged: nothing is at the path only when the read and the lstat both find nothing. A path
+// that changed between them (a link in a parent swapped for a file, a store that appeared) is never an empty store.
+test("readStoreBytes reports nothing at the path only when the lstat finds nothing too", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-second-look-"));
+  const file = join(dir, "store.cc");
+  const failing = (code: string) => () => {
+    throw Object.assign(new Error(code), { code });
+  };
+  assert.equal(readStoreBytes(file, failing("ENOENT")), undefined);
+  for (const code of ["ENOTDIR", "EACCES", "ELOOP"]) {
+    assert.throws(() => readStoreBytes(file, failing(code)), (error: NodeJS.ErrnoException) => error.code === code, code);
+  }
+
+  assert.throws(
+    () => readStoreBytes(file, () => ({ isSymbolicLink: () => true })),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("symbolic link"),
+  );
+  assert.throws(
+    () => readStoreBytes(file, () => ({ isSymbolicLink: () => false })),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("appeared while it was being read"),
+  );
+});
+
 test("SingleFileMessagePackBackingStore record refusal names only a string key", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-record-key-"));
   const file = join(dir, "store.cc");
@@ -2294,7 +2317,7 @@ test("SingleFileMessagePackBackingStore pushAll refuses a store whose header it 
 });
 
 // A file is replaced by a rewrite exactly when this runtime's own reader opens it: one verdict per file, asked by pullAll,
-// pushAll, push and delete alike. The bytes and every runtime's verdict: tests/vectors/document-variants-c2a/readability.
+// pushAll, soft pushAll, push and delete alike; a soft flush leaves the files that read as they are. The bytes and every runtime's verdict: tests/vectors/document-variants-c2a/readability.
 test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", async () => {
   const root = join(c2aVectors, "readability");
   const rows = (await readFile(join(root, "manifest.txt"), "utf8"))
@@ -2310,21 +2333,29 @@ test("SingleFileMessagePackBackingStore replaces a file exactly when it reads", 
   for (const [vector, , , typescript] of rows) {
     const reads = typescript === "reads";
     const bytes = await readFile(join(root, vector));
-    for (const operation of ["pullAll", "pushAll", "push", "delete"] as const) {
+    for (const operation of ["pullAll", "softPushAll", "pushAll", "push", "delete"] as const) {
       const file = join(dir, `${vector.replace(/[^a-z0-9.-]/giu, "_")}.${operation}.msgpack`);
       await writeFile(file, bytes);
       const store = new SingleFileMessagePackBackingStore(file);
       const run = () =>
         operation === "pullAll"
           ? store.pullAll()
-          : operation === "pushAll"
-            ? store.pushAll(envelopes)
-            : operation === "push"
-              ? store.push(envelopes[0]!)
-              : store.delete(envelopes[0]!);
+          : operation === "softPushAll"
+            ? store.pushAll(envelopes, { soft: true })
+            : operation === "pushAll"
+              ? store.pushAll(envelopes)
+              : operation === "push"
+                ? store.push(envelopes[0]!)
+                : store.delete(envelopes[0]!);
       if (reads) {
         await run();
         if (operation === "pullAll") {
+          continue;
+        }
+
+        // A soft flush leaves a store it reads byte for byte: nothing is written where something is.
+        if (operation === "softPushAll") {
+          assert.ok(bytes.equals(await readFile(file)), `${vector} ${operation} rewrote a store it reads`);
           continue;
         }
 
