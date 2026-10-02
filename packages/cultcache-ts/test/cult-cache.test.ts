@@ -2035,6 +2035,67 @@ test("SingleFileMessagePackBackingStore reads only a missing store as empty", as
   assert.deepEqual(await new SingleFileMessagePackBackingStore(legacyEmpty).pullAll(), []);
 });
 
+test("reading a store that is not there writes nothing, and a read of a store that is readable does not rewrite it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-read-writes-nothing-"));
+  const missing = join(dir, "store.cc");
+  assert.deepEqual(await new SingleFileMessagePackBackingStore(missing).pullAll(), []);
+  assert.equal(existsSync(missing), false);
+  assert.deepEqual(await readdir(dir), []);
+
+  const written = join(dir, "written.cc");
+  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  await new SingleFileMessagePackBackingStore(written).push(envelope);
+  const before = await readFile(written);
+  await new SingleFileMessagePackBackingStore(written).pullAll();
+  assert.deepEqual(await readFile(written), before);
+});
+
+test("a soft pushAll writes where nothing is, leaves a readable store alone, and refuses what the reader refuses", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-soft-"));
+  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  const other = { key: "other", type: "t", payload: Uint8Array.of(0x91, 0x01), storedAt: "2026-09-30T00:00:00Z" };
+
+  // Absent: the soft write seeds the store.
+  const absent = join(dir, "absent.cc");
+  await new SingleFileMessagePackBackingStore(absent).pushAll([envelope], { soft: true });
+  assert.deepEqual((await new SingleFileMessagePackBackingStore(absent).pullAll()).map((entry) => entry.key), ["k"]);
+
+  // Readable: the soft write is skipped, byte for byte.
+  const seeded = await readFile(absent);
+  await new SingleFileMessagePackBackingStore(absent).pushAll([other], { soft: true });
+  assert.deepEqual(await readFile(absent), seeded);
+
+  // Unreadable: refused, as pullAll refuses it, and the file is left exactly as it was.
+  const refused: Array<[string, Uint8Array]> = [
+    ["zero-byte", new Uint8Array()],
+    ["unknown-format", encode(["cultcache.store.v9", [], []])],
+    ["bin-header", Uint8Array.of(0x93, 0xc4, 0x01, 0x76, 0x90, 0x90)],
+    ["truncated", seeded.subarray(0, seeded.length - 1)],
+    ["garbage", Uint8Array.of(0xc1)],
+  ];
+  for (const [name, bytes] of refused) {
+    const file = join(dir, `${name}.cc`);
+    await writeFile(file, bytes);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pullAll(), StoreUnreadableError, name);
+    await assert.rejects(() => new SingleFileMessagePackBackingStore(file).pushAll([other], { soft: true }), StoreUnreadableError, name);
+    assert.deepEqual(await readFile(file), Buffer.from(bytes), name);
+  }
+});
+
+test("a header that does not start at the store prefix is not echoed whole, though it ends like a version", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-forged-header-"));
+  const file = join(dir, "store.cc");
+  for (const header of ["cultcache.store.SECRETcultcache.store.v9", "cultcache.store.
+cultcache.store.v9", "SECRETcultcache.store.v9"]) {
+    await writeFile(file, encode([header, [], []]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => error instanceof StoreUnreadableError && !error.message.includes("SECRET") && !error.message.includes(header),
+      header,
+    );
+  }
+});
+
 test("SingleFileMessagePackBackingStore reports a store it cannot reach as an I/O error", { skip: process.platform === "win32" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-unreachable-"));
   const loop = join(dir, "loop.cc");

@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstatSync, readFileSync } from "node:fs";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
@@ -46,7 +47,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   async pullAll(): Promise<CultCacheEnvelope[]> {
     // The disk decides the header: a file that is gone or legacy is not marked.
     this.#format = STORE_FORMAT_VERSION;
-    const disk = await this.#readDisk();
+    const disk = this.#readDisk();
     this.#format = disk.format;
     if (disk.repairedLegacyPayload) {
       await this.#writeAll([], disk.envelopes);
@@ -77,20 +78,22 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      if (options.soft && (await readStore(this.filePath)) !== undefined) {
-        return;
-      }
-
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
       // stays marked, and one that is not (or is gone or legacy) is written unmarked. The file is read by the same
       // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
-      // and left as it is.
+      // and left as it is. A soft flush asks that reader too: nothing at the path is written, a store is left alone.
       try {
-        this.#format = (await this.#readDisk()).format;
+        const disk = this.#readDisk();
+        if (options.soft && !disk.absent) {
+          return;
+        }
+
+        this.#format = disk.format;
       } catch (error) {
         // Only a dangling link reaches here with ENOENT: it holds no store, so a whole-store flush has no header to keep and
-        // replaces the link (R3 pins this). Every merging writer has already refused it when it read the current entries.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        // replaces the link (R3 pins this). A soft flush does not replace what it cannot read, and every merging writer
+        // has already refused the link when it read the current entries.
+        if (options.soft || (error as NodeJS.ErrnoException).code !== "ENOENT") {
           throw error;
         }
 
@@ -101,22 +104,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     });
   }
 
-  // The one reader of the store file, asked by open, push, delete and flush alike. A file that is gone is an
-  // empty unmarked store; a zero-byte file is not a store and is refused. Anything else must decode completely
-  // or the read throws StoreUnreadableError.
-  async #readDisk(): Promise<DiskStore> {
-    // An empty file is not a store, since no CultCache writer leaves one, so it is decoded and refused.
-    // Only a read that finds nothing at the path is an empty store.
-    const data = await readStore(this.filePath);
-    if (data === undefined) {
-      return { format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
-    }
-
-    try {
-      return decodeStoreFile(data);
-    } catch (error) {
-      throw new StoreUnreadableError(this.filePath, error);
-    }
+  // The one reader of the store file, asked by open, push, delete and flush alike; see readSingleFileStore.
+  #readDisk(): SingleFileStoreRead {
+    return readSingleFileStore(this.filePath);
   }
 
   async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -153,13 +143,29 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 }
 
 /**
- * Reads a store file, or returns undefined when nothing is at its path. A dangling symbolic
- * link is something: reading it as empty would let the writer rename a file over the link
- * and move the store off its volume. Any other failure to reach the file is thrown.
+ * The one reader of a CultCache single-file store, for this package's store and for any consumer that must read a
+ * store file (an authority bundle, say) rather than decode it itself. A path with nothing at it is an absent, empty,
+ * unmarked store. A dangling symbolic link is something: reading it as empty would let a writer rename a file over
+ * the link and move the store off its volume, so it throws with code ENOENT, as does any other failure to reach the
+ * file. A zero-byte file is not a store and, like anything that does not decode completely, throws StoreUnreadableError.
+ * The read is synchronous so a consumer that loads authority at start-up needs no second reader to stay synchronous.
  */
-async function readStore(path: string): Promise<Uint8Array | undefined> {
+export function readSingleFileStore(path: string): SingleFileStoreRead {
+  const data = readStoreBytes(path);
+  if (data === undefined) {
+    return { absent: true, format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
+  }
+
   try {
-    return await readFile(path);
+    return { absent: false, ...decodeStoreFile(data) };
+  } catch (error) {
+    throw new StoreUnreadableError(path, error);
+  }
+}
+
+function readStoreBytes(path: string): Uint8Array | undefined {
+  try {
+    return readFileSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
@@ -167,7 +173,7 @@ async function readStore(path: string): Promise<Uint8Array | undefined> {
   }
 
   try {
-    await lstat(path);
+    lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;
@@ -395,14 +401,16 @@ function encodeCatalogMember(member: CultCacheSchemaCatalogMember): unknown[] {
   ];
 }
 
-type DiskStore = {
+export type SingleFileStoreRead = {
+  // True when nothing is at the path; the other fields then describe an empty unmarked store.
+  absent: boolean;
   format: StoreFormat;
   envelopes: CultCacheEnvelope[];
   // A legacy file whose payloads were not bytes: reading it repairs them, and the store rewrites the file.
   repairedLegacyPayload: boolean;
 };
 
-function decodeStoreFile(data: Uint8Array): DiskStore {
+function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> {
   const decoded = decode(data);
   const snapshot = decodeSnapshot(decoded);
   if (snapshot) {
