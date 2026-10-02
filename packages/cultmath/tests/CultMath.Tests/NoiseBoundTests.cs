@@ -995,4 +995,202 @@ public sealed class NoiseBoundTests
             return Compose(d, fade, noise);
         }
     }
+
+    // One cell's transmittance: the density at the cell's mid-depth, over the ray's length through it.
+    private static float Integrate(Scenario field, Tile tile, float2 slope, float z0, float z1, bool lod, Counts counts) =>
+        exp(-(field.Density(tile, slope, (z0 + z1) * 0.5f, lod, counts) * field.Extinction) * ((z1 - z0) * sqrt(slope.x * slope.x + slope.y * slope.y + 1.0f)));
+
+    /// <summary>
+    /// The tile pre-pass on cell-index ranges: probe the slice of the range; provably empty skips it and
+    /// doubles the next range; otherwise a range of more than one cell halves, and a single cell is dense.
+    /// It starts with the whole grid, runs to the grid's end (a pre-pass knows no ray's transmittance) and
+    /// yields the dense cells in order. Its probes are counted once per tile.
+    /// </summary>
+    private static List<int> MarchTile(Scenario field, Tile tile, Counts probes)
+    {
+        var grid = field.Grid;
+        var cells = grid.Length - 1;
+        var dense = new List<int>();
+        var j = 0;
+        var span = cells;
+        while (j < cells)
+        {
+            var end = Math.Min(j + span, cells);
+            if (field.Bound(tile, grid[j], grid[end], gated: true, probes).y <= 0.0f)
+            {
+                j = end;
+                span = Math.Min(span * 2, cells);
+            }
+            else if (end - j > 1)
+            {
+                span = (end - j + 1) / 2;
+            }
+            else
+            {
+                dense.Add(j);
+                j++;
+            }
+        }
+
+        return dense;
+    }
+
+    // The footprint-aware march, the void's shipped one: steps of LodStep(z) inside the unmasked runs only,
+    // octave weights applied.
+    private static float MarchLod(VoidField field, Tile tile, float2 slope, List<int> cells, Counts counts, ref long steps)
+    {
+        var grid = field.Grid;
+        var transmittance = 1.0f;
+        var k = 0;
+        while (k < cells.Count && transmittance >= 0.02f)
+        {
+            var z = grid[cells[k]];
+            var end = cells[k] + 1;
+            for (k++; k < cells.Count && cells[k] == end; k++)
+                end++;
+            while (z < grid[end] && transmittance >= 0.02f)
+            {
+                var next = min(z + field.LodStep(z), grid[end]);
+                transmittance *= Integrate(field, tile, slope, z, next, lod: true, counts);
+                steps++;
+                z = next;
+            }
+        }
+
+        return transmittance;
+    }
+
+    internal sealed class RunStats
+    {
+        public readonly Counts Dense = new();
+        public readonly Counts Masked = new();
+        public readonly Counts Probes = new();
+        public readonly Counts Lod = new();
+        public long Rays;
+        public long Tiles;
+        public long DenseSteps;
+        public long MaskedSteps;
+        public long LodSteps;
+        public long Unfinished;
+        public float MaxDifference;
+        public float MaxLodDifference;
+
+        public double PerRay(double value) => value / Rays;
+
+        // Dense cost over the tile march's: each ray's own dense cells plus the tile's probes, shared.
+        public double Ratio => Dense.Cost / (Masked.Cost + Probes.Cost);
+
+        // What no amortization can beat: the dense cost over the cost of the dense cells alone.
+        public double Ceiling => Dense.Cost / Masked.Cost;
+
+        public double LodRatio => Dense.Cost / (Lod.Cost + Probes.Cost);
+    }
+
+    /// <summary>
+    /// Draws `tiles` tiles, runs the pre-pass once per tile, and marches each of the N^2 rays (one per pixel,
+    /// jittered inside it) densely over every cell and masked over the tile's dense cells, both with the
+    /// early-out at 0.02 and the same Integrate; with lod, the footprint-aware march as well.
+    /// </summary>
+    private static RunStats Run(Scenario field, int n, int tiles, int seed, bool lod = false)
+    {
+        var random = new System.Random(seed);
+        var stats = new RunStats();
+        var grid = field.Grid;
+        for (var t = 0; t < tiles; t++)
+        {
+            var tile = field.DrawTile(random, n);
+            var cells = MarchTile(field, tile, stats.Probes);
+            stats.Tiles++;
+            for (var j = 0; j < n; j++)
+            for (var i = 0; i < n; i++)
+            {
+                var slope = tile.PixelSlope(i, j, random.NextSingle(), random.NextSingle());
+                var dense = 1.0f;
+                for (var c = 0; c < grid.Length - 1 && dense >= 0.02f; c++, stats.DenseSteps++)
+                    dense *= Integrate(field, tile, slope, grid[c], grid[c + 1], lod: false, stats.Dense);
+                var masked = 1.0f;
+                for (var c = 0; c < cells.Count && masked >= 0.02f; c++, stats.MaskedSteps++)
+                    masked *= Integrate(field, tile, slope, grid[cells[c]], grid[cells[c] + 1], lod: false, stats.Masked);
+                stats.Rays++;
+                stats.MaxDifference = MathF.Max(stats.MaxDifference, MathF.Abs(dense - masked));
+                if (dense >= 0.02f)
+                    stats.Unfinished++;
+                if (lod)
+                {
+                    var marched = MarchLod((VoidField)field, tile, slope, cells, stats.Lod, ref stats.LodSteps);
+                    stats.MaxLodDifference = MathF.Max(stats.MaxLodDifference, MathF.Abs(dense - marched));
+                }
+            }
+        }
+
+        return stats;
+    }
+
+    private void Report(string label, RunStats s) => output.WriteLine(
+        $"IV-REPORT {label}: dense snoise/ray {s.PerRay(s.Dense.Snoise):F2} env/ray {s.PerRay(s.Dense.Envelope):F2} (samples/ray {s.PerRay(s.DenseSteps):F2}); "
+        + $"tile snoise/ray {s.PerRay(s.Masked.Snoise + (double)s.Probes.Snoise):F2} env/ray {s.PerRay(s.Masked.Envelope + (double)s.Probes.Envelope):F2} "
+        + $"(probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; dense cells/ray {s.PerRay(s.MaskedSteps):F2}); "
+        + $"cost ratio {s.Ratio:F2}x, ceiling {s.Ceiling:F2}x; max |dT| {s.MaxDifference:R}; unfinished rays {s.Unfinished}");
+
+    private void ReportVoid(string label, RunStats s) => output.WriteLine(
+        $"IV-REPORT {label}: steps/px ref {s.PerRay(s.DenseSteps):F2}, masked {s.PerRay(s.MaskedSteps):F2}, LOD {s.PerRay(s.LodSteps):F2} ({(double)s.DenseSteps / s.LodSteps:F2}x fewer); "
+        + $"snoise/px ref {s.PerRay(s.Dense.Snoise):F2}, masked {s.PerRay(s.Masked.Snoise):F2}, LOD {s.PerRay(s.Lod.Snoise):F2}; "
+        + $"cost/px ref {s.PerRay(s.Dense.Cost):F2}, masked {s.PerRay(s.Masked.Cost + s.Probes.Cost):F2}, LOD {s.PerRay(s.Lod.Cost + s.Probes.Cost):F2} incl. probes (ref/LOD {s.LodRatio:F2}x, ref/masked {s.Ratio:F2}x); "
+        + $"probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; max |dT| masked {s.MaxDifference:R}, LOD {s.MaxLodDifference:R}; unfinished rays {s.Unfinished}");
+
+    /// <summary>
+    /// The proving ground (docs/cultmath-interval-ground-cut.md, "Pass 3"). Scenarios (a) height fog,
+    /// (b) inside the fog, (c) Aetheria's wells and (d) r1's uniform slab, each over 64 tiles at
+    /// N in {1, 4, 8, 16} and warp in {0, D}: the tile march integrates exactly the dense march's cells, so
+    /// the transmittance agrees within 1e-3 (a difference would be a skipped cell that was not empty), and
+    /// its combined cost must be at most half the dense march's for (a) and (c) at N = 8. (e) the void: the
+    /// grid over hollow radius, camera offset and ramp width (32 tiles at N = 8) and the shipped point
+    /// (200 tiles), three marches each; at the shipped point the masked fixed-step march agrees with the
+    /// reference exactly, the footprint-aware march within 0.02, and it must take at most half the
+    /// reference's steps per pixel. A shortfall in (a), (c) or (e) skips naming saving-2x-scenarios; the
+    /// fields, the grids and the envelope cost are not tuned toward it.
+    /// </summary>
+    [Fact]
+    public void IntervalSkipHalvesEvaluations()
+    {
+        var ratios = new Dictionary<string, double>();
+        var scenarios = new (string Key, float Warp, Func<float, Scenario> Make)[]
+        {
+            ("a", FogField.AetheriaWarp, FogField.HeightFog),
+            ("b", FogField.AetheriaWarp, FogField.InsideFog),
+            ("c", FogField.AetheriaWarp, FogField.Wells),
+            ("d", SlabField.SlabWarp, SlabField.Create),
+        };
+        foreach (var (key, warp, make) in scenarios)
+        foreach (var n in new[] { 1, 4, 8, 16 })
+        foreach (var w in new[] { 0.0f, warp })
+        {
+            var field = make(w);
+            var stats = Run(field, n, 64, 0x5A7E + n);
+            Report($"{field.Name} N={n} warp={w:R}", stats);
+            Assert.True(stats.MaxDifference <= 1.0e-3f, $"{field.Name} N={n} warp={w:R}: transmittance differs by {stats.MaxDifference:R}");
+            if (key == "d")
+                output.WriteLine($"IV-REPORT (d) N={n} warp={w:R}: ungated dense snoise/ray {3.0 * stats.PerRay(stats.DenseSteps):F2} (three per dense sample, as r1 counted)");
+            if (n == 8)
+                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), stats.Ratio);
+        }
+
+        foreach (var rh in VoidField.HollowRadii)
+        foreach (var offset in VoidField.CameraOffsets)
+        foreach (var ramp in VoidField.Ramps)
+        {
+            var field = new VoidField(rh, ramp, offset.Fraction, offset.Name);
+            ReportVoid($"{field.Name} N=8", Run(field, 8, 32, 0x701D, lod: true));
+        }
+
+        var shipped = VoidField.Shipped();
+        var headline = Run(shipped, 8, 200, 0x5417, lod: true);
+        ReportVoid($"{shipped.Name} N=8 (headline, 200 tiles)", headline);
+        Assert.True(headline.MaxDifference == 0.0f, $"the masked fixed-step march differs from the reference by {headline.MaxDifference:R}");
+        Assert.True(headline.MaxLodDifference <= 0.02f, $"the footprint-aware march differs from the reference by {headline.MaxLodDifference:R}");
+        var steps = (double)headline.DenseSteps / headline.LodSteps;
+
+        if (ratios["a"] < 2.0 || ratios["c"] < 2.0 || steps < 2.0)
+            Assert.Skip($"saving-2x-scenarios: at N = 8, (a) saves {ratios["a"]:F2}x and (c) {ratios["c"]:F2}x combined cost (the lower of warp 0 and D); (e) takes {steps:F2}x fewer steps per pixel at the shipped point; the contract is 2x each");
+    }
 }
