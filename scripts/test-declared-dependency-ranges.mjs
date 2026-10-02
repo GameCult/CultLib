@@ -96,6 +96,7 @@ const workspaces = readJson(join(repoRoot, "package.json")).workspaces.map((dire
 });
 const byName = new Map(workspaces.map((workspace) => [workspace.manifest.name, workspace]));
 const tags = git("tag", "-l").split(/\r?\n/u).filter(Boolean);
+assert.ok(tags.length > 0, "this clone has no release tags; fetch them (git fetch --tags) so the admitted releases can be built");
 const scratch = mkdtempSync(join(tmpdir(), "cultlib-declared-ranges-"));
 const built = new Map();
 let checked = 0;
