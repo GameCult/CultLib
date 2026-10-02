@@ -161,8 +161,9 @@ namespace GameCult.Caching.Tests
                 CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directoryStore }))!;
 
             Assert.That(refusal.Message.Contains(header, StringComparison.Ordinal), Is.EqualTo(echoed), refusal.Message);
+            Assert.That(refusal.Message.Contains("SECRETHDR", StringComparison.Ordinal), Is.False, refusal.Message);
             if (!echoed)
-                Assert.That(refusal.Message, Does.Not.Contain("SECRETHDR").And.Not.Contain("٣"));
+                Assert.That(refusal.Message.Contains("٣", StringComparison.Ordinal), Is.False, refusal.Message);
         }
 
         // Only nothing at the path is an empty store. A link whose target is gone is an I/O error on open and on commit, never an
