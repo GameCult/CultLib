@@ -69,9 +69,15 @@ Sketch, to be replaced by the target pass:
 4. **HLSL interpreter** for the same bytecode, with interval ops and pruning.
    Fidget's MPL-2.0 WGSL is the reference. MPL code keeps its own MPL-headed
    files, as Phacelle does.
-5. **Meshing**: an octree of chunks, dual contouring for hard-surface creases,
-   and seams stitched between LOD levels. GameCult.Geometry's surface nets
-   comes from Asura Cut 2.
+5. **Meshing**: an octree of chunks with seams stitched between LOD levels.
+   - The default is surface nets (GameCult.Geometry, Asura Cut 2) plus
+     Asura's tile pass: Newton refinement onto `f = 0`, then crease snapping
+     from field gradients (Asura Cut 6c).
+   - The operator's lean (2026-10-02) is that gradient work beats dual
+     contouring here. Thin authored bevels can be shaded by their analytic
+     normals, and the refined positions can be iterated further.
+   - Dual contouring is not planned. The tile pass on station brushes is its
+     test.
 
 ## Truth and lowerings
 
