@@ -141,8 +141,13 @@ package name, its `CHANGELOG.md` path, the version being released, and a git
 tag prefix, it:
 
 1. resolves the previous published version from the highest existing
-   `<prefix>-v*` tag older than the version being released (or treats the
-   release as a package's first if none exists);
+   `<prefix>-v*` tag older than the version being released. A first release
+   is never inferred: with no such tag, or with tags that cannot be read (a
+   `--cwd` that is not a git repository), the check refuses unless the caller
+   declares `--first-release`; declaring it while an earlier tag exists is
+   refused too. A tag for the version being released does not exempt it: there
+   is no "already published" skip, so callers do not run the check for a
+   version they are only rebuilding;
 2. requires a `## [<version>]` changelog entry to exist at all;
 3. classifies the version bump (major/minor/patch) against the previous
    version, refusing anything that is not exactly the next version in some
@@ -169,24 +174,46 @@ above), and the check neither refuses nor demands a bump for one.
 The Unity release scripts pass `--api-baseline-path <repo-relative directory
 of tracked DLLs>` and one `--api-built <dll>` per assembly they built (plus
 `--api-refs <dir>` for directories that hold the built assemblies'
-dependencies). For each built DLL that has a namesake under the baseline path
-at the previous tag, the checker reads that namesake as a git blob at the tag
-(no worktree, no network, unaffected by what the working tree tracks now) and
-compares public API with `Microsoft.DotNet.ApiCompat.Tool`, pinned in
-`dotnet-tools.json` and run through `dotnet tool run`; the first
-`dotnet tool restore` needs NuGet, and later runs use the local cache. Each
-`CPnnnn` diagnostic is one measured break. A built DLL with no baseline is new
-and measures nothing. A `GameCult.*` assembly the previous tag tracked and the
-build no longer produces is itself a measured break. A package's first release
-(no previous tag) measures nothing.
+dependencies, and `--api-new <dll name>` for an assembly that is new in this
+release). For each built DLL the checker reads its namesake under the baseline
+path at the previous tag as a git blob (no worktree, no network, unaffected by
+what the working tree tracks now) and compares public API with
+`Microsoft.DotNet.ApiCompat.Tool`. Each `CPnnnn` diagnostic is one measured
+break. A `GameCult.*` assembly the previous tag tracked and the build no
+longer produces is itself a measured break.
 
-The tool failing to measure (not installed, an unreadable assembly, a crash:
-a non-zero exit with no diagnostic line) refuses the release; it is never a
-pass. ApiCompat cannot resolve `netstandard.dll` for the shipped
-netstandard2.1 assemblies and prints a resolution warning; removed inherited
-members and base types are still reported, and a test pins that. No
-suppression file is kept: a suppression would be a second, silent declaration
-of a break, so a break is declared only under `### Breaking`.
+Measuring nothing is a refusal, never a pass. The check refuses, naming what
+is missing, when the previous tag tracks no DLL under the baseline path (a
+wrong or moved path, or a tag that predates it); when a built assembly has no
+namesake at the tag and was not declared with `--api-new`; when an assembly
+declared new is already tracked; and when the tool fails to measure (not
+installed, an unreadable assembly, a crash: a non-zero exit with no diagnostic
+line). A first release declared with `--first-release` measures nothing.
+
+The tool and the `NETStandard.Library.Ref` 2.1.0 reference assemblies are
+pinned in `scripts/api-gate/` (`.config/dotnet-tools.json` and
+`ApiRefs.csproj`) and restored there by the check itself, so a release does
+not depend on any other tool in the repository's manifest. NuGet is needed
+until both are cached under `scripts/api-gate`. Both sides of every
+comparison resolve netstandard types through those reference assemblies, and the
+new side also through the built DLL's own directory and every `--api-refs`
+directory. No suppression file is kept: a suppression would be a second, silent
+declaration of a break, so a break is declared only under `### Breaking`.
+
+A passing measured run prints that unmeasured changes still need declaring.
+
+#### Unmeasured changes
+
+ApiCompat does not report these changes to a public member, and the check
+therefore passes them. Each is a breaking change under the rules above and is
+declared under `### Breaking`, as behavioural breaks are:
+
+- a member gaining or losing `static`;
+- a parameter gaining or losing `ref`, `out` or `in`;
+- a `const` field's value changing;
+- an enum member's underlying value changing;
+- a field gaining or losing `readonly`;
+- a default parameter value changing.
 
 The release scripts run the check once the assemblies under judgement exist,
 after the build and before anything is copied into the package.
