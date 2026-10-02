@@ -427,6 +427,52 @@ fn leading_header(bytes: &[u8]) -> Option<String> {
     read_string(bytes, &mut offset)
 }
 
+fn read_array_header(payload: &[u8], offset: &mut usize) -> Option<u32> {
+    let marker = *payload.get(*offset)?;
+    *offset += 1;
+    match marker {
+        0x90..=0x9f => Some((marker & 0x0f) as u32),
+        0xdc => {
+            let bytes = payload.get(*offset..(*offset + 2))?;
+            *offset += 2;
+            Some(u16::from_be_bytes([bytes[0], bytes[1]]) as u32)
+        }
+        0xdd => {
+            let bytes = payload.get(*offset..(*offset + 4))?;
+            *offset += 4;
+            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+        _ => None,
+    }
+}
+
+fn read_string(payload: &[u8], offset: &mut usize) -> Option<String> {
+    let marker = *payload.get(*offset)?;
+    *offset += 1;
+    let length = match marker {
+        0xa0..=0xbf => (marker & 0x1f) as usize,
+        0xd9 => {
+            let length = *payload.get(*offset)? as usize;
+            *offset += 1;
+            length
+        }
+        0xda => {
+            let bytes = payload.get(*offset..(*offset + 2))?;
+            *offset += 2;
+            u16::from_be_bytes([bytes[0], bytes[1]]) as usize
+        }
+        0xdb => {
+            let bytes = payload.get(*offset..(*offset + 4))?;
+            *offset += 4;
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+        }
+        _ => return None,
+    };
+
+    let bytes = payload.get(*offset..(*offset + length))?;
+    std::str::from_utf8(bytes).ok().map(str::to_string)
+}
+
 /// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
 /// schema id from its records, so that is its only conflict. Nothing is written. It names the id, the two names and a record key.
 #[derive(Debug)]
