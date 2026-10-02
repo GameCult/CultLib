@@ -82,6 +82,17 @@ public sealed class CultMeshSingleFileReadabilityTests
         }
     }
 
+    // A read asks the same reader as a write: a file this runtime cannot read, a zero-byte one included, is refused as unreadable
+    // and never reported as a store that lacks the record.
+    [Test]
+    public void AReadOfAZeroByteFileIsRefusedAsUnreadableNotAsAMissingRecord()
+    {
+        var path = Path.Combine(_root, "zero.cc");
+        File.WriteAllBytes(path, Array.Empty<byte>());
+
+        Assert.That(() => CultMesh.ReadSingleFileDocumentPayload(path, new CultRecordKey("publication"), "raw:schema"), Throws.TypeOf<CultStoreUnreadableException>());
+    }
+
     [Test]
     public void EveryVectorInTheFolderHasAManifestRow()
     {

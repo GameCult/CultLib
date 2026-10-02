@@ -902,11 +902,11 @@ public sealed class CultMeshStreamingTests
         await act.Should().ThrowAsync<NotSupportedException>();
     }
 
-    // A database serves only what its shards own, including when a handle reads a same-schema instance of another CLR type
-    // out of the cache behind it.
+    // A database serves only what its shards own. A schema has one CLR type (retire-schema-alias), so there is no second type
+    // that could reach a record around the shard that owns its schema.
     [TestCase("tests.mesh_note.v1", true)]
     [TestCase("tests.unrelated.v1", false)]
-    public async Task DocumentHandle_ReadsASameSchemaInstanceOnlyWhenAShardOwnsIt(string ownedSchemaId, bool served)
+    public async Task DocumentHandle_ReadsARecordOnlyWhenAShardOwnsItsSchema(string ownedSchemaId, bool served)
     {
         var cache = new CultCache();
         var key = new CultRecordKey("note:one");
@@ -916,7 +916,7 @@ public sealed class CultMeshStreamingTests
             RuntimeId = "reader",
             Shards = new[] { new CultNetShardDescriptor("notes", "reader", epoch: 1, isPrimary: true, schemaIds: new[] { ownedSchemaId }) }
         });
-        var handle = CultMesh.Document<MeshNoteAliasDocument>(database, key, CultMesh.Verse("starbridge", "reader"));
+        var handle = CultMesh.Document<MeshNoteDocument>(database, key, CultMesh.Verse("starbridge", "reader"));
 
         if (served)
         {

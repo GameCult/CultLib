@@ -276,8 +276,6 @@ namespace GameCult.Mesh
         private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
         {
             var bytes = File.ReadAllBytes(path);
-            if (bytes.Length == 0)
-                return new CultPersistedStoreSnapshot();
             CultPersistedStoreSnapshot snapshot;
             try
             {
