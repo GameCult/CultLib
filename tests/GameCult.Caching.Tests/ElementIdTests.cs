@@ -293,6 +293,27 @@ namespace GameCult.Caching.Tests
             Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Select(record => record.Key), Is.EqualTo(new[] { "other" }));
         }
 
+        // The file's record counts as moved when either half of its name (schema id, storedAt) is no longer the loaded one.
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        public void AWholeViewWriteCarriesTheFilesRecordWhenOnlyItsStoredAtOrOnlyItsIdMoved(bool newerStoredAt, bool ownersId)
+        {
+            var path = UnownedStore("moved.cc");
+            using var cache = Open(path);
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var moved = snapshot.Records.Single();
+            if (newerStoredAt)
+                moved.StoredAt = DateTimeOffset.UtcNow.AddMinutes(5).ToString("O");
+            if (ownersId)
+                moved.SchemaId = Registry.GetRequired(typeof(IdDeck)).SchemaId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var after = DiskRecord(path, "old");
+            Assert.That((after.SchemaId, after.StoredAt), Is.EqualTo((moved.SchemaId, moved.StoredAt)));
+        }
+
         // A record that carried no ids when it was laid back does not mark the store, though the ids it minted at load are in memory.
         [Test]
         public void ALaidBackRecordWithoutIdsDoesNotMarkTheStore()

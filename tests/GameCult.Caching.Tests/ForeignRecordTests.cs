@@ -240,6 +240,48 @@ namespace GameCult.Caching.Tests
             Assert.That(Stored(path, D), Is.EqualTo(widget));
         }
 
+        // The directory store stages a removal as its own pending key: a refusal takes it too.
+        [Test]
+        public void AStagedRemovalOfARecordAnotherWriterMadeForeignIsRefusedOnceAndThenGone()
+        {
+            var path = Seeded("staged-removal.cc", directory: true);
+            using var cache = Open(path, DeckOnly, directory: true);
+            using (var other = Open(path, Full, directory: true))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            cache.Remove(D);
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult())!;
+            Land(cache, Write.Commit, E, DeckOf("e"));
+
+            Assert.That(refusal.RecordKey, Is.EqualTo(D.Value));
+            Assert.That(Stored(path, D), Is.EqualTo(widget));
+        }
+
+        // What a refusal leaves staged is exactly what it did not refuse: the other record's write still lands on the next flush,
+        // and a store with nothing left staged is clean.
+        [Test]
+        public void ARefusalLeavesStagedWhatItDidNotRefuse()
+        {
+            var path = Seeded("pending.cc", directory: true);
+            using var cache = Open(path, DeckOnly, directory: true);
+            using (var other = Open(path, Full, directory: true))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+
+            cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+            Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            Assert.That(cache.IsDirty, Is.False, "nothing is left staged");
+
+            cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+            cache.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
+            Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            Assert.That(cache.IsDirty, Is.True, "e is still staged");
+            cache.FlushAsync().GetAwaiter().GetResult();
+
+            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+            Assert.That(cache.IsDirty, Is.False);
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void RemovingARecordAnotherWriterMadeForeignIsRefused(bool directory)
