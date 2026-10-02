@@ -351,6 +351,12 @@ function main() {
     process.exitCode = 2;
     return;
   }
+  // Checked before anything reads tags: a malformed version is its own refusal, and the
+  // value is not repeated back.
+  if (!VERSION_PATTERN.test(version.trim())) {
+    refuse(`${packageName}: --version is not a MAJOR.MINOR.PATCH version`);
+    return;
+  }
   if (!existsSync(changelog)) {
     refuse(`${packageName}: changelog not found at ${changelog}`);
     return;

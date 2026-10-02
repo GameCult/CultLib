@@ -750,3 +750,63 @@ test("evaluateRelease: lists at most five measured breaks, and says nothing more
   }).reason;
   assert.match(agreed, /a "### Breaking" section and 1 measured public API break\(s\)/);
 });
+
+test("CLI: a malformed version is refused by name, without repeating it, with or without --first-release", () => {
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    const changelogPath = join(dir, "CHANGELOG.md");
+    writeFileSync(changelogPath, changelogFor("1.1.0"));
+    for (const extra of [[], ["--first-release"]]) {
+      const output = runCheckerExpectFailure(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.1.x-canary", "--tag-prefix", "widget", ...extra]);
+      assert.match(output, /--version is not a MAJOR\.MINOR\.PATCH version/);
+      assert.doesNotMatch(output, /canary/);
+      assert.doesNotMatch(output, /could not be read/);
+    }
+  });
+});
+
+test("refusals never repeat what the inputs contain", () => {
+  const canary = "CANARY-5f3a9c-never-echoed";
+  const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-canary-"));
+  try {
+    const junk = join(scratch, "GameCult.Widget.dll");
+    writeFileSync(junk, `MZ not an assembly ${canary}`);
+    const canaryChangelog = (dir, version, { breaking = false } = {}) => {
+      const path = join(dir, "CHANGELOG.md");
+      writeFileSync(path, changelogFor(version, { breaking }).replace("- something changed", `- something changed ${canary}`) + `\n## [0.0.1]\n\n- ${canary}\n`);
+      return path;
+    };
+    const refuse = (dir, args) => {
+      const output = runCheckerExpectFailure(dir, args);
+      assert.doesNotMatch(output, new RegExp(canary), `the refusal repeated an input: ${output}`);
+      return output;
+    };
+    withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+      const measured = (version, built, options) => {
+        const args = measuredArgs(dir, version, built, options);
+        args[args.indexOf("--changelog") + 1] = canaryChangelog(dir, version, options);
+        return args;
+      };
+      // a measured break, with the canary in the changelog it must be declared in
+      assert.match(refuse(dir, measured("1.1.0", [trimmedWidget()])), /Gone/);
+      // the tool cannot read the built assembly
+      assert.match(refuse(dir, measured("1.0.1", [junk])), /could not be measured/);
+      // no entry for the version, a skipped version, a breaking entry under too small a bump
+      const noEntry = measured("1.0.1", [oldWidget()]);
+      noEntry[noEntry.indexOf("--version") + 1] = "1.0.2";
+      assert.match(refuse(dir, noEntry), /no "## \[1\.0\.2\]" entry/);
+      const skip = measured("1.0.9", [oldWidget()]);
+      assert.match(refuse(dir, skip), /skips ahead/);
+      assert.match(refuse(dir, measured("1.0.1", [oldWidget()], { breaking: true })), /needs a major bump/);
+    });
+    // the tag's own blob is unreadable
+    withReleasedBaseline({ baseline: { "GameCult.Widget.dll": junk } }, (dir) => {
+      const args = measuredArgs(dir, "1.0.1", [oldWidget()]);
+      args[args.indexOf("--changelog") + 1] = canaryChangelog(dir, "1.0.1");
+      assert.match(refuse(dir, args), /could not be measured/);
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
