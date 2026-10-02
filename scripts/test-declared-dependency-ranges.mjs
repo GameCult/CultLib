@@ -24,9 +24,16 @@ const rootRequire = createRequire(join(repoRoot, "package.json"));
 const ts = rootRequire("typescript");
 const semver = createRequire(join(npmRoot(), "package.json"))("semver");
 
+// npm ships semver, so the check needs no dependency of its own. npm's root is beside the node binary on Windows and under lib/ on Unix.
 function npmRoot() {
-  const cli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-  return dirname(dirname(cli));
+  const candidates = [
+    ...(process.env.npm_execpath ? [dirname(dirname(process.env.npm_execpath))] : []),
+    join(dirname(process.execPath), "node_modules", "npm"),
+    join(dirname(process.execPath), "..", "lib", "node_modules", "npm"),
+  ];
+  const root = candidates.find((candidate) => existsSync(join(candidate, "package.json")));
+  assert.ok(root, `npm's package root was not found in ${candidates.join(", ")}`);
+  return root;
 }
 
 function readJson(path) {
