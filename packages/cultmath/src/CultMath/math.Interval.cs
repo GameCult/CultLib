@@ -164,4 +164,27 @@ public static partial class math
 
         return sum;
     }
+
+    /// <summary>
+    /// A ball (xyz centre, w radius) enclosing every point of every ray of a screen tile over the depth
+    /// segment [z0, z1], each point then moved by a warp of length at most warp: the ball to hand
+    /// iv_snoise_ball (scaled by the noise frequency) when one probe serves the whole tile. Camera frame:
+    /// a pinhole at the origin looking down +z, where the ray of slope m is the points (m z, z).
+    /// centreSlope is the tile's central slope m_c; footprintPerDepth is the largest distance of any
+    /// ray's slope from m_c, N / (sqrt(2) f) for an N x N pixel tile at focal length f pixels (the full
+    /// pixel footprint, so sub-pixel jitter is covered). The centre is (m_c z_m, z_m), z_m = (z0 + z1) / 2;
+    /// the radius is ((z1 - z0) / 2) |(m_c, 1)| + z1 footprintPerDepth + warp. Derivation: a point of slope
+    /// m_c + e (|e| &lt;= footprintPerDepth) at depth z is c + (z - z_m)(m_c, 1) + z (e, 0); the first term is
+    /// at most the first radius term, the second at most the second, and the warp adds at most warp
+    /// (NoiseBoundTests.TileBallEnclosesEveryRaySegment). The two vectors are never parallel, so the
+    /// triangle inequality is strict. The caller rotates and translates the centre into world space (the
+    /// radius is unchanged) and scales both by its noise frequency.
+    /// </summary>
+    public static float4 iv_frustum_ball(float2 centreSlope, float z0, float z1, float footprintPerDepth, float warp)
+    {
+        var zm = (z0 + z1) * 0.5f;
+        var axis = sqrt(centreSlope.x * centreSlope.x + centreSlope.y * centreSlope.y + 1.0f);
+        var radius = (z1 - z0) * 0.5f * axis + z1 * footprintPerDepth + warp;
+        return new float4(centreSlope.x * zm, centreSlope.y * zm, zm, radius);
+    }
 }

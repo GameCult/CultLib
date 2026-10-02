@@ -7,8 +7,12 @@ namespace CultMath.Tests;
 /// <summary>
 /// The noise bounds (design.md, "Intervals"): iv_snoise_ball and iv_fbm_ball enclose their functions over
 /// a ball, a domain warp bounded by D is enclosed by enlarging the radius by D, SNOISE_LIPSCHITZ has
-/// measured provenance, and an interval-culled march spends fewer snoise evaluations than a dense one for
-/// the same transmittance. Lines starting IV-REPORT carry the numbers the cut report quotes.
+/// measured provenance, iv_frustum_ball encloses a screen tile's rays over a depth segment, and an
+/// interval-culled march spends fewer snoise evaluations than a dense one for the same transmittance.
+/// Lines starting IV-REPORT carry the numbers the cut report quotes.
+///
+/// Hand mutations of iv_frustum_ball that TileBallEnclosesEveryRaySegment must kill: z0 for z1 in the
+/// lateral term (z0 * footprintPerDepth); |m_c| for |(m_c, 1)| in the depth term; the warp dropped.
 /// </summary>
 public sealed class NoiseBoundTests
 {
@@ -103,6 +107,57 @@ public sealed class NoiseBoundTests
                 var warped = x + flow;
                 Assert.True(length(warped - centre) <= (radius + warp) * (1.0f + 1.0e-5f), $"warped point {warped} leaves the ball ({centre}, {radius + warp:R})");
                 Assert.True(Inside(snoise(warped), bound), $"iv_snoise_ball({centre}, {radius + warp:R}) = {bound} misses snoise({warped}) = {snoise(warped):R}");
+            }
+        }
+    }
+
+    // ---- The tile ball and the composed bound ----
+
+    /// <summary>
+    /// iv_frustum_ball encloses every point of every ray of an N x N tile over a depth segment, sub-pixel
+    /// jitter included, each point then moved by a flow of length at most warp, with no tolerance: 2,000
+    /// seeded tiles (N in {1, 4, 8, 16}, f in [500, 3000], |m_c| up to 1.1, segments over the slab's, the
+    /// fog's and the void's depth ranges, a quarter starting at the camera) x 64 points, the first eight at
+    /// a corner of the footprint at either end of the segment with a full-length flow. It also pins the
+    /// ball to the derivation: centre and radius equal the formula evaluated in double to one part in
+    /// 1e5, so a ball that grows (sound but wasteful) fails too. Each tile's camera is drawn on its own, as
+    /// a moving camera's frames are: no ball, mask or probe result is carried from one to the next.
+    /// </summary>
+    [Fact]
+    public void TileBallEnclosesEveryRaySegment()
+    {
+        var random = new System.Random(0x711E);
+        int[] sizes = { 1, 4, 8, 16 };
+        float[] depths = { 12.0f, 1000.0f, 2400.0f };
+        for (var t = 0; t < 2000; t++)
+        {
+            var n = sizes[random.Next(sizes.Length)];
+            var focal = Uniform(random, 500.0f, 3000.0f);
+            var slope = new float2(Uniform(random, -0.77f, 0.77f), Uniform(random, -0.77f, 0.77f));
+            var depth = depths[random.Next(depths.Length)];
+            var z0 = random.Next(4) == 0 ? 0.0f : Uniform(random, 0.0f, depth * 0.9f);
+            var z1 = z0 + LogUniform(random, 1.0e-3f * depth, depth - z0);
+            var warp = random.Next(4) == 0 ? 0.0f : LogUniform(random, 1.0e-3f, 60.0f);
+            var half = n / (2.0f * focal);
+            var footprint = n / (MathF.Sqrt(2.0f) * focal);
+            var ball = iv_frustum_ball(slope, z0, z1, footprint, warp);
+            var centre = new float3(ball.x, ball.y, ball.z);
+
+            var zm = (z0 + (double)z1) / 2.0;
+            var radius = (z1 - (double)z0) / 2.0 * Math.Sqrt((double)slope.x * slope.x + (double)slope.y * slope.y + 1.0) + z1 * (double)footprint + warp;
+            Assert.True(Math.Abs(ball.w - radius) <= 1.0e-5 * radius, $"radius {ball.w:R}, derivation {radius:R}");
+            Assert.True(Math.Abs(ball.x - slope.x * zm) + Math.Abs(ball.y - slope.y * zm) + Math.Abs(ball.z - zm) <= 1.0e-5 * zm, $"centre {centre}, derivation ({slope.x * zm:R}, {slope.y * zm:R}, {zm:R})");
+
+            for (var i = 0; i < 64; i++)
+            {
+                var offset = i < 8
+                    ? new float2((i & 1) == 0 ? -half : half, (i & 2) == 0 ? -half : half)
+                    : new float2(Uniform(random, -half, half), Uniform(random, -half, half));
+                var z = i < 8 ? ((i & 4) == 0 ? z0 : z1) : Uniform(random, z0, z1);
+                var m = slope + offset;
+                var flow = UnitVector(random) * (i < 8 ? warp : warp * MathF.Sqrt(random.NextSingle()));
+                var p = new float3(m.x * z, m.y * z, z) + flow;
+                Assert.True(length(p - centre) <= ball.w, $"iv_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball} misses {p} (slope {m}, depth {z:R}), distance {length(p - centre):R}");
             }
         }
     }
@@ -280,6 +335,7 @@ public sealed class NoiseBoundTests
             string.Join(", ", fbmRatios.Select(t => $"fbm4 r={t.r:R} {t.Item2:F2}")));
         Assert.All(snoiseRatios.Concat(fbmRatios), t => Assert.True(double.IsFinite(t.Item2)));
     }
+
 
     // ---- The saving ----
 
