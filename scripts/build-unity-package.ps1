@@ -39,21 +39,6 @@ if (Test-Path -LiteralPath $outputRoot) {
 
 $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
 
-# docs/semver-policy.md: refuse to build a release whose CHANGELOG.md entry
-# claims a breaking change under too small a bump, or whose version skips or
-# reverses the previous published tag. Runs before the (slow) build below so
-# a bad version number fails fast.
-& node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
-  --package "org.gamecult.cultlib" `
-  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
-  --version $unityPackageVersion `
-  --tag-prefix "cultlib-unity" `
-  --cwd $repoRoot
-if ($LASTEXITCODE -ne 0) {
-  throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
-}
-
-
 # Release gate: cultlib's Unity package resolves CultMath through the org.gamecult.cultmath
 # dependency, so a cultlib release must not run ahead of the CultMath package it names.
 # (1) The declared dependency version must not exceed the CultMath package's own version.
@@ -185,6 +170,30 @@ foreach ($assemblyName in $expectedAssemblies) {
   if (-not $publishedByName.ContainsKey($assemblyName)) {
     throw "CultLib Unity package is missing expected assembly: $assemblyName"
   }
+}
+
+# docs/semver-policy.md: refuse a release whose version does not tell the truth. The check measures
+# the public API of every shipped GameCult.* assembly against the DLLs the previous cultlib-unity tag
+# tracked (read from git), so it runs here, once the assemblies under judgement exist.
+$measuredArguments = @()
+foreach ($assemblyName in $expectedAssemblies) {
+  if ($assemblyName.StartsWith("GameCult.")) {
+    $measuredArguments += @("--api-built", $publishedByName[$assemblyName].FullName)
+  }
+}
+foreach ($refRoot in @($publishRoot, $quicPublishRoot, $webSocketPublishRoot)) {
+  $measuredArguments += @("--api-refs", $refRoot)
+}
+& node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
+  --package "org.gamecult.cultlib" `
+  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
+  --version $unityPackageVersion `
+  --tag-prefix "cultlib-unity" `
+  --cwd $repoRoot `
+  --api-baseline-path "unity/org.gamecult.cultlib/Runtime/Plugins" `
+  @measuredArguments
+if ($LASTEXITCODE -ne 0) {
+  throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
 }
 
 Copy-Item -LiteralPath (Join-Path $templateRoot "Runtime\GameCult.CultLib.asmdef") `
