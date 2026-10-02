@@ -2085,8 +2085,7 @@ test("a soft pushAll writes where nothing is, leaves a readable store alone, and
 test("a header that does not start at the store prefix is not echoed whole, though it ends like a version", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-forged-header-"));
   const file = join(dir, "store.cc");
-  for (const header of ["cultcache.store.SECRETcultcache.store.v9", "cultcache.store.
-cultcache.store.v9", "SECRETcultcache.store.v9"]) {
+  for (const header of ["cultcache.store.SECRETcultcache.store.v9", "cultcache.store.\ncultcache.store.v9", "SECRETcultcache.store.v9"]) {
     await writeFile(file, encode([header, [], []]));
     await assert.rejects(
       () => new SingleFileMessagePackBackingStore(file).pullAll(),
