@@ -24,6 +24,7 @@
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="..\..\shaders\CultMath.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\shaders\CultMath.Phacelle.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.Phacelle.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\shaders\CultMath.Interval.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.Interval.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
