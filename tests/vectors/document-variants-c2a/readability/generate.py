@@ -31,6 +31,7 @@ vectors = {
     "scalar": b"\x01",
     "map": b"\x80",
     "truncated": whole[:-1],
+    "trailing-byte": whole + b"\x01",
     "trailing-bytes": whole + b"\x01\x02\x03",
     "trailing-store": whole + whole,
     # A header and a body of the wrong shape, for both readable headers.

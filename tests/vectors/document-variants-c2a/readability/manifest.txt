@@ -16,6 +16,7 @@ bin-header-v9.bin   refuses  refuses  refuses  refuses
 scalar.bin          refuses  refuses  refuses  refuses
 map.bin             refuses  refuses  refuses  refuses
 truncated.bin       refuses  refuses  refuses  refuses
+trailing-byte.bin   refuses  refuses  refuses  refuses
 trailing-bytes.bin  refuses  refuses  refuses  refuses
 trailing-store.bin  refuses  refuses  refuses  refuses
 bad-body-v1.bin     refuses  refuses  refuses  refuses
