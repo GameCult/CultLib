@@ -416,6 +416,17 @@ fn store_header(bytes: &[u8]) -> Result<Option<String>> {
     Ok(header.0)
 }
 
+/// The header string read from the leading bytes alone, or `None` when they do not open with an array whose first slot is a
+/// string. A store cut short after its header still names its format, so a newer store is refused as unsupported, not as
+/// damaged. [`store_header`] is the proof that a readable store is whole.
+fn leading_header(bytes: &[u8]) -> Option<String> {
+    let mut offset = 0usize;
+    if read_array_header(bytes, &mut offset)? == 0 {
+        return None;
+    }
+    read_string(bytes, &mut offset)
+}
+
 /// A write the catalog cannot describe: records of different types under one schema id. This writer derives one entry per carried
 /// schema id from its records, so that is its only conflict. Nothing is written. It names the id, the two names and a record key.
 #[derive(Debug)]
@@ -925,8 +936,7 @@ impl SingleFileMessagePackBackingStore {
                 kind,
             })
         };
-        let header = store_header(&bytes).map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error))?;
-        match header {
+        match leading_header(&bytes) {
             Some(header) if header.starts_with("cultcache.store.") && readable_store_format(&header).is_none() => Err(unreadable(
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
                 anyhow!(
@@ -5057,11 +5067,8 @@ mod tests {
             std::fs::copy(source, &path)?;
             let before = std::fs::read(&path)?;
             let mut store = SingleFileMessagePackBackingStore::new(&path);
-            let message = format!(
-                "{:#}",
-                store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err()
-            );
-            assert!(message.contains("is not readable"), "{vector}: {message}");
+            let error = store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{vector}: {error:#}");
             assert_eq!(std::fs::read(&path)?, before, "{vector} was rewritten");
         }
         Ok(())
@@ -5082,11 +5089,8 @@ mod tests {
             let path = temp.path().join("store.msgpack");
             std::fs::write(&path, &bytes)?;
             let mut store = SingleFileMessagePackBackingStore::new(&path);
-            let message = format!(
-                "{:#}",
-                store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err()
-            );
-            assert!(message.contains("is not readable"), "{name}: {message}");
+            let error = store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()).unwrap_err();
+            assert_eq!(unreadable_kind(&error), Some(CultCacheStoreUnreadableKind::UnsupportedFormat), "{name}: {error:#}");
             assert_eq!(std::fs::read(&path)?, bytes, "{name} was rewritten");
         }
         Ok(())
@@ -5678,11 +5682,10 @@ mod tests {
         assert!(!invalid.contains("runtime that"), "{invalid}");
     }
 
-    /// The store path is a directory, so the staging file is written and synced and
-    /// then cannot be renamed over it: a failure after the write, reached without
-    /// permissions.
+    /// The store path is a directory, so the one reader cannot reach a store there: the write stops at the read, as an
+    /// I/O error and not a write failure, before any staging file exists.
     #[test]
-    fn a_write_that_fails_at_the_rename_leaves_no_staging_file() -> Result<()> {
+    fn a_write_over_a_directory_stops_at_the_read_and_leaves_no_staging_file() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("store.cc");
         fs::create_dir(&path)?;
@@ -5692,7 +5695,7 @@ mod tests {
         let error = store
             .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
             .unwrap_err();
-        assert!(format!("{error:#}").contains("failed to atomically replace"), "{error:#}");
+        assert!(io_error_in(&error).is_some() && write_failure_kind(&error).is_none(), "{error:#}");
 
         let staging: Vec<_> = fs::read_dir(temp.path())?
             .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
@@ -5831,14 +5834,14 @@ mod tests {
         assert_eq!(fs::read(&path)?, before);
         assert_eq!(fs::read_dir(temp.path())?.count(), 2, "only the store and its lock remain");
 
-        // The rename fails when the store path is a directory.
+        // A store path that is a directory is refused at the read: an I/O error, not a write failure.
         let blocked = temp.path().join("blocked.cc");
         fs::create_dir(&blocked)?;
         let mut blocked_store = SingleFileMessagePackBackingStore::new(&blocked);
         let error = blocked_store
             .push_all(&[snapshot_envelope("alpha", b"1")], PushAllOptions::default())
             .unwrap_err();
-        assert_eq!(write_failure_kind(&error), Some(CultCacheStoreWriteFailedKind::NotReplaced), "{error:#}");
+        assert!(io_error_in(&error).is_some() && write_failure_kind(&error).is_none(), "{error:#}");
         assert!(fs::metadata(&blocked)?.is_dir());
         Ok(())
     }
