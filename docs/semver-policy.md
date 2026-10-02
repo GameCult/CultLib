@@ -141,13 +141,19 @@ package name, its `CHANGELOG.md` path, the version being released, and a git
 tag prefix, it:
 
 1. resolves the previous published version from the highest existing
-   `<prefix>-v*` tag older than the version being released. A first release
-   is never inferred: with no such tag, or with tags that cannot be read (a
-   `--cwd` that is not a git repository), the check refuses unless the caller
-   declares `--first-release`; declaring it while an earlier tag exists is
-   refused too. A tag for the version being released does not exempt it: there
-   is no "already published" skip, so callers do not run the check for a
-   version they are only rebuilding;
+   `<prefix>-v*` tag strictly older than the version being released. A tag
+   equal to the version does not exempt it and does not count as a previous
+   release: there is no "already published" skip, so a rebuild or a CI re-run
+   at a tagged version is measured against that version's predecessor, exactly
+   as at release, and gets the same verdict. A first release is never
+   inferred: with no older tag, or with tags that cannot be read (a `--cwd`
+   that is not a git repository), the check refuses unless the caller declares
+   `--first-release`. The declaration is believed only when no other
+   `<prefix>-v*` tag exists (older or newer than the version) and
+   `--tag-prefix` names the directory that holds the changelog
+   (`packages/<prefix>/CHANGELOG.md`, the workflow's own spelling of a
+   package). A deleted predecessor tag leaves nothing in git to find, so under
+   the right prefix it cannot be told from a first release;
 2. requires a `## [<version>]` changelog entry to exist at all;
 3. classifies the version bump (major/minor/patch) against the previous
    version, refusing anything that is not exactly the next version in some
@@ -179,16 +185,20 @@ release). For each built DLL the checker reads its namesake under the baseline
 path at the previous tag as a git blob (no worktree, no network, unaffected by
 what the working tree tracks now) and compares public API with
 `Microsoft.DotNet.ApiCompat.Tool`. Each `CPnnnn` diagnostic is one measured
-break. A `GameCult.*` assembly the previous tag tracked and the build no
-longer produces is itself a measured break.
+break. Every assembly the previous tag tracked under the baseline path that
+the build no longer produces is itself a measured break, whatever its name, so
+a release script passes every assembly it ships, not only its own.
 
 Measuring nothing is a refusal, never a pass. The check refuses, naming what
 is missing, when the previous tag tracks no DLL under the baseline path (a
-wrong or moved path, or a tag that predates it); when a built assembly has no
-namesake at the tag and was not declared with `--api-new`; when an assembly
-declared new is already tracked; and when the tool fails to measure (not
-installed, an unreadable assembly, a crash: a non-zero exit with no diagnostic
-line). A first release declared with `--first-release` measures nothing.
+wrong or moved path, or a tag that predates it); when git cannot read the
+tracked assemblies; when a built assembly has no namesake at the tag and was
+not declared with `--api-new`; when an assembly declared new is already
+tracked; when no built assembly has a namesake at the tag, so that no
+comparison ran (renaming the only assembly and declaring it new is this case);
+and when the tool fails to measure (not installed, an unreadable assembly, a
+crash: a non-zero exit with no diagnostic line). A verified first release
+measures nothing.
 
 The tool and the `NETStandard.Library.Ref` 2.1.0 reference assemblies are
 pinned in `scripts/api-gate/` (`.config/dotnet-tools.json` and
@@ -228,7 +238,8 @@ It is wired into:
 
 - `.github/workflows/publish-packages.yml`, right after each job's existing
   "tag matches manifest version" check, for `cultcache-ts`, `cultcache-py`,
-  `cultnet-py`, and `cultmesh-py`;
+  `cultnet-py`, and `cultmesh-py`; a job passes `--first-release` when no
+  other tag of its prefix exists, and the check verifies that claim itself;
 - `scripts/build-unity-package.ps1`, for `org.gamecult.cultlib`;
 - `packages/cultmath/scripts/build-unity-package.ps1`, for
   `org.gamecult.cultmath`;
