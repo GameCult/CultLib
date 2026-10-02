@@ -222,6 +222,7 @@ namespace GameCult.Caching.Tests
         {
             var snapshot = new CultPersistedStoreSnapshot { FormatVersion = header };
             var error = Assert.Throws<CultStoreUnreadableException>(() => CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot))!;
+            Assert.That(error.Message, Does.Contain($"this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}."));
             if (echoed)
             {
                 Assert.That(error.Message, Does.Contain("format " + header + " is not"));
