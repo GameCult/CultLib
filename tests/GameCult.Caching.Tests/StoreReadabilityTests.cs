@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using GameCult.Caching.MessagePack;
@@ -28,8 +29,18 @@ namespace GameCult.Caching.Tests
         [TearDown]
         public void TearDown()
         {
-            if (Directory.Exists(_directory))
-                Directory.Delete(_directory, true);
+            if (!Directory.Exists(_directory))
+                return;
+            // A recursive delete cannot remove a link whose target is gone; take the links out by themselves first.
+            foreach (var entry in Directory.EnumerateFileSystemEntries(_directory).Where(entry => IsALink(entry)))
+            {
+                if ((new FileInfo(entry).Attributes & FileAttributes.Directory) != 0)
+                    Directory.Delete(entry, false);
+                else
+                    File.Delete(entry);
+            }
+
+            Directory.Delete(_directory, true);
         }
 
         private static string VectorRoot()
@@ -169,12 +180,35 @@ namespace GameCult.Caching.Tests
         }
 
         // Only nothing at the path is an empty store. A link whose target is gone is an I/O error on open and on commit, never an
-        // empty store and never an untyped missing-file failure, and the link is left where it was.
+        // empty store and never an untyped missing-file or access failure, and the link is left where it was.
         [Test]
-        public void ADanglingLinkIsAnIoErrorOnOpenAndOnCommitNotAnEmptyStore()
+        public void ADanglingDirectoryLinkIsAnIoErrorOnOpenNotAnEmptyStore()
         {
             var path = Path.Combine(_directory, "dangling.cc");
-            File.CreateSymbolicLink(path, Path.Combine(_directory, "unmounted", "store.cc"));
+            CreateDanglingDirectoryLink(path, Path.Combine(_directory, "unmounted"));
+
+            Assert.That(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }), Throws.TypeOf<IOException>());
+            Assert.That(IsALink(path), "the link was replaced");
+            Assert.That(Directory.Exists(Path.Combine(_directory, "unmounted")), Is.False);
+        }
+
+        [Test]
+        public void ACommitOntoADanglingDirectoryLinkIsAnIoErrorAndLeavesTheLink()
+        {
+            var path = Path.Combine(_directory, "link.cc");
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            CreateDanglingDirectoryLink(path, Path.Combine(_directory, "unmounted"));
+
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<IOException>());
+            Assert.That(IsALink(path), "the link was replaced");
+            Assert.That(Directory.Exists(Path.Combine(_directory, "unmounted")), Is.False, "a write went through the link");
+        }
+
+        [Test]
+        public void ADanglingFileLinkIsAnIoErrorOnOpenNotAnEmptyStore()
+        {
+            var path = Path.Combine(_directory, "dangling-file.cc");
+            CreateFileLinkOrIgnore(path, Path.Combine(_directory, "unmounted", "store.cc"));
 
             Assert.That(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }), Throws.TypeOf<IOException>());
             Assert.That(new FileInfo(path).LinkTarget, Is.Not.Null, "the link was replaced");
@@ -182,18 +216,58 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void ACommitOntoALinkThatDanglesAfterOpenIsAnIoErrorAndLeavesTheLink()
+        public void ACommitOntoAFileLinkThatDanglesAfterOpenIsAnIoErrorAndLeavesTheLink()
         {
             var target = Path.Combine(_directory, "target.cc");
-            var path = Path.Combine(_directory, "link.cc");
+            var path = Path.Combine(_directory, "file-link.cc");
             File.WriteAllBytes(target, File.ReadAllBytes(Path.Combine(VectorRoot(), "empty-array.bin")));
-            File.CreateSymbolicLink(path, target);
+            CreateFileLinkOrIgnore(path, target);
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             File.Delete(target);
 
             Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<IOException>());
             Assert.That(new FileInfo(path).LinkTarget, Is.Not.Null, "the link was replaced");
             Assert.That(File.Exists(target), Is.False, "a write went through the link");
+        }
+
+        // A link whose target is gone. A directory junction needs no privilege on Windows, where a file symlink needs one this
+        // workstation lacks; elsewhere a symlink to a missing directory is the same thing.
+        private static void CreateDanglingDirectoryLink(string path, string target)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                File.CreateSymbolicLink(path, target);
+                return;
+            }
+
+            Directory.CreateDirectory(target);
+            var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{path}\" \"{target}\"")
+            {
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            })!;
+            mklink.WaitForExit();
+            Assert.That(mklink.ExitCode, Is.Zero, "mklink /J failed");
+            Directory.Delete(target);
+        }
+
+        private static bool IsALink(string path)
+        {
+            var attributes = new FileInfo(path).Attributes;
+            return (int)attributes != -1 && (attributes & FileAttributes.ReparsePoint) != 0;
+        }
+
+        private static void CreateFileLinkOrIgnore(string path, string target)
+        {
+            try
+            {
+                File.CreateSymbolicLink(path, target);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Assert.Ignore("A file symlink needs a privilege this account lacks: " + ex.Message);
+            }
         }
 
         // An id one entry owns and a later entry lists as compatible names the entry that owns it.

@@ -4023,6 +4023,11 @@ namespace GameCult.Caching
             {
                 throw new IOException("The store path is a link whose target cannot be reached.", ex);
             }
+            // A Windows junction is a directory, not a file, so opening one that dangles fails with an access error, not a missing file.
+            catch (UnauthorizedAccessException ex) when (PathIsALink() && (FileInfo.Attributes & FileAttributes.Directory) != 0)
+            {
+                throw new IOException("The store path is a link whose target cannot be reached.", ex);
+            }
             catch (FileNotFoundException)
             {
                 return null;
