@@ -426,7 +426,6 @@ namespace GameCult.Caching.Tests
         // A commit that lands onto the file as it is keeps the header the file carries: a store already v3 stays v3.
         [TestCase("../v3-base.msgpack", "cultcache.store.v3")]
         [TestCase("compatible-id-only-v3.bin", "cultcache.store.v3")]
-        [TestCase("zero-byte.bin", "cultcache.store.v1")]
         [TestCase("empty-array.bin", "cultcache.store.v1")]
         public void AConditionalCommitOntoAReadableFileKeepsItsHeader(string vector, string header)
         {

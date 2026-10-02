@@ -507,7 +507,7 @@ fn rudp_serve_once(options: &BTreeMap<String, String>) -> Result<()> {
     let local_port = socket.local_addr()?.port();
     let mut transport_options =
         CultNetRudpSocketTransportOptions::server("rust-rudp-interop", socket, 0x22446688);
-    transport_options.initial_sequence = 100;
+    transport_options.initial_sequence = Some(100);
     transport_options.resend_delay_ms = 25;
     transport_options.max_fragment_bytes = max_fragment_bytes;
     let mut transport = CultNetRudpSocketTransportConnection::new(transport_options)?;
@@ -608,7 +608,7 @@ fn rudp_serve_message_once(options: &BTreeMap<String, String>) -> Result<()> {
     let local_port = socket.local_addr()?.port();
     let mut transport_options =
         CultNetRudpSocketTransportOptions::server("rust-rudp-message-interop", socket, 0x22446689);
-    transport_options.initial_sequence = 100;
+    transport_options.initial_sequence = Some(100);
     transport_options.resend_delay_ms = 25;
     let mut transport = CultNetRudpSocketTransportConnection::new(transport_options)?;
 
@@ -967,7 +967,7 @@ fn run_rudp_server(
                 let peer = peers.entry(remote_addr).or_insert_with(|| RudpPeerSession {
                     session: CultNetRudpSession::new(CultNetRudpSessionOptions {
                         connection_id: RUDP_INTEROP_CONNECTION_ID,
-                        initial_sequence: 100,
+                        initial_sequence: Some(100),
                         resend_delay_ms: RUDP_INTEROP_RESEND_DELAY_MS,
                         max_pending_reliable_packets: None,
                     }),

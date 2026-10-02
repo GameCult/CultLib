@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import socket
 import time
 from collections.abc import Callable
@@ -384,6 +385,22 @@ def create_tcp_framed_schema_transport(
     )
 
 
+def rudp_client_bind_host(endpoint_host: str) -> str:
+    """Return the address an RUDP client binds when its caller names none.
+
+    Loopback for a loopback endpoint, otherwise the unspecified address of the
+    endpoint's family. A socket bound to loopback cannot send off the host on
+    Windows.
+    """
+    family, _, _, _, address = socket.getaddrinfo(
+        endpoint_host.removeprefix("[").removesuffix("]"), None, type=socket.SOCK_DGRAM
+    )[0]
+    loopback = ipaddress.ip_address(address[0]).is_loopback
+    if family == socket.AF_INET6:
+        return "::1" if loopback else "::"
+    return "127.0.0.1" if loopback else "0.0.0.0"
+
+
 def create_rudp_schema_transport(
     *,
     host: str,
@@ -391,16 +408,20 @@ def create_rudp_schema_transport(
     connection_id: int,
     timeout_seconds: float = 4.0,
     runtime_id: str = "cultnet-python-rudp-client",
-    bind_host: str = "127.0.0.1",
+    bind_host: str | None = None,
     bind_port: int = 0,
-    initial_sequence: int = 1,
+    initial_sequence: int | None = None,
     resend_delay_ms: int = 25,
     transport_id: str = "rudp",
     max_payload_bytes: int | None = None,
     max_fragment_bytes: int | None = None,
     max_pending_reliable_packets: int | None = None,
 ) -> CultNetRudpSocketTransportConnection:
-    transport_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if bind_host is None:
+        bind_host = rudp_client_bind_host(host)
+    transport_socket = socket.socket(
+        socket.AF_INET6 if ":" in bind_host else socket.AF_INET, socket.SOCK_DGRAM
+    )
     transport_socket.bind((bind_host, bind_port))
     transport_socket.settimeout(min(timeout_seconds, 0.02))
     transport = CultNetRudpSocketTransportConnection(

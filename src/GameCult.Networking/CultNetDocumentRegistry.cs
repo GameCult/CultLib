@@ -301,7 +301,16 @@ namespace GameCult.Networking
             CultCache cache,
             string messageId,
             CultNetSnapshotRequestMessage? filter = null,
-            CultNetDocumentMessageOptions? options = null)
+            CultNetDocumentMessageOptions? options = null) =>
+            CreateRawSnapshotResponse(cache, messageId, filter, options, rowFilter: null);
+
+        // rowFilter leaves out the cached rows it rejects before evaluation (a database serves only what its shards own).
+        internal CultNetSnapshotResponseRawMessage CreateRawSnapshotResponse(
+            CultCache cache,
+            string messageId,
+            CultNetSnapshotRequestMessage? filter,
+            CultNetDocumentMessageOptions? options,
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             var lowSchemas = CultNetV0SelectionLowering.Lower(filter?.SchemaIds);
@@ -344,7 +353,7 @@ namespace GameCult.Networking
                 ordinalOf = static (_, _) => 0;
             }
 
-            var page = SelectAll(cache, selection, ordinalOf, asOf: 0, options);
+            var page = SelectAll(cache, selection, ordinalOf, asOf: 0, options, rowFilter);
 
             return new CultNetSnapshotResponseRawMessage
             {
@@ -369,13 +378,27 @@ namespace GameCult.Networking
             CultNetDocumentMessageOptions? options = null,
             Func<string, CultRecordKey, string>? shardIdOf = null,
             CultNetSelectionCursorKey? cursorKey = null,
-            Func<string, ulong>? asOfForShard = null)
+            Func<string, ulong>? asOfForShard = null) =>
+            CreateSelectionResponse(cache, messageId, selection, ordinalOf, asOf, options, shardIdOf, cursorKey, asOfForShard, rowFilter: null);
+
+        // rowFilter leaves out the cached rows it rejects before evaluation (a database serves only what its shards own).
+        internal CultNetSnapshotResponseRawV1Message CreateSelectionResponse(
+            CultCache cache,
+            string messageId,
+            CultNetSelection selection,
+            Func<string, CultRecordKey, long> ordinalOf,
+            ulong asOf,
+            CultNetDocumentMessageOptions? options,
+            Func<string, CultRecordKey, string>? shardIdOf,
+            CultNetSelectionCursorKey? cursorKey,
+            Func<string, ulong>? asOfForShard,
+            Func<CultDocumentDescriptor, CultRecordKey, bool>? rowFilter)
         {
             if (cache == null) throw new ArgumentNullException(nameof(cache));
             if (selection == null) throw new ArgumentNullException(nameof(selection));
             if (ordinalOf == null) throw new ArgumentNullException(nameof(ordinalOf));
 
-            var page = SelectPage(cache, selection, ordinalOf, asOf, options, shardIdOf: shardIdOf, cursorKey: cursorKey, asOfForShard: asOfForShard);
+            var page = SelectPage(cache, selection, ordinalOf, asOf, options, rowFilter, shardIdOf, cursorKey, asOfForShard);
             return new CultNetSnapshotResponseRawV1Message
             {
                 MessageId = RequireNonEmpty(messageId, nameof(messageId)),

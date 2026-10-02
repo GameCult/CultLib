@@ -10,6 +10,11 @@ namespace GameCult.Networking
     /// <summary>
     /// Stores accepted shard-log entries in their replica catch-up wire shape.
     /// </summary>
+    /// <remarks>
+    /// A database calls its store from a cache journal, under that cache's gate, so a slow store slows every writer of
+    /// the cache and blocks its readers too, because reads take the same gate. A store must not call the cache, or wait for a thread that does. Appends must throw rather than
+    /// swallow a failure: the database burns the sequence and compacts past it, and tells the writer.
+    /// </remarks>
     public interface ICultNetShardMutationLogStore
     {
         /// <summary>

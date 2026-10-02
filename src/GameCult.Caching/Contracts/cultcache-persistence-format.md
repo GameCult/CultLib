@@ -298,8 +298,8 @@ array (a second store appended included), is not an array, has fewer or more tha
 (a header alone included), whose first slot is not a header it reads, or whose catalog or
 records it cannot decode (a record with more slots than its header allows, a variant record
 it does not read). A runtime never skips a slot it does not understand. It refuses on open
-and on rewrite alike, because the rewrite asks the same full reader as the open. A zero-byte
-file and an empty array are an empty store. A flush or a commit replaces a file only when the
+and on rewrite alike, because the rewrite asks the same full reader as the open. A missing
+file and an empty array are an empty store; a zero-byte file is not a store and is refused as unreadable. A flush or a commit replaces a file only when the
 runtime's own reader opens it, so one verdict covers open, flush and commit, and a file the
 runtime cannot read is left as it is. Each runtime refuses with one typed error:
 `CultStoreUnreadableException` (C#), `StoreUnreadableError` (Rust, TypeScript, Python), with

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { decode, encode } from "@msgpack/msgpack";
@@ -44,7 +44,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   }
 
   async pullAll(): Promise<CultCacheEnvelope[]> {
-    // The disk decides the header: a file that is gone, empty or legacy is not marked.
+    // The disk decides the header: a file that is gone or legacy is not marked.
     this.#format = STORE_FORMAT_VERSION;
     const disk = await this.#readDisk();
     this.#format = disk.format;
@@ -77,16 +77,8 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
 
   async pushAll(entries: CultCacheEnvelope[], options: PushAllOptions = {}): Promise<void> {
     await this.#enqueue(async () => {
-      if (options.soft) {
-        try {
-          await readFile(this.filePath);
-          return;
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (code !== "ENOENT") {
-            throw error;
-          }
-        }
+      if (options.soft && (await readStore(this.filePath)) !== undefined) {
+        return;
       }
 
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
@@ -101,18 +93,10 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
   // The one reader of the store file, asked by open, push, delete and flush alike. A file that is gone or zero bytes is an
   // empty unmarked store; anything else must decode completely or the read throws StoreUnreadableError.
   async #readDisk(): Promise<DiskStore> {
-    let data: Uint8Array;
-    try {
-      data = await readFile(this.filePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return { format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
-      }
-
-      throw error;
-    }
-
-    if (data.length === 0) {
+    // An empty file is not a store, since no CultCache writer leaves one, so it is decoded and refused.
+    // Only a read that finds nothing at the path is an empty store.
+    const data = await readStore(this.filePath);
+    if (data === undefined) {
       return { format: STORE_FORMAT_VERSION, envelopes: [], repairedLegacyPayload: false };
     }
 
@@ -154,6 +138,33 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       throw error;
     }
   }
+}
+
+/**
+ * Reads a store file, or returns undefined when nothing is at its path. A dangling symbolic
+ * link is something: reading it as empty would let the writer rename a file over the link
+ * and move the store off its volume. Any other failure to reach the file is thrown.
+ */
+async function readStore(path: string): Promise<Uint8Array | undefined> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+
+    throw error;
+  }
+
+  throw Object.assign(new Error(`CultCache store ${path} is a symbolic link whose target does not exist.`), { code: "ENOENT" });
 }
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {

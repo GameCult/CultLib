@@ -284,7 +284,7 @@ public static class CultDocumentMessagePackSerialization
             !string.Equals(version, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal))
         {
             throw new CultStoreUnreadableException(
-                $"Store format {version} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
+                $"Store format {DescribeHeader(version)} is not readable; this runtime reads {CultPersistedStoreSnapshot.FormatV1}, {CultPersistedStoreSnapshot.FormatV2} and {CultPersistedStoreSnapshot.FormatV3}.");
         }
 
         // Only a v2 or v3 store may hold a variant: a v1 header over a variant record is a store no reader could trust.
@@ -297,6 +297,17 @@ public static class CultDocumentMessagePackSerialization
                     $"Record '{variant.Key}' (schema '{variant.SchemaId}') is a variant but the store declares {version}; variants need {CultPersistedStoreSnapshot.FormatV2} or {CultPersistedStoreSnapshot.FormatV3}.");
             }
         }
+    }
+
+    // A store header as a refusal may show it: echoed in the shape cultcache.store.v<digits>, and otherwise described
+    // only by its length, since the bytes are the store's.
+    private static string DescribeHeader(string header)
+    {
+        const string prefix = "cultcache.store.v";
+        var version = header.StartsWith(prefix, StringComparison.Ordinal) ? header.Substring(prefix.Length) : "";
+        return version.Length > 0 && version.All(character => character >= '0' && character <= '9')
+            ? header
+            : $"an unrecognised cultcache.store.* header of {System.Text.Encoding.UTF8.GetByteCount(header)} bytes";
     }
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)

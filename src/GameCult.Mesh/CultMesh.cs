@@ -537,14 +537,18 @@ namespace GameCult.Mesh
     /// </summary>
     public sealed class CultMeshRudpSocketOptions
     {
-        /// <summary>Gets or sets the local bind host.</summary>
-        public string BindHost { get; set; } = "0.0.0.0";
+        /// <summary>
+        /// Gets or sets the local bind host. Unset, a server binds every IPv4 interface, and a
+        /// client binds loopback for a loopback endpoint and the unspecified address of the
+        /// endpoint's family otherwise, so it can reach a remote host.
+        /// </summary>
+        public string? BindHost { get; set; }
         /// <summary>Gets or sets the local bind port.</summary>
         public int BindPort { get; set; }
         /// <summary>Gets or sets a caller-owned bound socket.</summary>
         public Socket? Socket { get; set; }
-        /// <summary>Gets or sets the first local packet sequence.</summary>
-        public uint InitialSequence { get; set; } = 1;
+        /// <summary>Gets or sets the first local packet sequence. Unset, each session draws its own at random.</summary>
+        public uint? InitialSequence { get; set; }
         /// <summary>Gets or sets the reliable resend delay in milliseconds.</summary>
         public long ResendDelayMs { get; set; } = 250;
         /// <summary>Gets or sets the advertised transport id.</summary>
@@ -2931,7 +2935,7 @@ namespace GameCult.Mesh
             return new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
             {
                 RuntimeId = runtimeId,
-                Socket = options.Socket ?? BindRudpSocket(options.BindHost, options.BindPort),
+                Socket = options.Socket ?? BindRudpSocket(ResolveRudpAddress(options.BindHost ?? "0.0.0.0"), options.BindPort),
                 Mode = CultNetRudpSocketMode.Server,
                 ConnectionId = connectionId,
                 InitialSequence = options.InitialSequence,
@@ -2955,12 +2959,16 @@ namespace GameCult.Mesh
         {
             if (endpoint == null) throw new ArgumentNullException(nameof(endpoint));
             options ??= new CultMeshRudpSocketOptions();
+            var remote = ResolveRudpAddress(endpoint.Host);
+            var bindAddress = options.BindHost == null
+                ? RudpClientBindAddress(remote)
+                : ResolveRudpAddress(options.BindHost);
             return new CultNetRudpSocketTransportConnection(new CultNetRudpSocketTransportOptions
             {
                 RuntimeId = runtimeId,
-                Socket = options.Socket ?? BindRudpSocket(options.BindHost, options.BindPort),
+                Socket = options.Socket ?? BindRudpSocket(bindAddress, options.BindPort),
                 Mode = CultNetRudpSocketMode.Client,
-                RemoteEndPoint = new IPEndPoint(ResolveRudpAddress(endpoint.Host), endpoint.Port),
+                RemoteEndPoint = new IPEndPoint(remote, endpoint.Port),
                 ConnectionId = connectionId,
                 InitialSequence = options.InitialSequence,
                 ResendDelayMs = options.ResendDelayMs,
@@ -3232,9 +3240,21 @@ namespace GameCult.Mesh
             return CultNetLocal.ConnectClient(host, port, security, configureClient);
         }
 
-        private static Socket BindRudpSocket(string host, int port)
+        // A socket bound to loopback cannot send off the host on Windows, so a client keeps
+        // loopback only when its peer is on loopback.
+        private static IPAddress RudpClientBindAddress(IPAddress remote)
         {
-            var address = ResolveRudpAddress(host);
+            var ipv6 = remote.AddressFamily == AddressFamily.InterNetworkV6;
+            if (IPAddress.IsLoopback(remote))
+            {
+                return ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback;
+            }
+
+            return ipv6 ? IPAddress.IPv6Any : IPAddress.Any;
+        }
+
+        private static Socket BindRudpSocket(IPAddress address, int port)
+        {
             var socket = new Socket(address.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
             socket.Bind(new IPEndPoint(address, port));
             socket.ReceiveTimeout = 20;
@@ -3377,7 +3397,8 @@ namespace GameCult.Mesh
             if (document != null)
                 return document;
 
-            var untyped = database.Cache.Get(key);
+            // Through the database, which serves only what its shards own; the cache behind it may hold more.
+            var untyped = await database.GetAsync<object>(key).ConfigureAwait(false);
             if (untyped != null && IsSameCultDocumentSchema<TDocument>(untyped.GetType()))
                 return ConvertUntypedDocument<TDocument>(untyped);
 

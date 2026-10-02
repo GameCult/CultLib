@@ -106,6 +106,7 @@ export {
   createRudpTransportProfile,
   decodeRudpPacket,
   encodeRudpPacket,
+  rudpClientBindHost,
   CULTNET_RUDP_RELIABLE_SEND_WINDOW_PACKETS,
   CultNetRudpReconnectLoop,
   CultNetRudpSession,

@@ -622,6 +622,12 @@ The ack cuts build on these behaviours and do not alter them:
   drops what it owed. How a new generation is recognised (Cut 1c) needs one (Q-A6). The two are separable
   because 1b does not forget peer state: the peer may not know the session ended, and forgetting what was
   received would let its retransmits be delivered twice.
+  **Correction (Cut 1/1b Soul, 2026-09-30): they are separable as specs, not as merges.** 1b drops owed
+  writes, which leaves holes the sender will never fill; the receiver keeps `R` across the ending, so if the
+  next handshake does not reset it, every later ordered frame is held and acked, and flush succeeds while
+  nothing is delivered. Only 1c's reset on a non-repeated handshake removes that. **1b merges only together
+  with 1c.** Soul also found `R` seeded by the first reliable packet rather than the handshake; ruled:
+  `R` is seeded only by the handshake, and reliable data before the Accept is neither acked nor delivered.
 - **What must hold after both.** A write is Acknowledged or Invalidated within the generation it was
   issued in. A restarted client is admitted. A new server session's frames are delivered after a
   reconnect. A retransmitted Connect is still a repeat.
@@ -1543,3 +1549,47 @@ Each question stands alone.
   `packetsDropped` until K1. Record the stats shape in the parity doc once both land.
 - **The P4 probe at the old pins** predates its fix; rerun `09318d13`'s P4 against a pinned sender if
   old-sender evidence is needed.
+
+**Follow-up (media FEC Cut 3 Hands, 2026-09-30):** `channel_send_options` in `rudp.rs` has no test for the
+`"schema"` and `"latest"` channel arms. Deleting either falls to the default and every test stays green. Pin their send
+flags on the wire the way the media arm is now pinned (raw peer socket), in whichever cut next touches channel
+profiles.
+
+**Rulings after the Cut 1/1b/1c Soul pass (Self, 2026-09-30):**
+- **Stale data after a reconnect.** A reliable sequence at or before the generation's seeded `R` (serial arithmetic
+  within the receive window) is a duplicate: acknowledged, not delivered. This is what §6/§8 already promised.
+- **Stale Connect (RFC 5961's challenge ACK).** A Connect whose sequence precedes the current generation's Connect
+  within the receive window is stale: it is answered with an Ack naming the current generation and does not reset.
+  A client whose Connect gets no Accept before its connect attempt times out starts a fresh attempt with a newly
+  drawn initial sequence, so a restarted client whose random sequence lands in that window still connects.
+- **Server mode.** A Connect from a different endpoint is never a repeat; the session predicate stays sequence-only.
+  (Hands' deviation 5 was rejected: pinned clients restarting on a new port were locked out.)
+- **The random default belongs to the session.** A session draws its own initial sequence when none is set, so one
+  options object reused across sessions or reconnects never repeats a sequence.
+- **Connect attempts (Self, 2026-09-30, after the Cut 1c fix-batch Soul pass).** While a Connect awaits its Accept, only an
+  Accept the client honours retires it; an Ack never does (an Ack naming the pending Connect had wedged the client for
+  good). A fresh attempt after the connect-attempt timeout uses exactly the abandoned sequence + (receive window − 1),
+  not a random draw: that keeps a late copy of the abandoned Connect inside the new one's stale window while escaping the
+  server's stale window (unless the server sits exactly there, in which case the next attempt escapes). Only a client's
+  first Connect draws randomly.
+- **Recorded divergence (not this campaign's to fix yet).** Only Rust has a receiver receive-ahead window (1,024). TS,
+  C# and Python acknowledge a far-ahead reliable frame by name and hold it behind an ordered gap indefinitely, so a
+  stranded ordered channel is silent loss there and "still owed" in Rust. Map a receive window for the three runtimes.
+- **Residuals after the final Cut 1c Soul pass (recorded 2026-09-30, low, not fixed):**
+  - A late copy of a Connect from two or more attempts back (reordered > ~3 s) still restarts the server; the +window−1
+    rule keeps only the immediately previous attempt stale. Rust then times out and reconnects; TS/C#/Python hit the
+    receive-window divergence above (silent loss behind the gap).
+  - A client pinning `initial_sequence` that restarts while its old data is still in flight after the restarted Connect
+    can be matched to the old session's resent Accept (byte-identical; the client cannot tell). Pinning forfeits restart
+    detection; the random default closes it. Document on the option.
+  - Repeated failed attempts walk the sequence up 4095 per 3 s and clamp at `u32::MAX−1` after ~18-27 days on one session;
+    make exhaustion a hard error the caller sees (the clamp removal mutant survives).
+- **Cuts 3 and D Soul pass (Self, 2026-09-30).** Cut 3: the 4 MiB bound counts every byte sent above the lowest
+  unacknowledged sequence, acked or not (the spec's wording; the first implementation counted only pending packets).
+  Cut D: a send failure is either permanent (the datagram can never be sent as built, e.g. `EMSGSIZE`) or transient;
+  a permanent failure is returned from a caller-directed send and, inside a poll, ends only that peer's session with a
+  typed reason; transient failures stay counted losses. Windows `ConnectionResetError` on receive is idle, never fatal,
+  in every server. Cut D's negative grep `send_packet(...)?;` is obsolete: the `?` now propagates encode errors only.
+- **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
+  while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
+  limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.

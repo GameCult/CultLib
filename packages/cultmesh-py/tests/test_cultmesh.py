@@ -213,6 +213,37 @@ class CultMeshTests(unittest.TestCase):
         self.assertEqual(received_messages[0]["schemaVersion"], "cultnet.schema_catalog_request.v0")
         self.assertEqual(received_messages[0]["messageId"], "rudp-transport-factory")
 
+    def _rudp_client_bound_host(self, endpoint: str, bind_host: str | None = None) -> str:
+        client = CultMesh.create_rudp_client("python-cultmesh-bind-client", 0x10203060, endpoint, bind_host=bind_host)
+        try:
+            return client.socket.getsockname()[0]
+        finally:
+            client.socket.close()
+
+    # A client bound to loopback cannot send to another host on Windows, so a
+    # client for a remote endpoint binds the unspecified address of its family.
+    def test_cultmesh_rudp_client_for_a_remote_endpoint_binds_the_unspecified_address(self) -> None:
+        self.assertEqual(self._rudp_client_bound_host("rudp://10.77.0.1:17872"), "0.0.0.0")
+        self.assertEqual(self._rudp_client_bound_host("rudp://[2001:db8::1]:17872"), "::")
+
+    def test_cultmesh_rudp_client_for_a_loopback_endpoint_binds_loopback(self) -> None:
+        self.assertEqual(self._rudp_client_bound_host("rudp://127.0.0.1:17872"), "127.0.0.1")
+        self.assertEqual(self._rudp_client_bound_host("rudp://[::1]:17872"), "::1")
+
+    def test_cultmesh_rudp_client_binds_an_explicit_bind_host_whatever_the_endpoint(self) -> None:
+        self.assertEqual(self._rudp_client_bound_host("rudp://10.77.0.1:17872", "127.0.0.1"), "127.0.0.1")
+        self.assertEqual(self._rudp_client_bound_host("rudp://127.0.0.1:17872", "0.0.0.0"), "0.0.0.0")
+
+    def test_cultmesh_rudp_server_binds_loopback_unless_told_otherwise(self) -> None:
+        loopback = CultMesh.create_rudp_server("python-cultmesh-bind-server", 0x10203061)
+        anywhere = CultMesh.create_rudp_server("python-cultmesh-bind-server", 0x10203062, bind_host="0.0.0.0")
+        try:
+            self.assertEqual(loopback.socket.getsockname()[0], "127.0.0.1")
+            self.assertEqual(anywhere.socket.getsockname()[0], "0.0.0.0")
+        finally:
+            loopback.socket.close()
+            anywhere.socket.close()
+
     def test_cultmesh_facade_creates_rudp_client_from_peer_endpoint(self) -> None:
         connection_id = 0x10203042
         server = CultMesh.create_rudp_server(

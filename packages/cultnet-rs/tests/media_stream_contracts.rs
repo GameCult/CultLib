@@ -5,9 +5,10 @@
 
 use cultcache_rs::DatabaseEntry;
 use cultnet_rs::{
-    GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA, GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA,
-    GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA, GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA,
-    GameCultMediaAudioPacketRecord, GameCultMediaReceiverFeedbackRecord,
+    GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA, GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA,
+    GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA, GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA,
+    GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA, GameCultMediaAudioPacketRecord,
+    GameCultMediaAudioParityShardRecord, GameCultMediaReceiverFeedbackRecord,
     GameCultMediaVideoAccessUnitRecord, GameCultMediaVideoParityShardRecord,
 };
 use rmpv::Value;
@@ -129,9 +130,14 @@ fn parity_shards_carry_the_geometry_recovery_needs() {
         dependency_frame_id: Some(4241),
         deadline_ticks: 108_000,
         chunk_count: 5,
+        fec_scheme: "rs-gf256-v1".to_string(),
+        block_index: 0,
+        block_count: 1,
+        block_data_start: 0,
+        block_data_count: 5,
         parity_index: 1,
         parity_count: 2,
-        chunk_payload_bytes: 1024,
+        shard_payload_bytes: 1024,
         last_chunk_payload_bytes: 512,
         payload: vec![9, 9, 9],
     };
@@ -141,16 +147,60 @@ fn parity_shards_carry_the_geometry_recovery_needs() {
         panic!("parity shards must encode as a positional array");
     };
 
-    assert_eq!(slots.len(), 17, "field count is wire contract");
-    assert_eq!(slots[12].as_u64(), Some(1), "slot 12 is parity_index");
-    assert_eq!(slots[13].as_u64(), Some(2), "slot 13 is parity_count");
+    assert_eq!(slots.len(), 22, "field count is wire contract");
+    assert_eq!(slots[12].as_str(), Some("rs-gf256-v1"), "slot 12 is fec_scheme");
+    assert_eq!(slots[13].as_u64(), Some(0), "slot 13 is block_index");
+    assert_eq!(slots[16].as_u64(), Some(5), "slot 16 is block_data_count (k)");
+    assert_eq!(slots[17].as_u64(), Some(1), "slot 17 is parity_index");
+    assert_eq!(slots[18].as_u64(), Some(2), "slot 18 is parity_count (m)");
     assert_eq!(
-        slots[15].as_u64(),
+        slots[20].as_u64(),
         Some(512),
-        "slot 15 is last_chunk_payload_bytes, which recovery needs to size the tail"
+        "slot 20 is last_chunk_payload_bytes, which recovery needs to size the tail"
+    );
+    assert_eq!(
+        slots[21].as_slice(),
+        Some([9, 9, 9].as_slice()),
+        "the parity payload is bin, not an array of integers"
     );
 
     let decoded: GameCultMediaVideoParityShardRecord =
+        rmp_serde::from_slice(&encoded).expect("round-trips");
+    assert_eq!(decoded, shard);
+}
+
+#[test]
+fn audio_parity_shards_carry_the_geometry_recovery_needs() {
+    let shard = GameCultMediaAudioParityShardRecord {
+        stream_id: "raven-primary-av".to_string(),
+        session_id: "session-1".to_string(),
+        codec: "opus".to_string(),
+        fec_scheme: "rs-gf256-v1".to_string(),
+        base_packet_id: 77,
+        base_pts_ticks: 960,
+        packet_duration_ticks: 960,
+        timebase_num: 1,
+        timebase_den: 48_000,
+        deadline_ticks: 4_800,
+        data_shard_count: 4,
+        parity_index: 1,
+        parity_shard_count: 2,
+        shard_payload_bytes: 3,
+        payload: vec![7, 8, 9],
+    };
+
+    let encoded = rmp_serde::to_vec(&shard).expect("encodes");
+    let Value::Array(slots) = decode_as_value(&encoded) else {
+        panic!("audio parity shards must encode as a positional array");
+    };
+
+    assert_eq!(slots.len(), 15, "field count is wire contract");
+    assert_eq!(slots[4].as_u64(), Some(77), "slot 4 is base_packet_id");
+    assert_eq!(slots[10].as_u64(), Some(4), "slot 10 is data_shard_count (k)");
+    assert_eq!(slots[12].as_u64(), Some(2), "slot 12 is parity_shard_count (m)");
+    assert_eq!(slots[14].as_slice(), Some([7, 8, 9].as_slice()), "the payload is bin");
+
+    let decoded: GameCultMediaAudioParityShardRecord =
         rmp_serde::from_slice(&encoded).expect("round-trips");
     assert_eq!(decoded, shard);
 }
@@ -205,6 +255,11 @@ fn published_schema_constants_match_the_derived_identity() {
         GameCultMediaAudioPacketRecord::SCHEMA_NAME,
         GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA
     );
+    assert_eq!(
+        GameCultMediaAudioParityShardRecord::SCHEMA_NAME,
+        GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA
+    );
+    assert_eq!(GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA, "gamecult.media_video_parity_shard.v3");
     assert_eq!(
         GameCultMediaReceiverFeedbackRecord::SCHEMA_NAME,
         GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA

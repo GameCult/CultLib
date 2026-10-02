@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import unittest
@@ -1320,6 +1321,129 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([(e.key, e.type) for e in envelopes], [("alpha", "vectors.item"), ("beta", "vectors.item")])
         self.assertEqual(envelopes[0].payload, b"\x92\xa5alpha\x01")
         self.assertEqual(envelopes[1].payload, b"\x92\xa4beta\x02")
+
+    def test_single_file_refusals_say_what_was_found_without_blaming_variants(self) -> None:
+        with self.assertRaises(ValueError) as unsupported:
+            self._pull_vector("unknown-header.msgpack")
+        self.assertIn("not one this runtime reads", str(unsupported.exception))
+        self.assertNotIn("variant", str(unsupported.exception))
+        with self.assertRaises(ValueError) as invalid:
+            self._pull_vector("extra-slot-full-payload.msgpack")
+        self.assertIn("not a valid store", str(invalid.exception))
+        self.assertNotIn("variant", str(invalid.exception))
+
+    def test_single_file_only_a_missing_store_reads_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(SingleFileMessagePackBackingStore(Path(tmp) / "store.cc").pull_all(), [])
+
+            # An existing empty file is not a store: no CultCache writer leaves one.
+            empty = Path(tmp) / "empty.cc"
+            empty.write_bytes(b"")
+            with self.assertRaises(ValueError):
+                SingleFileMessagePackBackingStore(empty).pull_all()
+            self.assertEqual(empty.read_bytes(), b"")
+
+            # An empty array is the legacy envelope array with no envelopes: no header, no format claimed.
+            legacy_empty = Path(tmp) / "legacy-empty.cc"
+            legacy_empty.write_bytes(b"\x90")
+            self.assertEqual(SingleFileMessagePackBackingStore(legacy_empty).pull_all(), [])
+
+    def test_single_file_refusals_never_echo_a_value_from_the_store(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            cases = [
+                (["cultcache.store.v12", [], []], True),
+                (["cultcache.store.SECRET-HEADER", [], []], False),
+                (["cultcache.store.v12SECRET", [], []], False),
+                (["cultcache.store.v", [], []], False),
+                (["cultcache.store.v1", ["SECRET-CATALOG-TEXT"], []], None),
+            ]
+            for value, echoed in cases:
+                path.write_bytes(msgpack.packb(value, use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                message = str(caught.exception)
+                if echoed:
+                    self.assertIn(repr(value[0]), message)
+                else:
+                    self.assertNotIn("SECRET", message)
+                    if echoed is False:
+                        self.assertNotIn(repr(value[0]), message)
+                        self.assertIn(f"of {len(value[0])} bytes", message)
+
+    def test_single_file_record_refusal_names_only_a_string_key(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            for key, schema in ((["SECRET-IN-LIST"], "s"), (b"SECRET-BYTES", "s"), ("k", {"SECRET": 1})):
+                path.write_bytes(msgpack.packb(
+                    ["cultcache.store.v1", [], [[key, schema, "t", b"\x90", "extra"]]], use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertNotIn("SECRET", str(caught.exception))
+                self.assertIn("not a valid store", str(caught.exception))
+
+    # What a write does through a symbolic link today. R3 decides whether a write resolves
+    # the link or refuses it; this pins the current behaviour so that change is deliberate.
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_r3_decides_resolve_or_refuse_a_push_through_a_live_link_replaces_the_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            volume = Path(tmp) / "volume"
+            volume.mkdir()
+            target = volume / "store.cc"
+            envelope = CultCacheEnvelope(key="a", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z")
+            SingleFileMessagePackBackingStore(target).push(envelope)
+            before = target.read_bytes()
+            link = Path(tmp) / "store.cc"
+            link.symlink_to(target)
+            SingleFileMessagePackBackingStore(link).push(replace(envelope, key="b"))
+            self.assertFalse(link.is_symlink())
+            self.assertTrue(link.is_file())
+            self.assertEqual(target.read_bytes(), before)
+
+    @unittest.skipIf(os.name != "posix", "symbolic links need POSIX here")
+    def test_a_dangling_symlink_at_a_store_path_is_an_os_error_and_nothing_is_written(self) -> None:
+        for store_type in (SingleFileMessagePackBackingStore, JsonLinesBackingStore):
+            with tempfile.TemporaryDirectory() as tmp:
+                volume = Path(tmp) / "volume"
+                volume.mkdir()
+                path = Path(tmp) / "store.cc"
+                path.symlink_to(volume / "store.cc")
+                store = store_type(path)
+                with self.assertRaises(FileNotFoundError):
+                    store.pull_all()
+                with self.assertRaises(FileNotFoundError):
+                    store.push(CultCacheEnvelope(key="k", type="t", payload=b"\x90", stored_at="2026-09-30T00:00:00Z"))
+                self.assertTrue(path.is_symlink())
+                self.assertEqual(list(volume.iterdir()), [])
+
+    @unittest.skipIf(os.name != "posix", "symlink loops and file-as-parent errors are POSIX errno cases")
+    def test_json_lines_store_that_cannot_be_reached_is_an_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(JsonLinesBackingStore(Path(tmp) / "missing.jsonl").pull_all(), [])
+            loop = Path(tmp) / "loop.jsonl"
+            loop.symlink_to(loop)
+            parent = Path(tmp) / "body"
+            parent.write_bytes(b"not a directory")
+            for path in (loop, parent / "store.jsonl"):
+                with self.assertRaises(OSError) as caught:
+                    JsonLinesBackingStore(path).pull_all()
+                self.assertNotIsInstance(caught.exception, FileNotFoundError)
+
+    @unittest.skipIf(os.name != "posix", "symlink loops and file-as-parent errors are POSIX errno cases")
+    def test_single_file_store_that_cannot_be_reached_is_an_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp) / "loop.cc"
+            loop.symlink_to(loop)
+            parent = Path(tmp) / "body"
+            parent.write_bytes(b"not a directory")
+            for path in (loop, parent / "store.cc"):
+                with self.assertRaises(OSError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertNotIsInstance(caught.exception, FileNotFoundError)
 
 
     # The element-id marker: tests/vectors/document-variants-c2a/v3-base.msgpack is v1-base with its header replaced.

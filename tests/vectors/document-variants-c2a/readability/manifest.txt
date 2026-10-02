@@ -1,7 +1,7 @@
 # Whether each runtime's own reader opens the file. A flush and a commit replace a file exactly when it reads.
 # Columns: file, csharp, rust, typescript, python. `../v3-base.msgpack` is the one valid store.
 ../v3-base.msgpack  reads    reads    reads    reads
-zero-byte.bin       reads    reads    reads    reads
+zero-byte.bin       refuses  refuses  refuses  refuses
 empty-array.bin     reads    reads    reads    reads
 legacy-envelopes.bin refuses reads    reads    reads
 legacy-trailing.bin refuses refuses refuses refuses
