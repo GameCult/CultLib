@@ -167,6 +167,9 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
 // --- CLI wrapper: resolves the previous published tag via git and reads the
 // changelog off disk, then delegates to the pure functions above. ---
 
+// The previous release is the newest same-prefix tag strictly older than the version.
+// `other` is any same-prefix tag that is not the version itself, older or newer: a
+// package with one has been released before, whatever the version arithmetic says.
 function resolvePreviousVersion(tagPrefix, currentVersion, cwd) {
   // A directory that cannot list tags (not a git repository, git missing) throws: that
   // is not evidence that there was no previous release.
@@ -177,6 +180,7 @@ function resolvePreviousVersion(tagPrefix, currentVersion, cwd) {
   const prefix = `${tagPrefix}-v`;
   const current = parseVersion(currentVersion);
   let best = null;
+  let other = null;
   for (const tag of tags) {
     if (!tag.startsWith(prefix)) continue;
     const versionText = tag.slice(prefix.length);
@@ -187,12 +191,13 @@ function resolvePreviousVersion(tagPrefix, currentVersion, cwd) {
       continue;
     }
     if (sameVersion(candidate, current)) continue; // the tag being released itself
+    other ??= tag;
     if (compareVersions(candidate, current) >= 0) continue; // ignore anything not older
     if (best === null || compareVersions(candidate, best) > 0) {
       best = candidate;
     }
   }
-  return best ? formatVersion(best) : null;
+  return { previous: best ? formatVersion(best) : null, other };
 }
 
 // --- Measured public API: the built DLLs are compared with the DLLs the
@@ -248,30 +253,37 @@ function prepareGate() {
 }
 
 // The DLLs the previous tag tracked under `baselinePath`, as git blobs: no
-// worktree, no network, and unaffected by what the working tree holds now.
+// worktree, no network, and unaffected by what the working tree holds now. A git
+// failure is a refusal that names the step, never git's own output.
 function extractBaseline({ tag, baselinePath, into, cwd }) {
   const dir = baselinePath.replace(/\\/g, "/").replace(/\/+$/, "");
-  const listing = execFileSync("git", ["ls-tree", "--name-only", tag, `${dir}/`], { cwd, encoding: "utf8" });
-  const names = listing.split("\n").map((line) => basename(line.trim())).filter((name) => name.toLowerCase().endsWith(".dll"));
-  for (const name of names) {
-    const blob = execFileSync("git", ["show", `${tag}:${dir}/${name}`], { cwd, maxBuffer: 1 << 28 });
-    writeFileSync(join(into, name), blob);
+  const git = (args, options) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], ...options });
+  try {
+    const listing = git(["ls-tree", "--name-only", tag, "--", `${dir}/`], { encoding: "utf8" });
+    const names = listing.split("\n").map((line) => basename(line.trim())).filter((name) => name.toLowerCase().endsWith(".dll"));
+    for (const name of names) {
+      writeFileSync(join(into, name), git(["show", `${tag}:${dir}/${name}`], { maxBuffer: 1 << 28 }));
+    }
+    return { dir, names };
+  } catch {
+    return { failure: `git could not read the assemblies tracked under ${dir} at ${tag}` };
   }
-  return { dir, names };
 }
 
 // Compares each built assembly with its namesake at the previous tag. Measuring
-// nothing is a failure: the baseline path must hold DLLs at the tag, and every
+// nothing is a failure: the baseline path must hold DLLs at the tag, every
 // built assembly must have a namesake there unless the caller declares it new
-// (`declaredNew`). A GameCult.* assembly the tag tracked and the build no longer
-// produces is itself a break.
+// (`declaredNew`), and at least one comparison must run. An assembly the tag
+// tracked and the build no longer produces is itself a break, whatever its name.
 export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, built, refs, declaredNew = [], cwd }) {
   const tag = `${tagPrefix}-v${previousVersion}`;
   const work = mkdtempSync(join(tmpdir(), "cultlib-apicompat-"));
   try {
     const left = join(work, "left");
     mkdirSync(left);
-    const { dir, names: baselineNames } = extractBaseline({ tag, baselinePath, into: left, cwd });
+    const baseline = extractBaseline({ tag, baselinePath, into: left, cwd });
+    if (baseline.failure) return baseline;
+    const { dir, names: baselineNames } = baseline;
     if (baselineNames.length === 0) {
       return { failure: `${tag} tracks no assembly under ${dir}: the baseline path is missing or moved, or that tag does not track the DLLs` };
     }
@@ -286,12 +298,11 @@ export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, bui
     }
     const gate = prepareGate();
     if (gate.failure) return gate;
-    const breaks = [];
-    for (const name of baselineNames) {
-      if (name.startsWith("GameCult.") && !builtNames.has(name)) {
-        breaks.push(`assembly ${name} exists at ${tag} but is no longer built`);
-      }
+    const unbuilt = baselineNames.filter((name) => !builtNames.has(name));
+    if (unbuilt.length === baselineNames.length) {
+      return { failure: `no built assembly has a namesake tracked at ${tag}, so nothing was compared (${tag} tracks ${baselineNames.join(", ")})` };
     }
+    const breaks = unbuilt.map((name) => `assembly ${name} exists at ${tag} but is no longer built`);
     for (const path of built) {
       const name = basename(path);
       if (!baselineNames.includes(name)) continue;
@@ -358,15 +369,18 @@ function main() {
     refuse(`${packageName}: --version is not a MAJOR.MINOR.PATCH version`);
     return;
   }
-  if (!existsSync(changelog)) {
-    refuse(`${packageName}: changelog not found at ${changelog}`);
+  let changelogText;
+  try {
+    changelogText = readFileSync(changelog, "utf8");
+  } catch (err) {
+    refuse(`${packageName}: ${err.code === "ENOENT" ? "changelog not found" : "changelog cannot be read"} at ${changelog}`);
     return;
   }
-  const changelogText = readFileSync(changelog, "utf8");
   const firstRelease = args["first-release"] === true;
   let previousVersion;
+  let otherTag = null;
   try {
-    previousVersion = resolvePreviousVersion(tagPrefix, version, cwd);
+    ({ previous: previousVersion, other: otherTag } = resolvePreviousVersion(tagPrefix, version, cwd));
   } catch {
     if (!firstRelease) {
       refuse(`${packageName}: the tags of --cwd could not be read (not a git repository?), so the previous release is unknown; ` +
@@ -380,8 +394,15 @@ function main() {
       "if this is the package's first release, declare it with --first-release");
     return;
   }
-  if (previousVersion != null && firstRelease) {
-    refuse(`${packageName}: --first-release was declared but ${tagPrefix}-v${previousVersion} already exists`);
+  if (firstRelease && otherTag != null) {
+    refuse(`${packageName}: --first-release was declared but ${otherTag} already exists`);
+    return;
+  }
+  // A package's tag prefix is its directory under packages/ (the workflow's tag triggers and
+  // job matrix spell it the same way), so a first release is believed only for the prefix
+  // its changelog's directory names.
+  if (firstRelease && basename(dirname(resolve(changelog))) !== tagPrefix) {
+    refuse(`${packageName}: --first-release is accepted only when --tag-prefix names the directory that holds the changelog`);
     return;
   }
   let measuredBreaks = [];

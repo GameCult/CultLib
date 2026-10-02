@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -260,12 +260,19 @@ test("CLI: a tag for the version being released does not skip the check", () => 
   });
 });
 
+// A package's changelog lives in a directory named like its tag prefix (packages/<prefix>/).
+function packageChangelog(dir, version, prefix = "widget") {
+  mkdirSync(join(dir, prefix), { recursive: true });
+  const path = join(dir, prefix, "CHANGELOG.md");
+  writeFileSync(path, changelogFor(version));
+  return path;
+}
+
 test("CLI: no previous tag, or tags that cannot be read, refuse unless the first release is declared", () => {
   withTempGitRepo((dir) => {
     execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
     execFileSync("git", ["tag", "other-v1.0.0"], { cwd: dir });
-    const changelogPath = join(dir, "CHANGELOG.md");
-    writeFileSync(changelogPath, changelogFor("1.0.0"));
+    const changelogPath = packageChangelog(dir, "1.0.0");
     const args = ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"];
     assert.match(runCheckerExpectFailure(dir, args), /nothing to compare against; if this is the package's first release, declare it with --first-release/);
     assert.match(runChecker(dir, [...args, "--first-release"]), /first release \(1\.0\.0\)/);
@@ -274,8 +281,7 @@ test("CLI: no previous tag, or tags that cannot be read, refuse unless the first
   });
   const notARepo = mkdtempSync(join(tmpdir(), "cultlib-semver-norepo-"));
   try {
-    const changelogPath = join(notARepo, "CHANGELOG.md");
-    writeFileSync(changelogPath, changelogFor("1.0.0"));
+    const changelogPath = packageChangelog(notARepo, "1.0.0");
     const args = ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"];
     const refused = runCheckerExpectFailure(notARepo, args);
     assert.match(refused, /tags of --cwd could not be read .*; if this is the package's first release, declare it with --first-release/);
@@ -295,6 +301,69 @@ test("CLI: declaring a first release while an earlier tag exists is refused", ()
     const output = runCheckerExpectFailure(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.1.0", "--tag-prefix", "widget", "--first-release"]);
     assert.match(output, /--first-release was declared but widget-v1\.0\.0 already exists/);
   });
+});
+
+test("CLI: --first-release is believed only with no other same-prefix tag and the package's own prefix", () => {
+  const declared = (dir, version, prefix = "widget") => [
+    "--package", "widget", "--changelog", packageChangelog(dir, version), "--version", version, "--tag-prefix", prefix, "--first-release",
+  ];
+  // a newer tag of the prefix: not a first release (the unflagged run refuses it too)
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v2.0.0"], { cwd: dir });
+    assert.match(runCheckerExpectFailure(dir, declared(dir, "0.9.0")), /--first-release was declared but widget-v(1|2)\.0\.0 already exists/);
+  });
+  // a mistyped prefix, with the real package's tags in the repository
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    const args = declared(dir, "1.0.1", "widgit");
+    assert.match(runCheckerExpectFailure(dir, args), /--first-release is accepted only when --tag-prefix names the directory that holds the changelog/);
+    // the right prefix names the tag that exists, so it is refused for that
+    assert.match(runCheckerExpectFailure(dir, declared(dir, "1.0.1")), /already exists/);
+  });
+  // with the predecessor tag deleted, a mistyped prefix is still refused by the prefix check
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    execFileSync("git", ["tag", "-d", "widget-v1.0.0"], { cwd: dir });
+    assert.match(runCheckerExpectFailure(dir, declared(dir, "1.0.1", "widgit")), /names the directory that holds the changelog/);
+  });
+  // the version's own tag is not another tag: a re-run of a package's only release
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    assert.match(runChecker(dir, declared(dir, "1.0.0")), /first release \(1\.0\.0\)/);
+  });
+});
+
+// The publish workflow's own first-release decision, run as the workflow runs it, then handed
+// to the checker: a package's first release passes, and the release after it does too.
+const workflowFile = fileURLToPath(new URL("../.github/workflows/publish-packages.yml", import.meta.url));
+
+test("workflow: the --first-release line passes a package's first release and its second", { skip: process.platform === "win32" }, () => {
+  const workflow = readFileSync(workflowFile, "utf8");
+  const lines = [...workflow.matchAll(/^ *if \[ -z "\$\(git tag -l '([^']*)-v\*' [^\n]*first="--first-release"; fi\r?$/gm)];
+  assert.equal(lines.length, 2, "the cultcache-ts job and the python matrix each decide it once");
+  for (const [line, prefix] of lines) {
+    const decision = line.trim().replace("${{ matrix.package }}", "widget");
+    const first = (dir, tag) => execFileSync("bash", ["-c", `${decision}; printf '%s' "$first"`], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_REF_NAME: tag } });
+    withTempGitRepo((dir) => {
+      execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+      const name = prefix.includes("matrix") ? "widget" : prefix;
+      execFileSync("git", ["tag", `${name}-v1.0.0`], { cwd: dir });
+      assert.equal(first(dir, `${name}-v1.0.0`), "--first-release");
+      execFileSync("git", ["tag", `${name}-v1.1.0`], { cwd: dir });
+      assert.equal(first(dir, `${name}-v1.1.0`), "");
+      // another package's tags are not this package's releases
+      execFileSync("git", ["tag", "unrelated-v9.0.0"], { cwd: dir });
+      execFileSync("git", ["tag", "-d", `${name}-v1.0.0`], { cwd: dir });
+      execFileSync("git", ["tag", "-d", `${name}-v1.1.0`], { cwd: dir });
+      execFileSync("git", ["tag", `${name}-v0.1.0`], { cwd: dir });
+      assert.equal(first(dir, `${name}-v0.1.0`), "--first-release");
+    });
+  }
 });
 
 // --- Measured public API. The fixtures are real assemblies, built here with
@@ -402,18 +471,36 @@ test("measured: a declared break with nothing measured still passes", () => {
   });
 });
 
-test("measured: a removed GameCult.* assembly is a break, a declared new assembly and a removed third-party one are not", () => {
+test("measured: a tracked assembly that is no longer built is a break, whatever its name; a declared new assembly is not", () => {
   const other = buildAssembly("GameCult.Other", "namespace O { public class D {} }");
   const thirdParty = buildAssembly("Vendor.Lib", "namespace V { public class E {} }");
   const baseline = { "GameCult.Widget.dll": oldWidget(), "GameCult.Other.dll": other, "Vendor.Lib.dll": thirdParty };
   withReleasedBaseline({ baseline }, (dir) => {
     const refused = runCheckerExpectFailure(dir, measuredArgs(dir, "1.1.0", [oldWidget()]));
     assert.match(refused, /GameCult\.Other\.dll exists at widget-v1\.0\.0 but is no longer built/);
-    assert.doesNotMatch(refused, /Vendor\.Lib/);
-    assert.match(refused, /breaks 1 public API member/);
+    assert.match(refused, /Vendor\.Lib\.dll exists at widget-v1\.0\.0 but is no longer built/);
+    assert.match(refused, /breaks 2 public API member/);
     const brandNew = buildAssembly("GameCult.Brand", "namespace B { public class F {} }");
-    const ok = runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget(), other, brandNew], { news: ["GameCult.Brand.dll"] }));
+    const ok = runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget(), other, thirdParty, brandNew], { news: ["GameCult.Brand.dll"] }));
     assert.match(ok, /1\.0\.1 is a patch bump/);
+  });
+});
+
+test("measured: renaming the only assembly and declaring it new compares nothing and is refused", () => {
+  // CultMath's shape: one assembly, and its name is not GameCult.*.
+  const cultMath = buildAssembly("CultMath", WITH_GONE);
+  const renamedTrimmed = buildAssembly("CultMath.Next", WITHOUT_GONE);
+  withReleasedBaseline({ baseline: { "CultMath.dll": cultMath } }, (dir) => {
+    const own = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [buildAssembly("CultMath", WITHOUT_GONE)]));
+    assert.match(own, /Gone/);
+    const renamed = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [renamedTrimmed], { news: ["CultMath.Next.dll"] }));
+    assert.match(renamed, /no built assembly has a namesake tracked at widget-v1\.0\.0, so nothing was compared/);
+    assert.match(renamed, /CultMath\.dll/);
+    // with a comparison that ran, the unbuilt tracked assembly is itself the break
+    withReleasedBaseline({ baseline: { "CultMath.dll": cultMath, "Other.dll": buildAssembly("Other", "namespace O { public class D {} }") } }, (both) => {
+      const partial = runCheckerExpectFailure(both, measuredArgs(both, "1.0.1", [cultMath, renamedTrimmed], { news: ["CultMath.Next.dll"] }));
+      assert.match(partial, /Other\.dll exists at widget-v1\.0\.0 but is no longer built/);
+    });
   });
 });
 
@@ -478,13 +565,35 @@ test("measured: a base type moved to a subclass in another assembly resolves thr
     const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-refs-"));
     try {
       mkdirSync(join(scratch, "built"));
+      mkdirSync(join(scratch, "builtA"));
       mkdirSync(join(scratch, "refs"));
       copyFileSync(newB, join(scratch, "built", "GameCult.Widget.dll"));
+      copyFileSync(newA, join(scratch, "builtA", "Vendor.A.dll"));
       copyFileSync(newA, join(scratch, "refs", "Vendor.A.dll"));
-      const built = join(scratch, "built", "GameCult.Widget.dll");
-      // The new base assembly is reachable only through --api-refs: the checker must pass it on.
-      assert.match(runChecker(dir, measuredArgs(dir, "1.0.1", [built], { refs: [join(scratch, "refs")] })), /1\.0\.1 is a patch bump/);
-      assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [built])), /CP0007/);
+      const built = [join(scratch, "built", "GameCult.Widget.dll"), join(scratch, "builtA", "Vendor.A.dll")];
+      // The new base assembly is reachable from the widget's directory only through --api-refs: the checker must pass it on.
+      assert.match(runChecker(dir, measuredArgs(dir, "1.0.1", built, { refs: [join(scratch, "refs")] })), /1\.0\.1 is a patch bump/);
+      assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", built)), /CP0007/);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+test("measured: a base chain changed in a dependency is seen on the GameCult type through the left references", () => {
+  // Old Vendor.A: Mid derives from Exception. New Vendor.A: Mid has no base. GameCult's D derives from Mid in both.
+  // ApiCompat reports the lost ISerializable on D only when the left side can resolve netstandard and Vendor.A.
+  const oldA = buildAssembly("Vendor.A", "namespace A { public class Mid : System.Exception { } }");
+  const newA = buildAssembly("Vendor.A", "namespace A { public class Mid { } }");
+  const oldB = buildAssembly("GameCult.Widget", "namespace B { public class D : A.Mid { } }", [oldA]);
+  const newB = buildAssembly("GameCult.Widget", "namespace B { public class D : A.Mid { } }", [newA]);
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldB, "Vendor.A.dll": oldA } }, (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-left-"));
+    try {
+      copyFileSync(newB, join(scratch, "GameCult.Widget.dll"));
+      copyFileSync(newA, join(scratch, "Vendor.A.dll"));
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [join(scratch, "GameCult.Widget.dll"), join(scratch, "Vendor.A.dll")]));
+      assert.match(output, /Type 'B\.D' does not implement interface 'System\.Runtime\.Serialization\.ISerializable'/);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
@@ -514,7 +623,9 @@ test("measured: a declared first release measures nothing", () => {
     execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
     const junk = join(dir, "junk.dll");
     writeFileSync(junk, "junk");
-    const output = runChecker(dir, [...measuredArgs(dir, "1.0.0", [junk]), "--first-release"]);
+    const args = measuredArgs(dir, "1.0.0", [junk]);
+    args[args.indexOf("--changelog") + 1] = packageChangelog(dir, "1.0.0");
+    const output = runChecker(dir, [...args, "--first-release"]);
     assert.match(output, /first release/);
     assert.doesNotMatch(output, /public API measured/);
   });
@@ -543,6 +654,37 @@ test("measured: measuring nothing refuses, naming what is missing", () => {
     execFileSync("git", ["commit", "-q", "-m", "release"], { cwd: dir });
     execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
     assert.match(fail(dir, measuredArgs(dir, "1.1.0", [oldWidget()])), /does not track the DLLs/);
+  });
+});
+
+test("measured: a git failure while reading the baseline, and a changelog that is not a file, are refusals without a stack or git's output", () => {
+  const clean = (output) => {
+    assert.doesNotMatch(output, /fatal|Command failed|\n\s+at |usage: git|unknown option/);
+    return output;
+  };
+  // the tag tracks a gitlink named like a DLL: ls-tree lists it, git show cannot read it
+  withTempGitRepo((dir) => {
+    mkdirSync(join(dir, PLUGINS), { recursive: true });
+    copyFileSync(oldWidget(), join(dir, PLUGINS, "GameCult.Widget.dll"));
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["update-index", "--add", "--cacheinfo", "160000,1111111111111111111111111111111111111111,unity/widget/Runtime/Plugins/Gitlink.dll"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "release"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    const output = clean(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()])));
+    assert.match(output, /git could not read the assemblies tracked under unity\/widget\/Runtime\/Plugins at widget-v1\.0\.0/);
+  });
+  // a baseline path that git would take for an option
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const args = measuredArgs(dir, "1.0.1", [oldWidget()]);
+    args[args.indexOf("--api-baseline-path") + 1] = "--bogus";
+    assert.match(clean(runCheckerExpectFailure(dir, args)), /tracks no assembly under --bogus|git could not read/);
+  });
+  // a changelog path that is a directory
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    mkdirSync(join(dir, "CHANGELOG.md"));
+    const output = clean(runCheckerExpectFailure(dir, ["--package", "widget", "--changelog", join(dir, "CHANGELOG.md"), "--version", "1.0.0", "--tag-prefix", "widget"]));
+    assert.match(output, /changelog cannot be read at /);
   });
 });
 

@@ -173,13 +173,12 @@ foreach ($assemblyName in $expectedAssemblies) {
 }
 
 # docs/semver-policy.md: refuse a release whose version does not tell the truth. The check measures
-# the public API of every shipped GameCult.* assembly against the DLLs the previous cultlib-unity tag
-# tracked (read from git), so it runs here, once the assemblies under judgement exist.
+# the public API of every shipped assembly against the DLLs the previous cultlib-unity tag
+# tracked (read from git), so it runs here, once the assemblies under judgement exist. Every
+# tracked assembly the build does not hand over counts as removed, so all of them are handed over.
 $measuredArguments = @()
 foreach ($assemblyName in $expectedAssemblies) {
-  if ($assemblyName.StartsWith("GameCult.")) {
-    $measuredArguments += @("--api-built", $publishedByName[$assemblyName].FullName)
-  }
+  $measuredArguments += @("--api-built", $publishedByName[$assemblyName].FullName)
 }
 foreach ($refRoot in @($publishRoot, $quicPublishRoot, $webSocketPublishRoot)) {
   $measuredArguments += @("--api-refs", $refRoot)
