@@ -1389,7 +1389,7 @@ class CultCacheTests(unittest.TestCase):
                     SingleFileMessagePackBackingStore(path).pull_all()
                 self.assertIn(f"CultCache store format {found} is not one this runtime reads; {reads}", str(caught.exception))
 
-            path.write_bytes(msgpack.packb(["cultcache.store.v1", [], [["k", "s", "t", b"", "extra"]]], use_bin_type=True))
+            path.write_bytes(msgpack.packb(["cultcache.store.v1", [], [["k", "s", "t", b"\x90", "extra"]]], use_bin_type=True))
             with self.assertRaises(ValueError) as caught:
                 SingleFileMessagePackBackingStore(path).pull_all()
             self.assertIn(
