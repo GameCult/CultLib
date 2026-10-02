@@ -404,6 +404,10 @@ fn store_header(bytes: &[u8]) -> Result<Option<String>> {
                         _ => None,
                     }))
                 }
+            }
+            deserializer.deserialize_seq(HeaderVisitor)
+        }
+    }
     let mut cursor = std::io::Cursor::new(bytes);
     let header = <Header as serde::Deserialize>::deserialize(&mut rmp_serde::Deserializer::new(&mut cursor))
         .map_err(|error| opaque_decode_error(error).context("the store is not one complete MessagePack array"))?;
@@ -955,7 +959,13 @@ impl SingleFileMessagePackBackingStore {
         // payloads this store passes through may hold ids), one that is gone or legacy is written v1. The file is read by
         // the same reader as an open, so a store this runtime cannot read completely, a variant included, is refused
         // and never overwritten.
-        let disk = self.read_store_unlocked()?;
+        let disk = match self.read_store_unlocked() {
+            // A dangling link holds no store, so a whole-file replace has no header to keep and replaces the link (R3 pins
+            // this). The only NotFound the reader returns is that one: a merging writer has already refused it when it
+            // read the current entries.
+            Err(error) if io_not_found(&error) => DiskStore::empty(),
+            other => other?,
+        };
         let bytes = encode_store_snapshot(entries, &disk)
             .and_then(|snapshot| rmp_serde::to_vec(&snapshot).context("failed to encode MessagePack"))
             .map_err(|error| error.context(failed(CultCacheStoreWriteFailedKind::Rejected)))?;
@@ -2986,6 +2996,12 @@ fn release_lock<T>(lock: File, result: Result<T>) -> Result<T> {
         injected_write_fault(WriteStep::Unlock).and_then(|()| fs2::FileExt::unlock(&lock));
     drop(lock);
     result
+}
+
+fn io_not_found(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound))
 }
 
 /// True only when nothing is at `path`; a symbolic link, dangling or not, is something.

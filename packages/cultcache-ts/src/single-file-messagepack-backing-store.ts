@@ -85,7 +85,18 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. The file is read by the same
       // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
       // and left as it is.
-      this.#format = (await this.#readDisk()).format;
+      try {
+        this.#format = (await this.#readDisk()).format;
+      } catch (error) {
+        // Only a dangling link reaches here with ENOENT: it holds no store, so a whole-store flush has no header to keep and
+        // replaces the link (R3 pins this). Every merging writer has already refused it when it read the current entries.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+
+        this.#format = STORE_FORMAT_VERSION;
+      }
+
       await this.#writeAll(entries, []);
     });
   }
