@@ -341,6 +341,104 @@ Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
 
+## Intervals
+
+`math.Interval.cs` and `shaders/CultMath.Interval.hlsl` (included from
+`CultMath.hlsl` after the Phacelle include) carry interval arithmetic for
+culling empty space with a proof. Their invariant, **intervals-enclose**: every
+interval function returns a `[lo, hi]` that contains `f(x)` for every `x` in
+its input region, where `f(x)` is the same function evaluated pointwise in
+float32. A consumer that skips a region because `hi < cutoff` has skipped
+nothing that was there.
+
+Representation: an interval is `float2(lo, hi)` with `lo <= hi`, both finite.
+There is no empty interval; a caller that needs "provably empty" tests
+`hi < cutoff`. `iv_point(x)` is `float2(x, x)`.
+
+Ops: `iv_point`, `iv_add`, `iv_sub`, `iv_neg`, `iv_mul` (the least and greatest
+of the four corner products), `iv_scale(iv, float)`, `iv_abs` and `iv_sqr`
+(an interval straddling zero starts at 0), `iv_min`, `iv_max`, `iv_sqrt`
+(`lo` clamped at 0), `iv_exp`, `iv_clamp(iv, float, float)`, `iv_saturate`,
+`iv_smoothstep(float, float, iv)` (its ordered endpoints) and
+`iv_lerp(iv, iv, float)`. No others until a consumer names one. Each has an
+HLSL mirror named `cultmath_iv_*`, compared bit for bit by
+`HlslSourceCompatibilityTests`.
+
+The ulp-widening rule. Each bound is computed with the pointwise function's
+own float32 operations. IEEE round-to-nearest is monotone, so an op that is
+monotone on its region encloses its float32 evaluation exactly, with no
+widening; that covers every op above except two, which widen by exactly one
+ulp, in the implementation and never in the test:
+
+- `iv_exp`: `exp` is not required to be correctly rounded, so a libm need not
+  be monotone. .NET's `MathF.Exp` on Linux steps down 0 times over every float
+  in [-87, 88.7] (`IntervalTests.MeasureMonotonicity`), so on that CPU the
+  widening is a margin; it is there for other libms and GPUs.
+- `iv_smoothstep`: `t * t * (3 - 2t)` in float32 steps down 337,095 times over
+  the floats in [0, 1], each time by at most 1 ulp (`MeasureMonotonicity`).
+  Since `t = saturate((x - minimum) / (maximum - minimum))` is itself monotone
+  in `x`, that covers every `smoothstep`.
+
+`iv_lerp` is the natural interval extension of `x + (y - x) * amount`, which is
+how `lerp` evaluates; every step is monotone, so it encloses with no widening
+for any `amount`, and it is tight only when `a` is a point, because `x` appears
+twice.
+
+`IntervalTests` runs every op over 10,000 seeded intervals (centres in
+[-20, 20], widths log-uniform in [1e-4, 10], every eighth a point) and 16
+points inside each, endpoints and zero included, with no tolerance; and for
+every op it raises `lo` and lowers `hi` by one ulp and requires the harness to
+catch each. A new op is one entry in that table.
+
+Noise bounds. `iv_snoise_ball(c, r)` is `[n - L r, n + L r]` intersected with
+`[-1, 1]`, where `n = snoise(c)` and `L = SNOISE_LIPSCHITZ`: one `snoise`, value
+only. No interval function reads `snoise_grad`, and none has a value-only or
+gradient twin. `iv_fbm_ball(c, r, octaves, lacunarity, gain)` is the octave sum
+of `iv_snoise_ball(c * f_i, r * |f_i|)` scaled by `a_i`, compounding frequency
+and amplitude exactly as `fbm_grad` does, octaves clamped to [0, 16]. A domain
+warp that moves a point by at most `D` is enclosed by the radius `r + D`
+(`NoiseBoundTests.WarpedPointsStayEnclosed`); this is what the gamecult.org
+ground's march rests on.
+
+`L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
+explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
+[-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
+(9.181147), and multiplies by 1.10: `L = 10.099261`. It also reaches
+`|snoise| = 0.9718335` by the same ascent on the value, which is what lets the
+bound intersect with `[-1, 1]`. `LipschitzConstantPinsSampledGradients`
+checks 1e5 more seeded points against `L` and climbs again from the start
+`MeasureLipschitz` prints as its witness, failing if `L` is not 1.10 times that
+maximum to within half a percent, so a 1% move of `L` fails. The enclosure tests
+over 2,000 balls x 64 points are the defence. A change to the `snoise` kernel
+must re-run `MeasureLipschitz` and re-pin `L` and the witness.
+
+What the ball bounds guarantee: enclosure of `snoise` and `fbm_grad(...).w` over
+the ball, in float32. What they do not: anything about tapes, pruning, choice
+tracking or affine forms; those are later steps of
+`docs/cultmath-tape-target.md` (CultLib root). How loose they are is a number:
+`NoiseBoundTests.TightnessReport` prints the mean interval width over the
+sampled range: 5.08 for `iv_snoise_ball` at `r = 0.05`, 1.96 at 0.25 and 1.28
+at 1.0; 6.64 and 2.82 for 4-octave `iv_fbm_ball` at 0.05 and 0.25.
+
+The saving is a number too. `NoiseBoundTests.IntervalSkipHalvesEvaluations`
+marches 1,000 seeded rays through the map's warped coverage field (`F0 = 0.35`,
+cutoff 0.25, a slab of depth 12) once at the dense step and once with the
+adaptive interval march, and counts `snoise` evaluations (three per dense
+sample, one per probe; the flow is not counted, because the site reads it from
+a texture). Both marches integrate the same cells, so their transmittance
+agrees exactly. At the test's parameters (first step 0.25, dense step 0.125,
+warp bound 0.05) the dense march spends 287,940 evaluations and the interval
+march 309,550: 0.93x, not the 2x saving the proving-ground contract asks for.
+Over the grid the test also prints, the best is 1.83x (first step 0.0625, no
+warp), and at a first step of 1 it is 0.74x. With `L` near 10 a probe proves a
+segment empty only where `snoise` is far below the cutoff, and a probe that
+fails costs one evaluation on top of the three the dense sample costs. The test
+skips with that open fork named instead of passing; whether the march, the
+field or the bound changes is the campaign's decision.
+
+Consumers: the gamecult.org ground shader (through the GLSL lowering) and
+Aetheria's nebula raymarch at its CultMath pin bump.
+
 ## Rules
 
 - Keep type names HLSL-shaped: `float2`, `float3`, `float4`, `float3x3`, and `math`.

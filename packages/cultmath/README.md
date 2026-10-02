@@ -33,8 +33,14 @@ shader semantics.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.
-  It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) from the same
-  directory, so ship both files.
+  It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) and
+  `shaders/CultMath.Interval.hlsl` from the same directory, so ship all three.
+- interval arithmetic for culling empty space with a proof: `iv_*` functions
+  over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
+  and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
+  ball. Every one returns an interval containing the function's value at every
+  point of its input, so a raymarch can skip a segment whose `hi` is below its
+  cutoff; `cultmath_iv_*` in HLSL. See `docs/design.md`, "Intervals".
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
