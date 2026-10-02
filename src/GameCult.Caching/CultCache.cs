@@ -3574,13 +3574,40 @@ namespace GameCult.Caching
                 throw Overwrites(foreign);
         }
 
-        protected CultSchemaConflictException Overwrites(CultForeignRecord foreign) => new(
-            $"Record '{foreign.Key}' in {this} is stored under schema id '{foreign.SchemaId}' ('{foreign.SchemaName}'), which " +
-            "no registered type owns or lists as compatible. The store carries it untouched and refuses a write that would replace or remove it; " +
+        // The one decision of whether a write may proceed over what the file holds as foreign, for every store kind. A key this
+        // cache writes or removes (staged, or in a batch) that the file now holds foreign is refused, every such key at once.
+        // Only those leave: the store forgets its staged change (unstage), and the cache drops its copy through the path a pull
+        // drops what the file no longer holds for it, so the store, the cache and the file agree on what is held. A record this
+        // cache holds but did not write is not refused: it stays until a pull drops it, and the write that never touched it lands.
+        protected void RefuseForeign(IEnumerable<string> written, Func<string, CultForeignRecord?> foreignAt, Action<string> unstage)
+        {
+            var refused = written.Distinct(StringComparer.Ordinal)
+                .Select(foreignAt)
+                .OfType<CultForeignRecord>()
+                .OrderBy(record => record.Key, StringComparer.Ordinal)
+                .ToArray();
+            if (refused.Length == 0)
+                return;
+            var dropped = refused
+                .Select(record => Entries.TryGetValue(record.Key, out var held) ? held : null)
+                .OfType<CultStoredDocument>()
+                .ToArray();
+            foreach (var record in refused)
+                unstage(record.Key);
+            if (dropped.Length > 0)
+                Loaded?.Invoke(Array.Empty<CultStoredDocument>(), dropped);
+            foreach (var held in dropped)
+                Entries.TryRemove(held.Key.Value, out _);
+            throw Overwrites(refused);
+        }
+
+        protected CultSchemaConflictException Overwrites(params CultForeignRecord[] foreign) => new(
+            $"{(foreign.Length == 1 ? "Record" : "Records")} {string.Join(", ", foreign.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this} " +
+            "no registered type owns or lists as compatible. The store carries what it holds under such a schema untouched and refuses a write that would replace or remove it; " +
             "declare the id on a type to claim it.",
-            foreign.SchemaId,
-            new[] { foreign.SchemaName },
-            foreign.Key);
+            foreign[0].SchemaId,
+            foreign.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
+            foreign[0].Key);
 
         protected void MarkFlushSucceeded()
         {
@@ -3597,6 +3624,10 @@ namespace GameCult.Caching
         }
 
         protected FileInfo FileInfo { get; }
+
+        // Keys this cache has written or removed here since the store last loaded or wrote them: the only keys a foreign record can refuse.
+        private readonly HashSet<string> _staged = new(StringComparer.Ordinal);
+
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
 
         /// <summary>
@@ -3621,6 +3652,7 @@ namespace GameCult.Caching
             if (IsDirty)
                 return;
 
+            _staged.Clear();
             var snapshot = ReadSnapshot();
             if (snapshot == null)
             {
@@ -3698,6 +3730,7 @@ namespace GameCult.Caching
             {
                 RefuseOverwrite(entry.Key.Value);
                 Entries[entry.Key.Value] = entry;
+                _staged.Add(entry.Key.Value);
                 IsDirty = true;
             });
         }
@@ -3708,6 +3741,7 @@ namespace GameCult.Caching
             Held(() =>
             {
                 Entries.TryRemove(entry.Key.Value, out _);
+                _staged.Add(entry.Key.Value);
                 IsDirty = true;
             });
         }
@@ -3724,6 +3758,7 @@ namespace GameCult.Caching
                 {
                     var disk = ReadSnapshot();
                     var foreign = ForeignOnDisk(disk);
+                    RefuseForeign(_staged, foreign);
                     var view = WholeView(Entries.Values, disk, foreign);
                     WriteSnapshot(
                         view.Records,
@@ -3735,6 +3770,7 @@ namespace GameCult.Caching
                     WroteWholeView(view.Records, view.LaidBack);
                 }
 
+                _staged.Clear();
                 MarkFlushSucceeded();
             });
         }
@@ -3759,7 +3795,7 @@ namespace GameCult.Caching
             // and staged single writes land with it. A conditional commit (store clean) lands the batch onto the file as it is.
             var ontoDisk = request.HasConditions && !IsDirty;
             var foreign = ForeignOnDisk(disk);
-            RefuseForeign(request.Upserts.Concat(request.Deletes), foreign);
+            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), foreign);
 
             var view = ontoDisk ? null : WholeView(Entries.Values, disk, foreign);
             var records = (view?.Records ?? disk.Records).ToDictionary(record => record.Key, StringComparer.Ordinal);
@@ -3789,6 +3825,7 @@ namespace GameCult.Caching
                 Entries[entry.Key.Value] = entry;
             if (view != null)
                 WroteWholeView(records.Values, view.LaidBack);
+            _staged.Clear();
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
         }
@@ -3799,8 +3836,8 @@ namespace GameCult.Caching
         // bytes than the file holds at that storedAt. A record written exactly as it is stored keeps its storedAt.
         // Records and catalog entries this runtime does not own survive the write: a record loaded under an id its type does not own
         // and that nothing has written since is laid back as it was loaded, with the catalog entry that published it, and every
-        // foreign record the file holds now is laid back as the file holds it. An entry whose key the file holds as a foreign record
-        // is refused. Arrived is the catalog the write publishes those records by.
+        // foreign record the file holds now is laid back as the file holds it, over this cache's clean copy of it; a write this cache staged over one
+        // was refused before this. Arrived is the catalog the write publishes those records by.
         private sealed class WholeViewWrite
         {
             public CultPersistedRecord[] Records = Array.Empty<CultPersistedRecord>();
@@ -3809,29 +3846,28 @@ namespace GameCult.Caching
             public HashSet<string> LaidBack = new(StringComparer.Ordinal);
         }
 
-        // A write over a record the file holds as foreign is refused, and what this store held for the refused keys goes with the
-        // refusal: its copy is not what the file holds, and kept it would refuse every later write to other records too.
         private void RefuseForeign(
-            IEnumerable<CultStoredDocument> written,
-            IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign)
-        {
-            var refused = written.Where(entry => foreign.ContainsKey(entry.Key.Value)).ToArray();
-            if (refused.Length == 0)
-                return;
-            foreach (var entry in refused)
-                Entries.TryRemove(entry.Key.Value, out _);
-            throw Overwrites(foreign[refused[0].Key.Value].Foreign);
-        }
+            IEnumerable<string> written,
+            IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign) =>
+            RefuseForeign(
+                written,
+                key => foreign.TryGetValue(key, out var carried) ? carried.Foreign : null,
+                key =>
+                {
+                    _staged.Remove(key);
+                    IsDirty = _staged.Count > 0;
+                });
 
         private WholeViewWrite WholeView(
             IEnumerable<CultStoredDocument> view,
             CultPersistedStoreSnapshot? disk,
             IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign)
         {
-            var entries = view.ToArray();
-            RefuseForeign(entries, foreign);
+            // A record the file holds as foreign is the file's: it is carried, and this cache's clean copy of it is not written.
+            var entries = view.Where(entry => !foreign.ContainsKey(entry.Key.Value)).ToArray();
 
             var write = new WholeViewWrite();
+            write.LaidBack.UnionWith(foreign.Keys);
             var laidBackEntries = new List<CultSchemaCatalogEntry>();
             var onDisk = (disk?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, StringComparer.Ordinal);
             write.Records = entries.Select(entry =>

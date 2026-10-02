@@ -243,28 +243,19 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     }
 
     // The manifest's other records stay as they are, foreign ones included; a write that would replace or remove a foreign
-    // record is refused before any page is written. The refusal takes the refused keys with it: a staged change to a record that
-    // is foreign now, and this store's copy of one, are not what the file holds, and kept they would refuse every later write.
-    private void RefuseForeign(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written)
-    {
-        var foreign = currentManifest.Records
-            .Where(record => Foreign(record, currentManifest.SchemaCatalog) != null)
-            .Select(record => record.Key)
-            .ToHashSet(StringComparer.Ordinal);
-        var refused = written.Concat(_deletedKeys.Keys).Concat(_dirtyKeys.Keys).Where(foreign.Contains).Distinct().ToArray();
-        if (refused.Length == 0)
-            return;
-        foreach (var key in refused)
-        {
-            Entries.TryRemove(key, out _);
-            _dirtyKeys.TryRemove(key, out _);
-            _deletedKeys.TryRemove(key, out _);
-        }
-
-        IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
-        var held = currentManifest.Records.First(record => record.Key == refused[0]);
-        throw Overwrites(Foreign(held, currentManifest.SchemaCatalog)!);
-    }
+    // record is refused before any page is written, by the one rule every store shares (CacheBackingStore.RefuseForeign).
+    private void RefuseForeign(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written) =>
+        RefuseForeign(
+            written.Concat(_deletedKeys.Keys).Concat(_dirtyKeys.Keys),
+            key => currentManifest.Records.FirstOrDefault(record => record.Key == key) is { } held
+                ? Foreign(held, currentManifest.SchemaCatalog)
+                : null,
+            key =>
+            {
+                _dirtyKeys.TryRemove(key, out _);
+                _deletedKeys.TryRemove(key, out _);
+                IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
+            });
 
     // Runs under the commit lease: pages first, then the manifest that names them.
     private void WriteGeneration(CultPersistedStoreSnapshot currentManifest)

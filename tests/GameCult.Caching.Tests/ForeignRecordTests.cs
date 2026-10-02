@@ -194,8 +194,7 @@ namespace GameCult.Caching.Tests
                 other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
             var before = Fingerprint(path);
 
-            // The single-file store writes its whole view, so any write reaches d; the directory store writes only d itself.
-            var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, Write.Flush, directory ? D : E, DeckOf(Canary)))!;
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, Write.Flush, D, DeckOf(Canary)))!;
 
             Assert.That(refusal.RecordKey, Is.EqualTo(D.Value));
             Assert.That(refusal.Message, Does.Not.Contain(Canary));
@@ -221,6 +220,111 @@ namespace GameCult.Caching.Tests
             Assert.That(Stored(path, D), Is.EqualTo(widget), "the other writer's record is as it was");
             Assert.That(EmittedDocumentTypes.Read(cache.Get(E)!, "Name"), Is.EqualTo("e"));
             Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+        }
+
+        // The cache and the store agree on what a refusal left: the refused record is not served, not after a later write, not after
+        // a pull, and not by a fresh open. What the cache served before the refusal was never what the file holds.
+        [Test]
+        public void ARefusedRecordIsNotServedAfterTheRefusalAfterALaterWriteOrAfterAPull(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write refused)
+        {
+            var path = Seeded("not-served.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+
+            Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)));
+            var afterRefusal = cache.Get(D);
+            Land(cache, Write.Commit, E, DeckOf("e"));
+            var afterLaterWrite = cache.Get(D);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            var afterPull = cache.Get(D);
+            using var fresh = Open(path, DeckOnly, directory);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(afterRefusal, Is.Null, "after the refusal");
+                Assert.That(afterLaterWrite, Is.Null, "after a later write");
+                Assert.That(afterPull, Is.Null, "after a pull");
+                Assert.That(fresh.Get(D), Is.Null, "a fresh open");
+                Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(StoreOf(fresh).ForeignRecords.Select(record => record.Key)));
+            });
+        }
+
+        // A refusal names every key it refused, and every one of them leaves the cache; a record the write did not touch stays.
+        [Test]
+        public void ARefusalOfSeveralRecordsNamesEachAndTheCacheDropsEach(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write refused)
+        {
+            var path = PathOf("several.cc");
+            var d2 = new CultRecordKey("d2");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch =>
+                {
+                    batch.Upsert(Deck, DeckOf("d"), D);
+                    batch.Upsert(Deck, DeckOf("d2"), d2);
+                    batch.Upsert(Deck, DeckOf("e"), E);
+                });
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch =>
+                {
+                    batch.Upsert(Widget, WidgetOf("w1"), D);
+                    batch.Upsert(Widget, WidgetOf("w2"), d2);
+                });
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+            {
+                if (refused == Write.Flush)
+                {
+                    cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+                    cache.UpsertAsync(Deck, DeckOf(Canary), d2).GetAwaiter().GetResult();
+                    cache.FlushAsync().GetAwaiter().GetResult();
+                }
+                else
+                {
+                    cache.Commit(batch =>
+                    {
+                        batch.Upsert(Deck, DeckOf(Canary), D);
+                        batch.Upsert(Deck, DeckOf(Canary), d2);
+                    });
+                }
+            })!;
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(refusal.Message, Does.Contain("'d'").And.Contain("'d2'").And.Not.Contain(Canary));
+                Assert.That(cache.Get(D), Is.Null);
+                Assert.That(cache.Get(d2), Is.Null);
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(E)!, "Name"), Is.EqualTo("e"), "a record the write did not touch stays");
+            });
+        }
+
+        // A write that never touches a record another writer made foreign is not refused for holding a stale copy of it: it lands
+        // the first time, in both store kinds, and the next pull drops the copy.
+        [Test]
+        public void AWriteThatNeverTouchedARecordAnotherWriterMadeForeignLandsAtOnce(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = Seeded("untouched.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            Land(cache, write, E, DeckOf("e"));
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(Stored(path, D), Is.EqualTo(widget), "the other writer's record is as it was");
+                Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+                Assert.That(cache.Get(D), Is.Null, "the pull drops the stale copy");
+            });
         }
 
         // The same when the stale copy was only held, never written: a flush after the other writer's record landed refuses once.
