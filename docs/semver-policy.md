@@ -148,13 +148,52 @@ tag prefix, it:
    version, refusing anything that is not exactly the next version in some
    lane — a skip, a reversal, or a repeat are all refused, not just wrong
    bump sizes;
-4. if the changelog entry has a `### Breaking` section, requires the bump to
-   be at least major (or, pre-1.0, at least minor);
-5. fails loudly, naming the package, the previous and new version, and (when
-   relevant) the changelog heading that triggered the requirement.
+4. when the release script supplies built assemblies (below), treats the
+   release as breaking if the public API measurably lost or changed a member
+   against the previous tag, whether or not the changelog says so; a
+   measured break with no `### Breaking` section is refused, naming the
+   count, the first diagnostics, and the heading that must declare them;
+5. if the release is breaking (a `### Breaking` section, a measured break, or
+   both), requires the bump to be at least major (or, pre-1.0, at least
+   minor); a `### Breaking` section with nothing measured is valid, because
+   behavioural breaks are invisible to a signature comparison;
+6. fails loudly, naming the package, the previous and new version, and (when
+   relevant) the changelog heading or the measured diagnostics that
+   triggered the requirement.
+
+Additions are never a rule: adding a public member is not breaking (see
+above), and the check neither refuses nor demands a bump for one.
+
+### Measured input
+
+The Unity release scripts pass `--api-baseline-path <repo-relative directory
+of tracked DLLs>` and one `--api-built <dll>` per assembly they built (plus
+`--api-refs <dir>` for directories that hold the built assemblies'
+dependencies). For each built DLL that has a namesake under the baseline path
+at the previous tag, the checker reads that namesake as a git blob at the tag
+(no worktree, no network, unaffected by what the working tree tracks now) and
+compares public API with `Microsoft.DotNet.ApiCompat.Tool`, pinned in
+`dotnet-tools.json` and run through `dotnet tool run`; the first
+`dotnet tool restore` needs NuGet, and later runs use the local cache. Each
+`CPnnnn` diagnostic is one measured break. A built DLL with no baseline is new
+and measures nothing. A `GameCult.*` assembly the previous tag tracked and the
+build no longer produces is itself a measured break. A package's first release
+(no previous tag) measures nothing.
+
+The tool failing to measure (not installed, an unreadable assembly, a crash:
+a non-zero exit with no diagnostic line) refuses the release; it is never a
+pass. ApiCompat cannot resolve `netstandard.dll` for the shipped
+netstandard2.1 assemblies and prints a resolution warning; removed inherited
+members and base types are still reported, and a test pins that. No
+suppression file is kept: a suppression would be a second, silent declaration
+of a break, so a break is declared only under `### Breaking`.
+
+The release scripts run the check once the assemblies under judgement exist,
+after the build and before anything is copied into the package.
 
 Run it directly: `node scripts/check-changelog-semver.mjs --package <name>
---changelog <path> --version <x.y.z> --tag-prefix <prefix>`. Its own tests
+--changelog <path> --version <x.y.z> --tag-prefix <prefix>` (CI's TS and Python
+jobs and `verify-caching-unity-release.ps1` pass no measured input). Its own tests
 live in `scripts/check-changelog-semver.test.mjs` (`node --test
 scripts/check-changelog-semver.test.mjs`).
 
@@ -192,6 +231,10 @@ when someone remembers to run the Unity release scripts, the same way the
 existing assembly-version check does. A tag pushed by hand without running
 the release script bypasses both checks equally; closing that gap is a CI
 trigger on tag push for the Unity packages, not something this change adds.
+
+What stays unmeasured: behaviour behind an unchanged signature, wire formats,
+native exports of the QUIC bridge, and the Caching Unity package's source
+(it has no assembly). Those rest on the `### Breaking` declaration.
 
 Rust crates (consumed as pinned git revisions, not tagged releases in the
 usual sense) and the CultNet protocol surface itself (no automated wire
