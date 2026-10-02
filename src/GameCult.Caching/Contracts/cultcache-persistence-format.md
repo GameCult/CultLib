@@ -302,8 +302,9 @@ and on rewrite alike, because the rewrite asks the same full reader as the open.
 file and an empty array are an empty store; a zero-byte file is not a store and is refused as unreadable. A flush or a commit replaces a file only when the
 runtime's own reader opens it, so one verdict covers open, flush and commit, and a file the
 runtime cannot read is left as it is. Each runtime refuses with one typed error:
-`CultStoreUnreadableException` (C#), `StoreUnreadableError` (Rust, TypeScript, Python), with
-the underlying cause attached. Rust, TypeScript and Python also open the legacy envelope
+`CultStoreUnreadableException` (C#), `CultCacheStoreUnreadable{path, kind}` (Rust, its kind
+telling an undecodable store from an unsupported format), `StoreUnreadableError` (TypeScript,
+Python), with the underlying cause attached. Rust, TypeScript and Python also open the legacy envelope
 array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# has no legacy
 reader and refuses it. The shared byte vectors and each runtime's verdict are
 `tests/vectors/document-variants-c2a/readability/manifest.txt`.

@@ -134,6 +134,65 @@ namespace GameCult.Caching.Tests
                 Throws.TypeOf<CultStoreUnreadableException>().With.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(path));
         }
 
+        private static byte[] StoreWithHeader(string header) =>
+            CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+            {
+                FormatVersion = header,
+                SchemaCatalog = Array.Empty<CultSchemaCatalogEntry>(),
+                Records = Array.Empty<CultPersistedRecord>()
+            });
+
+        // A refusal shows a stored header only as cultcache.store.v followed by ASCII digits; any other header is described by its
+        // length, so what the file says never reaches a log. A single-file store and a directory manifest are refused alike.
+        [TestCase("cultcache.store.v9", true, false)]
+        [TestCase("cultcache.store.SECRETHDR", false, false)]
+        [TestCase("cultcache.store.v", false, false)]
+        [TestCase("cultcache.store.v٣", false, false)]
+        [TestCase("cultcache.store.v9", true, true)]
+        [TestCase("cultcache.store.SECRETHDR", false, true)]
+        [TestCase("cultcache.store.v", false, true)]
+        [TestCase("cultcache.store.v٣", false, true)]
+        public void ARefusalEchoesAHeaderOnlyAsStoreVersionDigits(string header, bool echoed, bool directoryStore)
+        {
+            var path = Path.Combine(_directory, "header.cc");
+            File.WriteAllBytes(path, StoreWithHeader(header));
+
+            var refusal = Assert.Throws<CultStoreUnreadableException>(() =>
+                CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directoryStore }))!;
+
+            Assert.That(refusal.Message.Contains(header, StringComparison.Ordinal), Is.EqualTo(echoed), refusal.Message);
+            if (!echoed)
+                Assert.That(refusal.Message, Does.Not.Contain("SECRETHDR").And.Not.Contain("٣"));
+        }
+
+        // Only nothing at the path is an empty store. A link whose target is gone is an I/O error on open and on commit, never an
+        // empty store and never an untyped missing-file failure, and the link is left where it was.
+        [Test]
+        public void ADanglingLinkIsAnIoErrorOnOpenAndOnCommitNotAnEmptyStore()
+        {
+            var path = Path.Combine(_directory, "dangling.cc");
+            File.CreateSymbolicLink(path, Path.Combine(_directory, "unmounted", "store.cc"));
+
+            Assert.That(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }), Throws.TypeOf<IOException>());
+            Assert.That(new FileInfo(path).LinkTarget, Is.Not.Null, "the link was replaced");
+            Assert.That(Directory.Exists(Path.Combine(_directory, "unmounted")), Is.False);
+        }
+
+        [Test]
+        public void ACommitOntoALinkThatDanglesAfterOpenIsAnIoErrorAndLeavesTheLink()
+        {
+            var target = Path.Combine(_directory, "target.cc");
+            var path = Path.Combine(_directory, "link.cc");
+            File.WriteAllBytes(target, File.ReadAllBytes(Path.Combine(VectorRoot(), "empty-array.bin")));
+            File.CreateSymbolicLink(path, target);
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
+            File.Delete(target);
+
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<IOException>());
+            Assert.That(new FileInfo(path).LinkTarget, Is.Not.Null, "the link was replaced");
+            Assert.That(File.Exists(target), Is.False, "a write went through the link");
+        }
+
         // An id one entry owns and a later entry lists as compatible names the entry that owns it.
         [TestCase("own-id-over-compatible-v3.bin")]
         [TestCase("compatible-before-owner-v3.bin")]

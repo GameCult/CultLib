@@ -495,7 +495,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             !string.Equals(snapshot.FormatVersion, IndexedFormatVersionWithIds, StringComparison.Ordinal))
         {
             throw new CultStoreUnreadableException(
-                $"Directory store {_manifestFile.FullName} is {snapshot.FormatVersion}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
+                $"Directory store {_manifestFile.FullName} is {CultDocumentMessagePackSerialization.DescribeHeader(snapshot.FormatVersion)}; only {IndexedFormatVersion} and {IndexedFormatVersionWithIds} are readable.",
                 _manifestFile.FullName);
         }
 

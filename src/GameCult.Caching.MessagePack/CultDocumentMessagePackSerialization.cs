@@ -301,7 +301,7 @@ public static class CultDocumentMessagePackSerialization
 
     // A store header as a refusal may show it: echoed in the shape cultcache.store.v<digits>, and otherwise described
     // only by its length, since the bytes are the store's.
-    private static string DescribeHeader(string header)
+    internal static string DescribeHeader(string header)
     {
         const string prefix = "cultcache.store.v";
         var version = header.StartsWith(prefix, StringComparison.Ordinal) ? header.Substring(prefix.Length) : "";

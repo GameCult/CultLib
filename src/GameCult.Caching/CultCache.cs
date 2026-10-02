@@ -4012,11 +4012,16 @@ namespace GameCult.Caching
         private byte[]? ReadDisk()
         {
             FileInfo.Refresh();
-            if (!FileInfo.Exists)
+            // Only nothing at the path is an empty store. A link whose target is gone is a store that cannot be reached.
+            if (!FileInfo.Exists && FileInfo.LinkTarget == null)
                 return null;
             try
             {
                 return ReadAllBytesShared(FileInfo.FullName);
+            }
+            catch (FileNotFoundException ex) when (FileInfo.LinkTarget != null)
+            {
+                throw new IOException("The store path is a link whose target cannot be reached.", ex);
             }
             catch (FileNotFoundException)
             {
