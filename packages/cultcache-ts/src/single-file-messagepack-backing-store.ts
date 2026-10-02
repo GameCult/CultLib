@@ -82,7 +82,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
       }
 
       // A flush of the whole store writes the header the file on disk carries, read now: a file marked for element ids
-      // stays marked, and one that is not (or is gone, empty or legacy) is written unmarked. The file is read by the same
+      // stays marked, and one that is not (or is gone or legacy) is written unmarked. The file is read by the same
       // reader as `pullAll`, so one it would refuse (not exactly one store, a variant, a body it cannot decode) is refused
       // and left as it is.
       try {
@@ -101,8 +101,9 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
     });
   }
 
-  // The one reader of the store file, asked by open, push, delete and flush alike. A file that is gone or zero bytes is an
-  // empty unmarked store; anything else must decode completely or the read throws StoreUnreadableError.
+  // The one reader of the store file, asked by open, push, delete and flush alike. A file that is gone is an
+  // empty unmarked store; a zero-byte file is not a store and is refused. Anything else must decode completely
+  // or the read throws StoreUnreadableError.
   async #readDisk(): Promise<DiskStore> {
     // An empty file is not a store, since no CultCache writer leaves one, so it is decoded and refused.
     // Only a read that finds nothing at the path is an empty store.

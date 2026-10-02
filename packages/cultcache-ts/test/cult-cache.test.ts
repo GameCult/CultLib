@@ -1999,6 +1999,26 @@ test("SingleFileMessagePackBackingStore refusals say what was found without blam
   );
 });
 
+test("SingleFileMessagePackBackingStore refusal says what was found and names every format it reads", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cultcache-refusal-"));
+  const file = join(dir, "store.cc");
+  const reads = 'it reads "cultcache.store.v1" and "cultcache.store.v3" only.';
+  for (const [header, found] of [
+    ["cultcache.store.v12", '"cultcache.store.v12"'],
+    ["cultcache.store.SECRET", "an unrecognised cultcache.store.* header of 22 bytes"],
+    ["cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes"],
+    // Digits are ASCII only: two Arabic-Indic digits are four bytes and are not the known shape.
+    ["cultcache.store.v١٢", "an unrecognised cultcache.store.* header of 21 bytes"],
+  ] as const) {
+    await writeFile(file, encode([header, [], []]));
+    await assert.rejects(
+      () => new SingleFileMessagePackBackingStore(file).pullAll(),
+      (error: Error) => error.message.includes(`CultCache store format ${found} is not one this runtime reads; ${reads}`),
+      header,
+    );
+  }
+});
+
 test("SingleFileMessagePackBackingStore reads only a missing store as empty", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-absent-"));
   assert.deepEqual(await new SingleFileMessagePackBackingStore(join(dir, "store.cc")).pullAll(), []);

@@ -1383,6 +1383,8 @@ class CultCacheTests(unittest.TestCase):
                 ("cultcache.store.v12", "'cultcache.store.v12'"),
                 ("cultcache.store.SECRET", "an unrecognised cultcache.store.* header of 22 bytes"),
                 ("cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes"),
+                # Digits are ASCII only: two Arabic-Indic digits are four bytes and are not the known shape.
+                ("cultcache.store.v١٢", "an unrecognised cultcache.store.* header of 21 bytes"),
             ):
                 path.write_bytes(msgpack.packb([header, [], []], use_bin_type=True))
                 with self.assertRaises(ValueError) as caught:
