@@ -268,9 +268,12 @@ namespace GameCult.Caching.Tests
 
                 using var cache = new CultCache();
 
-                Assert.That(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)),
-                    Throws.TypeOf<CultStoreUnreadableException>().With.Message.Contains(formatVersion)
-                        .And.Property(nameof(CultStoreUnreadableException.Path)).EqualTo(manifest));
+                // The refusal names the manifest, and shows the header only when it is cultcache.store.v<digits>: the suffixed
+                // names a directory store once wrote are stored text like any other.
+                var shown = System.Text.RegularExpressions.Regex.IsMatch(formatVersion, @"^cultcache\.store\.v[0-9]+$");
+                var refusal = Assert.Throws<CultStoreUnreadableException>(() => cache.AddBackingStore(new DirectoryMessagePackBackingStore(manifest)))!;
+                Assert.That(refusal.Path, Is.EqualTo(manifest));
+                Assert.That(refusal.Message.Contains(" is " + formatVersion + ";", StringComparison.Ordinal), Is.EqualTo(shown), refusal.Message);
                 Assert.That(cache.BackingStores, Is.Empty);
                 Assert.That(File.ReadAllBytes(manifest), Is.EqualTo(bytes));
             }
