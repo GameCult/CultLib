@@ -234,7 +234,8 @@ namespace GameCult.Caching.Tests
             using (var other = Open(path, Full, directory))
                 other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
 
-            Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)));
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)))!;
+            Assert.That(refusal.Message, Does.StartWith("Record 'd' (schema id '" + WidgetId + "'"), "one refused key reads as one record");
             var afterRefusal = cache.Get(D);
             Land(cache, Write.Commit, E, DeckOf("e"));
             var afterLaterWrite = cache.Get(D);
@@ -296,7 +297,8 @@ namespace GameCult.Caching.Tests
 
             Assert.Multiple(() =>
             {
-                Assert.That(refusal.Message, Does.Contain("'d'").And.Contain("'d2'").And.Not.Contain(Canary));
+                Assert.That(refusal.RecordKey, Is.EqualTo("d"), "the first refused key in key order");
+                Assert.That(refusal.Message, Does.Contain("Records 'd' (schema id '" + WidgetId + "'").And.Contain("'d2' (schema id '" + WidgetId + "'").And.Not.Contain(Canary));
                 Assert.That(cache.Get(D), Is.Null);
                 Assert.That(cache.Get(d2), Is.Null);
                 Assert.That(EmittedDocumentTypes.Read(cache.Get(E)!, "Name"), Is.EqualTo("e"), "a record the write did not touch stays");
@@ -327,6 +329,27 @@ namespace GameCult.Caching.Tests
             });
         }
 
+        // The write carried the file's record for d; it did not store this cache's copy, so the copy's stamp is still what the
+        // cache read, and a condition on it still fails against the other writer's record.
+        [Test]
+        public void ACarriedForeignRecordDoesNotRestampTheStaleCopyTheCacheHolds(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = Seeded("restamp.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+
+            Land(cache, write, E, DeckOf("e"));
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(D, cache.Get(D));
+                batch.Upsert(Deck, DeckOf("e2"), E);
+            }), Is.False, "the cache never read the other writer's record");
+        }
+
         // The same when the stale copy was only held, never written: a flush after the other writer's record landed refuses once.
         [Test]
         public void AFlushRefusedForAStaleCopyOfAForeignRecordRefusesOnce([Values(false, true)] bool directory)
@@ -344,13 +367,52 @@ namespace GameCult.Caching.Tests
             Assert.That(Stored(path, D), Is.EqualTo(widget));
         }
 
-        // The directory store stages a removal as its own pending key: a refusal takes it too.
+        // A key staged and not yet written is refused by any write that carries it, whatever key that write names: an unconditional
+        // commit writes what a flush would.
         [Test]
-        public void AStagedRemovalOfARecordAnotherWriterMadeForeignIsRefusedOnceAndThenGone()
+        public void AStagedWriteIsRefusedByACommitOfAnotherRecord([Values(false, true)] bool directory)
         {
-            var path = Seeded("staged-removal.cc", directory: true);
-            using var cache = Open(path, DeckOnly, directory: true);
-            using (var other = Open(path, Full, directory: true))
+            var path = Seeded("staged-commit.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(Deck, DeckOf("e"), E)))!;
+
+            Assert.That(refusal.RecordKey, Is.EqualTo(D.Value));
+            Assert.That(Stored(path, D), Is.EqualTo(widget));
+        }
+
+        // What a write landed is no longer staged: a record that becomes foreign afterwards is the other writer's, and writing
+        // another record is not refused for it.
+        [Test]
+        public void AWrittenRecordIsNoLongerStagedSoALaterForeignRecordDoesNotRefuseOtherWrites(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write landed)
+        {
+            var path = Seeded("landed.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            Land(cache, landed, D, DeckOf("d again"));
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            Land(cache, Write.Commit, E, DeckOf("e"));
+
+            Assert.That(Stored(path, D), Is.EqualTo(widget));
+            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+        }
+
+        // A staged removal is a write of its own: a refusal takes it too.
+        [TestCase(false)]
+        [TestCase(true)]
+        public void AStagedRemovalOfARecordAnotherWriterMadeForeignIsRefusedOnceAndThenGone(bool directory)
+        {
+            var path = Seeded("staged-removal.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
                 other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
             var widget = Stored(path, D);
 
@@ -364,12 +426,13 @@ namespace GameCult.Caching.Tests
 
         // What a refusal leaves staged is exactly what it did not refuse: the other record's write still lands on the next flush,
         // and a store with nothing left staged is clean.
-        [Test]
-        public void ARefusalLeavesStagedWhatItDidNotRefuse()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ARefusalLeavesStagedWhatItDidNotRefuse(bool directory)
         {
-            var path = Seeded("pending.cc", directory: true);
-            using var cache = Open(path, DeckOnly, directory: true);
-            using (var other = Open(path, Full, directory: true))
+            var path = Seeded("pending.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
                 other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
 
             cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();

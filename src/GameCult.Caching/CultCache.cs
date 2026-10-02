@@ -3625,7 +3625,8 @@ namespace GameCult.Caching
 
         protected FileInfo FileInfo { get; }
 
-        // Keys this cache has written or removed here since the store last loaded or wrote them: the only keys a foreign record can refuse.
+        // Keys this cache has written or removed here since the store last wrote them: the only keys a foreign record can refuse.
+        // A key is staged exactly while the store is dirty with it, and a pull runs only on a clean store.
         private readonly HashSet<string> _staged = new(StringComparer.Ordinal);
 
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
@@ -3652,7 +3653,6 @@ namespace GameCult.Caching
             if (IsDirty)
                 return;
 
-            _staged.Clear();
             var snapshot = ReadSnapshot();
             if (snapshot == null)
             {
