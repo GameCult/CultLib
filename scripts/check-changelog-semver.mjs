@@ -11,7 +11,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // The exact heading spelling the policy mandates for a breaking-change
@@ -342,7 +342,8 @@ const UNMEASURED_NOTICE =
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const { package: packageName, changelog, version, "tag-prefix": tagPrefix, cwd = process.cwd() } = args;
-  const built = args["api-built"] ?? [];
+  // The tool runs from scripts/api-gate, so a path given relative to this process is made absolute first.
+  const built = (args["api-built"] ?? []).map((path) => resolve(path));
   if (!packageName || !changelog || !version || !tagPrefix || (built.length > 0) !== Boolean(args["api-baseline-path"])) {
     console.error(
       "usage: check-changelog-semver.mjs --package <name> --changelog <path> --version <x.y.z> --tag-prefix <prefix> [--cwd <dir>] [--first-release]\n" +
@@ -390,7 +391,7 @@ function main() {
       previousVersion,
       baselinePath: args["api-baseline-path"],
       built,
-      refs: args["api-refs"] ?? [],
+      refs: (args["api-refs"] ?? []).map((path) => resolve(path)),
       declaredNew: args["api-new"] ?? [],
       cwd,
     });

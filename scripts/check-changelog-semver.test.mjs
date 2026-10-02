@@ -820,3 +820,18 @@ test("refusals never repeat what the inputs contain", () => {
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+test("measured: built and reference paths given relative to the process are read from there", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-relative-"));
+    try {
+      mkdirSync(join(scratch, "refs"));
+      copyFileSync(trimmedWidget(), join(scratch, "GameCult.Widget.dll"));
+      const args = measuredArgs(dir, "1.1.0", ["GameCult.Widget.dll"], { refs: ["refs"] });
+      // The tool is started elsewhere, so an unresolved relative path would not be found.
+      assert.match(runCheckerExpectFailure(dir, args, { processCwd: scratch }), /Gone/);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
