@@ -37,5 +37,5 @@ gradient and the exact pruning are new here.
   `src/CultMath/math.Phacelle.cs`, `src/CultMath/CultPhasor.cs`,
   `shaders/CultMath.Phacelle.hlsl` and the Unity copy of that include. Each
   carries the MPL-2.0 header and this attribution. The rest of CultMath is MIT,
-  so the `GameCult.Math` NuGet package declares `MIT AND MPL-2.0` and ships this
-  file. The Unity package as a whole is MPL-2.0.
+  so the `GameCult.Math` NuGet package and the `org.gamecult.cultmath` Unity
+  package both declare `MIT AND MPL-2.0` and ship this file.
