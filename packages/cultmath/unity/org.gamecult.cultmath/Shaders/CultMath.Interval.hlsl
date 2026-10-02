@@ -87,7 +87,7 @@ float2 cultmath_iv_snoise_ball(float3 centre, float radius)
     return float2(max(n - e, -1.0), min(n + e, 1.0));
 }
 
-// Octave sum of cultmath_iv_snoise_ball, compounding frequency and amplitude as cultmath_fbm_grad does.
+// Octave sum of cultmath_iv_snoise_ball, compounding frequency and amplitude as the value-and-gradient fBm does.
 float2 cultmath_iv_fbm_ball(float3 centre, float radius, int octaves, float lacunarity, float gain)
 {
     octaves = clamp(octaves, 0, 16);

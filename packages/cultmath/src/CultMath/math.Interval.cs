@@ -11,10 +11,11 @@ public static partial class math
     // the libm is not required to be, the bound is widened by exactly one ulp, and the doc comment
     // says so. There is no empty interval: a caller that needs "provably empty" tests hi < cutoff.
 
-    // Lipschitz constant of snoise(float3) in its input: an upper bound on |snoise_grad(p).xyz|. Provenance:
-    // NoiseBoundTests.MeasureLipschitz (slow, explicit) takes the largest |snoise_grad| over 1e6 seeded
-    // points, refines the 1e4 largest by gradient ascent, and multiplies the refined maximum by 1.10;
-    // NoiseBoundTests.LipschitzConstantPinsSampledGradients pins this value against a fast re-measure.
+    // Lipschitz constant of snoise(float3) in its input: an upper bound on the length of its analytic
+    // gradient. Provenance: NoiseBoundTests.MeasureLipschitz (slow, explicit) takes the largest gradient
+    // length over 1e6 seeded points, refines the 1e4 largest by gradient ascent, and multiplies the
+    // refined maximum by 1.10; NoiseBoundTests.LipschitzConstantPinsSampledGradients pins this value
+    // against a fast re-measure and the ascent from MeasureLipschitz's witness.
     // Empirical with a margin, not a proof; the enclosure tests are the defence. A change to the
     // snoise kernel must re-run MeasureLipschitz and re-pin this constant.
     public const float SNOISE_LIPSCHITZ = 10.099261f;
@@ -142,10 +143,11 @@ public static partial class math
     }
 
     /// <summary>
-    /// Encloses fbm_grad(x, octaves, lacunarity, gain).w for every x within distance radius of centre: the
-    /// octave sum of iv_snoise_ball(centre * f_i, radius * |f_i|) scaled by a_i, with frequency f_i and
-    /// amplitude a_i compounded exactly as fbm_grad compounds them. octaves is clamped to [0, 16] like
-    /// fbm_grad.
+    /// Encloses the fBm value, sum of a_i * snoise(x * f_i) over the octaves, for every x within distance
+    /// radius of centre: the octave sum of iv_snoise_ball(centre * f_i, radius * |f_i|) scaled by a_i,
+    /// with frequency f_i and amplitude a_i compounded exactly as the value-and-gradient fBm compounds
+    /// them (its .w is what NoiseBoundTests.FbmBallEnclosesPoints encloses). octaves is clamped to [0, 16]
+    /// as there.
     /// </summary>
     public static float2 iv_fbm_ball(float3 centre, float radius, int octaves, float lacunarity, float gain)
     {
