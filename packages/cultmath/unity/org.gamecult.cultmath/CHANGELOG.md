@@ -5,6 +5,37 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
+## [0.3.0]
+
+### Breaking
+
+- `math.snoise(float3)` and `math.snoise(float2)`, and their HLSL mirrors
+  `cultmath_snoise`, return different values. The kernel now follows
+  stegu/webgl-noise: the falloff `r^2` constant is 0.5 (was 0.6), the output
+  scale is 105 (was 42), and 2D and 3D share one permutation offset of +10.
+  This removes the value discontinuities the 3D kernel had at simplex cell
+  boundaries. Any content seeded from `snoise` changes; regenerate it when
+  you take this version.
+
+### Added
+
+- `math.smin_grad`: smooth minimum with gradient, for `float4` operands
+  carrying the gradient in `xyz` and the value in `w`.
+- `math.cellular` and the `CultCellular` result struct: cellular (Worley)
+  noise returning the gradient and distance to the nearest feature points.
+- `math.snoise_grad`, `math.fbm_grad` and `math.ridged_grad`: simplex noise,
+  fractal Brownian motion and ridged multifractal with analytic gradients,
+  returned as `float4` with the gradient in `xyz` and the value in `w`.
+- `math.phacelle` and the `CultPhasor` result struct: Phacelle noise with
+  gradient. `math.Phacelle.cs`, `CultPhasor.cs` and
+  `Shaders/CultMath.Phacelle.hlsl` are MPL-2.0 (see
+  `THIRD-PARTY-NOTICES.md`).
+- `BoundedLeastSquares`: an allocation-free, deterministic bounded
+  least-squares solver (`Solve`) with a status result and the input contract
+  documented on the type.
+- The matching `cultmath_*` HLSL mirrors of the functions above in
+  `Shaders/CultMath.hlsl` and `Shaders/CultMath.Phacelle.hlsl`.
+
 ## [0.2.4]
 
 ### Added
