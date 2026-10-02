@@ -3007,9 +3007,7 @@ fn stage_and_replace(mut staged: File, staged_path: &Path, bytes: &[u8], destina
         .and_then(|()| staged.sync_all())
         .with_context(|| format!("failed to sync {}", staged_path.display()))?;
     drop(staged);
-    injected_write_fault(WriteStep::Rename)
-        .map_err(anyhow::Error::from)
-        .and_then(|()| replace_file_atomically(staged_path, destination))
+    replace_file_atomically(staged_path, destination)
 }
 
 /// Releases a lock taken around `result`'s action and returns that result.
@@ -3085,7 +3083,7 @@ fn remove_abandoned_staging_files(destination: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
-    fs::rename(staged, destination).with_context(|| {
+    injected_write_fault(WriteStep::Rename).and_then(|()| fs::rename(staged, destination)).with_context(|| {
         format!(
             "failed to atomically replace {} with {}",
             destination.display(),
@@ -3100,6 +3098,8 @@ fn replace_file_atomically(staged: &Path, destination: &Path) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+
+    injected_write_fault(WriteStep::Rename).context("failed to atomically replace the store")?;
 
     let staged_wide = staged
         .as_os_str()
