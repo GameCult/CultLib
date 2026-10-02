@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { readSingleFileStore } from "@gamecult/cultcache-ts";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
@@ -27,7 +28,6 @@ export const IDUNN_RUNTIME_CANDIDATE_BIND_ENVIRONMENT = "GAMECULT_IDUNN_CANDIDAT
 const PROVIDER_ID_DOMAIN = Buffer.from("gamecult.provider-health.identity.v1\0", "utf8");
 const PROVIDER_PROTECTOR_CONTEXT = "gamecult-provider-health-identity-v1";
 const ACTIVATION_ID_DOMAIN = Buffer.from("idunn.runtime-activation.id.v1\0", "utf8");
-const CULTCACHE_STORE_FORMAT = "cultcache.store.v1";
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 // Limit: more than this many warmings signed between Idunn's observation and
 // assertWriteLease would push the leased one out and refuse a valid lease.
@@ -318,25 +318,13 @@ function deepFreeze<T>(value: T): T {
 }
 
 function readAuthorityRecord(filePath: string, type: string, schemaId: string): { payload: Uint8Array } {
-  const decoded = decode(fs.readFileSync(filePath));
-  if (!Array.isArray(decoded) || decoded[0] !== CULTCACHE_STORE_FORMAT || !Array.isArray(decoded[1]) || !Array.isArray(decoded[2])) {
-    throw new Error(`Idunn authority file ${filePath} is not a CultCache v1 store.`);
-  }
-  if (decoded[2].length !== 1) throw new Error(`Idunn authority file ${filePath} must contain exactly one record.`);
-  const matchingRecords = (decoded[2] as unknown[]).filter((raw) => {
-    const row = array(raw, 4, "CultCache record");
-    return row[1] === schemaId;
-  });
-  if (matchingRecords.length !== 1) throw new Error(`Idunn authority file must contain exactly one ${schemaId} record.`);
-  const row = array(matchingRecords[0], 4, "CultCache record");
-  const catalog = (decoded[1] as unknown[]).find((raw) => {
-    const entry = Array.isArray(raw) ? raw : [];
-    return entry[0] === schemaId;
-  });
-  const catalogEntry = array(catalog, 7, "CultCache schema catalog entry");
-  if (catalogEntry[1] !== type) throw new Error(`Idunn authority record has unexpected CultCache type ${String(catalogEntry[1])}.`);
-  if (!(row[3] instanceof Uint8Array)) throw new Error("Idunn authority payload is not MessagePack bytes.");
-  return { payload: row[3] };
+  const store = readSingleFileStore(filePath);
+  if (store.absent) throw new Error(`Idunn authority file ${filePath} does not exist.`);
+  if (store.envelopes.length !== 1) throw new Error(`Idunn authority file ${filePath} must contain exactly one record.`);
+  const record = store.envelopes[0]!;
+  if (record.schemaId !== schemaId) throw new Error(`Idunn authority file must contain exactly one ${schemaId} record.`);
+  if (record.type !== type) throw new Error(`Idunn authority record has unexpected CultCache type ${record.type}.`);
+  return { payload: record.payload };
 }
 
 function decodeExpected(payload: Uint8Array): ExpectedIncarnation {

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import dgram from "node:dgram";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { StoreUnreadableError } from "@gamecult/cultcache-ts";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
@@ -54,7 +56,7 @@ function expectedFacts(set: FixtureSet) {
 function openAuthority(
   context: TestContext,
   set: FixtureSet,
-  options: { machineId?: "etc" | "dbus"; lease?: string } = {},
+  options: { machineId?: "etc" | "dbus"; lease?: string; bundle?: string } = {},
 ): IdunnRuntimeAuthority {
   const facts = expectedFacts(set);
   const originalEnvironment = { ...process.env };
@@ -62,7 +64,7 @@ function openAuthority(
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
   });
-  process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = path.join(FIXTURES, set);
+  process.env.GAMECULT_IDUNN_RUNTIME_BUNDLE = options.bundle ?? path.join(FIXTURES, set);
   process.env.GAMECULT_IDUNN_CANDIDATE_BIND = facts.candidate;
   if (options.lease) process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE = path.join(FIXTURES, set, options.lease);
   else delete process.env.GAMECULT_IDUNN_PROCESS_WRITE_LEASE;
@@ -82,6 +84,22 @@ function openAuthority(
     return realReadFileSync(filePath as never, ...args as never[]);
   });
   return loadIdunnRuntimeAuthorityFromEnvironment(facts.target, facts.healthContract);
+}
+
+/** A copy of one Rust-written bundle in a scratch directory, with `change` applied to the bytes of the named file. */
+function bundleWith(context: TestContext, set: FixtureSet, file: string, change: (bytes: Buffer) => Buffer | undefined): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "idunn-authority-"));
+  context.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const name of ["expected.cc", "activation.cc"]) {
+    const bytes = fixtureFile(set, name);
+    const changed = name === file ? change(bytes) : bytes;
+    if (changed !== undefined) fs.writeFileSync(path.join(dir, name), changed);
+  }
+  return dir;
+}
+
+function withHeader(header: string): (bytes: Buffer) => Buffer {
+  return (bytes) => Buffer.from(encode([header, ...(decode(bytes) as unknown[]).slice(1)]));
 }
 
 function signerFor(context: TestContext, set: FixtureSet, capacityDelta = 0, lease?: string) {
@@ -132,6 +150,36 @@ test("rejects a credential file holding more than one envelope", (context) => {
     /exactly one envelope/,
   );
 });
+
+// The authority files are read by cultcache-ts's one store reader, so a store it reads is read here and a file it
+// refuses is refused here with the same typed error and the same text.
+for (const file of ["expected.cc", "activation.cc"]) {
+  test(`${file}: a store marked for element ids opens, as the one reader reads it`, (context) => {
+    const bundle = bundleWith(context, "web", file, withHeader("cultcache.store.v3"));
+    assert.equal(openAuthority(context, "web", { bundle }).expected.target, expectedFacts("web").target);
+  });
+
+  test(`${file}: a zero-byte file is refused as unreadable, not read as an empty store or a missing one`, (context) => {
+    const bundle = bundleWith(context, "web", file, () => Buffer.alloc(0));
+    assert.throws(() => openAuthority(context, "web", { bundle }), StoreUnreadableError);
+  });
+
+  test(`${file}: a file that is not there is refused`, (context) => {
+    const bundle = bundleWith(context, "web", file, () => undefined);
+    assert.throws(() => openAuthority(context, "web", { bundle }), /does not exist/);
+  });
+
+  test(`${file}: a refused header is never echoed, whether or not it starts at the store prefix`, (context) => {
+    for (const header of ["cultcache.store.SECRET", "cultcache.store.SECRETcultcache.store.v9", "SECRETcultcache.store.v9", "cultcache.store.v9"]) {
+      const bundle = bundleWith(context, "web", file, withHeader(header));
+      assert.throws(
+        () => openAuthority(context, "web", { bundle }),
+        (error: Error) => error instanceof StoreUnreadableError && (header === "cultcache.store.v9" ? error.message.includes(header) : !error.message.includes("SECRET")),
+        header,
+      );
+    }
+  });
+}
 
 function presenceSlot(document: { payload: Uint8Array }, slot: number): unknown {
   return (decode(document.payload) as unknown[])[slot];
