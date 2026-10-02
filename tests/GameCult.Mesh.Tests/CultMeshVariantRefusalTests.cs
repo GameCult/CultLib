@@ -38,26 +38,7 @@ public sealed class CultMeshVariantRefusalTests
         message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
     }
 
-    [Test]
-    public void ReadSingleFileDocument_RefusesExtraRecordSlotInTheLegacyCatalogLayoutToo()
-    {
-        var message = Refusal("legacy-catalog-extra-slot.msgpack").Message;
-        message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
-    }
-
-    // The older catalog layout is read by the same store reader, so it is held to one array too: the same store with bytes after it
-    // is refused, and only the bytes make the difference.
-    [Test]
-    public void ReadSingleFileDocument_ReadsTheLegacyCatalogLayoutButNotWithBytesAfterIt()
-    {
-        CultMesh.ReadSingleFileDocumentPayload(VectorPath("legacy-catalog-plain.msgpack"), new CultRecordKey("item:bellows"), ItemSchemaId)
-            .Should().NotBeEmpty();
-
-        Refusal("legacy-catalog-trailing.msgpack").Message.Should().Contain("after its MessagePack array");
-    }
-
-    // A store in the current layout with one catalog slot malformed is refused as CultCache refuses it. It is not the older layout,
-    // so it is not read with the older reader, which would take the malformed canonical schema slot for a slot to skip.
+    // A store in the current layout with one catalog slot malformed is refused as CultCache refuses it.
     [TestCase("current-catalog-bad-canonical.msgpack")]
     [TestCase("current-catalog-bad-members.msgpack")]
     [TestCase("current-catalog-bad-compat.msgpack")]

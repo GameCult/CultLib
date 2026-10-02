@@ -1,11 +1,9 @@
 using System;
-using System.Buffers;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
-using MessagePack;
 
 namespace GameCult.Mesh
 {
@@ -241,9 +239,7 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
-            // The file being replaced is read first, by the reader every read of it uses: one this runtime cannot read refuses the
-            // write instead of being overwritten.
-            var existing = File.Exists(path) ? ReadSingleFileSnapshot(path) : null;
+            CultPersistedStoreSnapshot? existing = null;
 
             // A typed write sees the document it replaces the file with, so its ids decide. A raw payload is opaque: the writer
             // cannot see whether it holds ids, so a file already marked stays marked.
@@ -263,96 +259,6 @@ namespace GameCult.Mesh
                 }
             };
 
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
-
-            WriteFileAtomically(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-        }
-
-        // Every refusal is a CultStoreUnreadableException naming the file. A store whose catalog entries are in the older layout is
-        // read by the same store reader with the older entry reader, so it is judged by the same framing, slot count and records.
-        // Only a store that is in the older layout goes there; any other refusal stands as the current reader gave it.
-        private static CultPersistedStoreSnapshot ReadSingleFileSnapshot(string path)
-        {
-            var bytes = File.ReadAllBytes(path);
-            CultPersistedStoreSnapshot snapshot;
-            try
-            {
-                try
-                {
-                    snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
-                }
-                catch (CultStoreUnreadableException) when (HasOlderCatalogLayout(bytes))
-                {
-                    snapshot = CultDocumentMessagePackSerialization.ReadStore(bytes, ReadLegacySchemaCatalogEntry);
-                }
-
-                CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-            }
-            catch (CultStoreUnreadableException ex) when (ex.Path == null)
-            {
-                throw new CultStoreUnreadableException(ex.Message, path, ex.InnerException);
-            }
-
-            return snapshot;
-        }
-
-        // The older layout puts the content hash, a string, at catalog entry slot 5, where the current layout has the array of
-        // compatible schema ids.
-        private static bool HasOlderCatalogLayout(byte[] bytes)
-        {
-            try
-            {
-                var reader = new MessagePackReader(bytes);
-                if (reader.ReadArrayHeader() != 3)
-                    return false;
-                reader.Skip();
-                var entries = reader.ReadArrayHeader();
-                for (var entry = 0; entry < entries; entry++)
-                {
-                    var fields = reader.ReadArrayHeader();
-                    for (var field = 0; field < fields; field++)
-                    {
-                        if (field == 5 && reader.NextMessagePackType == MessagePackType.String)
-                            return true;
-                        reader.Skip();
-                    }
-                }
-
-                return false;
-            }
-            catch (Exception ex) when (ex is EndOfStreamException or MessagePackSerializationException or InvalidOperationException)
-            {
-                return false;
-            }
-        }
-
-        private static CultSchemaCatalogEntry ReadLegacySchemaCatalogEntry(ref MessagePackReader reader)
-        {
-            var fieldCount = reader.ReadArrayHeader();
-            var entry = new CultSchemaCatalogEntry();
-            if (fieldCount > 0) entry.SchemaId = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 1) entry.SchemaName = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 2) entry.SchemaVersion = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 3) entry.CanonicalSchemaJson = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 4) reader.Skip();
-            if (fieldCount > 5) entry.ContentHash = reader.ReadString() ?? string.Empty;
-            if (fieldCount > 6)
-            {
-                var memberCount = reader.ReadArrayHeader();
-                for (var index = 0; index < memberCount; index++)
-                    reader.Skip();
-            }
-
-            for (var index = 7; index < fieldCount; index++)
-                reader.Skip();
-
-            entry.CompatibleSchemaIds = string.IsNullOrWhiteSpace(entry.SchemaId)
-                ? Array.Empty<string>()
-                : new[] { entry.SchemaId };
-            entry.Members = Array.Empty<CultSchemaMemberCatalogEntry>();
-            return entry;
         }
 
         private static bool PublishesSchema(CultSchemaCatalogEntry[] catalog, string schemaId)
@@ -360,15 +266,6 @@ namespace GameCult.Mesh
             return catalog.Any(entry =>
                 string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal) ||
                 entry.CompatibleSchemaIds.Any(candidate => string.Equals(candidate, schemaId, StringComparison.Ordinal)));
-        }
-
-        private static void WriteFileAtomically(string path, byte[] bytes)
-        {
-            var tempPath = path + ".tmp";
-            File.WriteAllBytes(tempPath, bytes);
-            if (File.Exists(path))
-                File.Delete(path);
-            File.Move(tempPath, path);
         }
     }
 }

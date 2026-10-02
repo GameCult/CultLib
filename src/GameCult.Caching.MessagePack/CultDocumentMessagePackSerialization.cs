@@ -185,13 +185,7 @@ public static class CultDocumentMessagePackSerialization
     /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
     /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
     /// </summary>
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) => ReadStore(payload, ReadSchemaCatalogEntry);
-
-    internal delegate CultSchemaCatalogEntry CatalogEntryReader(ref MessagePackReader reader);
-
-    // The one store reader. A caller with an older catalog layout supplies its own entry reader; the framing, the slot count
-    // and the records are judged here, once.
-    internal static CultPersistedStoreSnapshot ReadStore(byte[] payload, CatalogEntryReader readCatalogEntry)
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
     {
         try
         {
@@ -215,7 +209,7 @@ public static class CultDocumentMessagePackSerialization
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
             for (var index = 0; index < catalogCount; index++)
             {
-                snapshot.SchemaCatalog[index] = readCatalogEntry(ref reader);
+                snapshot.SchemaCatalog[index] = ReadSchemaCatalogEntry(ref reader);
             }
 
             var recordCount = reader.ReadArrayHeader();
