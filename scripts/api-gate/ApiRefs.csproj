@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Restores the netstandard2.1 reference assemblies for scripts/check-changelog-semver.mjs.
+       Not built: PackageDownload only fetches the package into ./packages. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RestorePackagesPath>$(MSBuildThisFileDirectory)packages</RestorePackagesPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageDownload Include="NETStandard.Library.Ref" Version="[2.1.0]" />
+  </ItemGroup>
+</Project>

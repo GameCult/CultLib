@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
@@ -248,18 +248,50 @@ test("CLI: fails when the changelog claims breaking under too small a bump", () 
   });
 });
 
-test("CLI: does not re-litigate a version already published as a tag", () => {
+test("CLI: a tag for the version being released does not skip the check", () => {
   withTempGitRepo((dir) => {
     execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
     execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
-    // 1.0.0 itself is a scar: its own changelog claims breaking under a
-    // patch-looking first release. Rebuilding it locally (no new version)
-    // must not fail just because history already shipped that way.
-    execFileSync("git", ["tag", "widget-v0.9.0"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.1"], { cwd: dir });
     const changelogPath = join(dir, "CHANGELOG.md");
-    writeFileSync(changelogPath, changelogFor("1.0.0", { breaking: true }));
-    const output = runChecker(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"]);
-    assert.match(output, /already published/);
+    writeFileSync(changelogPath, changelogFor("1.0.1", { breaking: true }));
+    const output = runCheckerExpectFailure(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.1", "--tag-prefix", "widget"]);
+    assert.match(output, /needs a major bump/);
+  });
+});
+
+test("CLI: no previous tag, or tags that cannot be read, refuse unless the first release is declared", () => {
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "other-v1.0.0"], { cwd: dir });
+    const changelogPath = join(dir, "CHANGELOG.md");
+    writeFileSync(changelogPath, changelogFor("1.0.0"));
+    const args = ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"];
+    assert.match(runCheckerExpectFailure(dir, args), /nothing to compare against; if this is the package's first release, declare it with --first-release/);
+    assert.match(runChecker(dir, [...args, "--first-release"]), /first release \(1\.0\.0\)/);
+    // A flag takes no value: the option after it is still read.
+    assert.match(runChecker(dir, ["--first-release", ...args]), /first release/);
+  });
+  const notARepo = mkdtempSync(join(tmpdir(), "cultlib-semver-norepo-"));
+  try {
+    const changelogPath = join(notARepo, "CHANGELOG.md");
+    writeFileSync(changelogPath, changelogFor("1.0.0"));
+    const args = ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"];
+    assert.match(runCheckerExpectFailure(notARepo, args), /tags of --cwd could not be read/);
+    assert.match(runChecker(notARepo, [...args, "--first-release"]), /first release/);
+  } finally {
+    rmSync(notARepo, { recursive: true, force: true });
+  }
+});
+
+test("CLI: declaring a first release while an earlier tag exists is refused", () => {
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    const changelogPath = join(dir, "CHANGELOG.md");
+    writeFileSync(changelogPath, changelogFor("1.1.0"));
+    const output = runCheckerExpectFailure(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.1.0", "--tag-prefix", "widget", "--first-release"]);
+    assert.match(output, /--first-release was declared but widget-v1\.0\.0 already exists/);
   });
 });
 
@@ -273,16 +305,18 @@ const fixtureRoot = join(tmpdir(), "cultlib-semver-fixtures");
 
 // Builds `source` into <assemblyName>.dll (netstandard2.1, like the shipped
 // assemblies) once per distinct (name, source) and returns the dll's path.
-function buildAssembly(assemblyName, source) {
+function buildAssembly(assemblyName, source, references = []) {
   const dir = join(fixtureRoot, createHash("sha256").update(`${assemblyName}
-${source}`).digest("hex").slice(0, 16));
+${source}
+${references.join("|")}`).digest("hex").slice(0, 16));
   const dll = join(dir, "out", `${assemblyName}.dll`);
   if (!existsSync(dll)) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "Fixture.csproj"),
       `<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>netstandard2.1</TargetFramework>` +
-        `<AssemblyName>${assemblyName}</AssemblyName><Deterministic>true</Deterministic></PropertyGroup></Project>`,
+        `<AssemblyName>${assemblyName}</AssemblyName><Deterministic>true</Deterministic></PropertyGroup>` +
+        `<ItemGroup>${references.map((path) => `<Reference Include="${basename(path, ".dll")}"><HintPath>${path}</HintPath></Reference>`).join("")}</ItemGroup></Project>`,
     );
     writeFileSync(join(dir, "Source.cs"), source);
     execFileSync("dotnet", ["build", "-c", "Release", "-o", "out", "--nologo", "-v", "q"], { cwd: dir, stdio: "pipe" });
@@ -311,12 +345,13 @@ function withReleasedBaseline({ baseline, afterTag = baseline, previous = "1.0.0
   });
 }
 
-function measuredArgs(dir, version, builtPaths, { breaking = false } = {}) {
+function measuredArgs(dir, version, builtPaths, { breaking = false, news = [], refs = [] } = {}) {
   const changelogPath = join(dir, "CHANGELOG.md");
   writeFileSync(changelogPath, changelogFor(version, { breaking }));
   return [
     "--package", "widget", "--changelog", changelogPath, "--version", version, "--tag-prefix", "widget",
     "--api-baseline-path", PLUGINS, ...builtPaths.flatMap((path) => ["--api-built", path]),
+    ...news.flatMap((name) => ["--api-new", name]), ...refs.flatMap((refDir) => ["--api-refs", refDir]),
   ];
 }
 
@@ -365,7 +400,7 @@ test("measured: a declared break with nothing measured still passes", () => {
   });
 });
 
-test("measured: a removed GameCult.* assembly is a break, a new assembly and a removed third-party one are not", () => {
+test("measured: a removed GameCult.* assembly is a break, a declared new assembly and a removed third-party one are not", () => {
   const other = buildAssembly("GameCult.Other", "namespace O { public class D {} }");
   const thirdParty = buildAssembly("Vendor.Lib", "namespace V { public class E {} }");
   const baseline = { "GameCult.Widget.dll": oldWidget(), "GameCult.Other.dll": other, "Vendor.Lib.dll": thirdParty };
@@ -375,7 +410,7 @@ test("measured: a removed GameCult.* assembly is a break, a new assembly and a r
     assert.doesNotMatch(refused, /Vendor\.Lib/);
     assert.match(refused, /breaks 1 public API member/);
     const brandNew = buildAssembly("GameCult.Brand", "namespace B { public class F {} }");
-    const ok = runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget(), other, brandNew]));
+    const ok = runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget(), other, brandNew], { news: ["GameCult.Brand.dll"] }));
     assert.match(ok, /1\.0\.1 is a patch bump/);
   });
 });
@@ -398,7 +433,7 @@ test("readApiCompatRun: diagnostics are breaks, an empty failure is a failure, a
   assert.deepEqual(readApiCompatRun({ status: 0, output: "Could not resolve reference 'netstandard.dll'\n" }), { breaks: [] });
 });
 
-test("measured: removed inherited members are caught although netstandard cannot be resolved", () => {
+test("measured: removed inherited members are caught", () => {
   // The shipped assemblies are netstandard2.1 and ApiCompat cannot resolve netstandard.dll
   // for them; both ways an inherited member can disappear are still reported.
   const viaNetstandardBase = buildAssembly("GameCult.Widget", "namespace N { public class C : System.Collections.Generic.List<int> { } }");
@@ -415,12 +450,50 @@ test("measured: removed inherited members are caught although netstandard cannot
   });
 });
 
-test("measured: an already-published version is not measured", () => {
+test("measured: netstandard reference assemblies keep non-breaking changes to netstandard-derived types clean", () => {
+  const pass = (baseline, built) =>
+    withReleasedBaseline({ baseline: { "GameCult.Widget.dll": baseline } }, (dir) => {
+      assert.match(runChecker(dir, measuredArgs(dir, "1.0.1", [built])), /1\.0\.1 is a patch bump/);
+    });
+  // Inserting a class between the type and its netstandard base keeps every old base in the chain.
+  pass(
+    buildAssembly("GameCult.Widget", "namespace N { public class C : System.Exception { } }"),
+    buildAssembly("GameCult.Widget", "namespace N { public class C : System.ArgumentException { } }"),
+  );
+  // Dropping a member that hid a netstandard member leaves the inherited one visible.
+  pass(
+    buildAssembly("GameCult.Widget", 'namespace N { public class C : System.Exception { public new string Message => "m"; } }'),
+    buildAssembly("GameCult.Widget", "namespace N { public class C : System.Exception { } }"),
+  );
+});
+
+test("measured: a base type moved to a subclass in another assembly resolves through --api-refs and the baseline directory", () => {
+  const oldA = buildAssembly("Vendor.A", "namespace A { public class Base { public void Inh() {} } }");
+  const newA = buildAssembly("Vendor.A", "namespace A { public class Base { public void Inh() {} } public class Mid : Base { } }");
+  const oldB = buildAssembly("GameCult.Widget", "namespace B { public class D : A.Base { } }", [oldA]);
+  const newB = buildAssembly("GameCult.Widget", "namespace B { public class D : A.Mid { } }", [newA]);
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldB, "Vendor.A.dll": oldA } }, (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-refs-"));
+    try {
+      mkdirSync(join(scratch, "built"));
+      mkdirSync(join(scratch, "refs"));
+      copyFileSync(newB, join(scratch, "built", "GameCult.Widget.dll"));
+      copyFileSync(newA, join(scratch, "refs", "Vendor.A.dll"));
+      const built = join(scratch, "built", "GameCult.Widget.dll");
+      // The new base assembly is reachable only through --api-refs: the checker must pass it on.
+      assert.match(runChecker(dir, measuredArgs(dir, "1.0.1", [built], { refs: [join(scratch, "refs")] })), /1\.0\.1 is a patch bump/);
+      assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [built])), /CP0007/);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+test("measured: a local tag of the released version does not skip the measurement", () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    const junk = join(dir, "junk.dll");
-    writeFileSync(junk, "junk");
-    const output = runChecker(dir, measuredArgs(dir, "1.0.0", [junk], { breaking: true }));
-    assert.match(output, /already published/);
+    execFileSync("git", ["tag", "widget-v1.1.0"], { cwd: dir });
+    const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.1.0", [trimmedWidget()]));
+    assert.match(output, /Gone/);
   });
 });
 
@@ -434,13 +507,55 @@ test("measured: the baseline is the tag's blob, not the working tree's DLL", () 
   );
 });
 
-test("measured: a first release measures nothing", () => {
+test("measured: a declared first release measures nothing", () => {
   withTempGitRepo((dir) => {
     execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
     const junk = join(dir, "junk.dll");
     writeFileSync(junk, "junk");
-    const output = runChecker(dir, measuredArgs(dir, "1.0.0", [junk]));
+    const output = runChecker(dir, [...measuredArgs(dir, "1.0.0", [junk]), "--first-release"]);
     assert.match(output, /first release/);
+    assert.doesNotMatch(output, /public API measured/);
+  });
+});
+
+test("measured: measuring nothing refuses, naming what is missing", () => {
+  const fail = (dir, args) => runCheckerExpectFailure(dir, args);
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    // a baseline path that is wrong or moved
+    const moved = measuredArgs(dir, "1.1.0", [trimmedWidget()]);
+    moved[moved.indexOf("--api-baseline-path") + 1] = "unity/moved/Runtime/Plugins";
+    assert.match(fail(dir, moved), /widget-v1\.0\.0 tracks no assembly under unity\/moved\/Runtime\/Plugins: the baseline path is missing or moved/);
+    // a shipped DLL the tag does not track
+    const fresh = buildAssembly("GameCult.Fresh", "namespace F { public class G {} }");
+    const output = fail(dir, measuredArgs(dir, "1.1.0", [oldWidget(), fresh]));
+    assert.match(output, /GameCult\.Fresh\.dll is built but widget-v1\.0\.0 does not track it under .*; if it is a new assembly, declare it with --api-new GameCult\.Fresh\.dll/);
+    // declaring an assembly new that the tag already tracks is a wrong declaration
+    const wrong = fail(dir, measuredArgs(dir, "1.1.0", [oldWidget()], { news: ["GameCult.Widget.dll"] }));
+    assert.match(wrong, /GameCult\.Widget\.dll is declared new but widget-v1\.0\.0 already tracks it/);
+  });
+  // a previous tag that does not track the DLLs at all
+  withTempGitRepo((dir) => {
+    mkdirSync(join(dir, PLUGINS), { recursive: true });
+    writeFileSync(join(dir, PLUGINS, "README.txt"), "no dlls yet");
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "release"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    assert.match(fail(dir, measuredArgs(dir, "1.1.0", [oldWidget()])), /does not track the DLLs/);
+  });
+});
+
+test("measured: a passing release says that unmeasured changes still need declaring", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const output = runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget()]));
+    assert.match(output, /public API measured; changes ApiCompat cannot see \(see "Unmeasured changes" in docs\/semver-policy\.md\) must still be declared under "### Breaking"/);
+  });
+  withTempGitRepo((dir) => {
+    execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "init"], { cwd: dir });
+    execFileSync("git", ["tag", "widget-v1.0.0"], { cwd: dir });
+    const changelogPath = join(dir, "CHANGELOG.md");
+    writeFileSync(changelogPath, changelogFor("1.0.1"));
+    const unmeasured = runChecker(dir, ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.1", "--tag-prefix", "widget"]);
+    assert.doesNotMatch(unmeasured, /public API measured/);
   });
 });
 
@@ -472,6 +587,8 @@ test("measured: every missing required option is a usage error", () => {
     }
     const builtWithoutBaseline = runCheckerExpectFailure(dir, [...complete, "--api-built", "x.dll"], { status: 2 });
     assert.match(builtWithoutBaseline, /usage:/);
+    const baselineWithoutBuilt = runCheckerExpectFailure(dir, [...complete, "--api-baseline-path", PLUGINS], { status: 2 });
+    assert.match(baselineWithoutBuilt, /usage:/);
   });
 });
 
@@ -521,38 +638,88 @@ test("measured: leaves no temporary files behind, passing or failing", () => {
   });
 });
 
-test("measured: a missing or unrestorable tool fails closed and says why", () => {
-  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    // The checker finds its tool manifest next to its own scripts directory.
-    const bare = mkdtempSync(join(tmpdir(), "cultlib-semver-bare-"));
-    try {
-      mkdirSync(join(bare, "scripts"));
-      const script = join(bare, "scripts", "check-changelog-semver.mjs");
-      copyFileSync(checkerPath, script);
-      const noManifest = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
-      assert.match(noManifest, /could not be measured/);
-      assert.match(noManifest, /without measuring: Cannot find a tool in the manifest/);
-      writeFileSync(join(bare, "dotnet-tools.json"), "{ this is not a manifest");
-      const brokenManifest = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
-      assert.match(brokenManifest, /could not be measured/);
-      assert.match(brokenManifest, /dotnet tool restore failed: Json parsing error/);
-    } finally {
-      rmSync(bare, { recursive: true, force: true });
+// A copy of the checker with its own scripts/api-gate directory, so a test can break the
+// gate without touching the repository's.
+function withCheckerCopy(gateFiles, fn) {
+  const bare = mkdtempSync(join(tmpdir(), "cultlib-semver-bare-"));
+  try {
+    mkdirSync(join(bare, "scripts"));
+    const script = join(bare, "scripts", "check-changelog-semver.mjs");
+    copyFileSync(checkerPath, script);
+    for (const [path, text] of Object.entries(gateFiles)) {
+      mkdirSync(dirname(join(bare, "scripts", "api-gate", path)), { recursive: true });
+      writeFileSync(join(bare, "scripts", "api-gate", path), text);
     }
+    fn(script);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+}
+
+test("measured: a missing or broken tool manifest fails closed and says why", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    withCheckerCopy({}, (script) => {
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+      assert.match(output, /could not be measured/);
+      assert.match(output, /the api-gate tool manifest \(scripts\/api-gate\/\.config\/dotnet-tools\.json\) is missing/);
+    });
+    withCheckerCopy({ ".config/dotnet-tools.json": "{ this is not a manifest" }, (script) => {
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+      assert.match(output, /could not be measured/);
+      assert.match(output, /dotnet tool restore failed: .*Json parsing error/);
+    });
   });
 });
 
-test("measured: dotnet missing from the PATH fails closed", { skip: process.platform === "win32" }, () => {
+// A directory holding git and a stand-in `dotnet` shell script, as the whole PATH.
+function withFakeDotnet(dotnetScript, fn) {
+  const bin = mkdtempSync(join(tmpdir(), "cultlib-semver-path-"));
+  try {
+    const git = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    symlinkSync(git, join(bin, "git"));
+    if (dotnetScript != null) writeFileSync(join(bin, "dotnet"), `#!/bin/sh\n${dotnetScript}\n`, { mode: 0o755 });
+    fn({ ...process.env, PATH: bin });
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
+const posix = { skip: process.platform === "win32" };
+
+test("measured: dotnet missing from the PATH fails closed", posix, () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    const gitOnly = mkdtempSync(join(tmpdir(), "cultlib-semver-path-"));
-    try {
-      const git = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
-      symlinkSync(git, join(gitOnly, "git"));
-      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { env: { ...process.env, PATH: gitOnly } });
+    withFakeDotnet(null, (env) => {
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { env });
       assert.match(output, /dotnet tool restore failed: .*ENOENT/);
-    } finally {
-      rmSync(gitOnly, { recursive: true, force: true });
-    }
+    });
+  });
+});
+
+test("measured: a restore failure shows the last three lines of the tool's own output, in order", posix, () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const args = measuredArgs(dir, "1.0.1", [oldWidget()]);
+    // stdout then stderr, CRLF and LF line ends, trailing blank lines: only the last three real lines remain.
+    const toolRestore = "if [ \"$1\" = tool ] && [ \"$2\" = restore ]; then printf 'out1\\nout2\\n'; printf 'err1\\r\\nerr2\\n\\n' >&2; exit 1; fi\nexit 0";
+    withFakeDotnet(toolRestore, (env) => {
+      const output = runCheckerExpectFailure(dir, args, { env });
+      assert.match(output, /could not be measured against widget-v1\.0\.0: dotnet tool restore failed: out2 \| err1 \| err2\s*$/);
+    });
+    const packageRestore = "if [ \"$1\" = restore ]; then printf 'a\\nb\\nc\\nd\\n' >&2; exit 1; fi\nexit 0";
+    withFakeDotnet(packageRestore, (env) => {
+      const output = runCheckerExpectFailure(dir, args, { env });
+      assert.match(output, /: dotnet restore failed: b \| c \| d\s*$/);
+    });
+  });
+});
+
+test("measured: restores that succeed without delivering the reference assemblies fail closed", posix, () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    withCheckerCopy({ ".config/dotnet-tools.json": "{}" }, (script) => {
+      withFakeDotnet("exit 0", (env) => {
+        const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env });
+        assert.match(output, /the pinned netstandard reference assemblies were not restored under scripts\/api-gate\/packages/);
+      });
+    });
   });
 });
 
