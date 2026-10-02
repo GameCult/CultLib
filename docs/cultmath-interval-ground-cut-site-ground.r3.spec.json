@@ -1,0 +1,240 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "site-ground",
+  "revision": 3,
+  "title": "Site ground r3: the void. A pseudo-Gaussian brush carves a bowl in a cloud floor, a sun at its bottom lights the cavity and orbits, the camera follows low; tile pre-pass, camera-aware TAA",
+  "repo": "GameCult/gamecult-site",
+  "branch": "main",
+  "base": "535d170",
+  "depends_on": [
+    "site-masthead:cut_spec:wash-home-only.r1",
+    "cultmath-tapes:cut_spec:glsl-lowering.r2",
+    "cultmath-tapes:cut_spec:interval-ops.r2"
+  ],
+  "first": [
+    "Map: F:/Projects/CultLib/docs/cultmath-interval-ground-cut.md, 'Pass 3' (the void scene, the composed bound, the pre-pass, the budget), then 'The shader design' for what pass 3 does not restate (sampled wash, palette input, pausing, contrast). Rulings in force: cultmath-tapes:ruling:operator-ground-void-brush (the scene), operator-tile-amortized-march (the march), site-masthead:ruling:operator-chromeless-column; wash-home-only's authority map. Re-pin base to main after wash-home-only lands. Stardust and DoF stay the next cut; leave the named composite slot. r2's token, readback, controller, vendoring, parity and fallback items stand unless this revision names them.",
+    "The original, read once (Aetheria at e6181c11, 2021-03-13, Assets/Scenes/Main Menu.unity; Prefabs/RPG/Planets/Sun.prefab; Materials/Brushes/Gravity Well.mat, Main Menu Sun Fog Tint.mat, Main Menu Ambient Fog Tint.mat, Sector Boundary Fog.mat; Materials/Fog Marching Main Menu.mat; Shaders/Raymarching/VolumeRender.shader at that commit; Shaders/Brushes/PowerBrush.shader). What survives, in the original's units: the brush is PowerBrush (1 - x^2)^16 with depth 40 over radius 256 (half depth at r = 52, pseudo-Gaussian sigma about 45), the sun's own gravity-well child; a wide boundary bowl (depth 75, power 0.25, radius 1500) is flat across the scene and acts as a constant 75; floor offset -16.46, floor blend 39.6, so the fog top is at y = -91 outside the void and dips to -131 at the sun; the sun sphere (radius 12.5) sits at y = -130, the bottom of the void.",
+    "What survives (continued): the sun is a child of 'Center', which rotates 5 degrees per second about y (72 s period), at orbit radius 175; the camera is a Cinemachine vcam following the sun (framing transposer, distance 150, damping 10, handheld noise amplitude 1 at frequency 0.25) and looking at 'Look Target' (0, -130, 0), the orbit centre at the sun's depth; the saved camera sits at y = -27, 64 above the fog top. The lighting was authored, not marched: the sun's 'Fog Tint' brush (1 - x^2)^3, depth 2, radius 128, colour (1, 0.4, 0.1) orange, painted into the tint map, times a scene-wide ambient tint (0.18, 0.59, 1) blue, depth 0.01. Stardust: 256^2 particles, spacing 2, floor -60, ceiling 0, height exponent 800 / (ceiling + wellDepth) so particles climb higher where the well is deeper (the void fills with stardust). Noise: strength 150, frequency 0.01, safety 50. Not surviving: the 2021 d() details, the tint map's runtime contents, the video.",
+    "The field, in the original's units (world units; the camera is near the sun, so float32 is fine): well map h(xz) = H0 + Dw (1 - (r / Rw)^2)^16 for r = |xz - sun.xz| < Rw, else H0; H0 = 75, Dw = 40, Rw = 256. Pre-distortion SDF s(p) = p.y + h(p.xz) - F with F = -16.46, so the fog surface is s = 0: y = -91 outside, -131 at the sun. fade(s) = 1 - smoothstep(0.75 S, S, s), S = 50. s' = s + A fade(s) n(warp(p)), n the two-phase warped coverage noise plus half the detail octave at F0 = 0.01, A = 20 (authored; the original's 150 is too violent for a 40-deep bowl). density = max(0, -s' / B) K, B = 39.6, K the extinction. Clear space is s' >= 0, and above s >= S no noise is evaluated. The brush is radial in xz and carves a bowl in a cloud floor, as the original did (Q7 a); a true 3D spherical cavity is Q7 b.",
+    "Scene motion. The sun orbits the origin at radius 175 in xz with period 72 s at depth y = -130; the void (h) is centred on the sun and moves with it. The camera follows the sun at horizontal distance 150 along the orbit's tangent behind it, at y = sun.y + 25 = -105 (inside the bowl: 14 below the rim at -91), looking at the orbit centre at the sun's depth (0, -130, 0), with a slow handheld drift (two low-frequency snoise on time, amplitude 2 units). Camera, sun and void positions are one function of time in ground.js (worldAt(t)), uploaded as uniforms; the shaders never integrate motion.",
+    "The flow field, authored around the void: flow(xz) = SWIRL * tangent(xz - sun.xz) * (1 - (r / Rw)^2)^2 + GLOBAL * (snoise(xz Ff + o1), snoise(xz Ff + o2)) (the swirl is largest mid-slope and zero at the rim and the centre; the global term is r2's). The flow texture is a world-space window of side 4 Rw centred on the sun, quarter of the canvas resolution, re-rendered every frame; warp, hue, motion vectors and (next cut) the stardust read it, so D4 holds with a moving scene. D = FLOW_MAX * PERIOD / 2 as before, with FLOW_MAX the authored maximum of the swirl plus the global amplitude.",
+    "The march (tile pre-pass, interval-ops r2's design). Pre-pass at W/8 x H/8: per tile, the loop over the slab's cell ranges (uniform cells, StepDense = 10, 96 cells to a far plane of 960 along +view depth): the envelope probe first (exact box: y and xz ranges by cultmath_iv_mul of the depth and slope intervals, h's interval from the box's least and greatest distance to the sun's xz, monotone), then the noise ball (cultmath_iv_frustum_ball with D, cultmath_iv_snoise_ball) only when fade.hi > 0 and L r F0 leaves room to prove anything; writes the 96-bit mask of cells not proven empty to an RGBA32UI texel. Main pass: texelFetch the mask, place S samples stratified over the unmasked cells only (exact: masked cells are zero), integrate transmittance and the depth-weighted mean distance, and apply the light below. With the camera inside the void, sky tiles retire the whole slab in a few envelope probes; wall and floor tiles mark the cells at the wall.",
+    "Lighting, the cheapest version that keeps it moody (the original's own mechanism, made 3D): at each sample, light = SUN_COLOUR * (1 - (d / Rl)^2)^3 for d = |p - sun| < Rl, Rl = 128, plus AMBIENT * ambientTint; colour = density * (light + ambient) * hue(flow). No light march: zero extra snoise, one length and one pow per sample. The far cavity stays dark because the pulse is zero beyond Rl; the walls brighten by proximity to the sun; the sun itself is a small additive disc drawn in the resolve at its projected position, occluded by the accumulated transmittance along its ray. Not in this cut, measured before it is ever added: one envelope-only transmittance sample toward the sun per primary sample (self-shadowing by the bowl's geometry), about +25% march cost; it is desktop-only if ever.",
+    "TAA with a moving camera. ground.js uploads this frame's and the previous frame's view-projection. For each pixel the resolve reconstructs the world point at the march's depth-weighted mean distance (written by the main pass into a second history channel, R16F), moves it back by the field motion (p + flow(p) * dt: the pattern moves at -flow), projects it with the previous VP and fetches history at that uv. The same 3x3 min/max clamp, alpha = max(1/frames, 1/32), out-of-bounds alpha 1; history reset on resize, first frame and budget step. Transmittance, colour and the depth channel are all reprojected by the one motion vector. ?ground=debug-mv shows |mv| with the camera moving and the flow frozen, and with the flow moving and the camera frozen, so both terms are seen separately.",
+    "Stardust distribution and the sun disc are the next cut (site-stardust), authored to the void: particles spawned in the bowl's volume with the original's height rule (more headroom where the well is deeper), lit by the same pulse, moving with the swirl. This cut leaves the composite slot and the depth history they need.",
+    "Fit with the tokens. Inputs: --gamecult-nebula-0 (orange 255 138 42) is SUN_COLOUR; --gamecult-nebula-2 (sky 89 183 255) is the ambient tint; --gamecult-nebula-1 (violet 109 96 255) is the cloud hue's second pole; --gamecult-nebula-base the sky. Outputs from the 8x8 readback as r2, with one change: --gamecult-light-0-at is written from the sun's projected screen position (quantised to 1%, at most 2 Hz), so the CSS wash's main light follows the sun while the shader runs; --gamecult-light-0 and -a come from the texel there; lights 1 and 2 keep their seed positions and sample their colours. When the canvas is absent the seeds paint a still of the same composition (the seed light-0-at is the sun's mean screen position).",
+    "Prove in the browser pane, in addition to r2's list: with ?ground=debug the pre-pass's mean probes per tile and the fraction of cells masked, and the mean snoise per pixel against a dense-reference frame (?ground=dense: no pre-pass, S samples over the whole slab; the two frames' mean luminance agree within 1/255); the camera reprojection test above; the orbit (after 36 s the sun's screen position has moved half an orbit and the TAA shows no smear at the walls); the contrast clamp with the lit cavity (max luminance <= 0.035 still holds; the sun disc is exempt only inside its own radius, which the clamp test masks and reports)."
+  ],
+  "deletes": [
+    {
+      "path": "site/quartz/styles/custom.scss",
+      "lines": 6,
+      "note": "ritual body block 119-124: its own background goes; its seeds live under :root:has(body[data-slug]) (r2)."
+    },
+    {
+      "path": "site/quartz/styles/custom.scss",
+      "lines": 9,
+      "note": "body 10-27: the literal colours and stops become token references (r2)."
+    }
+  ],
+  "keeps_moves": [
+    "r2's tokens, sampled wash, controller, vendoring (now two files: the site vendors CultMath.glsl only, MIT; the parity run concatenates CultMath.Phacelle.glsl for the phacelle family), parity flags, fallbacks and the contrast clamp: unchanged except where this revision names them.",
+    "--gamecult-wash and the index override from wash-home-only: untouched.",
+    ".page::before, the tour/Pitch VN ground, the Thing deck's .hero-bg, the masthead, the engine: untouched.",
+    "The CSS wash stays the ground when the canvas is absent, not yet drawn, or removed by the controller."
+  ],
+  "adds": [
+    "site/quartz/components/GameCultGround.tsx: as r2.",
+    "site/quartz/static/ground/ground.js (~500 lines): r2's passes plus worldAt(t) (sun, void, camera), the two view-projections, the pre-pass, the mask texture, the depth history, the sun-disc composite and the light-0-at writer.",
+    "site/quartz/static/ground/flow.frag.glsl (world-space window, swirl plus global), prepass.frag.glsl (the tile loop, mask out), cloud.frag.glsl (masked sampling, light, depth out), taa.frag.glsl (camera plus flow reprojection), downsample.frag.glsl.",
+    "site/quartz/static/ground/CultMath.glsl and glsl-parity.json, vendored from CultLib at interval-ops r2's head or later (cultmath_iv_frustum_ball present).",
+    "scripts/ground/check-cultmath-glsl.ps1: the vendoring drift check.",
+    "custom.scss and docs/brand-design-language.md: as r2, with the void composition named in the brand doc's ground paragraph."
+  ],
+  "file_changes": [
+    {
+      "location": {
+        "path": "site/quartz/styles/custom.scss",
+        "line": 4,
+        "end_line": 8
+      },
+      "change": ":root block: the fifteen ground seeds and --gamecult-ground-mean; light-0-at seeded at the sun's mean screen position."
+    },
+    {
+      "location": {
+        "path": "site/quartz/styles/custom.scss",
+        "line": 10,
+        "end_line": 31
+      },
+      "change": "body: four nebula input tokens; radials and the linear gradient reference the ground tokens (r2)."
+    },
+    {
+      "location": {
+        "path": "site/quartz/styles/custom.scss",
+        "line": 103,
+        "end_line": 124
+      },
+      "change": "ritual block: background declaration deleted; :root:has(body[data-slug]) carries its seeds and nebula inputs (r2)."
+    },
+    {
+      "location": {
+        "path": "site/quartz.layout.ts",
+        "line": 19
+      },
+      "change": "header: [GameCultThemeLock(), GameCultGround(), GameCultMasthead()]."
+    },
+    {
+      "location": {
+        "path": "docs/brand-design-language.md",
+        "line": 69,
+        "end_line": 84
+      },
+      "change": "wash section rewritten: the void scene, the sampled wash, the seeds, the nebula inputs and what each drives."
+    }
+  ],
+  "authority_map": {
+    "owner": "The shader owns the ground. ground.js owns worldAt(t) (sun, void, camera), the flow texture, the pre-pass mask, the march, the TAA, the readback and the sampled tokens; custom.scss owns the four nebula inputs, --gamecult-wash and the seeds; CultLib owns every noise and interval function; the composed bound in prepass.frag.glsl is built from cultmath_iv_* only.",
+    "inputs": [
+      "the four nebula tokens and --gamecult-wash (computed on body)",
+      "prefers-reduced-motion, visibilityState, canvas size, devicePixelRatio, elapsed time",
+      "measured GPU frame time (timer query, fence, or rAF cadence)",
+      "the shader's own 8x8 readback and the sun's projected position",
+      "the vendored CultMath.glsl at its pinned CultLib commit"
+    ],
+    "outputs": [
+      "one opaque moving canvas under the page, luminance <= 0.035 outside the sun disc",
+      "the fifteen ground tokens and --gamecult-ground-mean on :root inline, at most 2 Hz; light-0-at follows the sun",
+      "debug, dense-reference and parity readbacks (console, flag only)"
+    ],
+    "derived_state": [
+      "sun, void and camera positions are derived from time by worldAt(t); nothing integrates motion frame to frame",
+      "the tile mask is derived each frame from that frame's camera and the field; it is never carried across frames",
+      "the flow texture is the one owner of motion: warp, hue, motion vectors and the stardust read it",
+      "the TAA history (colour, transmittance, depth) is a cache reprojected by camera and flow; reset on resize, first frame and budget step",
+      "the ground tokens are derived from the readback while the shader runs; the seeds are the fallback; the shader never reads them",
+      "S and dpr are derived from measurement within the session; the sessionStorage token set is a cache"
+    ],
+    "forbidden_writers": [
+      "no colour, alpha, position or radius literal in ground.js or any GLSL file; the scene's dimensions (H0, Dw, Rw, F, S, Rl, orbit radius, period, camera offset) are named constants in one place in ground.js, uploaded as uniforms",
+      "no sample placed in a masked cell; no probe in the main pass; no early-out of the pre-pass on transmittance",
+      "no light march in this cut; the light is the analytic pulse",
+      "no read of the ground output tokens by the shader or ground.js except the seed read before the first readback",
+      "no userAgent, platform or maxTouchPoints; no class or attribute set on body or html; no second wash token; no second flow evaluation; no noise or interval function defined in the site's GLSL",
+      "no synchronous readPixels to client memory; one requestAnimationFrame scheduler; localStorage never"
+    ],
+    "shared_paths": [
+      "every page paints one canvas and one token set; the ritual essays differ only in seeds and inputs",
+      "slow device, hidden tab, reduced motion, missing WebGL2 and missing half-float all pass through the one controller",
+      "the 8x8 readback and the sun projection are the only paths from the shader to CSS",
+      "the pre-pass and the main pass read the same uniforms from the same worldAt(t); the dense-reference mode differs only by skipping the mask"
+    ],
+    "deletion_line": "As r2: the ritual block's own background and the body literals go in the same commit the tokens are declared. Nothing else in the engine or content changes. Against pass 2's design this revision removes the static camera and the everywhere-clouds field; it adds one pre-pass, one mask texture, one depth history channel and the scene function."
+  },
+  "verification": {
+    "builds": [
+      "Deploy Quartz green on the landing commit: gh run list -R GameCult/gamecult-site -w \"Deploy Quartz\" -L 1",
+      "scripts/ground/check-cultmath-glsl.ps1 exits 0 against a CultLib checkout at the pinned commit",
+      "the built stylesheet contains rgb(var(--gamecult-light-0) / calc(var(--gamecult-light-0-a) * var(--gamecult-wash))) verbatim and the ritual :root:has rule"
+    ],
+    "tests": [
+      {
+        "name": "browser pane, /?ground=debug: max relative luminance over the canvas outside the sun disc after 32 frames <= 0.035",
+        "pins": "text contrast with the lit cavity."
+      },
+      {
+        "name": "browser pane, /?ground=debug vs /?ground=dense: mean luminance within 1/255; mean snoise per pixel printed for both; masked-cell fraction and probes per tile printed",
+        "pins": "the mask culls only provably empty cells; the saving on the shipped scene is a number."
+      },
+      {
+        "name": "browser pane, /?ground=debug-mv: |mv| non-zero with the camera moving and flow frozen, and with flow moving and camera frozen; zero under reduced motion",
+        "pins": "both reprojection terms are live and separable."
+      },
+      {
+        "name": "browser pane, / for 40 s: the sun's screen position moves about half an orbit; no history smear at the walls (3x3 clamp); light-0-at on :root follows within 2 s",
+        "pins": "the moving scene converges and the CSS wash follows the sun."
+      },
+      {
+        "name": "browser pane, /?ground=parity: every fixture family within its tolerance class on WebGL2, cultmath_iv_frustum_ball exact; numbers and GPU string in the report",
+        "pins": "GLSL = C# on a device, including the tile ball."
+      },
+      {
+        "name": "browser pane, /?ground=parity-wash and a ritual essay: canvas vs CSS seed wash within 2/255 at 16 points with density 0 and the sun disc off",
+        "pins": "the seeds and the shader's base agree."
+      },
+      {
+        "name": "reduced motion, hidden tab, WebGL2 disabled, sessionStorage cleared: as r2",
+        "pins": "every fallback goes through the controller."
+      },
+      {
+        "name": "git diff base..head --stat: custom.scss, quartz.layout.ts, docs/brand-design-language.md, the new component, static/ground/*, scripts/ground/* only",
+        "pins": "no engine, content or masthead change."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "#[0-9a-fA-F]{6}\\b|rgba?\\(|\\b(255|138|109|183)\\b",
+        "scope": "site/quartz/static/ground/*.js and *.glsl: 0 matches."
+      },
+      {
+        "pattern": "gamecult-ground-|gamecult-light-",
+        "scope": "site/quartz/static/ground/*.glsl: 0 matches; in ground.js only inside the token writer and the seed read."
+      },
+      {
+        "pattern": "userAgent|navigator\\.platform|maxTouchPoints|localStorage|setInterval|classList|setAttribute\\(",
+        "scope": "site/quartz/static/ground/ground.js: 0 matches."
+      },
+      {
+        "pattern": "cultmath_iv_",
+        "scope": "cloud.frag.glsl, taa.frag.glsl, flow.frag.glsl: 0 matches; the bound lives only in prepass.frag.glsl."
+      },
+      {
+        "pattern": "float cultmath_|vec4 cultmath_|float snoise|hash\\(",
+        "scope": "every site .frag.glsl: 0 matches; cultmath_* is defined only in the vendored CultMath.glsl."
+      },
+      {
+        "pattern": "Mozilla|MPL|cultmath_phacelle",
+        "scope": "site/quartz/static/ground/CultMath.glsl: 0 matches; the site vendors the MIT file."
+      },
+      {
+        "pattern": "radial-gradient\\([^)]*rgba?\\([0-9]",
+        "scope": "site/quartz/styles/custom.scss, body rule and ritual block: 0 matches."
+      },
+      {
+        "pattern": "gamecult-titlebar|gamecult-nav-link|sidebar|composite|GameCult-Quartz",
+        "scope": "git diff base..head changed lines: 0 matches."
+      }
+    ],
+    "operator": [
+      "open / on the desktop and on the phone; say whether the void, the sun's orbit and the camera's height read as the old main menu (uniforms: A, SWIRL, Rl, the camera offset)",
+      "on the phone with ?ground=debug, read the logged GPU ms per pass and the controller's final S/dpr; say whether it got warm after five minutes",
+      "say whether the analytic light is moody enough or the self-shadowing sample (desktop only) should be tried",
+      "navigate / -> /Blog -> back; say whether the ground is continuous (Q5)"
+    ]
+  },
+  "estimate": {
+    "lines_added": 1250,
+    "lines_removed": 15,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [
+      "GLSL ES 3.00 shader files in static/ground",
+      "vendored glsl-parity.json",
+      "one sessionStorage key holding the last sampled token set",
+      "an RGBA32UI tile-mask texture and an R16F depth history (GPU-side only)"
+    ],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "cultmath-tapes:ruling:operator-ground-void-brush",
+    "cultmath-tapes:ruling:operator-tile-amortized-march",
+    "cultmath-tapes:ruling:operator-split-phacelle",
+    "site-masthead:ruling:operator-chromeless-column"
+  ],
+  "questions": [
+    "Q4 in the map: palette input tokens (a, recommended)",
+    "Q5 in the map: carry the last sampled wash across page loads (a, recommended)",
+    "Q7 in the map: the brush carves a bowl in a cloud floor as the original (a, recommended) or a 3D spherical cavity in a cloud volume (b)"
+  ]
+}

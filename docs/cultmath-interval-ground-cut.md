@@ -331,20 +331,24 @@ TFLOP available; estimates, replaced by measurement):
 | Pass | Work | ms |
 | --- | --- | --- |
 | Flow texture, quarter res | 160 k texels × 2 snoise | 0.05 |
-| Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≤ 144 probes, mostly envelope-only; ≈ 0.4–2 snoise-equivalents per pixel, measured | 0.2–0.8 |
-| March at `S = 8` | 2.6 M × 8 snoise, placed in unmasked cells only | 3.1 |
-| TAA resolve + DoF gather | ~19 texel reads per pixel | 1.0 |
+| Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≤ 144 probes, mostly envelope-only; in the void most sky tiles finish in a few probes; ≈ 0.4–2 snoise-equivalents per pixel, measured | 0.2–0.8 |
+| March at `S = 8` | 2.6 M × 8 snoise, placed in unmasked cells only, plus the analytic sun light (one length, one pow per sample, ≈ 5%) | 3.3 |
+| TAA resolve + DoF gather | ~19 texel reads per pixel, plus the depth-history fetch and one matrix multiply for the camera reprojection | 1.1 |
+| Sun self-shadowing sample (named, not taken) | one envelope-only transmittance sample per primary sample, ≈ +25% of the march | +0.8, not on the phone |
 | Stardust layer, half res, 4,096 particles | fill-bound, small | 0.2 |
 | 8×8 downsample + PBO readback at 2 Hz | tiny | 0.05 |
-| **Total at `S = 8`** | | **≈ 4.4** |
-| Total at `S = 6` / `S = 4` | | ≈ 3.6 / 2.9 |
+| **Total at `S = 8`, the void scene (pass 3)** | | **≈ 4.9** |
+| Total at `S = 6` / `S = 4` | | ≈ 4.0 / 3.2 |
 
-Said plainly: at `S = 8` the full stack does not fit the 4 ms phone budget on
-the estimate. The controller will settle a mid-range phone at `S = 4–6`,
-which the TAA covers (convergence in ~32 frames, about a second). What gives,
-in order, is the sample count, then the resolution; the stardust and the DoF
-are never dropped before the clouds' samples, because they cost a quarter of
-the march. On desktop at `S = 16` the stack is ≈ 1.6 ms.
+Said plainly: at `S = 8` the void scene with the pre-pass, the analytic light
+and the camera reprojection does not fit the 4 ms phone budget on the
+estimate; `S = 6` sits at the line and `S = 4` is under it. The controller
+will settle a mid-range phone at `S = 4–6`, which the TAA covers (convergence
+in ~32 frames, about a second), and the pre-pass is what makes `S = 4` look
+like more: the samples land only on the walls. What gives, in order, is the
+sample count, then the resolution; the stardust and the DoF are never dropped
+before the clouds' samples; the self-shadowing sample is not taken on any
+device until measured. On desktop at `S = 16` the stack is ≈ 1.9 ms.
 
 Measurement, in this order, all in `ground.js` behind a debug flag and used by
 the controller: `EXT_disjoint_timer_query_webgl2` where present (Chrome
@@ -437,7 +441,8 @@ Pinned: CultLib `main` `d0ea37f8`; `hands/cultmath-interval-ops` at
 `c9bd003b` (report `cut-interval-ops.h1`); `hands/cultmath-glsl-lowering` at
 `5ae207e8` (report `cut-glsl-lowering.h1`, branched from interval-ops).
 Rulings: `operator-tile-amortized-march`, `operator-split-phacelle`,
-`operator-compiler-downloads`, `self-exp-measure-in-site`.
+`operator-compiler-downloads`, `self-exp-measure-in-site`,
+`operator-ground-void-brush` (answers Q6; the void scene below).
 
 ### The operator's words
 
@@ -517,25 +522,89 @@ warped points of 2,000 slices, no tolerance).
 | (b) inside the fog | `h = 0`, camera at `y = F − 10`, rays level | 0.8–1.0x: every ray saturates in a few cells; the pre-pass still probes the whole grid |
 | (c) Aetheria-like | zone bowl `R = 2000` + four wells (masses 100, 1000, 10000, 1000), camera above the fog in the bowl, rays gazing across (`m_y ∈ [−0.25, 0.1]`), Aetheria's units and 256-sample quadratic grid | 2–4x: the clear cells before the fog surface collapse to a few probes per tile; the fog cells cost the same on both sides. The noise ball proves nothing at Aetheria's scale (`L r F0 ≥ 1.6` at the finest cell with `D = 60`), so it is not evaluated; the saving is the envelope's |
 | (d) uniform slab | r1's field, kept as the worst case | 1.3–1.5x: the ceiling at `L = 10.099261` with the cheaper baseline |
+| (e) the void, the shipped scene | the original's bowl and units, camera inside the bowl at `y = −105`, rays over the whole frustum | 2–3x: sky rays go from 96 envelope evaluations to a few probes per tile; wall rays cost the same on both sides; the mix decides. The noise ball proves nothing here either (`L r F0 ≥ 1.5` at the finest cell) |
 
-The 2x contract is asserted on (a) and (c) at `N = 8`; (b) and (d) are
-printed. A shortfall skips the assertion naming `saving-2x-scenarios`; the
+The 2x contract is asserted on (a), (c) and (e) at `N = 8`; (b) and (d) are
+printed. The headline is (e). A shortfall skips the assertion naming `saving-2x-scenarios`; the
 fields, grids and `e` are not tuned. The honest summary: at a Lipschitz bound
 near 10 the noise ball is weak everywhere; what intervals buy on these fields
 is the envelope's empty space, found exactly, and the tiles make finding it
 nearly free.
 
-### The site ground gets the envelope
+### The site ground: the void (ruling `operator-ground-void-brush`)
 
-The site's field becomes Aetheria's structure at site scale: a nebula floor
-`y = −h(x, z)` below the camera (camera at `y = 0`, looking `+z`), `h` three
-authored `PowerPulse` wells seeded in the slab plus a shallow bowl, clear sky
-above the safety distance, the coverage noise displacing the floor with the
-flow warp as before, the hue from the flow texture as before. The screen's
-upper region is clear space (the stardust shows through; the DoF blurs it by
-the clouds' opacity where there are clouds); the lower region is the floor,
-dipping into the wells the viewer gazes across. Which look the operator wants
-is Q6.
+The operator's words: "There was an old main menu visual with a purely
+authored field, first thing I did all the way back when the shader was new. I
+believe it was a single negative pseudo gaussian spherical brush creating a
+void in the clouds, with a sun gently nestled at the bottom lighting the
+cavity and orbiting along a track with the camera following low, very moody,
+gives us lots of options for authoring the flow field and stardust
+distribution"
+
+**The original, found.** Aetheria `e6181c11` ("Main Menu", 2021-03-13):
+`Assets/Scenes/Main Menu.unity`, the `Sun` prefab instance under a `Center`
+pivot, `Materials/Brushes/Gravity Well.mat` and
+`Main Menu Sun Fog Tint.mat`, `Fog Marching Main Menu.mat` on
+`VolumeRender.shader` of that commit. What survives, in its units:
+
+| Element | Original value |
+| --- | --- |
+| The brush | `PowerBrush` `(1 − x²)^16`, depth 40, radius 256 (half depth at r = 52; a Gaussian of σ ≈ 45); the sun's own gravity-well child. A boundary bowl (depth 75, power 0.25, radius 1500) is flat across the scene: a constant 75 |
+| The floor | offset −16.46, blend 39.6: the fog top is `y = −91` outside the void, `−131` at the sun |
+| The sun | sphere radius 12.5 at `y = −130`: the bottom of the void |
+| The orbit | `Center` rotates 5°/s about y (72 s period); the sun at radius 175 |
+| The camera | Cinemachine vcam following the sun (framing transposer, distance 150, damping 10, handheld noise amplitude 1 at 0.25 Hz), looking at `Look Target` `(0, −130, 0)`, the orbit centre at the sun's depth; saved at `y = −27` |
+| The light | authored, not marched: the sun's tint brush `(1 − x²)^3`, depth 2, radius 128, orange `(1, .4, .1)`, plus a scene-wide blue ambient tint `(0.18, 0.59, 1)` × 0.01 |
+| Stardust | 256² particles, spacing 2, floor −60, ceiling 0, height exponent `800 / (ceiling + wellDepth)`: more headroom where the well is deeper, so the void fills with stardust |
+| Noise | strength 150, frequency 0.01, safety 50 |
+
+Not surviving: the 2021 `d()` displacement details (the 2021-05-30 "Volumetric
+Redux" rewrote it), the tint map's runtime contents, the video. The brush is
+radial in `xz` and carves a bowl in a cloud floor; "spherical" in the
+operator's words is the brush, not a 3D cavity (Q7).
+
+**The site scene** (`site-ground` r3): the same units. `h(xz) = 75 + 40 (1 −
+(r/256)²)^16`, `s = y + h − F`, `F = −16.46`, fog where `s' < 0`, `S = 50`,
+`A = 20` (the original's 150 is too violent for a 40-deep bowl), `F0 = 0.01`.
+The sun orbits the origin at radius 175, period 72 s, `y = −130`; the void
+moves with it. The camera follows 150 behind along the tangent at `y = −105`:
+inside the bowl, 14 below the rim, looking at the orbit centre at the sun's
+depth, with a slow handheld drift. `worldAt(t)` in `ground.js` is the one
+owner of sun, void and camera; nothing integrates motion. The flow is authored
+around the void: a swirl `SWIRL · tangent · (1 − (r/Rw)²)²` (largest
+mid-slope, zero at rim and centre) plus the global noise flow, rendered into a
+world-space window of side `4 Rw` around the sun, so warp, hue, motion vectors
+and the stardust read one texture (D4). The stardust (next cut) spawns in the
+bowl with the original's height rule and is lit by the same pulse.
+
+**Lighting, cheapest moody version:** the original's mechanism made 3D. At a
+sample, `light = SUN · (1 − (d/Rl)²)^3` for `d = |p − sun| < Rl = 128`, plus
+the blue ambient; `colour = density · (light + ambient) · hue(flow)`. Zero
+extra `snoise`; the far cavity stays dark because the pulse is zero beyond
+`Rl`; the sun is a small additive disc in the resolve, occluded by the
+accumulated transmittance. A self-shadowing step (one envelope-only
+transmittance sample toward the sun per primary sample, no noise, ≈ +25% on
+the march) is named, not taken: desktop-only if measurement ever allows.
+
+**TAA with a moving camera:** the main pass writes the depth-weighted mean
+march distance to an `R16F` history channel; the resolve reconstructs the
+world point at that depth, moves it back by the field motion (`p + flow·dt`),
+projects it with the previous frame's view-projection and fetches history
+there. Same 3×3 clamp, same `α`, same resets. Colour, transmittance and depth
+are reprojected by the one motion vector.
+
+**Fit with the tokens:** `--gamecult-nebula-0` (orange) is the sun's colour,
+`--gamecult-nebula-2` (sky) the ambient, `--gamecult-nebula-1` the cloud hue's
+second pole, the base the sky. Outputs as pass 2, with one change:
+`--gamecult-light-0-at` is written from the sun's projected position, so the
+CSS wash's main light follows the sun; its seed is the sun's mean screen
+position, so the fallback is a still of the same composition.
+
+**Soundness with a moving camera:** each frame's pre-pass evaluates
+`iv_frustum_ball` from that frame's camera; no ball, mask or probe result is
+carried across frames. The only cross-frame state is the TAA history, which
+is colour, not a soundness input. The saving test draws each tile's camera
+independently and says so.
 
 The march: a **low-resolution pre-pass** at `W/8 × H/8` runs the tile loop
 over the slab's cell ranges (the envelope first, the noise ball only when the
@@ -577,17 +646,21 @@ timeouts are reported as timeouts, not kills.
 
 ## Questions
 
-**Q6. The site ground's envelope look.** The envelope gives the shader empty
-space to prove; it also changes what the page looks like.
-- (a) A nebula floor below the camera with authored wells and clear sky
-  above: Aetheria's gaze-across-the-well composition; the upper screen is
-  stardust over the base colour, the lower screen clouds dipping into wells.
-  **Recommended**: the real shape, the culling pays, and it is the video the
-  operator described.
-- (b) A cloud wall facing the camera with authored clear pockets (holes the
-  envelope carves): closer to pass 2's everywhere-clouds look; culling pays
-  only inside the pockets.
-- (c) Both, blended by page: the home page (a), the ritual essays (b).
+**Q6. The site ground's envelope look.** Answered outside the options by
+`cultmath-tapes:ruling:operator-ground-void-brush`: the old main menu's void
+(pass 3, "The site ground: the void").
+
+**Q7. What "spherical" means for the brush.**
+- (a) As the original: the brush is radial in `xz` and carves a bowl in a
+  cloud floor; the sun sits at the bowl's bottom; clear sky above the rim.
+  **Recommended**: it is the scene that existed, and its parameters survive.
+- (b) A true 3D spherical cavity in a cloud volume (clouds above as well as
+  below, the sun at the cavity's bottom). The culling is the same (the
+  envelope is monotone in distance either way); the look is more enclosed and
+  the sky, stardust and DoF composition changes.
+
+Specs for pass 3: `docs/cultmath-interval-ground-cut-site-ground.r3.spec.json`
+beside the two CultLib r2 specs.
 
 **Q4. Where the shader's palette input comes from.**
 - (a) Four new input tokens in `custom.scss` (`--gamecult-nebula-0/1/2`,
