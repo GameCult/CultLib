@@ -332,7 +332,7 @@ TFLOP available; estimates, replaced by measurement):
 | --- | --- | --- |
 | Flow texture, quarter res | 160 k texels × 2 snoise | 0.05 |
 | Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≈ 30 probes in the cavity (interior retired in a few, the wall's ≈ 15 cells at 1.5 probes each), envelope-only because the noise ball cannot prove anything at this scale; ≈ 0.1 snoise-equivalents per pixel; worst case ≤ 192 probes per tile | 0.1 (≤ 0.8) |
-| March at `S = 8` | 2.6 M × 8 snoise, every pixel marches a wall (no sky pixel ends free), samples placed in unmasked cells only, plus the analytic sun light (one length, one pow per sample, ≈ 5%) | 3.3 |
+| March at `S = 8` | 2.6 M × 8 snoise per frame, every pixel marches a wall; LOD and the mask decide where the frame's samples land, not how many (the controller does) | 3.3 |
 | TAA resolve + DoF gather | ~19 texel reads per pixel, plus the depth-history fetch and one matrix multiply for the camera reprojection | 1.1 |
 | Sun self-shadowing sample (named, not taken) | one envelope-only transmittance sample per primary sample, ≈ +25% of the march | +0.8, not on the phone |
 | Stardust layer, half res, 4,096 particles | fill-bound, small | 0.2 |
@@ -340,12 +340,13 @@ TFLOP available; estimates, replaced by measurement):
 | **Total at `S = 8`, the cavity (pass 3)** | | **≈ 4.8** |
 | Total at `S = 6` / `S = 4` | | ≈ 3.9 / 3.1 |
 
-Said plainly: at `S = 8` the cavity with the pre-pass, the analytic light and
-the camera reprojection does not fit the 4 ms phone budget on the estimate;
-`S = 6` sits at the line and `S = 4` is under it. The controller will settle
-a mid-range phone at `S = 4–6`, which the TAA covers (convergence in ~32
-frames, about a second), and the pre-pass is what makes `S = 4` look like
-more: every ray's samples land in its wall, none in the hollow. What gives, in order, is the
+Said plainly: LOD does not change the per-frame cost, which the controller
+fixes by `S`; it changes how much a frame's samples are worth. At `S = 8` the
+cavity does not fit the 4 ms phone budget on the estimate (≈ 4.8); `S = 6`
+sits at the line and `S = 4` is under it. What gives is `S`, and with the
+mask and LOD that is nearly free: a converged wall needs about 12 snoise per
+pixel in total, so `S = 4` converges in about three frames through the TAA
+instead of thirty, and `S = 8` in two. Then `dpr`, as before. What gives, in order, is the
 sample count, then the resolution; the stardust and the DoF are never dropped
 before the clouds' samples; the self-shadowing sample is not taken on any
 device until measured. On desktop at `S = 16` the stack is ≈ 1.9 ms.
@@ -522,12 +523,76 @@ warped points of 2,000 slices, no tolerance).
 | (b) inside the fog | `h = 0`, camera at `y = F − 10`, rays level | 0.8–1.0x: every ray saturates in a few cells; the pre-pass still probes the whole grid |
 | (c) Aetheria-like | zone bowl `R = 2000` + four wells (masses 100, 1000, 10000, 1000), camera above the fog in the bowl, rays gazing across (`m_y ∈ [−0.25, 0.1]`), Aetheria's units and 256-sample quadratic grid | 2–4x: the clear cells before the fog surface collapse to a few probes per tile; the fog cells cost the same on both sides. The noise ball proves nothing at Aetheria's scale (`L r F0 ≥ 1.6` at the finest cell with `D = 60`), so it is not evaluated; the saving is the envelope's |
 | (d) uniform slab | r1's field, kept as the worst case | 1.3–1.5x: the ceiling at `L = 10.099261` with the cheaper baseline |
-| (e) the void, the shipped scene | the true cavity in the original's units (`Rc = 640`, `Rh = 198`), camera 186 from the centre, low, rays over the whole frustum; every ray crosses 14–380 units of interior and ends in a wall | **1.0–1.2x on combined cost, under 2x.** With no sky the interior costs the dense march only envelope evaluations (≈ 20 × 0.2 per ray against ≈ 15 wall cells × 3.2) and the pre-pass can only remove those; the noise ball proves nothing (`L r F0 ≥ 1.5`). What the pre-pass buys here is sample placement: at the site's `S` the samples land in the 150-unit wall ramp instead of the whole ray, a 2.0–2.6x effective sample density (printed as marched length over wall length) |
+| (e) the void, the shipped scene | the true cavity, hollow radius `Rh = 198`, ramp `S = 50`, camera 186 from the centre, low; every ray crosses interior and ends in a wall; three marches (fixed-step reference, masked fixed-step, masked LOD) | **steps per pixel ≈ 35 → 6 (5–8x fewer), combined cost 1.7x, snoise alone 1.25x**, from the model below. The noise ball proves nothing (`L r F0 ≥ 1.5`); the interior is retired by the envelope, the ramp is sampled at the content limit |
 
 The 2x contract on combined cost is asserted on (a) and (c) at `N = 8`; (b)
-and (d) are printed. (e) is the headline and prints both its numbers; which
-one it promises is Q8 (`cavity-contract`), and until that is ruled its
-assertion skips naming the question. A shortfall skips the assertion naming `saving-2x-scenarios`; the
+and (d) are printed. (e) is the headline: its contract is steps per pixel
+(below), and it prints cost and snoise beside it.
+
+### Footprint LOD, and the cavity cost as a function
+
+The operator's words: "Surely this depends on the size of the cavity and the
+camera placement, no? The slope of the wall's density gradient offset
+determines the region we have to sample in. How much we actually sample that
+region depends on how close it is to the camera. A 10-wide gradient 1,000
+units away only needs one raymarching step worth of detail, right?"
+
+Right. Pass 3b costed every wall at a fixed step. The march is now
+footprint-aware, in the site and in the saving test:
+
+- `θ_px = 2 tan(fov/2) / H`; the footprint at distance `z` is `z θ_px`.
+- Step `Δ(z) = max(k z θ_px, min(S/4, λ_fine(z)/2))`, `k = 4`: never finer
+  than four footprints, otherwise the finer of the two content limits (four
+  samples across the ramp, two per wavelength of the finest live octave).
+- Octave `i` of wavelength `λ_i` carries weight `w_i(z) = 1 −
+  smoothstep(λ_i/2m, λ_i/m, z θ_px)`, `m = 4`: one smooth blend per octave,
+  no popping; TAA hides the per-frame sparsity.
+- The weights are part of the field, so the bound encloses the truncated
+  field exactly: the noise interval over a slice is `Σ_i iv_mul([w_i(z1),
+  w_i(z0)], iv_snoise_ball(c F_i, r F_i))`, `w_i` monotone in `z`.
+  `intervals-enclose` holds for what the shader evaluates.
+- The pre-pass says where each ray's ramp begins; LOD says how finely to
+  sample it once there. They compound. The reference a march that does not
+  know where the wall is must pay is the fixed step `min(10, S/4)` everywhere.
+
+The cavity is parametrised by the hollow radius `Rh` and the ramp width `S`;
+the brush `(1 − (d/Rc)²)^e` with `CARVE` gives `Rh = Rc √(1 − CARVE^(−1/e))`
+and `S` from the exponent (`e = 4` gives `S ≈ 1.3 Rh`, `e = 0.25` gives
+`S ≈ 0.12 Rh`), so `(Rh, S)` are the knobs and `(Rc, e)` derived. Shipped:
+`Rh = 198`, `S = 50` (`e ≈ 0.6`, `Rc ≈ 220`), `K = 1/30`.
+
+Imagination's model (scratchpad `cavity_model.py`; the test confirms or
+refutes), 1080p, `N = 8`, per pixel for a converged frame; "ref" is the
+fixed-step reference's steps:
+
+| `Rh` | camera | `S = 10` steps / snoise / cost ratio | `S = 50` | `S = 150` |
+| --- | --- | --- | --- | --- |
+| 100 | low | 6 / 12 / 2.6x | 6 / 12 / 1.6x | 14 / 36 / 1.3x |
+| 200 | low (**shipped**, ref ≈ 35 steps) | 6 / 12 / 3.2x | **6 / 12 / 1.7x** | 14 / 36 / 1.4x |
+| 400 | low | 6 / 12 / 4.0x | 6 / 12 / 1.9x | 14 / 36 / 1.5x |
+| 1000 | low | 5 / 9 / 8.2x | 6 / 12 / 2.5x | 14 / 36 / 1.7x |
+| 1000 | centred | 4.3 / 7 / 12.9x | 6 / 12 / 2.9x | 14 / 36 / 1.8x |
+
+Centred and mid offsets differ from low by under 10% at every point. What
+the table says: within the frustum the footprint is under 4 units, so the
+step is set by the content limits (`S/4`, and the detail octave's 12.5-unit
+half-wavelength), not by distance; the "10-wide gradient 1,000 units away"
+row is where the footprint finally bites (4.3 steps, 7 snoise). The sample
+count is nearly flat in `Rh` and camera offset and rises with `S` only once
+the detail wavelength, not the ramp, sets the step. What makes the shipped
+scene cheaper without losing the mood, in order: a lower per-frame sample
+budget, which LOD and the mask make nearly lossless (`S_budget = 4` converges
+in about three frames at the walls); a thinner ramp (`S = 10` is 3.2x on cost
+but reads as a surface; 25–50 keeps the fog); a longer detail wavelength or
+no detail octave at the far wall; a larger hollow, which changes the
+composition and costs nothing per pixel.
+
+**Q8 retired.** At the shipped point the shipped march takes 5–8x fewer steps
+than the fixed-step reference and 1.7x less combined cost; the contract for
+(e) is the number that scales with GPU time, steps per pixel: ≥ 2x fewer than
+the fixed-step reference at the shipped parameters, with snoise per pixel and
+combined cost printed beside it and promised nothing. The test asserts that;
+the browser measures it (`?ground=debug` against `?ground=dense`). A shortfall skips the assertion naming `saving-2x-scenarios`; the
 fields, grids and `e` are not tuned. The honest summary: at a Lipschitz bound
 near 10 the noise ball is weak everywhere; what intervals buy on these fields
 is the envelope's empty space, found exactly, and the tiles make finding it
@@ -679,19 +744,10 @@ timeouts are reported as timeouts, not kills.
 cloud volume that surrounds it on every side, including above; not the 2021
 bowl.
 
-**Q8. `cavity-contract`: which number the shipped cavity scene promises.**
-The proving-ground contract's "2x fewer evaluations at equal transmittance"
-cannot hold in a cavity with no sky (prediction 1.0–1.2x, above), because a
-pointwise-gated dense march already pays almost nothing in the hollow. The
-pre-pass's real gain there is where the samples land.
-- (a) (e) is asserted on the placement ratio (marched length over wall
-  length per ray, ≥ 2x, predicted 2.0–2.6x); the cost-ratio 2x stays on (a)
-  and (c). **Recommended**: it is the number that describes the shipped
-  gain, and it is still a measured property of the same march.
-- (b) (e) is printed only; the contract stays on (a) and (c); the browser
-  measurement (variance at the walls, snoise per pixel) is the shipped
-  scene's evidence.
-- (c) Relax the contract for (e) to the measured cost ratio.
+**Q8. `cavity-contract`.** Retired in pass 3d (see "Footprint LOD"): the
+contract for (e) is steps per pixel against the fixed-step reference at the
+shipped parameters, ≥ 2x fewer, predicted 5–8x; cost and snoise are printed
+beside it and promised nothing.
 
 Specs for pass 3: `docs/cultmath-interval-ground-cut-site-ground.r3.spec.json`
 beside the two CultLib r2 specs.
