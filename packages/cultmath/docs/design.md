@@ -133,6 +133,64 @@ as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
+### GLSL Target: Source Transformations
+
+`shaders/CultMath.glsl` is a GLSL ES 3.00 (WebGL2) library generated from
+`shaders/CultMath.hlsl` by `GlslLowering` (in the test project). It is a derived
+file: never edit it by hand. Regenerate it, and the golden fixture
+`tests/CultMath.Tests/fixtures/glsl-parity.json`, with:
+
+```powershell
+$env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
+```
+
+`GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between the
+committed file and the lowering of the committed HLSL. These transformations,
+in order, are the complete list:
+
+1. Each `#include "name"` is replaced in place by the included file, by the
+   same resolver the C# mirror uses; GLSL has no `#include`.
+2. Include guards are dropped, and so are the functions taking
+   `Texture2D`/`SamplerState`; the host shader samples its own textures.
+3. Type names: `floatN`, `intN`, `uintN` and `boolN` become `vecN`, `ivecN`,
+   `uvecN` and `bvecN`.
+4. File-scope `static const` becomes `const`.
+5. C-style casts `(float)x`, `(int)x` and `(uint)x` become `float(x)`, `int(x)`
+   and `uint(x)`. The operand is found by a balanced-bracket scanner:
+   `(int)((state >> 28) + 4u)` nests parentheses.
+6. Intrinsics are renamed: `lerp` to `mix`, `frac` to `fract`, `rsqrt` to
+   `inversesqrt`, `asuint` to `floatBitsToUint`, `asfloat` to
+   `uintBitsToFloat`, and `saturate(x)` becomes `clamp(x, 0.0, 1.0)`.
+7. Float literals pass through unchanged.
+8. The library is wrapped in a `CULTMATH_GLSL` guard.
+9. The first line names the file as generated and says how to regenerate it.
+
+GLSL ES 3.00 is stricter than HLSL: no implicit conversions between int, uint
+and float, no C-style casts, and no `step(genType, float)` overload. Those gaps
+are closed in the HLSL, never in the lowering: the HLSL is written in the subset
+both languages share, with edits that are legal HLSL and compute the same bits
+(`step(h, float4(0.0, 0.0, 0.0, 0.0))` rather than `step(h, 0.0)`, `+ 4u` where
+a uint is added, `(float)((uint)hash.x >> 8)` before a float multiply). The C#
+mirror and the FXC and dxc compiles keep those edits honest. A body that needs a
+transformation outside the list fails `GlslMirrorTests.NoHlslOnlyTokensSurvive`
+rather than gaining a special case.
+
+The library declares no precision. The host shader does, and it must be
+`precision highp float; precision highp int;`: the PCG hashes need 32-bit
+integers. `tools/compile-glsl.ps1` writes such a wrapper (its own `#version
+300 es` line, the precision, the library by string concatenation, and one call
+of every public function) and compiles it with glslang, which
+`tools/get-glslang.ps1` fetches pinned. The Unity package does not ship the
+GLSL file.
+
+Parity runs in two legs, each with one owner: HLSL against C# by the mirror
+test, bit for bit; GLSL against C# by the golden fixture, which records 256
+seeded cases per function family as float32 bit patterns, evaluated by the
+consumer on WebGL2 and read back. Integer-only families (`pcg3d`, `pcg4d`) must
+match exactly; float families are ulp-bounded, the bound measured on the device.
+`iv_exp` is not in the fixture, because its C# bits come from the platform's
+`exp`.
+
 ## Invariant 8: Value-and-Gradient Primitives
 
 A primitive tagged invariant 8 returns its value and analytic gradient

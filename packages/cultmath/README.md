@@ -41,6 +41,12 @@ shader semantics.
   ball. Every one returns an interval containing the function's value at every
   point of its input, so a raymarch can skip a segment whose `hi` is below its
   cutoff; `cultmath_iv_*` in HLSL. See `docs/design.md`, "Intervals".
+- `shaders/CultMath.glsl`, the same `cultmath_*` library in GLSL ES 3.00 for
+  WebGL2, generated from `CultMath.hlsl` (never edited by hand). GLSL has no
+  `#include`: a WebGL consumer concatenates the file's text after its own
+  `#version 300 es` line and `precision highp float; precision highp int;`
+  (the library declares no precision, and its hashes need 32-bit integers),
+  then appends its own shader source.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
