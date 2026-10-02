@@ -10,7 +10,7 @@
   "scripts": {
     "build:ts": "node scripts/run-typescript-workspaces.mjs build",
     "test:ts": "node scripts/run-typescript-workspaces.mjs test",
-    "test:pack:ts": "node scripts/test-typescript-package-closure.mjs",
+    "test:pack:ts": "node scripts/test-typescript-package-closure.mjs && node scripts/test-declared-dependency-ranges.mjs",
     "test:eve-browser-network": "node scripts/verify-eve-browser-network.mjs"
   },
   "devDependencies": {
