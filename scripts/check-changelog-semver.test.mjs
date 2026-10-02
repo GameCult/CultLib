@@ -522,7 +522,7 @@ test("measured: a missing or unrestorable tool fails closed and says why", () =>
       writeFileSync(join(bare, "dotnet-tools.json"), "{ this is not a manifest");
       const brokenManifest = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
       assert.match(brokenManifest, /could not be measured/);
-      assert.match(brokenManifest, /dotnet tool restore failed: S/);
+      assert.match(brokenManifest, /dotnet tool restore failed: Json parsing error/);
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
