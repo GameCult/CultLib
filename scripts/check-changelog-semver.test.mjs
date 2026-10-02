@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -261,17 +262,18 @@ test("CLI: does not re-litigate a version already published as a tag", () => {
 // the SDK and compared by the pinned ApiCompat tool through the CLI, so every
 // rule is observed where the release scripts observe it. ---
 
-const fixtureRoot = mkdtempSync(join(tmpdir(), "cultlib-semver-fixtures-"));
-process.on("exit", () => rmSync(fixtureRoot, { recursive: true, force: true }));
-const builtFixtures = new Map();
+// Built fixtures are cached by content under the temp directory, so reruns (and a
+// mutation tool's many reruns) do not rebuild the same tiny assemblies.
+const fixtureRoot = join(tmpdir(), "cultlib-semver-fixtures");
 
 // Builds `source` into <assemblyName>.dll (netstandard2.1, like the shipped
 // assemblies) once per distinct (name, source) and returns the dll's path.
 function buildAssembly(assemblyName, source) {
-  const key = `${assemblyName}\n${source}`;
-  if (!builtFixtures.has(key)) {
-    const dir = join(fixtureRoot, `fx${builtFixtures.size}`);
-    mkdirSync(dir);
+  const dir = join(fixtureRoot, createHash("sha256").update(`${assemblyName}
+${source}`).digest("hex").slice(0, 16));
+  const dll = join(dir, "out", `${assemblyName}.dll`);
+  if (!existsSync(dll)) {
+    mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "Fixture.csproj"),
       `<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>netstandard2.1</TargetFramework>` +
@@ -279,9 +281,8 @@ function buildAssembly(assemblyName, source) {
     );
     writeFileSync(join(dir, "Source.cs"), source);
     execFileSync("dotnet", ["build", "-c", "Release", "-o", "out", "--nologo", "-v", "q"], { cwd: dir, stdio: "pipe" });
-    builtFixtures.set(key, join(dir, "out", `${assemblyName}.dll`));
   }
-  return builtFixtures.get(key);
+  return dll;
 }
 
 const PLUGINS = "unity/widget/Runtime/Plugins";
