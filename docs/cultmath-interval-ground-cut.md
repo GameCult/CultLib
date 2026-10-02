@@ -331,21 +331,21 @@ TFLOP available; estimates, replaced by measurement):
 | Pass | Work | ms |
 | --- | --- | --- |
 | Flow texture, quarter res | 160 k texels × 2 snoise | 0.05 |
-| Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≤ 144 probes, mostly envelope-only; in the void most sky tiles finish in a few probes; ≈ 0.4–2 snoise-equivalents per pixel, measured | 0.2–0.8 |
-| March at `S = 8` | 2.6 M × 8 snoise, placed in unmasked cells only, plus the analytic sun light (one length, one pow per sample, ≈ 5%) | 3.3 |
+| Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≈ 30 probes in the cavity (interior retired in a few, the wall's ≈ 15 cells at 1.5 probes each), envelope-only because the noise ball cannot prove anything at this scale; ≈ 0.1 snoise-equivalents per pixel; worst case ≤ 192 probes per tile | 0.1 (≤ 0.8) |
+| March at `S = 8` | 2.6 M × 8 snoise, every pixel marches a wall (no sky pixel ends free), samples placed in unmasked cells only, plus the analytic sun light (one length, one pow per sample, ≈ 5%) | 3.3 |
 | TAA resolve + DoF gather | ~19 texel reads per pixel, plus the depth-history fetch and one matrix multiply for the camera reprojection | 1.1 |
 | Sun self-shadowing sample (named, not taken) | one envelope-only transmittance sample per primary sample, ≈ +25% of the march | +0.8, not on the phone |
 | Stardust layer, half res, 4,096 particles | fill-bound, small | 0.2 |
 | 8×8 downsample + PBO readback at 2 Hz | tiny | 0.05 |
-| **Total at `S = 8`, the void scene (pass 3)** | | **≈ 4.9** |
-| Total at `S = 6` / `S = 4` | | ≈ 4.0 / 3.2 |
+| **Total at `S = 8`, the cavity (pass 3)** | | **≈ 4.8** |
+| Total at `S = 6` / `S = 4` | | ≈ 3.9 / 3.1 |
 
-Said plainly: at `S = 8` the void scene with the pre-pass, the analytic light
-and the camera reprojection does not fit the 4 ms phone budget on the
-estimate; `S = 6` sits at the line and `S = 4` is under it. The controller
-will settle a mid-range phone at `S = 4–6`, which the TAA covers (convergence
-in ~32 frames, about a second), and the pre-pass is what makes `S = 4` look
-like more: the samples land only on the walls. What gives, in order, is the
+Said plainly: at `S = 8` the cavity with the pre-pass, the analytic light and
+the camera reprojection does not fit the 4 ms phone budget on the estimate;
+`S = 6` sits at the line and `S = 4` is under it. The controller will settle
+a mid-range phone at `S = 4–6`, which the TAA covers (convergence in ~32
+frames, about a second), and the pre-pass is what makes `S = 4` look like
+more: every ray's samples land in its wall, none in the hollow. What gives, in order, is the
 sample count, then the resolution; the stardust and the DoF are never dropped
 before the clouds' samples; the self-shadowing sample is not taken on any
 device until measured. On desktop at `S = 16` the stack is ≈ 1.9 ms.
@@ -522,10 +522,12 @@ warped points of 2,000 slices, no tolerance).
 | (b) inside the fog | `h = 0`, camera at `y = F − 10`, rays level | 0.8–1.0x: every ray saturates in a few cells; the pre-pass still probes the whole grid |
 | (c) Aetheria-like | zone bowl `R = 2000` + four wells (masses 100, 1000, 10000, 1000), camera above the fog in the bowl, rays gazing across (`m_y ∈ [−0.25, 0.1]`), Aetheria's units and 256-sample quadratic grid | 2–4x: the clear cells before the fog surface collapse to a few probes per tile; the fog cells cost the same on both sides. The noise ball proves nothing at Aetheria's scale (`L r F0 ≥ 1.6` at the finest cell with `D = 60`), so it is not evaluated; the saving is the envelope's |
 | (d) uniform slab | r1's field, kept as the worst case | 1.3–1.5x: the ceiling at `L = 10.099261` with the cheaper baseline |
-| (e) the void, the shipped scene | the original's bowl and units, camera inside the bowl at `y = −105`, rays over the whole frustum | 2–3x: sky rays go from 96 envelope evaluations to a few probes per tile; wall rays cost the same on both sides; the mix decides. The noise ball proves nothing here either (`L r F0 ≥ 1.5` at the finest cell) |
+| (e) the void, the shipped scene | the true cavity in the original's units (`Rc = 640`, `Rh = 198`), camera 186 from the centre, low, rays over the whole frustum; every ray crosses 14–380 units of interior and ends in a wall | **1.0–1.2x on combined cost, under 2x.** With no sky the interior costs the dense march only envelope evaluations (≈ 20 × 0.2 per ray against ≈ 15 wall cells × 3.2) and the pre-pass can only remove those; the noise ball proves nothing (`L r F0 ≥ 1.5`). What the pre-pass buys here is sample placement: at the site's `S` the samples land in the 150-unit wall ramp instead of the whole ray, a 2.0–2.6x effective sample density (printed as marched length over wall length) |
 
-The 2x contract is asserted on (a), (c) and (e) at `N = 8`; (b) and (d) are
-printed. The headline is (e). A shortfall skips the assertion naming `saving-2x-scenarios`; the
+The 2x contract on combined cost is asserted on (a) and (c) at `N = 8`; (b)
+and (d) are printed. (e) is the headline and prints both its numbers; which
+one it promises is Q8 (`cavity-contract`), and until that is ruled its
+assertion skips naming the question. A shortfall skips the assertion naming `saving-2x-scenarios`; the
 fields, grids and `e` are not tuned. The honest summary: at a Lipschitz bound
 near 10 the noise ball is weak everywhere; what intervals buy on these fields
 is the envelope's empty space, found exactly, and the tiles make finding it
@@ -559,18 +561,38 @@ pivot, `Materials/Brushes/Gravity Well.mat` and
 | Noise | strength 150, frequency 0.01, safety 50 |
 
 Not surviving: the 2021 `d()` displacement details (the 2021-05-30 "Volumetric
-Redux" rewrote it), the tint map's runtime contents, the video. The brush is
-radial in `xz` and carves a bowl in a cloud floor; "spherical" in the
-operator's words is the brush, not a 3D cavity (Q7).
+Redux" rewrote it), the tint map's runtime contents, the video. The 2021
+brush was radial in `xz` and carved a bowl in a cloud floor; the operator
+ruled (Q7, `operator-void-true-cavity`) that the site's void is a true 3D
+hollow inside a cloud volume that surrounds it on every side, including
+above. Everything else recovered carries over.
 
-**The site scene** (`site-ground` r3): the same units. `h(xz) = 75 + 40 (1 −
-(r/256)²)^16`, `s = y + h − F`, `F = −16.46`, fog where `s' < 0`, `S = 50`,
-`A = 20` (the original's 150 is too violent for a 40-deep bowl), `F0 = 0.01`.
-The sun orbits the origin at radius 175, period 72 s, `y = −130`; the void
-moves with it. The camera follows 150 behind along the tangent at `y = −105`:
-inside the bowl, 14 below the rim, looking at the orbit centre at the sun's
-depth, with a slow handheld drift. `worldAt(t)` in `ground.js` is the one
-owner of sun, void and camera; nothing integrates motion. The flow is authored
+**The site scene** (`site-ground` r3): the original's units. Outer volume: an
+unbounded uniform fill (chosen over a shell: every ray then ends in a wall
+and the march terminates by opacity, never by a far plane; `Z1 = 2 Rc` bounds
+the pre-pass range only). The carve: `d = |p − c_v|`, `g(d) = (1 −
+(d/Rc)²)^4` for `d < Rc`, `Rc = 640`, `CARVE = 1.5`; `density = K · max(0,
+1 − CARVE · g(d'))`, exactly 0 inside the hollow radius `Rh = Rc √(1 −
+CARVE^(−1/4)) = 198`, half at `0.49 Rc`, full at `Rc`; `K = 1/30`, so a wall
+is opaque within ≈ 150 units of entry. Noise displaces the wall only:
+`fade(d) = smoothstep(Rh − S, Rh, d)`, `S = 50`, `d' = d + A · fade · n`,
+`A = 20`, `F0 = 0.01`. Its bound over a tile's slice: `d`'s interval is the
+box's least and greatest distance to `c_v` (exact); `g`, `fade` and the carve
+are monotone in it; the slice is provably empty iff `d_hi + A · fade(d_hi) ·
+n_hi ≤ Rh`, and deep inside (`fade = 0`) no noise is evaluated. `Rc` grew
+from the brush's 256 because a 3D hollow must hold the camera.
+
+The sun orbits the origin at radius 175, period 72 s; the cavity centre is
+`c_v = sun + (0, Rh − 12.5, 0)`, so the sun sphere rests on the hollow's
+bottom and the hollow moves with it. The camera follows 120 behind the sun
+along the tangent and 45 above it: 186 from `c_v`, 12 inside the hollow, low,
+looking at `sun + (0, 60, 0)` so the lit lower wall and the dark upper wall
+share the frame. The 2021 follow distance 150 and height 25 do not fit a
+hollow a camera can stand in; 120 and 45 are the re-derivation. There is no
+sky: behind a fully transmissive pixel the resolve shows the base token, and
+only an unfinished ray (budget exhausted before the wall, measured, under 1%)
+reaches it. `worldAt(t)` in `ground.js` is the one
+owner of sun, cavity and camera; nothing integrates motion. The flow is authored
 around the void: a swirl `SWIRL · tangent · (1 − (r/Rw)²)²` (largest
 mid-slope, zero at rim and centre) plus the global noise flow, rendered into a
 world-space window of side `4 Rw` around the sun, so warp, hue, motion vectors
@@ -578,11 +600,13 @@ and the stardust read one texture (D4). The stardust (next cut) spawns in the
 bowl with the original's height rule and is lit by the same pulse.
 
 **Lighting, cheapest moody version:** the original's mechanism made 3D. At a
-sample, `light = SUN · (1 − (d/Rl)²)^3` for `d = |p − sun| < Rl = 128`, plus
-the blue ambient; `colour = density · (light + ambient) · hue(flow)`. Zero
-extra `snoise`; the far cavity stays dark because the pulse is zero beyond
-`Rl`; the sun is a small additive disc in the resolve, occluded by the
-accumulated transmittance. A self-shadowing step (one envelope-only
+sample, `light = SUN · (1 − (d/Rl)²)^3` for `d = |p − sun| < Rl = Rh = 198`
+(the original's 128 scaled with the hollow), plus the blue ambient; `colour =
+density · (light + ambient) · hue(flow)`. Zero extra `snoise`; the lower wall
+within `Rl` of the sun glows and the upper wall stays dark because the pulse
+is zero beyond `Rl`, which is the moody split; the sun inside the hollow is
+occluded by nothing, so it is a small additive disc in the resolve, occluded
+only by the accumulated transmittance along its ray. A self-shadowing step (one envelope-only
 transmittance sample toward the sun per primary sample, no noise, ≈ +25% on
 the march) is named, not taken: desktop-only if measurement ever allows.
 
@@ -650,14 +674,24 @@ timeouts are reported as timeouts, not kills.
 `cultmath-tapes:ruling:operator-ground-void-brush`: the old main menu's void
 (pass 3, "The site ground: the void").
 
-**Q7. What "spherical" means for the brush.**
-- (a) As the original: the brush is radial in `xz` and carves a bowl in a
-  cloud floor; the sun sits at the bowl's bottom; clear sky above the rim.
-  **Recommended**: it is the scene that existed, and its parameters survive.
-- (b) A true 3D spherical cavity in a cloud volume (clouds above as well as
-  below, the sun at the cavity's bottom). The culling is the same (the
-  envelope is monotone in distance either way); the look is more enclosed and
-  the sky, stardust and DoF composition changes.
+**Q7. What "spherical" means for the brush.** Ruled
+`cultmath-tapes:ruling:operator-void-true-cavity`: a true 3D hollow inside a
+cloud volume that surrounds it on every side, including above; not the 2021
+bowl.
+
+**Q8. `cavity-contract`: which number the shipped cavity scene promises.**
+The proving-ground contract's "2x fewer evaluations at equal transmittance"
+cannot hold in a cavity with no sky (prediction 1.0–1.2x, above), because a
+pointwise-gated dense march already pays almost nothing in the hollow. The
+pre-pass's real gain there is where the samples land.
+- (a) (e) is asserted on the placement ratio (marched length over wall
+  length per ray, ≥ 2x, predicted 2.0–2.6x); the cost-ratio 2x stays on (a)
+  and (c). **Recommended**: it is the number that describes the shipped
+  gain, and it is still a measured property of the same march.
+- (b) (e) is printed only; the contract stays on (a) and (c); the browser
+  measurement (variance at the walls, snoise per pixel) is the shipped
+  scene's evidence.
+- (c) Relax the contract for (e) to the measured cost ratio.
 
 Specs for pass 3: `docs/cultmath-interval-ground-cut-site-ground.r3.spec.json`
 beside the two CultLib r2 specs.
