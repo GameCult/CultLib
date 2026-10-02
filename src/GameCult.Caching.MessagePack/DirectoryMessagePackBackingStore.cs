@@ -186,6 +186,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             if (!request.ConditionsHold(manifest.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
+            RefuseForeign(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value));
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
             var previousDeletedKeys = _deletedKeys.Keys.ToArray();
@@ -235,8 +236,34 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
 
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
-            WriteGeneration(ReadManifest());
+            var manifest = ReadManifest();
+            RefuseForeign(manifest, Array.Empty<string>());
+            WriteGeneration(manifest);
         });
+    }
+
+    // The manifest's other records stay as they are, foreign ones included; a write that would replace or remove a foreign
+    // record is refused before any page is written. The refusal takes the refused keys with it: a staged change to a record that
+    // is foreign now, and this store's copy of one, are not what the file holds, and kept they would refuse every later write.
+    private void RefuseForeign(CultPersistedStoreSnapshot currentManifest, IEnumerable<string> written)
+    {
+        var foreign = currentManifest.Records
+            .Where(record => Foreign(record, currentManifest.SchemaCatalog) != null)
+            .Select(record => record.Key)
+            .ToHashSet(StringComparer.Ordinal);
+        var refused = written.Concat(_deletedKeys.Keys).Concat(_dirtyKeys.Keys).Where(foreign.Contains).Distinct().ToArray();
+        if (refused.Length == 0)
+            return;
+        foreach (var key in refused)
+        {
+            Entries.TryRemove(key, out _);
+            _dirtyKeys.TryRemove(key, out _);
+            _deletedKeys.TryRemove(key, out _);
+        }
+
+        IsDirty = !_dirtyKeys.IsEmpty || !_deletedKeys.IsEmpty;
+        var held = currentManifest.Records.First(record => record.Key == refused[0]);
+        throw Overwrites(Foreign(held, currentManifest.SchemaCatalog)!);
     }
 
     // Runs under the commit lease: pages first, then the manifest that names them.
@@ -244,14 +271,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         Directory.CreateDirectory(_recordDirectory.FullName);
         var currentIndex = currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal);
-        // The manifest's other records stay as they are, foreign ones included; a write that would replace or remove a foreign
-        // record is refused before any page is written.
-        foreach (var key in _deletedKeys.Keys.Concat(_dirtyKeys.Keys))
-        {
-            if (currentIndex.TryGetValue(key, out var held) && Foreign(held, currentManifest.SchemaCatalog) is { } carried)
-                throw Overwrites(carried);
-        }
-
         foreach (var key in _deletedKeys.Keys)
             currentIndex.Remove(key);
         foreach (var key in _dirtyKeys.Keys)

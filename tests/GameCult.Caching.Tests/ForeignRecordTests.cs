@@ -202,6 +202,44 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
 
+        // A refusal does not poison the store: what the cache held for the refused record goes with the refusal, so a later write
+        // to another record lands and the file keeps the other writer's record.
+        [Test]
+        public void AfterARefusedWriteAWriteToAnotherRecordLands(
+            [Values(false, true)] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write refused)
+        {
+            var path = Seeded("unstuck.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            Assert.Throws<CultSchemaConflictException>(() => Land(cache, refused, D, DeckOf(Canary)));
+            Land(cache, Write.Commit, E, DeckOf("e"));
+
+            Assert.That(Stored(path, D), Is.EqualTo(widget), "the other writer's record is as it was");
+            Assert.That(EmittedDocumentTypes.Read(cache.Get(E)!, "Name"), Is.EqualTo("e"));
+            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+        }
+
+        // The same when the stale copy was only held, never written: a flush after the other writer's record landed refuses once.
+        [Test]
+        public void AFlushRefusedForAStaleCopyOfAForeignRecordRefusesOnce([Values(false, true)] bool directory)
+        {
+            var path = Seeded("stale.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            Assert.Throws<CultSchemaConflictException>(() => Land(cache, Write.Commit, D, DeckOf(Canary)));
+            Land(cache, Write.Flush, E, DeckOf("e"));
+            Land(cache, Write.Flush, E, DeckOf("e again"));
+
+            Assert.That(Stored(path, D), Is.EqualTo(widget));
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void RemovingARecordAnotherWriterMadeForeignIsRefused(bool directory)
