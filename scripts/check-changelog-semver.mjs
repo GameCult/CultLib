@@ -170,7 +170,7 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
 function resolvePreviousVersion(tagPrefix, currentVersion, cwd) {
   // A directory that cannot list tags (not a git repository, git missing) throws: that
   // is not evidence that there was no previous release.
-  const tags = execFileSync("git", ["tag", "-l", `${tagPrefix}-v*`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+  const tags = execFileSync("git", ["tag", "-l", `${tagPrefix}-v*`], { cwd, encoding: "utf8" })
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);

@@ -725,7 +725,7 @@ test("measured: restores that succeed without delivering the reference assemblie
         assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env }), notRestored);
       });
       // The package directory arrives, but without netstandard.dll in it.
-      const emptyPackage = 'if [ "$1" = restore ]; then mkdir -p packages/netstandard.library.ref/2.1.0/ref/netstandard2.1; fi\nexit 0';
+      const emptyPackage = 'if [ "$1" = restore ]; then /bin/mkdir -p packages/netstandard.library.ref/2.1.0/ref/netstandard2.1; fi\nexit 0';
       withFakeDotnet(emptyPackage, (env) => {
         assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env }), notRestored);
       });
