@@ -305,7 +305,11 @@ namespace GameCult.Caching.Tests
             if (newerStoredAt)
                 moved.StoredAt = DateTimeOffset.UtcNow.AddMinutes(5).ToString("O");
             if (ownersId)
-                moved.SchemaId = Registry.GetRequired(typeof(IdDeck)).SchemaId;
+            {
+                var owner = Registry.GetRequired(typeof(IdDeck));
+                moved.SchemaId = owner.SchemaId;
+                snapshot.SchemaCatalog = snapshot.SchemaCatalog.Append(owner.ToCatalogEntry()).ToArray();
+            }
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
 
             cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
