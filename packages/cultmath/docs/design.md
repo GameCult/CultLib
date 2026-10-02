@@ -400,6 +400,44 @@ warp that moves a point by at most `D` is enclosed by the radius `r + D`
 (`NoiseBoundTests.WarpedPointsStayEnclosed`); this is what the gamecult.org
 ground's march rests on.
 
+`iv_frustum_ball(m_c, z0, z1, footprintPerDepth, warp)` is the ball one probe
+serves a whole screen tile with. In a pinhole camera frame looking down `+z`,
+where the ray of slope `m` is the points `(m z, z)`, it encloses every point of
+every ray whose slope lies within `footprintPerDepth` of `m_c` (`N / (sqrt(2) f)`
+for an `N x N` tile at focal length `f` pixels: the full pixel footprint, so
+sub-pixel jitter is covered), over depths `[z0, z1]`, each point moved by a warp
+of length at most `warp`. The centre is `(m_c z_m, z_m)`, `z_m` the mid-depth;
+the radius is `((z1 - z0) / 2) |(m_c, 1)| + z1 footprintPerDepth + warp`. A point
+of slope `m_c + e` at depth `z` is the centre plus `(z - z_m)(m_c, 1)` plus
+`z (e, 0)`, and the two vectors are never parallel, so the bound is strict. The
+caller rotates and translates the centre into world space and scales centre and
+radius by its noise frequency. `NoiseBoundTests.TileBallEnclosesEveryRaySegment`
+checks 2,000 seeded tiles x 64 points, tile corners at both depth ends with
+full-length flows included, with no tolerance, and pins the ball to the
+derivation, so a ball grown past it fails too. A moving camera needs nothing
+more: each frame's probes use that frame's camera, and no ball, mask or probe
+result is carried from one frame to the next.
+
+The noise ball alone proves little: at `L` near 10 it bounds `snoise` to a width
+of `2 L r`, which covers all of `[-1, 1]` once `L r` reaches 1. Empty space
+becomes provable through an analytic envelope. The consumer's density is a
+pre-distortion SDF (a height fog, a well map, a carved sphere) that noise
+displaces only near its surface, and the consumer composes the bound from `iv_*`
+ops. The envelope is taken over the slice's exact box (`iv_mul` of the depth
+range by each slope range, then the SDF's own monotone pieces), together with its
+fade. The noise is `iv_snoise_ball` over `iv_frustum_ball`, scaled by the noise
+frequency. The warp moves only the noise argument, so it enlarges the ball and
+the envelope's box takes none of it. Where the fade's upper end is 0 the noise
+term is identically 0 and no `snoise` is evaluated. Where the envelope already
+proves the slice empty with the noise at its full range, the ball is not
+evaluated either. A probe is worth attempting only when the best result any
+centre value could give would prove the slice, and a ball with `L r >= 2` is
+`[-1, 1]` whatever `snoise(c)` is, so it costs nothing. CultMath owns none of the
+envelope: the interval files have no envelope function, and each consumer composes
+its own. `NoiseBoundTests.EnvelopeBoundEnclosesDensity` checks that composition,
+the one the site and Aetheria use, over 2,000 seeded slices x 64 warped points
+with no tolerance.
+
 `L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
 explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
 [-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
@@ -420,21 +458,43 @@ tracking or affine forms; those are later steps of
 sampled range: 5.08 for `iv_snoise_ball` at `r = 0.05`, 1.96 at 0.25 and 1.28
 at 1.0; 6.64 and 2.82 for 4-octave `iv_fbm_ball` at 0.05 and 0.25.
 
-The saving is a number too. `NoiseBoundTests.IntervalSkipHalvesEvaluations`
-marches 1,000 seeded rays through the map's warped coverage field (`F0 = 0.35`,
-cutoff 0.25, a slab of depth 12) once at the dense step and once with the
-adaptive interval march, and counts `snoise` evaluations (three per dense
-sample, one per probe; the flow is not counted, because the site reads it from
-a texture). Both marches integrate the same cells, so their transmittance
-agrees exactly. At the test's parameters (first step 0.25, dense step 0.125,
-warp bound 0.05) the dense march spends 287,940 evaluations and the interval
-march 309,550: 0.93x, not the 2x saving the proving-ground contract asks for.
-Over the grid the test also prints, the best is 1.83x (first step 0.0625, no
-warp), and at a first step of 1 it is 0.74x. With `L` near 10 a probe proves a
-segment empty only where `snoise` is far below the cutoff, and a probe that
-fails costs one evaluation on top of the three the dense sample costs. The test
-skips with that open fork named instead of passing; whether the march, the
-field or the bound changes is the campaign's decision.
+The saving is measured where there is empty space to find.
+`NoiseBoundTests.IntervalSkipHalvesEvaluations` draws screen tiles, each with
+its own camera, and runs one pre-pass per tile over the dense grid's cell ranges:
+it starts with the whole grid, skips and doubles a range it proves empty, halves
+one it cannot, and runs to the grid's end. Each of the tile's `N^2` rays is then
+marched twice with the same integrator and the same early-out at transmittance
+0.02: once over every cell, once over the tile's unproven cells only. The two
+integrate the same cells, so their transmittance agrees exactly in every
+configuration. Cost is counted in `snoise` evaluations, with an envelope
+evaluation or probe weighted 0.2. That weight is an estimate, and both counts are
+printed. The flow is not counted. At `N = 8` with the warp on, in Aetheria's units
+on its 256-cell quadratic grid:
+
+- (a) Height fog, camera above the safety band, rays level and up: the whole
+  grid is one envelope probe per tile, against 256 envelope evaluations per ray,
+  16384x.
+- (b) Inside the fog: 0.99x. Every cell is fog, and the pre-pass probes each one.
+- (c) The zone bowl and four wells, the camera gazing across: 1.41x, and 3.32x
+  with no warp. The pre-pass cuts envelope evaluations from 212.93 to 37.12 per
+  ray. Almost all of the dense march's 78.67 `snoise` per ray fall in the noise
+  band, where the rays need them (ceiling 1.42x). The warp bound `D = 60` is what
+  leaves the noise ball unable to prove anything at this noise scale.
+- (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
+- (e) The void at the shipped point (`Rh = 198`, `S = 50`, the low camera,
+  200 tiles), with three marches. The fixed-step reference takes 36.34 steps per
+  pixel. The same cells masked by the pre-pass take 20.13, with identical
+  transmittance. The footprint-aware march takes 16.45 inside the unmasked
+  cells, within 0.008339431 of the reference's transmittance: 2.21x fewer steps.
+  `snoise` per pixel goes from 32.98 to 26.56, and combined cost improves 1.34x.
+  Over the grid of hollow radius, camera offset and ramp width the steps ratio
+  runs from 1.57x (`Rh = 100`, low, `S = 150`) to 12.40x (`Rh = 1000`, centred,
+  `S = 10`), and the cost ratio from 1.12x to 3.47x.
+
+The contract is 2x on combined cost for (a) and (c) and 2x fewer steps per pixel
+for (e). (a) and (e) meet it. (c) does not, so the test skips naming
+`saving-2x-scenarios`. The fields, the grids and the 0.2 weight are not tuned
+toward the contract.
 
 Consumers: the gamecult.org ground shader (through the GLSL lowering) and
 Aetheria's nebula raymarch at its CultMath pin bump.
