@@ -2143,7 +2143,10 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   await symlink(join(volume, "store.cc"), file);
   const store = new SingleFileMessagePackBackingStore(file);
   const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
-  await assert.rejects(() => store.pullAll(), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  await assert.rejects(
+    () => store.pullAll(),
+    (error: NodeJS.ErrnoException) => error.code === "ENOENT" && error.message.includes("symbolic link") && error.message.includes(file),
+  );
   await assert.rejects(() => store.push(envelope), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   assert.ok((await lstat(file)).isSymbolicLink());

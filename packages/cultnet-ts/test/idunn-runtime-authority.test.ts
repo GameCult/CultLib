@@ -181,6 +181,40 @@ for (const file of ["expected.cc", "activation.cc"]) {
   });
 }
 
+// What an authority file may hold once the one reader has accepted it: exactly one record, under the schema
+// id and the type the loader asked for. Each case edits the Rust-written store and changes one thing.
+function withStore(change: (store: unknown[][]) => void): (bytes: Buffer) => Buffer {
+  return (bytes) => {
+    const store = decode(bytes) as unknown[][];
+    change(store);
+    return Buffer.from(encode(store));
+  };
+}
+
+test("an authority file holding two records is refused", (context) => {
+  const bundle = bundleWith(context, "web", "expected.cc", withStore((store) => {
+    const second = [...(store[2]![0] as unknown[])];
+    second[0] = "second";
+    store[2]!.push(second);
+  }));
+  assert.throws(() => openAuthority(context, "web", { bundle }), /must contain exactly one record/);
+});
+
+test("an authority file whose one record is under another schema id is refused", (context) => {
+  const bundle = bundleWith(context, "web", "expected.cc", () => fixtureFile("web", "activation.cc"));
+  assert.throws(
+    () => openAuthority(context, "web", { bundle }),
+    (error: Error) => /must contain exactly one .+ record/.test(error.message) && !error.message.includes("unexpected CultCache type"),
+  );
+});
+
+test("an authority record whose catalog names another type is refused, naming that type", (context) => {
+  const bundle = bundleWith(context, "web", "expected.cc", withStore((store) => {
+    (store[1]![0] as unknown[])[1] = "idunn.other_type";
+  }));
+  assert.throws(() => openAuthority(context, "web", { bundle }), /unexpected CultCache type idunn.other_type/);
+});
+
 function presenceSlot(document: { payload: Uint8Array }, slot: number): unknown {
   return (decode(document.payload) as unknown[])[slot];
 }
