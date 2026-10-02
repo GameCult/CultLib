@@ -8,9 +8,11 @@
 // CLI wrapper that reads the changelog file and asks git for the previous
 // published tag, then calls `evaluateRelease`.
 
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // The exact heading spelling the policy mandates for a breaking-change
 // section. `unity/org.gamecult.cultlib/CHANGELOG.md`'s 1.0.60 entry set this
@@ -100,12 +102,15 @@ function isPreOneZero(prev) {
 
 // Evaluates one release. `previousVersion` may be null for a package's first
 // ever release (nothing to compare against, so the bump rule does not apply,
-// but a changelog entry is still required).
-export function evaluateRelease({ packageName, changelogText, version, previousVersion }) {
+// but a changelog entry is still required). `measuredBreaks` lists the public
+// API diagnostics measured against the previous tag's assemblies; a non-empty
+// list makes the release breaking whether or not the changelog says so, and
+// the changelog must then declare it.
+export function evaluateRelease({ packageName, changelogText, version, previousVersion, measuredBreaks = [] }) {
   const next = parseVersion(version);
-  let breaking;
+  let declared;
   try {
-    breaking = hasBreakingSection(changelogText, version);
+    declared = hasBreakingSection(changelogText, version);
   } catch (err) {
     return { ok: false, reason: `${packageName}: ${err.message}` };
   }
@@ -127,9 +132,21 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
     };
   }
 
-  if (!breaking) {
+  const measured = measuredBreaks.length > 0;
+  if (measured && !declared) {
+    const shown = measuredBreaks.slice(0, 5).join("; ") + (measuredBreaks.length > 5 ? "; ..." : "");
+    return {
+      ok: false,
+      reason: `${packageName}: ${version} breaks ${measuredBreaks.length} public API member(s) measured against ` +
+        `${previousVersion} (${shown}); declare them under "${BREAKING_HEADING}" in the changelog and bump accordingly`,
+    };
+  }
+  if (!declared) {
     return { ok: true, reason: `${packageName}: ${version} is a ${bump} bump over ${previousVersion}, no breaking section` };
   }
+  const evidence = measured
+    ? `a "${BREAKING_HEADING}" section and ${measuredBreaks.length} measured public API break(s)`
+    : `a "${BREAKING_HEADING}" section`;
 
   const pre1 = isPreOneZero(prev);
   const requiredLanes = pre1 ? ["major", "minor"] : ["major"];
@@ -139,12 +156,12 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
       : `a major bump`;
     return {
       ok: false,
-      reason: `${packageName}: ${version}'s changelog has a "${BREAKING_HEADING}" section but is only a ${bump} bump ` +
+      reason: `${packageName}: ${version} has ${evidence} but is only a ${bump} bump ` +
         `over ${previousVersion}; a breaking release needs ${requirement}`,
     };
   }
 
-  return { ok: true, reason: `${packageName}: ${version} is a ${bump} bump over ${previousVersion} and its "${BREAKING_HEADING}" section agrees` };
+  return { ok: true, reason: `${packageName}: ${version} is a ${bump} bump over ${previousVersion} and has ${evidence}, which agree` };
 }
 
 // --- CLI wrapper: resolves the previous published tag via git and reads the
@@ -194,13 +211,95 @@ function tagAlreadyPublished(tagPrefix, version, cwd) {
   }
 }
 
+// --- Measured public API: the built DLLs are compared with the DLLs the
+// previous tag tracked, by Microsoft.DotNet.ApiCompat.Tool (pinned in
+// dotnet-tools.json). Nothing here compares members itself. ---
+
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const DIAGNOSTIC_LINE = /^CP\d{4}: /;
+
+// One ApiCompat run's verdict. A diagnostic line is a measured break. A
+// non-zero exit with no diagnostic line means the tool did not measure
+// anything (missing tool, unreadable input, crash): that is a failure, never a
+// pass.
+export function readApiCompatRun({ status, output }) {
+  const breaks = output.split(/\r?\n/).filter((line) => DIAGNOSTIC_LINE.test(line));
+  if (breaks.length === 0 && status !== 0) {
+    return { failure: `apicompat exited ${status} without measuring: ${output.trim().split(/\r?\n/).slice(0, 5).join(" | ")}` };
+  }
+  return { breaks };
+}
+
+function runApiCompat(args) {
+  const run = spawnSync("dotnet", ["tool", "run", "apicompat", ...args], { cwd: repoRoot, encoding: "utf8" });
+  if (run.error) {
+    return { failure: `could not start dotnet: ${run.error.message}` };
+  }
+  return readApiCompatRun({ status: run.status, output: `${run.stdout}${run.stderr}` });
+}
+
+// The DLLs the previous tag tracked under `baselinePath`, as git blobs: no
+// worktree, no network, and unaffected by what the working tree holds now.
+function extractBaseline({ tag, baselinePath, into, cwd }) {
+  const dir = baselinePath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const listing = execFileSync("git", ["ls-tree", "--name-only", tag, `${dir}/`], { cwd, encoding: "utf8" });
+  const names = listing.split("\n").map((line) => basename(line.trim())).filter((name) => name.toLowerCase().endsWith(".dll"));
+  for (const name of names) {
+    const blob = execFileSync("git", ["show", `${tag}:${dir}/${name}`], { cwd, maxBuffer: 1 << 28 });
+    writeFileSync(join(into, name), blob);
+  }
+  return names;
+}
+
+// Compares each built assembly with its namesake at the previous tag. A built
+// assembly with no namesake is new and measures nothing; a GameCult.*
+// assembly the tag tracked and the build no longer produces is itself a break.
+export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, built, refs = [], cwd }) {
+  const tag = `${tagPrefix}-v${previousVersion}`;
+  const work = mkdtempSync(join(tmpdir(), "cultlib-apicompat-"));
+  try {
+    const left = join(work, "left");
+    mkdirSync(left);
+    const baselineNames = extractBaseline({ tag, baselinePath, into: left, cwd });
+    const restore = spawnSync("dotnet", ["tool", "restore"], { cwd: repoRoot, encoding: "utf8" });
+    if (restore.status !== 0) {
+      return { failure: `dotnet tool restore failed: ${`${restore.stdout}${restore.stderr}`.trim().split(/\r?\n/).slice(-3).join(" | ")}` };
+    }
+    const builtNames = new Set(built.map((path) => basename(path)));
+    const breaks = [];
+    for (const name of baselineNames) {
+      if (name.startsWith("GameCult.") && !builtNames.has(name)) {
+        breaks.push(`assembly ${name} exists at ${tag} but is no longer built`);
+      }
+    }
+    for (const path of built) {
+      const name = basename(path);
+      if (!baselineNames.includes(name)) continue;
+      const rightRefs = [...new Set([dirname(path), ...refs])].join(",");
+      const run = runApiCompat(["--left-assembly", join(left, name), "--right-assembly", path, "--left-assembly-references", left, "--right-assembly-references", rightRefs]);
+      if (run.failure) return { failure: `${name}: ${run.failure}` };
+      breaks.push(...run.breaks);
+    }
+    return { breaks };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+// Repeatable options (--api-built, --api-refs) collect into arrays.
+const REPEATABLE = new Set(["api-built", "api-refs"]);
+
 function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith("--")) continue;
     const key = arg.slice(2);
-    args[key] = argv[i + 1];
+    if (REPEATABLE.has(key)) {
+      (args[key] ??= []).push(argv[i + 1]);
+    } else {
+      args[key] = argv[i + 1];
+    }
     i += 1;
   }
   return args;
@@ -209,9 +308,10 @@ function parseArgs(argv) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   const { package: packageName, changelog, version, "tag-prefix": tagPrefix, cwd = process.cwd() } = args;
-  if (!packageName || !changelog || !version || !tagPrefix) {
+  if (!packageName || !changelog || !version || !tagPrefix || (args["api-built"] && !args["api-baseline-path"])) {
     console.error(
-      "usage: check-changelog-semver.mjs --package <name> --changelog <path> --version <x.y.z> --tag-prefix <prefix> [--cwd <dir>]",
+      "usage: check-changelog-semver.mjs --package <name> --changelog <path> --version <x.y.z> --tag-prefix <prefix> [--cwd <dir>]\n" +
+        "         [--api-baseline-path <repo-relative dir of tracked DLLs> --api-built <dll>... [--api-refs <dir>...]]",
     );
     process.exitCode = 2;
     return;
@@ -227,7 +327,25 @@ function main() {
   }
   const changelogText = readFileSync(changelog, "utf8");
   const previousVersion = resolvePreviousVersion(tagPrefix, version, cwd);
-  const result = evaluateRelease({ packageName, changelogText, version, previousVersion });
+  let measuredBreaks = [];
+  const built = args["api-built"] ?? [];
+  if (built.length > 0 && previousVersion != null) {
+    const measurement = measureApiBreaks({
+      tagPrefix,
+      previousVersion,
+      baselinePath: args["api-baseline-path"],
+      built,
+      refs: args["api-refs"] ?? [],
+      cwd,
+    });
+    if (measurement.failure) {
+      console.error(`${packageName}: public API could not be measured against ${tagPrefix}-v${previousVersion}: ${measurement.failure}`);
+      process.exitCode = 1;
+      return;
+    }
+    measuredBreaks = measurement.breaks;
+  }
+  const result = evaluateRelease({ packageName, changelogText, version, previousVersion, measuredBreaks });
   console.log(result.reason);
   if (!result.ok) {
     process.exitCode = 1;
