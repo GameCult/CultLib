@@ -232,9 +232,6 @@ export function readApiCompatRun({ status, output }) {
 
 function runApiCompat(args) {
   const run = spawnSync("dotnet", ["tool", "run", "apicompat", ...args], { cwd: repoRoot, encoding: "utf8" });
-  if (run.error) {
-    return { failure: `could not start dotnet: ${run.error.message}` };
-  }
   return readApiCompatRun({ status: run.status, output: `${run.stdout}${run.stderr}` });
 }
 
@@ -254,7 +251,7 @@ function extractBaseline({ tag, baselinePath, into, cwd }) {
 // Compares each built assembly with its namesake at the previous tag. A built
 // assembly with no namesake is new and measures nothing; a GameCult.*
 // assembly the tag tracked and the build no longer produces is itself a break.
-export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, built, refs = [], cwd }) {
+export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, built, refs, cwd }) {
   const tag = `${tagPrefix}-v${previousVersion}`;
   const work = mkdtempSync(join(tmpdir(), "cultlib-apicompat-"));
   try {
@@ -263,7 +260,8 @@ export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, bui
     const baselineNames = extractBaseline({ tag, baselinePath, into: left, cwd });
     const restore = spawnSync("dotnet", ["tool", "restore"], { cwd: repoRoot, encoding: "utf8" });
     if (restore.status !== 0) {
-      return { failure: `dotnet tool restore failed: ${`${restore.stdout}${restore.stderr}`.trim().split(/\r?\n/).slice(-3).join(" | ")}` };
+      const detail = restore.error ? restore.error.message : `${restore.stdout}${restore.stderr}`.trim().split(/\r?\n/).slice(-3).join(" | ");
+      return { failure: `dotnet tool restore failed: ${detail}` };
     }
     const builtNames = new Set(built.map((path) => basename(path)));
     const breaks = [];

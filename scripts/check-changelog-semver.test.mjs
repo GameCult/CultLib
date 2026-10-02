@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -204,19 +204,23 @@ function withTempGitRepo(fn) {
   }
 }
 
-function runChecker(cwd, args) {
-  return execFileSync(process.execPath, [checkerPath, ...args, "--cwd", cwd], {
+// Runs the checker with `cwd` as its working directory, which is never the
+// repository that holds the checker: the release scripts do not run it from there either.
+function runChecker(cwd, args, { env, script = checkerPath } = {}) {
+  return execFileSync(process.execPath, [script, ...args, "--cwd", cwd], {
+    cwd,
+    env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
-function runCheckerExpectFailure(cwd, args) {
+function runCheckerExpectFailure(cwd, args, { status = 1, ...options } = {}) {
   try {
-    runChecker(cwd, args);
+    runChecker(cwd, args, options);
     throw new Error("expected the checker to exit non-zero");
   } catch (err) {
-    assert.equal(err.status, 1);
+    assert.equal(err.status, status);
     return err.stdout + err.stderr;
   }
 }
@@ -454,4 +458,110 @@ test("evaluateRelease: measured breaks count as breaking for the lane, declared 
   assert.match(reason, /m4/);
   assert.doesNotMatch(reason, /m5/);
   assert.match(reason, /; \.\.\./);
+});
+
+test("measured: every missing required option is a usage error", () => {
+  withTempGitRepo((dir) => {
+    const complete = ["--package", "widget", "--changelog", join(dir, "CHANGELOG.md"), "--version", "1.1.0", "--tag-prefix", "widget"];
+    for (let i = 0; i < complete.length; i += 2) {
+      const withoutOne = complete.filter((_, index) => index !== i && index !== i + 1);
+      const output = runCheckerExpectFailure(dir, withoutOne, { status: 2 });
+      assert.match(output, /usage: check-changelog-semver\.mjs/);
+      assert.match(output, /--api-baseline-path/);
+    }
+    const builtWithoutBaseline = runCheckerExpectFailure(dir, [...complete, "--api-built", "x.dll"], { status: 2 });
+    assert.match(builtWithoutBaseline, /usage:/);
+  });
+});
+
+test("CLI: a missing changelog fails and names the path; stray positional words are ignored", () => {
+  withTempGitRepo((dir) => {
+    const missing = join(dir, "NOPE.md");
+    const output = runCheckerExpectFailure(dir, ["stray", "--package", "widget", "--changelog", missing, "--version", "1.1.0", "--tag-prefix", "widget"]);
+    assert.match(output, /changelog not found at .*NOPE.md/);
+  });
+});
+
+test("measured: the baseline path may use backslashes or a trailing slash", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    for (const path of [`${PLUGINS}/`, PLUGINS.replace(/\//g, "\\")]) {
+      const args = measuredArgs(dir, "1.1.0", [trimmedWidget()]);
+      args[args.indexOf("--api-baseline-path") + 1] = path;
+      assert.match(runCheckerExpectFailure(dir, args), /Gone/);
+    }
+  });
+});
+
+test("measured: leaves no temporary files behind, passing or failing", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-scratch-"));
+    try {
+      const env = { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch };
+      runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { env });
+      assert.deepEqual(readdirSync(scratch), []);
+      runCheckerExpectFailure(dir, measuredArgs(dir, "1.1.0", [trimmedWidget()]), { env });
+      assert.deepEqual(readdirSync(scratch), []);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+test("measured: a tool that cannot be restored fails closed and says why", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    // The checker finds its tool manifest next to its own scripts directory; a copy without one cannot restore.
+    const bare = mkdtempSync(join(tmpdir(), "cultlib-semver-bare-"));
+    try {
+      mkdirSync(join(bare, "scripts"));
+      const script = join(bare, "scripts", "check-changelog-semver.mjs");
+      copyFileSync(checkerPath, script);
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+      assert.match(output, /could not be measured/);
+      assert.match(output, /dotnet tool restore failed: .*manifest/i);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+test("measured: dotnet missing from the PATH fails closed", { skip: process.platform === "win32" }, () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const gitOnly = mkdtempSync(join(tmpdir(), "cultlib-semver-path-"));
+    try {
+      const git = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+      symlinkSync(git, join(gitOnly, "git"));
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { env: { ...process.env, PATH: gitOnly } });
+      assert.match(output, /dotnet tool restore failed: .*ENOENT/);
+    } finally {
+      rmSync(gitOnly, { recursive: true, force: true });
+    }
+  });
+});
+
+test("readApiCompatRun: only line-initial diagnostics count, and a failure shows the first five trimmed lines", () => {
+  assert.deepEqual(readApiCompatRun({ status: 1, output: "warning CP1002: not at the start\nCP0002: Member 'x'\n" }), { breaks: ["CP0002: Member 'x'"] });
+  const failure = readApiCompatRun({ status: 3, output: "\n  one\ntwo\nthree\nfour\nfive\nsix\n" }).failure;
+  assert.equal(failure, "apicompat exited 3 without measuring: one | two | three | four | five");
+});
+
+test("evaluateRelease: lists at most five measured breaks, and says nothing more for five", () => {
+  const evaluate = (count) =>
+    evaluateRelease({
+      packageName: "p",
+      changelogText: changelogFor("1.1.0"),
+      version: "1.1.0",
+      previousVersion: "1.0.0",
+      measuredBreaks: Array.from({ length: count }, (_, i) => `CP0002: m${i}`),
+    }).reason;
+  assert.match(evaluate(5), /\(CP0002: m0; CP0002: m1; CP0002: m2; CP0002: m3; CP0002: m4\);/);
+  assert.doesNotMatch(evaluate(5), /\.\.\./);
+  assert.match(evaluate(6), /m4; \.\.\.\);/);
+  const agreed = evaluateRelease({
+    packageName: "p",
+    changelogText: changelogFor("2.0.0", { breaking: true }),
+    version: "2.0.0",
+    previousVersion: "1.0.0",
+    measuredBreaks: ["CP0002: m0"],
+  }).reason;
+  assert.match(agreed, /a "### Breaking" section and 1 measured public API break\(s\)/);
 });
