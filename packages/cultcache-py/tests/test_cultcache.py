@@ -1373,6 +1373,30 @@ class CultCacheTests(unittest.TestCase):
                         self.assertNotIn(repr(value[0]), message)
                         self.assertIn(f"of {len(value[0])} bytes", message)
 
+    def test_single_file_refusals_say_exactly_what_was_found_and_what_is_read(self) -> None:
+        import msgpack  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            reads = "it reads 'cultcache.store.v1' and 'cultcache.store.v3' only"
+            for header, found in (
+                ("cultcache.store.v12", "'cultcache.store.v12'"),
+                ("cultcache.store.SECRET", "an unrecognised cultcache.store.* header of 22 bytes"),
+                ("cultcache.store.v", "an unrecognised cultcache.store.* header of 17 bytes"),
+            ):
+                path.write_bytes(msgpack.packb([header, [], []], use_bin_type=True))
+                with self.assertRaises(ValueError) as caught:
+                    SingleFileMessagePackBackingStore(path).pull_all()
+                self.assertIn(f"CultCache store format {found} is not one this runtime reads; {reads}", str(caught.exception))
+
+            path.write_bytes(msgpack.packb(["cultcache.store.v1", [], [["k", "s", "t", b"", "extra"]]], use_bin_type=True))
+            with self.assertRaises(ValueError) as caught:
+                SingleFileMessagePackBackingStore(path).pull_all()
+            self.assertIn(
+                "CultCache record 'k' (schema 's') has 5 slots, more than the 4 of a cultcache.store.v1 record, so this is not a valid store",
+                str(caught.exception),
+            )
+
     def test_single_file_record_refusal_names_only_a_string_key(self) -> None:
         import msgpack  # type: ignore
 
