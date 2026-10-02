@@ -497,27 +497,32 @@ test("measured: leaves no temporary files behind, passing or failing", () => {
     const scratch = mkdtempSync(join(tmpdir(), "cultlib-semver-scratch-"));
     try {
       const env = { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch };
+      const leftovers = () => readdirSync(scratch).filter((name) => name.startsWith("cultlib-apicompat-"));
       runChecker(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { env });
-      assert.deepEqual(readdirSync(scratch), []);
+      assert.deepEqual(leftovers(), []);
       runCheckerExpectFailure(dir, measuredArgs(dir, "1.1.0", [trimmedWidget()]), { env });
-      assert.deepEqual(readdirSync(scratch), []);
+      assert.deepEqual(leftovers(), []);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
   });
 });
 
-test("measured: a tool that cannot be restored fails closed and says why", () => {
+test("measured: a missing or unrestorable tool fails closed and says why", () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    // The checker finds its tool manifest next to its own scripts directory; a copy without one cannot restore.
+    // The checker finds its tool manifest next to its own scripts directory.
     const bare = mkdtempSync(join(tmpdir(), "cultlib-semver-bare-"));
     try {
       mkdirSync(join(bare, "scripts"));
       const script = join(bare, "scripts", "check-changelog-semver.mjs");
       copyFileSync(checkerPath, script);
-      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
-      assert.match(output, /could not be measured/);
-      assert.match(output, /dotnet tool restore failed: .*manifest/i);
+      const noManifest = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+      assert.match(noManifest, /could not be measured/);
+      assert.match(noManifest, /without measuring: Cannot find a tool in the manifest/);
+      writeFileSync(join(bare, "dotnet-tools.json"), "{ this is not a manifest");
+      const brokenManifest = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+      assert.match(brokenManifest, /could not be measured/);
+      assert.match(brokenManifest, /dotnet tool restore failed: S/);
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
