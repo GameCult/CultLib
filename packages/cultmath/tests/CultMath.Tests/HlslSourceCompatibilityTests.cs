@@ -374,7 +374,7 @@ public sealed class HlslSourceCompatibilityTests
         return (result.Success ? Assembly.Load(stream.ToArray()) : null, errors);
     }
 
-    private static string FindCultMathRoot()
+    internal static string FindCultMathRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "packages", "cultmath", "shaders", "CultMath.hlsl")))
