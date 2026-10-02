@@ -161,7 +161,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = ReadSingleFileSnapshot(path);
+            var snapshot = StoreAt(path).ReadDurable() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             var record = snapshot.Records.SingleOrDefault(candidate => string.Equals(candidate.Key, key.Value, StringComparison.Ordinal))
                 ?? throw new InvalidDataException($"CultCache document '{path}' does not contain record '{key.Value}'.");
 
@@ -192,7 +192,7 @@ namespace GameCult.Mesh
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (string.IsNullOrWhiteSpace(expectedSchemaId)) throw new ArgumentException("Value must be non-empty.", nameof(expectedSchemaId));
 
-            var snapshot = ReadSingleFileSnapshot(path);
+            var snapshot = StoreAt(path).ReadDurable() ?? throw new FileNotFoundException($"CultCache document '{path}' does not exist.", path);
             if (snapshot.Records.Length != 1)
             {
                 throw new InvalidDataException(
@@ -239,11 +239,10 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
-            CultPersistedStoreSnapshot? existing = null;
-
             // A typed write sees the document it replaces the file with, so its ids decide. A raw payload is opaque: the writer
-            // cannot see whether it holds ids, so a file already marked stays marked.
-            var snapshot = new CultPersistedStoreSnapshot
+            // cannot see whether it holds ids, so a file already marked stays marked. The store reads the file it replaces under
+            // its lock: one this runtime cannot read refuses the write instead of being overwritten.
+            StoreAt(path).ReplaceDurable(existing => new CultPersistedStoreSnapshot
             {
                 FormatVersion = CacheBackingStore.HeaderFor(holdsIds, existing?.FormatVersion, wholeStore: contentKnown, directoryStore: false),
                 SchemaCatalog = new[] { catalogEntry },
@@ -257,9 +256,10 @@ namespace GameCult.Mesh
                         Payload = payload
                     }
                 }
-            };
-
+            });
         }
+
+        private static SingleFileMessagePackBackingStore StoreAt(string path) => new SingleFileMessagePackBackingStore(path);
 
         private static bool PublishesSchema(CultSchemaCatalogEntry[] catalog, string schemaId)
         {

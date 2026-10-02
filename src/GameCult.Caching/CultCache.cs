@@ -4009,12 +4009,30 @@ namespace GameCult.Caching
             }
         }
 
+        // CultMesh's single-file document helpers reach this store file only through these two members, so they share its one
+        // reader, its lock and its atomic replace. c2a-write-set replaces ReplaceDurable with ApplyWriteSet.
+        internal CultPersistedStoreSnapshot? ReadDurable() => Held(ReadSnapshot);
+
+        internal void ReplaceDurable(Func<CultPersistedStoreSnapshot?, CultPersistedStoreSnapshot> next) => Held(() =>
+        {
+            using (AcquireLock(wait: true))
+            {
+                var snapshot = next(ReadSnapshot());
+                Directory.CreateDirectory(FileInfo.DirectoryName!);
+                WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+            }
+        });
+
         private byte[]? ReadDisk()
         {
             FileInfo.Refresh();
-            // Only nothing at the path is an empty store. A link whose target is gone is a store that cannot be reached.
-            if (!FileInfo.Exists && !PathIsALink())
+            // Only nothing at the path is an empty store: a path with nothing at it reports no attributes at all (-1). A link whose
+            // target is gone is a store that cannot be reached, and a directory is not a store file.
+            var attributes = FileInfo.Attributes;
+            if ((int)attributes == -1)
                 return null;
+            if ((attributes & FileAttributes.Directory) != 0 && (attributes & FileAttributes.ReparsePoint) == 0)
+                throw new IOException("The store path is a directory, not a store file.");
             try
             {
                 return ReadAllBytesShared(FileInfo.FullName);
