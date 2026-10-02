@@ -204,11 +204,12 @@ function withTempGitRepo(fn) {
   }
 }
 
-// Runs the checker with `cwd` as its working directory, which is never the
-// repository that holds the checker: the release scripts do not run it from there either.
-function runChecker(cwd, args, { env, script = checkerPath } = {}) {
+// Runs the checker on the repository at `cwd` (--cwd). The process itself starts in
+// `processCwd`, by default that same repository, never the one that holds the checker:
+// the release scripts do not run it from there either.
+function runChecker(cwd, args, { env, script = checkerPath, processCwd = cwd } = {}) {
   return execFileSync(process.execPath, [script, ...args, "--cwd", cwd], {
-    cwd,
+    cwd: processCwd,
     env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -484,10 +485,22 @@ test("CLI: a missing changelog fails and names the path; stray positional words 
 
 test("measured: the baseline path may use backslashes or a trailing slash", () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    for (const path of [`${PLUGINS}/`, PLUGINS.replace(/\//g, "\\")]) {
+    for (const path of [`${PLUGINS}/`, `${PLUGINS}//`, PLUGINS.replace(/\//g, "\\")]) {
       const args = measuredArgs(dir, "1.1.0", [trimmedWidget()]);
       args[args.indexOf("--api-baseline-path") + 1] = path;
       assert.match(runCheckerExpectFailure(dir, args), /Gone/);
+    }
+  });
+});
+
+test("measured: reads the repository named by --cwd, not the directory the process started in", () => {
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "cultlib-semver-elsewhere-"));
+    try {
+      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.1.0", [trimmedWidget()]), { processCwd: elsewhere });
+      assert.match(output, /Gone/);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
     }
   });
 });
