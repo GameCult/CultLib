@@ -405,6 +405,24 @@ namespace GameCult.Caching.Tests
             Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
         }
 
+        // A commit writes the whole view, so what it landed that was staged is no longer staged either.
+        [Test]
+        public void AStagedWriteLandedByACommitIsNoLongerStaged([Values(false, true)] bool directory)
+        {
+            var path = Seeded("staged-landed.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            cache.UpsertAsync(Deck, DeckOf("d staged"), D).GetAwaiter().GetResult();
+            Land(cache, Write.Commit, E, DeckOf("e"));
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
+            var widget = Stored(path, D);
+
+            Land(cache, Write.Commit, new CultRecordKey("e2"), DeckOf("e2"));
+
+            Assert.That(Stored(path, D), Is.EqualTo(widget));
+            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e2"));
+        }
+
         // A staged removal is a write of its own: a refusal takes it too.
         [TestCase(false)]
         [TestCase(true)]
