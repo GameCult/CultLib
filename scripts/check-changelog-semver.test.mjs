@@ -277,7 +277,9 @@ test("CLI: no previous tag, or tags that cannot be read, refuse unless the first
     const changelogPath = join(notARepo, "CHANGELOG.md");
     writeFileSync(changelogPath, changelogFor("1.0.0"));
     const args = ["--package", "widget", "--changelog", changelogPath, "--version", "1.0.0", "--tag-prefix", "widget"];
-    assert.match(runCheckerExpectFailure(notARepo, args), /tags of --cwd could not be read/);
+    const refused = runCheckerExpectFailure(notARepo, args);
+    assert.match(refused, /tags of --cwd could not be read .*; if this is the package's first release, declare it with --first-release/);
+    assert.doesNotMatch(refused, /fatal/); // git's own complaint is not forwarded
     assert.match(runChecker(notARepo, [...args, "--first-release"]), /first release/);
   } finally {
     rmSync(notARepo, { recursive: true, force: true });
@@ -658,11 +660,14 @@ function withCheckerCopy(gateFiles, fn) {
 
 test("measured: a missing or broken tool manifest fails closed and says why", () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
-    withCheckerCopy({}, (script) => {
-      const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
-      assert.match(output, /could not be measured/);
-      assert.match(output, /the api-gate tool manifest \(scripts\/api-gate\/\.config\/dotnet-tools\.json\) is missing/);
-    });
+    // A gate directory without the manifest, and one with a .config directory but no manifest in it.
+    for (const gateFiles of [{}, { ".config/other.json": "{}" }]) {
+      withCheckerCopy(gateFiles, (script) => {
+        const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
+        assert.match(output, /could not be measured/);
+        assert.match(output, /the api-gate tool manifest \(scripts\/api-gate\/\.config\/dotnet-tools\.json\) is missing/);
+      });
+    }
     withCheckerCopy({ ".config/dotnet-tools.json": "{ this is not a manifest" }, (script) => {
       const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script });
       assert.match(output, /could not be measured/);
@@ -715,9 +720,14 @@ test("measured: a restore failure shows the last three lines of the tool's own o
 test("measured: restores that succeed without delivering the reference assemblies fail closed", posix, () => {
   withReleasedBaseline({ baseline: { "GameCult.Widget.dll": oldWidget() } }, (dir) => {
     withCheckerCopy({ ".config/dotnet-tools.json": "{}" }, (script) => {
+      const notRestored = /the pinned netstandard reference assemblies were not restored under scripts\/api-gate\/packages/;
       withFakeDotnet("exit 0", (env) => {
-        const output = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env });
-        assert.match(output, /the pinned netstandard reference assemblies were not restored under scripts\/api-gate\/packages/);
+        assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env }), notRestored);
+      });
+      // The package directory arrives, but without netstandard.dll in it.
+      const emptyPackage = 'if [ "$1" = restore ]; then mkdir -p packages/netstandard.library.ref/2.1.0/ref/netstandard2.1; fi\nexit 0';
+      withFakeDotnet(emptyPackage, (env) => {
+        assert.match(runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.1", [oldWidget()]), { script, env }), notRestored);
       });
     });
   });
