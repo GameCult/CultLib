@@ -1,0 +1,141 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "glsl-lowering",
+  "revision": 1,
+  "title": "GLSL lowering: shaders/CultMath.glsl is generated from CultMath.hlsl by one enumerated textual transformation, pinned by a test, compiled by glslang, with a committed golden fixture for WebGL2 parity",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-glsl-lowering",
+  "base": "c49c76ee",
+  "depends_on": [],
+  "first": [
+    "Map: docs/cultmath-interval-ground-cut.md, sections 'Where the interval math lives' (route C) and 'The authority map'. Model: the HLSL -> C# mirror in tests/CultMath.Tests/HlslSourceCompatibilityTests.cs (wrapper at :348) and its complete transformation list in packages/cultmath/docs/design.md:92-134. The GLSL lowering follows the same discipline: a complete, enumerated list; anything outside it fails the test rather than being patched around.",
+    "Read how HlslSourceCompatibilityTests resolves #include \"CultMath.Phacelle.hlsl\" (CultMath.hlsl:506); the GLSL lowering inlines the included file at that line, because GLSL has no #include.",
+    "Target dialect: GLSL ES 3.00 (#version 300 es), WebGL2. No implicit int/uint -> float conversion; step(vec4, float) and max(vec4, float) differ (max(genType, float) exists, step(genType, float) does not); C-style casts do not exist; lerp/frac/saturate/rsqrt/asuint are mix/fract/clamp(x,0.0,1.0)/inversesqrt/floatBitsToUint; floatN/intN are vecN/ivecN; static const is const. Mixed-signedness shifts are allowed.",
+    "Where the lowered text does not compile, fix the HLSL into the common subset with a legal, bit-identical HLSL edit (e.g. CultMath.hlsl:114 and :200 step(h, 0.0) -> step(h, float4(0.0, 0.0, 0.0, 0.0)); :471-473 and :502 (float)((uint)hash.x >> 8) before the float multiply). The HLSL -> C# mirror test and the FXC/dxc compiles keep those edits honest. Never special-case the lowering for one function.",
+    "Casts need a balanced-paren scanner, not a regex: (int)((state >> 28) + 4) at CultMath.hlsl:396 is the case that breaks a regex.",
+    "Dropped, as the C# mirror drops them: include guards (replaced by CULTMATH_GLSL guards), and the Texture2D/SamplerState functions at CultMath.hlsl:535-573. The GLSL declares no precision; the host shader does (precision highp float; precision highp int; the pcg hashes need 32-bit int).",
+    "Regeneration: the pin test writes shaders/CultMath.glsl when the environment variable CULTMATH_WRITE_GLSL=1 is set, then asserts equality. No new project, no PowerShell copy of the transformation.",
+    "Golden fixture: tests export 256 seeded points per function family (snoise float3/float2, snoise_grad, fbm_grad 4 octaves, ridged_grad, cellular, pcg3d/pcg4d, iv_* if present on main by then) with outputs as float32 bit patterns in hex, to tests/CultMath.Tests/fixtures/glsl-parity.json. JSON is tolerated here: the consumer is a browser-pane WebGL2 readback, a xenos boundary. The site cut evaluates it.",
+    "glslang: tools/get-glslang.ps1 fetches a pinned glslangValidator release the way tools/get-dxc.ps1 does; tools/compile-glsl.ps1 compiles a #version 300 es fragment wrapper that includes shaders/CultMath.glsl and calls every public function once. Run on Starfire, one job, detached with a log, polled in the foreground.",
+    "Verification on Yggdrasil: dotnet test from packages/cultmath/tests/CultMath.Tests; Stryker --since:c49c76ee from a plain clone (not a linked worktree: Stryker resolves --since paths against the main checkout). Never run verification as a background shell task."
+  ],
+  "deletes": [],
+  "keeps_moves": [
+    "Both tracked CultMath.hlsl copies (packages/cultmath/shaders and unity/org.gamecult.cultmath/Shaders) stay one blob; the common-subset edits land in both.",
+    "The C# mirror test, the FXC probe and dxc -T lib_6_3 -HV 2021 all still pass on the edited HLSL; the Unity package does not ship the GLSL file.",
+    "design.md's HLSL -> C# transformation list (92-134) is unchanged; the GLSL list is a new sibling section."
+  ],
+  "adds": [
+    "tests/CultMath.Tests/GlslLowering.cs: the HLSL -> GLSL ES 3.00 transformation, one static function string -> string, with the list as named steps in order: inline includes; drop guards and texture functions; type names; static const; casts via the balanced scanner; intrinsic renames (lerp, frac, saturate, rsqrt, asuint/asfloat); float literal passthrough; guards CULTMATH_GLSL added; a provenance header line naming the source file and that the file is generated.",
+    "tests/CultMath.Tests/GlslMirrorTests.cs: CommittedGlslEqualsLowering (writes when CULTMATH_WRITE_GLSL=1, prints a unified diff on failure); NoHlslOnlyTokensSurvive (regex over the output for float[234]\\(|int[234]\\(|lerp\\(|frac\\(|saturate\\(|static const|\\((float|int|uint)\\)|Texture2D|SamplerState -> 0 matches); EveryPublicFunctionIsLowered (the set of cultmath_* function names in the HLSL minus the texture ones equals the set in the GLSL); GoldenFixtureMatchesCSharp (regenerates the fixture in memory from C# and asserts equality with the committed file).",
+    "shaders/CultMath.glsl: the committed generated artifact.",
+    "tests/CultMath.Tests/fixtures/glsl-parity.json: the golden fixture (seed, points, per-function expected bit patterns, tolerance class per function: exact for integer-hash paths, ulp-bounded for transcendental).",
+    "tools/get-glslang.ps1 and tools/compile-glsl.ps1, mirroring get-dxc.ps1 / compile-hlsl-spirv.ps1 in shape.",
+    "packages/cultmath/docs/design.md: a section 'GLSL Target: Source Transformations' after :134 with the complete list, the common-subset rule for HLSL, the regeneration command, and that the GLSL is a derived file never edited by hand.",
+    "packages/cultmath/README.md: one paragraph that CultMath.glsl exists, what dialect it is, and how a WebGL consumer includes it (string concatenation before its own #version-led source; declare highp)."
+  ],
+  "file_changes": [
+    {
+      "location": { "path": "packages/cultmath/shaders/CultMath.hlsl", "line": 114 },
+      "change": "step(h, 0.0) -> step(h, float4(0.0, 0.0, 0.0, 0.0)); same at :200. Bit-identical in HLSL and C#."
+    },
+    {
+      "location": { "path": "packages/cultmath/shaders/CultMath.hlsl", "line": 470 },
+      "change": "jitter components and the id at :502: an explicit (float) cast around the shifted uint before the float multiply, so the lowered text has no uint*float."
+    },
+    {
+      "location": { "path": "packages/cultmath/shaders/CultMath.Phacelle.hlsl", "line": 1 },
+      "change": "whatever common-subset edits the glslang compile demands; each one bit-identical, each one listed in the cut report."
+    },
+    {
+      "location": { "path": "packages/cultmath/docs/design.md", "line": 134 },
+      "change": "new section: GLSL Target: Source Transformations."
+    }
+  ],
+  "authority_map": {
+    "owner": "GlslLowering (tests/CultMath.Tests) owns the HLSL -> GLSL transformation; shaders/CultMath.glsl is its derived output, pinned by GlslMirrorTests. CultMath.hlsl stays the one hand-written shader source.",
+    "inputs": [
+      "shaders/CultMath.hlsl and shaders/CultMath.Phacelle.hlsl text",
+      "C# math for the golden fixture values"
+    ],
+    "outputs": [
+      "shaders/CultMath.glsl (GLSL ES 3.00 library, every public cultmath_* function except texture samplers)",
+      "tests/CultMath.Tests/fixtures/glsl-parity.json"
+    ],
+    "derived_state": [
+      "CultMath.glsl is derived; a hand edit fails CommittedGlslEqualsLowering",
+      "the fixture is derived from C#; a stale fixture fails GoldenFixtureMatchesCSharp"
+    ],
+    "forbidden_writers": [
+      "no per-function special case in the lowering; a dialect gap is fixed in the HLSL in the common subset",
+      "no second transformation implementation (no PowerShell or JS copy of the rules)",
+      "no GLSL in the Unity package; no precision statement in the library file"
+    ],
+    "shared_paths": [
+      "both tracked CultMath.hlsl copies receive the same edits; the existing one-blob rule covers them",
+      "the same dotnet test run pins the C# mirror, the GLSL pin and the fixture"
+    ],
+    "deletion_line": "Nothing is deleted in CultLib. The liability bought is one generated file, one test file, one fixture and two tool scripts; what it retires is every future hand copy of CultMath noise in a GLSL consumer, starting with the site."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests green; paste counts",
+      "Yggdrasil: dotnet stryker --since:c49c76ee from a plain clone; triage every survivor by name",
+      "Starfire: tools/compile-glsl.ps1 exits 0 on the wrapper over shaders/CultMath.glsl; a negative-control wrapper with one lerp( call must fail (records that the compile check sees errors)",
+      "Starfire: FXC cs_5_0 and dxc -T lib_6_3 -HV 2021 still compile both HLSL copies after the common-subset edits"
+    ],
+    "tests": [
+      {
+        "name": "GlslMirrorTests.CommittedGlslEqualsLowering",
+        "pins": "the committed GLSL is exactly the lowering of the committed HLSL; the regeneration path is the same code."
+      },
+      {
+        "name": "GlslMirrorTests.NoHlslOnlyTokensSurvive",
+        "pins": "the list is complete: no HLSL-only token survives in the output."
+      },
+      {
+        "name": "GlslMirrorTests.EveryPublicFunctionIsLowered",
+        "pins": "no function is silently dropped except the texture samplers."
+      },
+      {
+        "name": "GlslMirrorTests.GoldenFixtureMatchesCSharp",
+        "pins": "the fixture the site will read on WebGL2 is C#'s current truth."
+      },
+      {
+        "name": "HlslSourceCompatibilityTests.EveryMirrorFunctionMatchesCSharpMath (existing)",
+        "pins": "the common-subset edits changed no bit of any HLSL function."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "lerp\\(|frac\\(|saturate\\(|float[234]\\(|int[234]\\(|static const|\\((float|int|uint)\\)|Texture2D|SamplerState|#include",
+        "scope": "packages/cultmath/shaders/CultMath.glsl: 0 matches."
+      },
+      {
+        "pattern": "precision (high|medium|low)p",
+        "scope": "packages/cultmath/shaders/CultMath.glsl: 0 matches (the host declares precision)."
+      },
+      {
+        "pattern": "CultMath\\.glsl",
+        "scope": "packages/cultmath/unity/**: 0 matches; the Unity package does not ship the GLSL."
+      },
+      {
+        "pattern": "git diff c49c76ee..HEAD -- packages/cultmath/shaders/CultMath.hlsl | grep '^[-+]' | grep -v '^[-+][-+]'",
+        "scope": "every changed HLSL line is listed in the cut report with the reason (dialect gap it closes); none changes a value, proven by the mirror test and the existing goldens."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 1100,
+    "lines_removed": 8,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": ["GLSL ES 3.00 library file (generated)", "glsl-parity.json fixture"],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [],
+  "questions": ["Q1 in the map: campaign home (cultmath-tapes, recommended)"]
+}

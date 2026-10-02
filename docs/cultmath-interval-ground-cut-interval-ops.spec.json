@@ -1,0 +1,140 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "interval-ops",
+  "revision": 1,
+  "title": "Interval ops: cultmath_iv_* over float2(lo, hi) in C# and HLSL with enclosure tests, a committed Lipschitz constant for snoise, and ball bounds for snoise and fbm",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-interval-ops",
+  "base": "c49c76ee",
+  "depends_on": [],
+  "first": [
+    "Map: docs/cultmath-interval-ground-cut.md, sections 'Ownership', 'Interval culling along the ray' and 'The proving-ground contract'. Parked target: docs/cultmath-tape-target.md, sketch step 1 (:59-64) and 'Open before unparking' (:106-115). This cut is step 1 and nothing after it: no tape, no pruning, no min/max choice tracking, no affine arithmetic (map D1).",
+    "Common rules from the Asura cut map (Asura docs/cut-map.md, 'Common rules for every addition', :453-489): C# in packages/cultmath/src/CultMath as a partial of math (the Phacelle pattern: math.Phacelle.cs beside math.cs), HLSL in a new shaders/CultMath.Interval.hlsl included from CultMath.hlsl the way CultMath.Phacelle.hlsl is (:506), names prefixed cultmath_, both tracked HLSL copies one blob, bodies inside design.md's transformation list (:92-134), THIRD-PARTY-NOTICES untouched (nothing is ported; Fidget's ideas are used, not its code).",
+    "Representation: an interval is float2(lo, hi), lo <= hi, both finite. The empty interval does not exist; a caller that needs 'provably empty' tests hi < cutoff. Point intervals are iv_point(x) = float2(x, x).",
+    "Op set, each with the C# twin the mirror test demands: iv_point, iv_add, iv_sub, iv_neg, iv_mul, iv_scale(iv, float), iv_abs, iv_min, iv_max, iv_sqr, iv_sqrt (lo clamped at 0), iv_exp, iv_clamp(iv, float, float), iv_saturate, iv_smoothstep(float e0, float e1, iv) (monotone: endpoints), iv_lerp(iv, iv, float t). No others until a consumer names one.",
+    "Noise bounds: CULTMATH_SNOISE_LIPSCHITZ (static const float, provenance in the comment: measured max |snoise_grad| over 1e6 seeded points plus 1e4 gradient-ascent refinements, times 1.10; the test that measures it is committed as a slow, explicitly-run test and the constant is pinned by a fast test). iv_snoise_ball(float3 c, float r) = [snoise(c) - L r, snoise(c) + L r] intersected with [-1, 1]. iv_fbm_ball(c, r, octaves, lacunarity, gain) = the octave sum of iv_snoise_ball(c * f_i, r * f_i) scaled by a_i, octaves clamped to [0, 16] like fbm_grad.",
+    "Write the enclosure property first, as the shared harness: for each op, 10,000 seeded random intervals (widths from 1e-4 to 10, centres in [-20, 20]) and 16 points inside each; assert f(x) in op(I) with no tolerance (the bound is computed in the same float32 arithmetic; where rounding could exclude an endpoint, widen the op by one ulp in the implementation, not the test, and say so in design.md). For the ball bounds: 2,000 balls, r in [1e-3, 2], 64 points inside each.",
+    "The saving test: a representative coverage field (one snoise octave at F0 = 0.35, cutoff 0.25) and 1,000 seeded rays through a slab of depth 12; march once at the dense step and once with the adaptive interval march from the map (Δ0, ΔMAX = 8 Δ0, ΔDENSE = Δ0/2, grow on skip, halve on maybe); count snoise evaluations; assert the integrated transmittance agrees within 1e-3 and the evaluation count is at least 2x lower. Print both counts and the ratio; the cut report quotes them.",
+    "Tightness: a committed test prints the mean width ratio (interval width / true range over the 64 points) for iv_snoise_ball at r = 0.05, 0.25, 1.0 and for iv_fbm_ball at 4 octaves. No assertion beyond finiteness; the number is for the report and for a later affine cut to beat.",
+    "Verification on Yggdrasil: dotnet test from packages/cultmath/tests/CultMath.Tests; Stryker --since:c49c76ee from a plain clone. Starfire: FXC cs_5_0 kernel calling every iv_* function and both ball bounds; dxc -T lib_6_3 -HV 2021. Detached with a log, polled in the foreground; never a background shell task. Numbers in comments or docs come from committed tests only.",
+    "If glsl-lowering has merged to main before this branch does, rebase and regenerate shaders/CultMath.glsl (CULTMATH_WRITE_GLSL=1) so the pin test is green on the merge; if not, the lowering cut regenerates after this one. Either order works because the GLSL is derived."
+  ],
+  "deletes": [],
+  "keeps_moves": [
+    "snoise, snoise_grad, fbm_grad, ridged_grad, cellular, phacelle: untouched. The bounds call snoise (value) only; snoise_grad is used by the Lipschitz measurement test, not by any bound (map D2).",
+    "design.md's invariant 8 section (136-) is unchanged; intervals are not value-and-gradient primitives and do not claim the float4(grad, value) layout.",
+    "HlslMirrorTests' ban on erosion kernels stands; nothing named interval touches it."
+  ],
+  "adds": [
+    "packages/cultmath/src/CultMath/math.Interval.cs: public static partial class math with iv_point, iv_add, iv_sub, iv_neg, iv_mul, iv_scale, iv_abs, iv_min, iv_max, iv_sqr, iv_sqrt, iv_exp, iv_clamp, iv_saturate, iv_smoothstep, iv_lerp, iv_snoise_ball, iv_fbm_ball, and the constant SNOISE_LIPSCHITZ; each with a doc comment stating the enclosure it guarantees and the ulp widening where one is needed.",
+    "packages/cultmath/shaders/CultMath.Interval.hlsl: the HLSL mirrors with the same names prefixed cultmath_, and CULTMATH_SNOISE_LIPSCHITZ as static const; included from CultMath.hlsl after the Phacelle include (:506). Both tracked HLSL copies.",
+    "tests/CultMath.Tests/IntervalTests.cs: the enclosure harness over every op; iv_mul sign cases (all four quadrant combinations and a zero-straddling factor); iv_sqrt with lo < 0; iv_abs straddling zero gives [0, max(|lo|,|hi|)]; iv_smoothstep monotonicity; iv_min/iv_max against the pointwise min/max; a mutant that shrinks any bound by one ulp dies (hand-mutation list in the file header for the float arithmetic Stryker cannot reach, as in 2a-ii-a).",
+    "tests/CultMath.Tests/NoiseBoundTests.cs: iv_snoise_ball and iv_fbm_ball enclosure; LipschitzConstantPinsSampledGradients (fast, 1e5 points); MeasureLipschitz (slow, explicit trait, prints the max and the refined max); TightnessReport; the saving test (InvalSkipHalvesEvaluations) with its printed counts.",
+    "packages/cultmath/docs/design.md: a section 'Intervals' after the invariant 8 section: representation, the op list, the ulp-widening rule, the Lipschitz provenance and margin, what the ball bounds guarantee and what they do not (nothing about tapes), and that the site's ground shader and Aetheria's nebula raymarch are the consumers.",
+    "packages/cultmath/README.md: one paragraph under the noise entry naming the interval family and its purpose (empty-space culling with a proof)."
+  ],
+  "file_changes": [
+    {
+      "location": { "path": "packages/cultmath/shaders/CultMath.hlsl", "line": 506 },
+      "change": "add #include \"CultMath.Interval.hlsl\" after the Phacelle include; both tracked copies."
+    },
+    {
+      "location": { "path": "packages/cultmath/src/CultMath/math.cs", "line": 602 },
+      "change": "no change to snoise; a comment pointer from snoise to SNOISE_LIPSCHITZ in math.Interval.cs so the next kernel change knows the constant must be re-measured."
+    },
+    {
+      "location": { "path": "packages/cultmath/docs/design.md", "line": 136 },
+      "change": "new 'Intervals' section after invariant 8."
+    },
+    {
+      "location": { "path": "packages/cultmath/tests/CultMath.Tests/HlslSourceCompatibilityTests.cs", "line": 348 },
+      "change": "none expected; confirm the mirror resolves the second #include and that every cultmath_iv_* finds its C# twin (a mirror without a twin fails Assert.Contains MirrorOnly)."
+    }
+  ],
+  "authority_map": {
+    "owner": "CultMath owns interval arithmetic and the noise bounds in C# and HLSL (and GLSL by derivation). The Lipschitz constant is owned by the committed measurement test; the kernel of snoise owns its value.",
+    "inputs": [
+      "the existing snoise(float3) value function; snoise_grad for the measurement test only",
+      "seeded random points and intervals in tests"
+    ],
+    "outputs": [
+      "cultmath_iv_* and the two ball bounds, each enclosing its function over its input region",
+      "three printed numbers for the report: the Lipschitz max, the tightness ratios, the evaluation saving"
+    ],
+    "derived_state": [
+      "CULTMATH_SNOISE_LIPSCHITZ is derived from the snoise kernel; a kernel change must re-run MeasureLipschitz and re-pin",
+      "shaders/CultMath.glsl (if the lowering has landed) is derived and regenerated, never edited"
+    ],
+    "forbidden_writers": [
+      "no interval op without the enclosure test and a C# twin",
+      "no bound that reads snoise_grad; no value-only/gradient twin of any iv_* function",
+      "no tape, bytecode, pruning, choice flag or affine form in this cut; names containing tape, prune or affine do not appear",
+      "no number in a comment or design.md that a committed test did not print"
+    ],
+    "shared_paths": [
+      "the same IntervalTests enclosure harness runs every op; a new op is one entry in its table",
+      "the existing HLSL mirror test covers every HLSL interval function with no new comparison path"
+    ],
+    "deletion_line": "Nothing is deleted. The liability is one C# file, one HLSL file, two test files and a doc section; it buys the invariant intervals-enclose for every GPU consumer, and it is step 1 of the parked tapes campaign landed in advance."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests green (MeasureLipschitz excluded by trait); paste counts",
+      "Yggdrasil: dotnet stryker --since:c49c76ee from a plain clone; 0 survivors in math.Interval.cs except listed equivalents; hand mutations for float3 arithmetic listed and killed",
+      "Starfire: FXC cs_5_0 kernel over every new function; dxc -T lib_6_3 -HV 2021 on both HLSL copies"
+    ],
+    "tests": [
+      {
+        "name": "IntervalTests.EveryOpEnclosesItsPoints",
+        "pins": "intervals-enclose for every op, no tolerance."
+      },
+      {
+        "name": "NoiseBoundTests.SnoiseBallEnclosesPoints / FbmBallEnclosesPoints",
+        "pins": "the ball bounds enclose snoise and fbm over 2,000 balls x 64 points."
+      },
+      {
+        "name": "NoiseBoundTests.LipschitzConstantPinsSampledGradients",
+        "pins": "no sampled |snoise_grad| exceeds the constant; a constant lowered by 1% fails."
+      },
+      {
+        "name": "NoiseBoundTests.IntervalSkipHalvesEvaluations",
+        "pins": "the adaptive march needs <= half the evaluations of the dense march for the same transmittance within 1e-3."
+      },
+      {
+        "name": "HlslSourceCompatibilityTests.EveryMirrorFunctionMatchesCSharpMath (existing)",
+        "pins": "every cultmath_iv_* and both bounds match C# bit for bit."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "tape|prune|affine|choice",
+        "scope": "packages/cultmath/src/CultMath/math.Interval.cs and shaders/CultMath.Interval.hlsl: 0 matches (case-insensitive)."
+      },
+      {
+        "pattern": "snoise_grad|fbm_grad",
+        "scope": "math.Interval.cs and CultMath.Interval.hlsl: 0 matches; the bounds use values only."
+      },
+      {
+        "pattern": "spherical_erosion|AdvancedErosionFilter",
+        "scope": "packages/cultmath: 0 matches (HlslMirrorTests' standing rule)."
+      },
+      {
+        "pattern": "git diff --name-only c49c76ee..HEAD",
+        "scope": "only packages/cultmath/** (and shaders/CultMath.glsl if regenerated); no other package or src tree."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 900,
+    "lines_removed": 0,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [],
+  "questions": ["Q1 in the map: campaign home (cultmath-tapes, recommended)"]
+}
