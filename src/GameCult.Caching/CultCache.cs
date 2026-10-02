@@ -3669,7 +3669,7 @@ namespace GameCult.Caching
                 // An entry under the type's own id that lists the record's id says the record is this schema's: it is re-encoded.
                 var publisher = Publisher(record.SchemaId, snapshot.SchemaCatalog);
                 if (!Owns(held.Descriptor, publisher.SchemaId))
-                    _unowned[record.Key] = (held, record, publisher, SerializePayload(held.Document));
+                    _unowned[record.Key] = (held, record, publisher, held.Variant == null ? SerializePayload(held.Document) : null);
             }
         }
 
@@ -3677,9 +3677,9 @@ namespace GameCult.Caching
         // earlier declaration of the schema, resolved through the catalog's name or its pointer to a local id), each with the
         // catalog entry that published it, keyed while the store holds the entry it loaded. A whole-view write lays such a record
         // back exactly as it was stored, id and catalog entry included; only a write of the record itself stores it under its
-        // type's own id. Payload is what the loaded document serialized to when it was loaded, so a change made to the document in
-        // place is told from a record nobody wrote.
-        private readonly Dictionary<string, (CultStoredDocument Loaded, CultPersistedRecord Record, CultSchemaCatalogEntry Entry, byte[] Payload)> _unowned =
+        // type's own id. Payload is what a plain document serialized to when it was loaded, so a change made to the document in
+        // place is told from a record nobody wrote (a variant persists its delta, never its resolved document).
+        private readonly Dictionary<string, (CultStoredDocument Loaded, CultPersistedRecord Record, CultSchemaCatalogEntry Entry, byte[]? Payload)> _unowned =
             new(StringComparer.Ordinal);
 
         private static bool Owns(CultDocumentDescriptor descriptor, string schemaId) =>
@@ -3837,7 +3837,7 @@ namespace GameCult.Caching
             write.Records = entries.Select(entry =>
             {
                 if (_unowned.TryGetValue(entry.Key.Value, out var loaded) && ReferenceEquals(loaded.Loaded, entry) &&
-                    SerializePayload(entry.Document).AsSpan().SequenceEqual(loaded.Payload))
+                    (loaded.Payload == null || SerializePayload(entry.Document).AsSpan().SequenceEqual(loaded.Payload)))
                 {
                     // Laid back only while the file still holds what was loaded: after that the file's record is its owner's newer
                     // write, which stays as it is, and a record the file no longer holds is not written back.
