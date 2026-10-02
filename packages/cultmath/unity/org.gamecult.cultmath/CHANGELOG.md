@@ -11,11 +11,12 @@ backfilled here; see `docs/semver-policy.md` for why.
 
 - `math.snoise(float3)` and `math.snoise(float2)`, and their HLSL mirrors
   `cultmath_snoise`, return different values. The kernel now follows
-  stegu/webgl-noise: the falloff `r^2` constant is 0.5 (was 0.6), the output
-  scale is 105 (was 42), and 2D and 3D share one permutation offset of +10.
-  This removes the value discontinuities the 3D kernel had at simplex cell
-  boundaries. Any content seeded from `snoise` changes; regenerate it when
-  you take this version.
+  stegu/webgl-noise. For 3D only, the falloff `r^2` constant is 0.5 (was 0.6)
+  and the output scale is 105 (was 42). For 2D, the falloff constant (0.5) and
+  the output scale (130) are unchanged. In both, the shared permutation offset
+  is now +10 (was +1), which changes the values of both. This removes the value
+  discontinuities the 3D kernel had at simplex cell boundaries. Any content
+  seeded from `snoise` changes; regenerate it when you take this version.
 
 ### Added
 
