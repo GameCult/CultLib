@@ -1,9 +1,8 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status: Imagination pass 1, 2026-10-02. Nothing here is ruled except what the
-operator said, quoted below. The campaign named here does not exist in the mind
-yet; the Self admits it if the operator takes Q1. Where this map and the Body
-disagree, the Body wins and this map is stale.
+Status: Imagination pass 2, 2026-10-02. Pass 1's Q1–Q3 are answered (below);
+the Self opens the `cultmath-tapes` campaign from this revision. Where this
+map and the Body disagree, the Body wins and this map is stale.
 
 Pinned HEADs (every `file:line` below is against these):
 
@@ -11,7 +10,7 @@ Pinned HEADs (every `file:line` below is against these):
 | --- | --- | --- |
 | CultLib | `main` | `c49c76ee` (CultMath 0.3.0 merged at `614fd445`) |
 | gamecult-site | `main` | `535d170` (before `wash-home-only` lands) |
-| Aetheria | local checkout | read only; `Volumetric.cginc`, `Raymarching/CloudShader.shader`, `Clouds.shader`, `Zone Display/VolumeCloudRenderer.cs` |
+| Aetheria | local checkout | read only; `Volumetric.cginc`, `Raymarching/CloudShader.shader`, `Compute/Stardust/Stardust.{compute,shader,cs}`, `CustomDoF/DepthOfField.hlsl`, `Zone Display/VolumeCloudRenderer.cs` |
 
 ## The operator's words
 
@@ -27,11 +26,22 @@ Pinned HEADs (every `file:line` below is against these):
    we're accumulating samples with TAA (Aetheria's TAA is honestly
    embarrassing and it still handles smooth 1080p clouds on my tired old
    1070)"
+3. On pass 1's Q3 (ground tokens as the shader's input): "I like that, but the
+   background should be nice and dynamic and we should sample the wash from
+   the result instead. Is there any point sending you video? I don't think
+   your vision model has anything in it to encode motion. Anyway, this video
+   really blew people away, with its combination of the clouds, the flowing
+   stardust and my hacked DoF shader where I replaced the circle of confusion
+   calculation with an output from the raymarching shader, I think it was
+   final transmittance? Doesn't matter, looks great to have the clouds blur
+   what's behind them. This does remind me we're totally gonna need that
+   stardust too, it really sells the motion of the nebulae"
 
-So: full screen, per pixel, on phones too; few samples per frame; TAA
-accumulates them; interval arithmetic makes the few samples count. The
-"static frame on phones" idea is overruled. The static frame survives only
-under `prefers-reduced-motion`.
+Rulings from pass 1: **Q1** new campaign `cultmath-tapes`. **Q2** the slow
+ladder is samples, then resolution, then the CSS wash. **Q3** answered outside
+the options: the shader owns the ground and it moves; the CSS wash is sampled
+from the shader's result; the ground tokens are seed and fallback only, never
+the shader's input; stardust and the raymarch-driven DoF are in scope.
 
 ## Ownership
 
@@ -40,374 +50,398 @@ under `prefers-reduced-motion`.
 **CultLib, `packages/cultmath`.** This is the parked campaign's own first step
 (`docs/cultmath-tape-target.md`, sketch step 1: "CultMath `interval` in C# and
 HLSL with parity tests ... It stands alone, and is the first cut to take even
-if the rest stays parked"). Nothing about that reasoning changed. The "planned
-Asura campaign" in the operator's words is that document: the tapes campaign,
-whose first consumer named there is Aetheria's volumetric raymarching. Asura
-itself does not need intervals (`cultmath-tape-target.md:103`).
+if the rest stays parked"). The "planned Asura campaign" in the operator's
+words is that document; its first named consumer is Aetheria's volumetric
+raymarching, and Asura itself does not need intervals
+(`cultmath-tape-target.md:103`).
 
-The site speaks WebGL2 GLSL ES 3.00, not HLSL. Three routes were weighed:
+The site speaks WebGL2 GLSL ES 3.00. Three routes were weighed:
 
 | Route | What | Why not |
 | --- | --- | --- |
 | A | Hand-port the needed functions to GLSL inside gamecult-site | A second noise authority with no parity test; the exact thing Aetheria's `GPU Noise` copies are (follow-up `aetheria-snoise-pin-bump`). |
 | B | `dxc -spirv` then SPIRV-Cross to GLSL ES, using the existing `tools/compile-hlsl-spirv.ps1` chain | SPIRV-Cross emits one whole shader with mangled names; there is no library a site shader can call `cultmath_snoise` from. |
-| C | **A textual lowering HLSL → GLSL in CultLib, with a complete, enumerated transformation list, the same discipline as the HLSL → C# mirror (`packages/cultmath/docs/design.md:92-134`)** | Chosen. |
+| C | **A textual lowering HLSL → GLSL in CultLib with a complete, enumerated transformation list, the discipline of the HLSL → C# mirror (`packages/cultmath/docs/design.md:92-134`)** | Chosen. |
 
 Under C, `shaders/CultMath.glsl` is a committed generated artifact, like
-`Swizzles.g.cs`. One implementation of the lowering lives in the test project,
-a test pins the committed file equal to the lowering of `CultMath.hlsl`, and
-the same test regenerates it when asked. GLSL's stricter typing (no implicit
-`int`/`uint` → `float`, `step(vec4, float)` does not exist) is not patched in
-the lowering: the HLSL is written in the common subset, which is legal HLSL
-and bit-identical, and glslang compiles the lowered text in CultLib's tooling
-so it stays there. Parity then runs in two legs, each with one owner:
-
-- HLSL ⇔ C#: the existing bit-for-bit mirror test, automatic for every new
-  function.
-- GLSL ⇔ C#: a committed golden fixture (sample points and expected bit
-  patterns, exported from C#) that the site's Hands evaluates on WebGL2 in the
-  browser pane and reads back. CultLib has no GPU harness (follow-up
-  `gpu-snoise-parity`); the browser pane is one. This cut does not close that
-  follow-up, which asks for FXC-on-D3D11, but it gives it a second device.
-
-The site vendors `CultMath.glsl` with a header naming the CultLib commit it was
-copied from. The site is a xenos consumer of CultLib at that boundary; it does
-not take a package.
+`Swizzles.g.cs`. One implementation of the lowering lives in the test project;
+a test pins the committed file equal to the lowering of `CultMath.hlsl` and
+regenerates it when asked. GLSL's stricter typing is not patched in the
+lowering: the HLSL is written in the common subset (legal, bit-identical) and
+glslang compiles the lowered text in CultLib's tooling. Parity runs in two
+legs, each with one owner: HLSL ⇔ C# by the existing bit-for-bit mirror;
+GLSL ⇔ C# by a committed golden fixture evaluated on WebGL2 in the browser
+pane and read back. CultLib has no GPU harness (follow-up
+`gpu-snoise-parity`); the browser pane is one. The site vendors
+`CultMath.glsl` with the CultLib commit in its header.
 
 ### Campaign
 
-Recommend a **new campaign, `cultmath-tapes`**, repos `GameCult/CultLib` and
-`GameCult/gamecult-site`, target doc `docs/cultmath-tape-target.md` unparked
-for step 1 only (Q1). Not `asura`: Asura's target names intervals as not
-needed, and its invariants are about planets. Not `site-masthead`: that
-campaign is one repo and its target lists "the shader (a separate campaign if
-ruled)" under `not_in_scope` (`masthead-campaign.md:822`). The site cut cites
-`site-masthead:ruling:operator-chromeless-column` and depends on
-`wash-home-only` landing first, because it rewrites the same six lines.
+`cultmath-tapes` (Q1), repos `GameCult/CultLib` and `GameCult/gamecult-site`,
+target doc `docs/cultmath-tape-target.md` unparked for step 1 only. The site
+cuts cite `site-masthead:ruling:operator-chromeless-column` and depend on
+`wash-home-only` landing first, because they rewrite the same lines.
 
 ### Owner, consumers, invariant
 
-- Owner: CultMath owns interval arithmetic and the noise bounds, in C# and
-  HLSL, with GLSL as a derived lowering. The site owns its density field, its
-  march, its TAA and its budget controller. CSS tokens on `body` own the
-  ground's colours, lights and intensity; the shader derives its uniforms from
-  them.
-- Consumers: the site ground shader now; Aetheria's nebula raymarch at its
-  CultMath pin bump; the tapes campaign's HLSL interpreter later.
-- Protected invariant, **`intervals-enclose`**: every interval function
-  returns a `[lo, hi]` that contains `f(x)` for every `x` in its input
-  interval or ball, in C#, HLSL and GLSL alike. A consumer that skips a region
-  because `hi < cutoff` has skipped nothing that was there. This is what the
-  site proves and what the tapes campaign inherits.
+- Owner: CultMath owns interval arithmetic and the noise bounds in C# and HLSL,
+  GLSL derived. The site owns its field, flow, march, TAA, stardust, DoF and
+  budget controller. `custom.scss` owns the brand palette the shader reads
+  (four nebula tokens) and the seed values of the ground tokens. `ground.js`
+  owns the sampled ground tokens while it runs.
+- Consumers: the site ground now; Aetheria's nebula raymarch at its CultMath
+  pin bump; the tapes campaign's HLSL interpreter later.
+- Protected invariant, **`intervals-enclose`**: every interval function returns
+  a `[lo, hi]` containing `f(x)` for every `x` in its input region, in C#, HLSL
+  and GLSL alike. A consumer that skips a region because `hi < cutoff` has
+  skipped nothing that was there. The domain warp does not weaken it: a warped
+  point lies in the ball enlarged by the warp bound, and a test says so.
 
-## The authority map (all three cuts)
+## The authority map (all four cuts)
 
-- Owner: `packages/cultmath` for `iv_*` and `iv_snoise_ball`/`iv_fbm_ball`;
-  `GlslLowering` (test project) for `shaders/CultMath.glsl`; `custom.scss`
-  `body` tokens for ground colour, light colour/alpha/position/radius and
-  `--gamecult-wash`; `ground.js` for scheduling, budget and TAA; the two site
-  GLSL files for the field and the resolve.
-- Inputs: CultMath reads nothing new. The lowering reads `CultMath.hlsl` and
-  `CultMath.Phacelle.hlsl` only. `ground.js` reads the computed `body` tokens,
-  `prefers-reduced-motion`, `visibilityState`, canvas size and the measured
-  GPU frame time. The field reads uniforms only.
+- Owner: `packages/cultmath` for `iv_*` and the ball bounds; `GlslLowering`
+  (test project) for `shaders/CultMath.glsl`; `custom.scss` for the four
+  nebula input tokens, `--gamecult-wash`, and the seed values of the fifteen
+  ground tokens; `ground.js` for the flow texture, scheduling, budget, TAA,
+  the stardust and DoF passes, and the sampled ground tokens; the site GLSL
+  files for the field, the particles and the resolve.
+- Inputs: CultMath reads nothing new. The lowering reads the two HLSL files.
+  `ground.js` reads the nebula tokens, `--gamecult-wash`,
+  `prefers-reduced-motion`, `visibilityState`, canvas size, device pixel
+  ratio, the measured GPU frame time and its own 8×8 readback. The field
+  reads uniforms and the flow texture only.
 - Outputs: `CultMath.glsl`; the interval functions; one canvas under the
-  page; a per-session measurement log (console, debug flag only).
-- Derived state: the shader's palette, light geometry and intensity are
-  derived from the CSS tokens; nothing in JS or GLSL holds a colour. The CSS
-  wash is the same tokens rendered by CSS: it is the fallback, not a second
-  ground. `CultMath.glsl` is derived from `CultMath.hlsl`; editing it by hand
-  fails the pin test. The TAA history is a cache; a reset costs 32 frames and
-  no correctness.
-- Forbidden writers: no colour literal, radius or position in `ground.js` or
-  the GLSL; no user-agent, platform or touch-point sniffing anywhere; no
-  class toggled on `body` by script; no second wash token; no page rule
-  setting a radial alpha (carried from `wash-home-only`); no GLSL edited by
-  hand; no `iv_*` function without a C# twin; no second noise copy in the
-  site.
-- Shared paths: every ground on the site, the ritual essays included, paints
-  through the same tokens, in CSS and in the shader. Every route to a
-  reduced budget (slow device, hidden tab, reduced motion, missing WebGL2 or
-  half-float) goes through the one controller in `ground.js`; there is no
-  second "mobile" path.
-- Deletion line: in the site, the six literal radial colours and the three
-  literal gradient stops become token references in the same commit the
-  tokens are declared. In CultLib nothing is deleted; the GLSL file is new and
-  the interval file is new. The subtraction this buys is upstream: at
-  Aetheria's pin bump, `Assets/Plugins/GPU Noise/*.cginc` can go, and the
-  tapes campaign's step 1 is already landed when it unparks.
+  page; the fifteen ground tokens written on `:root` from the readback; a
+  debug log behind a flag.
+- Derived state: the ground tokens are derived from the shader's result while
+  it runs and are seed values otherwise; the CSS wash renders them; nothing
+  reads them back into the shader. The flow texture is the one owner of
+  motion: the warp, the TAA motion vectors and the stardust all read it.
+  `CultMath.glsl` is derived from `CultMath.hlsl`. The TAA history is a cache.
+  `S`, `dpr` and the particle count are derived from measurement within the
+  session.
+- Forbidden writers: no colour literal in `ground.js` or any GLSL; the shader
+  never reads a ground token; `ground.js` never reads the ground tokens except
+  to seed before its first readback; no user-agent, platform or touch-point
+  sniffing; no class on `body` or `html` by script; no second wash token; no
+  second flow function (particles and clouds read one texture); no GLSL edited
+  by hand; no `iv_*` without a C# twin; no noise defined in the site.
+- Shared paths: every page's ground, the ritual essays included, is one
+  canvas and one token set, in CSS and in the shader. Every reduced budget
+  (slow device, hidden tab, reduced motion, missing WebGL2 or half-float) goes
+  through the one controller. The 8×8 readback is the one path from the
+  shader to CSS.
+- Deletion line: in the site, the six literal radial colours and three
+  literal stops become token references and the ritual block's own ground
+  goes, in the same commit the tokens are declared. In CultLib nothing is
+  deleted. The subtraction this buys is upstream: Aetheria's
+  `Assets/Plugins/GPU Noise/*.cginc` at its pin bump, and the tapes campaign's
+  step 1 already landed.
 
 ## The shader design
 
-### Density field (site-owned, in `cloud.frag.glsl`)
+### What Aetheria contributes, and what the web version keeps
 
-The subset of Aetheria taken: `Volumetric.cginc`'s structure of a fill term
-plus a coverage term shaped by noise, and `CloudShader.shader`'s transmittance
-integration (`IntegrateRaymarch`, `:83-104`). Not taken: the height-field
-textures, the fluid flow map, `triNoise3d`, the tint LOD lookup, the packed
-depth, and the three-pass Unity plumbing. `Clouds.shader`'s `1-abs(snoise)`
-envelope over an fBm is the shape of the detail term. The noise is CultMath
-`cultmath_snoise` via the lowering, and nothing else.
+| Aetheria | Mechanism | Web subset |
+| --- | --- | --- |
+| `Volumetric.cginc:165-221` density | fill + coverage, domain-warped by `flow()` in two half-period phases cross-faded with `tri2` (a flow map; the advection never accumulates) | kept, one coverage octave and one detail octave, CultMath noise |
+| `Volumetric.cginc:130-135` `globalFlow` | `Tri3D(p/scale − scroll) · amplitude` | replaced by two `snoise` at low frequency, rendered once per frame into a quarter-res flow texture |
+| `CloudShader.shader:83-104` | transmittance integration | kept |
+| `CloudShader.shader:261-314` TAA | reprojection by `_PrevVP`, γ=0.5 variance clip, fixed 5% blend, packed depth, the `density2` bug at `:311` | not kept; see TAA |
+| `Stardust.compute:118-147` | stateless particles: grid cell hashed to a spawn point, `position −= flow · lifetime · period`, size `parabola(lifetime, 2)`, colour from a hue ramp × nebula tint | kept as an instanced vertex shader reading the flow texture; `gl_InstanceID` is the cell |
+| `DepthOfField.hlsl:29-32` `FragCoC` | the CoC is read straight from a global `_DoFBlurTex` (its writer is not in this checkout; the operator recalls final transmittance), then the bokeh gather `FragBlur` `:150-201` | a gather on the stardust layer with radius ∝ cloud opacity at that pixel |
+
+### Density field (site-owned, `cloud.frag.glsl`)
 
 ```text
 camera at the origin, looking +z, static; the slab z in [Z0, Z1] fills the view
-p(t)      = dir * t + drift * time                 (drift slow: ~0.02 units/s)
-coverage  = snoise(p * F0)                         (one octave, F0 ~ 0.35)
-occupancy = max(0, coverage - CUTOFF) * K          (CUTOFF ~ 0.25: most space is empty)
-detail    = 1 - abs(snoise(p * F0 * 4 + 17))       (one octave; the dune envelope)
-density   = occupancy * mix(0.6, 1.0, detail)
-colour    = sum_i light_i.rgb * light_i.alpha * falloff_i(screen uv)   (the three CSS lights)
+flow(uv)     = A · (snoise(q·Ff + o1), snoise(q·Ff + o2), 0)   q = slab mid-plane point; quarter-res texture, once per frame
+phase_k(t)   = fract(t / PERIOD + k/2),  w_k = tri2(phase_k)        k = 0,1
+warp_k(p)    = p + flow · (phase_k − 0.5) · PERIOD
+coverage(p)  = Σ_k w_k · snoise(warp_k(p) · F0)                     two snoise
+occupancy    = max(0, coverage − CUTOFF) · K
+detail(p)    = 1 − |snoise(p · 4F0 + 17)|                           one snoise; the dune envelope
+density      = occupancy · mix(0.6, 1.0, detail)
+hue(uv)      = mix of the three nebula colours by flow.xy / A       free: the flow texture's own channels
+colour       = hue · intensity
 ```
 
-Two `snoise` per dense sample, one per empty probe. The lights are the three
-CSS radials with the same centre, radius and colour; a point in the volume is
-"lit" by the radial falloff at its screen position, so the clouds are the wash
-made structured, with no 3D lighting.
+Three `snoise` per dense sample, one per empty probe. The pattern moves at
+velocity `−flow` everywhere, because both phases advance at the same rate;
+the cross-fade only changes content. That is what makes the motion vectors
+below exact.
 
-### Interval culling along the ray
+### Interval culling along the ray, with the warp
 
-`cultmath_iv_snoise_ball(c, r)` returns `[n(c) - L r, n(c) + L r] ∩ [-1, 1]`,
-where `L` is CultMath's committed Lipschitz constant for `snoise(float3)`. Over
-a ray segment `[t, t + Δ]` the ball is centred at `t + Δ/2` with radius `Δ/2`,
-scaled by `F0`. The march is adaptive subdivision, which is Fidget's region
-test on a 1-D region:
+`cultmath_iv_snoise_ball(c, r)` returns `[n(c) − L r, n(c) + L r] ∩ [−1, 1]`
+with `L` the committed Lipschitz constant. Over a segment `[t, t+Δ]` the
+unwarped ball is centred at `t + Δ/2` with radius `Δ/2`; the warp displaces
+any point by at most `D = |flow|max · PERIOD / 2`, so the ball `(c, Δ/2 + D)`
+contains both phases' warped points, and one evaluation bounds the whole
+coverage term. The march is adaptive subdivision, Fidget's region test on a
+1-D region:
 
 ```text
-Δ = Δ0; t = Z0/dir.z + jitter * Δ0
+Δ = Δ0; t = Z0/dir.z + jitter · Δ0
 while t < t_exit and evals < S:
-    iv = iv_snoise_ball(p(t + Δ/2) * F0, F0 * Δ/2)          -- 1 eval
-    if iv.hi < CUTOFF:   t += Δ; Δ = min(Δ * 2, ΔMAX)      -- provably empty: skip, grow
-    elif Δ > ΔDENSE:     Δ = Δ / 2                           -- maybe dense: refine
-    else:                integrate density(p(t + Δ/2)) over Δ; t += Δ    -- 1 more eval
+    iv = iv_snoise_ball(p(t + Δ/2) · F0, F0 · (Δ/2 + D))            1 eval
+    if iv.hi < CUTOFF:   t += Δ; Δ = min(2Δ, ΔMAX)                  provably empty: skip, grow
+    elif Δ > ΔDENSE:     Δ = Δ / 2                                   maybe dense: refine
+    else:                integrate density(p(t + Δ/2)) over Δ; t += Δ    3 evals
     if transmittance < 0.02: break
-if t < t_exit: integrate one coarse sample over the rest     -- the budget ran out; measured, must be rare
+if t < t_exit: integrate one coarse sample over the rest             the budget ran out; measured, must be rare
 ```
 
-The `iv.hi < CUTOFF` test is the interval proof that the `0` branch of
-`max(0, coverage - CUTOFF)` wins on the whole segment: Fidget's `min`/`max`
-pruning rule at its smallest, applied to a two-clause expression by hand. Tape
-and automatic pruning stay parked; this cut proves the arithmetic they rest on.
+`iv.hi < CUTOFF` is the interval proof that the `0` branch of
+`max(0, coverage − CUTOFF)` wins on the whole segment: Fidget's `min`/`max`
+pruning at its smallest, applied by hand to a two-clause expression. Tape and
+automatic pruning stay parked; this proves the arithmetic they rest on.
 
 ### Step budget
 
-`S` is the per-pixel, per-frame evaluation budget (each `snoise` call is one
-eval, so a dense sample costs 2). `S = 16` on desktop, `S = 8` on a phone,
-`S = 4` the floor; the controller sets it from measurement, not from the
-device. A debug mode writes `evals / S` and an "unfinished ray" flag into the
-colour so Hands can read back the mean and the unfinished fraction. The
-contract: at the chosen `S` on the shipped field, under 1% of rays are
-unfinished.
+`S` counts `snoise` evaluations per pixel per frame. `S = 16` desktop, `8`
+phone, `4` floor; the controller sets it from measurement. A debug mode writes
+`evals / S` and an unfinished flag into the colour. Contract: under 1% of rays
+unfinished at the chosen `S` on the shipped field.
 
-### TAA
+### TAA, motion-aware
 
-The camera never moves and the canvas is fixed, so there is no reprojection:
-history is the same pixel. What remains is temporal supersampling with
-rejection:
+The camera is static but the field moves, so history is reprojected by the
+known motion, which the flow texture owns:
 
-- Jitter: a Halton(2,3) frame offset for the ray start, plus interleaved
-  gradient noise per pixel, rotated per frame, so neighbours decorrelate.
-- Accumulation: `α = max(1 / frames, 1/32)`: the first frames converge fast,
-  then settle. The accumulated value is colour plus transmittance.
-- Rejection: a 3×3 min/max box of the current frame clamps the history
-  (AABB clamp, not variance clipping). The field's drift is slow enough that
-  the clamp only bites where the field really changed.
-- Reset on resize, on a token change (route change: Quartz has `enableSPA:
-  false` at `quartz.config.ts:15`, so a route change is a page load and the
-  reset is free) and on the first frame.
-- Buffers: two RGBA16F history targets at canvas size. 8-bit history stalls
-  convergence at `α = 1/32` for a ground this dark, so half-float is required;
-  if `EXT_color_buffer_half_float` is missing, the controller falls back to
-  the CSS wash.
+- Motion vector: `mv = project(−flow(uv) · dt)` in pixels; history is fetched
+  at `uv − mv`. Exact for the pattern between cross-fades (see above); the
+  cross-fade and the detail term are handled by rejection.
+- Jitter: Halton(2,3) frame offset on the ray start plus interleaved gradient
+  noise per pixel, rotated per frame.
+- Accumulation: `α = max(1/frames, 1/32)` on colour and transmittance.
+- Rejection: a 3×3 min/max box of the current frame clamps the reprojected
+  history (AABB clamp, not variance clipping); out-of-bounds fetches take
+  `α = 1`.
+- Reset on resize, on the first frame and on a budget step.
+- Buffers: two RGBA16F history targets at canvas size (8-bit stalls
+  convergence at `α = 1/32` on a ground this dark); missing half-float falls
+  back to the CSS wash through the controller.
 
-What is not copied from Aetheria's `CloudShader.shader` pass 2: variance
-clipping at `γ = 0.5` on an undersampled input (`:303-308`), a fixed 5% blend
-with out-of-bounds forced to 100% (`:311`), the packed depth/density float
-(`:181`, `:270`), and the bug at `:311`, which blends the alpha with
-`density2`, the last 3×3 neighbour's density from the loop above, not the
-pixel's own.
+### Stardust (cut `site-stardust`)
 
-### Resolution
+Stateless, as Aetheria's: instance `i` is a cell of an `N×N` grid over the
+slab's mid-plane, hashed by `cultmath_pcg3d` to a spawn point and a lifetime
+offset; `lifetime = fract(t/PERIOD_P + offset)`; position = spawn − flow(uv
+of spawn) · lifetime · PERIOD_P, read from the flow texture in the vertex
+shader; size = `parabola(lifetime, 2)` × a hashed size; colour = the nebula
+hue at its screen position × a hashed brightness. Rendered as instanced
+billboards (one 6-vertex quad, `gl_InstanceID`) with additive blending into a
+half-resolution RGBA16F stardust layer, with the `powerPulse` falloff of
+`Stardust.shader:74-78`. Count: 16,384 desktop, 4,096 phone, controller-scaled
+with `S`. The particles and the clouds move as one because they read the same
+texture; there is no second flow.
 
-Full device pixels: `canvas.width = innerWidth * devicePixelRatio`. The
-controller's steps are in order: lower `S` (16 → 8 → 4), then render at CSS
-pixels (`dpr = 1`), then the CSS wash. The second step is Q2.
+### Depth of field driven by the raymarch (cut `site-stardust`)
 
-### Palette and intensity
+Aetheria's hack: the CoC is a raymarch output, so clouds blur what is behind
+them. Web version: in the resolve pass, the stardust layer is gathered with an
+8-tap Poisson disk whose radius is `RMAX · opacity(uv)`, where
+`opacity = 1 − T` is the TAA-accumulated cloud transmittance at that pixel
+(the stable, converged value, which is why it is read from history and not
+from the current frame). Composite: `ground + clouds + stardust_blurred · T`.
+All stardust is treated as behind the whole cloud layer; a per-depth
+transmittance would cost a second march and is not in scope.
 
-Fifteen tokens on `body` in `custom.scss`, read by CSS and by `ground.js`:
+### Sampled wash: the CSS reads the shader
 
-```text
---gamecult-ground-0/1/2         three gradient stop colours (#03070d #07111a #09141f)
---gamecult-light-N              "255 138 42"  (N = 0..2)
---gamecult-light-N-a            0.18
---gamecult-light-N-at           "78% 14%"
---gamecult-light-N-r            "18%"   (or a length; the ritual ground uses rem)
---gamecult-wash                 from wash-home-only: 1 on /, 0.5 elsewhere
-```
+After the resolve, a tiny pass downsamples the final frame to 8×8 (RGBA8).
+`ground.js` reads it back asynchronously: `readPixels` into a
+`PIXEL_PACK_BUFFER`, a `fenceSync`, then `getBufferSubData` on a later frame
+once the fence has signalled. Never a synchronous readback. At most twice a
+second, and only written when a value moved by more than 1/255:
 
-The CSS radials and the linear gradient reference the tokens. The ritual essays'
-block overrides the tokens instead of painting its own ground, which deletes
-its three literal radials. `ground.js` resolves `%` radii as CSS does (circle,
-farthest corner of the body's background positioning area) and lengths through
-the root font size. The parity test: with density forced to 0 the canvas equals
-the CSS wash within 2/255 per channel at 16 probe points, home and ritual.
-Intensity multiplies the cloud term; at 0 both paths show the plain gradient.
+- `--gamecult-ground-0/1/2`: the mean of rows 0–1, 3–4 and 6–7.
+- `--gamecult-light-N`, `-a`: the colour at the seed light's centre texel,
+  split into the hue (normalised) and the excess over the ground stop there.
+- `--gamecult-light-N-at`, `-r`: the seed values; positions are not fitted.
+- `--gamecult-ground-mean`: the 8×8 mean, for any tinted UI.
+
+These are written to `:root`'s inline style, so they beat the stylesheet's
+seed declarations. The seeds live on `:root` in `custom.scss` (today's
+literal wash), with the ritual essays' seeds under
+`:root:has(body[data-slug="Blog/..."])`. The body background and the ritual
+ground read the tokens. When WebGL2 is absent or the controller removes the
+canvas, the seeds are what paints. Across page loads the last sample may be
+carried as a cache (Q5).
+
+### Palette input
+
+The shader reads four input tokens from `custom.scss`, which is where the
+brand says colour is defined: `--gamecult-nebula-0/1/2` (today orange
+`255 138 42`, violet `109 96 255`, sky `89 183 255`) and
+`--gamecult-nebula-base` (`#07111a`), plus `--gamecult-wash` as intensity.
+Inputs and outputs are different tokens, so there is no cycle (Q4).
+
+### Resolution and the slow ladder (Q2)
+
+Full device pixels. The controller's ladder: `S` 16 → 8 → 4, then `dpr → 1`
+(the stardust layer and DoF follow the canvas), then the CSS wash. Never a
+step up within a session.
 
 ### Pausing and fallbacks
 
-- `visibilityState !== "visible"`: no frames. On return, keep history.
-- `prefers-reduced-motion: reduce`: drift is 0, render until 32 accumulated
-  frames, then stop; resize re-renders. The clouds are still there, still.
-- No WebGL2, context lost, no half-float: canvas removed, CSS wash shows.
-- Too slow: measured, see below. Never a user-agent branch.
-- The canvas is `position: fixed; inset: 0; z-index: -1; pointer-events: none;
-  aria-hidden`. The root background paints first, so the canvas covers the CSS
-  wash only once it has drawn; until then, and if it never does, the wash is
-  what the reader sees.
+- `visibilityState !== "visible"`: no frames; on return, history is kept and
+  the motion vector uses the real elapsed `dt`, clamped to one frame.
+- `prefers-reduced-motion: reduce`: time is frozen (phase, flow and particle
+  lifetimes fixed), render until 32 accumulated frames, stop; resize
+  re-renders. The clouds and stardust are there, still.
+- No WebGL2, context lost, no half-float: canvas removed; the seeds paint.
+- Too slow: measured; see below.
+- The canvas is `position: fixed; inset: 0; z-index: -1; pointer-events:
+  none; aria-hidden`. The root background paints first, so the canvas covers
+  the CSS wash only once drawn.
 
 ### Text contrast
 
-The shader clamps its output so relative luminance never exceeds 0.035, about
-the current orange hotspot (`#07111a` plus `rgba(255,138,42,.18)` is roughly
-`(53, 42, 34)`, luminance 0.025). Body text `#b7c7d9` (luminance 0.55) keeps a
-contrast ratio of at least 7:1 against any ground pixel. A readback test
-asserts the max over the canvas after 32 frames on `/` at intensity 1.
+The resolve clamps relative luminance at 0.035 (about today's orange hotspot,
+`#07111a` + `rgba(255,138,42,.18)` ≈ `(53, 42, 34)`, luminance 0.025), after
+stardust and DoF are composited. Body text `#b7c7d9` (0.55) keeps ≥ 7:1 on any
+ground pixel. A readback test asserts the max after 32 frames on `/`.
 
 ## Budget and how it is measured
 
 | Device | Pixels | GPU per frame at 30 fps | Proxy |
 | --- | --- | --- | --- |
-| Desktop, GTX 1070 class, 2560×1440 | 3.7 M | ≤ 1.0 ms | 3% GPU duty |
-| Laptop iGPU, Iris Xe, 1920×1080 at dpr 1.25 | 3.2 M | ≤ 3.0 ms | 9% duty |
-| Mid-range phone, Pixel 6a / Galaxy A54 class, 1080×2400 | 2.6 M | ≤ 4.0 ms | ≤ 12% duty; no upward drift of the median over 5 minutes (a thermal detector by measurement, not a sensor) |
+| Desktop, GTX 1070 class, 2560×1440 | 3.7 M | ≤ 2.0 ms | 6% GPU duty |
+| Laptop iGPU, Iris Xe, 1920×1080 at dpr 1.25 | 3.2 M | ≤ 3.5 ms | 10% duty |
+| Mid-range phone, Pixel 6a / Galaxy A54 class, 1080×2400 | 2.6 M | ≤ 4.0 ms | ≤ 12% duty; no upward drift of the median over 5 minutes |
 
-The cost model that sizes `S`: one 3D simplex is ~150 flops; a phone GPU
-delivers ~1 TFLOP; 2.6 M × 8 evals × 150 is 3.1 GFLOP, about 3 ms, plus ~1 ms
-for the resolve pass (10 texel reads per pixel). Those are estimates; the
-measurements replace them.
+Cost model for the full stack on the phone (one `snoise` ≈ 150 flops, ~1
+TFLOP available; estimates, replaced by measurement):
 
-Measurement, in this order of preference, all in `ground.js` behind a debug
-flag and used by the controller:
+| Pass | Work | ms |
+| --- | --- | --- |
+| Flow texture, quarter res | 160 k texels × 2 snoise | 0.05 |
+| March at `S = 8` | 2.6 M × 8 snoise | 3.1 |
+| TAA resolve + DoF gather | ~19 texel reads per pixel | 1.0 |
+| Stardust layer, half res, 4,096 particles | fill-bound, small | 0.2 |
+| 8×8 downsample + PBO readback at 2 Hz | tiny | 0.05 |
+| **Total at `S = 8`** | | **≈ 4.4** |
+| Total at `S = 6` / `S = 4` | | ≈ 3.6 / 2.9 |
 
-1. `EXT_disjoint_timer_query_webgl2` where present (Chrome desktop):
-   per-frame GPU time of the march pass and the resolve pass.
-2. A `fenceSync` after the resolve pass, polled; the time from issue to
-   signalled is the GPU time when the queue is otherwise empty, which a
-   background page's queue is. Available on every WebGL2, including Safari
-   and phones.
-3. `requestAnimationFrame` cadence as the last signal: if frames are
-   delivered under 24 fps for 30 consecutive frames while the page is idle,
-   the controller steps down.
+Said plainly: at `S = 8` the full stack does not fit the 4 ms phone budget on
+the estimate. The controller will settle a mid-range phone at `S = 4–6`,
+which the TAA covers (convergence in ~32 frames, about a second). What gives,
+in order, is the sample count, then the resolution; the stardust and the DoF
+are never dropped before the clouds' samples, because they cost a quarter of
+the march. On desktop at `S = 16` the stack is ≈ 1.6 ms.
 
-Hands proves it in the browser pane: desktop numbers from the pane with the
-timer query, phone numbers from the pane's mobile viewport emulation for the
-pixel count and from the operator's phone for the real GPU time (operator
-verification). Each landed number goes into the cut report, not into prose.
+Measurement, in this order, all in `ground.js` behind a debug flag and used by
+the controller: `EXT_disjoint_timer_query_webgl2` where present (Chrome
+desktop) per pass; else a `fenceSync` after the resolve, polled (universal on
+WebGL2, phones and Safari included; the queue of a background page is
+otherwise empty); else `requestAnimationFrame` cadence. Hands proves it in the
+browser pane: desktop numbers with the timer query, the phone's pixel count
+from the mobile preset, the phone's GPU time from the operator's phone.
 
-## The proving-ground contract (what Asura and the tapes campaign inherit)
+## The proving-ground contract (what the tapes campaign inherits)
 
-1. **Enclosure tests in C#** (and so in HLSL by the mirror): for every `iv_*`
-   op, random intervals and random points inside them, `f(x) ∈ op(I)`. For
-   `iv_snoise_ball` and `iv_fbm_ball`, 2,000 random balls with 64 points each.
-   A mutant that shrinks any bound dies.
-2. **The Lipschitz constant has provenance**: `CULTMATH_SNOISE_LIPSCHITZ` is
-   the max of `|snoise_grad|` over 10⁶ random points refined by gradient
-   ascent, times a stated margin (1.10). The test that measures it is
-   committed and the constant is pinned by a test that fails if any sampled
-   gradient exceeds it. It is empirical with a margin, not a proof; the map
-   says so, and the enclosure tests are the defence.
-3. **Tightness is a number**: the mean ratio of interval width to the true
-   range over the sampled balls, printed by a committed test and quoted in
-   the cut report, so a later affine-arithmetic cut has something to beat.
-4. **The saving is a number**: a C# test marches 1,000 random rays through a
-   representative coverage field with and without interval skipping and
-   asserts at least a 2× reduction in evaluations; the real field's mean
-   evals per pixel and unfinished-ray fraction come from the browser readback.
-5. **Three runtimes agree**: the GLSL golden fixture (256 points, bit
-   patterns from C#) passes on WebGL2 within 1 ulp for the integer-hash paths
-   and a stated tolerance for the transcendental ones, with the tolerance and
-   the device named in the report.
+1. **Enclosure tests in C#** (and HLSL by the mirror): every `iv_*` op over
+   random intervals and points; `iv_snoise_ball`/`iv_fbm_ball` over 2,000
+   balls × 64 points. A mutant that shrinks any bound dies.
+2. **The warp is enclosed**: for random flows bounded by `D`, every point
+   `warp_k(p)` over the segment lies in the enlarged ball and `snoise` of it
+   lies in `iv_snoise_ball(c, r + D)`. This is the test the site's march rests
+   on.
+3. **The Lipschitz constant has provenance**: the max of `|snoise_grad|` over
+   10⁶ points refined by gradient ascent, × 1.10, measured by a committed
+   test and pinned by another. Empirical with a margin, not a proof; the
+   enclosure tests are the defence.
+4. **Tightness is a number**: mean interval width over true range, printed
+   by a committed test, for a later affine cut to beat.
+5. **The saving is a number**: a C# test marches 1,000 rays through a
+   representative warped coverage field with and without interval skipping
+   and asserts ≥ 2× fewer evaluations at equal transmittance; the shipped
+   field's evals per pixel and unfinished fraction come from the browser.
+6. **Three runtimes agree**: the GLSL golden fixture passes on WebGL2, with
+   tolerance class and device named in the report.
 
-What this cut does **not** prove, said plainly: tape evaluation, automatic
-pruning, the `min`/`max` choice tracking, and interval ops over anything but
-plain `[lo, hi]`. Those unpark with steps 2–4.
+Not proved here, said plainly: tape evaluation, automatic pruning, `min`/`max`
+choice tracking, affine arithmetic. Those unpark with steps 2–4.
 
 ## Cut order
 
 ```text
 glsl-lowering (CultLib) ─┐
-interval-ops  (CultLib) ─┴─> site-ground (gamecult-site, after wash-home-only)
+interval-ops  (CultLib) ─┴─> site-ground (clouds, flow, TAA, sampled wash) ─> site-stardust (particles, DoF)
+                                  ^ after site-masthead wash-home-only
 ```
 
-Three cuts, not one. One cut would be three repos' worth of concerns and
-three Soul vocabularies (a text transformer, numerical bounds, a browser
-budget); CultMath cuts have overrun 2× when they carried two concerns
-(`Asura cut-map.md:131`). `glsl-lowering` and `interval-ops` are independent
-and can run in parallel worktrees; `interval-ops` gets its GLSL for free from
-the lowering test once both are on `main`. No CultMath release is in this
-sequence: the site consumes a commit, not a package. The next CultMath release
-carries the intervals to Unity consumers.
+Four cuts. The two CultLib cuts are as in pass 1, except `interval-ops` gains
+the warp enclosure test. `site-ground` grew (flow texture, reprojection, the
+readback and token restructure); `site-stardust` is split out because its
+Soul vocabulary is different (particle statistics, blur quality, the composite)
+and because the ground must be measured on its own before the stardust is
+charged against the same budget. No CultMath release is in the sequence; the
+site consumes a commit.
 
 Specs: `docs/cultmath-interval-ground-cut-glsl-lowering.spec.json`,
 `docs/cultmath-interval-ground-cut-interval-ops.spec.json`,
-`docs/cultmath-interval-ground-cut-site-ground.spec.json`.
+`docs/cultmath-interval-ground-cut-site-ground.spec.json`,
+`docs/cultmath-interval-ground-cut-site-stardust.spec.json`.
 
 ## Standing design decisions (means; Self may overrule)
 
 - D1. Intervals are `float2(lo, hi)`. Affine arithmetic is not taken; the
-  tightness number from the contract says whether it is ever worth it.
-- D2. No `iv_*` function has a value-only or gradient twin. The bounds take
-  the point value only; `snoise_grad` is used by the Lipschitz test, not by
-  the bound.
-- D3. The site vendors `CultMath.glsl` by CultLib commit, with the SHA in the
-  file header and a check in the site cut that the bytes equal CultLib's at
-  that SHA. A build-time fetch would make the site's build depend on another
-  repo being reachable.
-- D4. The ground shader is opaque and reproduces the gradient and the lights
-  from the tokens. A transparent canvas over the CSS wash would need the CSS
-  radials hidden by a class (two ground states, a flash on load), and parsing
-  the computed `background-image` string would make the palette authority a
-  serializer's whim.
-- D5. The history reset on token change is a page load, because SPA is off. If
+  tightness number says whether it is ever worth it.
+- D2. No `iv_*` function has a value-only or gradient twin; the bounds take
+  the point value only.
+- D3. The site vendors `CultMath.glsl` by CultLib commit, SHA in the header, a
+  drift check in the site cut.
+- D4. The flow texture is the one owner of motion. Warp, motion vectors, hue
+  and particles read it; nothing evaluates flow a second way.
+- D5. Routes are page loads (`enableSPA: false`, `quartz.config.ts:15`); if
   SPA is ever enabled, `ground.js` listens for Quartz's `nav` event and
-  re-reads the tokens; the spec names the hook so it is not forgotten.
-- D6. The budget controller holds state for the session only (no storage).
-  Measuring costs under a second and a stored verdict would outlive a driver
-  update.
+  re-reads the input tokens.
+- D6. The budget verdict is session-only; a stored verdict would outlive a
+  driver update.
+- D7. Inputs and outputs are different tokens: four nebula inputs, fifteen
+  ground outputs with seeds. The shader never reads an output; CSS never reads
+  an input except through the shader's result.
+- D8. The ground tokens are written on `:root` inline, so the seed in the
+  stylesheet loses to the sample without a class or a second rule.
+- D9. The DoF blurs all stardust by the final opacity; per-depth transmittance
+  is out of scope.
+- D10. Stardust and DoF land after the ground has been measured alone, so the
+  report can say what each costs.
 
 ## Questions
 
-**Q1. Campaign home.**
-- (a) New campaign `cultmath-tapes`, target `docs/cultmath-tape-target.md`
-  unparked for step 1, repos CultLib and gamecult-site. **Recommended.** It is
-  the campaign the operator called "planned", and the site is its first
-  consumer.
-- (b) File the CultLib cuts under `asura` as 2a-iii and the site cut under
-  `site-masthead`. Rejected: both targets say this work is not theirs.
+**Q4. Where the shader's palette input comes from.**
+- (a) Four new input tokens in `custom.scss` (`--gamecult-nebula-0/1/2`,
+  `--gamecult-nebula-base`), seeded with today's wash colours.
+  **Recommended.** The nebula palette can be tuned without moving the UI
+  accent, and the brand doc's rule (colour is defined in `custom.scss`) holds.
+- (b) Reuse `--secondary` and `--tertiary` from `quartz.config.ts` and promote
+  the violet to a config token. Fewer tokens; ties the nebula to the UI accent
+  for good.
 
-**Q2. The second step of the slow-device ladder.**
-- (a) After `S` hits its floor, render at CSS pixels (`dpr = 1`) before giving
-  up to the CSS wash. **Recommended.** It is still a measured response, and a
-  2× pixel cut is a 2× GPU cut, which keeps clouds on more phones.
-- (b) Never drop below device pixels; a device that fails at `S = 4` gets the
-  CSS wash. Purer to the order, but it loses the phones one notch too slow.
-
-**Q3. Ground authority in CSS.**
-- (a) Fifteen tokens on `body`, referenced by the CSS gradients and read by
-  the shader; the ritual block overrides tokens. **Recommended.** One
-  definition of the ground, two renderers.
-- (b) Keep the literals in CSS and duplicate the palette in `ground.js`.
-  Rejected: the brand doc says the brand is defined in `custom.scss`; a copy
-  in JS is a second authority that drifts.
+**Q5. Carrying the last sampled wash across page loads.**
+- (a) `ground.js` keeps the last written token set in `sessionStorage` and
+  applies it before the first paint on the next page; the seeds apply when
+  nothing is stored. A cache, never authority. **Recommended.** Without it,
+  every navigation shows the seed wash for the first frames, then the shader.
+- (b) No storage; the seed paints first on every page. Simpler; a visible
+  shift on every navigation.
 
 ## Unsettled
 
-- The Lipschitz constant is empirical with a margin. If a reader wants a
-  proof, the Ashima kernel's gradient is a bounded polynomial per simplex
-  cell and a proof is possible; it is not in this cut.
-- The ritual ground's radii are `rem` lengths and its gradient has three
-  stops but the first has no position (`custom.scss:124`). Hands normalises
-  it to three positioned stops when tokenising; the appearance is unchanged.
-- Whether GameCult-Quartz's bundler lets a component's `afterDOMLoaded` do a
-  dynamic `import()` of a static module, or whether the loader must be a
-  classic script tag in `Head`. Hands reads the engine; both are one line.
+- The Lipschitz constant is empirical with a margin; a per-cell polynomial
+  proof is possible and not in this cut.
+- `_DoFBlurTex`'s writer is not in the Aetheria checkout; the web DoF takes the
+  operator's recollection (final transmittance) as the driver. If stills of
+  the video arrive, Hands can match the blur radius against them, but the
+  mechanism does not depend on it.
+- The ritual ground's radii are `rem` lengths and its first gradient stop is
+  unpositioned (`custom.scss:124`); Hands normalises it when tokenising.
+- Whether GameCult-Quartz's bundler permits a dynamic `import()` from a
+  component's `afterDOMLoaded` or needs a script tag; one line either way.
+- `:root:has(body[data-slug])` for the ritual seeds: supported in every
+  current browser; a browser without `:has` gets the default seeds, which is
+  acceptable for a fallback of a fallback.

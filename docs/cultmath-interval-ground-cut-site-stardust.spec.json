@@ -1,0 +1,141 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "site-stardust",
+  "revision": 1,
+  "title": "Site stardust: stateless particles advected by the ground's flow texture, rendered to a half-res layer, blurred by the clouds' accumulated opacity (raymarch-driven DoF), composited behind the nebula",
+  "repo": "GameCult/gamecult-site",
+  "branch": "main",
+  "base": "535d170",
+  "depends_on": [
+    "cultmath-tapes:cut_spec:site-ground.r2"
+  ],
+  "first": [
+    "Map: F:/Projects/CultLib/docs/cultmath-interval-ground-cut.md, 'Stardust', 'Depth of field driven by the raymarch', 'Budget', D4, D9, D10. Re-pin base to main after site-ground lands. The composite slot site-ground left in the resolve is where this cut plugs in; do not restructure the resolve.",
+    "Aetheria reference, read once, copy nothing: Compute/Stardust/Stardust.compute:118-147 (grid cell -> hashed spawn, lifetime = frac(time/period + hash), position -= flow * lifetime * period, size = parabola(lifetime, 2), colour from a hue ramp x nebula tint); Stardust.shader:49-86 (billboard from quadPoints by SV_VertexID/SV_InstanceID, powerPulse falloff, distance exponents); CustomDoF/DepthOfField.hlsl:29-32 (CoC read from a raymarch output), :150-201 (disk gather weighted by CoC), :217-242 (combine). The web version is far smaller: no distance exponents (the slab is thin), no shadow pass, no near/far split.",
+    "Particles are stateless: no buffers are updated. One static 6-vertex quad VBO; drawArraysInstanced with count N; the vertex shader derives everything from gl_InstanceID, time and the flow texture (vertex texture fetch is standard in WebGL2): cell = (id mod G, id / G) over the slab mid-plane; hashes via cultmath_pcg3d (the vendored CultMath.glsl is concatenated before the vertex source too) for spawn jitter, lifetime offset, size and brightness; lifetime = fract(t / PERIOD_P + offset); position = spawn - flow(spawn uv) * lifetime * PERIOD_P; size = base * parabola(lifetime, 2); colour = hue at the screen position (from the flow texture's channels, the same mix as the clouds) * brightness. Reduced motion freezes t as site-ground does.",
+    "Stardust layer: half-resolution RGBA16F target, cleared each frame, additive blend, powerPulse falloff in the fragment shader; N = 16384 desktop, 4096 phone; the controller scales N with S (N halves when S halves) and the layer follows dpr.",
+    "DoF: in the resolve's composite slot, read opacity = 1 - T from the reprojected, clamped history (not the current frame) and gather the stardust layer with an 8-tap Poisson disk of radius RMAX * opacity in layer texels (RMAX ~ 12 px at dpr 1, scaled by dpr); weight taps by a soft disk; composite out = ground + clouds + stardust_blurred * T, then the luminance clamp. All stardust is behind the whole cloud layer (D9).",
+    "Debug flags: ?ground=debug-stardust writes the stardust layer alone; ?ground=debug-coc writes opacity into red. Prove in the browser pane: the stardust and the clouds move together (with ?ground=debug-mv from site-ground and the particle velocity written in green under ?ground=debug-stardust-v, the two directions agree within 5 degrees at 64 sampled pixels where |flow| is above a threshold); luminance clamp still holds after the composite; GPU ms per pass (stardust layer, gather) with the timer query at desktop and at the mobile preset's pixel count; the full-stack total against the budget table; the unfinished-ray fraction unchanged by this cut.",
+    "Budget contract (map, 'Budget'): the stardust layer plus the gather cost no more than a quarter of the march at the same S; if the measurement says otherwise, the gather drops to 4 taps before N drops, and the report says which. Stardust is never cut before the clouds' S on the ladder."
+  ],
+  "deletes": [],
+  "keeps_moves": [
+    "site-ground's flow texture, march, TAA, readback and token writer: untouched; the stardust reads the flow texture and the hue mix the same way the clouds do.",
+    "The sampled wash now includes the stardust in its 8x8 readback by construction (it samples the final frame); nothing changes in the writer.",
+    "The budget controller gains one scaled quantity (N) and no new state; the ladder order is unchanged."
+  ],
+  "adds": [
+    "site/quartz/static/ground/stardust.vert.glsl and stardust.frag.glsl: the instanced billboard and the powerPulse sprite.",
+    "ground.js: the stardust pass (one VBO, one program, drawArraysInstanced), the half-res layer, N in the controller, the gather in the resolve's composite slot, the two debug flags.",
+    "taa.frag.glsl: the composite slot filled: opacity from history, the 8-tap gather, out = ground + clouds + stardust_blurred * T.",
+    "docs/brand-design-language.md: two sentences under the ground shader paragraph: the stardust and the DoF, and that they read the same flow and hue as the nebula."
+  ],
+  "file_changes": [
+    {
+      "location": { "path": "site/quartz/static/ground/ground.js", "line": 1 },
+      "change": "stardust pass, layer, N scaling, gather hookup, debug flags; line numbers are site-ground's and are re-read by function name."
+    },
+    {
+      "location": { "path": "site/quartz/static/ground/taa.frag.glsl", "line": 1 },
+      "change": "the named composite slot becomes the opacity-weighted gather and the final composite."
+    },
+    {
+      "location": { "path": "docs/brand-design-language.md", "line": 69 },
+      "change": "two sentences on stardust and DoF under the ground shader paragraph (post site-ground numbering)."
+    }
+  ],
+  "authority_map": {
+    "owner": "ground.js owns the stardust pass and the DoF gather; the flow texture (site-ground) owns the particles' motion; the TAA history owns the opacity the DoF reads; the nebula input tokens own the particles' hue through the same mix as the clouds.",
+    "inputs": [
+      "the flow texture and the hue mix (site-ground)",
+      "the reprojected, clamped history's transmittance",
+      "time, N and dpr from the controller; gl_InstanceID"
+    ],
+    "outputs": [
+      "a half-res stardust layer per frame",
+      "the composite with stardust blurred by cloud opacity behind the nebula, still under the luminance clamp"
+    ],
+    "derived_state": [
+      "every particle's position, lifetime, size and colour are derived from gl_InstanceID, time and the flow texture each frame; nothing is stored or updated",
+      "N is derived from S by the controller; the layer size from dpr",
+      "the blur radius is derived from the accumulated opacity; there is no second CoC source"
+    ],
+    "forbidden_writers": [
+      "no particle buffer update, transform feedback or CPU-side particle state",
+      "no second flow function or hue mix; the vertex shader samples the flow texture",
+      "no colour literal; no per-depth transmittance; no second march",
+      "no new controller state beyond N; the ladder order is not changed",
+      "no change to the readback or the token writer"
+    ],
+    "shared_paths": [
+      "clouds and stardust read one flow texture and one hue mix, so they move and colour as one",
+      "the one resolve pass composites ground, clouds and stardust and applies the one luminance clamp",
+      "the one controller scales S, N and dpr together"
+    ],
+    "deletion_line": "Nothing is deleted. The addition is two small shaders, one pass and one gather; it buys the stardust and the DoF the operator named, and it must prove it fits the same budget."
+  },
+  "verification": {
+    "builds": [
+      "Deploy Quartz green on the landing commit",
+      "scripts/ground/check-cultmath-glsl.ps1 still exits 0"
+    ],
+    "tests": [
+      {
+        "name": "browser pane, /?ground=debug-stardust-v with ?ground=debug-mv: particle velocity and cloud motion vectors agree within 5 degrees at 64 sampled pixels where |flow| exceeds the threshold",
+        "pins": "one flow: the stardust and the nebula move as one."
+      },
+      {
+        "name": "browser pane, /?ground=debug-coc: opacity is 0 where the clouds are empty and rises inside them; the stardust gather radius follows it (a visible blur under a dense cloud, sharp in a gap)",
+        "pins": "the raymarch drives the DoF, as in Aetheria's hack."
+      },
+      {
+        "name": "browser pane, /?ground=debug: max relative luminance after 32 frames <= 0.035 with stardust on",
+        "pins": "the clamp holds after the composite."
+      },
+      {
+        "name": "browser pane, timer query at desktop and at the mobile preset: stardust layer + gather <= 25% of the march at the same S; full-stack totals quoted against the budget table",
+        "pins": "the stardust fits the same budget or the report says what gave."
+      },
+      {
+        "name": "reduced motion: particles frozen, frames stop at 32; hidden tab: no frames",
+        "pins": "the stardust obeys the one controller."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "bufferSubData|transformFeedback|TRANSFORM_FEEDBACK|new Float32Array\\((N|count|particles)",
+        "scope": "ground.js stardust section: 0 matches; particles are stateless."
+      },
+      {
+        "pattern": "#[0-9a-fA-F]{6}\\b|rgba?\\(",
+        "scope": "stardust.vert.glsl, stardust.frag.glsl, ground.js: 0 matches."
+      },
+      {
+        "pattern": "snoise\\(|float cultmath_",
+        "scope": "stardust.vert.glsl and stardust.frag.glsl: 0 matches; the flow and hue come from the texture, not from a second evaluation."
+      },
+      {
+        "pattern": "readPixels|setProperty",
+        "scope": "git diff base..head changed lines in ground.js: 0 matches; the readback and the token writer are not touched."
+      }
+    ],
+    "operator": [
+      "open / on the desktop and on the phone; say whether the stardust sells the motion and whether the blur under the clouds reads like the video (RMAX, N, PERIOD_P are the dials)",
+      "on the phone with ?ground=debug, read the full-stack GPU ms and the final S/N/dpr; say whether it got warm"
+    ]
+  },
+  "estimate": {
+    "lines_added": 320,
+    "lines_removed": 4,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "site-masthead:ruling:operator-chromeless-column"
+  ],
+  "questions": []
+}
