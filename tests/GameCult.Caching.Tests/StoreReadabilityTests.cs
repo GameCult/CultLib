@@ -160,7 +160,9 @@ namespace GameCult.Caching.Tests
             var refusal = Assert.Throws<CultStoreUnreadableException>(() =>
                 CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directoryStore }))!;
 
-            Assert.That(refusal.Message.Contains(header, StringComparison.Ordinal), Is.EqualTo(echoed), refusal.Message);
+            // The readable formats are named in the same message, so "echoed" is read from how the header is introduced.
+            Assert.That(refusal.Message.Contains(" is " + header + ";", StringComparison.Ordinal) || refusal.Message.Contains("format " + header + " is not readable", StringComparison.Ordinal), Is.EqualTo(echoed), refusal.Message);
+            Assert.That(refusal.Message.Contains("an unrecognised cultcache.store.* header of ", StringComparison.Ordinal), Is.EqualTo(!echoed), refusal.Message);
             Assert.That(refusal.Message.Contains("SECRETHDR", StringComparison.Ordinal), Is.False, refusal.Message);
             if (!echoed)
                 Assert.That(refusal.Message.Contains("٣", StringComparison.Ordinal), Is.False, refusal.Message);
