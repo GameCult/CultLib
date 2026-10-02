@@ -219,13 +219,8 @@ namespace GameCult.Caching.Tests
         {
             var path = PathOf("unowned-pre-id.cc");
             WritePreIdStore(path, null, ("old", "o", 1));
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var ownId = snapshot.Records.Single().SchemaId;
-            var entry = snapshot.SchemaCatalog.Single();
-            entry.SchemaId = "other.runtime.deck";
-            entry.CompatibleSchemaIds = new[] { "other.runtime.deck" };
-            snapshot.Records.Single().SchemaId = "other.runtime.deck";
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var ownId = DiskRecord(path, "old").SchemaId;
+            RelabelAsOtherRuntime(path);
             var stored = DiskRecord(path, "old");
 
             using var cache = Open(path);
@@ -235,6 +230,115 @@ namespace GameCult.Caching.Tests
             Assert.That((laidBack.SchemaId, laidBack.StoredAt, laidBack.Payload), Is.EqualTo((stored.SchemaId, stored.StoredAt, stored.Payload)));
             Assert.That(cache.MintElementIds(), Is.EqualTo(1), "its ids are still in memory only");
             Assert.That(DiskRecord(path, "old").SchemaId, Is.EqualTo(ownId), "a write of the record stores it under the type's own id");
+        }
+
+        // The store's one record, stored as another runtime stores that schema: under an id the type does not own, published by a
+        // catalog entry of its own.
+        private static void RelabelAsOtherRuntime(string path)
+        {
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = "other.runtime.deck";
+            entry.CompatibleSchemaIds = new[] { "other.runtime.deck" };
+            snapshot.Records.Single().SchemaId = "other.runtime.deck";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        }
+
+        private string UnownedStore(string name)
+        {
+            var path = PathOf(name);
+            WritePreIdStore(path, null, ("old", "o", 1));
+            RelabelAsOtherRuntime(path);
+            return path;
+        }
+
+        // The record's owner wrote it after this cache loaded it: the file holds the owner's newer record, and this cache's write of
+        // another record leaves it as it is, storedAt included (a record's storedAt never moves backwards).
+        [Test]
+        public void AWholeViewWriteDoesNotRevertARecordItsOwnerWroteAfterTheLoad([Values] bool flush)
+        {
+            var path = UnownedStore("owner-wrote.cc");
+            using var cache = Open(path);
+            var loadedAt = DiskRecord(path, "old").StoredAt;
+            using (var owner = Open(path))
+                owner.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("owner"), new CultRecordKey("old")));
+            var owned = DiskRecord(path, "old");
+
+            if (flush)
+            {
+                cache.UpsertAsync(typeof(IdDeck), Deck("other"), new CultRecordKey("other")).GetAwaiter().GetResult();
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+            else
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var after = DiskRecord(path, "old");
+            Assert.That((after.SchemaId, after.StoredAt, after.Payload), Is.EqualTo((owned.SchemaId, owned.StoredAt, owned.Payload)));
+            Assert.That(string.CompareOrdinal(after.StoredAt, loadedAt), Is.GreaterThan(0));
+            Assert.That(MessagePackSerializer.Deserialize<IdDeck>(after.Payload).Name, Is.EqualTo("owner"));
+        }
+
+        // The owner removed it: this cache's stale copy is not written back.
+        [Test]
+        public void AWholeViewWriteDoesNotWriteBackARecordItsOwnerRemovedAfterTheLoad()
+        {
+            var path = UnownedStore("owner-removed.cc");
+            using var cache = Open(path);
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            snapshot.Records = Array.Empty<CultPersistedRecord>();
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Select(record => record.Key), Is.EqualTo(new[] { "other" }));
+        }
+
+        // A record that carried no ids when it was laid back does not mark the store, though the ids it minted at load are in memory.
+        [Test]
+        public void ALaidBackRecordWithoutIdsDoesNotMarkTheStore()
+        {
+            var path = UnownedStore("laid-back-v1.cc");
+            using var cache = Open(path);
+
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("empty", reels: 0), new CultRecordKey("empty")));
+
+            Assert.That(DiskRecord(path, "old").SchemaId, Is.EqualTo("other.runtime.deck"), "laid back");
+            Assert.That(CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+        }
+
+        // A change made to a laid-back document in place is a write of the record, as it is for a record the type owns: it is stored
+        // under the type's own id, not dropped.
+        [Test]
+        public void AnInPlaceChangeToALaidBackDocumentIsWritten()
+        {
+            var path = UnownedStore("in-place.cc");
+            using var cache = Open(path);
+            cache.Get<IdDeck>(new CultRecordKey("old"))!.Name = "changed";
+
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var written = DiskRecord(path, "old");
+            Assert.That(written.SchemaId, Is.Not.EqualTo("other.runtime.deck"));
+            Assert.That(MessagePackSerializer.Deserialize<IdDeck>(written.Payload).Name, Is.EqualTo("changed"));
+        }
+
+        // The catalog entry that published a laid-back record is written as it was loaded, whatever the file's entry for the id says now.
+        [Test]
+        public void ALaidBackRecordIsPublishedByTheCatalogEntryItWasLoadedWith()
+        {
+            var path = UnownedStore("laid-back-entry.cc");
+            using var cache = Open(path);
+            var loadedHash = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).SchemaCatalog.Single().ContentHash;
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            snapshot.SchemaCatalog.Single().ContentHash = "changed-by-another-writer";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
+
+            var published = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).SchemaCatalog
+                .Where(entry => entry.SchemaId == "other.runtime.deck").ToArray();
+            Assert.That(published, Has.Length.EqualTo(1));
+            Assert.That(published[0].ContentHash, Is.EqualTo(loadedHash));
         }
 
         // A whole-view write that persists the ids a record minted at load stores other bytes under the same id: a new store of
