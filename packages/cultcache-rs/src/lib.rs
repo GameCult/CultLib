@@ -549,6 +549,8 @@ impl std::error::Error for CultCacheStoreWriteFailed {}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PushAllOptions {
+    /// Seed the store only where nothing is: a single-file flush writes when nothing is at the path, leaves a store it can
+    /// read byte for byte, and refuses what its reader refuses (a dangling link included), as a plain flush refuses.
     pub soft: bool,
 }
 
@@ -934,7 +936,7 @@ impl SingleFileMessagePackBackingStore {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_absent(&self.path)? => {
-                return Ok(DiskStore::empty());
+                return Ok(DiskStore::absent());
             }
             Err(error) => {
                 return Err(anyhow::Error::new(error)
@@ -991,7 +993,7 @@ impl SingleFileMessagePackBackingStore {
             // A dangling link holds no store, so a whole-file replace has no header to keep and replaces the link (R3 pins
             // this). The only NotFound the reader returns is that one: a merging writer has already refused it when it
             // read the current entries.
-            Err(error) if io_not_found(&error) => DiskStore::empty(),
+            Err(error) if io_not_found(&error) => DiskStore::absent(),
             other => other?,
         };
         let bytes = encode_store_snapshot(entries, &disk)
@@ -1263,8 +1265,14 @@ impl CacheBackingStore for SingleFileMessagePackBackingStore {
         })
     }
 
-    fn push_all(&mut self, entries: &[CultCacheEnvelope], _options: PushAllOptions) -> Result<()> {
+    fn push_all(&mut self, entries: &[CultCacheEnvelope], options: PushAllOptions) -> Result<()> {
         self.with_exclusive_lock(|| {
+            // A soft flush asks the one reader: nothing at the path is written, a store it reads is left alone, and anything
+            // the reader refuses (an unreadable file, a dangling link) is refused here as it is for open.
+            if options.soft && !self.read_store_unlocked()?.absent {
+                return Ok(());
+            }
+
             let mut entries = entries.to_vec();
             entries.sort_by_key(entry_id);
             self.write_all_unlocked(&entries)
@@ -2896,24 +2904,26 @@ fn decode_store_file(bytes: &[u8], header: Option<&str>) -> Result<DiskStore> {
             let format = readable_store_format(header)
                 .ok_or_else(|| anyhow!("the first slot is not a store header this runtime reads"))?;
             let (envelopes, catalog) = decode_store_snapshot(bytes)?;
-            Ok(DiskStore { format, envelopes, catalog })
+            Ok(DiskStore { absent: false, format, envelopes, catalog })
         }
-        None => Ok(DiskStore { format: STORE_FORMAT_V1, envelopes: decode_legacy_envelopes(bytes)?, catalog: Vec::new() }),
+        None => Ok(DiskStore { absent: false, format: STORE_FORMAT_V1, envelopes: decode_legacy_envelopes(bytes)?, catalog: Vec::new() }),
     }
 }
 
 /// What a store file holds, as its one reader decoded it: the header a rewrite keeps, its envelopes, and the catalog entries it
 /// publishes them by, which a rewrite lays back for the ids they name.
 struct DiskStore {
+    /// Nothing was at the path; the other fields describe an empty v1 store.
+    absent: bool,
     format: &'static str,
     envelopes: Vec<CultCacheEnvelope>,
     catalog: Vec<PersistedSchemaCatalogEntry>,
 }
 
 impl DiskStore {
-    /// A file that is gone: an empty v1 store.
-    fn empty() -> Self {
-        Self { format: STORE_FORMAT_V1, envelopes: Vec::new(), catalog: Vec::new() }
+    /// A file that is gone, or a dangling link a whole-file replace is about to replace: an empty v1 store.
+    fn absent() -> Self {
+        Self { absent: true, format: STORE_FORMAT_V1, envelopes: Vec::new(), catalog: Vec::new() }
     }
 }
 
@@ -5136,18 +5146,24 @@ mod tests {
             let bytes = std::fs::read(root.join(vector))?;
             // A v3 store keeps its marker through a rewrite; every other file that reads is written v1.
             let header = if vector.contains("v3") { "cultcache.store.v3" } else { STORE_FORMAT_V1 };
-            for operation in ["open", "push_all", "push"] {
+            for operation in ["open", "soft_push_all", "push_all", "push"] {
                 let temp = tempfile::tempdir()?;
                 let path = temp.path().join("store.msgpack");
                 std::fs::write(&path, &bytes)?;
                 let mut store = SingleFileMessagePackBackingStore::new(&path);
                 let outcome = match operation {
                     "open" => store.pull_all().map(|_| ()),
+                    "soft_push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions { soft: true }),
                     "push_all" => store.push_all(&[snapshot_envelope("x", b"one")], PushAllOptions::default()),
                     _ => store.push(&snapshot_envelope("x", b"one")),
                 };
                 let what = format!("{vector} {operation}");
                 assert_eq!(outcome.is_ok(), reads, "{what}: {outcome:?}");
+                if operation == "soft_push_all" && reads {
+                    // A soft flush leaves a store it reads byte for byte.
+                    assert_eq!(std::fs::read(&path)?, bytes, "{what} rewrote a store it reads");
+                    continue;
+                }
                 if !reads {
                     let error = outcome.unwrap_err();
                     let expected = if vector == "header-v9.bin" {
@@ -5995,6 +6011,34 @@ mod tests {
         SingleFileMessagePackBackingStore::new(&link).push(&snapshot_envelope("b", b"2"))?;
         assert!(fs::symlink_metadata(&link)?.file_type().is_file(), "the link was replaced by a regular file");
         assert_eq!(fs::read(&target)?, before, "the store the link pointed to is unchanged");
+        Ok(())
+    }
+
+    // The two cases the vectors cannot hold: nothing at the path is written, and a dangling link is refused and left as it is.
+    #[test]
+    fn a_soft_push_all_writes_where_nothing_is_and_refuses_a_dangling_link() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("store.cc");
+        SingleFileMessagePackBackingStore::new(&path).push_all(&[snapshot_envelope("a", b"1")], PushAllOptions { soft: true })?;
+        let seeded = fs::read(&path)?;
+        let mut store = SingleFileMessagePackBackingStore::new(&path);
+        assert_eq!(store.pull_all()?.len(), 1);
+        store.push_all(&[snapshot_envelope("b", b"2")], PushAllOptions { soft: true })?;
+        assert_eq!(fs::read(&path)?, seeded, "a soft flush over a store it reads wrote");
+
+        #[cfg(unix)]
+        {
+            let volume = temp.path().join("volume");
+            fs::create_dir(&volume)?;
+            let link = temp.path().join("dangling.cc");
+            std::os::unix::fs::symlink(volume.join("store.cc"), &link)?;
+            let error = SingleFileMessagePackBackingStore::new(&link)
+                .push_all(&[snapshot_envelope("a", b"1")], PushAllOptions { soft: true })
+                .unwrap_err();
+            assert!(io_not_found(&error), "{error:#}");
+            assert!(fs::symlink_metadata(&link)?.file_type().is_symlink(), "the link was replaced");
+            assert_eq!(fs::read_dir(&volume)?.count(), 0, "nothing reached the link's volume");
+        }
         Ok(())
     }
 

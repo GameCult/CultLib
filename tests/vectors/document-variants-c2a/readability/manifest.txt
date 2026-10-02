@@ -1,4 +1,4 @@
-# Whether each runtime's own reader opens the file. A flush and a commit replace a file exactly when it reads.
+# Whether each runtime's own reader opens the file. A flush and a commit replace a file exactly when it reads; where a runtime has a soft flush (TypeScript, Rust) it leaves a file that reads byte for byte and refuses one that does not.
 # Columns: file, csharp, rust, typescript, python. `../v3-base.msgpack` is the one valid store.
 ../v3-base.msgpack  reads    reads    reads    reads
 zero-byte.bin       refuses  refuses  refuses  refuses
