@@ -1,0 +1,216 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "interval-ops",
+  "revision": 2,
+  "title": "Interval ops r2: envelope-then-noise fields, scenarios with authored empty space, the tile march on cell ranges, iv_frustum_ball, wasted probes removed, dxc run",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-interval-ops",
+  "base": "c9bd003b",
+  "depends_on": [],
+  "first": [
+    "Follow-up on cut report cultmath-tapes:cut_report:cut-interval-ops.h1 (head c9bd003b, worktree F:\\Projects\\CultLib-iv). Rulings in force: operator-tile-amortized-march (the bound stays; one probe per screen tile), operator-compiler-downloads. The operator's challenge, verbatim in the map's Pass 3 section: r1 measured a uniform noise slab with no empty space to skip, the worst case for intervals, and the density that matters is an analytic envelope (a pre-distortion SDF) modulated by noise, where the envelope's interval is tight and proves whole ray lengths empty in one probe. Map: docs/cultmath-interval-ground-cut.md, 'Pass 3'. r1's ops and bounds stay; this revision touches math.Interval.cs, CultMath.Interval.hlsl (both tracked copies), NoiseBoundTests.cs, design.md and README only.",
+    "The field, from Aetheria (Assets/Shaders/Volumetric.cginc:165-221, :91-102; Scripts/ServerShared/Zone.cs:369-397 GetHeight, :426 PowerPulse; Resources/Settings.asset DefaultEnvironment and PlanetSettings). Pre-distortion SDF s(p) = p.y + h(p.xz), h >= 0 the well map: h = PowerPulse(|p.xz| / (2R), 2) * 64 (the zone bowl) + sum over wells of PowerPulse(|p.xz - c_b| / r_b, 16) * d_b, with PowerPulse(x, e) = (1 - 4x^2)^e for x in [0, 1/2] and 0 beyond, r_b = 500 M^0.25, d_b = 30 M^0.175 (Aetheria's GravityRadius/GravityDepth curves).",
+    "(Field, continued.) Noise only where s < S (SafetyDistance 30): fade(s) = 1 - smoothstep(0.75 S, S, s); displaced height s' = s + A fade(s) n(p) with n the warped two-phase coverage noise plus half the detail octave (r1's field shape); density = max(0, (F - s') / B) (Aetheria's floor: FloorOffset F = -20, FloorBlend B = 10; the patch band and the 1e-9 fill are left out). Above the safety distance density is exactly 0, and so is the noise cost: Aetheria's dense march gates the noise pointwise (`if (dist < _SafetyDistance)`); the test's dense march does the same.",
+    "The composed bound over a tile's frustum slice [z0, z1], every step an existing iv_* op. Envelope over the slice's exact box, not the ball: with slopes m in [m_c - s, m_c + s] per axis and z in [z0, z1], y = iv_mul([z0, z1], m_y) and x = iv_mul([z0, z1], m_x) (plus the tile's translation o); h's interval over the xz box is the sum over bowls of [pulse(far), pulse(near)], near and far the least and greatest distance from the box to the bowl's centre (pulse is monotone decreasing in distance, so each term is exact; the only slack is the sum).",
+    "(Bound, continued.) iv_s = iv_add(y, iv_h); iv_fade = the ordered endpoints of fade over iv_s (monotone); iv_n = iv_snoise_ball(ball.xyz * F0, ball.w * F0) with ball = iv_frustum_ball(..., warp = D); iv_s' = iv_add(iv_s, iv_scale(iv_mul(iv_fade, iv_n), A)); the slice is provably empty iff iv_s'.lo >= F. When iv_fade.hi == 0 the noise term is identically zero and iv_snoise_ball is not evaluated: the envelope alone proves the slice empty at no snoise cost. That short-circuit is the compounding the ruling expects from tiles.",
+    "Where the warp lives in the bound. Aetheria warps only the noise argument (triNoise3d(pos + fl * ...)); the surface height is read at the unwarped xz and the displacement is applied to y afterwards. So the envelope is evaluated on the pre-distortion SDF over the unwarped slice (no D), and only the noise ball is enlarged by D (iv_frustum_ball's warp argument). A warp applied to the envelope's argument would be unsound without enlarging the box by D; the field is defined so that it is not. The test EnvelopeBoundEnclosesDensity pins this: 2,000 seeded slices x 64 warped points, the composed bound encloses density(p) with no tolerance (every op is monotone or already widened in r1; if a seeded case fails at an endpoint, widen in the implementation, never the test).",
+    "iv_frustum_ball(float2 centreSlope, float z0, float z1, float footprintPerDepth, float warp) -> float4(centre, radius), in C# and both HLSL copies, is the one new CultMath function: the noise ball of a tile over a depth segment. Camera: pinhole at the origin looking +z, focal length f pixels; a pixel's ray is p(z') = (m z', z'); a tile's slopes lie in m_c + [-N/(2f), N/(2f)]^2 (full footprint, so sub-pixel jitter is covered), s = N / (sqrt(2) f). Centre c = (m_c z_m, z_m), z_m = (z0 + z1) / 2; radius r = ((z1 - z0) / 2) |(m_c, 1)| + z1 s + warp. Proof: a point of slope m_c + e (|e| <= s) at depth z' is c + (z' - z_m)(m_c, 1) + z'(e, 0), the terms bounded by the two radius terms, and the warp moves it by at most D (WarpedPointsStayEnclosed). The slice is a convex polytope, so every point between rays is enclosed too. The two vectors are never parallel, so the inequality is strict and float32 cannot cross it.",
+    "(Tile ball, continued.) Test TileBallEnclosesEveryRaySegment: 2,000 seeded tiles (N in {1, 4, 8, 16}, f in [500, 3000], |m_c| <= 1.1, segments across each scenario's z range), 64 points each with sub-pixel offsets, both depth ends and a flow of length <= warp; no tolerance. Hand mutations that must die, listed in the file header: z0 for z1 in the lateral term; |m_c| for |(m_c, 1)|; the warp dropped.",
+    "Implementation review of r1's march (NoiseBoundTests.cs:344-376), each item fixed here: (1) every probe was charged one snoise per ray; the tile shares it (ruling). (2) Coarse probes were attempted where the ball could never prove emptiness: iv_snoise_ball's hi is n(c) + L r clamped to 1, so a probe with L r F0 >= 1 + cutoff is a guaranteed failure; at r1's StepMax = 2 that is L r F0 = 3.7, so every coarse probe was a wasted evaluation (the 0.74x row). r2 attempts a noise probe only when L * radius * F0 < 1 - (the cutoff the probe needs), otherwise the level is 'maybe' at no cost. (3) Growth was capped at StepMax = 8 Step0, so a ray through clear space paid Depth / StepMax probes; r2 grows to the remaining range (the hierarchy is over cell-index ranges, halving on maybe, doubling on skip, capped only by the grid's end).",
+    "(Review, continued.) (4) The dense sample evaluated the detail octave even where occupancy was 0; r2's dense sample evaluates coverage first and the detail only when the envelope and coverage leave density > 0, as Aetheria's `if (dist < _SafetyDistance)` does; the dense baseline gets cheaper and the comparison honest. (5) The finest-level probe before integrating a cell stays: amortized over the tile it costs 1/N^2 and can skip 3 snoise per ray. (6) The step never regrew after a dense cell until a skip; with (3) it regrows from the next skip, which is enough.",
+    "The march, on cell ranges. The dense grid is a scenario-owned list of cell boundaries z_0 < ... < z_J (uniform for the slab scenarios; Aetheria's quadratic spacing z_j = near + (j/J)^2 (far - near), J = 256, for the Aetheria-like ones, from CloudShader.shader:116). MarchTile takes a range [j0, j1): the envelope probe over the slice (z_j0, z_j1); if empty, skip and double the next range; else if the noise probe is affordable (item 2) and proves empty, skip; else if the range is more than one cell, halve; else the cell is dense. It runs to the grid's end once per tile (a pre-pass does not know any ray's transmittance) and yields the dense cells; each of the N^2 rays integrates exactly those cells in order with the dense march's own Integrate and early-out at 0.02. Counted separately: snoise evaluations and envelope evaluations (pointwise in the dense march; interval probes in the tile march), per ray with probes divided by N^2.",
+    "The cost model, printed and reasoned about in snoise units: a pointwise envelope evaluation or an envelope probe costs e = 0.2 (a handful of pulses or a height-map fetch against ~150 flops of snoise; stated as an estimate, both counts printed so any weight can be applied). Per scenario the test prints: dense snoise and envelope per ray, tile snoise and envelope probes per ray, the combined cost ratio, and the probe-free ceiling (dense cost over the cost of the dense cells alone). The 2x contract is on the combined cost at N = 8 for scenarios (a) and (c); (b) and (d) are printed as the worst cases and not asserted.",
+    "Scenarios (IV-REPORT lines, each with 64 tiles at N in {1, 4, 8, 16}, warp in {0, D}): (a) height fog: h = 0, camera at y = S + 30, rays with slope m_y in [0, 0.5] (level and up), Aetheria's grid, expected near-total skip (0 snoise either way; the envelope count carries the ratio). (b) inside the fog: h = 0, camera at y = F - 10, rays level, expected near 1x: every ray saturates within a few cells and the pre-pass still probes the whole grid. (c) Aetheria-like: the zone bowl R = 2000 and four wells of mass {100, 1000, 10000, 1000} at seeded positions inside R, camera at a seeded xz in the bowl at y = max(0, S + 10 - h(camera)), rays gazing across with m_y in [-0.25, 0.1], Aetheria's units (noise scale 414 so F0 = 1/414, D = 15 * 8 / 2 = 60, A = 20 with snoise in [-1, 1]), Aetheria's grid. (d) the uniform slab: r1's field and parameters, kept as the reported worst case. The headline is (c) at N = 8, 200 tiles.",
+    "Imagination's predictions for the report to confirm or refute, N = 8, combined cost: (a) above 50x (dense pays 256 envelope evaluations per ray, the tile about ten probes shared by 64 rays). (b) 0.8-1.0x. (c) 2-4x: the clear cells before the fog surface collapse to a few probes per tile, the fog cells cost the same on both sides; the noise ball proves nothing at Aetheria's scale (L r F0 >= 1.6 at the finest cell with D = 60), so item 2 keeps it from being evaluated and the saving is the envelope's. (d) 1.3-1.5x: the ceiling at L = 10.099261 with the cheaper dense baseline. If (a) or (c) misses 2x, skip the assertion the way r1 did, naming a new question saving-2x-scenarios with the printed numbers; do not tune the fields, the grids or e.",
+    "Stryker on Yggdrasil from a plain clone: --since:c9bd003b -m math.Interval.cs; report timeouts separately from kills (a timeout is not a demonstrated kill); if the saving test is what times mutants out, exclude it from Stryker's test selection (a measurement, not a pin) rather than raising the timeout. Compile checks on Starfire, one job, detached with a log, polled in the foreground: FXC cs_5_0 over every cultmath_iv_* including the new function, both tracked copies; then tools/get-dxc.ps1 (pinned, ruling operator-compiler-downloads) and dxc -T lib_6_3 -HV 2021 on both copies. Carried from r1 and still out of scope, name them in the report: the Unity CultMath.dll is not rebuilt; the Unity HLSL copies stay one blob with packages/cultmath/shaders; public asfloat(uint) stays. Branch from c9bd003b; if main moved by docs only, say so as r1 did."
+  ],
+  "deletes": [
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 33,
+      "note": ":344-376 MarchIntervals, the per-ray adaptive march with its StepMax cap and unconditional probes, replaced by MarchTile on cell ranges."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 10,
+      "note": ":401-408 the doc comment naming the r1 fork and :424-425 the Assert.Skip naming it; the fork is answered. A skip survives only on a shortfall in (a) or (c), naming saving-2x-scenarios."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 12,
+      "note": ":319-330 Density: the unconditional three-snoise sample is replaced by the envelope-gated sample (coverage first, detail only when density can be nonzero)."
+    },
+    {
+      "path": "packages/cultmath/docs/design.md",
+      "lines": 15,
+      "note": ":423-437 the saving paragraph with r1's numbers (0.93x, 1.83x, 0.74x), replaced by the scenario paragraph with r2's printed numbers."
+    }
+  ],
+  "keeps_moves": [
+    "Every iv_* op, both ball bounds, SNOISE_LIPSCHITZ and its provenance tests: untouched. The ruling keeps the bound; only the field model, the march and its test change.",
+    "SavingField's noise shape (F0 0.35 in the slab, the warped two-phase coverage, the detail octave, period 4) and (d)'s parameters: kept, as the worst case; scenario (d) must reproduce r1's dense count where the detail gating does not bite (print it).",
+    "MarchDense and Integrate: unchanged except that Density is envelope-gated; the dense grid becomes the scenario's boundary list.",
+    "IntervalTests, WarpedPointsStayEnclosed, TightnessReport, MeasureLipschitz, LipschitzConstantPinsSampledGradients: unchanged.",
+    "HlslSourceCompatibilityTests: no change expected; the new function must find its C# twin through the existing mirror."
+  ],
+  "adds": [
+    "packages/cultmath/src/CultMath/math.Interval.cs: iv_frustum_ball after iv_fbm_ball, doc comment carrying the derivation and that the caller scales by F0 and adds its translation.",
+    "packages/cultmath/shaders/CultMath.Interval.hlsl: cultmath_iv_frustum_ball, same text in both tracked copies.",
+    "tests/CultMath.Tests/NoiseBoundTests.cs: Scenario (grid, wells, camera, ray slopes, units), SavingField with the envelope (PowerPulse wells, fade, floor), EnvelopeBound (the composed interval, test-side; iv_* ops only), MarchTile, the per-tile Run; TileBallEnclosesEveryRaySegment; EnvelopeBoundEnclosesDensity; IntervalSkipHalvesEvaluations prints the scenario x N x warp grid and asserts (a) and (c) at N = 8.",
+    "packages/cultmath/docs/design.md, 'Intervals': the frustum-ball paragraph after :401; the envelope-then-noise paragraph (how a consumer composes the bound, the short-circuit, where the warp lives); the rewritten saving paragraph with the four scenarios and the headline.",
+    "packages/cultmath/README.md :38-43: iv_frustum_ball named; one sentence that the bounds compose with an analytic envelope."
+  ],
+  "file_changes": [
+    {
+      "location": {
+        "path": "packages/cultmath/src/CultMath/math.Interval.cs",
+        "line": 152
+      },
+      "change": "after iv_fbm_ball: public static float4 iv_frustum_ball(float2 centreSlope, float z0, float z1, float footprintPerDepth, float warp)."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/shaders/CultMath.Interval.hlsl",
+        "line": 91
+      },
+      "change": "after cultmath_iv_fbm_ball: float4 cultmath_iv_frustum_ball(...); both tracked copies."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 294
+      },
+      "change": "SavingField becomes envelope-then-noise over a Scenario; Density is envelope-gated; MarchTile replaces MarchIntervals; Run draws tiles and N^2 rays each, counting snoise and envelope evaluations separately."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 409
+      },
+      "change": "IntervalSkipHalvesEvaluations: scenarios (a)-(d) x N in {1, 4, 8, 16} x warp in {0, D}, 64 tiles each; headline (c) at N 8, 200 tiles; assert >= 2x combined cost for (a) and (c) at N = 8, else Skip naming saving-2x-scenarios."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 89
+      },
+      "change": "TileBallEnclosesEveryRaySegment and EnvelopeBoundEnclosesDensity beside WarpedPointsStayEnclosed."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/docs/design.md",
+        "line": 401
+      },
+      "change": "the frustum-ball and envelope-composition paragraphs; :423-437 the saving paragraph rewritten with r2's printed numbers only."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/README.md",
+        "line": 38
+      },
+      "change": "iv_frustum_ball named; the envelope composition in one sentence."
+    }
+  ],
+  "authority_map": {
+    "owner": "CultMath owns the interval ops, the noise bounds and now the frustum ball; a consumer (the test's SavingField, the site's pre-pass, Aetheria's march) owns its envelope and composes the bound from iv_* ops. The saving test owns the proving-ground numbers per scenario; the site's browser measurement owns the shipped gain. The bound (SNOISE_LIPSCHITZ, iv_snoise_ball) is unchanged.",
+    "inputs": [
+      "the r1 interval surface, unchanged",
+      "a tile's geometry (centre slope, depth segment, footprint per depth, warp bound) and a scenario's grid, wells, camera and units; Aetheria's shapes and settings as read from its checkout, cited by file:line in the test"
+    ],
+    "outputs": [
+      "iv_frustum_ball / cultmath_iv_frustum_ball: a ball enclosing every point of every ray of the tile over the segment, warped",
+      "printed numbers per scenario: dense and tile snoise and envelope counts per ray, combined cost ratio, probe-free ceiling, at N in {1, 4, 8, 16}"
+    ],
+    "derived_state": [
+      "the tile ball and the envelope box are derived from the tile's geometry; no radius is read from a texture, a uniform or a tuned constant",
+      "whether a noise probe is attempted is derived from L, the radius and the cutoff (item 2), never from a mode flag",
+      "the probe-free ceiling is derived from the same run; it states what no amortization can beat"
+    ],
+    "forbidden_writers": [
+      "no change to SNOISE_LIPSCHITZ, iv_snoise_ball, the noise shape or e; the scenarios may not be tuned toward 2x",
+      "no per-ray probe in the tile march; no early-out of the pre-pass on any ray's transmittance",
+      "no warp on the envelope's argument; the warp enlarges the noise ball only",
+      "no new CultMath function for the envelope: PowerPulse, the box and the composition are consumer-side, built from iv_* ops",
+      "no tape, prune, affine or choice token in the interval files; no number in design.md or a comment that the committed test did not print in this run"
+    ],
+    "shared_paths": [
+      "the dense march and the tile march integrate the same cells of the same grid with the same Integrate; the transmittance check is the proof that nothing provably empty was there",
+      "the one composed bound (EnvelopeBound) serves the enclosure test and the march; no second composition",
+      "the existing mirror test covers the new HLSL function; the Unity copy stays one blob"
+    ],
+    "deletion_line": "r1's per-ray march, its unconditional probes, its growth cap and the unconditional three-snoise dense sample go first; the tile march on cell ranges and the gated sample are written in their place. Nothing in src is deleted. The liability added is one geometry function and two tests plus the scenario model; it buys the tile-march soundness invariant in three runtimes and a saving number measured where there is empty space to find."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests green (MeasureLipschitz/MeasureMonotonicity excluded by trait); paste counts and every IV-REPORT line",
+      "Yggdrasil: dotnet stryker --since:c9bd003b -m math.Interval.cs from a plain clone; 0 survivors; timeouts listed separately from kills",
+      "Starfire: FXC cs_5_0 kernel over every cultmath_iv_* including cultmath_iv_frustum_ball, both HLSL copies",
+      "Starfire: tools/get-dxc.ps1 then dxc -T lib_6_3 -HV 2021 on both HLSL copies, exit 0"
+    ],
+    "tests": [
+      {
+        "name": "NoiseBoundTests.TileBallEnclosesEveryRaySegment",
+        "pins": "every sample point of every ray of an N x N tile over a depth segment, sub-pixel jitter and warp included, lies inside iv_frustum_ball."
+      },
+      {
+        "name": "NoiseBoundTests.EnvelopeBoundEnclosesDensity",
+        "pins": "the composed bound (envelope box, fade, noise ball enlarged by the warp) encloses density at every warped point of 2,000 slices, no tolerance; intervals-enclose holds for the composition the site and Aetheria will use."
+      },
+      {
+        "name": "NoiseBoundTests.IntervalSkipHalvesEvaluations",
+        "pins": "scenarios (a) and (c) at N = 8 cost at most half the dense combined cost with transmittance within 1e-3; prints every scenario, N and warp with both counts and the ceiling; a shortfall skips naming saving-2x-scenarios."
+      },
+      {
+        "name": "IntervalTests.EveryOpEnclosesItsPoints (existing)",
+        "pins": "r1's enclosure for every op still holds."
+      },
+      {
+        "name": "HlslSourceCompatibilityTests.EveryMirrorFunctionMatchesCSharpMath (existing)",
+        "pins": "cultmath_iv_frustum_ball matches iv_frustum_ball bit for bit."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "tape|prune|affine|choice",
+        "scope": "math.Interval.cs and CultMath.Interval.hlsl: 0 matches (case-insensitive)."
+      },
+      {
+        "pattern": "snoise_grad|fbm_grad",
+        "scope": "math.Interval.cs and CultMath.Interval.hlsl: 0 matches."
+      },
+      {
+        "pattern": "PowerPulse|pulse|envelope|Scenario",
+        "scope": "math.Interval.cs and CultMath.Interval.hlsl: 0 matches; the envelope is consumer-side."
+      },
+      {
+        "pattern": "Assert\\.Skip",
+        "scope": "NoiseBoundTests.cs: at most one, in IntervalSkipHalvesEvaluations, naming saving-2x-scenarios; 0 if (a) and (c) meet 2x."
+      },
+      {
+        "pattern": "10\\.099261|0\\.35f",
+        "scope": "git diff c9bd003b..HEAD -- packages/cultmath/src: the constant is not touched; the slab's F0 stays in (d)."
+      },
+      {
+        "pattern": "git diff --name-only c9bd003b..HEAD",
+        "scope": "only packages/cultmath/**; both tracked CultMath.Interval.hlsl copies change together."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 420,
+    "lines_removed": 80,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "cultmath-tapes:ruling:operator-tile-amortized-march",
+    "cultmath-tapes:ruling:operator-compiler-downloads",
+    "cultmath-tapes:ruling:operator-campaign-home"
+  ],
+  "questions": []
+}

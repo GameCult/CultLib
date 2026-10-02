@@ -1,8 +1,12 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status: Imagination pass 2, 2026-10-02. Pass 1's Q1–Q3 are answered (below);
-the Self opens the `cultmath-tapes` campaign from this revision. Where this
-map and the Body disagree, the Body wins and this map is stale.
+Status: Imagination pass 3, 2026-10-02. Pass 1's Q1–Q3 are answered (below);
+the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 (section
+"Pass 3" near the end) revises the two CultLib cuts after their first Hands
+reports and the operator's challenge to the march, and changes the site field
+to envelope-then-noise. Where pass 3 and an earlier section disagree, pass 3
+wins. Where this map and the Body disagree, the Body wins and this map is
+stale.
 
 Pinned HEADs (every `file:line` below is against these):
 
@@ -153,6 +157,10 @@ cuts cite `site-masthead:ruling:operator-chromeless-column` and depend on
 
 ### Density field (site-owned, `cloud.frag.glsl`)
 
+Pass 3 wraps this field in an envelope (a nebula floor with authored wells and
+clear sky above it); `coverage` below becomes the noise that displaces the
+floor, as in Aetheria. The flow, the phases and the hue stand.
+
 ```text
 camera at the origin, looking +z, static; the slab z in [Z0, Z1] fills the view
 flow(uv)     = A · (snoise(q·Ff + o1), snoise(q·Ff + o2), 0)   q = slab mid-plane point; quarter-res texture, once per frame
@@ -172,6 +180,11 @@ the cross-fade only changes content. That is what makes the motion vectors
 below exact.
 
 ### Interval culling along the ray, with the warp
+
+Pass 3 supersedes this section's march: the probe is per screen tile in a
+pre-pass, the field has an analytic envelope the probe tests first, and the
+loop below becomes the pre-pass's loop over cell ranges. The ball and the warp
+enlargement stand.
 
 `cultmath_iv_snoise_ball(c, r)` returns `[n(c) − L r, n(c) + L r] ∩ [−1, 1]`
 with `L` the committed Lipschitz constant. Over a segment `[t, t+Δ]` the
@@ -318,7 +331,8 @@ TFLOP available; estimates, replaced by measurement):
 | Pass | Work | ms |
 | --- | --- | --- |
 | Flow texture, quarter res | 160 k texels × 2 snoise | 0.05 |
-| March at `S = 8` | 2.6 M × 8 snoise | 3.1 |
+| Tile pre-pass (pass 3), 1/64 res, `N = 8` | 40 k tiles × ≤ 144 probes, mostly envelope-only; ≈ 0.4–2 snoise-equivalents per pixel, measured | 0.2–0.8 |
+| March at `S = 8` | 2.6 M × 8 snoise, placed in unmasked cells only | 3.1 |
 | TAA resolve + DoF gather | ~19 texel reads per pixel | 1.0 |
 | Stardust layer, half res, 4,096 particles | fill-bound, small | 0.2 |
 | 8×8 downsample + PBO readback at 2 Hz | tiny | 0.05 |
@@ -355,10 +369,13 @@ from the mobile preset, the phone's GPU time from the operator's phone.
    enclosure tests are the defence.
 4. **Tightness is a number**: mean interval width over true range, printed
    by a committed test, for a later affine cut to beat.
-5. **The saving is a number**: a C# test marches 1,000 rays through a
-   representative warped coverage field with and without interval skipping
-   and asserts ≥ 2× fewer evaluations at equal transmittance; the shipped
-   field's evals per pixel and unfinished fraction come from the browser.
+5. **The saving is a number** (amended in pass 3): a C# test marches tiles of
+   rays through four scenarios, an envelope-then-noise field with authored
+   empty space among them, with the dense march and with the tile-amortized
+   interval march, and asserts ≥ 2× lower combined cost at equal
+   transmittance on the authored scenarios; the uniform slab is printed as
+   the worst case. The shipped field's evals per pixel and unfinished
+   fraction come from the browser.
 6. **Three runtimes agree**: the GLSL golden fixture passes on WebGL2, with
    tolerance class and device named in the report.
 
@@ -384,7 +401,10 @@ site consumes a commit.
 Specs: `docs/cultmath-interval-ground-cut-glsl-lowering.spec.json`,
 `docs/cultmath-interval-ground-cut-interval-ops.spec.json`,
 `docs/cultmath-interval-ground-cut-site-ground.spec.json`,
-`docs/cultmath-interval-ground-cut-site-stardust.spec.json`.
+`docs/cultmath-interval-ground-cut-site-stardust.spec.json`. Revision 2 of
+the two CultLib cuts (pass 3):
+`docs/cultmath-interval-ground-cut-interval-ops.r2.spec.json`,
+`docs/cultmath-interval-ground-cut-glsl-lowering.r2.spec.json`.
 
 ## Standing design decisions (means; Self may overrule)
 
@@ -411,7 +431,163 @@ Specs: `docs/cultmath-interval-ground-cut-glsl-lowering.spec.json`,
 - D10. Stardust and DoF land after the ground has been measured alone, so the
   report can say what each costs.
 
+## Pass 3: the envelope, the scenarios, the tile pre-pass, the split Phacelle
+
+Pinned: CultLib `main` `d0ea37f8`; `hands/cultmath-interval-ops` at
+`c9bd003b` (report `cut-interval-ops.h1`); `hands/cultmath-glsl-lowering` at
+`5ae207e8` (report `cut-glsl-lowering.h1`, branched from interval-ops).
+Rulings: `operator-tile-amortized-march`, `operator-split-phacelle`,
+`operator-compiler-downloads`, `self-exp-measure-in-site`.
+
+### The operator's words
+
+On the march: "I'm skeptical about the interval march, both in implementation
+and measurement. Are we testing it in scenarios where we're actually giving
+it empty space to skip? Surely if the pre distortion SDF represents a clear
+sky with the camera above the fog and aimed up, the interval math can quickly
+tell us not to bother marching very far, no? In Aetheria the levels are
+authored to place deep gravity wells for the player to gaze across, with
+dynamic action spaced around the well, and finding the empty space there is
+the whole point of using intervals, no?"
+
+He is right. r1's saving test marched one `snoise` octave against a cutoff
+through a slab with coverage everywhere: the worst case for intervals, and
+0.93x said nothing about real scenes.
+
+### What r1 measured, and what was wrong in the march
+
+| Finding (`NoiseBoundTests.cs:344-376` at `c9bd003b`) | Effect | r2 |
+| --- | --- | --- |
+| Every probe charged one `snoise` per ray | a failed probe cost a third of a dense sample | one probe per tile (the ruling) |
+| Coarse probes attempted where the ball could never prove emptiness: `hi = n(c) + L r` clamps to 1, so `L r F0 ≥ 1 + cutoff` is a guaranteed failure; at `StepMax = 2`, `L r F0 = 3.7` | every coarse probe wasted; the 0.74x row | a noise probe is attempted only when `L r F0` leaves room to prove `hi < cutoff`; otherwise the level is "maybe" for free |
+| Growth capped at `StepMax = 8 Step0` | clear space cost `Depth / StepMax` probes | ranges double to the grid's end |
+| The dense sample evaluated the detail octave even at zero occupancy | the baseline was dearer than a sane shader | coverage first, detail only when density can be nonzero (Aetheria's `if (dist < _SafetyDistance)`) |
+| The finest-level probe before each dense cell | fine; amortized it is `1/N²` for a chance at 3 snoise | kept |
+| No field structure | nothing to skip | envelope-then-noise, below |
+
+### The field, from Aetheria
+
+`Volumetric.cginc:165-221` with `:91-102`, `Zone.cs:369-397`
+(`GetHeight`), `Zone.cs:426` (`PowerPulse`), `Settings.asset`
+(`DefaultEnvironment`, `PlanetSettings`):
+
+```text
+s(p)      = p.y + h(p.xz)                                  the pre-distortion SDF; h ≥ 0 the well map
+h(xz)     = PowerPulse(|xz| / 2R, 2) · 64 + Σ_b PowerPulse(|xz − c_b| / r_b, 16) · d_b
+PowerPulse(x, e) = (1 − 4x²)^e on [0, ½], 0 beyond;  r_b = 500 M^0.25, d_b = 30 M^0.175
+fade(s)   = 1 − smoothstep(0.75 S, S, s)                   S = SafetyDistance 30: no noise above it
+s'(p)     = s + A · fade(s) · n(warp(p))                   n = the two-phase warped coverage + ½ detail
+density   = max(0, (F − s') / B)                            F = FloorOffset −20, B = FloorBlend 10
+```
+
+Above the safety distance the density is exactly 0 and the noise is never
+evaluated, by the dense march too. The warp applies to the noise argument
+only; the height is read at the unwarped `xz` (Aetheria reads
+`_NebulaSurfaceHeight` at `pos.xz` and warps inside `triNoise3d`).
+
+### The composed bound (invariant `intervals-enclose`, kept)
+
+Over a tile's frustum slice `[z0, z1]`, every step an existing `iv_*` op:
+
+- Envelope over the slice's exact box, not the ball: `y = iv_mul([z0, z1],
+  m_y)`, `x = iv_mul([z0, z1], m_x)` with the tile's slope intervals;
+  `iv_h` = Σ over bowls of `[pulse(far), pulse(near)]`, `near`/`far` the
+  least and greatest distance from the box to the bowl centre (monotone, so
+  exact per bowl). `iv_s = iv_add(y, iv_h)`; `iv_fade` its ordered endpoints.
+- Noise over the ball: `iv_n = iv_snoise_ball(ball.xyz · F0, ball.w · F0)`,
+  `ball = iv_frustum_ball(m_c, z0, z1, N / (√2 f), D)`: centre on the tile's
+  central ray at mid-depth, radius `(Δ/2)·|(m_c, 1)| + z1·N/(√2 f) + D`.
+  The warp enlarges only this radius; the envelope's box takes none.
+- `iv_s' = iv_add(iv_s, iv_scale(iv_mul(iv_fade, iv_n), A))`; the slice is
+  provably empty iff `iv_s'.lo ≥ F`. When `iv_fade.hi = 0` the noise term is
+  identically zero and `iv_snoise_ball` is not called: the envelope proves
+  the slice empty at no `snoise` cost. This is why tiles compound: one
+  envelope probe per tile can retire a whole ray length.
+
+Two tests pin it: `TileBallEnclosesEveryRaySegment` (every ray's points,
+sub-pixel jitter and warp included, inside the ball) and
+`EnvelopeBoundEnclosesDensity` (the composed bound encloses `density` at
+warped points of 2,000 slices, no tolerance).
+
+### Scenarios and predictions (combined cost, `e = 0.2` snoise per envelope evaluation, `N = 8`)
+
+| Scenario | Setup | Prediction |
+| --- | --- | --- |
+| (a) height fog | `h = 0`, camera at `y = S + 30`, rays level and up | > 50x: dense pays 256 envelope evaluations per ray; the tile about ten probes shared by 64 rays; 0 snoise either way |
+| (b) inside the fog | `h = 0`, camera at `y = F − 10`, rays level | 0.8–1.0x: every ray saturates in a few cells; the pre-pass still probes the whole grid |
+| (c) Aetheria-like | zone bowl `R = 2000` + four wells (masses 100, 1000, 10000, 1000), camera above the fog in the bowl, rays gazing across (`m_y ∈ [−0.25, 0.1]`), Aetheria's units and 256-sample quadratic grid | 2–4x: the clear cells before the fog surface collapse to a few probes per tile; the fog cells cost the same on both sides. The noise ball proves nothing at Aetheria's scale (`L r F0 ≥ 1.6` at the finest cell with `D = 60`), so it is not evaluated; the saving is the envelope's |
+| (d) uniform slab | r1's field, kept as the worst case | 1.3–1.5x: the ceiling at `L = 10.099261` with the cheaper baseline |
+
+The 2x contract is asserted on (a) and (c) at `N = 8`; (b) and (d) are
+printed. A shortfall skips the assertion naming `saving-2x-scenarios`; the
+fields, grids and `e` are not tuned. The honest summary: at a Lipschitz bound
+near 10 the noise ball is weak everywhere; what intervals buy on these fields
+is the envelope's empty space, found exactly, and the tiles make finding it
+nearly free.
+
+### The site ground gets the envelope
+
+The site's field becomes Aetheria's structure at site scale: a nebula floor
+`y = −h(x, z)` below the camera (camera at `y = 0`, looking `+z`), `h` three
+authored `PowerPulse` wells seeded in the slab plus a shallow bowl, clear sky
+above the safety distance, the coverage noise displacing the floor with the
+flow warp as before, the hue from the flow texture as before. The screen's
+upper region is clear space (the stardust shows through; the DoF blurs it by
+the clouds' opacity where there are clouds); the lower region is the floor,
+dipping into the wells the viewer gazes across. Which look the operator wants
+is Q6.
+
+The march: a **low-resolution pre-pass** at `W/8 × H/8` runs the tile loop
+over the slab's cell ranges (the envelope first, the noise ball only when the
+envelope leaves `fade.hi > 0` and `L r F0` leaves room) and writes a per-tile
+skip mask of the dense cells not proven empty into an `RGBA32UI` texel (128
+bits; 96 cells at the slab's fine step). The main pass reads one texel
+(`texelFetch`) and places its `S` samples in unmasked cells only, stratified
+over the unmasked length; masked cells contribute exactly zero, so this is
+exact importance sampling, not an approximation. The fragment cannot share a
+probe across pixels (derivatives reach a 2×2 quad at best), so the pre-pass
+is the cheaper and the only sound option in WebGL2. Cost at `N = 8` is in the
+budget table: ≤ 144 probes per tile worst case (nothing skipped, hierarchy
+descended everywhere), mostly envelope-only, ≈ 0.4–2 snoise-equivalents per
+pixel; `N = 16` quarters it but makes the ball's lateral term equal the fine
+half-length at the slab's far plane. **Predicted `N = 8`.** The site's own
+ratio is measured in the browser against a dense reference with the same
+envelope gate (the proving-ground contract's second half).
+
+### The split Phacelle and the compile checks (glsl-lowering r2)
+
+- Transformation step 1 gains one licence-keyed entry: an include under its
+  own licence is lowered into its own file. `CultMath.glsl` (MIT: `CultMath.hlsl`
+  + `CultMath.Interval.hlsl`) and `CultMath.Phacelle.glsl` (MPL-2.0,
+  concatenated after it only by consumers that call `cultmath_phacelle`; the
+  site does not). Both pinned; `THIRD-PARTY-NOTICES.md` lists the MPL files
+  and no longer calls `CultMath.glsl` MPL.
+- `iv_exp` joins the fixture with a platform tolerance (1 ulp, the generating
+  OS named), because `self-exp-measure-in-site` has the site measure WebGL2
+  `exp` against it. The fixture is regenerated for `cultmath_iv_frustum_ball`.
+- glslang 16.6.0 and dxc are downloaded pinned and run: the MIT-only wrapper,
+  the two-file wrapper, a `lerp(` negative control, and a `cultmath_phacelle`
+  call against the MIT-only wrapper that must fail (proves the split).
+- The glsl branch rebases onto interval-ops r2's head; its first commit is the
+  regeneration alone.
+
+Carried, still out of scope: the Unity `CultMath.dll` rebuild (no release in
+the sequence); the fixture's ulp bounds on WebGL2 (site cut); Stryker's
+timeouts are reported as timeouts, not kills.
+
 ## Questions
+
+**Q6. The site ground's envelope look.** The envelope gives the shader empty
+space to prove; it also changes what the page looks like.
+- (a) A nebula floor below the camera with authored wells and clear sky
+  above: Aetheria's gaze-across-the-well composition; the upper screen is
+  stardust over the base colour, the lower screen clouds dipping into wells.
+  **Recommended**: the real shape, the culling pays, and it is the video the
+  operator described.
+- (b) A cloud wall facing the camera with authored clear pockets (holes the
+  envelope carves): closer to pass 2's everywhere-clouds look; culling pays
+  only inside the pockets.
+- (c) Both, blended by page: the home page (a), the ritual essays (b).
 
 **Q4. Where the shader's palette input comes from.**
 - (a) Four new input tokens in `custom.scss` (`--gamecult-nebula-0/1/2`,

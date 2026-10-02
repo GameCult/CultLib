@@ -1,0 +1,200 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "glsl-lowering",
+  "revision": 2,
+  "title": "GLSL lowering r2: Phacelle as its own MPL-2.0 file so CultMath.glsl is MIT, notices corrected, iv_exp in the fixture, fixture regenerated, glslang and dxc run",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-glsl-lowering",
+  "base": "c9bd003b",
+  "depends_on": [
+    "cultmath-tapes:cut_spec:cut-interval-ops.r2"
+  ],
+  "first": [
+    "Follow-up on cut report cultmath-tapes:cut_report:cut-glsl-lowering.h1 (head 5ae207e8, worktree F:\\Projects\\CultLib-glsl). Rulings in force: operator-split-phacelle, operator-compiler-downloads, self-exp-measure-in-site. Map: docs/cultmath-interval-ground-cut.md, section 'Pass 3'. First action: rebase hands/cultmath-glsl-lowering onto the head of hands/cultmath-interval-ops after its r2 lands (the base above is r1's head; the report records the real base). Regenerate the GLSL and the fixture on the rebased HLSL before any edit, so the first commit is the regeneration alone and shows what interval-ops r2 changed (cultmath_iv_frustum_ball is new; its fixture family is exact-tolerance geometry).",
+    "The split (operator-split-phacelle). Transformation step 1 becomes: each #include is inlined in place, except an include whose file is under its own licence, which is lowered on its own into its own output file. The list of such includes is one table in GlslLowering, SeparateFiles = { \"CultMath.Phacelle.hlsl\" -> \"CultMath.Phacelle.glsl\" }, with the reason beside the entry (file-level MPL-2.0). That is an enumerated rule of the lowering, documented as step 1 in design.md; it is not a per-function special case, and nothing else is keyed by name. Lower(root) returns the two texts; Lower(string) stays for the inlined body if that is simpler, but there is one resolver (ReadShaderSource, generalised to accept the include predicate), never a second.",
+    "shaders/CultMath.glsl: the provenance line says it is generated from CultMath.hlsl and CultMath.Interval.hlsl, MIT, and that cultmath_phacelle is in CultMath.Phacelle.glsl, to be concatenated after this file by consumers that call it. The dropped include line leaves nothing behind. shaders/CultMath.Phacelle.glsl: its own provenance line (generated from CultMath.Phacelle.hlsl, MPL-2.0, requires CultMath.glsl before it), the MPL-2.0 header and attribution exactly as the HLSL carries them, the CultPhasor struct and cultmath_phacelle, guard CULTMATH_PHACELLE_GLSL. Both files pinned by CommittedGlslEqualsLowering; CULTMATH_WRITE_GLSL=1 writes both.",
+    "Pin tests over both files: NoHlslOnlyTokensSurvive runs on each; EveryPublicFunctionIsLowered takes the union of both files' definitions against the HLSL (minus texture samplers) and additionally asserts cultmath_phacelle and CultPhasor appear only in the Phacelle file; a new PhacelleFileCompilesOnlyAfterTheLibrary is not needed, the compile check below proves it.",
+    "The fixture (self-exp-measure-in-site). The site measures WebGL2 exp against the fixture, so iv_exp joins it; its C# bits come from the platform exp and differ by OS, so its entry carries tolerance \"ulp-bounded, platform exp\" and names the OS that generated it. GoldenFixtureMatchesCSharp parses the committed JSON (System.Text.Json, BCL) and compares family by family: text-equal for every family except those whose tolerance names the platform, which compare case by case within 1 ulp and print the maximum observed. One fixture, one writer, one tolerance field already in the format; no second fixture. The phacelle family stays in the fixture; the site's parity harness concatenates both GLSL files for that run (the site ships only CultMath.glsl), say so in design.md.",
+    "Notices: packages/cultmath/THIRD-PARTY-NOTICES.md :35-43 lists the MPL-2.0 files as math.Phacelle.cs, CultPhasor.cs, CultMath.Phacelle.hlsl with its Unity copy, and shaders/CultMath.Phacelle.glsl; CultMath.glsl is MIT and says so in its header. The package licence expressions (MIT AND MPL-2.0) do not change: the NuGet still ships the HLSL include. README :36-37 and :44-49 name both GLSL files and when a consumer needs the second. design.md :136-192: step 1 rewritten, the second file, the wrapper runs, the fixture's platform tolerance. Unity ships neither GLSL file.",
+    "Compile checks on Starfire (operator-compiler-downloads), one job each, detached with a log, polled in the foreground: tools/get-glslang.ps1 (16.6.0, the pinned SHA already in the script; if the published digest differs, stop and report, do not edit the pin to match); tools/compile-glsl.ps1 gains a -Phacelle switch and runs twice: the MIT-only wrapper over CultMath.glsl calling every function in it, and the full wrapper over both files calling every function including cultmath_phacelle. Negative controls, both must fail: -Body 'float x = lerp(0.0, 1.0, 0.5);' and the MIT-only wrapper with -Body calling cultmath_phacelle (proves Phacelle is not in CultMath.glsl). Then tools/get-dxc.ps1 and dxc -T lib_6_3 -HV 2021 on both HLSL copies, exit 0. The browser-pane WebGL2 probe of r1 is repeated on the two-file wrapper.",
+    "Carried from r1 and still out of scope, name them in the report: the fixture's ulp bounds on WebGL2 are measured by the site cut; Stryker is not re-run unless packages/cultmath/src changes in this range (it should not; the lowering lives in tests). Deviations r1 reported that stand: the anchored token regex; the iv_exp absence is now resolved by this revision; the HLSL edits (damp splat, pcg3d order) stay."
+  ],
+  "deletes": [
+    {
+      "path": "packages/cultmath/shaders/CultMath.glsl",
+      "lines": 100,
+      "note": "the inlined Phacelle block (:510-612 at 5ae207e8: MPL header, CultPhasor, cultmath_phacelle) leaves this file; it is regenerated, not edited."
+    },
+    {
+      "path": "packages/cultmath/THIRD-PARTY-NOTICES.md",
+      "lines": 3,
+      "note": ":39-41 the sentence making CultMath.glsl MPL-2.0 as a whole."
+    }
+  ],
+  "keeps_moves": [
+    "Transformation steps 2-9 and their order: unchanged; the cast scanner, saturate lowering, the guard and provenance mechanism stay.",
+    "Both tracked CultMath.hlsl copies stay one blob; no HLSL edit is expected in this revision (a dialect gap found by the two-file compile is fixed in the HLSL in the common subset, bit-identical, listed in the report).",
+    "HlslSourceCompatibilityTests' mirror and FindCultMathRoot: the resolver generalises in place; no second include resolver.",
+    "tests/CultMath.Tests/fixtures/glsl-parity.json: the same file, regenerated; families keep their order so the diff shows only the two additions."
+  ],
+  "adds": [
+    "packages/cultmath/shaders/CultMath.Phacelle.glsl: generated, MPL-2.0, guard CULTMATH_PHACELLE_GLSL.",
+    "GlslLowering: the SeparateFiles table and the two-text Lower; GlslMirrorTests: the second file in CommittedGlslEqualsLowering, NoHlslOnlyTokensSurvive and EveryPublicFunctionIsLowered; GoldenFixtureMatchesCSharp's per-family comparison with the platform tolerance.",
+    "fixture families: cultmath_iv_frustum_ball (exact) and cultmath_iv_exp (ulp-bounded, platform exp).",
+    "tools/compile-glsl.ps1: -Phacelle switch (appends CultMath.Phacelle.glsl after the library and includes cultmath_phacelle in the calls).",
+    "design.md and README: the two files, the concatenation order, the fixture tolerance."
+  ],
+  "file_changes": [
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/GlslLowering.cs",
+        "line": 24
+      },
+      "change": "Lower takes the root (or the resolver's two texts) and returns both outputs; SeparateFiles table with the MPL reason; ProvenanceLine per file."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/HlslSourceCompatibilityTests.cs",
+        "line": 320
+      },
+      "change": "ReadShaderSource accepts a predicate (or returns the separated include's text beside the inlined body); the C# mirror keeps inlining everything."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/GlslMirrorTests.cs",
+        "line": 30
+      },
+      "change": "CommittedGlslEqualsLowering over both files; :45 NoHlslOnlyTokensSurvive over both; :54 EveryPublicFunctionIsLowered union plus the phacelle-only-in-its-file assertion; :64 GoldenFixtureMatchesCSharp per family with the platform tolerance."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tools/compile-glsl.ps1",
+        "line": 1
+      },
+      "change": "-Phacelle switch; the library text is CultMath.glsl, plus CultMath.Phacelle.glsl when set; the call list covers whichever functions are present."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/THIRD-PARTY-NOTICES.md",
+        "line": 35
+      },
+      "change": "MPL-2.0 file list: the two C# files, the HLSL include and its Unity copy, shaders/CultMath.Phacelle.glsl. CultMath.glsl is MIT."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/README.md",
+        "line": 44
+      },
+      "change": "both GLSL files; a consumer concatenates CultMath.Phacelle.glsl after CultMath.glsl only when it calls cultmath_phacelle."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/docs/design.md",
+        "line": 150
+      },
+      "change": "step 1 rewritten for the separated include; :182-192 the two wrapper runs and the fixture's platform tolerance; the site's parity run concatenates both files."
+    }
+  ],
+  "authority_map": {
+    "owner": "GlslLowering owns the HLSL -> GLSL transformation and now emits two derived files, one per licence; both are pinned by GlslMirrorTests and never edited. The fixture stays owned by GoldenFixtureMatchesCSharp with one tolerance field per family. THIRD-PARTY-NOTICES.md states which files are MPL-2.0 and is the one place that does.",
+    "inputs": [
+      "shaders/CultMath.hlsl, CultMath.Interval.hlsl and CultMath.Phacelle.hlsl text at the rebased head",
+      "C# math for the fixture values, including the platform exp for iv_exp"
+    ],
+    "outputs": [
+      "shaders/CultMath.glsl (MIT) and shaders/CultMath.Phacelle.glsl (MPL-2.0)",
+      "tests/CultMath.Tests/fixtures/glsl-parity.json with cultmath_iv_frustum_ball and cultmath_iv_exp families"
+    ],
+    "derived_state": [
+      "both GLSL files are derived; a hand edit to either fails CommittedGlslEqualsLowering",
+      "the fixture is derived from C#; the iv_exp family is derived from the generating platform's exp and compared within 1 ulp, every other family bit for bit"
+    ],
+    "forbidden_writers": [
+      "no per-function special case in the lowering; the only name-keyed rule is the SeparateFiles table, one entry, licence-justified",
+      "no second include resolver, no PowerShell or JS copy of the transformation",
+      "no GLSL in the Unity package; no precision statement in either library file",
+      "no edit to the pinned glslang or dxc hashes to make a download pass"
+    ],
+    "shared_paths": [
+      "the same dotnet test run pins the C# mirror, both GLSL files and the fixture",
+      "compile-glsl.ps1 is the one wrapper writer for the MIT-only run, the two-file run and both negative controls"
+    ],
+    "deletion_line": "The Phacelle block leaves CultMath.glsl by regeneration and the MPL sentence leaves the notices before the new file is added. Net: one more generated file and one switch; what it buys is an MIT CultMath.glsl the site can vendor without carrying MPL text, and the compile checks r1 could not run."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests green on the rebased branch; paste counts; GlslMirrorTests 4/4 with the per-family fixture line printed",
+      "Starfire: tools/get-glslang.ps1 installs 16.6.0 with the pinned SHA matching; tools/compile-glsl.ps1 exits 0 on the MIT-only wrapper and on -Phacelle; both negative controls fail with the error quoted",
+      "Starfire: tools/get-dxc.ps1 then dxc -T lib_6_3 -HV 2021 on both HLSL copies, exit 0; FXC cs_5_0 still green",
+      "Browser pane WebGL2: the two-file wrapper compiles with an empty log"
+    ],
+    "tests": [
+      {
+        "name": "GlslMirrorTests.CommittedGlslEqualsLowering",
+        "pins": "CultMath.glsl and CultMath.Phacelle.glsl are exactly the lowering of the committed HLSL; the regeneration path is the same code."
+      },
+      {
+        "name": "GlslMirrorTests.EveryPublicFunctionIsLowered",
+        "pins": "the union of both files equals the HLSL's cultmath_* set minus texture samplers; cultmath_phacelle and CultPhasor live only in the Phacelle file."
+      },
+      {
+        "name": "GlslMirrorTests.NoHlslOnlyTokensSurvive",
+        "pins": "no HLSL-only token in either file."
+      },
+      {
+        "name": "GlslMirrorTests.GoldenFixtureMatchesCSharp",
+        "pins": "every family is C#'s current output bit for bit, except iv_exp within 1 ulp of the platform exp; iv_frustum_ball is present and exact."
+      },
+      {
+        "name": "HlslSourceCompatibilityTests.EveryMirrorFunctionMatchesCSharpMath (existing)",
+        "pins": "no HLSL edit in this range changed a bit."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "Mozilla|MPL|Johansen|CultPhasor|cultmath_phacelle\\(",
+        "scope": "packages/cultmath/shaders/CultMath.glsl: 0 matches; the header's file-name pointer to CultMath.Phacelle.glsl is the only mention of Phacelle."
+      },
+      {
+        "pattern": "^CultPhasor cultmath_phacelle\\(",
+        "scope": "packages/cultmath/shaders/CultMath.Phacelle.glsl: exactly 1 match."
+      },
+      {
+        "pattern": "CultMath\\.glsl|Phacelle\\.glsl",
+        "scope": "packages/cultmath/unity/**: 0 matches."
+      },
+      {
+        "pattern": "\\b(float|u?int|bool)[234]\\b|\\blerp\\(|\\bfrac\\(|\\bsaturate\\(|\\brsqrt\\(|\\basuint\\(|\\basfloat\\(|static const|#include|precision (high|medium|low)p",
+        "scope": "both GLSL files: 0 matches (the anchored regex r1 settled on)."
+      },
+      {
+        "pattern": "CultMath\\.glsl",
+        "scope": "packages/cultmath/THIRD-PARTY-NOTICES.md: 0 matches in the MPL-2.0 file list; CultMath.Phacelle.glsl appears there once."
+      },
+      {
+        "pattern": "git diff <rebased base>..HEAD -- packages/cultmath/src",
+        "scope": "empty; the lowering and the fixture live in tests, so interval-ops r2's Stryker run stands for this range."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 320,
+    "lines_removed": 130,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [
+      "GLSL ES 3.00 library file (generated, MPL-2.0): shaders/CultMath.Phacelle.glsl"
+    ],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "cultmath-tapes:ruling:operator-split-phacelle",
+    "cultmath-tapes:ruling:operator-compiler-downloads",
+    "cultmath-tapes:ruling:self-exp-measure-in-site",
+    "cultmath-tapes:ruling:operator-campaign-home"
+  ],
+  "questions": []
+}
