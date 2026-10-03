@@ -146,10 +146,11 @@ jobs:
       # the release-checks suite, on a tag the semver policy check
       # (docs/semver-policy.md), and the package's unit tests, and only then
       # builds the sdist and wheel. Publish uploads only what this step built,
-      # so it has nothing to upload unless every check passed.
+      # so it has nothing to upload unless every check passed. It starts without
+      # NODE_OPTIONS, so no preloaded module runs inside it.
       - name: Build sdist and wheel
         if: steps.selected.outputs.run == 'true'
-        run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"
+        run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"
 
       - name: Publish
         if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')

@@ -312,9 +312,10 @@ removed (`NODE_OPTIONS`, `NODE_TEST_CONTEXT`, any other `NODE_TEST_*` variable,
 and `NODE_AUTH_TOKEN`), so none of those can make the tests run nothing and
 pass, and only the release action receives the token. That list names known
 variables; it does not prove that no other inherited variable can affect a
-check. The npm Publish step starts the guard under `env -u NODE_OPTIONS`, so a
-`NODE_OPTIONS` preload set in the workflow's or job's `env:` cannot run code
-inside the guard before its first line.
+check. The npm Publish step and the Python sdist and wheel build step start the
+guard under `env -u NODE_OPTIONS`, so a `NODE_OPTIONS` preload set in the
+workflow's or job's `env:` cannot run code inside the guard before its first
+line.
 The gate is that call, not a step condition, so no `if:` or `continue-on-error`
 can release what a check refused. The tests compare each job's release steps
 with their expected text exactly, less the steps' `if:` lines. Removing the call

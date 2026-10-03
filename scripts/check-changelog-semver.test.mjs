@@ -772,7 +772,7 @@ const RELEASE_STEPS = {
   ],
   // Publish uploads only the dist the guarded step built, so it has nothing to upload unless the suite passed.
   python: [
-    ["- name: Build sdist and wheel", "  run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} \"$GITHUB_REF\""],
+    ["- name: Build sdist and wheel", "  run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} \"$GITHUB_REF\""],
     ["- name: Publish", "  uses: pypa/gh-action-pypi-publish@release/v1", "  with:", "    packages-dir: packages/${{ matrix.package }}/dist"],
   ],
 };
@@ -831,7 +831,7 @@ test("workflow: each job releases only through release-after-suite.mjs", () => {
   const workflow = workflowText();
   assert.deepEqual(workflowReleaseProblems(workflow), []);
   const npmRun = 'run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"';
-  const pythonRun = 'run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"';
+  const pythonRun = 'run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"';
   const exact = /is not exactly the release call/;
   for (const run of [npmRun, pythonRun]) {
     assert.equal(workflow.split(run).length, 2, run);
@@ -847,7 +847,7 @@ test("workflow: each job releases only through release-after-suite.mjs", () => {
   }
   // the guard runs every release check itself, so neither the release steps' conditions nor a job allowed
   // to fail can release what a check refused
-  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: node)/, "if: always()$1")), []);
+  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: env -u NODE_OPTIONS node)/, "if: always()$1")), []);
   assert.deepEqual(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    continue-on-error: true\n")), []);
   // a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
   assert.match(workflowReleaseProblems(workflow.replace("- name: Build sdist and wheel", "- name: Build")).join("\n"), /needs exactly one step "- name: Build sdist and wheel"/);
