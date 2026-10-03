@@ -24,6 +24,12 @@ namespace GameCult.Caching.Tests
         private static readonly CultDocumentRegistry DeckOnly = CultDocumentRegistry.ForTypes(new[] { Deck });
         private static readonly string WidgetId = Full.GetRequired(Widget).SchemaId;
 
+        // Another writer's deck (an older or newer build, another runtime) under an id the deck does not declare. It declares the
+        // deck's own id compatible, so it may rewrite the deck's records; the deck still reads them through that listing, read-only.
+        private static readonly Type MovingDeck = Emit("ForeignSuiteMovingDeck", "tests.foreign_deck", "tests.foreign_deck.v3", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { DeckOnly.GetRequired(Deck).SchemaId });
+        private static readonly CultDocumentRegistry Moving = CultDocumentRegistry.ForTypes(new[] { MovingDeck });
+        private static readonly string MovingId = Moving.GetRequired(MovingDeck).SchemaId;
+
         private static readonly CultRecordKey D = new("d");
         private static readonly CultRecordKey E = new("e");
         private static readonly CultRecordKey W = new("w");
@@ -852,6 +858,167 @@ namespace GameCult.Caching.Tests
             }))!;
 
             Assert.That(refusal.Message, Does.Contain(v.Value).And.Contain(D.Value));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // The other writer rewrites a record under its own id, which this build reads but does not declare.
+        private static void Move(string path, CultRecordKey key, string name, bool directory)
+        {
+            using var other = Open(path, Moving, directory);
+            Assert.That(other.Commit(batch => batch.Upsert(MovingDeck, New(MovingDeck, ("Name", name)), key)), Is.True);
+        }
+
+        private static void RefusedOnDisk(CultSchemaConflictException refusal, CultRecordKey key)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((key.Value, MovingId)));
+                Assert.That(refusal.SchemaNames, Is.EqualTo(new[] { "tests.foreign_deck" }));
+                Assert.That(refusal.Message, Does.Not.Contain(Canary), "a refusal never echoes the document it refused");
+            });
+        }
+
+        // The staging half cannot see a record another writer moved to an undeclared id after this cache loaded it: the write is
+        // refused where it lands, under the store's lock, in both store kinds. Nothing is written, and the cache reloads the record as
+        // the store holds it, read-only, so the next write of it is refused before staging.
+        [Test]
+        public void AWriteOverARecordAnotherWriterMovedToAnUndeclaredIdIsRefusedAndReloadedReadOnly(
+            [Values] bool directory,
+            [Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = PathOf("moved.cc");
+            using var cache = Open(path, DeckOnly, directory);
+            cache.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            if (write == Write.Flush)
+                cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+            Move(path, D, "moved", directory);
+            var before = Fingerprint(path);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+            {
+                if (write == Write.Flush)
+                    cache.FlushAsync().GetAwaiter().GetResult();
+                else
+                    cache.Commit(batch => batch.Upsert(Deck, DeckOf(Canary), D));
+            })!;
+
+            RefusedOnDisk(refusal, D);
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("moved"), "the cache serves what the store holds");
+            Assert.That(cache.IsDirty, Is.False);
+            RefusedOnDisk(Assert.Throws<CultSchemaConflictException>(() => cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult())!, D);
+            Assert.That(cache.IsDirty, Is.False, "the second write was refused at staging");
+            cache.FlushAsync().GetAwaiter().GetResult();
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void AStagedRemovalOfARecordMovedToAnUndeclaredIdIsRefused([Values] bool directory)
+        {
+            var path = PathOf("moved-removal.cc");
+            using var cache = Open(path, DeckOnly, directory);
+            cache.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            Assert.That(cache.Remove(D), Is.True);
+            Move(path, D, "moved", directory);
+            var moved = Stored(path, D);
+
+            RefusedOnDisk(Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult())!, D);
+
+            Assert.That(Stored(path, D), Is.EqualTo(moved));
+            Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("moved"));
+            Assert.That(cache.IsDirty, Is.False);
+        }
+
+        // A key this cache never held, which another writer created under an undeclared id after the load: the write is refused, and
+        // the cache then holds the record read-only.
+        [Test]
+        public void ARecordThatAppearedUnderAnUndeclaredIdAtAWrittenKeyIsRefusedAndHeld([Values] bool directory)
+        {
+            var path = PathOf("appeared.cc");
+            using var cache = Open(path, DeckOnly, directory);
+            cache.Commit(batch => batch.Upsert(Deck, DeckOf("e"), E));
+            Move(path, D, "appeared", directory);
+            var before = Fingerprint(path);
+
+            cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
+            RefusedOnDisk(Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult())!, D);
+
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("appeared"));
+            RefusedOnDisk(Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(Deck, DeckOf(Canary), D)))!, D);
+            Assert.That(cache.IsDirty, Is.False);
+        }
+
+        public enum DirectWrite
+        {
+            Push,
+            Delete,
+            CommitUpsert,
+            CommitDelete
+        }
+
+        // The store's own write API reaches no staging refusal: a read-only record written through it directly is refused where the
+        // write lands, in both store kinds, and the store keeps the other writer's record under its id.
+        [Test]
+        public void ADirectStoreWriteOfAReadOnlyRecordIsRefusedAndNeverRelabelsIt([Values] bool directory, [Values] DirectWrite write)
+        {
+            var path = PathOf("direct.cc");
+            Move(path, D, "theirs", directory);
+            var before = Fingerprint(path);
+            using var cache = Open(path, DeckOnly, directory);
+            var store = StoreOf(cache);
+            var mine = new CultStoredDocument(D, DateTimeOffset.UtcNow.ToString("O"), DeckOnly.GetRequired(Deck), DeckOf(Canary));
+            var held = cache.GetStored(D)!;
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+            {
+                switch (write)
+                {
+                    case DirectWrite.Push:
+                        store.Push(mine);
+                        store.PushAll();
+                        break;
+                    case DirectWrite.Delete:
+                        store.Delete(held);
+                        store.PushAll();
+                        break;
+                    case DirectWrite.CommitUpsert:
+                        store.CommitBatch(new CultCommitRequest(new[] { mine }, Array.Empty<CultStoredDocument>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        break;
+                    case DirectWrite.CommitDelete:
+                        store.CommitBatch(new CultCommitRequest(Array.Empty<CultStoredDocument>(), new[] { held }, Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        break;
+                }
+            })!;
+
+            RefusedOnDisk(refusal, D);
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(MovingId), "never relabelled");
+            Assert.That(store.IsDirty, Is.False);
+            Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("theirs"));
+        }
+
+        // A removal of a foreign record, which the cache does not hold, is refused typed: the caller is never told it removed what the
+        // store still carries.
+        [Test]
+        public void RemovingAForeignRecordIsRefusedNotReportedAsDone([Values] bool directory, [Values] bool batch)
+        {
+            var path = Seeded(directory ? "remove-foreign-dir.cc" : "remove-foreign-file.cc", directory);
+            var before = Fingerprint(path);
+            using (var cache = Open(path, DeckOnly, directory))
+            {
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                {
+                    if (batch)
+                        cache.Commit(stage => stage.Remove(W));
+                    else
+                        cache.Remove(W);
+                })!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+                Assert.That(cache.IsDirty, Is.False);
+                Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False, "a key nothing holds is still no removal");
+            }
+
             Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
     }

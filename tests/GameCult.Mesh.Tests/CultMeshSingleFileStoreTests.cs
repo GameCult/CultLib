@@ -200,6 +200,46 @@ public sealed class CultMeshSingleFileStoreTests
         File.ReadAllBytes(path).Should().Equal(bytes);
     }
 
+    // A Mesh write declares the ids of the catalog entry it writes: its own and those it lists compatible. Over a record under any
+    // other id, typed or raw, it is refused with the typed schema conflict naming the record, and the file is left byte for byte.
+    [Test]
+    public void AMeshWriteOverARecordUnderAnIdItsEntryDoesNotDeclareIsRefused([Values] bool typed)
+    {
+        var path = Path.Combine(_root, $"undeclared-{typed}.cc");
+        if (typed)
+            CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, EmptyArray);
+        else
+            CultMesh.WriteSingleFileDocument(path, Key, Publication());
+        var bytes = File.ReadAllBytes(path);
+
+        var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+        {
+            if (typed)
+                CultMesh.WriteSingleFileDocument(path, Key, Publication("other"));
+            else
+                CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, new byte[] { 0x91, 0x01 });
+        })!;
+
+        (refusal.RecordKey, refusal.SchemaId).Should().Be((Key.Value, typed ? Raw.SchemaId : SchemaId()));
+        refusal.Message.Should().Contain("nothing was reloaded");
+        File.ReadAllBytes(path).Should().Equal(bytes);
+    }
+
+    // A write whose entry lists the held id compatible owns the record and replaces it under its own id.
+    [Test]
+    public void AMeshWriteWhoseEntryListsTheHeldIdLandsUnderItsOwnId()
+    {
+        var path = Path.Combine(_root, "listed.cc");
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, EmptyArray);
+        var next = new CultMeshSingleFileDocumentSchema("raw:schema.v2", "RawSchema", "2") { CompatibleSchemaIds = new[] { Raw.SchemaId } };
+
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, next, null, new byte[] { 0x91, 0x01 });
+
+        var record = Snapshot(path).Records.Single();
+        (record.Key, record.SchemaId).Should().Be((Key.Value, "raw:schema.v2"));
+        record.Payload.Should().Equal(new byte[] { 0x91, 0x01 });
+    }
+
     // The writer cannot see whether the raw payload or the records it copies hold element ids, so a marked file stays marked.
     [Test]
     public void AMeshRawWriteIntoAMarkedStoreKeepsItMarked()
