@@ -676,8 +676,10 @@ public sealed class NoiseBoundTests
 
         public FogField()
         {
-            // Near 0.3 and far 1000: the ARPG scene's camera (Assets/Scenes/ARPG.unity:635-636).
-            Grid = Quadratic(0.3f, 1000.0f, 256);
+            // Near 0.3 and far 2048: the ARPG scene's Main Camera, which carries the cloud march
+            // (Aetheria d3075eb0 Assets/Scenes/ARPG.unity:31777 m_Name, :31830 far clip plane;
+            // Assets/Scripts/Zone Display/VolumeCloudRenderer.cs:36 RequireComponent(Camera)).
+            Grid = Quadratic(0.3f, 2048.0f, 256);
             Extinction = 0.5f;
         }
 
