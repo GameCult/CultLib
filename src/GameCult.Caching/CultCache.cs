@@ -679,7 +679,8 @@ namespace GameCult.Caching
         // The registered type a record under this schema id belongs to, or null when no registered type claims it: a foreign record,
         // which a store carries untouched. Deciding this never decodes the record or compares shapes, so a store can classify what a
         // file holds without reading a payload. persisted is the catalog entry the record resolves through, and null when a
-        // registered type owns the id. Claimants that cannot be told apart refuse.
+        // registered type owns the id. Claimants that cannot be told apart refuse. Branches past the listers (a local id the persisted
+        // entry lists, then the schema name) pick a type to read with. They confer no ownership: Declares decides what a cache may write.
         internal CultDocumentDescriptor? Claimant(
             string schemaId,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
@@ -730,6 +731,14 @@ namespace GameCult.Caching
             }
 
             return null;
+        }
+
+        // The one answer to whether a cache may write, relabel or remove a record stored under this id: a registered type owns it or
+        // declares it compatible. Read live, so a type registered later that declares the id claims its records at their next write.
+        internal bool Declares(string schemaId)
+        {
+            var indexes = _indexes;
+            return indexes.BySchemaId.ContainsKey(schemaId) || indexes.ByCompatibleSchemaId.ContainsKey(schemaId);
         }
 
         private CultDocumentDescriptor RegisterDescriptor(CultDocumentDescriptor descriptor)
@@ -2860,6 +2869,7 @@ namespace GameCult.Caching
                 if (home.IsReadOnly)
                     throw new InvalidOperationException(
                         $"{stored.Descriptor.SchemaName} record {stored.Key.Value} routes to read-only backing store {home}.");
+                home.RefuseUndeclared(stored.Key.Value);
                 homes.Add(home);
             }
         }
@@ -3601,12 +3611,17 @@ namespace GameCult.Caching
             _foreignRecords = foreign.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
         }
 
-        // A write never replaces or removes a record this store carries for a schema it does not know.
-        protected void RefuseOverwrite(string key)
+        // A cache never writes, relabels or removes a record stored under an id its types do not declare: the staging half of rule 3.
+        // Refused when the store carries a foreign record at the key, or holds one whose stored id no registered type owns or declares
+        // compatible (a record a type reads by the catalog's schema name or a persisted entry's list: read-only). Called for every
+        // record a cache write admits or evicts, before anything is staged.
+        protected internal void RefuseUndeclared(string key)
         {
             var foreign = _foreignRecords.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
             if (foreign != null)
-                throw Overwrites(foreign);
+                throw Overwrites(null, new[] { (foreign.Key, foreign.SchemaId, foreign.SchemaName) });
+            if (Entries.TryGetValue(key, out var held) && !Registry.Declares(held.StoredSchemaId))
+                throw Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
         }
 
         // The one decision of whether a write may proceed over what the file holds as foreign, for every store kind. A key this
@@ -3622,7 +3637,8 @@ namespace GameCult.Caching
                 .ToArray();
             if (refused.Length == 0)
                 return;
-            Refuse(refused.Select(record => record.Key), _ => null, unstage, inner => Overwrites(inner, refused));
+            Refuse(refused.Select(record => record.Key), _ => null, unstage,
+                inner => Overwrites(inner, refused.Select(record => (record.Key, record.SchemaId, record.SchemaName)).ToArray()));
         }
 
         /// <summary>
@@ -3695,18 +3711,17 @@ namespace GameCult.Caching
             DateTimeOffset.TryParse(than, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var earlier) &&
             later > earlier;
 
-        // A record this store carries for a schema it does not know: a write that would replace or remove it is refused. When the
-        // reload that refusal owes failed, the refusal carries that failure as its inner exception.
-        protected CultSchemaConflictException Overwrites(params CultForeignRecord[] foreign) => Overwrites(null, foreign);
-
-        protected CultSchemaConflictException Overwrites(Exception? inner, CultForeignRecord[] foreign) => new(
-            $"{(foreign.Length == 1 ? "Record" : "Records")} {string.Join(", ", foreign.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this} " +
-            "no registered type owns or lists as compatible. The store carries what it holds under such a schema untouched and refuses a write that would replace or remove it; " +
-            "declare the id on a type to claim it." +
+        // The one refusal of a write onto records stored under ids no registered type declares, carried foreign or held read-only.
+        // It names each record's key, stored id and schema name, never its payload. When the reload that refusal owes failed, the
+        // refusal carries that failure as its inner exception.
+        protected CultSchemaConflictException Overwrites(Exception? inner, (string Key, string SchemaId, string SchemaName)[] refused) => new(
+            $"{(refused.Length == 1 ? "Record" : "Records")} {string.Join(", ", refused.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this}: " +
+            "no registered type owns this schema id or declares it compatible, so this cache never writes, relabels or removes it. " +
+            "Declare the id compatible on the type that should own it." +
             (inner == null ? string.Empty : " Reloading what the write refused failed, so the cache is unchanged."),
-            foreign[0].SchemaId,
-            foreign.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
-            foreign[0].Key,
+            refused[0].SchemaId,
+            refused.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
+            refused[0].Key,
             inner);
 
         protected void MarkFlushSucceeded()
@@ -3869,7 +3884,6 @@ namespace GameCult.Caching
             ThrowIfReadOnly();
             Held(() =>
             {
-                RefuseOverwrite(entry.Key.Value);
                 Entries[entry.Key.Value] = entry;
                 _staged.Add(entry.Key.Value);
                 IsDirty = true;

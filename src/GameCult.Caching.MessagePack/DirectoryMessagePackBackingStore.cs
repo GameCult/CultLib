@@ -150,7 +150,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         RefuseVariant(entry);
         Held(() =>
         {
-            RefuseOverwrite(entry.Key.Value);
             Entries[entry.Key.Value] = entry;
             _dirtyKeys[entry.Key.Value] = true;
             _deletedKeys.TryRemove(entry.Key.Value, out _);
