@@ -1354,3 +1354,7 @@ carries the contract.** The four mass-derived wells are kept as a printed row,
 are Aetheria's own geometry and the band-dominated case, where affine gains
 most. Dropping them would hide where affine pays. The cull-map image renders a
 deep-well camera at warp `D`.
+
+The contract question is re-asked against these numbers as
+`cultmath-tapes:question:affine-wells-contract-r2`. The first question was
+withdrawn in its favour, and `affine-forms` r2 supersedes r1.
