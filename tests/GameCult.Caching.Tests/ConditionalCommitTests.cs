@@ -895,9 +895,9 @@ namespace GameCult.Caching.Tests
                 base.Push(entry);
             }
 
-            protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+            protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
             {
-                var snapshot = base.DeserializeSnapshot(data);
+                var snapshot = base.ReadStore(data);
                 if (Pause is { } pause)
                 {
                     Paused = true;

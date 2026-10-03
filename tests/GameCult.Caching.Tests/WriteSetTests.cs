@@ -37,7 +37,29 @@ namespace GameCult.Caching.Tests
             public string Name = string.Empty;
         }
 
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(WsItem), typeof(WsOther) });
+        [CultDocument("tests.write_set_nested", "tests.write_set_nested.v1")]
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class WsNested
+        {
+            [Key(0)]
+            [CultName]
+            public string Name = string.Empty;
+
+            [Key(1)]
+            public List<string> Tags = new();
+
+            [Key(2)]
+            public WsInner Inner = new();
+        }
+
+        [MessagePackObject(AllowPrivate = true)]
+        internal sealed class WsInner
+        {
+            [Key(0)]
+            public int X;
+        }
+
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(WsItem), typeof(WsOther), typeof(WsNested) });
         private static readonly string ItemId = Registry.GetRequired(typeof(WsItem)).SchemaId;
         private static readonly CultRecordKey A = new("a");
         private static readonly CultRecordKey X = new("x");
@@ -77,7 +99,7 @@ namespace GameCult.Caching.Tests
         }
 
         private static byte[] EntryBytes(string path, string schemaId) =>
-            Read(path).SchemaCatalog.Single(entry => entry.SchemaId == schemaId).RawBytes!;
+            StoreSlices.CatalogEntry(path, schemaId);
 
         private static string[] Keys(string path) => Read(path).Records.Select(record => record.Key).OrderBy(key => key, StringComparer.Ordinal).ToArray();
 
@@ -289,6 +311,8 @@ namespace GameCult.Caching.Tests
                 Assert.Ignore("CULTLIB_REAL_STORE does not name a copy of a real store.");
             var path = PathOf("real.cc");
             File.Copy(source!, path);
+            var beforePath = PathOf("real-before.cc");
+            File.Copy(source!, beforePath);
             var before = Read(path);
 
             using (var cache = Open(path, false))
@@ -298,11 +322,11 @@ namespace GameCult.Caching.Tests
             TestContext.Out.WriteLine($"real store: {before.Records.Length} records, {before.SchemaCatalog.Length} catalog entries, header {before.FormatVersion}");
             Assert.That(after.Records.Length, Is.EqualTo(before.Records.Length + 1));
             Assert.That(after.FormatVersion, Is.EqualTo(before.FormatVersion));
-            byte[] Bytes(CultPersistedRecord record) => CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot { Records = new[] { record } });
-            var changed = before.Records.Where(record => !Bytes(record).SequenceEqual(Bytes(after.Records.Single(kept => kept.Key == record.Key)))).Select(record => record.Key).ToArray();
+
+            var changed = before.Records.Where(record => !StoreSlices.Record(beforePath, record.Key).SequenceEqual(StoreSlices.Record(path, record.Key))).Select(record => record.Key).ToArray();
             Assert.That(changed, Is.Empty, "records that are not byte-identical");
-            var afterEntries = after.SchemaCatalog.Select(entry => entry.RawBytes!).ToList();
-            var missing = before.SchemaCatalog.Where(entry => !afterEntries.Any(raw => raw.SequenceEqual(entry.RawBytes!))).Select(entry => entry.SchemaId).ToArray();
+            var afterEntries = StoreSlices.CatalogEntries(path).ToList();
+            var missing = StoreSlices.CatalogEntries(beforePath).Where(raw => !afterEntries.Any(other => other.SequenceEqual(raw))).Select(raw => BitConverter.ToString(raw)).ToArray();
             Assert.That(missing, Is.Empty, "catalog entries that are not byte-identical");
         }
 
@@ -801,42 +825,30 @@ namespace GameCult.Caching.Tests
             }), Is.True, "the writer's own condition on the variant holds");
         }
 
-        private sealed class CountingStore : SingleFileMessagePackBackingStore
-        {
-            public CountingStore(string path) : base(path) { }
-
-            public int Encoded;
-
-            protected override byte[] SerializeRecord(CultPersistedRecord record)
-            {
-                Encoded++;
-                return base.SerializeRecord(record);
-            }
-        }
 
         // A commit with no condition decides nothing about the other records, so it hashes none of them: only the record it writes
-        // is encoded to be named. A commit with a condition compares every durable record's version.
+        // is hashed to be named. A commit with a condition compares every durable record's version.
         [Test]
         public void AnUnconditionalCommitHashesOnlyTheRecordsItWrites()
         {
             var path = PathOf("cost.cc");
             Seed(path, false, "a", "b", "c", "d", "e");
-            var store = new CountingStore(path);
+            var store = new SingleFileMessagePackBackingStore(path);
             using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
             cache.AddBackingStore(store);
             cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
 
-            store.Encoded = 0;
+            store.RecordsHashed = 0;
             Assert.That(cache.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X)), Is.True);
-            Assert.That(store.Encoded, Is.EqualTo(1));
+            Assert.That(store.RecordsHashed, Is.EqualTo(1));
 
-            store.Encoded = 0;
+            store.RecordsHashed = 0;
             Assert.That(cache.Commit(batch =>
             {
                 batch.Expect(X, cache.Get<WsItem>(X)!);
                 batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x", Note = "again" }, X);
             }), Is.True);
-            Assert.That(store.Encoded, Is.GreaterThanOrEqualTo(6), "a condition hashes every durable record, which is how the count proves itself");
+            Assert.That(store.RecordsHashed, Is.GreaterThanOrEqualTo(6), "a condition hashes every durable record, which is how the count proves itself");
         }
 
         // Records no store has read or written are told apart however many are made in one clock tick.
@@ -893,6 +905,126 @@ namespace GameCult.Caching.Tests
         private static DateTimeOffset At(string storedAt) => DateTimeOffset.Parse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
 
         private static string StoredAtOf(string path, string key) => Read(path).Records.Single(record => record.Key == key).StoredAt;
+
+        // The stored bytes belong to the store that read them, never to a record object: a record read through the public snapshot
+        // API is only a decoded copy, so an edit made to its payload in place is what a write of it stores.
+        [Test]
+        public void ARecordReadThroughTheSnapshotApiAndEditedInPlaceIsWrittenAsEdited()
+        {
+            var path = PathOf("edit-payload.cc");
+            Seed(path, false, "k");
+            var snapshot = Read(path);
+            OverwriteInPlace(snapshot.Records.Single().Payload, "seeded", "SEEDED");
+
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            Assert.That(NoteOnDisk(path, false), Is.EqualTo("SEEDED"));
+            var record = CultDocumentMessagePackSerialization.DeserializePersistedRecord(StoreSlices.Record(path, "k"));
+            OverwriteInPlace(record.Payload, "SEEDED", "seeded");
+            Assert.That(
+                CultDocumentMessagePackSerialization.DeserializePersistedRecord(CultDocumentMessagePackSerialization.SerializePersistedRecord(record)).Payload,
+                Is.EqualTo(record.Payload), "a single record is re-encoded from its fields too");
+        }
+
+        [Test]
+        public void AnOverrideReadThroughTheSnapshotApiAndEditedInPlaceIsWrittenAsEdited()
+        {
+            var path = PathOf("edit-override.cc");
+            Seed(path, false, "a");
+            using (var seed = Open(path, false))
+                AddVariant(seed, "v", A);
+            var snapshot = Read(path);
+            var variant = snapshot.Records.Single(record => record.Key == "v").Variant!;
+            OverwriteInPlace(variant.Overrides.Single(entry => entry.Path[0].Slot == 1).Value, "variant-v", "VARIANT-v");
+
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+
+            using var fresh = Open(path, false);
+            Assert.That(fresh.Get<WsItem>(new CultRecordKey("v"))!.Note, Is.EqualTo("VARIANT-v"));
+        }
+
+        // A held document edited in place (a list, a nested object) and put back as the same instance is written as edited, and a
+        // later write of a neighbour copies it as the file then holds it.
+        [Test]
+        public void AHeldDocumentEditedInPlaceAndPutBackIsWrittenAsEdited([Values] bool commit)
+        {
+            var path = PathOf("edit-held.cc");
+            var n = new CultRecordKey("n");
+            using (var seed = Open(path, false))
+                seed.Commit(batch => batch.Upsert(typeof(WsNested), new WsNested { Name = "name-n", Tags = { "t1" }, Inner = { X = 1 } }, n));
+
+            using (var cache = Open(path, false))
+            {
+                var held = cache.Get<WsNested>(n)!;
+                held.Tags.Add("t2");
+                held.Inner.X = 9;
+                Land(cache, commit, typeof(WsNested), held, n);
+            }
+
+            using (var fresh = Open(path, false))
+            {
+                var read = fresh.Get<WsNested>(n)!;
+                Assert.That(read.Tags, Is.EqualTo(new[] { "t1", "t2" }));
+                Assert.That(read.Inner.X, Is.EqualTo(9));
+            }
+
+            var written = StoreSlices.Record(path, "n");
+            using (var other = Open(path, false))
+                Land(other, commit, typeof(WsItem), new WsItem { Name = "name-x" }, X);
+            Assert.That(StoreSlices.Record(path, "n"), Is.EqualTo(written), "the edit is copied as the file holds it");
+        }
+
+        // A record the writer did not stage keeps the bytes and the version its file holds, whatever encoding its writer chose,
+        // across any number of writes of its neighbours.
+        [Test]
+        public void AnUntouchedNonCanonicalRecordKeepsItsBytesAndVersionAcrossAWriteOfANeighbour([Values] bool commit)
+        {
+            var path = PathOf("untouched-wide.cc");
+            Seed(path, false, "k");
+            File.WriteAllBytes(path, WidenEveryRecord(File.ReadAllBytes(path), out var slices));
+            using var cache = Open(path, false);
+            var version = cache.GetStored(K)!.StoredVersion;
+            Assert.That(version, Is.EqualTo(HexOfSha256(slices["k"])));
+
+            Land(cache, commit, typeof(WsItem), new WsItem { Name = "name-x" }, X);
+            Land(cache, commit, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
+
+            Assert.That(StoreSlices.Record(path, "k"), Is.EqualTo(slices["k"]));
+            Assert.That(cache.GetStored(K)!.StoredVersion, Is.EqualTo(version));
+            using var fresh = Open(path, false);
+            Assert.That(fresh.GetStored(K)!.StoredVersion, Is.EqualTo(version));
+        }
+
+        // A record the writer stages is encoded from its object, so a non-canonical record put back unchanged is written canonically
+        // and, being other bytes, has another version.
+        [Test]
+        public void AStagedNonCanonicalRecordPutBackUnchangedIsReEncodedAndGetsANewVersion([Values] bool commit)
+        {
+            var path = PathOf("staged-wide.cc");
+            Seed(path, false, "k");
+            File.WriteAllBytes(path, WidenEveryRecord(File.ReadAllBytes(path), out var slices));
+            using var cache = Open(path, false);
+            var held = cache.Get<WsItem>(K)!;
+
+            Land(cache, commit, typeof(WsItem), held, K);
+
+            var written = StoreSlices.Record(path, "k");
+            Assert.That(written, Is.Not.EqualTo(slices["k"]));
+            Assert.That(written, Is.EqualTo(CultDocumentMessagePackSerialization.SerializePersistedRecord(Read(path).Records.Single())),
+                "the record is in the canonical encoding");
+            Assert.That(cache.GetStored(K)!.StoredVersion, Is.EqualTo(HexOfSha256(written)));
+            Assert.That(cache.GetStored(K)!.StoredVersion, Is.Not.EqualTo(HexOfSha256(slices["k"])));
+        }
+
+        private static void OverwriteInPlace(byte[] bytes, string from, string to)
+        {
+            var was = System.Text.Encoding.UTF8.GetBytes(from);
+            var now = System.Text.Encoding.UTF8.GetBytes(to);
+            Assert.That(now.Length, Is.EqualTo(was.Length));
+            var at = IndexOf(bytes, was);
+            Assert.That(at, Is.GreaterThanOrEqualTo(0), $"'{from}' is in the bytes");
+            Array.Copy(now, 0, bytes, at, now.Length);
+        }
 
         private static void AddVariant(CultCache cache, string key, CultRecordKey baseKey) =>
             cache.Commit(batch => batch.UpsertVariant(new CultRecordKey(key), baseKey, new[]

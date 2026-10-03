@@ -68,6 +68,13 @@ and a catalog entry's exact bytes, unknown fields included, so a copied record
 keeps its version. No type interprets a copied record: a write may hash another
 record's bytes to compare versions, and reads its header (key, schema id, variant
 slot), but never decodes its payload.
+A record is encoded from the object the writer hands in, and every other record is copied as the store holds it. The
+store that read a file owns that file's bytes: for each stored record, its exact slice of the file and the SHA-256 of that
+slice, which is the record's version; likewise each catalog entry's slice. A decoded record or snapshot object carries no
+bytes, so an object a caller edited in place is never mistaken for what the file holds. Consequently a record the writer
+staged is re-encoded canonically and has the version of its new encoding, even when its content is unchanged, and a
+record nobody staged keeps its bytes and its version for as long as no writer stages it. The public snapshot and record
+serializers encode every record from its fields.
 A record written over one the store holds gets a storedAt later than the one it
 replaces. A document changed in place and not staged is not written.
 

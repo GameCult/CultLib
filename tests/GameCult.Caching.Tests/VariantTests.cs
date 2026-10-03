@@ -847,6 +847,7 @@ namespace GameCult.Caching.Tests
             var path = PathOf(viaFlush ? "drift-untouched-flush.cc" : "drift-untouched-commit.cc");
             SeedDrift(path);
             var before = ReadStore(path);
+            var wideEntryBefore = StoreSlices.CatalogEntry(path, DriftWideId);
 
             using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
             {
@@ -870,8 +871,8 @@ namespace GameCult.Caching.Tests
             }
 
             Assert.That(OverriddenSlotsOn(path, DriftVariant.Value).OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "the dropped slot's override is still stored");
-            Assert.That(after.SchemaCatalog.Single(entry => entry.SchemaId == DriftWideId).RawBytes,
-                Is.EqualTo(before.SchemaCatalog.Single(entry => entry.SchemaId == DriftWideId).RawBytes));
+            Assert.That(StoreSlices.CatalogEntry(path, DriftWideId),
+                Is.EqualTo(wideEntryBefore));
         }
 
         // A type that lists Wide's id as compatible owns Wide's records: staging one writes it under the type's own id, at a later

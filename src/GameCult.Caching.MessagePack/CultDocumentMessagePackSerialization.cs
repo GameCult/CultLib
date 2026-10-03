@@ -155,22 +155,33 @@ public static class CultDocumentMessagePackSerialization
         return ReadPersistedRecord(ref reader);
     }
 
-    public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+    /// <summary>
+    /// Encodes the snapshot: every catalog entry and record from its fields, so what a caller edited is what is written.
+    /// </summary>
+    public static byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot) =>
+        SerializeStore(
+            snapshot.FormatVersion,
+            snapshot.SchemaCatalog.Select(SerializeCatalogEntry).ToArray(),
+            snapshot.Records.Select(SerializePersistedRecord).ToArray());
+
+    // A store file from its parts, each already encoded: what a store carries forward is the bytes its file held, what it writes is
+    // an encoding of the object.
+    internal static byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records)
     {
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
         writer.WriteArrayHeader(StoreSnapshotFieldCount);
-        writer.Write(snapshot.FormatVersion);
-        writer.WriteArrayHeader(snapshot.SchemaCatalog.Length);
-        foreach (var entry in snapshot.SchemaCatalog)
+        writer.Write(formatVersion);
+        writer.WriteArrayHeader(catalogEntries.Count);
+        foreach (var entry in catalogEntries)
         {
-            WriteSchemaCatalogEntry(ref writer, entry);
+            writer.WriteRaw(new ReadOnlySpan<byte>(entry));
         }
 
-        writer.WriteArrayHeader(snapshot.Records.Length);
-        foreach (var record in snapshot.Records)
+        writer.WriteArrayHeader(records.Count);
+        foreach (var record in records)
         {
-            WritePersistedRecord(ref writer, record);
+            writer.WriteRaw(new ReadOnlySpan<byte>(record));
         }
 
         writer.Flush();
@@ -185,7 +196,12 @@ public static class CultDocumentMessagePackSerialization
     /// <see cref="CultStoreUnreadableException"/>, so a reader never takes part of a file for the whole and never skips a slot
     /// it does not understand. The rewriting paths use this same reader as their verdict on whether a file may be replaced.
     /// </summary>
-    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload)
+    public static CultPersistedStoreSnapshot DeserializeSnapshot(byte[] payload) => ReadStore(payload).Snapshot;
+
+    // The reader behind DeserializeSnapshot, and beside the snapshot the exact bytes the file held for each catalog entry and each
+    // record (parallel to the snapshot's arrays). The snapshot's objects hold no bytes: a store that carries entries forward keeps
+    // these slices itself.
+    internal static (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] payload)
     {
         try
         {
@@ -200,27 +216,33 @@ public static class CultDocumentMessagePackSerialization
 
             var snapshot = new CultPersistedStoreSnapshot();
             if (fieldCount == 0)
-                return snapshot;
+                return (snapshot, Array.Empty<byte[]>(), Array.Empty<byte[]>());
 
             snapshot.FormatVersion = reader.ReadString()
                 ?? throw new CultStoreUnreadableException("Store snapshot declares no format version; this runtime reads " + CultPersistedStoreSnapshot.FormatV1 + ", " + CultPersistedStoreSnapshot.FormatV2 + " and " + CultPersistedStoreSnapshot.FormatV3 + ".");
 
             var catalogCount = reader.ReadArrayHeader();
             snapshot.SchemaCatalog = new CultSchemaCatalogEntry[catalogCount];
+            var catalogBytes = new byte[catalogCount][];
             for (var index = 0; index < catalogCount; index++)
             {
+                var start = reader.Position;
                 snapshot.SchemaCatalog[index] = ReadSchemaCatalogEntry(ref reader);
+                catalogBytes[index] = reader.Sequence.Slice(start, reader.Position).ToArray();
             }
 
             var recordCount = reader.ReadArrayHeader();
             snapshot.Records = new CultPersistedRecord[recordCount];
+            var recordBytes = new byte[recordCount][];
             for (var index = 0; index < recordCount; index++)
             {
+                var start = reader.Position;
                 snapshot.Records[index] = ReadPersistedRecord(ref reader);
+                recordBytes[index] = reader.Sequence.Slice(start, reader.Position).ToArray();
             }
 
             RequirePublishedSchemas(snapshot);
-            return snapshot;
+            return (snapshot, catalogBytes, recordBytes);
         }
         catch (CultStoreUnreadableException)
         {
@@ -306,12 +328,6 @@ public static class CultDocumentMessagePackSerialization
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
     {
-        if (record.RawBytes is { } raw)
-        {
-            writer.WriteRaw(new ReadOnlySpan<byte>(raw));
-            return;
-        }
-
         writer.WriteArrayHeader(record.Variant == null ? PersistedRecordFieldCount : VariantRecordFieldCount);
         writer.Write(record.Key);
         writer.Write(record.SchemaId);
@@ -395,7 +411,6 @@ public static class CultDocumentMessagePackSerialization
 
     public static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
     {
-        var start = reader.Position;
         var fieldCount = reader.ReadArrayHeader();
         var record = new CultPersistedRecord();
 
@@ -436,37 +451,19 @@ public static class CultDocumentMessagePackSerialization
             }
         }
 
-        record.RawBytes = reader.Sequence.Slice(start, reader.Position).ToArray();
         return record;
     }
 
-    // An entry read from a store is written as the bytes it was read from, so a fact this runtime does not decode survives a
-    // write that only carries the entry. That holds only while the decoded fields are the ones read: an entry changed since is
-    // encoded from them.
-    private static void WriteSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
-    {
-        if (entry.RawBytes is { } raw && EncodeSchemaCatalogEntry(entry).AsSpan().SequenceEqual(EncodeSchemaCatalogEntry(ReadRawSchemaCatalogEntry(raw))))
-            writer.WriteRaw(new ReadOnlySpan<byte>(raw));
-        else
-            WriteDecodedSchemaCatalogEntry(ref writer, entry);
-    }
-
-    private static CultSchemaCatalogEntry ReadRawSchemaCatalogEntry(byte[] raw)
-    {
-        var reader = new MessagePackReader(raw);
-        return ReadSchemaCatalogEntry(ref reader);
-    }
-
-    private static byte[] EncodeSchemaCatalogEntry(CultSchemaCatalogEntry entry)
+    internal static byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry)
     {
         var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
-        WriteDecodedSchemaCatalogEntry(ref writer, entry);
+        WriteSchemaCatalogEntry(ref writer, entry);
         writer.Flush();
         return buffer.WrittenSpan.ToArray();
     }
 
-    private static void WriteDecodedSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
+    private static void WriteSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
     {
         writer.WriteArrayHeader(SchemaCatalogEntryFieldCount);
         writer.Write(entry.SchemaId);
@@ -489,7 +486,6 @@ public static class CultDocumentMessagePackSerialization
 
     private static CultSchemaCatalogEntry ReadSchemaCatalogEntry(ref MessagePackReader reader)
     {
-        var start = reader.Position;
         var fieldCount = reader.ReadArrayHeader();
         var entry = new CultSchemaCatalogEntry();
 
@@ -543,7 +539,6 @@ public static class CultDocumentMessagePackSerialization
             reader.Skip();
         }
 
-        entry.RawBytes = reader.Sequence.Slice(start, reader.Position).ToArray();
         return entry;
     }
 
@@ -620,9 +615,9 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
     {
     }
 
-    protected override byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot)
+    protected override byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records)
     {
-        return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
+        return CultDocumentMessagePackSerialization.SerializeStore(formatVersion, catalogEntries, records);
     }
 
     protected override byte[] SerializeRecord(CultPersistedRecord record)
@@ -630,11 +625,16 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         return CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
     }
 
-    protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
+    protected override byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry)
     {
-        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
-        CultDocumentMessagePackSerialization.RequireSingleFileFormat(snapshot);
-        return snapshot;
+        return CultDocumentMessagePackSerialization.SerializeCatalogEntry(entry);
+    }
+
+    protected override (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data)
+    {
+        var store = CultDocumentMessagePackSerialization.ReadStore(data);
+        CultDocumentMessagePackSerialization.RequireSingleFileFormat(store.Snapshot);
+        return store;
     }
 
     protected override byte[] SerializePayload(object document)

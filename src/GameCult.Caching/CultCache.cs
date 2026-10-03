@@ -29,16 +29,10 @@ namespace GameCult.Caching
 
         public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
 
-        // The exact MessagePack bytes this entry was read from, when it was read from a store. A writer that carries the entry
-        // forward emits them as they are, so what this runtime does not decode (fields beyond the ones it knows, the width of an int,
-        // nil) survives; an entry whose decoded fields were changed since is encoded from them instead. Null for an entry a runtime
-        // built.
-        internal byte[]? RawBytes { get; set; }
-
         // The catalog a write leaves, derived from the records the written store holds and nothing else. For each schema id a record
         // carries, one entry that publishes it: for an id the write stages a record under, the entry the writer registered (or passed)
         // for it, which owns the id; for every other id the arrived (durable) entry that owns it, else the first that lists it as
-        // compatible, carried as the bytes it was read from. A registered entry never publishes an id nothing staged sits under, so
+        // compatible (the store that read it carries its bytes as read). A registered entry never publishes an id nothing staged sits under, so
         // the caller passes registered entries only for the ids it writes. Entries are written as chosen, never merged; a registered
         // descriptor wins over an arrived entry with the same own id. Two arrived entries with the same own id and different schema
         // names, or a record no chosen entry publishes, refuse the write.
@@ -134,24 +128,13 @@ namespace GameCult.Caching
 
     public sealed class CultPersistedRecord
     {
-        private string _key = string.Empty;
-        private string _schemaId = string.Empty;
-        private string _storedAt = string.Empty;
-        private byte[] _payload = Array.Empty<byte>();
-        private CultVariantDelta? _variant;
-
-        public string Key { get => _key; set { _key = value; RawBytes = null; } }
-        public string SchemaId { get => _schemaId; set { _schemaId = value; RawBytes = null; } }
-        public string StoredAt { get => _storedAt; set { _storedAt = value; RawBytes = null; } }
-        public byte[] Payload { get => _payload; set { _payload = value; RawBytes = null; } }
+        public string Key { get; set; } = string.Empty;
+        public string SchemaId { get; set; } = string.Empty;
+        public string StoredAt { get; set; } = string.Empty;
+        public byte[] Payload { get; set; } = Array.Empty<byte>();
 
         // Non-null for a variant record (slot 4): its base and overrides. Its payload is empty.
-        public CultVariantDelta? Variant { get => _variant; set { _variant = value; RawBytes = null; } }
-
-        // The exact bytes this record was read from, as a store file held them. A record is written as the bytes it was read from
-        // while no field has been assigned since, so a copied record stays byte-identical and its version (the SHA-256 of its
-        // stored bytes) is the one the file's bytes name, whatever encoding their writer chose. Assigning any field drops them.
-        internal byte[]? RawBytes { get; set; }
+        public CultVariantDelta? Variant { get; set; }
     }
 
     // One record a write puts in a single-file store: encoded, with the catalog entry that publishes the id it is stored under and
@@ -3750,24 +3733,75 @@ namespace GameCult.Caching
         // A write into a store holding a variant lands only while the durable versions still equal these.
         private readonly Dictionary<string, string> _lastRead = new(StringComparer.Ordinal);
 
-        protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
+        /// <summary>
+        /// A store file from its parts, each already encoded: a catalog entry or record this store carries forward is the bytes its
+        /// file held, one it writes is <see cref="SerializeCatalogEntry"/> or <see cref="SerializeRecord"/> of the object.
+        /// </summary>
+        protected abstract byte[] SerializeStore(string formatVersion, IReadOnlyList<byte[]> catalogEntries, IReadOnlyList<byte[]> records);
 
-        // One record's persisted encoding: the bytes a version names.
+        // One record's persisted encoding: the bytes a version names, and the bytes a written record is stored as.
         protected abstract byte[] SerializeRecord(CultPersistedRecord record);
 
-        private string Version(CultPersistedRecord record)
-        {
-            using var sha256 = SHA256.Create();
-            return VersionOf(sha256.ComputeHash(SerializeRecord(record)));
-        }
+        // One catalog entry's persisted encoding, for an entry the writer built.
+        protected abstract byte[] SerializeCatalogEntry(CultSchemaCatalogEntry entry);
 
         /// <summary>
         /// This store's one reader of a non-empty store file, and so its one verdict on whether the file may be replaced: open,
         /// flush and commit all ask it. It must throw <see cref="CultStoreUnreadableException"/> for anything that is not exactly one
         /// store this runtime reads (a truncated file, bytes after the store, a missing or extra slot, a format or record it does
-        /// not know), so a rewrite never overwrites a file it cannot see.
+        /// not know), so a rewrite never overwrites a file it cannot see. It returns the decoded snapshot and, parallel to the
+        /// snapshot's catalog and records, the exact bytes the file holds for each: the store keeps those, never the snapshot's objects.
         /// </summary>
-        protected abstract CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data);
+        protected abstract (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) ReadStore(byte[] data);
+
+        // Test seam: how many record encodings this store has hashed, to prove what a write hashes.
+        internal int RecordsHashed;
+
+        private string VersionOfBytes(byte[] bytes)
+        {
+            RecordsHashed++;
+            using var sha256 = SHA256.Create();
+            return VersionOf(sha256.ComputeHash(bytes));
+        }
+
+        // What the store's file holds, as the store owns it: the snapshot as read, and keyed by record key the exact slice the file
+        // holds for each record, whose version is the SHA-256 of that slice, hashed when a comparison first asks. Catalog entries
+        // keep their slices by the entry object this read produced. A write copies a record it did not stage from its slice here
+        // and re-encodes every record it was handed, so no object a caller edits is ever mistaken for the bytes in the file.
+        private sealed class Durable
+        {
+            private readonly SingleFileBackingStore _owner;
+            private readonly Dictionary<string, byte[]> _records;
+            private readonly Dictionary<string, string> _versions = new(StringComparer.Ordinal);
+            private readonly Dictionary<CultSchemaCatalogEntry, byte[]> _catalog = new();
+
+            internal Durable(SingleFileBackingStore owner, (CultPersistedStoreSnapshot Snapshot, byte[][] CatalogBytes, byte[][] RecordBytes) read)
+            {
+                _owner = owner;
+                Snapshot = read.Snapshot;
+                _records = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+                for (var index = 0; index < Snapshot.Records.Length; index++)
+                    _records[Snapshot.Records[index].Key] = read.RecordBytes[index];
+                for (var index = 0; index < Snapshot.SchemaCatalog.Length; index++)
+                    _catalog.Add(Snapshot.SchemaCatalog[index], read.CatalogBytes[index]);
+            }
+
+            internal CultPersistedStoreSnapshot Snapshot { get; }
+
+            internal byte[] Slice(string key) => _records[key];
+
+            internal string Version(string key)
+            {
+                if (!_versions.TryGetValue(key, out var version))
+                    _versions[key] = version = _owner.VersionOfBytes(_records[key]);
+                return version;
+            }
+
+            // The bytes to write for a catalog entry the write chose: the slice the file held when it is one of this read's entries,
+            // otherwise an encoding of the entry the writer built.
+            internal byte[] CatalogBytes(CultSchemaCatalogEntry entry) =>
+                _catalog.TryGetValue(entry, out var bytes) ? bytes : _owner.SerializeCatalogEntry(entry);
+        }
 
         protected abstract byte[] SerializePayload(object document);
         protected abstract object DeserializePayload(Type documentType, byte[] payload);
@@ -3783,8 +3817,8 @@ namespace GameCult.Caching
             if (IsDirty)
                 return;
 
-            var snapshot = ReadSnapshot();
-            if (snapshot == null)
+            var durable = ReadSnapshot();
+            if (durable == null)
             {
                 _lastRead.Clear();
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
@@ -3792,13 +3826,14 @@ namespace GameCult.Caching
                 return;
             }
 
+            var snapshot = durable.Snapshot;
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
             var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
             var foreign = new List<CultForeignRecord>();
             var versions = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
-                var version = versions[record.Key] = Version(record);
+                var version = versions[record.Key] = durable.Version(record.Key);
                 if (Foreign(record, snapshot.SchemaCatalog) is { } carried)
                 {
                     foreign.Add(carried);
@@ -3864,7 +3899,7 @@ namespace GameCult.Caching
                 using (AcquireLock(wait: true))
                 {
                     var disk = ReadSnapshot();
-                    RefuseForeign(_staged, ForeignOnDisk(disk));
+                    RefuseForeign(_staged, disk);
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
                     Wrote(ApplyWriteSet(disk, upserts, removals));
                 }
@@ -3888,12 +3923,13 @@ namespace GameCult.Caching
             if (fileLock == null)
                 return CultCommitOutcome.Contended;
 
-            var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
+            var disk = ReadSnapshot();
             if (request.HasConditions && !request.ConditionsHold(
-                    disk.Records.ToDictionary(record => record.Key, Version, StringComparer.Ordinal), Entries.Values))
+                    (disk?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, record => disk!.Version(record.Key), StringComparer.Ordinal),
+                    Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
-            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), ForeignOnDisk(disk));
+            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), disk);
             var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
             var written = ApplyWriteSet(disk, upserts, removals);
             foreach (var entry in request.Deletes)
@@ -3959,12 +3995,15 @@ namespace GameCult.Caching
         // a variant, or would after this write, is written only while its record versions are what this store last read: a variant
         // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Versions
         // only: a write hashes other records' bytes, never decodes them. Otherwise the whole write is refused and what it refused is
-        // reloaded (Refuse). Returns the records written, each with the version of the bytes written.
-        private IReadOnlyCollection<(CultStagedRecord Staged, string Version)> ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        // reloaded (Refuse). Every record the writer staged is encoded from its object now, and its version is the hash of that
+        // encoding; every other record is copied as the slice the file holds. Returns the records written, each with the version of
+        // the bytes written.
+        private IReadOnlyCollection<(CultStagedRecord Staged, string Version)> ApplyWriteSet(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
             RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
+            var durableRecords = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
             // A record written over one the store holds is stored at a storedAt later than the one it replaces, whoever wrote that.
-            var replaced = (durable?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
+            var replaced = durableRecords.ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
             foreach (var staged in upserts)
             {
                 if (replaced.TryGetValue(staged.Record.Key, out var durableAt))
@@ -3973,33 +4012,34 @@ namespace GameCult.Caching
 
             var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);
             var removed = removals.ToHashSet(StringComparer.Ordinal);
-            var copied = (durable?.Records ?? Array.Empty<CultPersistedRecord>())
+            var copied = durableRecords
                 .Where(record => !written.Contains(record.Key) && !removed.Contains(record.Key))
                 .ToArray();
-            var records = copied.Concat(upserts.Select(staged => staged.Record))
-                .OrderBy(record => record.Key, StringComparer.Ordinal)
+            var encoded = upserts.Select(staged => (Staged: staged, Bytes: SerializeRecord(staged.Record))).ToArray();
+            var records = copied.Concat(upserts.Select(staged => staged.Record)).ToArray();
+            var fileRecords = copied.Select(record => (record.Key, Bytes: durable!.Slice(record.Key)))
+                .Concat(encoded.Select(pair => (pair.Staged.Record.Key, pair.Bytes)))
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => pair.Bytes)
                 .ToArray();
-            var snapshot = new CultPersistedStoreSnapshot
-            {
-                FormatVersion = HeaderForWrite(
-                    durable?.FormatVersion,
-                    upserts.Select(staged => staged.HoldsIds).ToArray(),
-                    copiesAny: copied.Length > 0,
-                    directoryStore: false,
-                    holdsVariants: records.Any(record => record.Variant != null)),
-                SchemaCatalog = CultSchemaCatalogEntry.Derive(
-                        records,
-                        upserts.Select(staged => staged.Entry).Distinct().ToArray(),
-                        durable?.SchemaCatalog ?? Array.Empty<CultSchemaCatalogEntry>())
-                    .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
-                    .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
-                    .ToArray(),
-                Records = records
-            };
+            var catalog = CultSchemaCatalogEntry.Derive(
+                    records,
+                    upserts.Select(staged => staged.Entry).Distinct().ToArray(),
+                    durable?.Snapshot.SchemaCatalog ?? Array.Empty<CultSchemaCatalogEntry>())
+                .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+                .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
+                .Select(entry => durable?.CatalogBytes(entry) ?? SerializeCatalogEntry(entry))
+                .ToArray();
+            var format = HeaderForWrite(
+                durable?.Snapshot.FormatVersion,
+                upserts.Select(staged => staged.HoldsIds).ToArray(),
+                copiesAny: copied.Length > 0,
+                directoryStore: false,
+                holdsVariants: records.Any(record => record.Variant != null));
 
-            var versions = upserts.Select(staged => (staged, Version(staged.Record))).ToArray();
+            var versions = encoded.Select(pair => (pair.Staged, VersionOfBytes(pair.Bytes))).ToArray();
             Directory.CreateDirectory(FileInfo.DirectoryName!);
-            WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+            WriteSnapshotAtomically(FileInfo.FullName, SerializeStore(format, catalog, fileRecords));
             foreach (var key in removed)
                 _lastRead.Remove(key);
             foreach (var (staged, version) in versions)
@@ -4007,13 +4047,13 @@ namespace GameCult.Caching
             return versions;
         }
 
-        private void RefuseWriteIntoMovedVariantStore(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        private void RefuseWriteIntoMovedVariantStore(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
-            var records = durable?.Records ?? Array.Empty<CultPersistedRecord>();
+            var records = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
             if (records.All(record => record.Variant == null) && upserts.All(staged => staged.Record.Variant == null))
                 return;
             var changed = new HashSet<string>(StringComparer.Ordinal);
-            var versions = records.ToDictionary(record => record.Key, Version, StringComparer.Ordinal);
+            var versions = records.ToDictionary(record => record.Key, record => durable!.Version(record.Key), StringComparer.Ordinal);
             foreach (var (key, version) in versions)
             {
                 if (!_lastRead.TryGetValue(key, out var read) || !SameStoredIdentity(read, version))
@@ -4035,9 +4075,9 @@ namespace GameCult.Caching
             var changedKeys = changed.OrderBy(key => key, StringComparer.Ordinal).ToArray();
             Refuse(
                 recordKeys.Concat(changedKeys),
-                key => Cache == null || !byKey.TryGetValue(key, out var record) || Foreign(record, durable!.SchemaCatalog) != null
+                key => Cache == null || !byKey.TryGetValue(key, out var record) || Foreign(record, durable!.Snapshot.SchemaCatalog) != null
                     ? null
-                    : ToStoredDocument(record, versions[key], durable!.SchemaCatalog, DeserializePayload, out _),
+                    : ToStoredDocument(record, versions[key], durable!.Snapshot.SchemaCatalog, DeserializePayload, out _),
                 key =>
                 {
                     _staged.Remove(key);
@@ -4061,30 +4101,31 @@ namespace GameCult.Caching
                     inner));
         }
 
-        private void RefuseForeign(
-            IEnumerable<string> written,
-            IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign) =>
+        private void RefuseForeign(IEnumerable<string> written, Durable? disk)
+        {
+            var foreign = ForeignOnDisk(disk);
             RefuseForeign(
                 written,
-                key => foreign.TryGetValue(key, out var carried) ? carried.Foreign : null,
+                key => foreign.TryGetValue(key, out var carried) ? carried : null,
                 key =>
                 {
                     _staged.Remove(key);
                     IsDirty = _staged.Count > 0;
-                    if (foreign.TryGetValue(key, out var carried))
-                        _lastRead[key] = Version(carried.Record);
+                    if (foreign.ContainsKey(key))
+                        _lastRead[key] = disk!.Version(key);
                     else
                         _lastRead.Remove(key);
                 });
+        }
 
         // The records the file holds that no registered type claims, by key.
-        private Dictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> ForeignOnDisk(CultPersistedStoreSnapshot? disk)
+        private Dictionary<string, CultForeignRecord> ForeignOnDisk(Durable? disk)
         {
-            var foreign = new Dictionary<string, (CultForeignRecord, CultPersistedRecord)>(StringComparer.Ordinal);
-            foreach (var record in disk?.Records ?? Array.Empty<CultPersistedRecord>())
+            var foreign = new Dictionary<string, CultForeignRecord>(StringComparer.Ordinal);
+            foreach (var record in disk?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>())
             {
-                if (Foreign(record, disk!.SchemaCatalog) is { } carried)
-                    foreign[record.Key] = (carried, record);
+                if (Foreign(record, disk!.Snapshot.SchemaCatalog) is { } carried)
+                    foreign[record.Key] = carried;
             }
 
             return foreign;
@@ -4110,14 +4151,14 @@ namespace GameCult.Caching
 
         // Open, flush and commit read the file through this one call, so they agree on which files are stores. A file that is
         // gone is an empty store: nothing to read, nothing to lose. A zero-byte file is not a store; it is refused.
-        private CultPersistedStoreSnapshot? ReadSnapshot()
+        private Durable? ReadSnapshot()
         {
             var bytes = ReadDisk();
             if (bytes == null)
                 return null;
             try
             {
-                return DeserializeSnapshot(bytes);
+                return new Durable(this, ReadStore(bytes));
             }
             catch (CultStoreUnreadableException ex) when (ex.Path == null)
             {
@@ -4127,7 +4168,7 @@ namespace GameCult.Caching
 
         // CultMesh's single-file document helpers reach this store file only through this read and ApplyWriteSet, so they share
         // its one reader, its lock and its atomic replace.
-        internal CultPersistedStoreSnapshot? ReadDurable() => Held(ReadSnapshot);
+        internal CultPersistedStoreSnapshot? ReadDurable() => Held(() => ReadSnapshot()?.Snapshot);
 
         private byte[]? ReadDisk()
         {

@@ -189,6 +189,7 @@ namespace GameCult.Caching.Tests
             var path = OldStore("copied.cc");
             var descriptor = Declaring.GetRequired<DeclaringDeck>();
             var before = Read(path);
+            var entryBefore = StoreSlices.CatalogEntry(path, OldId);
 
             using (var cache = Open(path, Declaring))
                 cache.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e")));
@@ -199,7 +200,7 @@ namespace GameCult.Caching.Tests
             var copied = written.Records.Single(record => record.Key == "d");
             var original = before.Records.Single();
             Assert.That((copied.StoredAt, copied.Payload), Is.EqualTo((original.StoredAt, original.Payload)));
-            Assert.That(written.SchemaCatalog.Single(entry => entry.SchemaId == OldId).RawBytes, Is.EqualTo(before.SchemaCatalog.Single().RawBytes),
+            Assert.That(StoreSlices.CatalogEntry(path, OldId), Is.EqualTo(entryBefore),
                 "the entry that published the old id is carried as its bytes");
         }
 
