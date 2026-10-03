@@ -222,12 +222,12 @@ against what is durably on disk at that moment:
   constrained; unrelated concurrent writes do not fail the commit. Passing any
   instance other than the one the cache holds throws.
 - `ExpectUnchanged()`: the store's persisted record set must equal what this
-  cache last loaded from it, compared as the ordered list of
-  `(key, schemaId, storedAt)`. Any insert, delete or replace fails it.
+  cache last loaded from it, compared as the ordered list of `(key, version)`.
+  Any insert, delete or replace fails it.
 
-Record identity for conditions is `(schemaId, storedAt)`. It is sound because
-every write to a key mints a `storedAt` strictly later than the record it
-replaces; writers bump a minted timestamp by one tick when it is not later.
+Record identity for conditions is the record's version, the SHA-256 of its stored
+bytes (cultcache-persistence-format.md). Any write that changes a record changes
+its version, whatever storedAt it carries.
 
 - A failed condition is a lost race, not an error: `Commit` returns false and
   nothing is written, changed in memory, or published. `TryCommit` makes one
@@ -268,8 +268,7 @@ refuses to replace a file whose header it cannot read, and leaves it as it was.
 - A conditional commit lands the batch onto the file as it is under the lock.
 
 A store is written by one runtime at a time. Whether a Rust `fs2` lock and a C#
-exclusive open of the same lock file exclude each other is not established, and
-another runtime need not obey the `storedAt` rule.
+exclusive open of the same lock file exclude each other is not established.
 
 ## Serialization options
 

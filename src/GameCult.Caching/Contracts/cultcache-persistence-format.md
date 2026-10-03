@@ -46,8 +46,11 @@ store. The store commits the batch as one durable step. Nothing in the batch is
 visible, to the committing flow or to observers, until the store has accepted
 it; a failed commit changes nothing on disk or in memory.
 
-A batch may carry conditions: per-record `(schemaId, storedAt)` identity, or
-the whole store unchanged since it was last loaded. Conditions are evaluated
+A batch may carry conditions: per-record version, or the whole store unchanged
+since it was last loaded. A record's version is the SHA-256 of its persisted
+encoding, the array `[key, schemaId, storedAt, payload(, variant)]` a directory
+page holds; it names the schema id and storedAt as well as the bytes. storedAt is
+metadata and decides no condition. Conditions are evaluated
 under the store's exclusive lock against what is durably on disk. A failed
 condition is a lost race, not an error: the commit reports it and writes
 nothing.
@@ -58,8 +61,9 @@ applies only what it staged (writes and removals) and, for a commit, its batch,
 and replaces the store with the result. Every other record, and every catalog
 entry the result references, is copied forward as stored: key, schema id,
 storedAt, payload and variant, and a catalog entry's exact bytes, unknown
-fields included. No type interprets a copied record: a write reads other
-records' headers (key, schema id, storedAt, variant slot), never their payloads.
+fields included. No type interprets a copied record: a write may hash another
+record's bytes to compare versions, and reads its header (key, schema id, variant
+slot), but never decodes its payload.
 A record written over one the store holds gets a storedAt later than the one it
 replaces. A document changed in place and not staged is not written.
 
@@ -72,7 +76,7 @@ the keys it depends on.
 **A store that holds a variant, or would after the write, is written only from
 what its writer last read.** A variant resolves against other records (its base
 chain, and the index values it shares the store with). So before writing, the
-writer compares every record header in the store with the headers it last read
+writer compares every record's version with the version it last read
 or wrote. If any record moved, appeared or disappeared, the whole write is
 refused with the typed write conflict, naming the keys it would have written and
 the keys that moved, and nothing is written. A writer that has read nothing,
@@ -552,8 +556,8 @@ The v1 concurrent single-file policy is:
    latest snapshot and write nothing if one fails. In a store with no variant, a
    plain flush and an unconditional commit compare nothing: they apply their
    staged writes onto the current snapshot, last-writer-wins per staged key. A
-   write into a store that holds or would hold a variant compares every record
-   header with what the writer last read, and is refused if any moved. One whose
+   write into a store that holds or would hold a variant compares every record's
+   version with what the writer last read, and is refused if any moved. One whose
    header they cannot read is refused untouched.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
