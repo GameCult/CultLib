@@ -142,7 +142,7 @@ static async Task EditInPlaceAsync(string file, string kind)
         }
         case "override":
         {
-            var cache = BuildCache(file);
+            var cache = CultCacheMessagePack.Create(file, new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(new[] { typeof(CultCacheInteropNote) }) });
             await cache.PullAllBackingStoresAsync();
             var note = cache.AllEntries.OfType<CultCacheInteropNote>().Single();
             await cache.UpsertVariantAsync(
