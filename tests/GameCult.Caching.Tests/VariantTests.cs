@@ -665,6 +665,34 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.Get(other), Is.Not.Null);
         }
 
+        // A write lands on the file as it is now, so it is judged on the set the file will hold: the variants another writer left in it
+        // and this cache's own staged edits. Another writer adds a variant whose indexed value this cache's staged edit of its base
+        // now takes.
+        [Test]
+        public void AWriteIsJudgedOnTheStagedEditsAndTheVariantsAnotherWriterLeftInTheFile([Values] bool viaCommit)
+        {
+            var path = PathOf(viaCommit ? "judged-commit.cc" : "judged-flush.cc");
+            using var cache = Open(path);
+            SeedBase(cache);
+            using (var other = Open(path))
+                SeedBig(other);
+            var edited = Laser();
+            edited.Code = "laser big";
+            cache.UpsertAsync(typeof(VariantGear), edited, BaseKey).GetAwaiter().GetResult();
+
+            var refusal = Refused(() =>
+            {
+                if (viaCommit)
+                    cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("n"), new CultRecordKey("n")));
+                else
+                    cache.FlushAllBackingStores();
+            });
+
+            Assert.That(refusal.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value));
+            using var check = Open(path);
+            Assert.That(check.Get<VariantGear>(BaseKey)!.Code, Is.EqualTo("l1"), "the refused edit was not written");
+        }
+
         // ---- a write copies what it did not stage, and re-encodes what it stages under the type's own id ----
 
         private static readonly string DriftWideId = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }).GetRequired(typeof(DriftWide)).SchemaId;

@@ -276,6 +276,33 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.IsDirty, Is.False);
         }
 
+        // The operator's check on a real store: CULTLIB_REAL_STORE names a copy of one. A cache that registers none of its types
+        // stages one record and flushes or commits: every other record and catalog entry, and the header, are byte for byte as they were.
+        [Test]
+        public void ARealStoreSurvivesOneStagedWriteByteForByte([Values] bool commit)
+        {
+            var source = Environment.GetEnvironmentVariable("CULTLIB_REAL_STORE");
+            if (string.IsNullOrEmpty(source) || !File.Exists(source))
+                Assert.Ignore("CULTLIB_REAL_STORE does not name a copy of a real store.");
+            var path = PathOf("real.cc");
+            File.Copy(source!, path);
+            var before = Read(path);
+
+            using (var cache = Open(path, false))
+                Land(cache, commit, typeof(WsItem), new WsItem { Name = "name-real-write" }, new CultRecordKey("real-write"));
+
+            var after = Read(path);
+            TestContext.Out.WriteLine($"real store: {before.Records.Length} records, {before.SchemaCatalog.Length} catalog entries, header {before.FormatVersion}");
+            Assert.That(after.Records.Length, Is.EqualTo(before.Records.Length + 1));
+            Assert.That(after.FormatVersion, Is.EqualTo(before.FormatVersion));
+            byte[] Bytes(CultPersistedRecord record) => CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot { Records = new[] { record } });
+            var changed = before.Records.Where(record => !Bytes(record).SequenceEqual(Bytes(after.Records.Single(kept => kept.Key == record.Key)))).Select(record => record.Key).ToArray();
+            Assert.That(changed, Is.Empty, "records that are not byte-identical");
+            var afterEntries = after.SchemaCatalog.Select(entry => entry.RawBytes!).ToList();
+            var missing = before.SchemaCatalog.Where(entry => !afterEntries.Any(raw => raw.SequenceEqual(entry.RawBytes!))).Select(entry => entry.SchemaId).ToArray();
+            Assert.That(missing, Is.Empty, "catalog entries that are not byte-identical");
+        }
+
         private static void MarkAs(string path, string header)
         {
             var snapshot = Read(path);
@@ -302,6 +329,55 @@ namespace GameCult.Caching.Tests
             Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
 
             Assert.That(Read(path).FormatVersion, Is.EqualTo(anotherWriterAddedARecord ? CultPersistedStoreSnapshot.FormatV3 : CultPersistedStoreSnapshot.FormatV1));
+        }
+
+        // A copied record is known to hold no id only while the store holds it as this cache read it: another writer changed it after
+        // the load, so the cache cannot say what it holds now.
+        [Test]
+        public void AMarkedHeaderIsKeptWhenAnotherWriterChangedACopiedRecordAfterTheLoad()
+        {
+            var path = PathOf("mark-changed.cc");
+            Seed(path, false, "a");
+            MarkAs(path, CultPersistedStoreSnapshot.FormatV3);
+            using var cache = Open(path, false);
+            using (var other = Open(path, false))
+                other.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-a", Note = "changed" }, A));
+            MarkAs(path, CultPersistedStoreSnapshot.FormatV3);
+
+            Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
+
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
+        }
+
+        // What this cache wrote it knows: the record it stored without ids counts as holding none the next time it copies it.
+        [Test]
+        public void AMarkedHeaderIsDroppedWhenEveryRecordThisCacheWroteIsKnownToHoldNoId()
+        {
+            var path = PathOf("mark-wrote.cc");
+            Seed(path, false, "a");
+            using var cache = Open(path, false);
+            Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
+            MarkAs(path, CultPersistedStoreSnapshot.FormatV3);
+
+            Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-z" }, new CultRecordKey("z"));
+
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+        }
+
+        // A batch is the write that lands last: it replaces a staged write of the same key.
+        [Test]
+        public void ABatchWinsOverAStagedWriteOfTheSameKey()
+        {
+            var path = PathOf("batch-wins.cc");
+            Seed(path, false, "a");
+            using (var cache = Open(path, false))
+            {
+                cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-a", Note = "staged" }, A).GetAwaiter().GetResult();
+                Assert.That(cache.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-a", Note = "batch" }, A)), Is.True);
+            }
+
+            using var check = Open(path, false);
+            Assert.That(check.Get<WsItem>(A)!.Note, Is.EqualTo("batch"));
         }
 
         // v2 exactly when the written store holds a variant: a copied variant keeps it, and the last one removed drops it.
