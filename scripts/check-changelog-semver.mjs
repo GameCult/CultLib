@@ -253,10 +253,10 @@ function firstTagTrackingManaged(tags, dir, cwd) {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
       })
-        .split(" ")
+        .split("\0")
         .filter((entry) => entry.toLowerCase().endsWith(".dll"));
       for (const entry of entries) {
-        const tab = entry.indexOf("	");
+        const tab = entry.indexOf("\t");
         const id = entry.slice(0, tab).split(" ")[2];
         const path = entry.slice(tab + 1);
         if (!managedBlobs.has(id)) {
