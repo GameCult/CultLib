@@ -62,9 +62,11 @@ if ([version]$cultMathDeclared -ne [version]$cultMathAvailable) {
 # Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
 # carries its pdb's content id. ContinuousIntegrationBuild maps the local source path to /_/.
 # dotnet publish has no --no-incremental, so clear the configuration's intermediates instead: a stale obj
-# directory must not decide what the byte check compares.
-Get-ChildItem -LiteralPath (Join-Path $repoRoot "obj\src") -Directory -ErrorAction SilentlyContinue |
-  ForEach-Object { Join-Path $_.FullName $Configuration } |
+# directory must not decide what the byte check compares. Directory.Build.props puts every project's
+# intermediates under obj\<project dir>, CultMath's at obj\packages\cultmath\src\CultMath, so clear the
+# configuration directory beside every restored project's project.assets.json, not only those under obj\src.
+@(Get-ChildItem -LiteralPath (Join-Path $repoRoot "obj") -Recurse -File -Filter "project.assets.json" -ErrorAction SilentlyContinue) |
+  ForEach-Object { Join-Path $_.DirectoryName $Configuration } |
   Where-Object { Test-Path -LiteralPath $_ } |
   ForEach-Object { Remove-Item -LiteralPath $_ -Recurse -Force }
 $deterministicArguments = @("--disable-build-servers", "-p:UseSharedCompilation=false",
