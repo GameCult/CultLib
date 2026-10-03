@@ -747,19 +747,29 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
 // before it calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
-// A status function replaces a step's implicit success(), so Publish would run after the suite failed:
-// the same bypass as continue-on-error. "!cancelled()" matches through "cancelled(".
-const STATUS_FUNCTION = /\b(?:always|cancelled|failure)\s*\(/;
+// Any status function replaces a step's implicit success(), so Publish could run after the suite failed:
+// the same bypass as continue-on-error. success() is refused too: "success() || c" publishes on c alone,
+// and "success() && c" is sound but says nothing the same condition without it does not. "!cancelled()"
+// matches through "cancelled(".
+const STATUS_FUNCTION = /\b(?:always|cancelled|failure|success)\s*\(/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
 // The if: of the step that holds offset `at` in a job's text, or null when the step has none. A step
-// runs from its "- name:" line to the next one. Only the if: line is read, so a block scalar
-// (if: >- or if: |) comes back as its indicator; workflowSuiteProblems refuses it.
+// runs from its "- name:" line to the next one. Only the if: line is read, so an if: whose value goes on
+// past that line comes back as MULTI_LINE, which workflowSuiteProblems refuses: a block scalar (if: >-,
+// if: |), or a plain or quoted scalar continued on a following line indented deeper than the key, where
+// always() or "|| true" would hide from a one-line read.
+const MULTI_LINE = Symbol("multi-line if:");
 function stepCondition(job, at) {
   const names = [...job.matchAll(/^\s+- name:/gm)].map((match) => match.index);
   const start = names.filter((index) => index <= at).at(-1) ?? 0;
   const end = names.find((index) => index > at) ?? job.length;
-  return job.slice(start, end).match(/^\s+if:\s*(.*?)\s*$/m)?.[1] ?? null;
+  const step = job.slice(start, end);
+  const condition = step.match(/^([ \t]*)if:[ \t]*(.*?)[ \t]*\r?$/m);
+  if (condition === null) return null;
+  const next = step.slice(condition.index + condition[0].length).split("\n").find((line) => line.trim() !== "");
+  const continued = next !== undefined && next.match(/^[ \t]*/)[0].length > condition[1].length;
+  return continued || /^[>|]/.test(condition[2]) ? MULTI_LINE : condition[2];
 }
 
 // The suite must run whenever Publish does, so Publish's condition has to imply the suite's. Three
@@ -796,10 +806,10 @@ function workflowSuiteProblems(workflow) {
     const publish = at(/^\s+- name: Publish\b/m);
     if (publish < 0) return;
     const [suiteIf, publishIf] = [stepCondition(job, suite), stepCondition(job, publish)];
-    if ([suiteIf, publishIf].some((condition) => /^[>|]/.test(condition ?? ""))) {
-      problems.push(`${label} gives the suite or Publish a block-scalar if:, which the pin does not read; write it on one line`);
+    if ([suiteIf, publishIf].includes(MULTI_LINE)) {
+      problems.push(`${label} gives the suite or Publish a multi-line if: (a block scalar, or a value continued on the next line), which the pin does not read; write it on one line`);
     } else if (STATUS_FUNCTION.test(publishIf ?? "")) {
-      problems.push(`${label} lets Publish run after the suite fails or is skipped: its if: calls always(), cancelled() or failure()`);
+      problems.push(`${label} lets Publish run after the suite fails or is skipped: its if: calls always(), cancelled(), failure() or success()`);
     } else if (!suiteConditionCovers(suiteIf, publishIf)) {
       problems.push(`${label} runs the suite under a condition the pin cannot prove Publish implies; it accepts no suite if:, an equal if:, or Publish's if: as the suite's followed by " && " with no "||"`);
     }
@@ -853,16 +863,22 @@ test("workflow: every job runs the suite first, with every tag fetched; removing
   // a status function in Publish's if: runs it after the suite failed or was skipped
   const npmPublishIf = (prefix) => workflow.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, `$1${prefix}$2`);
   const status = /lets Publish run after the suite fails or is skipped/;
-  for (const prefix of ["always() && ", "!cancelled() && ", "cancelled() || ", "failure() && "]) {
+  for (const prefix of ["always() && ", "!cancelled() && ", "cancelled() || ", "failure() && ", "success() || "]) {
     assert.match(workflowSuiteProblems(npmPublishIf(prefix)).join("\n"), status, prefix);
   }
   assert.match(workflowSuiteProblems(pythonPublishIf((condition) => condition.replace(" && ", " && always() && "))).join("\n"), status);
-  // a block-scalar if: on either step is refused rather than compared by its indicator
-  const blockScalar = /gives the suite or Publish a block-scalar if:/;
+  // a multi-line if: on either step is refused rather than read by its first line: a block scalar...
+  const multiLine = /gives the suite or Publish a multi-line if:/;
   const npmBlockSuite = npmSuiteIf(">-\n          false");
-  assert.match(workflowSuiteProblems(npmBlockSuite.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1>-\n          $2")).join("\n"), blockScalar);
-  assert.match(workflowSuiteProblems(npmSuiteIf("|\n          true")).join("\n"), blockScalar);
-  assert.match(workflowSuiteProblems(npmPublishIf(">-\n          ")).join("\n"), blockScalar);
+  assert.match(workflowSuiteProblems(npmBlockSuite.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1>-\n          $2")).join("\n"), multiLine);
+  assert.match(workflowSuiteProblems(npmSuiteIf("|\n          true")).join("\n"), multiLine);
+  assert.match(workflowSuiteProblems(npmPublishIf(">-\n          ")).join("\n"), multiLine);
+  // ...or a plain or quoted scalar continued on a following line, where always() or "|| true" would hide
+  const npmPublishTail = (tail) => workflow.replace(/(- name: Publish\r?\n\s+if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, `$1${tail}`);
+  assert.match(workflowSuiteProblems(npmPublishTail(" &&\n          always()")).join("\n"), multiLine);
+  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => `${condition}\n          || true`)).join("\n"), multiLine);
+  assert.match(workflowSuiteProblems(npmPublishIf("\"").replace(/(if: "startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1 &&\n          always()\"")).join("\n"), multiLine);
+  assert.match(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref,\n          'refs/tags/cultcache-ts-v')")).join("\n"), multiLine);
   // a suite condition equal to Publish's passes
   assert.deepEqual(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref, 'refs/tags/cultcache-ts-v')")), []);
 });
