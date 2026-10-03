@@ -248,19 +248,16 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
   match its content address, at most five times; a pull that has not settled
   by then throws.
 
-**A plain flush and an unconditional commit are last-writer-wins: per file for
-single-file stores, per key for directory stores.** Both run
-under the same lock, so two writers never interleave bytes, but they compare
-nothing. Only a conditional commit (`Expect` or `ExpectUnchanged`) protects
-against another writer; processes sharing a store must all use it. A writer
-wins only over a file it can read: a single-file store refuses to replace a file
-whose header it cannot read, and leaves it as it was.
+**A plain flush and an unconditional commit are last-writer-wins per staged
+key, in both store kinds.** Both run under the same lock, so two writers never
+interleave bytes, but they compare nothing. Only a conditional commit
+(`Expect` or `ExpectUnchanged`) tells a writer another writer moved the keys it
+depends on. A writer wins only over a file it can read: a single-file store
+refuses to replace a file whose header it cannot read, and leaves it as it was.
 
-- A single-file store writes this cache's whole view of the file: a record
-  another writer added since this cache last pulled is gone.
-- A directory store writes this cache's staged keys onto the current manifest:
-  another writer's unrelated keys survive, a key both wrote holds the last
-  write.
+- A single-file store and a directory store apply this cache's staged writes and
+  removals onto what the store holds now: another writer's unrelated records
+  survive as stored, a key both wrote holds the last write.
 - An unconditional commit writes exactly what a flush of the same staged state
   plus the batch would write. It also persists any single writes staged earlier
   in that store, and leaves the store clean.

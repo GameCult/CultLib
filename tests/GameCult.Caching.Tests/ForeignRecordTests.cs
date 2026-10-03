@@ -603,23 +603,6 @@ namespace GameCult.Caching.Tests
             return path;
         }
 
-        // The record and the entry that described it when it loaded travel together: another writer re-describing the id since
-        // does not change what a whole view lays back.
-        [Test]
-        public void AWholeViewLaysBackTheCatalogEntryItLoadedWhateverTheFileSaysNow([Values(Write.Flush, Write.Commit)] Write write)
-        {
-            var path = OtherRuntimeStore("redescribed.cc");
-            var loaded = CatalogEntryBytes(path, OtherRuntimeId);
-            using var cache = Open(path, DeckOnly, directory: false);
-            var snapshot = Read(path);
-            snapshot.SchemaCatalog.Single(entry => entry.SchemaId == OtherRuntimeId).SchemaVersion = "tests.foreign_deck.redescribed";
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-
-            Land(cache, write, E, DeckOf("e"));
-
-            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(loaded));
-        }
-
         // A store whose file is gone holds nothing, foreign records included.
         [Test]
         public void AStoreWhoseFileIsGoneListsNoForeignRecords()
@@ -650,25 +633,6 @@ namespace GameCult.Caching.Tests
             {
                 SchemaCatalog = Read(path).SchemaCatalog.Where(entry => entry.SchemaId == schemaId).ToArray()
             });
-
-        // Records and catalog entries a runtime does not own survive its writes: a write of another record lays the record back with
-        // its id, storedAt, bytes and catalog entry as they were stored.
-        [Test]
-        public void AWriteOfAnotherRecordLaysBackARecordUnderAnIdThisBuildDoesNotOwn([Values] Write write)
-        {
-            var path = OtherRuntimeStore("other-runtime.cc");
-            var before = Stored(path, D);
-            var entry = CatalogEntryBytes(path, OtherRuntimeId);
-
-            using (var cache = Open(path, DeckOnly, directory: false))
-            {
-                Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("d"), "this build reads it");
-                Land(cache, write, E, DeckOf("e"));
-            }
-
-            Assert.That(Stored(path, D), Is.EqualTo(before));
-            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(entry));
-        }
 
         // A write of the record itself stores what the cache holds, under the type's own id.
         [Test]

@@ -52,14 +52,22 @@ under the store's exclusive lock against what is durably on disk. A failed
 condition is a lost race, not an error: the commit reports it and writes
 nothing.
 
-**Conditional commit is the only safe multi-process write.** A plain flush and
-an unconditional commit are last-writer-wins and write the same bytes: a single
-file is replaced by the writer's whole view, a directory manifest takes the
-writer's staged keys over the current manifest. An unconditional commit also
-persists writes staged earlier and leaves the store clean. Processes sharing a
-store must all use conditional commit. The last writer wins only over a file it
-can read: a single-file flush or commit refuses a file whose header it cannot
-read (truncated, or a format it does not read) and leaves the file as it was.
+**A flush, a commit and a single-file document write apply a write set.** Under
+the store's exclusive lock the writer reads what is durably in the store now,
+applies only what it staged (writes and removals) and, for a commit, its batch,
+and replaces the store with the result. Every other record, and every catalog
+entry the result references, is copied forward as stored: key, schema id,
+storedAt, payload and variant, and a catalog entry's exact bytes, unknown
+fields included. No type interprets a copied record. A plain flush and an
+unconditional commit write the same bytes and are last-writer-wins only per
+staged key; a document changed in place and not staged is not written. An
+unconditional commit also persists writes staged earlier and leaves the store
+clean. Conditional commit is how a writer learns that another writer moved the
+keys it depends on. A writer refuses a file whose header it cannot read
+(truncated, or a format it does not read) and leaves the file as it was. C#
+applies this to single-file stores, directory stores and CultMesh's single-file
+document writes; Rust, TypeScript and Python rewrite the store from their own copy until their
+parity cuts land.
 
 A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
 makes the open throw and is left byte-identical; it is never silently
@@ -142,33 +150,29 @@ names a local type only when no local type has the id, for a store written by a 
 schema ids this one cannot know (a Rust type's schema id is its entry type). A schema renamed under
 a stable id therefore opens in every runtime that holds the id.
 
-Records and catalog entries a runtime does not own survive its writes. A record a cache resolved
-through the catalog's schema name, or through an entry pointing at a local id, is readable, but its
-id is not one its type owns or declares compatible: a write of another record, a whole-view write
-included, lays it back with its id, storedAt, bytes and catalog entry exactly as they were stored.
-Only a write of that record itself stores it under the type's own id. A writer that describes
-schema ids itself (Rust, whose catalog entries are derived from its entry types) lays back the entry
-the file holds for an id it rewrites, and describes an id only when the file has no entry for it or
-when its registered type owns the id under another name (a rename).
+A write copies forward what it did not stage. A record a cache resolved through the catalog's schema
+name, or through an entry pointing at a local id, is readable, but its id is not one its type owns
+or declares compatible: a write of another record copies it with its id, storedAt, bytes and
+catalog entry exactly as they were stored. Only a write of that record itself stores it under the
+type's own id.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
 byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
-in C#), and the cache never holds it. Writes of other records proceed and lay it back as the file holds it, a
-whole-view write included. A write that would replace or remove it is refused with the typed schema conflict
-naming its key and id, and nothing is written. A marked header stays marked while a store carries one, because
-the writer cannot see whether it holds element ids. Declaring its id on a type claims it at the next load.
+in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
+naming its key and id, and nothing is written. A marked header stays marked while a store carries a record the writer cannot show to hold no element id. Declaring its id on a type claims it at the next load.
 
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
 in catalog order).
 
 A writer derives the catalog from the records it writes, and from nothing else. For each distinct
-schema id a record carries it chooses exactly one entry that publishes it: the entry that owns the id
-(a registered schema's descriptor, else an entry the record arrived with), else an entry that lists
-it as compatible (again registered first). When a registered descriptor and an arrived entry share an
-own id, the descriptor wins: a rename or a stale content hash takes the descriptor's name, hash,
-members and compatible ids as they are. Entries are written as chosen, deduplicated by own id, with
+schema id a record carries it chooses exactly one entry that publishes it. For an id the write stages
+a record under, that is the entry the writer registered or passed, and a rename or a stale content hash
+takes the descriptor's name, hash, members and compatible ids as they are. For every other id it is
+the durable entry that owns the id, else one that lists it as compatible, carried as its exact bytes,
+unknown trailing fields included. A registered entry never publishes an id the write stages nothing
+under. Entries are written as chosen, deduplicated by own id, with
 no union of compatible ids and no dependence on the order records arrive in; an entry no record needs
 is not written. A write is refused, and the store left as it was, when two entries of one tier share
 an own id and disagree on the schema name, when records of different types share a schema id, when a
@@ -522,8 +526,9 @@ The v1 concurrent single-file policy is:
 3. Writers re-read the current snapshot after taking the lock.
 4. Writers using conditional commit evaluate their conditions against the
    latest snapshot and write nothing if one fails. A plain flush and an
-   unconditional commit compare nothing and are last-writer-wins over a file
-   they can read; one whose header they cannot read is refused untouched.
+   unconditional commit compare nothing: they apply their staged writes onto the
+   current snapshot, last-writer-wins per staged key; one whose header they
+   cannot read is refused untouched.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 

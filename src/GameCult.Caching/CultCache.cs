@@ -3701,37 +3701,7 @@ namespace GameCult.Caching
                 Entries[stored.Key.Value] = stored;
             SetLastSchemaMigrationReports(reports);
             SetForeignRecords(foreign);
-
-            _unowned.Clear();
-            foreach (var record in snapshot.Records)
-            {
-                if (!Entries.TryGetValue(record.Key, out var held) || Owns(held.Descriptor, record.SchemaId))
-                    continue;
-                // An entry under the type's own id that lists the record's id says the record is this schema's: it is re-encoded.
-                var publisher = Publisher(record.SchemaId, snapshot.SchemaCatalog);
-                if (!Owns(held.Descriptor, publisher.SchemaId))
-                    _unowned[record.Key] = (held, record, publisher, held.Variant == null ? SerializePayload(held.Document) : null);
-            }
         }
-
-        // The records this store loaded under an id their type neither owns nor lists as compatible (another runtime's id, or an
-        // earlier declaration of the schema, resolved through the catalog's name or its pointer to a local id), each with the
-        // catalog entry that published it, keyed while the store holds the entry it loaded. A whole-view write lays such a record
-        // back exactly as it was stored, id and catalog entry included; only a write of the record itself stores it under its
-        // type's own id. Payload is what a plain document serialized to when it was loaded, so a change made to the document in
-        // place is told from a record nobody wrote (a variant persists its delta, never its resolved document).
-        private readonly Dictionary<string, (CultStoredDocument Loaded, CultPersistedRecord Record, CultSchemaCatalogEntry Entry, byte[]? Payload)> _unowned =
-            new(StringComparer.Ordinal);
-
-        private static bool Owns(CultDocumentDescriptor descriptor, string schemaId) =>
-            string.Equals(descriptor.SchemaId, schemaId, StringComparison.Ordinal) ||
-            descriptor.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal);
-
-        // The entry that publishes a schema id: the one that owns it, else the first that lists it.
-        private static CultSchemaCatalogEntry Publisher(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
-            catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
-            ?? catalog.First(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
-
         public override void Push(CultStoredDocument entry)
         {
             ThrowIfReadOnly();
@@ -3839,22 +3809,6 @@ namespace GameCult.Caching
             return CultCommitOutcome.Committed;
         }
 
-        // A record's (schema id, storedAt) names its stored bytes, and a commit condition trusts that name. So a whole-view write
-        // that stores a record differently is a new store of it and mints it a later storedAt: under another id than it was loaded
-        // under (a type re-encoding a record it read under an older id it declares), or with other
-        // bytes than the file holds at that storedAt. A record written exactly as it is stored keeps its storedAt.
-        // Records and catalog entries this runtime does not own survive the write: a record loaded under an id its type does not own
-        // and that nothing has written since is laid back as it was loaded, with the catalog entry that published it, and every
-        // foreign record the file holds now is laid back as the file holds it, over this cache's clean copy of it; a write this cache staged over one
-        // was refused before this. Arrived is the catalog the write publishes those records by.
-        private sealed class WholeViewWrite
-        {
-            public CultPersistedRecord[] Records = Array.Empty<CultPersistedRecord>();
-            public CultSchemaCatalogEntry[] Arrived = Array.Empty<CultSchemaCatalogEntry>();
-            // Keys written as the file holds or held them, not as this cache holds them.
-            public HashSet<string> LaidBack = new(StringComparer.Ordinal);
-        }
-
         private void RefuseForeign(
             IEnumerable<string> written,
             IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign) =>
@@ -3867,51 +3821,6 @@ namespace GameCult.Caching
                     IsDirty = _staged.Count > 0;
                 });
 
-        private WholeViewWrite WholeView(
-            IEnumerable<CultStoredDocument> view,
-            CultPersistedStoreSnapshot? disk,
-            IReadOnlyDictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> foreign)
-        {
-            // A record the file holds as foreign is the file's: it is carried, and this cache's clean copy of it is not written.
-            var entries = view.Where(entry => !foreign.ContainsKey(entry.Key.Value)).ToArray();
-
-            var write = new WholeViewWrite();
-            write.LaidBack.UnionWith(foreign.Keys);
-            var laidBackEntries = new List<CultSchemaCatalogEntry>();
-            var onDisk = (disk?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, StringComparer.Ordinal);
-            write.Records = entries.Select(entry =>
-            {
-                if (_unowned.TryGetValue(entry.Key.Value, out var loaded) && ReferenceEquals(loaded.Loaded, entry) &&
-                    (loaded.Payload == null || SerializePayload(entry.Document).AsSpan().SequenceEqual(loaded.Payload)))
-                {
-                    // Laid back only while the file still holds what was loaded: after that the file's record is its owner's newer
-                    // write, which stays as it is, and a record the file no longer holds is not written back.
-                    write.LaidBack.Add(entry.Key.Value);
-                    if (!onDisk.TryGetValue(entry.Key.Value, out var current))
-                        return null;
-                    if (current.SchemaId != loaded.Record.SchemaId || current.StoredAt != loaded.Record.StoredAt)
-                        return current;
-                    laidBackEntries.Add(loaded.Entry);
-                    return loaded.Record;
-                }
-
-                var record = ToPersistedRecord(entry, SerializePayload);
-                var unchanged = onDisk.TryGetValue(record.Key, out var stored) && stored.StoredAt == record.StoredAt
-                    ? SameStoredBytes(stored, record)
-                    : entry.StoredSchemaId == record.SchemaId;
-                if (!unchanged)
-                    record.StoredAt = CultCache.MintStoredAt(record.StoredAt);
-                return record;
-            }).OfType<CultPersistedRecord>().Concat(foreign.Values.Select(carried => carried.Record)).ToArray();
-
-            // An entry that published a laid-back record is written as it was loaded, whatever the file's entry for that id says now.
-            var laidBackIds = laidBackEntries.Select(entry => entry.SchemaId).ToHashSet(StringComparer.Ordinal);
-            write.Arrived = laidBackEntries.Distinct()
-                .Concat((disk?.SchemaCatalog ?? Array.Empty<CultSchemaCatalogEntry>()).Where(entry => !laidBackIds.Contains(entry.SchemaId)))
-                .ToArray();
-            return write;
-        }
-
         // The records the file holds that no registered type claims, by key.
         private Dictionary<string, (CultForeignRecord Foreign, CultPersistedRecord Record)> ForeignOnDisk(CultPersistedStoreSnapshot? disk)
         {
@@ -3923,36 +3832,6 @@ namespace GameCult.Caching
             }
 
             return foreign;
-        }
-
-        private static bool SameStoredBytes(CultPersistedRecord stored, CultPersistedRecord written) =>
-            stored.SchemaId == written.SchemaId &&
-            stored.Payload.AsSpan().SequenceEqual(written.Payload) &&
-            (stored.Variant == null
-                ? written.Variant == null
-                : written.Variant != null &&
-                  stored.Variant.BaseKey == written.Variant.BaseKey &&
-                  stored.Variant.Overrides.Count == written.Variant.Overrides.Count &&
-                  stored.Variant.Overrides.Zip(written.Variant.Overrides, (a, b) =>
-                          a.Op == b.Op && a.Id == b.Id && a.Value.AsSpan().SequenceEqual(b.Value) &&
-                          a.Path.Select(step => (step.Slot, step.ElementId)).SequenceEqual(b.Path.Select(step => (step.Slot, step.ElementId))))
-                      .All(same => same));
-
-        // The file now holds every record written, under the id and at the storedAt the write gave it: the store's entries and the
-        // cache's say so. A laid-back or carried record is on disk as the file had it, so the cache learns nothing new about it: in
-        // particular the ids it minted at load are still in memory only.
-        private void WroteWholeView(IReadOnlyCollection<CultPersistedRecord> written, HashSet<string> laidBack)
-        {
-            var asHeld = written.Where(record => !laidBack.Contains(record.Key)).ToArray();
-            foreach (var record in asHeld)
-            {
-                if (!Entries.TryGetValue(record.Key, out var entry))
-                    continue;
-                entry.StoredSchemaId = record.SchemaId;
-                entry.StoredAt = record.StoredAt;
-            }
-
-            Cache?.WroteWholeView(asHeld);
         }
 
         // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote
