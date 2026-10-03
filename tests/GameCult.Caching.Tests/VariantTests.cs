@@ -192,6 +192,7 @@ namespace GameCult.Caching.Tests
 
             a.PullAllBackingStoresAsync();
             seen = a.Get<VariantGear>(BigKey)!;
+            b.PullAllBackingStoresAsync();
             SeedBig(b, power: 26);
             Assert.That(a.Commit(batch =>
             {
