@@ -158,6 +158,43 @@ public sealed class CultMeshSingleFileStoreTests
             again.Records.Single(record => record.Key == key).Payload.Should().Equal(before.Records.Single(record => record.Key == key).Payload);
     }
 
+    // A Mesh write has read nothing and has no cache to resolve a variant against its base, so it never writes into a store that holds
+    // one: typed or raw, at the variant's key, its base's key or an unrelated key, it is refused and the file is left byte for byte.
+    [Test]
+    public void AMeshWriteIntoAStoreHoldingAVariantIsRefusedAndLeavesItByteIdentical(
+        [Values("variant", "base", "unrelated")] string target, [Values] bool typed)
+    {
+        var path = Path.Combine(_root, $"variant-{target}-{typed}.cc");
+        var baseKey = new CultRecordKey("a");
+        using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions()))
+        {
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(CultMeshBodyPublicationDocument), PublicationOf("a"), baseKey);
+                batch.UpsertVariant(new CultRecordKey("v"), baseKey, new[]
+                {
+                    cache.Override<CultMeshBodyPublicationDocument>(nameof(CultMeshBodyPublicationDocument.BodyId), "aetheria:v"),
+                    cache.Override<CultMeshBodyPublicationDocument>(nameof(CultMeshBodyPublicationDocument.ProducerId), "variant-producer")
+                });
+            });
+        }
+
+        var bytes = File.ReadAllBytes(path);
+        Snapshot(path).Records.Should().Contain(record => record.Variant != null);
+        var key = new CultRecordKey(target switch { "variant" => "v", "base" => "a", _ => "z" });
+
+        var conflict = Assert.Throws<CultWriteConflictException>(() =>
+        {
+            if (typed)
+                CultMesh.WriteSingleFileDocument(path, key, PublicationOf("z"));
+            else
+                CultMesh.WriteSingleFileDocumentPayload(path, key, Raw, null, new byte[] { 0x90 });
+        })!;
+
+        conflict.Message.Should().Contain("CultCache");
+        File.ReadAllBytes(path).Should().Equal(bytes);
+    }
+
     // The writer cannot see whether the raw payload or the records it copies hold element ids, so a marked file stays marked.
     [Test]
     public void AMeshRawWriteIntoAMarkedStoreKeepsItMarked()

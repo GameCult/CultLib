@@ -407,5 +407,110 @@ namespace GameCult.Caching.Tests
 
             Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
         }
+
+        // Another writer adds a record under this cache's schema id whose payload this cache's type cannot decode.
+        private static void AddUndecodableRecord(string path, string key)
+        {
+            var snapshot = Read(path);
+            snapshot.Records = snapshot.Records.Concat(new[]
+            {
+                new CultPersistedRecord { Key = key, SchemaId = ItemId, StoredAt = DateTimeOffset.UtcNow.ToString("O"), Payload = new byte[] { 0xC1 } }
+            }).OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
+            Write(path, snapshot);
+        }
+
+        // A flush decodes nothing it did not stage: a copied record this cache's type cannot decode is carried byte for byte.
+        [Test]
+        public void AFlushCopiesARecordThisCacheCannotDecode([Values] bool commit)
+        {
+            var path = PathOf("undecodable.cc");
+            Seed(path, false, "a");
+            using var a = Open(path, false);
+            AddUndecodableRecord(path, "r");
+            var carried = Stored(path, "r", false);
+
+            Land(a, commit, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
+
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "r", "y" }));
+            Assert.That(Stored(path, "r", false), Is.EqualTo(carried));
+        }
+
+        // The same record in a store holding a variant cannot be judged without decoding it: the write is refused with the decode
+        // failure as its cause, and the disk, the cache and its staged change are as they were.
+        [Test]
+        public void AWriteIntoAVariantStoreWithARecordThisCacheCannotLoadChangesNothing([Values] bool commit)
+        {
+            var path = PathOf("undecodable-variant.cc");
+            Seed(path, false, "a");
+            using (var seed = Open(path, false))
+                seed.Commit(batch => batch.UpsertVariant(new CultRecordKey("v"), A, new[] { seed.Override<WsItem>(nameof(WsItem.Note), "variant") }));
+            var a = Open(path, false);
+            AddUndecodableRecord(path, "r");
+            var before = File.ReadAllBytes(path);
+            var y = new CultRecordKey("y");
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+            {
+                if (commit)
+                    a.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-y" }, y));
+                else
+                    Land(a, false, typeof(WsItem), new WsItem { Name = "name-y" }, y);
+            })!;
+
+            Assert.That(conflict.InnerException, Is.Not.Null, "the decode failure is the cause");
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { "r" }));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(a.Get(new CultRecordKey("r")), Is.Null);
+            if (!commit)
+            {
+                Assert.That(a.IsDirty, Is.True, "a reload that fails changes nothing, the staged write included");
+                Assert.That(a.Get<WsItem>(y), Is.Not.Null);
+            }
+        }
+
+        // A stages k, B writes k later, A flushes: A's bytes land at a storedAt later than B's, so a writer holding B's k is told it moved.
+        [Test]
+        public void AWriteOverAnotherWritersLaterRecordStoresALaterStoredAt()
+        {
+            var path = PathOf("later.cc");
+            Seed(path, false, "a");
+            var k = new CultRecordKey("k");
+            using var a = Open(path, false);
+            a.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-a" }, k).GetAwaiter().GetResult();
+            System.Threading.Thread.Sleep(30);
+            using var b = Open(path, false);
+            b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k));
+            var seenByB = b.Get<WsItem>(k)!;
+            var bAt = Read(path).Records.Single(record => record.Key == "k").StoredAt;
+
+            a.FlushAllBackingStores();
+
+            var onDisk = Read(path).Records.Single(record => record.Key == "k");
+            Assert.That(DateTimeOffset.Parse(onDisk.StoredAt, null, System.Globalization.DateTimeStyles.RoundtripKind),
+                Is.GreaterThan(DateTimeOffset.Parse(bAt, null, System.Globalization.DateTimeStyles.RoundtripKind)));
+            Assert.That(a.Commit(batch => { batch.Expect(k, a.Get<WsItem>(k)!); batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "again" }, k); }),
+                Is.True, "A's own condition holds without a pull");
+            Assert.That(b.Commit(batch => { batch.Expect(k, seenByB); batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, k); }),
+                Is.False, "B's copy of k is no longer what the store holds");
+        }
+
+        // A commit that removes a key this cache staged removes it everywhere: the staged write does not survive the batch.
+        [Test]
+        public void ACommitThatRemovesAStagedKeyRemovesIt()
+        {
+            var path = PathOf("staged-removed.cc");
+            Seed(path, false, "a");
+            var k = new CultRecordKey("k");
+            using (var cache = Open(path, false))
+            {
+                cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-k" }, k).GetAwaiter().GetResult();
+                Assert.That(cache.Commit(batch => batch.Remove(k)), Is.True);
+                Assert.That(Keys(path), Is.EqualTo(new[] { "a" }));
+                Assert.That(cache.Get(k), Is.Null);
+            }
+
+            using var reopened = Open(path, false);
+            Assert.That(reopened.Get(k), Is.Null);
+        }
     }
 }

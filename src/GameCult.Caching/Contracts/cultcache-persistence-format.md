@@ -58,15 +58,37 @@ applies only what it staged (writes and removals) and, for a commit, its batch,
 and replaces the store with the result. Every other record, and every catalog
 entry the result references, is copied forward as stored: key, schema id,
 storedAt, payload and variant, and a catalog entry's exact bytes, unknown
-fields included. No type interprets a copied record. A plain flush and an
-unconditional commit write the same bytes and are last-writer-wins only per
-staged key; a document changed in place and not staged is not written. An
+fields included. No type interprets a copied record: a write reads other
+records' headers (key, schema id, storedAt, variant slot), never their payloads.
+A record written over one the store holds gets a storedAt later than the one it
+replaces. A document changed in place and not staged is not written.
+
+**In a store that holds no variant**, a plain flush and an unconditional commit
+write the same bytes and are last-writer-wins only per staged key. An
 unconditional commit also persists writes staged earlier and leaves the store
-clean. Conditional commit is how a writer learns that another writer moved the
-keys it depends on. A writer refuses a file whose header it cannot read
-(truncated, or a format it does not read) and leaves the file as it was. C#
-applies this to single-file stores, directory stores and CultMesh's single-file
-document writes; Rust, TypeScript and Python rewrite the store from their own copy until their
+clean. Conditional commit is how such a writer learns that another writer moved
+the keys it depends on.
+
+**A store that holds a variant, or would after the write, is written only from
+what its writer last read.** A variant resolves against other records (its base
+chain, and the index values it shares the store with). So before writing, the
+writer compares every record header in the store with the headers it last read
+or wrote. If any record moved, appeared or disappeared, the whole write is
+refused with the typed write conflict, naming the keys it would have written and
+the keys that moved, and nothing is written. A writer that has read nothing,
+such as CultMesh's single-file document write, never writes into a store holding
+a variant.
+
+**A refused write reloads what it refused.** A refusal (a foreign record at a
+key the write names, or a write conflict) reloads the durable view of every
+refused and moved key into the cache, as a pull would, and only then forgets the
+staged changes at those keys. The cache then serves what the store holds, and a
+retry is judged against that. If the reload is itself refused (the store holds a
+record this cache cannot load), nothing changes and the refusal carries that
+cause. A writer refuses a file whose header it cannot read (truncated, or a
+format it does not read) and leaves the file as it was. C# applies this to
+single-file stores, directory stores and CultMesh's single-file document writes;
+Rust, TypeScript and Python rewrite the store from their own copy until their
 parity cuts land.
 
 A store that fails to hydrate on open (corrupt bytes, unresolvable schema)
@@ -160,7 +182,7 @@ A record that resolves to no local type is a foreign record, for example one of 
 have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
 byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
 in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
-naming its key and id, and nothing is written. A marked header stays marked while a store carries a record the writer cannot show to hold no element id. Declaring its id on a type claims it at the next load.
+naming its key and id, and nothing is written. The refused keys are reloaded as the store holds them (a foreign record is not held), and their staged changes are forgotten. A marked header stays marked while a store carries a record the writer cannot show to hold no element id. Declaring its id on a type claims it at the next load.
 
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
@@ -525,10 +547,12 @@ The v1 concurrent single-file policy is:
 2. Writers take an exclusive sidecar lock derived from the `.cc` path.
 3. Writers re-read the current snapshot after taking the lock.
 4. Writers using conditional commit evaluate their conditions against the
-   latest snapshot and write nothing if one fails. A plain flush and an
-   unconditional commit compare nothing: they apply their staged writes onto the
-   current snapshot, last-writer-wins per staged key; one whose header they
-   cannot read is refused untouched.
+   latest snapshot and write nothing if one fails. In a store with no variant, a
+   plain flush and an unconditional commit compare nothing: they apply their
+   staged writes onto the current snapshot, last-writer-wins per staged key. A
+   write into a store that holds or would hold a variant compares every record
+   header with what the writer last read, and is refused if any moved. One whose
+   header they cannot read is refused untouched.
 5. Writers write a temp file, flush it, atomically replace the `.cc` file, and
    release the lock.
 

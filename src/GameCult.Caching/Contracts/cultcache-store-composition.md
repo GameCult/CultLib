@@ -248,8 +248,8 @@ replaces; writers bump a minted timestamp by one tick when it is not later.
   match its content address, at most five times; a pull that has not settled
   by then throws.
 
-**A plain flush and an unconditional commit are last-writer-wins per staged
-key, in both store kinds.** Both run under the same lock, so two writers never
+**In a store holding no variant, a plain flush and an unconditional commit are
+last-writer-wins per staged key, in both store kinds.** Both run under the same lock, so two writers never
 interleave bytes, but they compare nothing. Only a conditional commit
 (`Expect` or `ExpectUnchanged`) tells a writer another writer moved the keys it
 depends on. A writer wins only over a file it can read: a single-file store
@@ -258,6 +258,10 @@ refuses to replace a file whose header it cannot read, and leaves it as it was.
 - A single-file store and a directory store apply this cache's staged writes and
   removals onto what the store holds now: another writer's unrelated records
   survive as stored, a key both wrote holds the last write.
+- A single-file store holding a variant (the directory store refuses variants)
+  is written only from what its writer last read. A record that moved refuses
+  the whole write with the typed write conflict, and the refused and moved keys
+  are reloaded (cultcache-persistence-format.md).
 - An unconditional commit writes exactly what a flush of the same staged state
   plus the batch would write. It also persists any single writes staged earlier
   in that store, and leaves the store clean.

@@ -665,11 +665,11 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.Get(other), Is.Not.Null);
         }
 
-        // A write lands on the file as it is now, so it is judged on the set the file will hold: the variants another writer left in it
-        // and this cache's own staged edits. Another writer adds a variant whose indexed value this cache's staged edit of its base
-        // now takes.
+        // A store holding a variant is written only from what its writer last read. Another writer adds a variant whose indexed value
+        // this cache's staged edit of its base now takes: the write is refused whole, the cache reloads what it refused and what moved,
+        // and the retry is judged by the cache's own rules.
         [Test]
-        public void AWriteIsJudgedOnTheStagedEditsAndTheVariantsAnotherWriterLeftInTheFile([Values] bool viaCommit)
+        public void AWriteIntoAVariantStoreAnotherWriterChangedIsRefusedReloadedAndJudgedOnRetry([Values] bool viaCommit)
         {
             var path = PathOf(viaCommit ? "judged-commit.cc" : "judged-flush.cc");
             using var cache = Open(path);
@@ -679,18 +679,77 @@ namespace GameCult.Caching.Tests
             var edited = Laser();
             edited.Code = "laser big";
             cache.UpsertAsync(typeof(VariantGear), edited, BaseKey).GetAwaiter().GetResult();
+            var before = File.ReadAllBytes(path);
 
-            var refusal = Refused(() =>
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
             {
                 if (viaCommit)
                     cache.Commit(batch => batch.Upsert(typeof(VariantGear), Other("n"), new CultRecordKey("n")));
                 else
                     cache.FlushAllBackingStores();
-            });
+            })!;
 
-            Assert.That(refusal.Message, Does.Contain(BigKey.Value).And.Contain(BaseKey.Value));
-            using var check = Open(path);
-            Assert.That(check.Get<VariantGear>(BaseKey)!.Code, Is.EqualTo("l1"), "the refused edit was not written");
+            Assert.That(conflict.RecordKeys, Does.Contain(BaseKey.Value));
+            Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+            Assert.That(cache.Get<VariantGear>(BaseKey)!.Code, Is.EqualTo("l1"), "the refused edit is not served");
+            Assert.That(cache.Get(BigKey), Is.Not.Null, "the moved record is loaded");
+            Assert.That(cache.IsDirty, Is.False);
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before), "nothing was written");
+            Assert.That(Refused(() => cache.UpsertAsync(typeof(VariantGear), edited, BaseKey).GetAwaiter().GetResult()).Message,
+                Does.Contain(BigKey.Value), "the retry is judged by the cache's own index rule");
+        }
+
+        // A refused base removal leaves the cache serving the store, writable, and judging the next attempt itself.
+        [Test]
+        public void ARefusedBaseRemovalReloadsAndLeavesTheCacheWritable()
+        {
+            var path = PathOf("gear.cc");
+            var n = new CultRecordKey("n");
+            using var a = Open(path);
+            SeedBase(a);
+            using (var b = Open(path))
+                SeedBig(b);
+            a.Remove(BaseKey);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() => a.FlushAllBackingStores())!;
+
+            Assert.That(conflict.RecordKeys, Is.EqualTo(new[] { BaseKey.Value }));
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { BigKey.Value }));
+            Assert.That(a.Get(BaseKey), Is.Not.Null);
+            Assert.That(a.Get(BigKey), Is.Not.Null);
+            Assert.That(a.IsDirty, Is.False);
+            Assert.DoesNotThrow(() => a.FlushAllBackingStores());
+            Assert.DoesNotThrow(() => a.Commit(batch => batch.Upsert(typeof(VariantGear), Named("n", "nn"), n)));
+            Assert.That(Refused(() => a.Remove(BaseKey)).Message, Does.Contain(BigKey.Value), "a base with variants is refused by this cache's own rule");
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(n), Is.Not.Null);
+            Assert.That(reopened.Get(BigKey), Is.Not.Null);
+            Assert.That(reopened.Get(BaseKey), Is.Not.Null);
+        }
+
+        // A held record another writer changed is not trusted: the write is refused although this cache never staged it.
+        [Test]
+        public void AWriteIsRefusedWhenAnotherWriterChangedAVariantThisCacheHolds()
+        {
+            var path = PathOf("gear.cc");
+            using var a = Open(path);
+            SeedBase(a);
+            SeedBig(a);
+            using (var b = Open(path))
+                b.Commit(batch => batch.UpsertVariant(BigKey, BaseKey, new[]
+                {
+                    b.Override<VariantGear>(nameof(VariantGear.Name), "laser big"),
+                    b.Override<VariantGear>(nameof(VariantGear.Power), 99),
+                    b.Override<VariantGear>(nameof(VariantGear.Code), "laser big")
+                }));
+            Assert.That(a.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(25));
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+                a.Commit(batch => batch.Upsert(typeof(VariantGear), Named("y", "yy"), new CultRecordKey("y"))))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { BigKey.Value }));
+            Assert.That(a.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(99), "the cache serves the other writer's override after the refusal");
         }
 
         // ---- a write copies what it did not stage, and re-encodes what it stages under the type's own id ----
@@ -962,12 +1021,16 @@ namespace GameCult.Caching.Tests
                     a.Override<VariantGear>(nameof(VariantGear.Code), "shared")
                 }));
 
-                var refused = Refused(() => b.Commit(batch =>
+                void Write() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);
-                }));
-                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"));
+                });
+
+                var conflict = Assert.Throws<CultWriteConflictException>(Write)!;
+                Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+                var refused = Refused(Write);
+                Assert.That(refused.Message, Does.Contain(other.Value).And.Contain(BigKey.Value).And.Contain("code").And.Contain("shared"), "the retry is judged by Resolve");
                 Assert.That(b.Get(other), Is.Null, "nothing landed in memory");
             }
 
@@ -989,12 +1052,16 @@ namespace GameCult.Caching.Tests
                 var seen = b.Get<VariantGear>(BaseKey)!;
                 SeedBig(a);
 
-                var refused = Refused(() => b.Commit(batch =>
+                void Write() => b.Commit(batch =>
                 {
                     batch.Expect(BaseKey, seen);
                     batch.Remove(BaseKey);
-                }));
-                Assert.That(refused.Message, Does.Contain(BaseKey.Value).And.Contain(BigKey.Value));
+                });
+
+                var conflict = Assert.Throws<CultWriteConflictException>(Write)!;
+                Assert.That(conflict.ChangedKeys, Does.Contain(BigKey.Value));
+                var refused = Refused(Write);
+                Assert.That(refused.Message, Does.Contain(BaseKey.Value).And.Contain(BigKey.Value), "the retry is judged by Resolve");
                 Assert.That(b.Get(BaseKey), Is.Not.Null, "nothing landed in memory");
             }
 
@@ -1004,7 +1071,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AConditionalCommitThatIsSoundOnTheMergedSetStillLands()
+        public void AConditionalCommitThatIsSoundOntoAVariantStoreAnotherWriterChangedIsRefusedThenLandsOnRetry()
         {
             var path = PathOf("gear.cc");
             var other = new CultRecordKey("other");
@@ -1015,11 +1082,15 @@ namespace GameCult.Caching.Tests
             using (var b = Open(path))
             {
                 SeedBig(a);
-                Assert.That(b.Commit(batch =>
+                bool Write() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "fine"), other);
-                }), Is.True);
+                });
+
+                Assert.Throws<CultWriteConflictException>(() => Write());
+                Assert.That(b.Get(BigKey), Is.Not.Null, "the refusal reloaded the other writer's variant");
+                Assert.That(Write(), Is.True);
             }
 
             using var reopened = Open(path);
@@ -1135,7 +1206,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AVariantAnotherWriterLandedIsStillJudgedWhenThisCacheHoldsNoVariant()
+        public void AVariantAnotherWriterLandedIsRefusedAsChangedWhenThisCacheHoldsNoVariant()
         {
             var path = PathOf("gear.cc");
             var other = new CultRecordKey("other");
@@ -1146,7 +1217,7 @@ namespace GameCult.Caching.Tests
             using (var b = Open(path))
             {
                 VariantOnCode(a, "shared");
-                Refused(() => b.Commit(batch =>
+                Assert.Throws<CultWriteConflictException>(() => b.Commit(batch =>
                 {
                     batch.Expect(other, null);
                     batch.Upsert(typeof(VariantGear), Named("other", "shared"), other);

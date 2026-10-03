@@ -73,6 +73,13 @@ public sealed class CultMeshSingleFileReadabilityTests
             if (reads)
             {
                 var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
+                if (before.Records.Any(record => record.Variant != null))
+                {
+                    Assert.That(() => write(path), Throws.TypeOf<CultWriteConflictException>(), name);
+                    File.ReadAllBytes(path).Should().Equal(bytes, name + " wrote into a store holding a variant it cannot resolve");
+                    continue;
+                }
+
                 write(path);
                 var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
                 after.Records.Where(record => record.Key == "publication").Should().ContainSingle(name);
