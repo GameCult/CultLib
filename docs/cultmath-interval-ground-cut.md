@@ -1284,3 +1284,73 @@ only the Windows and GPU legs, one job at a time:
   carries both. Centring the warp in the site needs a bound on the flow
   texture's variation, and the texture stays the one motion owner (it is
   sampled at the centre, never re-derived).
+
+### Pass 5b: the deep well (ruling `wells-scale-order-of-magnitude`)
+
+The operator's words: "There should be a well pushing down with both a radius
+and depth an order of magnitude larger than the span of the bit that's
+expensive to sample, the fog gradient, otherwise there's no meaningful skipping
+being measured".
+
+**Her diagnosis holds.** The expensive band is the stretch of the
+pre-distortion height `s` where only the noise decides whether there is
+density.
+- `FogField` has `F = -20` and `A = 20`, and the noise reaches ±1.5. With the
+  fade at 1, a slice is provably empty only where `s >= F + 1.5 A = 10`.
+- It is dense whatever the noise does where `s < F - 1.5 A = -50`.
+- So the band is `G = 60` units.
+
+Today's (c) wells, from `NoiseBoundTests.cs:753-776`:
+- **Depths** are `d = 30 M^0.175`: 67, 101, 150 and 101. That is 1.1 to 2.5
+  times `G`.
+- **Half-depth radii** are about `0.103 x 500 M^0.25` for a `PowerPulse`
+  exponent of 16: 163, 290, 515 and 290. That is 2.7 to 8.6 times `G`.
+- **The zone bowl** is 64 deep, 1.07 times `G`.
+
+No well is ten times `G` deep. The camera sits just above the band
+(`y = max(0, S + 10 - h)`) and grazes it, so most of the measured cost is the
+band itself, and little of it is empty space.
+
+**The probe.** The probe added a field, `(c') deep well`, on the scratch
+branch at `bf0148b8`:
+- the zone bowl plus one well at its centre, with depth 600 and half-depth
+  radius 600 (`PowerPulse` exponent 2, scale 2220), so each is `10 G`;
+- the camera's xz within 300 of the centre, at `y = F - h / 2`, halfway
+  between the sunken fog surface and the rim;
+- slopes as (c), `m_y` in [-0.25, 0.1].
+
+A level ray crosses about 600 units of empty well before the wall, and the
+band there is about 73 units along the ray. The run used the same run
+parameters, seeds and constants as Pass 5, on Yggdrasil.
+
+| `N = 8` | efficiency vs oracle | cost ratio | dense cells/ray | probe overhead | cull |
+| --- | --- | --- | --- | --- | --- |
+| deep well, warp 0, landed interval | 0.591 | 3.10x | 4.14 | 0.943 | 0.986 |
+| deep well, warp 0, centred interval | 0.579 | 3.04x | 4.14 | 0.924 | 0.986 |
+| deep well, warp 0, affine (one symbol) | **0.662** | **3.47x** | 3.27 | 0.879 | 0.993 |
+| deep well, warp 0, range ceiling | 0.859 | (oracle ceiling 5.24x) | | | 0.997 |
+| deep well, warp 60, landed interval | 0.462 | 2.45x | 6.58 | 0.970 | 0.967 |
+| deep well, warp 60, centred interval | 0.555 | 2.95x | 4.34 | 0.926 | 0.984 |
+| deep well, warp 60, affine (one symbol) | **0.644** | **3.42x** | 3.33 | 0.880 | 0.992 |
+| deep well, warp 60, range ceiling | 0.848 | (oracle ceiling 5.31x) | | | 0.996 |
+
+There were no enclosure violations, and transmittance equals the dense march
+in every row.
+
+What changes:
+- Where the empty space is real, the interval march already skips most of it.
+  It reaches 0.59 at warp 0, and 0.46, or 0.56 with the warp centred, at warp
+  `D`.
+- Affine's gain over the centred interval shrinks to 1.14x and 1.16x in
+  combined cost, against 1.39x and 1.37x on the band-dominated wells.
+- Against the landed interval it is 1.12x and 1.40x.
+- Affine reaches 0.77 and 0.76 of the range ceiling. What it wins is in the
+  wall's band, which is where the shallow wells spend everything.
+- Probe overhead is 0.88 in both rows, still under the 0.90 rule.
+
+Decision for the cut (`affine-forms` r2): **(c) becomes the deep well, which
+carries the contract.** The four mass-derived wells are kept as a printed row,
+`(c-band)`. They are not the skipping measurement the ruling asks for, but they
+are Aetheria's own geometry and the band-dominated case, where affine gains
+most. Dropping them would hide where affine pays. The cull-map image renders a
+deep-well camera at warp `D`.
