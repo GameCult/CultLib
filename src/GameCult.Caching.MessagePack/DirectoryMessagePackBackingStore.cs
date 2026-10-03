@@ -293,20 +293,23 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 pagePayload);
         }
 
+        // The catalog and the header follow the shared write rules: the registered entry publishes only the ids this write put a record
+        // under, every other record and entry stays as the manifest holds it.
+        var written = keysToWrite.Where(key => Entries.ContainsKey(key)).ToHashSet(StringComparer.Ordinal);
         var targetCatalog = CultSchemaCatalogEntry.Derive(
                 currentIndex.Values,
-                Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
+                written.Select(key => Entries[key].Descriptor).Distinct().Select(descriptor => descriptor.ToCatalogEntry()).ToArray(),
                 currentManifest.SchemaCatalog)
             .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
             .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
             .ToArray();
 
-        // The directory store writes only its dirty pages, so it keeps a manifest already marked.
-        var header = HeaderFor(
-            keysToWrite.Any(key => Entries.TryGetValue(key, out var written) && written.HoldsIds),
+        var header = HeaderForWrite(
             currentManifest.FormatVersion,
-            wholeStore: false,
-            directoryStore: true);
+            written.Select(key => (bool?)Entries[key].HoldsIds),
+            currentIndex.Values.Where(record => !written.Contains(record.Key)),
+            directoryStore: true,
+            holdsVariants: false);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
             .ToArray(), header);

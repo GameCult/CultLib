@@ -29,11 +29,19 @@ namespace GameCult.Caching
 
         public CultSchemaMemberCatalogEntry[] Members { get; set; } = Array.Empty<CultSchemaMemberCatalogEntry>();
 
-        // The catalog a write leaves, derived from the records being written and nothing else. For each schema id a record carries, one
-        // entry that publishes it: the entry that owns the id (a registered descriptor, else one that arrived with the records), else
-        // one that lists it as compatible (registered first). Entries are written as chosen, never merged; a registered descriptor
-        // wins over an arrived entry with the same own id. Two arrived entries with the same own id and different schema names, or a
-        // record no chosen entry publishes, refuse the write.
+        // The exact MessagePack bytes this entry was read from, when it was read from a store. A writer that carries the entry
+        // forward emits them as they are, so what this runtime does not decode (fields beyond the ones it knows, the width of an int,
+        // nil) survives; an entry whose decoded fields were changed since is encoded from them instead. Null for an entry a runtime
+        // built.
+        internal byte[]? RawBytes { get; set; }
+
+        // The catalog a write leaves, derived from the records the written store holds and nothing else. For each schema id a record
+        // carries, one entry that publishes it: for an id the write stages a record under, the entry the writer registered (or passed)
+        // for it, which owns the id; for every other id the arrived (durable) entry that owns it, else the first that lists it as
+        // compatible, carried as the bytes it was read from. A registered entry never publishes an id nothing staged sits under, so
+        // the caller passes registered entries only for the ids it writes. Entries are written as chosen, never merged; a registered
+        // descriptor wins over an arrived entry with the same own id. Two arrived entries with the same own id and different schema
+        // names, or a record no chosen entry publishes, refuse the write.
         // Entries that tie are taken in one fixed order, so the catalog does not depend on the order they arrive in.
         private static IEnumerable<CultSchemaCatalogEntry> Canonical(IEnumerable<CultSchemaCatalogEntry> entries) => entries
             .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
@@ -78,9 +86,8 @@ namespace GameCult.Caching
                 }
                 else
                 {
-                    pick = Canonical(registered.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal))).FirstOrDefault();
-                    isRegistered = pick != null;
-                    pick ??= Canonical(arrived.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal))).FirstOrDefault();
+                    pick = Canonical(arrived.Where(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal))).FirstOrDefault();
+                    isRegistered = false;
                 }
 
                 if (pick == null)
@@ -134,6 +141,22 @@ namespace GameCult.Caching
 
         // Non-null for a variant record (slot 4): its base and overrides. Its payload is empty.
         public CultVariantDelta? Variant { get; set; }
+    }
+
+    // One record a write puts in a single-file store: encoded, with the catalog entry that publishes the id it is stored under and
+    // whether its document holds element ids (null when the writer cannot see, as for a raw payload).
+    internal sealed class CultStagedRecord
+    {
+        internal CultStagedRecord(CultPersistedRecord record, CultSchemaCatalogEntry entry, bool? holdsIds)
+        {
+            Record = record;
+            Entry = entry;
+            HoldsIds = holdsIds;
+        }
+
+        internal CultPersistedRecord Record { get; }
+        internal CultSchemaCatalogEntry Entry { get; }
+        internal bool? HoldsIds { get; }
     }
 
     /// <summary>
@@ -1999,10 +2022,10 @@ namespace GameCult.Caching
         // Read under the gate, by a store judging a merge.
         internal bool HoldsVariants => _variantKeys.Count > 0;
 
-        // A store wrote its whole view: every record it wrote is stored under its type's own id at the storedAt the write gave it,
+        // A store wrote: every record it wrote is stored under its type's own id at the storedAt the write gave it,
         // and a plain record carries the ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the
         // store wrote the delta it was handed, and only a write of the variant changes that.
-        internal void WroteWholeView(IEnumerable<CultPersistedRecord> written) => Held(() =>
+        internal void Wrote(IEnumerable<CultPersistedRecord> written) => Held(() =>
         {
             foreach (var record in written)
             {
@@ -3444,6 +3467,25 @@ namespace GameCult.Caching
             return directoryStore ? DirectoryFormatV4 : holdsVariants ? CultPersistedStoreSnapshot.FormatV2 : CultPersistedStoreSnapshot.FormatV1;
         }
 
+        // The header a write leaves, for either store kind: HeaderFor decides, given what the write can see. Marked when a record it
+        // writes holds an id; kept marked while the store carries a record it cannot show holds none (an opaque payload it writes, or
+        // a copied record that is not known id-free); otherwise by content. A copied record is known id-free when this store holds
+        // that key under the same stored identity as the file and its document holds no id.
+        protected string HeaderForWrite(string? durableHeader, IEnumerable<bool?> written, IEnumerable<CultPersistedRecord> copied, bool directoryStore, bool holdsVariants)
+        {
+            var holds = written.ToArray();
+            var holdsIds = holds.Any(value => value == true);
+            var seen = HeaderFor(holdsIds, durableHeader, wholeStore: true, directoryStore, holdsVariants);
+            var unseen = HeaderFor(holdsIds, durableHeader, wholeStore: false, directoryStore, holdsVariants);
+            return seen == unseen || (holds.All(value => value != null) && copied.All(KnownIdFree)) ? seen : unseen;
+        }
+
+        private bool KnownIdFree(CultPersistedRecord record) =>
+            Entries.TryGetValue(record.Key, out var held) &&
+            held.StoredSchemaId == record.SchemaId &&
+            held.StoredAt == record.StoredAt &&
+            !held.HoldsIds;
+
         // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
         // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
         // returns. File locks are always taken inside it.
@@ -3725,9 +3767,10 @@ namespace GameCult.Caching
             });
         }
 
-        // A plain flush writes this store's whole view under the lock: two writers never interleave bytes, but the last
-        // one wins over any file this runtime can read. Processes sharing a store must use conditional commit. A file it
-        // cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused and left as it is.
+        // A flush applies this store's staged writes and removals onto what the file holds now, under the lock: two writers never
+        // interleave bytes, every record this cache did not stage stays as the file has it, and a plain flush is last-writer-wins
+        // only per staged key. A file it cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused
+        // and left as it is.
         public override void PushAll()
         {
             ThrowIfReadOnly();
@@ -3736,17 +3779,11 @@ namespace GameCult.Caching
                 using (AcquireLock(wait: true))
                 {
                     var disk = ReadSnapshot();
-                    var foreign = ForeignOnDisk(disk);
-                    RefuseForeign(_staged, foreign);
-                    var view = WholeView(Entries.Values, disk, foreign);
-                    WriteSnapshot(
-                        view.Records,
-                        Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry()).ToArray(),
-                        view.Arrived,
-                        Entries.Values.Any(entry => entry.HoldsIds && !view.LaidBack.Contains(entry.Key.Value)),
-                        disk?.FormatVersion,
-                        wholeStore: foreign.Count == 0);
-                    WroteWholeView(view.Records, view.LaidBack);
+                    RefuseForeign(_staged, ForeignOnDisk(disk));
+                    JudgeMerge(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), disk ?? new CultPersistedStoreSnapshot());
+                    var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
+                    ApplyWriteSet(disk, upserts, removals);
+                    Wrote(upserts.Select(staged => staged.Record));
                 }
 
                 _staged.Clear();
@@ -3760,6 +3797,8 @@ namespace GameCult.Caching
             return Held(() => CommitBatchCore(request, wait));
         }
 
+        // Conditions are checked against the file under the lock, and only the condition differs between a conditional and an
+        // unconditional commit: both apply the batch and every staged write onto the file as it is.
         private CultCommitOutcome CommitBatchCore(CultCommitRequest request, bool wait)
         {
             using var fileLock = AcquireLock(wait);
@@ -3770,43 +3809,100 @@ namespace GameCult.Caching
             if (!request.ConditionsHold(disk.Records, Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
-            // An unconditional commit writes what a flush would, this store's whole view plus the batch: last-writer-wins,
-            // and staged single writes land with it. A conditional commit (store clean) lands the batch onto the file as it is.
-            var ontoDisk = request.HasConditions && !IsDirty;
-            var foreign = ForeignOnDisk(disk);
-            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), foreign);
-
-            var view = ontoDisk ? null : WholeView(Entries.Values, disk, foreign);
-            var records = (view?.Records ?? disk.Records).ToDictionary(record => record.Key, StringComparer.Ordinal);
-            // The committer judged the batch against its own view; the file may have moved since. A merge is judged on the
-            // set the file will hold, exactly as that set would be judged loading: what other processes wrote (arriving),
-            // what they removed (departing), and this batch.
-            if (ontoDisk && Judging != null && MergeInvolvesVariants(request, disk))
-                JudgeMerge(request, disk);
-            foreach (var entry in request.Deletes)
-                records.Remove(entry.Key.Value);
-            foreach (var entry in request.Upserts)
-                records[entry.Key.Value] = ToPersistedRecord(entry, SerializePayload);
-
-            // Onto the file, only the batch's records are seen: the rest stay as they are, and the header they carry stays. An
-            // unconditional commit writes this store's whole view, so what its records hold decides. A record this commit
-            // replaces or removes no longer counts.
-            var replaced = request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
-            var holdsIds = request.Upserts.Any(entry => entry.HoldsIds) ||
-                           (!ontoDisk && Entries.Values.Any(entry => entry.HoldsIds && !replaced.Contains(entry.Key.Value) && !view!.LaidBack.Contains(entry.Key.Value)));
-            var registered = Entries.Values.Select(entry => entry.Descriptor.ToCatalogEntry())
-                .Concat(request.Upserts.Select(entry => entry.Descriptor.ToCatalogEntry()))
-                .ToArray();
-            WriteSnapshot(records.Values, registered, view?.Arrived ?? disk.SchemaCatalog, holdsIds, disk.FormatVersion, wholeStore: !ontoDisk && foreign.Count == 0);
+            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), ForeignOnDisk(disk));
+            JudgeMerge(request.Upserts, request.Deletes, disk);
+            var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
+            ApplyWriteSet(disk, upserts, removals);
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
-            if (view != null)
-                WroteWholeView(records.Values, view.LaidBack);
+            Wrote(upserts.Select(staged => staged.Record));
             _staged.Clear();
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
+        }
+
+        // What a write puts in the store and takes out of it: the staged keys as this cache holds them now (a key it no longer holds
+        // is a removal), and a commit's batch, which wins over a staged write of the same key. Records it did not stage are not here.
+        private (List<CultStagedRecord> Upserts, List<string> Removals) StagedWrites(
+            IReadOnlyList<CultStoredDocument> batchUpserts,
+            IReadOnlyList<CultStoredDocument> batchDeletes)
+        {
+            var documents = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
+            var removals = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var key in _staged)
+            {
+                if (Entries.TryGetValue(key, out var held))
+                    documents[key] = held;
+                else
+                    removals.Add(key);
+            }
+
+            foreach (var entry in batchDeletes)
+            {
+                documents.Remove(entry.Key.Value);
+                removals.Add(entry.Key.Value);
+            }
+
+            foreach (var entry in batchUpserts)
+            {
+                documents[entry.Key.Value] = entry;
+                removals.Remove(entry.Key.Value);
+            }
+
+            var catalogEntries = new Dictionary<CultDocumentDescriptor, CultSchemaCatalogEntry>();
+            var upserts = documents.Values.Select(document =>
+            {
+                if (!catalogEntries.TryGetValue(document.Descriptor, out var catalogEntry))
+                    catalogEntries[document.Descriptor] = catalogEntry = document.Descriptor.ToCatalogEntry();
+                return new CultStagedRecord(ToPersistedRecord(document, SerializePayload), catalogEntry, document.HoldsIds);
+            }).ToList();
+            return (upserts, removals.ToList());
+        }
+
+        /// <summary>
+        /// The one write of this store: under its lock, the durable store read there with the upserts written and the removals
+        /// and the upserts' keys taken out of what is copied, every other record copied forward as stored. CultMesh's
+        /// single-file document writes call this, with no cache attached.
+        /// </summary>
+        internal void ApplyWriteSet(IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals) => Held(() =>
+        {
+            using (AcquireLock(wait: true))
+                ApplyWriteSet(ReadSnapshot(), upserts, removals);
+        });
+
+        // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold.
+        private void ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        {
+            var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);
+            var removed = removals.ToHashSet(StringComparer.Ordinal);
+            var copied = (durable?.Records ?? Array.Empty<CultPersistedRecord>())
+                .Where(record => !written.Contains(record.Key) && !removed.Contains(record.Key))
+                .ToArray();
+            var records = copied.Concat(upserts.Select(staged => staged.Record))
+                .OrderBy(record => record.Key, StringComparer.Ordinal)
+                .ToArray();
+            var snapshot = new CultPersistedStoreSnapshot
+            {
+                FormatVersion = HeaderForWrite(
+                    durable?.FormatVersion,
+                    upserts.Select(staged => staged.HoldsIds),
+                    copied,
+                    directoryStore: false,
+                    holdsVariants: records.Any(record => record.Variant != null)),
+                SchemaCatalog = CultSchemaCatalogEntry.Derive(
+                        records,
+                        upserts.Select(staged => staged.Entry).Distinct().ToArray(),
+                        durable?.SchemaCatalog ?? Array.Empty<CultSchemaCatalogEntry>())
+                    .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
+                    .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
+                    .ToArray(),
+                Records = records
+            };
+
+            Directory.CreateDirectory(FileInfo.DirectoryName!);
+            WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
         }
 
         private void RefuseForeign(
@@ -3834,21 +3930,43 @@ namespace GameCult.Caching
             return foreign;
         }
 
+        // The file now holds every record written, under the id and at the storedAt the write gave it: the store's entries and the
+        // cache's say so. A copied record is on disk as the file had it, so nothing learns anything new about it: in particular the
+        // ids it minted at load are still in memory only.
+        private void Wrote(IEnumerable<CultPersistedRecord> written)
+        {
+            var records = written.ToArray();
+            foreach (var record in records)
+            {
+                if (!Entries.TryGetValue(record.Key, out var entry))
+                    continue;
+                entry.StoredSchemaId = record.SchemaId;
+                entry.StoredAt = record.StoredAt;
+            }
+
+            Cache?.Wrote(records);
+        }
+
         // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote
         // (read from the record's header, never its payload), or one this cache holds. A plain-only store never decodes
-        // another writer's records, so a schema this cache does not register cannot fail a commit that involves no variant.
-        private bool MergeInvolvesVariants(CultCommitRequest request, CultPersistedStoreSnapshot disk) =>
+        // another writer's records, so a schema this cache does not register cannot fail a write that involves no variant.
+        private bool MergeInvolvesVariants(IReadOnlyList<CultStoredDocument> batchUpserts, CultPersistedStoreSnapshot disk) =>
             Cache?.HoldsVariants == true ||
-            request.Upserts.Any(entry => entry.Variant != null) ||
+            batchUpserts.Any(entry => entry.Variant != null) ||
             disk.Records.Any(record => record.Variant != null);
 
-        private void JudgeMerge(CultCommitRequest request, CultPersistedStoreSnapshot disk)
+        // A write lands on the file as it is now, so the set the file will hold is judged exactly as that set would be judged
+        // loading: what other processes wrote (arriving), what they removed (departing), and this write's batch. A staged key is this
+        // cache's own, already judged when it was staged, so it is neither arriving nor departing.
+        private void JudgeMerge(IReadOnlyList<CultStoredDocument> batchUpserts, IReadOnlyList<CultStoredDocument> batchDeletes, CultPersistedStoreSnapshot disk)
         {
-            var landing = request.Upserts.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
-            var removing = request.Deletes.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
+            if (Judging == null || !MergeInvolvesVariants(batchUpserts, disk))
+                return;
+            var landing = batchUpserts.Select(entry => entry.Key.Value).Concat(_staged).ToHashSet(StringComparer.Ordinal);
+            var removing = batchDeletes.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
             var onDisk = disk.Records.Select(record => record.Key).ToHashSet(StringComparer.Ordinal);
-            var arriving = new List<CultStoredDocument>(request.Upserts);
-            var departing = new List<CultStoredDocument>(request.Deletes);
+            var arriving = new List<CultStoredDocument>(batchUpserts);
+            var departing = new List<CultStoredDocument>(batchDeletes);
             foreach (var record in disk.Records)
             {
                 if (landing.Contains(record.Key) || removing.Contains(record.Key))
@@ -3868,7 +3986,8 @@ namespace GameCult.Caching
 
             departing.AddRange(Entries.Values.Where(known =>
                 !onDisk.Contains(known.Key.Value) && !landing.Contains(known.Key.Value) && !removing.Contains(known.Key.Value)));
-            Judging!(arriving, departing);
+            if (arriving.Count > 0 || departing.Count > 0)
+                Judging(arriving, departing);
         }
 
         // Open, flush and commit read the file through this one call, so they agree on which files are stores. A file that is
@@ -3888,19 +4007,9 @@ namespace GameCult.Caching
             }
         }
 
-        // CultMesh's single-file document helpers reach this store file only through these two members, so they share its one
-        // reader, its lock and its atomic replace. c2a-write-set replaces ReplaceDurable with ApplyWriteSet.
+        // CultMesh's single-file document helpers reach this store file only through this read and ApplyWriteSet, so they share
+        // its one reader, its lock and its atomic replace.
         internal CultPersistedStoreSnapshot? ReadDurable() => Held(ReadSnapshot);
-
-        internal void ReplaceDurable(Func<CultPersistedStoreSnapshot?, CultPersistedStoreSnapshot> next) => Held(() =>
-        {
-            using (AcquireLock(wait: true))
-            {
-                var snapshot = next(ReadSnapshot());
-                Directory.CreateDirectory(FileInfo.DirectoryName!);
-                WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
-            }
-        });
 
         private byte[]? ReadDisk()
         {
@@ -3938,23 +4047,6 @@ namespace GameCult.Caching
             FileInfo.Refresh();
             var attributes = FileInfo.Attributes;
             return (int)attributes != -1 && (attributes & FileAttributes.ReparsePoint) != 0;
-        }
-
-        private void WriteSnapshot(IEnumerable<CultPersistedRecord> records, IReadOnlyCollection<CultSchemaCatalogEntry> registered, IReadOnlyCollection<CultSchemaCatalogEntry> arrived, bool holdsElementIds, string? existingHeader, bool wholeStore)
-        {
-            var ordered = records.OrderBy(record => record.Key, StringComparer.Ordinal).ToArray();
-            var snapshot = new CultPersistedStoreSnapshot
-            {
-                FormatVersion = HeaderFor(holdsElementIds, existingHeader, wholeStore, directoryStore: false, holdsVariants: ordered.Any(record => record.Variant != null)),
-                SchemaCatalog = CultSchemaCatalogEntry.Derive(ordered, registered, arrived)
-                    .OrderBy(entry => entry.SchemaName, StringComparer.Ordinal)
-                    .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
-                    .ToArray(),
-                Records = ordered
-            };
-
-            Directory.CreateDirectory(FileInfo.DirectoryName!);
-            WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
         }
 
         // The lock is a sidecar opened exclusively, which excludes other handles in this process and in others alike.

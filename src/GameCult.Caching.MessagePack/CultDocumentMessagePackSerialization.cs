@@ -128,7 +128,7 @@ public static class CultDocumentMessagePackSerialization
             elements[slot] = value;
         }
 
-        var buffer = new ArrayBufferWriter<byte>();
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
         var writer = new MessagePackWriter(buffer);
         writer.WriteArrayHeader(elements.Count);
         foreach (var element in elements)
@@ -432,7 +432,33 @@ public static class CultDocumentMessagePackSerialization
         return record;
     }
 
+    // An entry read from a store is written as the bytes it was read from, so a fact this runtime does not decode survives a
+    // write that only carries the entry. That holds only while the decoded fields are the ones read: an entry changed since is
+    // encoded from them.
     private static void WriteSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
+    {
+        if (entry.RawBytes is { } raw && EncodeSchemaCatalogEntry(entry).AsSpan().SequenceEqual(EncodeSchemaCatalogEntry(ReadRawSchemaCatalogEntry(raw))))
+            writer.WriteRaw(new ReadOnlySpan<byte>(raw));
+        else
+            WriteDecodedSchemaCatalogEntry(ref writer, entry);
+    }
+
+    private static CultSchemaCatalogEntry ReadRawSchemaCatalogEntry(byte[] raw)
+    {
+        var reader = new MessagePackReader(raw);
+        return ReadSchemaCatalogEntry(ref reader);
+    }
+
+    private static byte[] EncodeSchemaCatalogEntry(CultSchemaCatalogEntry entry)
+    {
+        var buffer = new global::System.Buffers.ArrayBufferWriter<byte>();
+        var writer = new MessagePackWriter(buffer);
+        WriteDecodedSchemaCatalogEntry(ref writer, entry);
+        writer.Flush();
+        return buffer.WrittenSpan.ToArray();
+    }
+
+    private static void WriteDecodedSchemaCatalogEntry(ref MessagePackWriter writer, CultSchemaCatalogEntry entry)
     {
         writer.WriteArrayHeader(SchemaCatalogEntryFieldCount);
         writer.Write(entry.SchemaId);
@@ -455,6 +481,7 @@ public static class CultDocumentMessagePackSerialization
 
     private static CultSchemaCatalogEntry ReadSchemaCatalogEntry(ref MessagePackReader reader)
     {
+        var start = reader.Position;
         var fieldCount = reader.ReadArrayHeader();
         var entry = new CultSchemaCatalogEntry();
 
@@ -508,6 +535,7 @@ public static class CultDocumentMessagePackSerialization
             reader.Skip();
         }
 
+        entry.RawBytes = reader.Sequence.Slice(start, reader.Position).ToArray();
         return entry;
     }
 

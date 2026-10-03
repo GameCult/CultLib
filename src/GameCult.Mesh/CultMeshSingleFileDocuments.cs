@@ -108,8 +108,7 @@ namespace GameCult.Mesh
                     descriptor.ToCatalogEntry(),
                     storedAt,
                     CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    CultElementIds.Holds(document),
-                    contentKnown: true);
+                    CultElementIds.Holds(document));
             }
             catch
             {
@@ -147,7 +146,7 @@ namespace GameCult.Mesh
             byte[] payload)
         {
             if (schema == null) throw new ArgumentNullException(nameof(schema));
-            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: false, contentKnown: false);
+            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: null);
         }
 
         /// <summary>
@@ -230,8 +229,7 @@ namespace GameCult.Mesh
             CultSchemaCatalogEntry catalogEntry,
             string? storedAt,
             byte[] payload,
-            bool holdsIds,
-            bool contentKnown)
+            bool? holdsIds)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
@@ -239,24 +237,24 @@ namespace GameCult.Mesh
                 throw new ArgumentException("Catalog entry must include a schema id.", nameof(catalogEntry));
 
             payload ??= Array.Empty<byte>();
-            // A typed write sees the document it replaces the file with, so its ids decide. A raw payload is opaque: the writer
-            // cannot see whether it holds ids, so a file already marked stays marked. The store reads the file it replaces under
-            // its lock: one this runtime cannot read refuses the write instead of being overwritten.
-            StoreAt(path).ReplaceDurable(existing => new CultPersistedStoreSnapshot
-            {
-                FormatVersion = CacheBackingStore.HeaderFor(holdsIds, existing?.FormatVersion, wholeStore: contentKnown, directoryStore: false),
-                SchemaCatalog = new[] { catalogEntry },
-                Records = new[]
+            // The write replaces this one key and copies every other record and catalog entry forward as the store holds them, under
+            // the store's lock. A typed write sees its document, so its ids decide the header; a raw payload is opaque (holdsIds null),
+            // so a file already marked stays marked. A store this runtime cannot read refuses the write instead of being overwritten.
+            StoreAt(path).ApplyWriteSet(
+                new[]
                 {
-                    new CultPersistedRecord
-                    {
-                        Key = key.Value,
-                        SchemaId = catalogEntry.SchemaId,
-                        StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
-                        Payload = payload
-                    }
-                }
-            });
+                    new CultStagedRecord(
+                        new CultPersistedRecord
+                        {
+                            Key = key.Value,
+                            SchemaId = catalogEntry.SchemaId,
+                            StoredAt = string.IsNullOrWhiteSpace(storedAt) ? DateTimeOffset.UtcNow.ToString("O") : storedAt!,
+                            Payload = payload
+                        },
+                        catalogEntry,
+                        holdsIds)
+                },
+                Array.Empty<string>());
         }
 
         private static SingleFileMessagePackBackingStore StoreAt(string path) => new SingleFileMessagePackBackingStore(path);
