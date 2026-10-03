@@ -73,10 +73,7 @@ internal static class GlslLowering
         source = Regex.Replace(source, @"(?ms)^\w+ \w+\([^)]*\b(Texture2D|SamplerState)\b[^)]*\)\s*\{.*?^\}[ \t]*$", string.Empty);
 
         // 3. Type names: floatN, intN, uintN and boolN become vecN, ivecN, uvecN and bvecN.
-        source = Regex.Replace(source, @"\bfloat([234])\b", "vec$1");
-        source = Regex.Replace(source, @"\bint([234])\b", "ivec$1");
-        source = Regex.Replace(source, @"\buint([234])\b", "uvec$1");
-        source = Regex.Replace(source, @"\bbool([234])\b", "bvec$1");
+        source = LowerTypeNames(source);
 
         // 4. File-scope `static const` becomes `const`.
         source = Regex.Replace(source, @"(?m)^static const ", "const ");
@@ -101,6 +98,15 @@ internal static class GlslLowering
         // 8. The guard named for the file (CultMath.glsl -> CULTMATH_GLSL), and 9. the provenance line.
         var guard = file.ToUpperInvariant().Replace('.', '_');
         return provenance + "\n#ifndef " + guard + "\n#define " + guard + "\n" + source.Trim('\n') + "\n\n#endif\n";
+    }
+
+    /// <summary>Step 3 alone; GlslMirrorTests maps the HLSL signatures with it to compare overloads.</summary>
+    internal static string LowerTypeNames(string source)
+    {
+        source = Regex.Replace(source, @"\bfloat([234])\b", "vec$1");
+        source = Regex.Replace(source, @"\bint([234])\b", "ivec$1");
+        source = Regex.Replace(source, @"\buint([234])\b", "uvec$1");
+        return Regex.Replace(source, @"\bbool([234])\b", "bvec$1");
     }
 
     private static readonly Regex Cast = new(@"\((float|int|uint)\)");

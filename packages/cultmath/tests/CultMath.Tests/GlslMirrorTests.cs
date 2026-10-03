@@ -61,14 +61,21 @@ public sealed class GlslMirrorTests
 
     private static readonly Regex Definition = new(@"(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)");
 
+    // A definition's signature, its name and parameter types, so an overload counts on its own:
+    // "cultmath_pcg3d(vec2)". HLSL type names are mapped by the lowering's own step 3.
+    private static string Signature(Match definition) =>
+        definition.Groups[1].Value + "(" + string.Join(", ", definition.Groups[2].Value
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(parameter => GlslLowering.LowerTypeNames(string.Join(' ', Regex.Split(parameter, @"\s+")[..^1])))) + ")";
+
     [Fact]
     public void EveryPublicFunctionIsLowered()
     {
         var lowered = Lowered;
         var hlsl = Definition.Matches(Hlsl).Where(m => !Regex.IsMatch(m.Groups[2].Value, @"\b(Texture2D|SamplerState)\b"))
-            .Select(m => m.Groups[1].Value).ToHashSet();
-        var glsl = lowered.SelectMany(output => Definition.Matches(output.Text)).Select(m => m.Groups[1].Value).ToHashSet();
-        Assert.Contains("cultmath_snoise", glsl);
+            .Select(Signature).ToHashSet();
+        var glsl = lowered.SelectMany(output => Definition.Matches(output.Text)).Select(Signature).ToHashSet();
+        Assert.Contains("cultmath_pcg3d(vec2)", glsl);
         Assert.True(hlsl.SetEquals(glsl), "HLSL only: " + string.Join(", ", hlsl.Except(glsl)) + "; GLSL only: " + string.Join(", ", glsl.Except(hlsl)));
 
         // The MPL-2.0 code is in its own file and nowhere in the MIT library.
@@ -79,6 +86,26 @@ public sealed class GlslMirrorTests
             Assert.DoesNotContain(token, library);
             Assert.Contains(token, phacelle);
         }
+    }
+
+    // The two-file contract a consumer relies on when it concatenates CultMath.Phacelle.glsl after
+    // CultMath.glsl: distinct guards (a shared one would hide the second file's body), each provenance
+    // line naming its file's licence, and the MIT file pointing at the one that holds cultmath_phacelle.
+    [Fact]
+    public void TwoFileHeaderContract()
+    {
+        var lowered = Lowered;
+        var guards = lowered.Select(output => Regex.Match(output.Text, @"^[^\n]*\n#ifndef (\w+)\n#define \1\n").Groups[1].Value).ToArray();
+        Assert.All(guards, guard => Assert.NotEqual(string.Empty, guard));
+        Assert.Equal(guards.Length, guards.Distinct().Count());
+
+        var library = lowered.Single(output => output.File == "CultMath.glsl").Text.Split('\n')[0];
+        var phacelle = lowered.Single(output => output.File == "CultMath.Phacelle.glsl").Text.Split('\n')[0];
+        Assert.Contains(" MIT.", library);
+        Assert.DoesNotContain("MPL", library);
+        Assert.Contains("cultmath_phacelle is in CultMath.Phacelle.glsl", library);
+        Assert.Contains(" MPL-2.0;", phacelle);
+        Assert.DoesNotContain("MIT", phacelle);
     }
 
     [Fact]
