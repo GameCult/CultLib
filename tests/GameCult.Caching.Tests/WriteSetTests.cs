@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using GameCult.Caching.MessagePack;
@@ -468,17 +469,17 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // A stages k, B writes k later, A flushes: A's bytes land at a storedAt later than B's, so a writer holding B's k is told it moved.
+        // A stages k, B writes k later, A flushes: A's bytes land at a storedAt later than B's in either store kind, so a writer holding B's k is told it moved.
         [Test]
-        public void AWriteOverAnotherWritersLaterRecordStoresALaterStoredAt()
+        public void AWriteOverAnotherWritersLaterRecordStoresALaterStoredAt([Values] bool directory)
         {
             var path = PathOf("later.cc");
-            Seed(path, false, "a");
+            Seed(path, directory, "a");
             var k = new CultRecordKey("k");
-            using var a = Open(path, false);
+            using var a = Open(path, directory);
             a.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-a" }, k).GetAwaiter().GetResult();
             System.Threading.Thread.Sleep(30);
-            using var b = Open(path, false);
+            using var b = Open(path, directory);
             b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k));
             var seenByB = b.Get<WsItem>(k)!;
             var bAt = Read(path).Records.Single(record => record.Key == "k").StoredAt;
@@ -511,6 +512,159 @@ namespace GameCult.Caching.Tests
 
             using var reopened = Open(path, false);
             Assert.That(reopened.Get(k), Is.Null);
+        }
+
+        private static DateTimeOffset At(string storedAt) => DateTimeOffset.Parse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+
+        private static string StoredAtOf(string path, string key) => Read(path).Records.Single(record => record.Key == key).StoredAt;
+
+        private static void AddVariant(CultCache cache, string key, CultRecordKey baseKey) =>
+            cache.Commit(batch => batch.UpsertVariant(new CultRecordKey(key), baseKey, new[]
+            {
+                cache.Override<WsItem>(nameof(WsItem.Name), "name-" + key),
+                cache.Override<WsItem>(nameof(WsItem.Note), "variant-" + key)
+            }));
+
+        // The record under a key now belongs to a schema no registered type claims, as if a build that knows more types wrote it.
+        private static void MakeForeign(string path, string key)
+        {
+            const string foreignId = "sha256:00000000000000000000000000000000000000000000000000000000000050de";
+            var snapshot = Read(path);
+            snapshot.Records.Single(record => record.Key == key).SchemaId = foreignId;
+            snapshot.SchemaCatalog = snapshot.SchemaCatalog.Append(new CultSchemaCatalogEntry
+            {
+                SchemaId = foreignId,
+                SchemaName = "tests.write_set_foreign",
+                SchemaVersion = "tests.write_set_foreign.v1",
+                ContentHash = "foreign",
+                CanonicalSchemaJson = "{}"
+            }).ToArray();
+            Write(path, snapshot);
+        }
+
+        // Two writers whose clocks put a record's storedAt ahead of both mint the same storedAt over it. The second to write
+        // replaces the first's different bytes, so it is stored later than the first's, and the first's copy is told it moved.
+        // The equal storedAt is the case, and the mint is from the stored one, not from the writer's clock (which is behind it).
+        [Test]
+        public void AWriteOverARecordAtItsOwnStoredAtIsStoredLaterWhateverTheClockSays([Values] bool commit)
+        {
+            var path = PathOf("skew.cc");
+            Seed(path, false, "k");
+            var k = new CultRecordKey("k");
+            var ahead = DateTimeOffset.UtcNow.AddHours(1).ToString("O", CultureInfo.InvariantCulture);
+            var snapshot = Read(path);
+            snapshot.Records.Single(record => record.Key == "k").StoredAt = ahead;
+            Write(path, snapshot);
+            using var a = Open(path, false);
+            using var b = Open(path, false);
+            if (commit)
+                b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k));
+            else
+            {
+                a.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-a" }, k).GetAwaiter().GetResult();
+                b.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k).GetAwaiter().GetResult();
+                b.FlushAllBackingStores();
+            }
+
+            var bAt = StoredAtOf(path, "k");
+            var seenByB = b.Get<WsItem>(k)!;
+            if (!commit)
+                Assert.That(a.GetStored(k)!.StoredAt, Is.EqualTo(bAt), "both writers minted the same storedAt over the record");
+
+            if (commit)
+                a.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-a" }, k));
+            else
+                a.FlushAllBackingStores();
+
+            Assert.That(At(StoredAtOf(path, "k")), Is.GreaterThan(At(bAt)), "A's different bytes are stored later than B's");
+            Assert.That(b.Commit(batch =>
+            {
+                batch.Expect(k, seenByB);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, k);
+            }), Is.False, "B's copy of k is not what the store holds");
+        }
+
+        // Another writer removes a base and its variant together; this cache, still holding both, adds a variant of that base.
+        // The base and the variant disappeared from the store, which moved it: the write is refused and the cache reloads.
+        [Test]
+        public void AVariantWrittenOverABaseAnotherWriterRemovedIsRefusedAndReloaded()
+        {
+            var path = PathOf("gone-base.cc");
+            Seed(path, false, "x");
+            using var a = Open(path, false);
+            AddVariant(a, "v", X);
+            using (var b = Open(path, false))
+                Assert.That(b.Commit(batch => { batch.Remove(new CultRecordKey("v")); batch.Remove(X); }), Is.True);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() => AddVariant(a, "w", X))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { "v", "x" }));
+            Assert.That(Keys(path), Is.Empty, "nothing was written");
+            Assert.That(a.Get(X), Is.Null, "the cache reloaded what the other writer removed");
+            using var fresh = Open(path, false);
+            Assert.That(fresh.Get(X), Is.Null);
+        }
+
+        // A foreign refusal whose own reload is refused (dropping x, which a held variant is based on) carries that refusal as its cause.
+        [Test]
+        public void AForeignRefusalWhoseReloadFailsCarriesThatCause([Values] bool commit)
+        {
+            var path = PathOf("foreign-reload.cc");
+            Seed(path, false, "x");
+            var a = Open(path, false);
+            AddVariant(a, "v", X);
+            MakeForeign(path, "x");
+            var before = File.ReadAllBytes(path);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                Land(a, commit, typeof(WsItem), new WsItem { Name = "name-x", Note = "edited" }, X))!;
+
+            Assert.That(refusal.RecordKey, Is.EqualTo("x"));
+            Assert.That(refusal.InnerException, Is.Not.Null, "the reload that failed is the cause");
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(a.Get<WsItem>(X), Is.Not.Null, "the reload failed, so the cache is unchanged");
+        }
+
+        // A refused foreign record is what the store holds, so the next write into a variant store is not told that it moved.
+        [Test]
+        public void AForeignRecordARefusalReloadedIsNotSeenAsMovedByTheNextWrite([Values] bool commit)
+        {
+            var path = PathOf("foreign-read.cc");
+            Seed(path, false, "a", "x");
+            using var a = Open(path, false);
+            AddVariant(a, "v", A);
+            MakeForeign(path, "x");
+            Assert.Throws<CultSchemaConflictException>(() =>
+                Land(a, commit, typeof(WsItem), new WsItem { Name = "name-x", Note = "edited" }, X));
+
+            Assert.DoesNotThrow(() => Land(a, commit, typeof(WsItem), new WsItem { Name = "name-n" }, new CultRecordKey("n")));
+
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "n", "v", "x" }));
+        }
+
+        // A writer that finds the store file gone has read nothing there: a write into the store it makes anew is not refused as
+        // moved because of what the writer read from the file that was.
+        [Test]
+        public void AWriterThatFindsTheStoreFileGoneWritesItAnewWithoutBeingToldItMoved()
+        {
+            var path = PathOf("gone-store.cc");
+            Seed(path, false, "a");
+            using var a = Open(path, false);
+            AddVariant(a, "v", A);
+            File.Delete(path);
+            a.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-a", Note = "again" }, A);
+                batch.UpsertVariant(new CultRecordKey("v"), A, new[]
+                {
+                    a.Override<WsItem>(nameof(WsItem.Name), "name-v"),
+                    a.Override<WsItem>(nameof(WsItem.Note), "variant-again")
+                });
+            }), Is.True);
+
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "v" }));
         }
     }
 }

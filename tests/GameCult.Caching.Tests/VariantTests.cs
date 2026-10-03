@@ -181,8 +181,13 @@ namespace GameCult.Caching.Tests
             var seen = a.Get<VariantGear>(BigKey)!;
 
             EditBase(b, gear => gear.Tags.Add("pierce"));
-            // The store holds a variant and moved, so the first write is refused and reloaded; the variant's own record did not move.
-            Assert.Throws<CultWriteConflictException>(() => a.Commit(batch => batch.Upsert(typeof(VariantOther), new VariantOther { Name = "marker" }, new CultRecordKey("marker"))));
+            // Expect tests the variant's stored delta only, and it did not change, so the condition holds and the write goes on: the
+            // store holds a variant and moved, so it is refused and reloaded as a write conflict. It is not a mismatch (false).
+            Assert.Throws<CultWriteConflictException>(() => a.Commit(batch =>
+            {
+                batch.Expect(BigKey, seen);
+                batch.Upsert(typeof(VariantOther), new VariantOther { Name = "marker" }, new CultRecordKey("marker"));
+            }));
             seen = a.Get<VariantGear>(BigKey)!;
             Assert.That(a.Commit(batch =>
             {
