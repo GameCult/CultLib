@@ -5,7 +5,8 @@ the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 revises the
 two CultLib cuts after their first Hands reports and the operator's challenge
 to the march, and changes the site field to envelope-then-noise; pass 4
 (section "Pass 4") revises `interval-ops` to r3 after its second Hands report
-and Soul's verdict, and names the one shipped void (Q9). Where a later pass and
+and Soul's verdict, and names the one shipped void (Q9). Pass 5 (section "Pass 5") maps
+affine forms against CultLib `main` at `a7966142`. Where a later pass and
 an earlier section disagree, the later pass wins. Where this map and the Body
 disagree, the Body wins and this map is stale.
 
@@ -1007,3 +1008,279 @@ beside the two CultLib r2 specs.
 - `:root:has(body[data-slug])` for the ritual seeds: supported in every
   current browser; a browser without `:has` gets the default seeds, which is
   acceptable for a fallback of a fallback.
+
+## Pass 5: affine forms (ruling `affine-forms-unparked`)
+
+Imagination pass 5, 2026-10-03. It maps the affine-arithmetic piece of the
+tape target, unparked on its own by ruling
+`cultmath-tapes:ruling:affine-forms-unparked`. It answers follow-up
+`cultmath-tapes:follow_up:wells-oracle-shortfall-affine-forms`. No tape,
+pruning or interpreter is built; tape steps 2-5 stay parked under
+`tape-target-unparks-when-asura-stable`. Pinned head: CultLib `main` at
+`a7966142`. Every `file:line` in this section is against that commit.
+
+### What was measured (body facts)
+
+The probe is a renamed copy of `NoiseBoundTests.cs` with five more bounds for
+`FogField`. It lives on the local branch `scratch/imagination-affine-probe`
+(`5fa8e9ce`). That branch was never pushed to origin and is not for merging.
+It was run on Yggdrasil through the ygg-verify stopgap (`dotnet/sdk:10.0`,
+about 3 minutes). It re-runs `Run(FogField.Wells(w), 8, 64, 0x5A7E + 8)`, so
+the tiles, rays and seeds are those of the landed (c) row at `N = 8`. V0
+reproduces the landed figures exactly (0.378 and 0.194).
+
+Constants the probe needed, each sampled over 2e5 seeded points with a 1.25
+margin (probe grade, not provenance):
+- the Frobenius norm of the Hessian of `snoise(float3)`, max 55.15, so
+  `M = 68.94`;
+- the gradient length of `snoise(float2)`, max 7.35, so `L2 = 9.19`;
+- for comparison, the mean `|snoise_grad|` is 2.59, against `L = 10.10`.
+
+The bounds:
+- **V0**: the landed bound.
+- **V1**: V0 with the detail octave's ball no longer enlarged by the warp. The
+  detail reads the unwarped point (`NoiseBoundTests.cs:860`, `Noise.Detail(p, ...)` of the unwarped `p`), yet `Bound`
+  hands it `ball.w`, which carries `D` (`:875`, `:890`).
+- **V2**: V1 with the warp centred. Each phase's coverage ball is centred at
+  `c + flow(c) shift_k`, with radius `r + |shift_k| rho`, where
+  `rho = FlowAmplitude L2 FlowFrequency r sqrt 2` bounds how far the flow moves
+  over the ball. This is the mean-value form of the warp: interval arithmetic
+  only, no affine noise.
+- **V3**: V2 with the centred form of the noise,
+  `n(c) +- min(L R, |g(c)| R + M R^2 / 2)` from one `snoise_grad`.
+- **V4**: V3 with a reduced affine form. Three shared symbols (depth `t`,
+  slopes `u` and `v`) carry the envelope's plane term and every noise term's
+  linear part, and one error symbol takes the rest. It applies where the fade
+  is the point 1, and is intersected with V3.
+- **V5**: V4 with one shared symbol, depth `t`, plus one error symbol:
+  Gamito's `t0 + t1 e1 + t2 e2`.
+
+A gradient evaluation is counted as 2 snoise, an estimate. V3 to V5 gate a
+probe on the best result any centre value and gradient could give.
+
+Range ceiling. A cell is range-nonempty if the density is positive at any of
+5 x 5 slopes over the tile's slope square (corners included) times 9 depths
+over the cell, or if it is in the oracle mask. Its efficiency is the oracle
+march's cost over the cost of marching the range mask, with probes free. The
+sampling can miss nonzero points, so this figure is an upper estimate. No
+sound enclosure can beat it.
+
+| (c), `N = 8` | efficiency (oracle) | cost ratio | dense cells/ray | probe overhead | cull |
+| --- | --- | --- | --- | --- | --- |
+| warp 0, V0 landed interval | 0.378 | 2.74x | 12.40 | 0.961 | 0.952 |
+| warp 0, V2 centred interval | 0.368 | 2.67x | 12.40 | 0.937 | 0.952 |
+| warp 0, V3 centred noise | 0.466 | 3.38x | 8.67 | 0.868 | 0.974 |
+| warp 0, V5 affine, one symbol | **0.511** | **3.71x** | 7.81 | 0.859 | 0.979 |
+| warp 0, V4 affine, three symbols | 0.534 | 3.88x | 7.37 | 0.853 | 0.981 |
+| warp 0, range ceiling | 0.859 | | | | 0.995 |
+| warp 60, V0 landed interval | 0.194 | 1.39x | 31.55 | 0.993 | 0.842 |
+| warp 60, V1 detail unwarped | 0.205 | 1.47x | 27.74 | 0.963 | 0.864 |
+| warp 60, V2 centred interval | 0.347 | 2.49x | 13.71 | 0.938 | 0.945 |
+| warp 60, V3 centred noise | 0.441 | 3.16x | 9.52 | 0.870 | 0.969 |
+| warp 60, V5 affine, one symbol | **0.477** | **3.42x** | 8.71 | 0.864 | 0.974 |
+| warp 60, V4 affine, three symbols | 0.502 | 3.60x | 8.16 | 0.856 | 0.977 |
+| warp 60, range ceiling | 0.854 | | | | 0.995 |
+
+Every variant's transmittance equals the dense march's (max |dT| 0). No
+variant's pre-pass proved a cell empty where any of the 225 samples per cell
+was nonzero (0 enclosure violations).
+
+What this establishes:
+
+1. **The oracle cannot be reached by any sound bound.** The oracle mask
+   samples one depth per ray. A bound must cover the whole slice of the tile,
+   so the best any exact enclosure could do is about 0.86 of the oracle. That
+   matches the 0.57-0.85 that conservative visibility methods reach against
+   exact sets (`docs/research/culling-efficiency-oracle-prior-art.md`). An
+   oracle target of 0.90 is unreachable by construction.
+2. **The warp diagnosis was half right.** At warp `D` most of the gap is the
+   warp enlarging the radius by its maximum (V0 to V2: 0.194 to 0.347). That
+   is fixed by evaluating the flow at the ball's centre and enlarging the
+   radius only by how far the flow can move across the ball. It takes no
+   affine noise, and it costs one more snoise per probe, for the second phase
+   ball. The detail octave's spurious warp (V1) is worth little on its own.
+3. **Affine noise buys the rest:** the centred form, then the shared depth
+   symbol. Against the centred interval, affine with one symbol closes about a fifth
+   of the oracle gap at warp 0 and at warp `D` (efficiency 0.368 to 0.511 and
+   0.347 to 0.477). Its combined cost ratio is 1.39x and 1.37x the centred
+   interval's, and 1.35x and 2.46x the landed interval's. It reaches 0.59 and
+   0.56 of the range ceiling.
+4. **Three symbols buy about 5% over one** (0.534 against 0.511, 0.502
+   against 0.477). One symbol fits a `float3`. Three need a struct or a
+   `float4` plus a `float`, and the HLSL mirror's harness compares struct
+   returns but has no struct parameters (`packages/cultmath/docs/design.md:126-135`).
+5. **The probe overhead falls** from 0.96 to 0.86 under every centred or
+   affine bound. Each probe costs a gradient and proves more, so the total
+   cost still drops by 1.35x to 2.46x. Today's (c) assertion, overhead at
+   least 0.90 (`NoiseBoundTests.cs:1558`, `:1588`), would reject the cheaper
+   march. That is question `affine-wells-contract`.
+
+### The model
+
+An affine form is a transient value, not a persistent kind. The persistent
+things this pass adds or changes:
+
+| Thing | Identity | Lifecycle | Authority |
+| --- | --- | --- | --- |
+| `SNOISE_HESSIAN` (C#), `CULTMATH_SNOISE_HESSIAN` (HLSL, lowered to GLSL) | The constant's name; one value in `math.Affine.cs`, mirrored | Measured once by `NoiseBoundTests.MeasureHessian` (slow, explicit), as `SNOISE_LIPSCHITZ` is. It is re-measured and re-pinned whenever the `snoise` kernel changes. | `MeasureHessian` sets it; `HessianConstantPinsSampledCurvature` pins it; no consumer carries its own |
+| `af_*` families in `fixtures/glsl-parity.json` | Family signature string, appended after the last existing family | Regenerated only by `CULTMATH_WRITE_GLSL=1`; earlier cases stay byte-identical | `GlslMirrorTests` generator |
+| The (c) contracts | `IntervalSkipHalvesEvaluations` assertions | Changed only by a ruling | Operator (question `affine-wells-contract`) |
+| `SNOISE2_LIPSCHITZ` (C#), mirrored in HLSL | The constant's name in `math.Interval.cs`, beside `SNOISE_LIPSCHITZ`, with an `iv_snoise_ball(float2, float)` overload | Measured by `MeasureLipschitz2` (slow, explicit) and pinned, as `L` is | CultMath. The (c) field's flow is `snoise(float2)`, and a bound on a CultMath function belongs to CultMath, not to a test-local helper. A consumer's own flow, such as the site's texture, keeps its own variation bound |
+
+### Representation
+
+**A reduced affine form with one shared symbol: `float3(x0, a, e)`, meaning
+`x0 + a·ε + e·δ`.** Here `ε ∈ [-1, 1]` is shared by every form over the same
+region, and `δ ∈ [-1, 1]` is a private error, with `e ≥ 0`.
+- This is Messine's AF1 as Gamito and Maddock use it for gradient noise,
+  `t0 + t1 e1 + t2 e2`.
+- Sharp and Jacobson's measurements show that this fixed-symbol form is the
+  fast one on GPUs: 1.0x against 8.4x for full affine.
+- It fits one `float3` register, as an interval fits a `float2`. It needs no
+  struct parameter, so the mirror, lowering and fixture machinery take it
+  unchanged.
+- V4 against V5 prices the two extra symbols at about 5% efficiency.
+
+For a tile probe `ε` is the depth parameter: `z = z_m + h ε` with
+`h = (z1 - z0) / 2`. The footprint goes into the error. For a single ray it is
+Gamito's form exactly.
+
+A point in space is not a new type. It is the three arguments
+`(centre: float3, axis: float3, radius: float)`, the set
+`{centre + axis ε + w : |w| ≤ radius}`. `af_snoise` and `af_fbm` take a point
+in that form, and `af_frustum_axis` and `af_frustum_ball` produce one for a
+tile slice.
+
+Ops, named by the (c) consumer, plus `af_mul` because affine arithmetic is
+defined by its product, as `iv_mul` is for intervals:
+- `af_point`, `af_symbol(x0, a)`, `af_from_iv`, `af_range` (the bridge to
+  `iv_*`);
+- `af_add`, `af_sub`, `af_neg`, `af_scale`, `af_add_iv`, `af_mul`;
+- `af_snoise`, `af_fbm`;
+- `af_frustum_axis`, `af_frustum_ball`.
+
+No others until a consumer names one, which is the rule `design.md` already
+states for intervals.
+
+The interval side gains `SNOISE2_LIPSCHITZ` and the overload
+`iv_snoise_ball(float2, float)`. The (c) field's flow is `snoise(float2)`, and
+centring the warp needs a bound on it, which belongs to its owner.
+
+`af_snoise(centre, axis, radius)` makes one `snoise_grad` call. With
+`R = |axis| + radius`, it returns the narrower of two sound forms:
+- the Lipschitz form `(n, 0, L R)`;
+- the centred form `(n, g · axis, |g| radius + M R² / 2)`.
+
+`e` absorbs the op's own float rounding and an allowance for a GPU's gradient
+error. The allowance is derived in the doc comment and measured on WebGL2 by
+the fixture's enclosure check, as `iv_frustum_ball`'s is.
+
+The warp stays the consumer's, so CultMath owns no flow. The rule, stated in
+`design.md` and tested for the (c) field: a warp whose value at the centre is
+known, and whose variation over the ball is at most `ρ`, is enclosed by moving
+the centre by `w(c)` and adding `ρ` to the radius. Interval balls benefit from
+it too (V2).
+
+### Authority map
+
+- **Owner.** `src/CultMath/math.Affine.cs` owns affine-form semantics on the
+  CPU. `shaders/CultMath.Affine.hlsl` mirrors it bit for bit, and is the shader
+  semantic authority. `shaders/CultMath.glsl` is derived from the HLSL.
+- **Inputs.**
+  - `snoise_grad`, whose `.w` is bit-equal to `snoise`;
+  - `SNOISE_LIPSCHITZ`;
+  - `SNOISE_HESSIAN`;
+  - the caller's forms and points.
+- **Outputs.** `float3` forms, and `float2` intervals through `af_range`.
+- **Derived state.**
+  - The GLSL text is generated by `GlslLowering`, unchanged.
+  - The fixture families are generated.
+  - The (c) efficiency rows are printed measurements, not state.
+- **Forbidden writers.**
+  - A consumer linearising noise itself: the probe's V4 and V5 did this by
+    hand, and Hands must call `af_snoise`.
+  - A second curvature constant anywhere.
+  - Hand-edited `CultMath.glsl`.
+  - An affine or interval evaluator over `CultMath.Expr` (the parked tape's,
+    see collisions below).
+  - A flow or envelope function in CultMath. Consumers compose those, as for
+    intervals.
+- **Shared paths.** The test field's `FogField`, the site ground and
+  Aetheria's nebula all reach affine noise through `af_snoise` or `af_fbm`,
+  and a tile slice through `af_frustum_*`.
+- **Deletion line.**
+  - In `FogField.Bound` (`NoiseBoundTests.cs:875`), the warp-enlarged ball is
+    replaced by the centred warp, and the detail ball stops carrying the warp
+    (`:890`).
+  - The (c) probe-overhead assertion (`:1558`, `:1588`) is replaced as the
+    ruling on `affine-wells-contract` says.
+  - `design.md`'s "What they do not: ... affine forms" (`:584-587`) and "That
+    gap belongs to the tape target's affine forms" (`:623-624`) are rewritten.
+  - The tape target's open item on representation is closed.
+
+### Cut order
+
+1. **`affine-forms`, the one she can see.**
+   - It adds C# `math.Affine.cs` and `AffineTests`, plus `SNOISE_HESSIAN`'s
+     provenance.
+   - The (c) field gains the centred warp and the affine bound.
+   - (c) is re-measured with three bound rows on the same tiles: landed
+     interval, centred interval, affine. The range ceiling is printed beside
+     the oracle.
+   - An explicit, env-gated test writes a cull-map PNG of one (c) frame: dense
+     cells per ray for each bound, and the transmittance. Self publishes it.
+   - `design.md` is updated.
+   - It is blocked on `affine-wells-contract` only for the assertion's shape.
+2. **`affine-shaders`.**
+   - It adds `CultMath.Affine.hlsl` and its Unity copy and `.meta`, the
+     include, and the regenerated `CultMath.glsl`.
+   - Fixture families are appended, with an enclosure check for `af_snoise`
+     and `af_frustum_ball`.
+   - The dxc and glslang compiles and the WebGL2 golden-fixture run happen on
+     Starfire.
+   - Both cuts share the branch `hands/cultmath-affine-forms` and merge
+     together after cut 2's Soul pass. Main never carries a C#-only `af_*`, so
+     three-runtimes-agree holds at every merged commit.
+
+Writing the C# before the HLSL inverts the usual order, because HLSL is the
+semantic authority. The cost is small: the ops are plain arithmetic in the
+common subset. Cut 2 changes the C# if the HLSL dialect forces something,
+never the reverse.
+
+### Verification venue
+
+Heavy work runs on Yggdrasil through the stopgap: `dotnet test`, Stryker scoped
+to `math.Affine.cs`, the (c) re-measure and the cull-map render. Starfire runs
+only the Windows and GPU legs, one job at a time:
+- `dxc -T lib_6_3 -HV 2021` on `CultMath.hlsl`;
+- `glslangValidator` 16.6.0 on the lowered GLSL (ruling
+  `operator-compiler-downloads`);
+- the WebGL2 golden-fixture run on the GTX 1070, under ANGLE D3D11 in a
+  browser. It is seeded from the glsl-lowering Soul pass's `gpu.js`
+  (follow-up `glsl-browser-parity-run`).
+
+### Collisions
+
+- **`cycles-converters` r1** edits the same seams:
+  - the include list (`CultMath.hlsl:509-510`);
+  - `HlslMirrorTests.cs:64-67`;
+  - `build-unity-package.ps1:82-87`;
+  - the fixture's family list.
+
+  Whichever merges second rebases, regenerates `CultMath.glsl` and the fixture
+  (`CULTMATH_WRITE_GLSL=1`), and appends its families after the first's.
+  Nothing semantic collides.
+- **`expr-ir` r1 and question `material-ir-in-cultmath`.** No file collides,
+  and neither cut waits on the other.
+  - Under `cultmath-ir-now`, the parked tape's step 2 will add interval and
+    affine evaluators over `ExprGraph`, and those will call `iv_*` and `af_*`
+    as op semantics. That is one more reason the affine ops are plain value
+    functions over `float3`, with no struct state.
+  - Under `aetheria-local`, nothing here changes.
+  - The `expr-ir` spec's negative check forbids `Interval(Evaluator)?` under
+    `Expr`. Self may add `Affine` to it at its next revision.
+- **`site-ground` r3** (not dispatched): the void (e) and the site's flow
+  texture are not measured here. Follow-up `site-ground-affine-and-centred-warp`
+  carries both. Centring the warp in the site needs a bound on the flow
+  texture's variation, and the texture stays the one motion owner (it is
+  sampled at the centre, never re-derived).
