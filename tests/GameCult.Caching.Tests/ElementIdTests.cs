@@ -84,6 +84,43 @@ namespace GameCult.Caching.Tests
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
         }
 
+        // An element id is an ordinary keyed string, so a record's bytes do not say whether it holds one: only the store header does.
+        // A cache whose type cannot see the ids (a later shape with no reels, declared compatible or resolved by name) that copies the
+        // record forward leaves the store marked, the record untouched, and its ids readable by the type that wrote them.
+        [Test]
+        public void ANarrowerTypeFlushingAnotherRecordKeepsAMarkedStoreMarked([Values] bool declared, [Values] bool directory)
+        {
+            var path = PathOf("narrow.cc");
+            var deckSchemaId = Registry.GetRequired(typeof(IdDeck)).SchemaId;
+            var deck = Deck("r");
+            using (var owner = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory }))
+                owner.Commit(batch => batch.Upsert(typeof(IdDeck), deck, new CultRecordKey("r")));
+            var marked = directory ? "cultcache.store.v5.directory-content-addressed-pages" : CultPersistedStoreSnapshot.FormatV3;
+            var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(before.FormatVersion, Is.EqualTo(marked));
+
+            var narrow = EmittedDocumentTypes.Emit(
+                "NarrowDeck" + (declared ? "Declared" : "ByName"),
+                "tests.element_id_deck",
+                declared ? "tests.element_id_deck.v9" : "tests.element_id_deck.v8",
+                new[] { new EmittedDocumentTypes.Field("Name", typeof(string), 0, IsName: true) },
+                declared ? new[] { deckSchemaId } : null);
+            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = CultDocumentRegistry.ForTypes(new[] { narrow }), UseDirectoryStore = directory }))
+            {
+                Assert.That(cache.Get(new CultRecordKey("r")), Is.Not.Null, "the narrower type reads the record it will copy");
+                cache.UpsertAsync(narrow, EmittedDocumentTypes.New(narrow, ("Name", "y")), new CultRecordKey("y")).GetAwaiter().GetResult();
+                cache.FlushAllBackingStores();
+            }
+
+            var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            Assert.That(after.FormatVersion, Is.EqualTo(marked));
+            var kept = before.Records.Single(record => record.Key == "r");
+            var copied = after.Records.Single(record => record.Key == "r");
+            Assert.That($"{copied.SchemaId}|{copied.StoredAt}", Is.EqualTo($"{kept.SchemaId}|{kept.StoredAt}"));
+            using var reader = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory });
+            Assert.That(reader.Get<IdDeck>(new CultRecordKey("r"))!.Reels.Select(reel => reel.Id), Is.EqualTo(deck.Reels.Select(reel => reel.Id)));
+        }
+
         private static CultPersistedRecord DiskRecord(string path, string key) =>
             CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == key);
 

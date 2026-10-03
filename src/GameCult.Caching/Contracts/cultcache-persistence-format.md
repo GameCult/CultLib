@@ -182,7 +182,7 @@ A record that resolves to no local type is a foreign record, for example one of 
 have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
 byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
 in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
-naming its key and id, and nothing is written. The refused keys are reloaded as the store holds them (a foreign record is not held), and their staged changes are forgotten. A marked header stays marked while a store carries a record the writer cannot show to hold no element id. Declaring its id on a type claims it at the next load.
+naming its key and id, and nothing is written. The refused keys are reloaded as the store holds them (a foreign record is not held), and their staged changes are forgotten. A write that carries a record forward keeps a marked header marked. Declaring its id on a type claims it at the next load.
 
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
@@ -311,12 +311,14 @@ The headers are `v1` (no variant, no element ids), `v2` (holds a variant) and `v
 an element id, variants or not). A single-file store declares `v3` when any record it
 holds carries an element id: a non-empty `[CultElementId]` value in a record's document,
 or in a variant's override values. A store that cannot read a variant's override values
-(no codec attached) counts the variant as holding one. A whole-store writer decides by
-what the store holds now, so the file drops back to `v1` (or `v2` with a variant) when
-the last id is taken away; a writer that touches only part of the file cannot see the
-rest, so a file already declared `v3` stays `v3` when it merges onto it. A directory
-store's manifest says `cultcache.store.v5.directory-content-addressed-pages` under the
-same rule, and `v4` otherwise.
+(no codec attached) counts the variant as holding one. An element id is an ordinary keyed
+string in the payload, so no reader can tell from a record's bytes whether it holds one;
+a writer knows it only for the records it encodes. A write that copies any record forward
+therefore keeps a `v3` header it found. Only a write that encodes every record the store
+will hold decides by content, and drops to `v1` (or `v2` with a variant) when none holds
+an id. A directory store's manifest says
+`cultcache.store.v5.directory-content-addressed-pages` under the same rule, and `v4`
+otherwise.
 
 A single-file store is exactly one MessagePack array of three slots: the header, the schema
 catalog and the records. Every runtime refuses a file that is truncated, has bytes after the

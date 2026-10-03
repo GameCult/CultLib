@@ -311,10 +311,10 @@ namespace GameCult.Caching.Tests
             Write(path, snapshot);
         }
 
-        // A marked header says the store holds an element id. A writer that copies only records it knows hold none leaves it
-        // unmarked (marked-by-content); one that copies a record it cannot show holds none keeps the mark.
+        // A marked header says the store holds an element id, and a record's bytes cannot say whether it does. A write that copies
+        // any record forward therefore keeps the mark, whatever this cache wrote or read of that record.
         [Test]
-        public void AMarkedHeaderIsDroppedOnlyWhenEveryCopiedRecordIsKnownToHoldNoId([Values] bool anotherWriterAddedARecord)
+        public void AMarkedHeaderIsKeptWhileTheWriteCopiesAnyRecord([Values] bool anotherWriterAddedARecord)
         {
             var path = PathOf("mark.cc");
             Seed(path, false, "a");
@@ -329,11 +329,24 @@ namespace GameCult.Caching.Tests
 
             Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"));
 
-            Assert.That(Read(path).FormatVersion, Is.EqualTo(anotherWriterAddedARecord ? CultPersistedStoreSnapshot.FormatV3 : CultPersistedStoreSnapshot.FormatV1));
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
         }
 
-        // A copied record is known to hold no id only while the store holds it as this cache read it: another writer changed it after
-        // the load, so the cache cannot say what it holds now.
+        // Only a write that encodes every record the store will hold can say none holds an id.
+        [Test]
+        public void AMarkedHeaderIsDroppedOnlyByAWriteThatEncodesEveryRecord([Values] bool commit)
+        {
+            var path = PathOf("mark-all.cc");
+            Seed(path, false, "a");
+            MarkAs(path, CultPersistedStoreSnapshot.FormatV3);
+            using var cache = Open(path, false);
+
+            Land(cache, commit, typeof(WsItem), new WsItem { Name = "name-a", Note = "again" }, A);
+
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+        }
+
+        // Another writer changed a copied record after this cache read it, and the mark stays: a copied record is not read to decide it.
         [Test]
         public void AMarkedHeaderIsKeptWhenAnotherWriterChangedACopiedRecordAfterTheLoad()
         {
@@ -350,9 +363,9 @@ namespace GameCult.Caching.Tests
             Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
         }
 
-        // What this cache wrote it knows: the record it stored without ids counts as holding none the next time it copies it.
+        // A copied record stays copied whoever wrote it: what this cache wrote earlier does not make the next write one that decides by content.
         [Test]
-        public void AMarkedHeaderIsDroppedWhenEveryRecordThisCacheWroteIsKnownToHoldNoId()
+        public void AMarkedHeaderIsKeptWhenEveryCopiedRecordWasWrittenByThisCache()
         {
             var path = PathOf("mark-wrote.cc");
             Seed(path, false, "a");
@@ -362,7 +375,7 @@ namespace GameCult.Caching.Tests
 
             Land(cache, commit: false, typeof(WsItem), new WsItem { Name = "name-z" }, new CultRecordKey("z"));
 
-            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
         }
 
         // A batch is the write that lands last: it replaces a staged write of the same key.
@@ -544,19 +557,19 @@ namespace GameCult.Caching.Tests
 
         // Two writers whose clocks put a record's storedAt ahead of both mint the same storedAt over it. The second to write
         // replaces the first's different bytes, so it is stored later than the first's, and the first's copy is told it moved.
-        // The equal storedAt is the case, and the mint is from the stored one, not from the writer's clock (which is behind it).
+        // The equal storedAt is the case, and the mint is from the stored one, not from the writer's clock (which is behind it). Either store kind.
         [Test]
-        public void AWriteOverARecordAtItsOwnStoredAtIsStoredLaterWhateverTheClockSays([Values] bool commit)
+        public void AWriteOverARecordAtItsOwnStoredAtIsStoredLaterWhateverTheClockSays([Values] bool directory, [Values] bool commit)
         {
             var path = PathOf("skew.cc");
-            Seed(path, false, "k");
+            Seed(path, directory, "k");
             var k = new CultRecordKey("k");
             var ahead = DateTimeOffset.UtcNow.AddHours(1).ToString("O", CultureInfo.InvariantCulture);
             var snapshot = Read(path);
             snapshot.Records.Single(record => record.Key == "k").StoredAt = ahead;
             Write(path, snapshot);
-            using var a = Open(path, false);
-            using var b = Open(path, false);
+            using var a = Open(path, directory);
+            using var b = Open(path, directory);
             if (commit)
                 b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k));
             else
@@ -582,6 +595,11 @@ namespace GameCult.Caching.Tests
                 batch.Expect(k, seenByB);
                 batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, k);
             }), Is.False, "B's copy of k is not what the store holds");
+            Assert.That(a.Commit(batch =>
+            {
+                batch.Expect(k, a.Get<WsItem>(k)!);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "again" }, k);
+            }), Is.True, "A's own condition holds without a pull: the cache took the storedAt the write gave it");
         }
 
         // Another writer removes a base and its variant together; this cache, still holding both, adds a variant of that base.
@@ -620,7 +638,27 @@ namespace GameCult.Caching.Tests
                 Land(a, commit, typeof(WsItem), new WsItem { Name = "name-x", Note = "edited" }, X))!;
 
             Assert.That(refusal.RecordKey, Is.EqualTo("x"));
-            Assert.That(refusal.InnerException, Is.Not.Null, "the reload that failed is the cause");
+            Assert.That(refusal.InnerException, Is.TypeOf<InvalidOperationException>().And.Message.Contains("variant v is based on it"), "the reload that failed is the cause");
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(a.Get<WsItem>(X), Is.Not.Null, "the reload failed, so the cache is unchanged");
+        }
+
+        // A write that finds a record it holds gone foreign is refused as a conflict, and when the reload that refusal owes fails
+        // (x cannot go while variant v is based on it) the conflict carries that failure, and nothing changes.
+        [Test]
+        public void AWriteConflictWhoseReloadFailsCarriesThatCause([Values] bool commit)
+        {
+            var path = PathOf("conflict-reload.cc");
+            Seed(path, false, "x");
+            var a = Open(path, false);
+            AddVariant(a, "v", X);
+            MakeForeign(path, "x");
+            var before = File.ReadAllBytes(path);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+                Land(a, commit, typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y")))!;
+
+            Assert.That(conflict.InnerException, Is.TypeOf<InvalidOperationException>().And.Message.Contains("variant v is based on it"), "the reload that failed is the cause");
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
             Assert.That(a.Get<WsItem>(X), Is.Not.Null, "the reload failed, so the cache is unchanged");
         }

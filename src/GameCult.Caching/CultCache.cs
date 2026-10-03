@@ -526,11 +526,6 @@ namespace GameCult.Caching
         // True while this record holds element ids minted when it loaded, that no write has persisted (see MintElementIds).
         internal bool IdsInMemoryOnly { get; set; }
 
-        // Whether the stored bytes of this record hold an element id: read when a store loaded the record, before any id was minted
-        // for it, and set when a store wrote it. Null when not known (a variant is not read at load). HoldsIds is what the document
-        // holds now; this is what the store holds, so a document changed in place and never written does not change it.
-        internal bool? StoredHoldsIds { get; set; }
-
         // True when some element this record persists holds a non-empty id, and the only thing a store reads to mark its header.
         // It is read off the stored form each time it is asked, so a store asks it as it writes: a document changed after it was
         // admitted, or loaded and changed in place, writes the header its content needs. A plain record persists its document; a
@@ -3462,24 +3457,17 @@ namespace GameCult.Caching
             return directoryStore ? DirectoryFormatV4 : holdsVariants ? CultPersistedStoreSnapshot.FormatV2 : CultPersistedStoreSnapshot.FormatV1;
         }
 
-        // The header a write leaves, for either store kind: HeaderFor decides, given what the write can see. Marked when a record it
-        // writes holds an id; kept marked while the store carries a record it cannot show holds none (an opaque payload it writes, or
-        // a copied record that is not known id-free). A copied record is known id-free when this store holds
-        // that key under the same stored identity as the file and knows its stored bytes hold no id (StoredHoldsIds).
-        protected string HeaderForWrite(string? durableHeader, IEnumerable<bool?> written, IEnumerable<CultPersistedRecord> copied, bool directoryStore, bool holdsVariants)
-        {
-            var holds = written.ToArray();
-            var holdsIds = holds.Any(value => value == true);
-            var seen = HeaderFor(holdsIds, durableHeader, wholeStore: true, directoryStore, holdsVariants);
-            var unseen = HeaderFor(holdsIds, durableHeader, wholeStore: false, directoryStore, holdsVariants);
-            return seen == unseen || (holds.All(value => value != null) && copied.All(KnownIdFree)) ? seen : unseen;
-        }
-
-        private bool KnownIdFree(CultPersistedRecord record) =>
-            Entries.TryGetValue(record.Key, out var held) &&
-            held.StoredSchemaId == record.SchemaId &&
-            held.StoredAt == record.StoredAt &&
-            held.StoredHoldsIds == false;
+        // The header a write leaves, for either store kind: HeaderFor decides. A record's bytes do not say whether it holds an
+        // element id (an id is an ordinary keyed string), so only the store header carries that fact. A write that copies any
+        // record forward keeps a marked header; a write that encodes every record the store will hold decides by content. An
+        // opaque payload (null) never marks an unmarked store, and keeps a marked one marked.
+        protected static string HeaderForWrite(string? durableHeader, IReadOnlyCollection<bool?> written, bool copiesAny, bool directoryStore, bool holdsVariants) =>
+            HeaderFor(
+                holdsIds: written.Any(value => value == true),
+                durableHeader,
+                wholeStore: !copiesAny && written.All(value => value != null),
+                directoryStore,
+                holdsVariants);
 
         // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
         // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
@@ -3591,8 +3579,7 @@ namespace GameCult.Caching
                 resolution.Descriptor,
                 document)
             {
-                StoredSchemaId = record.SchemaId,
-                StoredHoldsIds = CultElementIds.Holds(document)
+                StoredSchemaId = record.SchemaId
             };
         }
 
@@ -3957,8 +3944,8 @@ namespace GameCult.Caching
             {
                 FormatVersion = HeaderForWrite(
                     durable?.FormatVersion,
-                    upserts.Select(staged => staged.HoldsIds),
-                    copied,
+                    upserts.Select(staged => staged.HoldsIds).ToArray(),
+                    copiesAny: copied.Length > 0,
                     directoryStore: false,
                     holdsVariants: records.Any(record => record.Variant != null)),
                 SchemaCatalog = CultSchemaCatalogEntry.Derive(
@@ -4074,7 +4061,6 @@ namespace GameCult.Caching
                     continue;
                 entry.StoredSchemaId = write.Record.SchemaId;
                 entry.StoredAt = write.Record.StoredAt;
-                entry.StoredHoldsIds = write.HoldsIds;
             }
 
             Cache?.Wrote(staged.Select(write => write.Record));

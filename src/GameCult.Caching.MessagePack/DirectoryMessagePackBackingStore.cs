@@ -311,16 +311,13 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var holdsIds = written.ToDictionary(key => key, key => Entries[key].HoldsIds, StringComparer.Ordinal);
         var header = HeaderForWrite(
             currentManifest.FormatVersion,
-            holdsIds.Values.Select(holds => (bool?)holds),
-            currentIndex.Values.Where(record => !written.Contains(record.Key)),
+            holdsIds.Values.Select(holds => (bool?)holds).ToArray(),
+            copiesAny: currentIndex.Values.Any(record => !written.Contains(record.Key)),
             directoryStore: true,
             holdsVariants: false);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
             .ToArray(), header);
-
-        foreach (var key in written)
-            Entries[key].StoredHoldsIds = holdsIds[key];
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
