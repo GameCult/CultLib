@@ -674,6 +674,27 @@ namespace GameCult.Caching.Tests
             Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(current));
         }
 
+        // A write over a foreign record is refused at the write itself, in both store kinds, not first at the flush: nothing is staged
+        // and the cache never holds the record.
+        [Test]
+        public void AWriteOverAForeignRecordIsRefusedBeforeStaging([Values] bool directory)
+        {
+            var path = Seeded(directory ? "staged-dir.cc" : "staged-file.cc", directory);
+            var before = Fingerprint(path);
+
+            using (var cache = Open(path, DeckOnly, directory))
+            {
+                var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.UpsertAsync(Deck, DeckOf(Canary), W).GetAwaiter().GetResult())!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+                Assert.That(refusal.Message, Does.Not.Contain(Canary));
+                Assert.That(cache.IsDirty, Is.False, "nothing was staged");
+                Assert.That(cache.Get(W), Is.Null);
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
         // A record read through the catalog's schema name under an id this build neither owns nor declares is read-only: a write of
         // it is refused typed before anything is staged, the store is left byte for byte, and the record is still served.
         [Test]
