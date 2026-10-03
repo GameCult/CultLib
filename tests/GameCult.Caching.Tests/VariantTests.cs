@@ -665,38 +665,105 @@ namespace GameCult.Caching.Tests
             Assert.That(reopened.Get(other), Is.Not.Null);
         }
 
-        // ---- a variant sheds overrides its type lacks when it is flushed, as a plain record sheds the member ----
+        // ---- a write copies what it did not stage, and re-encodes what it stages under the type's own id ----
 
-        [Test]
-        public void AFlushShedsAnOverrideOfADroppedSlotSoALaterTypeReusingTheSlotDoesNotResurrectIt()
+        private static readonly string DriftWideId = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }).GetRequired(typeof(DriftWide)).SchemaId;
+
+        // The same schema name as Wide, a later version that lists Wide's id as compatible and has no Wing.
+        private static readonly Type DriftDeclared = EmittedDocumentTypes.Emit(
+            "DriftDeclared",
+            "tests.variant_drift",
+            "tests.variant_drift.v4",
+            new[] { new EmittedDocumentTypes.Field("Name", typeof(string), 0, IsName: true), new EmittedDocumentTypes.Field("Power", typeof(int), 1) },
+            new[] { DriftWideId });
+
+        private static readonly CultRecordKey DriftBase = new("drift-base");
+        private static readonly CultRecordKey DriftVariant = new("drift-variant");
+
+        private static CultPersistedStoreSnapshot ReadStore(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+
+        private void SeedDrift(string path)
         {
-            var path = PathOf("drift.cc");
-            var wide = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) });
-            using (var writer = Open(path, registry: wide))
+            using var writer = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }));
+            writer.Commit(batch =>
             {
-                writer.Commit(batch =>
+                batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, DriftBase);
+                batch.UpsertVariant(DriftVariant, DriftBase, new[]
                 {
-                    batch.Upsert(typeof(DriftWide), new DriftWide { Name = "drift", Power = 1, Wing = "base wing" }, new CultRecordKey("drift-base"));
-                    batch.UpsertVariant(new CultRecordKey("drift-variant"), new CultRecordKey("drift-base"), new[]
-                    {
-                        writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
-                        writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
-                    });
+                    writer.Override<DriftWide>(nameof(DriftWide.Name), "drift variant"),
+                    writer.Override<DriftWide>(nameof(DriftWide.Wing), "stale wing")
+                });
+            });
+        }
+
+        // Narrow reads Wide's records through the schema name and neither owns nor declares Wide's id. A write of another record
+        // copies them as Wide stored them: bytes, id, storedAt, the override of the slot Narrow lacks, and the entry that publishes
+        // Wide's id.
+        [Test]
+        public void AWriteOfAnotherRecordLeavesAVariantItsTypeHasNotDeclaredAsStored([Values] bool viaFlush)
+        {
+            var path = PathOf(viaFlush ? "drift-untouched-flush.cc" : "drift-untouched-commit.cc");
+            SeedDrift(path);
+            var before = ReadStore(path);
+
+            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
+            {
+                Assert.That(narrow.Get<DriftNarrow>(DriftVariant)!.Name, Is.EqualTo("drift variant"), "Narrow reads the variant");
+                var other = new CultRecordKey("other");
+                if (viaFlush)
+                {
+                    narrow.UpsertAsync(typeof(DriftNarrow), new DriftNarrow { Name = "other" }, other).GetAwaiter().GetResult();
+                    narrow.FlushAllBackingStores();
+                }
+                else
+                    narrow.Commit(batch => batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "other" }, other));
+            }
+
+            var after = ReadStore(path);
+            foreach (var key in new[] { DriftBase.Value, DriftVariant.Value })
+            {
+                var was = before.Records.Single(record => record.Key == key);
+                var is_ = after.Records.Single(record => record.Key == key);
+                Assert.That((is_.SchemaId, is_.StoredAt, is_.Payload), Is.EqualTo((was.SchemaId, was.StoredAt, was.Payload)), key);
+            }
+
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value).OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "the dropped slot's override is still stored");
+            Assert.That(after.SchemaCatalog.Single(entry => entry.SchemaId == DriftWideId).RawBytes,
+                Is.EqualTo(before.SchemaCatalog.Single(entry => entry.SchemaId == DriftWideId).RawBytes));
+        }
+
+        // A type that lists Wide's id as compatible owns Wide's records: staging one writes it under the type's own id, at a later
+        // storedAt, without the member the type dropped, so a later type reusing that slot does not resurrect it.
+        [Test]
+        public void AStagedWriteOfADeclaredCompatibleRecordIsReEncodedUnderTheTypesOwnIdAndShedsTheDroppedSlot()
+        {
+            var path = PathOf("drift-declared.cc");
+            SeedDrift(path);
+            var wideBase = ReadStore(path).Records.Single(record => record.Key == DriftBase.Value);
+            var ownId = CultDocumentRegistry.ForTypes(new[] { DriftDeclared }).GetRequired(DriftDeclared).SchemaId;
+
+            using (var declared = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { DriftDeclared })))
+            {
+                declared.Commit(batch =>
+                {
+                    batch.Upsert(DriftDeclared, declared.Get(DriftBase)!, DriftBase);
+                    batch.UpsertVariant(DriftVariant, DriftBase, new[] { declared.Override(DriftDeclared, "Name", "drift variant") });
                 });
             }
 
-            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
-                narrow.BackingStores[0].PushAll();
-
-            Assert.That(OverriddenSlotsOn(path, "drift-variant"), Is.EqualTo(new[] { 0 }), "the dropped slot's override is gone from the flushed record");
+            var written = ReadStore(path);
+            Assert.That(written.Records.Select(record => record.SchemaId), Is.All.EqualTo(ownId));
+            Assert.That(string.CompareOrdinal(written.Records.Single(record => record.Key == DriftBase.Value).StoredAt, wideBase.StoredAt), Is.GreaterThan(0));
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value), Is.EqualTo(new[] { 0 }), "the dropped slot's override is gone from the written record");
 
             using var reused = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftReused) }));
-            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-base"))!.Colour, Is.Empty);
-            Assert.That(reused.Get<DriftReused>(new CultRecordKey("drift-variant"))!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
+            Assert.That(reused.Get<DriftReused>(DriftBase)!.Colour, Is.Empty);
+            Assert.That(reused.Get<DriftReused>(DriftVariant)!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
         }
 
         [Test]
-        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnLoadAndShedOnTheNextFlush()
+        public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndStaysStoredUntilTheVariantIsWritten()
         {
             var path = WriteStore(PlainGear("hand-base"), OverridingRecord("hand-variant", "hand-base",
                 CultVariantOverride.Set(99, new byte[] { 0x01 }),
@@ -711,10 +778,16 @@ namespace GameCult.Caching.Tests
                 cache.BackingStores[0].PushAll();
             }
 
-            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }));
-            using var reopened = Open(path);
-            Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.Empty);
-            Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2, 99 }), "a flush that staged nothing copies the variant as stored");
+            using (var reopened = Open(path))
+            {
+                Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.EqualTo(new[] { 99 }));
+                Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
+                reopened.Commit(batch => batch.UpsertVariant(new CultRecordKey("hand-variant"), new CultRecordKey("hand-base"),
+                    new[] { reopened.Override<VariantGear>(nameof(VariantGear.Name), "hand variant") }));
+            }
+
+            Assert.That(OverriddenSlotsOn(path, "hand-variant"), Is.EqualTo(new[] { 0 }), "a write of the variant stores only what it was given");
         }
 
         private static int[] OverriddenSlotsOn(string path, string key) =>

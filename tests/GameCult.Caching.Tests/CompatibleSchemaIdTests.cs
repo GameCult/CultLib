@@ -181,20 +181,26 @@ namespace GameCult.Caching.Tests
                 Is.EqualTo(new[] { (D.Value, OldId, "tests.legacy_deck") }));
         }
 
-        // An unconditional commit writes the cache's whole view: the record the batch does not name is stamped with the registered
-        // id too, because the cache stamped it when it loaded it.
+        // An unconditional commit writes what it staged: the record the batch does not name is copied as the file holds it, under
+        // the old id and with the entry that publishes that id, though the cache resolved it to the registered type.
         [Test]
-        public void ACommitThatWritesTheWholeViewStampsEveryLoadedRecordWithTheRegisteredId()
+        public void AnUnconditionalCommitCopiesALoadedRecordUnderItsOldIdAsTheFileHoldsIt()
         {
-            var path = OldStore("whole-view.cc");
+            var path = OldStore("copied.cc");
             var descriptor = Declaring.GetRequired<DeclaringDeck>();
+            var before = Read(path);
 
             using (var cache = Open(path, Declaring))
                 cache.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e")));
 
             var written = Read(path);
-            Assert.That(written.Records.Select(record => record.SchemaId), Is.All.EqualTo(descriptor.SchemaId));
-            Assert.That(written.Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e" }));
+            Assert.That(written.Records.Single(record => record.Key == "d").SchemaId, Is.EqualTo(OldId));
+            Assert.That(written.Records.Single(record => record.Key == "e").SchemaId, Is.EqualTo(descriptor.SchemaId));
+            var copied = written.Records.Single(record => record.Key == "d");
+            var original = before.Records.Single();
+            Assert.That((copied.StoredAt, copied.Payload), Is.EqualTo((original.StoredAt, original.Payload)));
+            Assert.That(written.SchemaCatalog.Single(entry => entry.SchemaId == OldId).RawBytes, Is.EqualTo(before.SchemaCatalog.Single().RawBytes),
+                "the entry that published the old id is carried as its bytes");
         }
 
         // A commit onto the file writes its batch and leaves every other record as the file holds it: the store writer never
@@ -347,10 +353,10 @@ namespace GameCult.Caching.Tests
         }
 
         // A plain record and a variant loaded under a declared old id carry that id, so a condition on either holds while the file
-        // is unchanged. A whole-view commit then writes every record under its type's own id, and the cache holds each under that
-        // id: the same conditions hold against the rewritten file.
+        // is unchanged. An unconditional commit then copies both as they are, still under the old id, and the cache still holds
+        // each under it: the same conditions hold against the rewritten file.
         [Test]
-        public void ConditionsOnRecordsLoadedUnderAnOldIdHoldBeforeAndAfterAWholeViewCommit()
+        public void ConditionsOnRecordsLoadedUnderAnOldIdHoldBeforeAndAfterAnUnconditionalCommit()
         {
             var path = Path.Combine(_directory, "restamped.cc");
             var b = new CultRecordKey("b");
@@ -391,8 +397,8 @@ namespace GameCult.Caching.Tests
                 "commits onto the file left the loaded records under the old id");
 
             reader.Commit(batch => batch.Upsert(typeof(DeclaringDeck), new DeclaringDeck { Name = "e" }, new CultRecordKey("e")));
-            Assert.That(Read(path).Records.Select(record => record.SchemaId), Is.All.EqualTo(Declaring.GetRequired<DeclaringDeck>().SchemaId),
-                "the whole-view commit rewrote every record under the registered id");
+            Assert.That(Read(path).Records.Where(record => record.Key is "b" or "v").Select(record => record.SchemaId), Is.All.EqualTo(OldId),
+                "the unconditional commit copied the loaded records under the old id");
             ConditionsHold("rewritten");
         }
 
@@ -436,8 +442,8 @@ namespace GameCult.Caching.Tests
             writer.Commit(batch => batch.Upsert(RollV2, New(RollV2, ("Name", "k"), ("Extra", "important")), RollK));
         }
 
-        // A whole-view write by a cache of the given version, through a commit or a plain flush, that leaves the key set as it was.
-        private void WholeViewWrite(Type version, bool viaFlush)
+        // A write by a cache of the given version, through a commit or a plain flush, that leaves the key set as it was.
+        private void UnrelatedWrite(Type version, bool viaFlush)
         {
             using var cache = OpenRoll(version);
             Assert.That(EmittedDocumentTypes.Read(cache.Get(RollK)!, "Name"), Is.EqualTo("k"), $"{version.Name} reads k");
@@ -461,18 +467,18 @@ namespace GameCult.Caching.Tests
             batch.Upsert(RollV2, New(RollV2, ("Name", "y"), ("Extra", "derived-from-" + Extra(held))), RollY);
         });
 
-        // v1 reads v2's record through the entry that lists v1's id: an id v1 does not own. Its whole-view write lays k back exactly
-        // as v2 stored it, the member v1 lacks included, under v2's id and storedAt, so a v2 cache's condition on k still holds and
-        // what it derives from that member lands.
+        // v1 reads v2's record through the entry that lists v1's id: an id v1 does not own. A write of another record by v1 copies k
+        // exactly as v2 stored it, the member v1 lacks included, under v2's id and storedAt, so a v2 cache's condition on k still holds
+        // and what it derives from that member lands.
         [Test]
-        public void AWholeViewWriteByAnOlderVersionLeavesANewerRecordAsStored([Values] bool unchangedOnly, [Values] bool viaFlush)
+        public void AnUnrelatedWriteByAnOlderVersionLeavesANewerRecordAsStored([Values] bool unchangedOnly, [Values] bool viaFlush)
         {
             WriteImportant();
             var written = Read(RollPath);
 
             using var newer = OpenRoll(RollV2);
             var current = newer.Get(RollK)!;
-            WholeViewWrite(RollV1, viaFlush);
+            UnrelatedWrite(RollV1, viaFlush);
 
             var rewritten = Read(RollPath);
             var record = rewritten.Records.Single();
@@ -494,9 +500,9 @@ namespace GameCult.Caching.Tests
             older.Commit(batch => batch.Upsert(RollV1, older.Get(RollK)!, RollK));
         }
 
-        // A-B-A: v1 writes k and sheds Extra, then another v2 cache (a restart is enough) loads k under v1's id and writes its whole
-        // view, putting k back under v2's id: the id the first v2 cache loaded k under, with bytes that no longer hold Extra. That
-        // cache's condition must still fail, through commits and through plain flushes alike.
+        // v1 writes k and sheds Extra, then another v2 cache (a restart is enough) loads k under v1's id and writes another record.
+        // It copies k as v1 left it, under v1's id, so the first v2 cache's condition on k fails, through commits and through plain
+        // flushes alike.
         [TestCase(false, false)]
         [TestCase(true, false)]
         [TestCase(false, true)]
@@ -510,10 +516,10 @@ namespace GameCult.Caching.Tests
 
             OlderWritesK();
             Assert.That(Read(RollPath).Records.Single().SchemaId, Is.EqualTo(RollV1Id), "v1 wrote k under its id");
-            WholeViewWrite(RollV2, viaFlush);
-            var restored = Read(RollPath).Records.Single();
-            Assert.That(restored.SchemaId, Is.EqualTo(written.SchemaId), "the second v2 cache put k back under v2's id");
-            Assert.That(restored.Payload, Is.Not.EqualTo(written.Payload), "without Extra");
+            UnrelatedWrite(RollV2, viaFlush);
+            var copied = Read(RollPath).Records.Single();
+            Assert.That(copied.SchemaId, Is.EqualTo(RollV1Id), "the second v2 cache copied k under v1's id");
+            Assert.That(copied.Payload, Is.Not.EqualTo(written.Payload), "without Extra");
 
             Assert.That(Derive(held, current, unchangedOnly), Is.EqualTo(CultCommitOutcome.Mismatch));
             using var reopened = OpenRoll(RollV2);
@@ -521,62 +527,17 @@ namespace GameCult.Caching.Tests
             Assert.That(Extra(reopened.Get(RollK)), Is.Empty);
         }
 
-        // A plain flush that re-encodes a record it loaded under another id stores it under its own id at a later storedAt, and the
-        // cache holds what the flush wrote: a condition on the record holds straight after, with no pull.
-        [Test]
-        public void AFlushRestampsTheRecordItReencodesInTheCacheThatFlushed()
-        {
-            WriteImportant();
-            OlderWritesK();
-            var shed = Read(RollPath).Records.Single();
-            Assert.That(shed.SchemaId, Is.EqualTo(RollV1Id));
-
-            using var cache = OpenRoll(RollV2);
-            var current = cache.Get(RollK)!;
-            cache.BackingStores.Single().PushAll();
-
-            var flushed = Read(RollPath).Records.Single();
-            Assert.That(flushed.SchemaId, Is.Not.EqualTo(RollV1Id), "the flush stored k under v2's id");
-            Assert.That(string.CompareOrdinal(flushed.StoredAt, shed.StoredAt), Is.GreaterThan(0), "at a later storedAt");
-            Assert.That(Derive(cache, current, unchangedOnly: false), Is.EqualTo(CultCommitOutcome.Committed));
-            Assert.That(cache.TryCommit(batch =>
-            {
-                batch.ExpectUnchanged();
-                batch.Upsert(RollV2, New(RollV2, ("Name", "w")), new CultRecordKey("w"));
-            }), Is.EqualTo(CultCommitOutcome.Committed));
-        }
-
-        // A whole-view write that stores a record under another id than it was loaded under gives it a later storedAt, even when
-        // the file no longer holds the record it loaded.
-        [Test]
-        public void AFlushStoringARecordUnderANewIdGivesItALaterStoredAtWhateverTheFileHolds()
-        {
-            using (var older = OpenRoll(RollV1))
-                older.Commit(batch => batch.Upsert(RollV1, New(RollV1, ("Name", "k")), RollK));
-            var loaded = Read(RollPath).Records.Single();
-
-            using var cache = OpenRoll(RollV2);
-            using (var older = OpenRoll(RollV1))
-                older.Commit(batch => batch.Remove(RollK));
-            cache.BackingStores.Single().PushAll();
-
-            var flushed = Read(RollPath).Records.Single();
-            Assert.That(flushed.SchemaId, Is.Not.EqualTo(RollV1Id));
-            Assert.That(string.CompareOrdinal(flushed.StoredAt, loaded.StoredAt), Is.GreaterThan(0));
-        }
-
-        // A record a whole-view write stores exactly as the file holds it keeps its storedAt, so a condition another cache holds
-        // on it survives an unrelated flush.
+        // A record a write copies keeps its storedAt, so a condition another cache holds on it survives an unrelated write.
         [TestCase(false)]
         [TestCase(true)]
-        public void AWholeViewWriteKeepsTheStoredAtOfARecordItStoresUnchanged(bool viaFlush)
+        public void AnUnrelatedWriteKeepsTheStoredAtOfARecordItCopies(bool viaFlush)
         {
             WriteImportant();
             var written = Read(RollPath).Records.Single();
             using var held = OpenRoll(RollV2);
             var current = held.Get(RollK)!;
 
-            WholeViewWrite(RollV2, viaFlush);
+            UnrelatedWrite(RollV2, viaFlush);
 
             Assert.That(Read(RollPath).Records.Single().StoredAt, Is.EqualTo(written.StoredAt));
             Assert.That(Derive(held, current, unchangedOnly: false), Is.EqualTo(CultCommitOutcome.Committed));

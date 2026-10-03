@@ -634,6 +634,41 @@ namespace GameCult.Caching.Tests
                 SchemaCatalog = Read(path).SchemaCatalog.Where(entry => entry.SchemaId == schemaId).ToArray()
             });
 
+        // A write of another record copies a record under an id this build does not own as the store holds it: its id, storedAt,
+        // bytes and the catalog entry that publishes its id.
+        [Test]
+        public void AWriteOfAnotherRecordCopiesARecordUnderAnIdThisBuildDoesNotOwn([Values] Write write)
+        {
+            var path = OtherRuntimeStore("other-runtime.cc");
+            var before = Stored(path, D);
+            var entry = CatalogEntryBytes(path, OtherRuntimeId);
+
+            using (var cache = Open(path, DeckOnly, directory: false))
+            {
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("d"), "this build reads it");
+                Land(cache, write, E, DeckOf("e"));
+            }
+
+            Assert.That(Stored(path, D), Is.EqualTo(before));
+            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(entry));
+        }
+
+        // The entry that publishes a copied record is the one the store holds when the write lands, not the one the record loaded with.
+        [Test]
+        public void ACopiedRecordIsPublishedByTheCatalogEntryTheStoreHoldsNow([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = OtherRuntimeStore("redescribed.cc");
+            using var cache = Open(path, DeckOnly, directory: false);
+            var snapshot = Read(path);
+            snapshot.SchemaCatalog.Single(entry => entry.SchemaId == OtherRuntimeId).SchemaVersion = "tests.foreign_deck.redescribed";
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var current = CatalogEntryBytes(path, OtherRuntimeId);
+
+            Land(cache, write, E, DeckOf("e"));
+
+            Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(current));
+        }
+
         // A write of the record itself stores what the cache holds, under the type's own id.
         [Test]
         public void AWriteOfTheRecordItselfStoresItUnderTheTypesOwnId([Values(Write.Flush, Write.Commit)] Write write)

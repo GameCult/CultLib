@@ -72,8 +72,20 @@ public sealed class CultMeshSingleFileReadabilityTests
 
             if (reads)
             {
+                var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes);
                 write(path);
-                CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Should().ContainSingle(name);
+                var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+                after.Records.Where(record => record.Key == "publication").Should().ContainSingle(name);
+                var others = before.Records.Where(record => record.Key != "publication").ToArray();
+                after.Records.Should().HaveCount(others.Length + 1, name);
+                foreach (var record in others)
+                {
+                    var kept = after.Records.Single(candidate => candidate.Key == record.Key);
+                    kept.SchemaId.Should().Be(record.SchemaId, name);
+                    kept.StoredAt.Should().Be(record.StoredAt, name);
+                    kept.Payload.Should().Equal(record.Payload, name + " copies the file's other records as they are");
+                }
+
                 continue;
             }
 

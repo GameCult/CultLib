@@ -53,6 +53,13 @@ public sealed class CultMeshSingleFileStoreTests
         SchemaId = "eve.entity_soa.v1"
     };
 
+    private static CultMeshBodyPublicationDocument PublicationOf(string id) => new()
+    {
+        BodyId = "aetheria:" + id,
+        ProducerId = "aetheria",
+        SchemaId = "eve.entity_soa.v1"
+    };
+
     private static string SchemaId() => CultDocumentRegistry.Shared.GetRequired<CultMeshBodyPublicationDocument>().SchemaId;
 
     private static bool IsALink(string path)
@@ -101,6 +108,64 @@ public sealed class CultMeshSingleFileStoreTests
         {
             Assert.Ignore("A file symlink needs a privilege this account lacks: " + ex.Message);
         }
+    }
+
+    private static CultPersistedStoreSnapshot Snapshot(string path) =>
+        CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+
+    // A Mesh write is a write set of one key: every other record in the file and the entry that publishes it are copied forward as
+    // the file holds them, and a second write of the key replaces only that key.
+    [Test]
+    public void AMeshWriteIntoAStoreHoldingOtherRecordsCopiesThemForwardAndReplacesOnlyItsKey()
+    {
+        var path = Path.Combine(_root, "shared.cc");
+        using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions()))
+        {
+            cache.Commit(batch =>
+            {
+                batch.Upsert(typeof(CultMeshBodyPublicationDocument), PublicationOf("a"), new CultRecordKey("a"));
+                batch.Upsert(typeof(CultMeshBodyPublicationDocument), PublicationOf("b"), new CultRecordKey("b"));
+            });
+        }
+
+        var before = Snapshot(path);
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, new byte[] { 0x90 });
+        var after = Snapshot(path);
+
+        after.Records.Select(record => record.Key).Should().Equal("a", "b", "publication");
+        foreach (var key in new[] { "a", "b" })
+        {
+            var was = before.Records.Single(record => record.Key == key);
+            var kept = after.Records.Single(record => record.Key == key);
+            (kept.SchemaId, kept.StoredAt).Should().Be((was.SchemaId, was.StoredAt));
+            kept.Payload.Should().Equal(was.Payload);
+        }
+
+        after.SchemaCatalog.Single(entry => entry.SchemaId == SchemaId()).RawBytes.Should().Equal(before.SchemaCatalog.Single(entry => entry.SchemaId == SchemaId()).RawBytes);
+        after.SchemaCatalog.Should().Contain(entry => entry.SchemaId == "raw:schema");
+
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, new byte[] { 0x91, 0x01 });
+        var again = Snapshot(path);
+        again.Records.Select(record => record.Key).Should().Equal("a", "b", "publication");
+        again.Records.Single(record => record.Key == "publication").Payload.Should().Equal(new byte[] { 0x91, 0x01 });
+        foreach (var key in new[] { "a", "b" })
+            again.Records.Single(record => record.Key == key).Payload.Should().Equal(before.Records.Single(record => record.Key == key).Payload);
+    }
+
+    // The writer cannot see whether the raw payload or the records it copies hold element ids, so a marked file stays marked.
+    [Test]
+    public void AMeshRawWriteIntoAMarkedStoreKeepsItMarked()
+    {
+        var path = Path.Combine(_root, "marked.cc");
+        using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions()))
+            cache.Commit(batch => batch.Upsert(typeof(CultMeshBodyPublicationDocument), PublicationOf("a"), new CultRecordKey("a")));
+        var marked = Snapshot(path);
+        marked.FormatVersion = CultPersistedStoreSnapshot.FormatV3;
+        File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(marked));
+
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, new byte[] { 0x90 });
+
+        Snapshot(path).FormatVersion.Should().Be(CultPersistedStoreSnapshot.FormatV3);
     }
 
     [Test]

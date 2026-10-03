@@ -97,8 +97,9 @@ namespace GameCult.Caching.Tests
             if (reads)
             {
                 store.PushAll();
-                // A whole-store flush writes what the store holds: one deck with no element ids is v1, whatever the file was.
-                Assert.That(Header(path), Is.EqualTo("cultcache.store.v1"));
+                // A flush applies its staged writes (none) to the file: it cannot show that a record it did not read holds no
+                // element id, so the file keeps the header it carries.
+                Assert.That(Header(path), Is.EqualTo(Header(Path.Combine(VectorRoot(), vector))));
                 return;
             }
 
@@ -117,7 +118,8 @@ namespace GameCult.Caching.Tests
             if (reads)
             {
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
-                Assert.That(Header(path), Is.EqualTo("cultcache.store.v1"), "an unconditional commit writes the store's whole view, which holds no element id");
+                Assert.That(Header(path), Is.EqualTo(Header(Path.Combine(VectorRoot(), vector))),
+                    "the commit wrote a record without ids and copied the file's records, which it cannot show hold none");
                 return;
             }
 
@@ -352,13 +354,14 @@ namespace GameCult.Caching.Tests
                 Assert.That(derived.Select(entry => entry.SchemaId), Is.EqualTo(new[] { "y" }), "an entry no record needs is not written");
             }
 
+            // A registered entry publishes only the ids it owns: the caller passes it for the ids its write stages, and an id nothing
+            // staged sits under is published by the arrived entry that lists it, or by none.
             var registeredLister = Entry("r", "registered.lister", "h3", "r", "z");
             var arrivedLister = Entry("a", "arrived.lister", "h4", "a", "z");
-            foreach (var arrived in new[] { new[] { arrivedLister }, Array.Empty<CultSchemaCatalogEntry>() })
-            {
-                var derived = CultSchemaCatalogEntry.Derive(new[] { Rec("a", "z") }, new[] { registeredLister }, arrived).Single();
-                Assert.That(derived.SchemaId, Is.EqualTo("r"), "with no owner, a registered entry that lists the id is chosen over an arrived one");
-            }
+            var derivedByArrived = CultSchemaCatalogEntry.Derive(new[] { Rec("a", "z") }, new[] { registeredLister }, new[] { arrivedLister }).Single();
+            Assert.That(derivedByArrived.SchemaId, Is.EqualTo("a"), "a registered entry that lists the id does not publish it");
+            Assert.Throws<CultSchemaConflictException>(() =>
+                CultSchemaCatalogEntry.Derive(new[] { Rec("a", "z") }, new[] { registeredLister }, Array.Empty<CultSchemaCatalogEntry>()));
         }
 
         // Entries of one tier that tie are taken in one fixed order: the catalog does not depend on the order they arrive in.
@@ -430,8 +433,7 @@ namespace GameCult.Caching.Tests
             Assert.That(refusal.RecordKey, Is.EqualTo("a"));
         }
 
-        // A file entry that names an older schema under the registered schema's id, with a record kept under an older id it lists: a
-        // commit onto the file, or a whole-view flush, leaves a store that reopens with the record readable and the registered entry.
+        // A file entry that names an older schema under the registered schema's id, with a record kept under an older id it lists.
         private string LegacyFile(string name)
         {
             var path = Seed(name);
@@ -502,17 +504,20 @@ namespace GameCult.Caching.Tests
             Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "the other writer's record is on disk as it wrote it");
         }
 
+        // One rule for both commits: an unconditional commit onto the file copies the record under the older id as it is, and is
+        // refused for the same reason a conditional one is.
         [Test]
-        public void AWholeViewFlushAfterARenameWithAStableIdWritesTheRegisteredEntry()
+        public void AnUnconditionalCommitOntoAFileWhoseRecordSitsUnderAnIdOnlyAnArrivedEntryListsIsRefusedAndTheFileLeftAsItWas()
         {
-            var path = LegacyFile("legacy-flush.cc");
-            using (var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }))
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e")));
+            var path = LegacyFile("legacy-unconditional.cc");
+            var bytes = File.ReadAllBytes(path);
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
 
-            var written = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            Assert.That(written.SchemaCatalog.Single().ContentHash, Is.Not.EqualTo("stale"));
-            using var reopened = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
-            Assert.That(reopened.Get<IdDeck>(new CultRecordKey("d")), Is.Not.Null);
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))))!;
+            Assert.That(refusal.SchemaId, Is.EqualTo("old.id"));
+            Assert.That(refusal.RecordKey, Is.EqualTo("d"));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes));
         }
 
         // A record the cache does not hold, under an id only an arrived entry publishes while a registered descriptor owns that

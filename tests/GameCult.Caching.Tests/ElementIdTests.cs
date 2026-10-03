@@ -165,9 +165,8 @@ namespace GameCult.Caching.Tests
                 Assert.That(first.Distinct().Count(), Is.EqualTo(first.Length));
                 Assert.That(DiskRecord(path, "a").Payload, Is.EqualTo(before), "loading mints in memory and writes nothing");
                 cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
-                Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload)), Is.EqualTo(first),
-                    "the store's first write persists the ids each record minted at load");
-                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "and the write declares that the store holds ids");
+                Assert.That(DiskRecord(path, "a").Payload, Is.EqualTo(before), "a write of another record leaves a's bytes as they are: its minted ids stay in memory");
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "and the write declares that the store holds ids: the record it wrote holds some");
             }
 
             using (var again = Open(path))
@@ -210,26 +209,6 @@ namespace GameCult.Caching.Tests
             Assert.That(AllIds(reader.Get<IdDeck>(new CultRecordKey("old1"))!), Is.EqualTo(ids1));
             Assert.That(AllIds(reader.Get<IdDeck>(new CultRecordKey("old2"))!), Is.EqualTo(ids2));
             Assert.That(reader.MintElementIds(), Is.EqualTo(0));
-        }
-
-        // The store's one record, stored as another runtime stores that schema: under an id the type does not own, published by a
-        // catalog entry of its own.
-        private static void RelabelAsOtherRuntime(string path)
-        {
-            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var entry = snapshot.SchemaCatalog.Single();
-            entry.SchemaId = "other.runtime.deck";
-            entry.CompatibleSchemaIds = new[] { "other.runtime.deck" };
-            snapshot.Records.Single().SchemaId = "other.runtime.deck";
-            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
-        }
-
-        private string UnownedStore(string name)
-        {
-            var path = PathOf(name);
-            WritePreIdStore(path, null, ("old", "o", 1));
-            RelabelAsOtherRuntime(path);
-            return path;
         }
 
         [Test]
@@ -330,7 +309,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AStagedWriteThatIsFlushedCarriesTheMarkerAndPersistsLoadMintedIds()
+        public void AStagedWriteThatIsFlushedCarriesTheMarkerAndLeavesLoadMintedIdsToMintElementIds()
         {
             var path = PathOf("flush.cc");
             WritePreIdStore(path, null, ("a", "a", 1));
@@ -338,7 +317,7 @@ namespace GameCult.Caching.Tests
             {
                 cache.UpsertAsync(typeof(IdDeck), Deck("staged"), new CultRecordKey("staged")).GetAwaiter().GetResult();
                 cache.FlushAllBackingStores();
-                Assert.That(cache.MintElementIds(), Is.EqualTo(0), "the flush wrote the whole store, a's minted ids included");
+                Assert.That(cache.MintElementIds(), Is.EqualTo(1), "the flush wrote only the staged record: a's minted ids are still in memory");
             }
 
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"));
@@ -376,17 +355,21 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnUnconditionalWriteOfAPlainRecordMarksAStoreWhoseLoadedRecordsMintedIds()
+        public void AnUnconditionalWriteOfAPlainRecordDoesNotPersistOrMarkTheIdsALoadedRecordMinted()
         {
             var path = PathOf("loaded-minted.cc");
             WritePreIdStore(path, null, ("a", "a", 1));
+            var before = DiskRecord(path, "a");
             using (var cache = OpenWith(path, false, typeof(IdDeck), typeof(PreCut2FixtureItem)))
             {
                 Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
                 UpsertPlain(cache, "p");
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "nothing the write stored holds an id");
+                Assert.That(DiskRecord(path, "a").Payload, Is.EqualTo(before.Payload), "a is copied as it was stored");
+                cache.MintElementIds();
             }
 
-            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "the write persisted a's minted ids");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "MintElementIds persisted a's minted ids");
             Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "a").Payload)), Has.All.Not.Empty);
         }
 
@@ -751,32 +734,42 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "a whole-store flush decides by what the store now holds");
         }
 
-        // Soul's P7 and P10: a store reads the header off what it writes, when it writes it. A document changed after its admission,
-        // or loaded and changed in place, is marked by what it holds at the flush, in both directions.
+        // Soul's P7 and P10: a store reads the header off what it writes, when it writes it. A staged document changed after it was
+        // staged, loaded or not, is marked by what it holds at the flush, in both directions. A document changed in place and not
+        // staged is not written, so it marks nothing.
         [TestCase(false)]
         [TestCase(true)]
-        public void AFlushIsMarkedByWhatADocumentHoldsNowNotWhatItHeldWhenAdmitted(bool loaded)
+        public void AFlushIsMarkedByWhatAStagedDocumentHoldsNowNotWhatItHeldWhenStaged(bool loaded)
         {
-            var path = PathOf(loaded ? "mutated-loaded.cc" : "mutated-admitted.cc");
+            var path = PathOf(loaded ? "mutated-loaded.cc" : "mutated-staged.cc");
             var key = new CultRecordKey("d");
             using (var seed = Open(path))
                 seed.Commit(batch => batch.Upsert(typeof(IdDeck), EmptyDeck("d"), key));
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
+            var seeded = DiskRecord(path, "d");
 
             using var cache = Open(path);
-            var deck = EmptyDeck("d");
-            if (loaded)
-                deck = cache.Get<IdDeck>(key)!;
-            else
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), deck, key));
+            var deck = loaded ? cache.Get<IdDeck>(key)! : EmptyDeck("d");
+            void Stage() => cache.UpsertAsync(typeof(IdDeck), deck, key).GetAwaiter().GetResult();
+            if (!loaded)
+                Stage();
 
             deck.Reels.Add(new IdReel { Id = HexA });
+            if (loaded)
+            {
+                cache.BackingStores[0].PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "a change in place that was never staged is not written");
+                Assert.That(DiskRecord(path, "d").Payload, Is.EqualTo(seeded.Payload));
+                Stage();
+            }
+
             cache.BackingStores[0].PushAll();
-            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "an id added after admission marks the flush");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "an id added after staging marks the flush");
 
             deck.Reels.Clear();
+            Stage();
             cache.BackingStores[0].PushAll();
-            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the last id taken away after admission unmarks it");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the last id taken away after staging unmarks it");
         }
 
         // A store with no cache has no codec to read a variant's override values with, so it cannot see whether they hold an id: the

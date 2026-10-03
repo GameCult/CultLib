@@ -526,6 +526,11 @@ namespace GameCult.Caching
         // True while this record holds element ids minted when it loaded, that no write has persisted (see MintElementIds).
         internal bool IdsInMemoryOnly { get; set; }
 
+        // Whether the stored bytes of this record hold an element id: read when a store loaded the record, before any id was minted
+        // for it, and set when a store wrote it. Null when not known (a variant is not read at load). HoldsIds is what the document
+        // holds now; this is what the store holds, so a document changed in place and never written does not change it.
+        internal bool? StoredHoldsIds { get; set; }
+
         // True when some element this record persists holds a non-empty id, and the only thing a store reads to mark its header.
         // It is read off the stored form each time it is asked, so a store asks it as it writes: a document changed after it was
         // admitted, or loaded and changed in place, writes the header its content needs. A plain record persists its document; a
@@ -3469,8 +3474,8 @@ namespace GameCult.Caching
 
         // The header a write leaves, for either store kind: HeaderFor decides, given what the write can see. Marked when a record it
         // writes holds an id; kept marked while the store carries a record it cannot show holds none (an opaque payload it writes, or
-        // a copied record that is not known id-free); otherwise by content. A copied record is known id-free when this store holds
-        // that key under the same stored identity as the file and its document holds no id.
+        // a copied record that is not known id-free). A copied record is known id-free when this store holds
+        // that key under the same stored identity as the file and knows its stored bytes hold no id (StoredHoldsIds).
         protected string HeaderForWrite(string? durableHeader, IEnumerable<bool?> written, IEnumerable<CultPersistedRecord> copied, bool directoryStore, bool holdsVariants)
         {
             var holds = written.ToArray();
@@ -3484,7 +3489,7 @@ namespace GameCult.Caching
             Entries.TryGetValue(record.Key, out var held) &&
             held.StoredSchemaId == record.SchemaId &&
             held.StoredAt == record.StoredAt &&
-            !held.HoldsIds;
+            held.StoredHoldsIds == false;
 
         // Once attached, a hold on the cache's gate: the store and its cache share one lock, so a load calling back into
         // the cache can never take the gate after the store lock, and a direct call publishes what it loaded when it
@@ -3596,7 +3601,8 @@ namespace GameCult.Caching
                 resolution.Descriptor,
                 document)
             {
-                StoredSchemaId = record.SchemaId
+                StoredSchemaId = record.SchemaId,
+                StoredHoldsIds = CultElementIds.Holds(document)
             };
         }
 
@@ -3783,7 +3789,7 @@ namespace GameCult.Caching
                     JudgeMerge(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), disk ?? new CultPersistedStoreSnapshot());
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
                     ApplyWriteSet(disk, upserts, removals);
-                    Wrote(upserts.Select(staged => staged.Record));
+                    Wrote(upserts);
                 }
 
                 _staged.Clear();
@@ -3817,7 +3823,7 @@ namespace GameCult.Caching
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
-            Wrote(upserts.Select(staged => staged.Record));
+            Wrote(upserts);
             _staged.Clear();
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
@@ -3933,18 +3939,19 @@ namespace GameCult.Caching
         // The file now holds every record written, under the id and at the storedAt the write gave it: the store's entries and the
         // cache's say so. A copied record is on disk as the file had it, so nothing learns anything new about it: in particular the
         // ids it minted at load are still in memory only.
-        private void Wrote(IEnumerable<CultPersistedRecord> written)
+        private void Wrote(IEnumerable<CultStagedRecord> written)
         {
-            var records = written.ToArray();
-            foreach (var record in records)
+            var staged = written.ToArray();
+            foreach (var write in staged)
             {
-                if (!Entries.TryGetValue(record.Key, out var entry))
+                if (!Entries.TryGetValue(write.Record.Key, out var entry))
                     continue;
-                entry.StoredSchemaId = record.SchemaId;
-                entry.StoredAt = record.StoredAt;
+                entry.StoredSchemaId = write.Record.SchemaId;
+                entry.StoredAt = write.Record.StoredAt;
+                entry.StoredHoldsIds = write.HoldsIds;
             }
 
-            Cache?.Wrote(records);
+            Cache?.Wrote(staged.Select(write => write.Record));
         }
 
         // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote

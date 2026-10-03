@@ -304,15 +304,19 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             .ThenBy(entry => entry.SchemaId, StringComparer.Ordinal)
             .ToArray();
 
+        var holdsIds = written.ToDictionary(key => key, key => Entries[key].HoldsIds, StringComparer.Ordinal);
         var header = HeaderForWrite(
             currentManifest.FormatVersion,
-            written.Select(key => (bool?)Entries[key].HoldsIds),
+            holdsIds.Values.Select(holds => (bool?)holds),
             currentIndex.Values.Where(record => !written.Contains(record.Key)),
             directoryStore: true,
             holdsVariants: false);
         WriteManifest(targetCatalog, currentIndex.Values
             .OrderBy(record => record.Key, StringComparer.Ordinal)
             .ToArray(), header);
+
+        foreach (var key in written)
+            Entries[key].StoredHoldsIds = holdsIds[key];
 
         DeleteUnreferencedRecordPages(currentIndex.Values);
 
