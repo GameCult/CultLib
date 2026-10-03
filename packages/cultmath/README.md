@@ -39,7 +39,8 @@ shader semantics.
   over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
   and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
   ball, and `iv_frustum_ball`, the ball around a screen tile's rays over a depth
-  segment, so one probe serves the whole tile. Every one returns an interval
+  segment, so one probe serves the whole tile (its radius carries its own
+  float32 rounding bound). Every one returns an interval
   containing the function's value at every point of its input, so a raymarch
   can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
   The bounds compose with a consumer's own analytic envelope (a height fog, a

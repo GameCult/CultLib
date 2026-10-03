@@ -13,7 +13,11 @@ namespace CultMath.Tests;
 /// starting IV-REPORT carry the numbers the cut report quotes.
 ///
 /// Hand mutations of iv_frustum_ball that TileBallEnclosesEveryRaySegment must kill: z0 for z1 in the
-/// lateral term (z0 * footprintPerDepth); |m_c| for |(m_c, 1)| in the depth term; the warp dropped.
+/// lateral term (z0 * footprintPerDepth); |m_c| for |(m_c, 1)| in the depth term; the warp dropped; the
+/// rounding widening dropped (which the degenerate family's enclosure check alone must catch). Hand
+/// mutations of the test's own fields: w(z0) for w(z1) in VoidField.WeightBound must fail the truncated
+/// check of EnvelopeBoundEnclosesDensity on the LOD-far configuration; CarveRadius for HollowRadius in
+/// the lo test of VoidField.Compose must fail AnalyticBodyMatchesFineMarch.
 /// </summary>
 public sealed class NoiseBoundTests
 {
@@ -55,7 +59,7 @@ public sealed class NoiseBoundTests
         for (var b = 0; b < 2000; b++)
         {
             var centre = RandomCentre(random);
-            var radius = LogUniform(random, 1.0e-3f, 2.0f);
+            var radius = LogUniform(random, 1.0e-3f, 1.0e3f);
             var bound = iv_snoise_ball(centre, radius);
             for (var i = 0; i < 64; i++)
             {
@@ -72,7 +76,7 @@ public sealed class NoiseBoundTests
         for (var b = 0; b < 2000; b++)
         {
             var centre = RandomCentre(random);
-            var radius = LogUniform(random, 1.0e-3f, 2.0f);
+            var radius = LogUniform(random, 1.0e-3f, 1.0e3f);
             var octaves = random.Next(0, 7);
             var lacunarity = Uniform(random, 1.5f, 2.5f);
             var gain = Uniform(random, 0.3f, 0.7f);
@@ -114,53 +118,134 @@ public sealed class NoiseBoundTests
 
     // ---- The tile ball and the composed bound ----
 
+    // One tile case of TileBallEnclosesEveryRaySegment: the r2 domain, or one of the extreme families
+    // where float32 rounding of the centre is largest against the radius (Soul's verdict s1).
+    private static (int N, float Focal, float2 Slope, float Z0, float Z1, float Warp) DrawBallCase(System.Random random, string family)
+    {
+        int[] sizes = { 1, 4, 8, 16 };
+        float[] depths = { 12.0f, 1000.0f, 2400.0f };
+        var n = sizes[random.Next(sizes.Length)];
+        var focal = Uniform(random, 500.0f, 3000.0f);
+        var slope = new float2(Uniform(random, -0.77f, 0.77f), Uniform(random, -0.77f, 0.77f));
+        var depth = depths[random.Next(depths.Length)];
+        var z0 = random.Next(4) == 0 ? 0.0f : Uniform(random, 0.0f, depth * 0.9f);
+        var z1 = z0 + LogUniform(random, 1.0e-3f * depth, depth - z0);
+        var warp = random.Next(4) == 0 ? 0.0f : LogUniform(random, 1.0e-3f, 60.0f);
+        float Signed(float magnitude) => random.Next(2) == 0 ? -magnitude : magnitude;
+        switch (family)
+        {
+            case "degenerate":
+                z0 = z1 = LogUniform(random, 1.0e-3f * depth, depth);
+                break;
+            case "thin":
+                z0 = z1 - 1.0e-6f * z1;
+                break;
+            case "wide slope":
+                slope = new float2(Signed(LogUniform(random, 1.0e-3f, 707.0f)), Signed(LogUniform(random, 1.0e-3f, 707.0f)));
+                break;
+            case "far":
+                z1 = LogUniform(random, 1.0e4f, 1.0e7f);
+                z0 = z1 - z1 * LogUniform(random, 1.0e-6f, 1.0f);
+                break;
+            case "from the camera":
+                z0 = 0.0f;
+                z1 = LogUniform(random, 1.0e-3f, 1.0f);
+                break;
+            case "tiny focal":
+                focal = LogUniform(random, 1.0f, 500.0f);
+                break;
+            case "huge warp":
+                warp = LogUniform(random, 60.0f, 1.0e6f);
+                break;
+        }
+
+        return (n, focal, slope, z0, z1, warp);
+    }
+
     /// <summary>
-    /// iv_frustum_ball encloses every point of every ray of an N x N tile over a depth segment, sub-pixel
-    /// jitter included, each point then moved by a flow of length at most warp, with no tolerance: 2,000
-    /// seeded tiles (N in {1, 4, 8, 16}, f in [500, 3000], |m_c| up to 1.1, segments over the slab's, the
-    /// fog's and the void's depth ranges, a quarter starting at the camera) x 64 points, the first eight at
-    /// a corner of the footprint at either end of the segment with a full-length flow. It also pins the
-    /// ball to the derivation: centre and radius equal the formula evaluated in double to one part in
-    /// 1e5, so a ball that grows (sound but wasteful) fails too. Each tile's camera is drawn on its own, as
-    /// a moving camera's frames are: no ball, mask or probe result is carried from one to the next.
+    /// iv_frustum_ball encloses every exact point of every ray of an N x N tile over a depth segment,
+    /// sub-pixel jitter included, each point then moved by a flow of length at most warp, with no
+    /// tolerance: the distance is taken in double from the float32 ball to the point (m z, z) formed in
+    /// double from the float32 slope and depth. 2,000 seeded tiles of the r2 domain (N in {1, 4, 8, 16},
+    /// f in [500, 3000], |m_c| up to 1.1, segments over the slab's, the fog's and the void's depth ranges,
+    /// a quarter starting at the camera) x 64 points, and 2,000 tiles of each extreme family (z0 == z1;
+    /// z1 - z0 = 1e-6 z1; |m_c| up to 1000; z up to 1e7; z0 = 0, z1 down to 1e-3; f down to 1; warp up to
+    /// 1e6) x the 8 points at the footprint's corners at both depth ends. Every corner point's flow is
+    /// full-length and points outward from the ball's centre. It also pins the ball to the derivation in
+    /// double, both ways: the centre within 2^-22 |c|_1, and r &lt;= ball.w &lt;= r + 2^-19 (r + |c|_1), so a
+    /// ball that forgets its rounding widening fails and one that grows past it fails. Misses and pin
+    /// failures are counted per family and reported together. Each tile's camera is drawn on its own, as a
+    /// moving camera's frames are: no ball, mask or probe result is carried from one to the next.
     /// </summary>
     [Fact]
     public void TileBallEnclosesEveryRaySegment()
     {
         var random = new System.Random(0x711E);
-        int[] sizes = { 1, 4, 8, 16 };
-        float[] depths = { 12.0f, 1000.0f, 2400.0f };
-        for (var t = 0; t < 2000; t++)
+        string[] families = { "r2 domain", "degenerate", "thin", "wide slope", "far", "from the camera", "tiny focal", "huge warp" };
+        var misses = new Dictionary<string, int>();
+        var pins = new Dictionary<string, int>();
+        var witness = new List<string>();
+        foreach (var family in families)
         {
-            var n = sizes[random.Next(sizes.Length)];
-            var focal = Uniform(random, 500.0f, 3000.0f);
-            var slope = new float2(Uniform(random, -0.77f, 0.77f), Uniform(random, -0.77f, 0.77f));
-            var depth = depths[random.Next(depths.Length)];
-            var z0 = random.Next(4) == 0 ? 0.0f : Uniform(random, 0.0f, depth * 0.9f);
-            var z1 = z0 + LogUniform(random, 1.0e-3f * depth, depth - z0);
-            var warp = random.Next(4) == 0 ? 0.0f : LogUniform(random, 1.0e-3f, 60.0f);
-            var half = n / (2.0f * focal);
-            var footprint = n / (MathF.Sqrt(2.0f) * focal);
-            var ball = iv_frustum_ball(slope, z0, z1, footprint, warp);
-            var centre = new float3(ball.x, ball.y, ball.z);
-
-            var zm = (z0 + (double)z1) / 2.0;
-            var radius = (z1 - (double)z0) / 2.0 * Math.Sqrt((double)slope.x * slope.x + (double)slope.y * slope.y + 1.0) + z1 * (double)footprint + warp;
-            Assert.True(Math.Abs(ball.w - radius) <= 1.0e-5 * radius, $"radius {ball.w:R}, derivation {radius:R}");
-            Assert.True(Math.Abs(ball.x - slope.x * zm) + Math.Abs(ball.y - slope.y * zm) + Math.Abs(ball.z - zm) <= 1.0e-5 * zm, $"centre {centre}, derivation ({slope.x * zm:R}, {slope.y * zm:R}, {zm:R})");
-
-            for (var i = 0; i < 64; i++)
+            misses[family] = 0;
+            pins[family] = 0;
+            for (var t = 0; t < 2000; t++)
             {
-                var offset = i < 8
-                    ? new float2((i & 1) == 0 ? -half : half, (i & 2) == 0 ? -half : half)
-                    : new float2(Uniform(random, -half, half), Uniform(random, -half, half));
-                var z = i < 8 ? ((i & 4) == 0 ? z0 : z1) : Uniform(random, z0, z1);
-                var m = slope + offset;
-                var flow = UnitVector(random) * (i < 8 ? warp : warp * MathF.Sqrt(random.NextSingle()));
-                var p = new float3(m.x * z, m.y * z, z) + flow;
-                Assert.True(length(p - centre) <= ball.w, $"iv_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball} misses {p} (slope {m}, depth {z:R}), distance {length(p - centre):R}");
+                var (n, focal, slope, z0, z1, warp) = DrawBallCase(random, family);
+                var half = n / (2.0f * focal);
+                var footprint = n / (MathF.Sqrt(2.0f) * focal);
+                var ball = iv_frustum_ball(slope, z0, z1, footprint, warp);
+                var (cx, cy, cz, w) = ((double)ball.x, (double)ball.y, (double)ball.z, (double)ball.w);
+
+                var zm = (z0 + (double)z1) / 2.0;
+                var (ex, ey) = (slope.x * zm, slope.y * zm);
+                var c1 = Math.Abs(ex) + Math.Abs(ey) + Math.Abs(zm);
+                var radius = (z1 - (double)z0) / 2.0 * Math.Sqrt((double)slope.x * slope.x + (double)slope.y * slope.y + 1.0) + z1 * (double)footprint + warp;
+                var centreOff = Math.Abs(cx - ex) + Math.Abs(cy - ey) + Math.Abs(cz - zm);
+                if (!(centreOff <= Math.ScaleB(c1, -22) && radius <= w && w <= radius + Math.ScaleB(radius + c1, -19)))
+                {
+                    pins[family]++;
+                    if (witness.Count < 8)
+                        witness.Add($"{family} pin: iv_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball}; derivation centre ({ex:R}, {ey:R}, {zm:R}), radius {radius:R}");
+                }
+
+                for (var i = 0; i < (family == "r2 domain" ? 64 : 8); i++)
+                {
+                    var offset = i < 8
+                        ? new float2((i & 1) == 0 ? -half : half, (i & 2) == 0 ? -half : half)
+                        : new float2(Uniform(random, -half, half), Uniform(random, -half, half));
+                    var z = i < 8 ? ((i & 4) == 0 ? z0 : z1) : Uniform(random, z0, z1);
+                    var m = slope + offset;
+                    var (px, py, pz) = (m.x * (double)z, m.y * (double)z, (double)z);
+                    double fx, fy, fz;
+                    if (i < 8)
+                    {
+                        // Outward: along the corner's direction from the centre, full length.
+                        var (dx, dy, dz) = (px - cx, py - cy, pz - cz);
+                        var away = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                        (fx, fy, fz) = away > 0.0 ? (dx / away * warp, dy / away * warp, dz / away * warp) : (warp, 0.0, 0.0);
+                    }
+                    else
+                    {
+                        var flow = UnitVector(random) * (warp * MathF.Sqrt(random.NextSingle()));
+                        (fx, fy, fz) = (flow.x, flow.y, flow.z);
+                    }
+
+                    var (qx, qy, qz) = (px + fx - cx, py + fy - cy, pz + fz - cz);
+                    var distance = Math.Sqrt(qx * qx + qy * qy + qz * qz);
+                    if (!(distance <= w))
+                    {
+                        misses[family]++;
+                        if (witness.Count < 8)
+                            witness.Add($"{family}: iv_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball} misses slope {m}, depth {z:R} by {(distance - w) / w:R} r");
+                    }
+                }
             }
         }
+
+        Assert.True(misses.Values.Sum() + pins.Values.Sum() == 0,
+            "misses " + string.Join(", ", families.Select(f => $"{f} {misses[f]}")) + "; pin failures " + string.Join(", ", families.Select(f => $"{f} {pins[f]}"))
+            + Environment.NewLine + string.Join(Environment.NewLine, witness));
     }
 
     /// <summary>

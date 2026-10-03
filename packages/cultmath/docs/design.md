@@ -409,12 +409,26 @@ sub-pixel jitter is covered), over depths `[z0, z1]`, each point moved by a warp
 of length at most `warp`. The centre is `(m_c z_m, z_m)`, `z_m` the mid-depth;
 the radius is `((z1 - z0) / 2) |(m_c, 1)| + z1 footprintPerDepth + warp`. A point
 of slope `m_c + e` at depth `z` is the centre plus `(z - z_m)(m_c, 1)` plus
-`z (e, 0)`, and the two vectors are never parallel, so the bound is strict. The
-caller rotates and translates the centre into world space and scales centre and
-radius by its noise frequency. `NoiseBoundTests.TileBallEnclosesEveryRaySegment`
-checks 2,000 seeded tiles x 64 points, tile corners at both depth ends with
-full-length flows included, with no tolerance, and pins the ball to the
-derivation, so a ball grown past it fails too. A moving camera needs nothing
+`z (e, 0)`. The returned ball is float32, and on a degenerate (`z0 == z1`),
+thin or far segment the rounding of the centre alone exceeds the gap the
+triangle inequality leaves, so the radius is widened by
+`(|c|_1 + radius) 2^-20`. With `u = 2^-24`, each centre component carries at most
+two roundings (`z_m`, then the product), so the float centre is within
+`2u |c|_1` of the exact one; the radius carries at most seven (`z1 - z0`, the
+axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
+the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
+once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
+contraction only removes roundings, so HLSL and GLSL compilers are covered by
+the same bound. At the shipped scales (`|c|_1` near 600, `r` near 5) it adds
+`6e-4`. The caller rotates and translates the centre into world space and scales
+centre and radius by its noise frequency; the rounding of that transform is the
+caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
+tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of
+seven extreme families (`z0 == z1`, `z1 - z0 = 1e-6 z1`, `|m_c|` to 1000, `z` to
+`1e7`, `z0 = 0` with `z1` to `1e-3`, `f` down to 1, warp to `1e6`), corner flows
+full-length and outward, distances in double, with no tolerance. It pins the ball
+to the derivation both ways (`r <= ball.w <= r + 2^-19 (r + |c|_1)`), so a ball
+that forgets the widening fails and one grown past it fails too. A moving camera needs nothing
 more: each frame's probes use that frame's camera, and no ball, mask or probe
 result is carried from one frame to the next.
 
