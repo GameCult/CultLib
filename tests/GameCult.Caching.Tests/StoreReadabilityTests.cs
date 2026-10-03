@@ -621,6 +621,48 @@ namespace GameCult.Caching.Tests
             Assert.That(Header(path), Is.EqualTo(header));
         }
 
+        // A record's version is the SHA-256 of the bytes it is stored as: in a single file the record's own slice of the file, read
+        // here with the MessagePack reader and not the serializer; in a directory the hash the manifest indexes its page under.
+        [Test]
+        public void AVersionIsTheSha256OfTheRecordsStoredBytes([Values] bool directory)
+        {
+            var source = File.ReadAllBytes(Path.Combine(VectorRoot(), "..", "v3-base.msgpack"));
+            var slices = new Dictionary<string, string>();
+            var reader = new MessagePackReader(source);
+            reader.ReadArrayHeader();
+            reader.Skip();
+            reader.Skip();
+            var count = reader.ReadArrayHeader();
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(source);
+            for (var i = 0; i < count; i++)
+            {
+                var start = (int)reader.Consumed;
+                reader.Skip();
+                slices[snapshot.Records[i].Key] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(source.AsSpan(start, (int)reader.Consumed - start))).ToLowerInvariant();
+            }
+
+            var path = Path.Combine(_directory, "version.cc");
+            File.WriteAllBytes(path, source);
+            if (directory)
+            {
+                // The same records, written as a directory store: its versions are the manifest's page hashes.
+                File.Delete(path);
+                using (var seed = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = true }))
+                    seed.Commit(batch =>
+                    {
+                        foreach (var key in slices.Keys)
+                            batch.Upsert(typeof(VectorItem), new VectorItem { Name = key }, new CultRecordKey(key));
+                    });
+                slices = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records
+                    .ToDictionary(record => record.Key, record => Convert.ToHexString(record.Payload).ToLowerInvariant());
+            }
+
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory });
+
+            Assert.That(cache.AllStoredDocuments.ToDictionary(stored => stored.Key.Value, stored => stored.StoredVersion), Is.EqualTo(slices));
+            Assert.That(slices, Is.Not.Empty);
+        }
+
         // Every runtime's tests walk the manifest, so a vector without a row would go untested.
         [Test]
         public void EveryVectorInTheFolderHasAManifestRow()

@@ -508,6 +508,146 @@ namespace GameCult.Caching.Tests
                 Is.False, "B's copy of k is no longer what the store holds");
         }
 
+        // Rule 2: a record's version is the SHA-256 of its stored bytes. Another writer rewrites the record to other bytes yet leaves
+        // its storedAt as it was (a peer whose clock equals, or a tool): the bytes are all that tells the two records apart.
+        private void RewriteAtItsOwnStoredAt(string path, bool directory, string key, string note)
+        {
+            var storedAt = StoredAtOf(path, key);
+            using (var writer = Open(path, directory))
+                writer.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-" + key, Note = note }, new CultRecordKey(key)));
+            var snapshot = Read(path);
+            var record = snapshot.Records.Single(candidate => candidate.Key == key);
+            if (!directory)
+            {
+                record.StoredAt = storedAt;
+                Write(path, snapshot);
+                return;
+            }
+
+            var pages = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path);
+            var page = CultDocumentMessagePackSerialization.DeserializePersistedRecord(
+                File.ReadAllBytes(Path.Combine(pages, Convert.ToHexString(record.Payload).ToLowerInvariant() + ".msgpack")));
+            page.StoredAt = storedAt;
+            var bytes = CultDocumentMessagePackSerialization.SerializePersistedRecord(page);
+            var hash = System.Security.Cryptography.SHA256.HashData(bytes);
+            File.WriteAllBytes(Path.Combine(pages, Convert.ToHexString(hash).ToLowerInvariant() + ".msgpack"), bytes);
+            record.StoredAt = storedAt;
+            record.Payload = hash;
+            Write(path, snapshot);
+        }
+
+        private static string NoteOnDisk(string path, bool directory)
+        {
+            using var fresh = Open(path, directory);
+            return fresh.Get<WsItem>(K)!.Note;
+        }
+
+        private static readonly CultRecordKey K = new("k");
+
+        // A reads k; another writer rewrites it at its own storedAt; A's Expect on what it read fails and the disk keeps the rewrite.
+        [Test]
+        public void AStaleExpectFailsWhenAnotherWriterRewroteTheRecordAtItsOwnStoredAt([Values] bool directory)
+        {
+            var path = PathOf("t1.cc");
+            Seed(path, directory, "k");
+            using var a = Open(path, directory);
+            var observed = a.Get<WsItem>(K)!;
+            RewriteAtItsOwnStoredAt(path, directory, "k", "by-c");
+
+            var committed = a.Commit(batch =>
+            {
+                batch.Expect(K, observed);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, K);
+            });
+
+            Assert.That(committed, Is.False);
+            Assert.That(NoteOnDisk(path, directory), Is.EqualTo("by-c"));
+        }
+
+        // A pull serves the rewritten record although nothing about it but its bytes changed.
+        [Test]
+        public void APullServesARecordRewrittenAtItsOwnStoredAt([Values] bool directory)
+        {
+            var path = PathOf("t2.cc");
+            Seed(path, directory, "k");
+            using var a = Open(path, directory);
+            RewriteAtItsOwnStoredAt(path, directory, "k", "by-c");
+
+            a.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            Assert.That(a.Get<WsItem>(K)!.Note, Is.EqualTo("by-c"));
+        }
+
+        // ExpectUnchanged compares every record's version: a rewrite at the same storedAt fails it for an unrelated key.
+        [Test]
+        public void ExpectUnchangedFailsWhenARecordWasRewrittenAtItsOwnStoredAt([Values] bool directory)
+        {
+            var path = PathOf("t3.cc");
+            Seed(path, directory, "k");
+            using var a = Open(path, directory);
+            RewriteAtItsOwnStoredAt(path, directory, "k", "by-c");
+
+            var committed = a.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X);
+            });
+
+            Assert.That(committed, Is.False);
+            Assert.That(Keys(path), Is.EqualTo(new[] { "k" }));
+        }
+
+        // The staleness check of a store holding a variant compares versions: a rewrite at the record's own storedAt refuses the
+        // write, names the record, leaves the file as it was, and the cache then holds the rewrite so a retry lands.
+        [Test]
+        public void AWriteIntoAVariantStoreIsRefusedWhenARecordWasRewrittenAtItsOwnStoredAt()
+        {
+            var path = PathOf("t4.cc");
+            Seed(path, false, "a");
+            using var a = Open(path, false);
+            AddVariant(a, "v", A);
+            using (var peer = Open(path, false))
+                Assert.That(peer.Get<WsItem>(A), Is.Not.Null);
+            RewriteAtItsOwnStoredAt(path, false, "a", "by-c");
+            var before = File.ReadAllBytes(path);
+            var y = new CultRecordKey("y");
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+                Land(a, true, typeof(WsItem), new WsItem { Name = "name-y" }, y))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { "a" }));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(a.Get<WsItem>(A)!.Note, Is.EqualTo("by-c"), "the refusal reloaded the record by version");
+            Land(a, true, typeof(WsItem), new WsItem { Name = "name-y" }, y);
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "v", "y" }));
+        }
+
+        // A write teaches the writer's cache the version of the bytes it wrote, by flush or by commit, in either store kind: the
+        // writer's own Expect holds without a pull, and fails once anyone else writes the record.
+        [Test]
+        public void AnOwnWriteTeachesTheCacheItsVersion([Values] bool directory, [Values] bool commit)
+        {
+            var path = PathOf("t5.cc");
+            Seed(path, directory, "a");
+            using var a = Open(path, directory);
+            Land(a, commit, typeof(WsItem), new WsItem { Name = "name-k", Note = "by-a" }, K);
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.Expect(K, a.Get<WsItem>(K)!);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "again" }, K);
+            }), Is.True, "A's own condition holds without a pull");
+
+            var seen = a.Get<WsItem>(K)!;
+            using (var b = Open(path, directory))
+                b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, K));
+            Assert.That(a.Commit(batch =>
+            {
+                batch.Expect(K, seen);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, K);
+            }), Is.False);
+        }
+
         // A commit that removes a key this cache staged removes it everywhere: the staged write does not survive the batch.
         [Test]
         public void ACommitThatRemovesAStagedKeyRemovesIt()

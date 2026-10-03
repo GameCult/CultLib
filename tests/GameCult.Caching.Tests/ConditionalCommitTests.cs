@@ -258,6 +258,24 @@ namespace GameCult.Caching.Tests
             Assert.That(reads, Is.GreaterThan(0));
         }
 
+        // With no backing store a record's version is minted with it: an Expect on the held record commits, and once the record is
+        // replaced after it was observed (here by the same document again) the Expect no longer holds.
+        [Test]
+        public void InMemoryExpectHoldsUntilTheRecordIsReplaced()
+        {
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { typeof(Counter) }));
+            cache.Commit(batch => batch.Upsert(new Counter { Name = "counter", Value = 1 }, new CultRecordHandle<Counter>(Key)));
+            var first = cache.Get<Counter>(Key)!;
+
+            Assert.That(cache.Commit(batch => batch.Expect(Key, first)), Is.True);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(Key, first);
+                cache.UpsertAsync(first, new CultRecordHandle<Counter>(Key)).GetAwaiter().GetResult();
+            }), Is.False);
+        }
+
         [Test]
         public void StoredAtIsStrictlyIncreasingPerKey()
         {
