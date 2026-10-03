@@ -47,12 +47,15 @@ shader semantics.
   carved sphere): its interval over the segment proves empty space in one probe,
   and the noise ball is consulted only near the surface. See `docs/design.md`,
   "Intervals".
-- `shaders/CultMath.glsl`, the same `cultmath_*` library in GLSL ES 3.00 for
-  WebGL2, generated from `CultMath.hlsl` (never edited by hand). GLSL has no
-  `#include`: a WebGL consumer concatenates the file's text after its own
+- `shaders/CultMath.glsl` (MIT), the same `cultmath_*` library in GLSL ES 3.00
+  for WebGL2, generated from `CultMath.hlsl` (never edited by hand), and
+  `shaders/CultMath.Phacelle.glsl` (MPL-2.0), generated from
+  `CultMath.Phacelle.hlsl`, which holds `cultmath_phacelle` alone. GLSL has no
+  `#include`: a WebGL consumer concatenates `CultMath.glsl` after its own
   `#version 300 es` line and `precision highp float; precision highp int;`
   (the library declares no precision, and its hashes need 32-bit integers),
-  then appends its own shader source.
+  then `CultMath.Phacelle.glsl` only if it calls `cultmath_phacelle`, then its
+  own shader source.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.

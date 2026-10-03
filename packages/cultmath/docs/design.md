@@ -136,20 +136,28 @@ it fails the same walk that already handles a bare vector return.
 ### GLSL Target: Source Transformations
 
 `shaders/CultMath.glsl` is a GLSL ES 3.00 (WebGL2) library generated from
-`shaders/CultMath.hlsl` by `GlslLowering` (in the test project). It is a derived
-file: never edit it by hand. Regenerate it, and the golden fixture
+`shaders/CultMath.hlsl` by `GlslLowering` (in the test project), and
+`shaders/CultMath.Phacelle.glsl` is generated beside it from
+`shaders/CultMath.Phacelle.hlsl`. Both are derived files: never edit them by
+hand. Regenerate them, and the golden fixture
 `tests/CultMath.Tests/fixtures/glsl-parity.json`, with:
 
 ```powershell
 $env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
 ```
 
-`GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between the
-committed file and the lowering of the committed HLSL. These transformations,
-in order, are the complete list:
+`GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between
+either committed file and the lowering of the committed HLSL. These
+transformations, in order, are the complete list:
 
 1. Each `#include "name"` is replaced in place by the included file, by the
-   same resolver the C# mirror uses; GLSL has no `#include`.
+   same resolver the C# mirror uses; GLSL has no `#include`. The exception is
+   an include under a file-level licence of its own, listed in one table,
+   `GlslLowering.SeparateFiles`: its line is dropped and the file is lowered on
+   its own, by the same steps, into its own output. The table has one entry,
+   `CultMath.Phacelle.hlsl` to `CultMath.Phacelle.glsl`, because Phacelle is
+   MPL-2.0 and MPL-2.0 is file-level: kept separate, it leaves
+   `CultMath.glsl` MIT. Nothing else in the lowering is keyed by name.
 2. Include guards are dropped, and so are the functions taking
    `Texture2D`/`SamplerState`; the host shader samples its own textures.
 3. Type names: `floatN`, `intN`, `uintN` and `boolN` become `vecN`, `ivecN`,
@@ -162,8 +170,11 @@ in order, are the complete list:
    `inversesqrt`, `asuint` to `floatBitsToUint`, `asfloat` to
    `uintBitsToFloat`, and `saturate(x)` becomes `clamp(x, 0.0, 1.0)`.
 7. Float literals pass through unchanged.
-8. The library is wrapped in a `CULTMATH_GLSL` guard.
-9. The first line names the file as generated and says how to regenerate it.
+8. Each output is wrapped in a guard named for its file: `CULTMATH_GLSL`,
+   `CULTMATH_PHACELLE_GLSL`.
+9. The first line names the file as generated, its sources and its licence,
+   and says how to regenerate it; `CultMath.glsl`'s also says which
+   functions live in the separate file.
 
 GLSL ES 3.00 is stricter than HLSL: no implicit conversions between int, uint
 and float, no C-style casts, and no `step(genType, float)` overload. Those gaps
@@ -180,16 +191,26 @@ The library declares no precision. The host shader does, and it must be
 integers. `tools/compile-glsl.ps1` writes such a wrapper (its own `#version
 300 es` line, the precision, the library by string concatenation, and one call
 of every public function) and compiles it with glslang, which
-`tools/get-glslang.ps1` fetches pinned. The Unity package does not ship the
-GLSL file.
+`tools/get-glslang.ps1` fetches pinned. It runs twice: over `CultMath.glsl`
+alone, and with `-Phacelle` over `CultMath.glsl` followed by
+`CultMath.Phacelle.glsl`, the order a consumer that calls `cultmath_phacelle`
+concatenates them in. Two negative controls must fail: `-Body` with an HLSL
+token (`float x = lerp(0.0, 1.0, 0.5);`), and `-Body` calling
+`cultmath_phacelle` without `-Phacelle`, which proves the MIT file does not
+carry it. The Unity package ships neither GLSL file.
 
 Parity runs in two legs, each with one owner: HLSL against C# by the mirror
 test, bit for bit; GLSL against C# by the golden fixture, which records 256
 seeded cases per function family as float32 bit patterns, evaluated by the
-consumer on WebGL2 and read back. Integer-only families (`pcg3d`, `pcg4d`) must
-match exactly; float families are ulp-bounded, the bound measured on the device.
-`iv_exp` is not in the fixture, because its C# bits come from the platform's
-`exp`.
+consumer on WebGL2 and read back. The families `pcg3d`, `pcg4d` and
+`iv_frustum_ball` are marked exact; the other float families are ulp-bounded,
+the bound measured on the device. `iv_exp` is in the fixture so the site can
+measure WebGL2's `exp`, but its C# bits come from the platform's `exp` and
+differ by OS: its tolerance is "ulp-bounded, platform exp", its entry names the
+platform that generated it, and `GoldenFixtureMatchesCSharp` compares it case
+by case within one ulp of the running platform, printing the largest distance.
+Every other family is compared as text. Every fixture family is in
+`CultMath.glsl`, so the parity run needs no `CultMath.Phacelle.glsl`.
 
 ## Invariant 8: Value-and-Gradient Primitives
 
