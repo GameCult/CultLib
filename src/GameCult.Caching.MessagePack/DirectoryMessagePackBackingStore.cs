@@ -254,6 +254,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,
+            key => HeldAt(key) is { } held ? Foreign(held, currentManifest.SchemaCatalog) : null,
             key =>
             {
                 _dirtyKeys.TryRemove(key, out _);

@@ -194,10 +194,10 @@ namespace GameCult.Caching.Tests
         }
 
         // Another writer replaced a record this cache holds with a record of a type it does not have. A write that would lay this
-        // cache's record over it is refused; the file keeps the other writer's record.
-        [TestCase(false)]
-        [TestCase(true)]
-        public void AWriteOverARecordAnotherWriterMadeForeignIsRefused(bool directory)
+        // cache's record over it is refused; the file keeps the other writer's record. The refusal reloads it as a pull would: the
+        // store lists it foreign, so the next write of it is refused before staging.
+        [Test]
+        public void AWriteOverARecordAnotherWriterMadeForeignIsRefused([Values] bool directory, [Values(Write.Flush, Write.Commit)] Write write)
         {
             var path = Seeded("replaced.cc", directory);
             using var cache = Open(path, DeckOnly, directory);
@@ -205,11 +205,14 @@ namespace GameCult.Caching.Tests
                 other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), D));
             var before = Fingerprint(path);
 
-            var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, Write.Flush, D, DeckOf(Canary)))!;
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, write, D, DeckOf(Canary)))!;
 
             Assert.That(refusal.RecordKey, Is.EqualTo(D.Value));
             Assert.That(refusal.Message, Does.Not.Contain(Canary));
             Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "d", "w" }));
+            Assert.Throws<CultSchemaConflictException>(() => cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult());
+            Assert.That(cache.IsDirty, Is.False);
         }
 
         // A refusal does not poison the store: what the cache held for the refused record goes with the refusal, so a later write

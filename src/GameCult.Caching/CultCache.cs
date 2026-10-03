@@ -3659,11 +3659,12 @@ namespace GameCult.Caching
 
         // The apply half of rule 3, for every store kind, checked where the write lands under the store's lock. A key this write names
         // whose durable record is under an id no registered type declares is refused, every such key at once, through Refuse, which
-        // reloads it as the store holds it: dropped when foreign, held read-only when a type reads it.
+        // reloads it as the store holds it: listed foreign when no type reads it, held read-only when one does.
         protected void RefuseUndeclaredOnDisk(
             IEnumerable<string> written,
             Func<string, (string Key, string SchemaId, string SchemaName)?> undeclaredAt,
             Func<string, CultStoredDocument?> durableAt,
+            Func<string, CultForeignRecord?> foreignAt,
             Action<string> unstage,
             bool cacheless = false)
         {
@@ -3674,26 +3675,35 @@ namespace GameCult.Caching
                 .ToArray();
             if (refused.Length == 0)
                 return;
-            Refuse(refused.Select(record => record.Key), durableAt, unstage, inner => Overwrites(inner, refused, cacheless));
+            Refuse(refused.Select(record => record.Key), durableAt, foreignAt, unstage, inner => Overwrites(inner, refused, cacheless));
         }
 
         /// <summary>
         /// The one refusal of a write, for every store kind: it reloads what it refuses, or changes nothing. For each key,
         /// <paramref name="durableAt"/> gives the durable record decoded as a load would (null when the store holds none, or holds
-        /// it as a foreign record). What differs from this store's view is handed to <see cref="Loaded"/>, the path a pull uses;
-        /// only when that succeeds does the store forget its staged change at each key (<paramref name="unstage"/>) and take the
-        /// loaded and dropped records into its view. If the reload throws, nothing has changed and the refusal carries that
+        /// it as a foreign record), and <paramref name="foreignAt"/> the foreign record it holds there, if any. What differs from this
+        /// store's view is handed to <see cref="Loaded"/>, the path a pull uses; only when that succeeds does the store forget its
+        /// staged change at each key (<paramref name="unstage"/>), take the loaded and dropped records into its view, and list the
+        /// keys' foreign records as a pull lists them. If the reload throws, nothing has changed and the refusal carries that
         /// exception. Always throws what <paramref name="refusal"/> returns.
         /// </summary>
-        protected void Refuse(IEnumerable<string> keys, Func<string, CultStoredDocument?> durableAt, Action<string> unstage, Func<Exception?, Exception> refusal)
+        protected void Refuse(
+            IEnumerable<string> keys,
+            Func<string, CultStoredDocument?> durableAt,
+            Func<string, CultForeignRecord?> foreignAt,
+            Action<string> unstage,
+            Func<Exception?, Exception> refusal)
         {
             var refused = keys.Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).ToArray();
             var loaded = new List<CultStoredDocument>();
             var dropped = new List<CultStoredDocument>();
+            var foreign = new List<CultForeignRecord>();
             try
             {
                 foreach (var key in refused)
                 {
+                    if (foreignAt(key) is { } carried)
+                        foreign.Add(carried);
                     Entries.TryGetValue(key, out var held);
                     var durable = durableAt(key);
                     if (durable == null)
@@ -3719,6 +3729,7 @@ namespace GameCult.Caching
                 Entries.TryRemove(held.Key.Value, out _);
             foreach (var stored in loaded)
                 Entries[stored.Key.Value] = stored;
+            SetForeignRecords(_foreignRecords.Where(record => !refused.Contains(record.Key, StringComparer.Ordinal)).Concat(foreign));
             throw refusal(null);
         }
 
@@ -4130,6 +4141,7 @@ namespace GameCult.Caching
             Refuse(
                 recordKeys.Concat(changedKeys),
                 key => Cache == null ? null : DurableAt(durable, key),
+                key => ForeignAt(durable, key),
                 key =>
                 {
                     _staged.Remove(key);
@@ -4154,21 +4166,28 @@ namespace GameCult.Caching
         }
 
         // A cache declares through its registry. A cacheless CultMesh write declares the ids of the catalog entry it writes: its own id
-        // and the ids it lists compatible. A refused key's durable version is what this store has now read of it.
-        private void RefuseUndeclaredOnDisk(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        // and the ids it lists compatible.
+        private void RefuseUndeclaredOnDisk(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals) =>
+            RefuseUndeclaredOnDisk(
+                durable,
+                _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals),
+                Cache != null
+                    ? Registry.Declares
+                    : id => upserts.Any(staged =>
+                        string.Equals(staged.Entry.SchemaId, id, StringComparison.Ordinal) ||
+                        staged.Entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal)));
+
+        // A refused key's durable version is what this store has now read of it.
+        private void RefuseUndeclaredOnDisk(Durable? durable, IEnumerable<string> written, Func<string, bool> declares)
         {
-            Func<string, bool> declares = Cache != null
-                ? Registry.Declares
-                : id => upserts.Any(staged =>
-                    string.Equals(staged.Entry.SchemaId, id, StringComparison.Ordinal) ||
-                    staged.Entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal));
             var undeclared = UndeclaredOnDisk(durable, declares);
             if (undeclared.Count == 0)
                 return;
             RefuseUndeclaredOnDisk(
-                _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals),
+                written,
                 key => undeclared.TryGetValue(key, out var carried) ? carried : null,
                 key => Cache == null ? null : DurableAt(durable, key),
+                key => ForeignAt(durable, key),
                 key =>
                 {
                     _staged.Remove(key);
@@ -4190,6 +4209,12 @@ namespace GameCult.Caching
 
             return undeclared;
         }
+
+        // The durable record at a key as a load lists it when no registered type claims its id; null otherwise.
+        private CultForeignRecord? ForeignAt(Durable? durable, string key) =>
+            durable?.Snapshot.Records.FirstOrDefault(candidate => string.Equals(candidate.Key, key, StringComparison.Ordinal)) is { } record
+                ? Foreign(record, durable.Snapshot.SchemaCatalog)
+                : null;
 
         // The durable record at a key decoded as a load decodes it, at its durable version: null when the store holds none there or
         // holds it foreign. The one decode both refusals reload through.
