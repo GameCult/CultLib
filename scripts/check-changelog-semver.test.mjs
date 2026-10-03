@@ -741,79 +741,72 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
   assert.match(prefixPinProblems(releasePackages, workflowText(), [], readAtTag).join("\n"), /are the tags fetched\?/);
 });
 
-// The suite is what pins the declared prefixes and the checker's rules, so the places that release
-// run it first: every job of publish-packages.yml, on a checkout that holds every tag, with .NET set
-// up for the API gate, before any step that checks or publishes; and each Unity release script,
-// before it calls the checker.
+// The suite is what pins the declared prefixes and the checker's rules, so nothing releases without it.
+// publish-packages.yml releases only through scripts/release-after-suite.mjs, which runs the suite and then
+// the release action from one process, so no if: on any step can release what the suite did not pass. This
+// pin reads no condition. It compares each job's release steps whole, less their own if: line, with the
+// text below, so a release step that does anything else is a mismatch, and it refuses any step or job that
+// may fail without failing the job, or that runs through another shell. Each Unity release script runs the
+// suite itself, before it calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
-// Any status function replaces a step's implicit success(), so Publish could run after the suite failed:
-// the same bypass as continue-on-error. success() is refused too: "success() || c" publishes on c alone,
-// and "success() && c" is sound but says nothing the same condition without it does not. "!cancelled()"
-// matches through "cancelled(".
-const STATUS_FUNCTION = /\b(?:always|cancelled|failure|success)\s*\(/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
-// The if: of the step that holds offset `at` in a job's text, or null when the step has none. A step
-// runs from its "- name:" line to the next one. Only the if: line is read, so an if: whose value goes on
-// past that line comes back as MULTI_LINE, which workflowSuiteProblems refuses: a block scalar (if: >-,
-// if: |), or a plain or quoted scalar continued on a following line indented deeper than the key, where
-// always() or "|| true" would hide from a one-line read.
-const MULTI_LINE = Symbol("multi-line if:");
-function stepCondition(job, at) {
-  const names = [...job.matchAll(/^\s+- name:/gm)].map((match) => match.index);
-  const start = names.filter((index) => index <= at).at(-1) ?? 0;
-  const end = names.find((index) => index > at) ?? job.length;
-  const step = job.slice(start, end);
-  const condition = step.match(/^([ \t]*)if:[ \t]*(.*?)[ \t]*\r?$/m);
-  if (condition === null) return null;
-  const next = step.slice(condition.index + condition[0].length).split("\n").find((line) => line.trim() !== "");
-  const continued = next !== undefined && next.match(/^[ \t]*/)[0].length > condition[1].length;
-  return continued || /^[>|]/.test(condition[2]) ? MULTI_LINE : condition[2];
+const RELEASE_STEPS = {
+  "cultcache-ts": [
+    ["- name: Publish", "  run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts", "  env:", "    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"],
+  ],
+  // Publish uploads only the dist the guarded step built, so it has nothing to upload unless the suite passed.
+  python: [
+    ["- name: Build sdist and wheel", "  run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }}"],
+    ["- name: Publish", "  uses: pypa/gh-action-pypi-publish@release/v1", "  with:", "    packages-dir: packages/${{ matrix.package }}/dist"],
+  ],
+};
+
+// A job's steps, each as its lines relative to its "- name:" line, without comments, blank lines or the
+// step's own one-line if:. A line indented less than the step stays whole, so it cannot match.
+function jobSteps(job) {
+  const steps = [];
+  for (const line of job.split(/\r?\n/)) {
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    const name = line.match(/^( *)- name:/);
+    if (name) steps.push({ indent: name[1], lines: [] });
+    const step = steps.at(-1);
+    if (step === undefined) continue;
+    const relative = line.startsWith(step.indent) ? line.slice(step.indent.length) : line;
+    if (!/^  if: .*$/.test(relative)) step.lines.push(relative);
+  }
+  return steps;
 }
 
-// The suite must run whenever Publish does, so Publish's condition has to imply the suite's. Three
-// shapes prove that textually: the suite step has no if:, the two conditions are equal, or Publish's
-// is the suite's followed by " && ". The last is sound only when Publish's condition holds no "||":
-// && binds tighter than ||, so "S && c || d" publishes on d alone, and "a || b && c" splits S itself.
-// Matching text rather than parsing GitHub's expression language refuses some sound conditions too:
-// a parenthesised "S && (c || d)", conjuncts in another order ("c && S"), and a condition wrapped in
-// ${{ }} or spaced differently on one step only. Such a refusal costs a rewrite into one of the three
-// shapes; a wrong pass would publish a package the suite never checked.
-function suiteConditionCovers(suite, publish) {
-  if (suite === null || suite === publish) return true;
-  return publish !== null && publish.startsWith(`${suite} && `) && !publish.includes("||");
-}
-
-function workflowSuiteProblems(workflow) {
-  const [, jobs] = workflow.split(/^jobs:\r?\n/m);
+function workflowReleaseProblems(workflow) {
+  const [, jobs = ""] = workflow.split(/^jobs:\r?\n/m);
   const starts = [...jobs.matchAll(/^  ([\w-]+):\r?\n/gm)];
   const problems = [];
-  if (starts.length === 0) problems.push("the workflow has no jobs");
+  for (const id of Object.keys(RELEASE_STEPS)) {
+    if (!starts.some((start) => start[1] === id)) problems.push(`the workflow has no job ${id}`);
+  }
   starts.forEach((start, index) => {
-    const job = code(jobs.slice(start.index, starts[index + 1]?.index ?? jobs.length));
-    const at = (pattern) => job.search(pattern);
-    const suite = at(SUITE);
     const label = `job ${start[1]}`;
-    if (suite < 0) return problems.push(`${label} does not run the suite`);
-    if (/continue-on-error/.test(job)) problems.push(`${label} lets a step fail without failing the job`);
-    if (at(/fetch-depth:\s*0\b/) < 0 || at(/fetch-depth:\s*0\b/) > suite) problems.push(`${label} runs the suite before checking out with fetch-depth: 0`);
-    if (at(/actions\/setup-dotnet@/) < 0 || at(/actions\/setup-dotnet@/) > suite) problems.push(`${label} runs the suite before setting up .NET`);
-    for (const [what, pattern] of [["the checker", CHECKER], ["a publish step", /^\s+- name: Publish\b/m]]) {
-      if (at(pattern) < 0) problems.push(`${label} has no ${what}`);
-      else if (at(pattern) < suite) problems.push(`${label} reaches ${what} before the suite`);
-    }
-    const publish = at(/^\s+- name: Publish\b/m);
-    if (publish < 0) return;
-    const [suiteIf, publishIf] = [stepCondition(job, suite), stepCondition(job, publish)];
-    if ([suiteIf, publishIf].includes(MULTI_LINE)) {
-      problems.push(`${label} gives the suite or Publish a multi-line if: (a block scalar, or a value continued on the next line), which the pin does not read; write it on one line`);
-    } else if (STATUS_FUNCTION.test(publishIf ?? "")) {
-      problems.push(`${label} lets Publish run after the suite fails or is skipped: its if: calls always(), cancelled(), failure() or success()`);
-    } else if (!suiteConditionCovers(suiteIf, publishIf)) {
-      problems.push(`${label} runs the suite under a condition the pin cannot prove Publish implies; it accepts no suite if:, an equal if:, or Publish's if: as the suite's followed by " && " with no "||"`);
+    if (!Object.hasOwn(RELEASE_STEPS, start[1])) return problems.push(`${label} is not a job this pin knows; give it its release steps in RELEASE_STEPS`);
+    const steps = jobSteps(jobs.slice(start.index, starts[index + 1]?.index ?? jobs.length));
+    let from = 0;
+    for (const want of RELEASE_STEPS[start[1]]) {
+      const named = steps.filter((step) => step.lines[0] === want[0]);
+      const at = steps.findIndex((step, i) => i >= from && step.lines[0] === want[0]);
+      if (named.length !== 1 || at < 0) {
+        problems.push(`${label} needs exactly one step "${want[0]}", after the release step before it`);
+        continue;
+      }
+      if (steps[at].lines.join("\n") !== want.join("\n")) {
+        problems.push(`${label} step "${want[0]}" is not exactly the release call:\n${steps[at].lines.join("\n")}`);
+      }
+      from = at + 1;
     }
   });
+  if (/continue-on-error|\bshell\b|\bdefaults\b/.test(code(workflow))) {
+    problems.push("the workflow says continue-on-error, shell or defaults: no step may fail without failing its job, or run through another shell");
+  }
   return problems;
 }
 
@@ -823,64 +816,59 @@ function scriptSuiteProblems(script) {
   return body.search(CHECKER) < body.search(SUITE) ? ["calls the checker before the suite"] : [];
 }
 
-test("workflow: every job runs the suite first, with every tag fetched; removing, moving or disabling the step fails this test", () => {
+test("workflow: each job releases only through release-after-suite.mjs, and no step may fail without failing its job", () => {
   const workflow = workflowText();
-  assert.deepEqual(workflowSuiteProblems(workflow), []);
-  const suiteLines = /^\s+run: node --test scripts\/check-changelog-semver\.test\.mjs\r?\n/gm;
-  assert.equal(workflow.match(suiteLines).length, 2);
-  // the step removed from either job, or from both
-  let removed = 0;
-  assert.deepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => (removed++ === 0 ? "        run: true\n" : line))).length, 1);
-  assert.equal(workflowSuiteProblems(workflow.replace(suiteLines, "        run: true\n")).length, 2);
-  // the step moved after the checker, a shallow checkout, no .NET, and a step allowed to fail
-  const moved = workflow
-    .replace(suiteLines, "        run: true\n")
-    .replace(/(\s+- name: Verify semver policy\b)/, "\n      - name: Late\n        run: node --test scripts/check-changelog-semver.test.mjs$1");
-  assert.notDeepEqual(workflowSuiteProblems(moved), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/fetch-depth: 0/g, "fetch-depth: 1")), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/actions\/setup-dotnet@/g, "actions/setup-other@")), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => `${line}        continue-on-error: true\n`)), []);
-  // the suite step disabled, or run under a condition Publish does not imply
-  const npmSuiteIf = (condition) => {
-    let seen = 0;
-    return workflow.replace(suiteLines, (line) => (seen++ === 0 ? `        if: ${condition}\n${line}` : line));
-  };
-  const pythonSuiteIf = (condition) =>
-    workflow.replace(/if: steps\.selected\.outputs\.run == 'true'(\r?\n\s+run: node --test scripts\/check-changelog-semver\.test\.mjs)/, `if: ${condition}$1`);
-  const narrower = /runs the suite under a condition the pin cannot prove Publish implies; it accepts no suite if:, an equal if:/;
-  assert.match(workflowSuiteProblems(npmSuiteIf("false")).join("\n"), narrower);
-  assert.match(workflowSuiteProblems(pythonSuiteIf("false")).join("\n"), narrower);
-  assert.match(workflowSuiteProblems(npmSuiteIf("github.event_name == 'workflow_dispatch'")).join("\n"), narrower);
-  // a textual prefix that is not a whole conjunct proves nothing
-  assert.match(workflowSuiteProblems(pythonSuiteIf("steps.selected.outputs.run")).join("\n"), narrower);
-  // a leading conjunct is not enough once Publish's condition has an ||
-  const pythonPublishOr = workflow.replace(/(- name: Publish\r?\n\s+if: steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, "$1 || true");
-  assert.match(workflowSuiteProblems(pythonPublishOr).join("\n"), narrower);
-  // a sound condition outside the three shapes is refused too, and the message says why
-  const pythonPublishIf = (rewrite) =>
-    workflow.replace(/(- name: Publish\r?\n\s+if: )(steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, (_, head, condition) => `${head}${rewrite(condition)}`);
-  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => condition.replace("startsWith(github.ref, 'refs/tags/')", "(startsWith(github.ref, 'refs/tags/') || false)"))).join("\n"), narrower);
-  // a status function in Publish's if: runs it after the suite failed or was skipped
-  const npmPublishIf = (prefix) => workflow.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, `$1${prefix}$2`);
-  const status = /lets Publish run after the suite fails or is skipped/;
-  for (const prefix of ["always() && ", "!cancelled() && ", "cancelled() || ", "failure() && ", "success() || "]) {
-    assert.match(workflowSuiteProblems(npmPublishIf(prefix)).join("\n"), status, prefix);
+  assert.deepEqual(workflowReleaseProblems(workflow), []);
+  const npmRun = "run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts";
+  const pythonRun = "run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }}";
+  const exact = /is not exactly the release call/;
+  for (const run of [npmRun, pythonRun]) {
+    assert.equal(workflow.split(run).length, 2, run);
+    const edit = (replacement) => workflowReleaseProblems(workflow.replace(run, replacement)).join("\n");
+    // anything else on the line, on a continuation line, or in a block; another call; another shell
+    assert.match(edit(`${run} || true`), exact, run);
+    assert.match(edit(`${run}\n          || true`), exact, run);
+    assert.match(edit("run: |\n          node --test scripts/check-changelog-semver.test.mjs\n          true"), exact, run);
+    assert.match(edit(run.replace("release-after-suite.mjs", "check-changelog-semver.mjs")), exact, run);
+    assert.match(edit(`${run}\n        shell: bash`), /another shell/, run);
+    assert.match(edit(`${run}\n        continue-on-error: true`), /no step may fail/, run);
   }
-  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => condition.replace(" && ", " && always() && "))).join("\n"), status);
-  // a multi-line if: on either step is refused rather than read by its first line: a block scalar...
-  const multiLine = /gives the suite or Publish a multi-line if:/;
-  const npmBlockSuite = npmSuiteIf(">-\n          false");
-  assert.match(workflowSuiteProblems(npmBlockSuite.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1>-\n          $2")).join("\n"), multiLine);
-  assert.match(workflowSuiteProblems(npmSuiteIf("|\n          true")).join("\n"), multiLine);
-  assert.match(workflowSuiteProblems(npmPublishIf(">-\n          ")).join("\n"), multiLine);
-  // ...or a plain or quoted scalar continued on a following line, where always() or "|| true" would hide
-  const npmPublishTail = (tail) => workflow.replace(/(- name: Publish\r?\n\s+if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, `$1${tail}`);
-  assert.match(workflowSuiteProblems(npmPublishTail(" &&\n          always()")).join("\n"), multiLine);
-  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => `${condition}\n          || true`)).join("\n"), multiLine);
-  assert.match(workflowSuiteProblems(npmPublishIf("\"").replace(/(if: "startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1 &&\n          always()\"")).join("\n"), multiLine);
-  assert.match(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref,\n          'refs/tags/cultcache-ts-v')")).join("\n"), multiLine);
-  // a suite condition equal to Publish's passes
-  assert.deepEqual(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref, 'refs/tags/cultcache-ts-v')")), []);
+  // the guard runs the suite itself, so the release steps' conditions are free
+  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: node)/, "if: always()$1")), []);
+  // a job allowed to fail, a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
+  assert.match(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    continue-on-error: true\n")).join("\n"), /no step may fail/);
+  assert.match(workflowReleaseProblems(workflow.replace("- name: Build sdist and wheel", "- name: Build")).join("\n"), /needs exactly one step "- name: Build sdist and wheel"/);
+  assert.match(workflowReleaseProblems(workflow.replace("- name: Build and test", "- name: Publish\n        run: npm publish\n\n      - name: Build and test")).join("\n"), /needs exactly one step "- name: Publish"/);
+  assert.match(workflowReleaseProblems(workflow.replace("packages-dir: packages/${{ matrix.package }}/dist", "packages-dir: dist")).join("\n"), exact);
+  assert.match(workflowReleaseProblems(`${workflow}\n  other:\n    runs-on: ubuntu-latest\n`).join("\n"), /job other is not a job this pin knows/);
+});
+
+test("release-after-suite runs the suite first, and the release action only when the suite passed", async () => {
+  const { releaseAfterSuite, suite } = await import("./release-after-suite.mjs");
+  const calls = [];
+  const runner = (suiteStatus, actionStatus = 0) => (command, args, cwd) => {
+    calls.push([command, args, cwd]);
+    return command === process.execPath ? suiteStatus : actionStatus;
+  };
+  const suiteCall = [process.execPath, ["--test", suite], undefined];
+  assert.equal(releaseAfterSuite(["npm-publish", "packages/cultcache-ts"], runner(0)), 0);
+  assert.deepEqual(calls, [suiteCall, ["npm", ["publish", "--access", "public"], "packages/cultcache-ts"]]);
+  calls.length = 0;
+  assert.equal(releaseAfterSuite(["python-build", "packages/cultnet-py"], runner(0, 3)), 3);
+  assert.deepEqual(calls, [suiteCall, ["python", ["-m", "build", "packages/cultnet-py"], undefined]]);
+  for (const action of ["npm-publish", "python-build"]) {
+    calls.length = 0;
+    assert.equal(releaseAfterSuite([action, "packages/x"], runner(1)), 1);
+    assert.deepEqual(calls, [suiteCall], action);
+  }
+  for (const argv of [[], ["npm-publish"], ["constructor", "x"], ["npm-publish", "x", "y"]]) {
+    calls.length = 0;
+    assert.equal(releaseAfterSuite(argv, runner(0)), 2, argv.join(" "));
+    assert.deepEqual(calls, []);
+  }
+  // run as a script, a usage error exits 2 before the suite runs
+  const script = fileURLToPath(new URL("./release-after-suite.mjs", import.meta.url));
+  assert.throws(() => execFileSync(process.execPath, [script], { stdio: "pipe" }), (error) => error.status === 2);
 });
 
 test("the Unity release scripts run the suite before the checker; removing it fails this test", () => {

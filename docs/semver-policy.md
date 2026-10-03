@@ -182,8 +182,8 @@ or a missing declaration refuses), and:
    workflow tag trigger must be a declared prefix, and each such package's prefix
    must be a workflow trigger or, for the Caching Unity package the workflow does
    not build, the prefix of tags that hold its own manifest at the tag's own
-   version, so a typo or a copied prefix fails the suite. The workflow and the
-   three Unity release scripts run the suite before any check or publish step.
+   version, so a typo or a copied prefix fails the suite. Nothing releases
+   without the suite passing; see below for how each release path runs it.
    Releases run from a full clone with every tag (`fetch-depth: 0` in CI), the
    recorded `partial-tags-first-release`.
    Tags that cannot be read (a `--cwd` that is not a git repository, or a tag
@@ -280,20 +280,18 @@ It is wired into:
   `org.gamecult.cultmath`;
 - `scripts/verify-caching-unity-release.ps1`, for `org.gamecult.caching.unity`.
 
-Each of those runs the check's own tests first, and the tests pin that order.
-In `publish-packages.yml` the test step must run whenever the job's Publish
-step does. The pin proves that from the text of the two `if:` conditions, so it
-accepts only three shapes: no `if:` on the test step, the same `if:` on both,
-or Publish's `if:` as the test step's followed by ` && ` with no `||`. The pin
-reads one line, so a multi-line `if:` is refused: a block scalar (`>-`, `|`),
-or a plain or quoted value continued on the next line. So is a Publish `if:`
-calling `always()`, `cancelled()`, `failure()` or `success()`: any status
-function replaces the implicit `success()`, so `success() || c` would publish
-after the tests failed, and `success() && c` says nothing `c` alone does not. Matching text rather than parsing GitHub's expression language also
-refuses some sound conditions: a parenthesised `S && (c || d)`, conjuncts in
-another order, and a condition wrapped in `${{ }}` or spaced differently on one
-step only. Rewrite those into an accepted shape; a wrong pass would publish a
-package the tests never checked.
+Each of those runs the check's own tests before it releases. The Unity release
+scripts run them before they call the check, and the tests pin that order. In
+`publish-packages.yml` the release step runs `scripts/release-after-suite.mjs`,
+which runs the tests and then the release action from one process, and releases
+only if the tests passed: `npm publish` for `cultcache-ts`, and for the Python
+packages the sdist and wheel build, whose output is all the PyPI upload step
+uploads. The gate is that call, not a step condition, so no `if:` can release
+what the tests did not pass. The tests compare each job's release steps with
+their expected text exactly, less the steps' `if:` lines, and refuse
+`continue-on-error`, `shell` and `defaults` anywhere in the workflow. Removing
+the call is still possible, but only as a visible edit to those steps and to the
+tests.
 
 `org.gamecult.cultlib` compiles CultMath from source and ships beside
 `org.gamecult.cultmath`, so its build refuses unless it declares exactly the
