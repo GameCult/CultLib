@@ -66,6 +66,8 @@ Other Body facts that shape the map:
 | Watches | as today; each re-resolved dependent emits `Updated` with its own `Sequence` | published in the same hold as the base change | the cache |
 | Compare-exchange | `(schemaId, storedAt)` of the stored delta (ruling 2) | a base change does not stamp its variants | the cache; the resolved view is not an identity |
 | Persisted format version | store header `formatVersion` | `cultcache.store.v2` when the store holds at least one variant; `v1` otherwise (Q5) | the writing store, from content |
+| Single-file store file | the path; one MessagePack array `[header, catalog, records]` | replaced whole and atomically; refused when unreadable; see "Store authorities" | each runtime's one reader decides what is a store; the writer derives the header from it |
+| Store lock and staging files | `<file>.lock`; a unique temp beside the store | the lock is taken by C# and Rust writers (CultMesh included, through `ReplaceDurable`); staging is removed on a failed write | the store, never CultMesh or a consumer |
 | Variant slot on the wire (CultNet) | **empty cell**: no CultNet message carries a delta today | C5 | ruling 4 decides deltas; the message shape is C5's design |
 | Dictionary entries, scalar lists, arrays | **empty cell**: no stable identity exists | whole-member Set only (Q7) | Q7 |
 | Template (non-item) bases | **empty cell**: parked by ruling 6 | none | not in these cuts |
@@ -1382,3 +1384,104 @@ Verdict: **hold, not merged.** Recorded under drain mode; no fix dispatched. The
   - Main's `CultMeshStreamingTests.cs:919` uses `MeshNoteAliasDocument`, which c2a deleted.
   - The rough merge fails in Caching, Mesh (compile), TS and Python.
 - `ADeterministicIdIsTheSameUnderEveryCulture…` fails at the base too: the image is globalization-invariant.
+
+## Store authorities (Modeling, body at `hands/variants-c2a` `705ab669`, 2026-10-03)
+
+Source: cuts `merge-r1` (closed, reports h2-h6) and `mesh-single-file-reader` (closed, report h1). Every `file:line`
+is at `705ab669`; re-find by symbol when the branch moves. This section supersedes the Body facts in section 1
+about raw readers (the Mesh legacy snapshot decoder and `ReadLegacyPersistedRecord` no longer exist) and the
+merge notes in the C2a Soul sections below. C#, Rust, TypeScript and Python each have one single-file reader, and
+CultMesh reaches CultCache's reader, lock and replace through one internal entry.
+
+Abbreviations: **CS** `src/GameCult.Caching/CultCache.cs` (`SingleFileBackingStore` :3627-4140), **CSM**
+`src/GameCult.Caching.MessagePack/CultDocumentMessagePackSerialization.cs`, **MESH**
+`src/GameCult.Mesh/CultMeshSingleFileDocuments.cs`, **RS** `packages/cultcache-rs/src/lib.rs`, **TS**
+`packages/cultcache-ts/src/single-file-messagepack-backing-store.ts`, **PY**
+`packages/cultcache-py/src/cultcache_py/stores.py`, **AUTH** `packages/cultnet-ts/src/idunn-runtime-authority.ts`.
+
+The one door per runtime, and who walks through it:
+
+| Runtime | The reader | Callers that must use it |
+| --- | --- | --- |
+| C# | `SingleFileBackingStore.ReadSnapshot` CS:3997 over `ReadDisk` CS:4026 | `PullAllCore` CS:3665, `PushAll` CS:3768, `CommitBatchCore` CS:3799, `ReadDurable` CS:4014, `ReplaceDurable` CS:4016; MESH:164, :195, :245 |
+| Rust | `read_store_unlocked` RS:935 (header by `store_header` RS:389) | `read_all_unlocked` RS:924 (`pull_all` RS:1243 and the read-only snapshot), `write_all_unlocked` RS:983, soft `push_all` RS:1268 |
+| TypeScript | `readSingleFileStore` TS:153 (bytes by `readStoreBytes` TS:174), exported from `packages/cultcache-ts/src/index.ts:4` | the store's `#readDisk` TS:108 (`pullAll`, `push`, `delete`, `pushAll`); AUTH:321 `readAuthorityRecord` |
+| Python | `pull_all` decode path PY:123-140 (`_read_store` PY:265, `_decode_snapshot` PY:296) | `push`, `push_all`, `delete` call `pull_all` (PY:142-152) |
+
+### A. Header decision (what the file is, and what header a write carries)
+
+- **Owner.** Read side: the reader in the table above. C#: `CSM.DeserializeSnapshot` :188 (whole-array proof :245-269), then `RequireSingleFileFormat` :273, reached through `SingleFileMessagePackBackingStore.DeserializeSnapshot` CSM:592. Rust: `store_header` RS:389 is the only classifier of leading bytes (it returns `first` and the whole-array proof separately), then `readable_store_format` RS:2890 and `decode_store_file` RS:2901. TS: `decodeStoreFile` TS:423. Python: `_decode_snapshot` PY:296. Write side: the header is derived from what the reader just saw. C#: `HeaderFor` CS:3439, fed by `disk?.FormatVersion` in `PushAll` and `CommitBatchCore`, and by `existing?.FormatVersion` from MESH:247. Rust: `encode_store_snapshot` RS:2793, fed by the `DiskStore` read in `write_all_unlocked` RS:992. TS: `#format`, set by the pre-write read (TS:48-52, :86-100) and used by `encodeSnapshot` TS:136. Python: `_format`, set in `pull_all`, used by `_encode_snapshot` PY:245.
+- **Inputs.** The bytes at the path. **Outputs.** The decoded store with header and catalog; or a typed refusal (`CultStoreUnreadableException` in C#; `CultCacheStoreUnreadable{path, kind}` in Rust, kind `Undecodable` or `UnsupportedFormat`; `StoreUnreadableError` in TS and Python). A refusal names a header only as `cultcache.store.v<digits>`.
+- **Derived state.** The write header is never decided by the writer: it is the reader's verdict (header read, whole-store flag, whether ids or variants are held). A rewrite of a file that cannot be read cannot happen, because the reader throws first.
+- **Forbidden writers.** A second header classifier. Deleted: Rust `leading_header`, `read_array_header`, `read_string`; cultnet-ts's own decode of the store header; the TS async `readStore`; Rust `StoreUnreadableError` (negative grep `StoreUnreadableError` in `packages/cultcache-rs`: no match); Python `_decode_v1_snapshot`.
+- **Shared paths.** cultnet-ts reaches the header decision only through `readSingleFileStore` (AUTH:4, :321) and checks only record count, schema id and type. cultnet-ts therefore declares cultcache-ts `^0.15.0`, the first release that exports it.
+- **Cut line.** `merge-r1` h3 (Rust) and h4 (TS, cultnet-ts); spec `cut-merge-r1.r3` authority map.
+- **Pinned by.** `tests/vectors/document-variants-c2a/readability/manifest.txt`, walked by `StoreReadabilityTests.OpenReadsExactlyTheFilesTheVectorsSayItReads` (C#), `CultMeshSingleFileReadabilityTests.AWriteReplacesAFileExactlyWhenItReads` (Mesh), `a_file_is_replaced_exactly_when_it_reads` (RS:5132), "SingleFileMessagePackBackingStore replaces a file exactly when it reads" (TS test :2321) and `test_single_file_replaces_a_file_exactly_when_it_reads` (Python). AUTH cases: `packages/cultnet-ts/test/idunn-runtime-authority.test.ts`. Declared divergences in the manifest: `legacy-envelopes.bin` (C# refuses; the others read and replace it) and `variant-slot-v3.bin` (C# reads; the others refuse).
+- **Known gaps.** `variants:follow_up:c0-bad-canonical-in-manifest` (`current-catalog-bad-canonical.msgpack` is not in the manifest; TS reads it, Rust refuses). `variants:follow_up:legacy-vectors-all-runtimes` (the three `legacy-catalog-*` c0 vectors have a verdict only in C# tests; all four runtimes refuse them, probed). `variants:follow_up:range-check-in-ci` (`npm run test:pack:ts` builds every admitted tag and checks exports, but `.github/workflows/publish-packages.yml` does not run it).
+
+### B. Existence and links (what "nothing at the path" means)
+
+- **Owner.** C#: `ReadDisk` CS:4026 decides absence from the path's attributes (`-1`), with `PathIsALink` CS:4057. Rust: `is_absent` RS:3049, inside `read_store_unlocked` RS:936-945. TS: `readStoreBytes` TS:174 (the read and the lstat must both find nothing; the lstat is a test seam). Python: `_read_store` PY:265.
+- **Inputs.** The path's attributes and the read result. **Outputs.** Absent (an empty, unmarked store), or bytes, or an I/O error. Only nothing at the path is absent. A link whose target is gone is an I/O error in all four runtimes (C#: `IOException` for a file link and for a Windows directory junction, CS:4040-4048; Rust: `io::Error`; TS: an error with code `ENOENT`; Python: `FileNotFoundError` re-raised).
+- **Derived state.** Mesh's `FileNotFoundException` is derived from the store reader's `null` (MESH:164, :195); Mesh no longer owns absence.
+- **Forbidden writers.** `File.Exists` or any existence gate in MESH (negative grep `File\.(Exists|ReadAllBytes|Delete|Move|WriteAllBytes)|HasOlderCatalogLayout|ReadLegacySchemaCatalogEntry|WriteFileAtomically|ReadSingleFileSnapshot` over MESH: no match); a zero-length-means-absent shortcut; a writer's own read.
+- **Shared paths.** Open, flush, commit, `ReadDurable`, `ReplaceDurable`. Rust `pull_all` RS:1243 also checks `is_absent` on the store and on the lock path before it takes the shared lock; that skips lock creation only, and the verdict stays with the reader.
+- **Cut line.** `merge-r1` h2 (C#) and h4/h6 (TS `readStoreBytes`); `mesh-single-file-reader` h1.
+- **Pinned by.** C#: `StoreReadabilityTests` `ADanglingFileLinkIsAnIoErrorOnOpenNotAnEmptyStore` :208, `ADanglingDirectoryLinkIsAnIoErrorOnOpenNotAnEmptyStore` :185, and the commit variants :196, :219. Mesh: `ADanglingLinkIsAnIoErrorOnTypedWriteRawWriteAndReadNeverAMissingFile` :107 and `OnlyNothingAtThePathIsAMissingFile` :134 (`CultMeshSingleFileStoreTests.cs`). Rust: `a_dangling_symlink_at_the_store_path_is_an_error_and_nothing_is_written` RS:5832. TS: "readStoreBytes reports nothing at the path only when the lstat finds nothing too".
+- **Known gaps.** The writer side still tolerates a dangling link: Rust `write_all_unlocked` RS:992-996 and TS `pushAll` TS:94-100 replace it on a whole-store write (`variants:follow_up:writer-dangling-link-tolerance`, owner `c2a-write-set`). What a replace does to a live link is `variants:follow_up:store-replace-cut` item 2. Windows junction behavior was proven at `42f05f66` and `b1ff2dcb`, not at the final head.
+
+### C. Zero-byte file
+
+- **Owner.** None separate: a zero-byte file is bytes the one reader cannot decode. C#: `ReadDisk` returns the bytes and `CSM.DeserializeSnapshot` refuses them (the `Length: > 0` shortcut is deleted). Rust: the `store_header` whole-array proof fails, `Undecodable`. TS: `readSingleFileStore` TS:158 wraps the decode error in `StoreUnreadableError`. Python: the `unpackb` failure is wrapped at PY:139-140.
+- **Inputs/outputs.** Zero bytes in; a typed unreadable refusal out; every writer leaves the file as it was.
+- **Derived state.** None. **Forbidden writers.** Any `length === 0`, `is_empty` or `Length > 0` branch before decode (negative greps in spec `cut-merge-r1.r3`: `Length: > 0 } bytes` in CS, `data.length === 0` in TS).
+- **Shared paths.** Open, flush, commit, soft flush, Mesh typed and raw write, AUTH.
+- **Cut line.** `merge-r1` h1-h3; ruling `variants:ruling:merge-r1-precedence`.
+- **Pinned by.** Manifest row `zero-byte.bin` (refuses x4) in every walk above; Mesh `AReadOfAZeroByteFileIsRefusedAsUnreadableNotAsAMissingRecord` and `AZeroByteFileIsRefusedOnTypedAndRawWriteAndLeftAlone` (`CultMeshSingleFileStoreTests.cs:175`); the AUTH zero-byte case.
+- **Known gaps.** None open.
+
+### D. Directory at the path
+
+- **Owner.** C#: the explicit clause in `ReadDisk` CS:4034-4035 (a directory that is not a link is an `IOException`; a directory link falls to the catch at CS:4045). Rust: `fs::read` fails with a non-`NotFound` error, kept as `io::Error` (RS:940-944). TS: `readFileSync` throws `EISDIR`. Python: `Path.read_bytes` raises an `OSError`.
+- **Outputs.** An I/O error, never an empty store; the directory is untouched and the refusal text does not echo the path.
+- **Forbidden writers.** Treating a directory as absent, or creating a store over it.
+- **Shared paths.** Open, commit, Mesh read and write.
+- **Cut line.** `mesh-single-file-reader` h1 (the C# clause). Rust, TS and Python were correct by construction of their reads.
+- **Pinned by.** C#: `ADirectoryAtTheStorePathIsAnIoErrorOnOpenAndOnCommitNotAnEmptyStore` (`StoreReadabilityTests.cs:236`). Mesh: `ADirectoryAtThePathIsAnIoErrorOnReadAndWriteAndIsLeftAlone` (:149). Rust: `a_write_over_a_directory_stops_at_the_read_and_leaves_no_staging_file` RS:5726.
+- **Known gaps.** TS and Python have no test for a directory at the store path. No follow-up is registered; the natural home is `write-set-vectors` with the other readability pins.
+
+### E. Lock
+
+- **Owner.** C#: `AcquireLock` CS:4082 (`<file>.lock`, `FileShare.None`, 30 s wait), taken by `PushAll` CS:3766, `CommitBatchCore` CS:3795 and `ReplaceDurable` CS:4018, so Mesh writes wait for it. Rust: `with_exclusive_lock` RS:1038 and `with_shared_lock` RS:1031 (`fs2` flock on `<file>.lock`, `open_lock_file` RS:1162), taken by `pull_all` and `push_all`. TS: no cross-process lock; a per-store promise queue (`#enqueue`) only. Python: `threading.RLock` PY:119, in-process only.
+- **Inputs/outputs.** A read-modify-write request; the lock is held across the read and the replace for every writer that merges.
+- **Derived state.** A writer's header and merge base come from a read taken inside the lock (C# `PushAll`, `CommitBatchCore`, `ReplaceDurable`; Rust `write_all_unlocked`). TS and Python take them from a read outside any cross-process lock.
+- **Forbidden writers.** Any Mesh write outside `AcquireLock` (the former `File.Delete` plus `File.Move` writer and its fixed `path + ".tmp"` are deleted). C# readers on open take no file lock (`ReadSnapshot`), and Rust's read-only snapshot takes none by design.
+- **Shared paths.** The C# store and the Mesh single-file helpers; the Rust store.
+- **Cut line.** `mesh-single-file-reader` h1.
+- **Pinned by.** Mesh `AMeshWriteWaitsForTheStoreLock` (`CultMeshSingleFileStoreTests.cs:187`, deterministic) and `ConcurrentMeshWritersNeverErrorAndLeaveAReadableFile` (:261); mutant m3 (`ReplaceDurable` without `AcquireLock`) killed.
+- **Known gaps.** TS and Python have no cross-process lock; the mesh spec cites ruling `variants:ruling:write-lock-python-now-ts-later`, and no follow-up in this record carries the remaining TS work. `variants:follow_up:store-replace-cut` item 3: no test that `ReplaceDurable` reads under the lock. Prior art: `docs/research/cross-process-file-locking-prior-art.md`.
+
+### F. Replace (staging and atomic swap)
+
+- **Owner.** C#: `WriteSnapshotAtomically` CS:4104 (unique temp `.{name}.{guid}.tmp`, `WriteThrough`, then `File.Replace`, or `File.Move` when nothing is there), called from `WriteSnapshot` CS:4062 and `ReplaceDurable` CS:4016. Rust: `replace_unlocked` RS:1010, `stage_and_replace` RS:3011, `replace_file_atomically` (unix `rename` RS:3095; Windows `MoveFileExW` with retry RS:3106), then `sync_parent_directory` RS:3198; outcomes `Rejected`, `NotReplaced`, `ReplacedNotDurable`. TS: `#writeAll` TS:124-141 and `renameWithRetry` TS:198 (unique temp, no fsync). Python: `_replace_all` PY:154-159 (fixed `<path>.tmp`, `Path.replace`, no fsync).
+- **Inputs/outputs.** Encoded bytes in; the destination holds the old bytes or the new bytes, and a failed write removes its staging file (Rust pins the rename-failure path).
+- **Derived state.** None.
+- **Forbidden writers.** A second replace in a runtime. MESH's `WriteFileAtomically` is deleted; Mesh reaches the replace only through `ReplaceDurable`.
+- **Shared paths.** C# cache flush, commit and Mesh writes; Rust `write_all_unlocked`.
+- **Cut line.** `mesh-single-file-reader` h1 (C#). Rust's replace predates the campaign; `merge-r1` h3 added its rename fault seam.
+- **Pinned by.** Rust `a_write_whose_rename_fails_is_not_replaced_and_leaves_no_staging_file` (seam `WriteStep::Rename` RS:3212). Mesh `ACacheOpeningDuringMeshWritesNeverSeesAnEmptyStore` (:212, Linux only; it skips Windows).
+- **Known gaps.** `variants:follow_up:store-replace-cut`: (1) the Windows primitive, decided by open question `variants:question:windows-store-replace-primitive` (probe: `File.Replace` gave 1,722 empty opens in 17,313 under Mesh writers; `MoveFileExW` and POSIX rename gave none; `docs/research/windows-store-replace-prior-art.md`); (2) what a replace does to a live symlink (Mesh pins parity with a cache commit, `AMeshWriteOverALiveLinkLeavesWhatACacheCommitLeaves` :287); (3) a read-under-lock test; (4) a live directory link misreported as unreachable. Python's fixed temp name lets two processes share one staging file (research doc above). Rust's Windows replace loop and its rename fault line are unmutated (h3, undone).
+
+### G. Soft write decision (a soft flush writes only where nothing is)
+
+- **Owner.** The one reader decides; the writer does not. TS: `pushAll` TS:79-104 (absent writes; a readable store is left byte for byte; an unreadable one is refused; a dangling link is refused when soft). Rust: the soft branch of `push_all` RS:1268-1280 (`!read_store_unlocked()?.absent` returns). C#: none; `CultMesh`'s `FlushAsync(bool soft)` accepts the flag and drops it (`src/GameCult.Mesh/CultMesh.cs:433-436`). Python: no soft flush. cultmesh-ts passes the flag (`packages/cultmesh-ts/src/index.ts:4073`).
+- **Inputs/outputs.** A flush with `soft`; no write for a readable store, a write for an absent one, the reader's refusal otherwise.
+- **Derived state.** None. **Forbidden writers.** A soft check that reads the file its own way (TS `readStore` once returned zero bytes as present; deleted in h4).
+- **Shared paths.** TS `pushAll` and Rust `push_all` only.
+- **Cut line.** `merge-r1` h4 (TS) and h6 (Rust).
+- **Pinned by.** The manifest walks run a soft flush over every vector in TS (the `softPushAll` operation, TS test :2336) and Rust (`soft_push_all`, RS:5149), each with an absent and a dangling-link case; `a_soft_push_all_writes_where_nothing_is_and_refuses_a_dangling_link` RS:6019.
+- **Known gaps.** C# and Python have no soft decision, and the C# Mesh flag is dead; no follow-up is registered (h6 `undone` names it). `writer-dangling-link-tolerance` applies to the non-soft branch.
+
+### What no cut owns yet
+
+`c2a-write-set` replaces `ReplaceDurable` with `ApplyWriteSet` (comment at CS:4012-4013) and decides `writer-dangling-link-tolerance`. `write-set-vectors` owns `c0-bad-canonical-in-manifest` and `legacy-vectors-all-runtimes`. `merge-main` owns `range-check-in-ci`. Imagination owns `store-replace-cut`.
