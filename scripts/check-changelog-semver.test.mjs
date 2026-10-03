@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix as posixPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
@@ -400,23 +400,115 @@ test("CLI: a later backport tag on another branch does not change a rebuild's pr
   });
 });
 
-test("CLI: a declared prefix that names no release is not a first release when the changelog lists earlier versions", () => {
-  // CultMath's shape: 0.3.0 is released and tracks the DLL; 0.3.1 removes a member.
-  const cultMath = buildAssembly("CultMath", WITH_GONE);
-  const trimmed = buildAssembly("CultMath", WITHOUT_GONE);
-  withReleasedBaseline({ baseline: { "CultMath.dll": cultMath }, previous: "0.3.0" }, (dir) => {
-    const entry = { ...WIDGET, assemblies: PLUGINS };
-    const args = measuredArgs(dir, "0.3.1", [trimmed]);
-    writeFileSync(join(dir, "CHANGELOG.md"), `${changelogFor("0.3.1")}\n## [0.3.0]\n\n- the release\n`);
-    assert.match(runCheckerExpectFailure(dir, args), /Gone/);
-    // one mistyped character in the declaration
-    declare(dir, { widget: { ...entry, tagPrefix: "widgt" } });
-    const typo = runCheckerExpectFailure(dir, args);
-    assert.match(typo, /0\.3\.1 would be a first release, but the changelog already lists 0\.3\.0/);
-    assert.doesNotMatch(typo, /first release \(/);
-    // a release the changelog lists nothing before is still a first release
-    writeChangelog(dir, "0.3.1");
-    assert.match(runChecker(dir, args), /first release \(0\.3\.1\)/);
+// A repository where each tag tracks the files it is given: tag name -> { path: contents }.
+// Every file is committed under the tag that first names it, so a later tag tracks the earlier ones'.
+function tagWithFiles(dir, tag, files) {
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, path)), { recursive: true });
+    writeFileSync(join(dir, path), contents);
+  }
+  git(dir, "add", "--", ...Object.keys(files));
+  commitAndTag(dir, tag);
+}
+
+test("CLI: a mistyped declared prefix is refused, because a tag under another prefix tracks the package's files", () => {
+  // The real entries of CultMath, cultlib and a Python package, each released once under its
+  // real prefix, then the declaration misspelled. Nothing is measured: the refusal comes from git.
+  const cases = [
+    { name: "org.gamecult.cultmath", released: "0.3.0", next: "0.3.1", file: "CultMath.dll" },
+    { name: "org.gamecult.cultlib", released: "1.0.60", next: "1.0.61", file: "GameCult.Core.dll" },
+    { name: "cultcache-py", released: "0.1.0", next: "0.1.1", file: "cultcache/__init__.py" },
+  ];
+  for (const { name, released, next, file } of cases) {
+    const real = releasePackages[name];
+    const folder = real.assemblies ?? posixPath.dirname(real.changelog);
+    withTempGitRepo((dir) => {
+      declare(dir, { [name]: real });
+      tagWithFiles(dir, `${real.tagPrefix}-v${released}`, { [`${folder}/${file}`]: "released" });
+      mkdirSync(dirname(join(dir, real.changelog)), { recursive: true });
+      writeFileSync(join(dir, real.changelog), changelogFor(next));
+      const junk = join(dir, "junk.dll");
+      writeFileSync(junk, "junk");
+      const args = ["--package", name, "--version", next, ...(real.assemblies ? ["--api-built", junk] : [])];
+      declare(dir, { [name]: { ...real, tagPrefix: real.tagPrefix.slice(0, -1) } });
+      const refused = runCheckerExpectFailure(dir, args);
+      assert.match(refused, new RegExp(`${real.tagPrefix}-v${released} tracks files under `));
+      assert.doesNotMatch(refused, /first release \(/);
+      // the same release under the real prefix is a bump over its predecessor, not a first release
+      if (!real.assemblies) {
+        declare(dir, { [name]: real });
+        assert.match(runChecker(dir, args), /patch bump over/);
+      }
+    });
+  }
+});
+
+test("CLI: no tag tracks the package's folder, so a release is a first release however many other tags exist", () => {
+  withTempGitRepo((dir) => {
+    declare(dir, { widget: { ...WIDGET, changelog: "widget/CHANGELOG.md", assemblies: PLUGINS } });
+    tagWithFiles(dir, "other-v1.0.0", { "other/file.txt": "other" });
+    tagWithFiles(dir, "other-v1.1.0", { "other/more.txt": "more" });
+    // the package's folder arrives after every tag, and its files are not tracked by any of them
+    mkdirSync(join(dir, "widget"), { recursive: true });
+    writeFileSync(join(dir, "widget", "CHANGELOG.md"), changelogFor("1.0.0"));
+    const junk = join(dir, "junk.dll");
+    writeFileSync(junk, "junk");
+    const args = [...widgetArgs("1.0.0"), "--api-built", junk];
+    assert.match(runChecker(dir, args), /first release \(1\.0\.0\)/);
+    // its own tag does not stop a rebuild of that first release
+    tagWithFiles(dir, "widget-v1.0.0", { [`${PLUGINS}/GameCult.Widget.dll`]: "shipped" });
+    assert.match(runChecker(dir, args), /first release \(1\.0\.0\)/);
+    // but the same files under any other tag make a later release with no same-prefix baseline a refusal
+    declare(dir, { widget: { ...WIDGET, changelog: "widget/CHANGELOG.md", assemblies: PLUGINS, tagPrefix: "widgt" } });
+    assert.match(runCheckerExpectFailure(dir, args), /widget-v1\.0\.0 tracks files under unity\/widget\/Runtime\/Plugins/);
+  });
+});
+
+test("CLI: a package without assemblies is told from a new one by its own directory, and a changelog at the root by the whole tree", () => {
+  withTempGitRepo((dir) => {
+    declare(dir, { widget: { ...WIDGET, changelog: "pkg/CHANGELOG.md" } });
+    tagWithFiles(dir, "other-v1.0.0", { "elsewhere.txt": "x" });
+    mkdirSync(join(dir, "pkg"));
+    writeFileSync(join(dir, "pkg", "CHANGELOG.md"), changelogFor("1.0.0"));
+    assert.match(runChecker(dir, widgetArgs("1.0.0")), /first release \(1\.0\.0\)/);
+    tagWithFiles(dir, "other-v1.1.0", { "pkg/code.py": "x" });
+    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /other-v1\.1\.0 tracks files under pkg/);
+  });
+  withTempGitRepo((dir) => {
+    tagWithFiles(dir, "other-v1.0.0", { "elsewhere.txt": "x" });
+    writeChangelog(dir, "1.0.0");
+    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /other-v1.0.0 tracks files under ./);
+  });
+});
+
+test("CLI: a folder that moved is the declared folder alone: the old path does not count", () => {
+  const baseline = buildAssembly("GameCult.Widget", WITH_GONE);
+  withReleasedBaseline({ baseline: { "GameCult.Widget.dll": baseline } }, (dir) => {
+    const moved = "unity/widget2/Runtime/Plugins";
+    const built = buildAssembly("GameCult.Widget", WITH_GONE);
+    // under the real prefix the moved folder holds nothing at the tag: refused as a moved directory
+    declare(dir, { widget: { ...WIDGET, assemblies: moved } });
+    writeChangelog(dir, "1.0.1");
+    assert.match(runCheckerExpectFailure(dir, [...widgetArgs("1.0.1"), "--api-built", built]), /tracks no managed assembly under unity\/widget2\/Runtime\/Plugins/);
+    // under a mistyped prefix, no tag tracks the new folder, and the old one is not looked at
+    declare(dir, { widget: { ...WIDGET, assemblies: moved, tagPrefix: "widgt" } });
+    assert.match(runChecker(dir, [...widgetArgs("1.0.1"), "--api-built", built]), /first release \(1\.0\.1\)/);
+  });
+});
+
+test("CLI: a tag that cannot be read at its ancestry or its files refuses", () => {
+  withTempGitRepo((dir) => {
+    commitAndTag(dir, "widget-v0.8.0");
+    // a tag whose object is missing from the repository (a damaged checkout)
+    writeFileSync(join(dir, ".git", "refs", "tags", "widget-v0.9.0"), "1".repeat(40) + "\n");
+    writeChangelog(dir, "1.0.0");
+    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /whether widget-v0\.9\.0 is an ancestor of the commit being checked could not be read/);
+  });
+  withTempGitRepo((dir) => {
+    commitAndTag(dir, "other-v1.0.0");
+    writeFileSync(join(dir, ".git", "refs", "tags", "other-v2.0.0"), "1".repeat(40) + "\n");
+    writeChangelog(dir, "1.0.0");
+    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /could not be read, so a first release cannot be told from a mistyped prefix/);
   });
 });
 
