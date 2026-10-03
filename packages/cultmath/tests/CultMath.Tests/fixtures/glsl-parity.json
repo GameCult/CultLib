@@ -6557,7 +6557,7 @@
     {
       "glsl": "vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)",
       "tolerance": "ulp-bounded",
-      "check": "enclosure: from the arguments (mx, my, z0, z1, fp, warp) compute in double zm = (z0 + z1) / 2, c = (mx zm, my zm, zm), r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp; every case must have GPU radius >= r + |GPU centre - c| (Euclidean). Report the largest ulp distance per component as for any ulp-bounded family; only enclosure fails the check.",
+      "check": "enclosure and tightness: from the arguments (mx, my, z0, z1, fp, warp) compute in double zm = (z0 + z1) / 2, c = (mx zm, my zm, zm), |c|_1 = |mx zm| + |my zm| + |zm|, r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp and d = |GPU centre - c| (Euclidean); every case must have r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1). Report the largest ulp distance per component as for any ulp-bounded family; only the two bounds fail the check.",
       "cases": [
         "3eba7b90 3eb7145c 427992e9 42ba552a 3c779789 3f90a589 -> 41e2a26a 41de7fa1 429b8f4f 419e80d6",
         "3f73f64c 3f0c1560 4222d6fe 4297c95b 3d2b135d 3f4911fc -> 425e3d89 41ff38c0 426934da 41f0be8c",
@@ -7082,7 +7082,7 @@
     },
     {
       "glsl": "CultPhasor cultmath_phacelle(vec3, vec3, float, float)",
-      "tolerance": "ulp-bounded, platform exp, sin, cos",
+      "tolerance": "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
       "platform": "Ubuntu 24.04.5 LTS; .NET 10.0.12",
       "cases": [
         "c01d8630 41b2cd8c 41ea274c bfa19894 40aeb6ce 40918978 3e9be843 3f000000 -> bf74d9fb 3fb71956 bf35fe4e 3f21280a c01277e2 403b5fe4 40464bbd bd5b4455",

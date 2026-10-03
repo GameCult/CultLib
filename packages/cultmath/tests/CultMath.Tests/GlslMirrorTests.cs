@@ -111,42 +111,59 @@ public sealed class GlslMirrorTests
     [Fact]
     public void GoldenFixtureMatchesCSharp()
     {
-        var expected = GoldenFixture();
+        // Arguments are drawn only here, when regenerating: Interval draws widths through MathF.Pow, whose
+        // bits differ by OS. Checking evaluates C# on the committed fixture's own arguments.
         if (Write)
         {
+            var random = new System.Random(Seed);
             Directory.CreateDirectory(Path.GetDirectoryName(FixturePath)!);
-            File.WriteAllText(FixturePath, expected);
+            File.WriteAllText(FixturePath, GoldenFixture((f, _) => Families[f].Arguments(random)));
         }
 
-        // Family by family: every family is compared as text, except those whose tolerance names the
-        // platform, whose results are compared case by case within one ulp. A family with an enclosure
-        // check must also pass it on C#'s own results, so the rule the WebGL2 consumer applies holds for
-        // the reference.
         var committed = JsonNode.Parse(File.ReadAllText(FixturePath))!.AsObject();
-        var current = JsonNode.Parse(expected)!.AsObject();
         var committedFamilies = committed["functions"]!.AsArray();
+        Assert.Equal(Families.Length, committedFamilies.Count);
+        for (var f = 0; f < Families.Length; f++)
+            Assert.True(committedFamilies[f]!["cases"]!.AsArray().Count == Points, $"{Families[f].Glsl}: the fixture does not hold {Points} cases");
+        var current = JsonNode.Parse(GoldenFixture((f, p) =>
+            Arguments(Resolve(Families[f].Glsl), ((string)committedFamilies[f]!["cases"]![p]!).Split(" -> ")[0])))!.AsObject();
         var currentFamilies = current["functions"]!.AsArray();
-        Assert.Equal(currentFamilies.Count, committedFamilies.Count);
-        for (var f = 0; f < currentFamilies.Count; f++)
+
+        // Family by family: every family is compared as text, except those whose C# bits come from the
+        // platform's libm, which are compared case by case within their family's platform bound. A family
+        // with a check must also pass it on C#'s own results, so the rule the WebGL2 consumer applies holds
+        // for the reference.
+        for (var f = 0; f < Families.Length; f++)
         {
             var want = currentFamilies[f]!.AsObject();
             var have = committedFamilies[f]!.AsObject();
             var name = (string)want["glsl"]!;
             Assert.Equal(name, (string?)have["glsl"]);
             Assert.Equal((string)want["tolerance"]!, (string?)have["tolerance"]);
-            if (((string)want["tolerance"]!).Contains(PlatformTolerance))
+            Assert.Equal((string?)want["check"], (string?)have["check"]);
+            switch (Families[f].Platform)
             {
-                var ulps = MaxUlps(have["cases"]!.AsArray(), want["cases"]!.AsArray(), name);
-                output.WriteLine($"{name}: within {ulps} ulp of this platform's libm ({RuntimeInformation.OSDescription}); fixture generated on {have["platform"]}");
-                Assert.True(ulps <= 1, $"{name}: {ulps} ulp from this platform's result, more than 1");
-            }
-            else
-            {
-                Assert.True(JsonNode.DeepEquals(want, have), $"fixtures/glsl-parity.json family {name} is not C#'s current output (regenerate with CULTMATH_WRITE_GLSL=1)");
+                case Platform.Ulp:
+                    var ulps = MaxDistance(have["cases"]!.AsArray(), want["cases"]!.AsArray(), (x, y) => Math.Abs((long)Ordered(x) - Ordered(y)));
+                    output.WriteLine($"{name}: within {ulps} ulp of this platform's libm ({RuntimeInformation.OSDescription}); fixture generated on {have["platform"]}");
+                    Assert.True(ulps <= 1, $"{name}: {ulps} ulp from this platform's result, more than 1");
+                    break;
+                case Platform.Scaled:
+                    var scaled = MaxDistance(have["cases"]!.AsArray(), want["cases"]!.AsArray(), (x, y) =>
+                    {
+                        double v = BitConverter.Int32BitsToSingle(x), w = BitConverter.Int32BitsToSingle(y);
+                        return x == y ? 0.0 : Math.Abs(v - w) / Math.Max(Math.Abs(v), 1.0);
+                    });
+                    output.WriteLine($"{name}: |diff| / max(|v|, 1) at most {scaled:R} from this platform's libm ({RuntimeInformation.OSDescription}); fixture generated on {have["platform"]}");
+                    Assert.True(scaled <= ScaledPlatformBound, $"{name}: {scaled:R} max(|v|, 1) from this platform's result, more than 2^-20");
+                    break;
+                default:
+                    Assert.True(JsonNode.DeepEquals(want, have), $"fixtures/glsl-parity.json family {name} is not C#'s current output (regenerate with CULTMATH_WRITE_GLSL=1)");
+                    break;
             }
 
             if (want["check"] is not null)
-                AssertFrustumEnclosure(have["cases"]!.AsArray());
+                AssertFrustumBall(want["cases"]!.AsArray());
         }
 
         committed.Remove("functions");
@@ -154,27 +171,24 @@ public sealed class GlslMirrorTests
         Assert.True(JsonNode.DeepEquals(current, committed), "fixtures/glsl-parity.json header is not the generator's (regenerate with CULTMATH_WRITE_GLSL=1)");
     }
 
-    // The largest distance in float32 ulps between two families' results; arguments must be identical.
-    private static long MaxUlps(JsonArray committed, JsonArray current, string name)
+    // The largest distance, component by component, between two families' results (committed first).
+    private static double MaxDistance(JsonArray committed, JsonArray current, Func<int, int, double> distance)
     {
-        Assert.Equal(current.Count, committed.Count);
-        long max = 0;
+        var max = 0.0;
         for (var c = 0; c < current.Count; c++)
         {
-            var have = ((string)committed[c]!).Split(" -> ");
-            var want = ((string)current[c]!).Split(" -> ");
-            Assert.True(have[0] == want[0], $"{name} case {c}: arguments differ");
-            var haveBits = have[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
-            var wantBits = want[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
+            var haveBits = ((string)committed[c]!).Split(" -> ")[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
+            var wantBits = ((string)current[c]!).Split(" -> ")[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
             Assert.Equal(wantBits.Length, haveBits.Length);
-            max = Math.Max(max, haveBits.Zip(wantBits, (x, y) => Math.Abs((long)Ordered(x) - Ordered(y))).Max());
+            max = Math.Max(max, haveBits.Zip(wantBits, distance).Max());
         }
 
         return max;
     }
 
-    // FrustumEnclosure applied to C#'s own results: every case's ball encloses the exact one.
-    private static void AssertFrustumEnclosure(JsonArray cases)
+    // FrustumBall applied to C#'s own results: every case's ball encloses the exact one and is no wider
+    // than its rounding widening allows.
+    private static void AssertFrustumBall(JsonArray cases)
     {
         foreach (var entry in cases)
         {
@@ -185,9 +199,34 @@ public sealed class GlslMirrorTests
             var zm = (z0 + z1) / 2.0;
             var radius = (z1 - z0) / 2.0 * Math.Sqrt(mx * mx + my * my + 1.0) + z1 * footprint + warp;
             double dx = b[0] - mx * zm, dy = b[1] - my * zm, dz = b[2] - zm;
-            var gap = b[3] - (radius + Math.Sqrt(dx * dx + dy * dy + dz * dz));
-            Assert.True(gap >= 0.0, $"iv_frustum_ball case {entry}: radius short of the exact ball by {-gap}");
+            var reach = radius + Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            var c1 = Math.Abs(mx * zm) + Math.Abs(my * zm) + Math.Abs(zm);
+            Assert.True(b[3] >= reach, $"iv_frustum_ball case {entry}: radius short of the exact ball by {reach - b[3]}");
+            Assert.True(b[3] <= reach + Math.ScaleB(radius + c1, -19), $"iv_frustum_ball case {entry}: radius past the exact ball by {b[3] - reach}, more than 2^-19 (r + |c|_1)");
         }
+    }
+
+    // A committed case's arguments, decoded into the C# method's parameter types in Hex's field order.
+    private static object[] Arguments(MethodInfo method, string hex)
+    {
+        var scalars = new Queue<uint>(hex.Split(' ').Select(h => Convert.ToUInt32(h, 16)));
+        var arguments = method.GetParameters().Select(parameter => FromScalars(parameter.ParameterType, scalars)).ToArray();
+        Assert.Empty(scalars);
+        return arguments;
+    }
+
+    private static object FromScalars(Type type, Queue<uint> scalars)
+    {
+        if (type == typeof(float))
+            return BitConverter.Int32BitsToSingle((int)scalars.Dequeue());
+        if (type == typeof(int))
+            return (int)scalars.Dequeue();
+        if (type == typeof(uint))
+            return scalars.Dequeue();
+        var value = Activator.CreateInstance(type)!;
+        foreach (var field in type.GetFields().Where(f => !f.IsStatic))
+            field.SetValue(value, FromScalars(field.FieldType, scalars));
+        return value;
     }
 
     private static double[] Floats(string hex) =>
@@ -201,7 +240,16 @@ public sealed class GlslMirrorTests
     private const int Seed = 20261002;
     private const int Points = 256;
 
-    private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null);
+    // How GoldenFixtureMatchesCSharp compares a family whose C# bits come from the platform's libm (exp,
+    // sin, cos) and so differ by OS; such an entry records the platform that generated it. Every other
+    // family is compared as text.
+    private enum Platform { None, Ulp, Scaled }
+
+    // Platform.Scaled: |diff| <= 2^-20 max(|v|, 1) per component. Ulps mean nothing near zero, where
+    // phacelle's sums of exp, sin and cos cancel; Windows differs from Linux by up to 3.6e-7 of it.
+    private const double ScaledPlatformBound = 9.5367431640625e-7;
+
+    private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null, Platform Platform = Platform.None);
 
     private static float Uniform(System.Random r, float lo, float hi) => lo + (hi - lo) * r.NextSingle();
     private static float3 Point3(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
@@ -214,19 +262,15 @@ public sealed class GlslMirrorTests
         return new float2(centre - width * 0.5f, centre + width * 0.5f);
     }
 
-    // A tolerance containing this names a family whose C# bits come from the platform's libm (exp, sin,
-    // cos) and so differ by OS: GoldenFixtureMatchesCSharp compares it within one ulp, and its entry
-    // records the platform.
-    private const string PlatformTolerance = "platform ";
-
     // iv_frustum_ball's sqrt is not correctly rounded on WebGL2 and its compilers may reassociate, so its
-    // bits are not portable; what the march needs is enclosure. The consumer checks that in double from
-    // each case's arguments. It is written into the family's fixture entry, where the consumer reads it.
-    private const string FrustumEnclosure =
-        "enclosure: from the arguments (mx, my, z0, z1, fp, warp) compute in double zm = (z0 + z1) / 2, " +
-        "c = (mx zm, my zm, zm), r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp; every case must have " +
-        "GPU radius >= r + |GPU centre - c| (Euclidean). Report the largest ulp distance per component as for " +
-        "any ulp-bounded family; only enclosure fails the check.";
+    // bits are not portable; what the march needs is enclosure, and what culling needs is a ball no wider
+    // than its rounding widening. The consumer checks both in double from each case's arguments. It is
+    // written into the family's fixture entry, where the consumer reads it.
+    private const string FrustumBall =
+        "enclosure and tightness: from the arguments (mx, my, z0, z1, fp, warp) compute in double zm = (z0 + z1) / 2, " +
+        "c = (mx zm, my zm, zm), |c|_1 = |mx zm| + |my zm| + |zm|, r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp " +
+        "and d = |GPU centre - c| (Euclidean); every case must have r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1). " +
+        "Report the largest ulp distance per component as for any ulp-bounded family; only the two bounds fail the check.";
 
     // A Phacelle stripe wave vector: each component in [-6, 6], about one stripe per cell.
     private static float3 Side(System.Random r) => new(Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f));
@@ -268,15 +312,15 @@ public sealed class GlslMirrorTests
             var slope = new float2(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f));
             var z0 = Uniform(r, 0.1f, 100.0f);
             return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
-        }, FrustumEnclosure),
-        new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, " + PlatformTolerance + "exp", r => new object[] { Interval(r) }),
-        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, " + PlatformTolerance + "exp, sin, cos",
-            r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }),
+        }, FrustumBall),
+        new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, platform exp", r => new object[] { Interval(r) }, Platform: Platform.Ulp),
+        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
+            r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }, Platform: Platform.Scaled),
     };
 
-    private static string GoldenFixture()
+    // The fixture text, each case's arguments given by family and point index.
+    private static string GoldenFixture(Func<int, int, object[]> arguments)
     {
-        var random = new System.Random(Seed);
         var json = new StringBuilder();
         json.Append("{\n");
         json.Append("  \"generator\": \"GlslMirrorTests.GoldenFixtureMatchesCSharp (packages/cultmath/tests/CultMath.Tests); regenerate with CULTMATH_WRITE_GLSL=1\",\n");
@@ -293,14 +337,14 @@ public sealed class GlslMirrorTests
             json.Append($"      \"tolerance\": \"{family.Tolerance}\",\n");
             if (family.Check is not null)
                 json.Append($"      \"check\": \"{family.Check}\",\n");
-            if (family.Tolerance.Contains(PlatformTolerance))
+            if (family.Platform != Platform.None)
                 json.Append($"      \"platform\": \"{RuntimeInformation.OSDescription}; {RuntimeInformation.FrameworkDescription}\",\n");
             json.Append("      \"cases\": [\n");
             for (var p = 0; p < Points; p++)
             {
-                var arguments = family.Arguments(random);
-                var result = method.Invoke(null, arguments)!;
-                json.Append("        \"").Append(Hex(arguments)).Append(" -> ").Append(Hex(new[] { result })).Append('"');
+                var values = arguments(f, p);
+                var result = method.Invoke(null, values)!;
+                json.Append("        \"").Append(Hex(values)).Append(" -> ").Append(Hex(new[] { result })).Append('"');
                 json.Append(p + 1 < Points ? ",\n" : "\n");
             }
 
