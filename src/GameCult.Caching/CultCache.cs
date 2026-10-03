@@ -134,13 +134,24 @@ namespace GameCult.Caching
 
     public sealed class CultPersistedRecord
     {
-        public string Key { get; set; } = string.Empty;
-        public string SchemaId { get; set; } = string.Empty;
-        public string StoredAt { get; set; } = string.Empty;
-        public byte[] Payload { get; set; } = Array.Empty<byte>();
+        private string _key = string.Empty;
+        private string _schemaId = string.Empty;
+        private string _storedAt = string.Empty;
+        private byte[] _payload = Array.Empty<byte>();
+        private CultVariantDelta? _variant;
+
+        public string Key { get => _key; set { _key = value; RawBytes = null; } }
+        public string SchemaId { get => _schemaId; set { _schemaId = value; RawBytes = null; } }
+        public string StoredAt { get => _storedAt; set { _storedAt = value; RawBytes = null; } }
+        public byte[] Payload { get => _payload; set { _payload = value; RawBytes = null; } }
 
         // Non-null for a variant record (slot 4): its base and overrides. Its payload is empty.
-        public CultVariantDelta? Variant { get; set; }
+        public CultVariantDelta? Variant { get => _variant; set { _variant = value; RawBytes = null; } }
+
+        // The exact bytes this record was read from, as a store file held them. A record is written as the bytes it was read from
+        // while no field has been assigned since, so a copied record stays byte-identical and its version (the SHA-256 of its
+        // stored bytes) is the one the file's bytes name, whatever encoding their writer chose. Assigning any field drops them.
+        internal byte[]? RawBytes { get; set; }
     }
 
     // One record a write puts in a single-file store: encoded, with the catalog entry that publishes the id it is stored under and

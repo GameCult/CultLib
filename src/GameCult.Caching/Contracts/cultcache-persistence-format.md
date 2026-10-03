@@ -47,10 +47,14 @@ visible, to the committing flow or to observers, until the store has accepted
 it; a failed commit changes nothing on disk or in memory.
 
 A batch may carry conditions: per-record version, or the whole store unchanged
-since it was last loaded. A record's version is the SHA-256 of its persisted
-encoding, the array `[key, schemaId, storedAt, payload(, variant)]` a directory
-page holds; it names the schema id and storedAt as well as the bytes. storedAt is
-metadata and decides no condition. Conditions are evaluated
+since it was last loaded. A record's version is the SHA-256 of the exact bytes the
+record is stored as: in a single file the record's own slice of the file, the array
+`[key, schemaId, storedAt, payload(, variant)]` exactly as the file holds it, in
+whatever legal MessagePack encoding its writer chose (never a re-encoding of the
+decoded record); in a directory store the page the manifest indexes. A record being
+written has the version of the bytes it is written as. It names the schema id and
+storedAt as well as the payload. storedAt is metadata and decides no condition.
+Conditions are evaluated
 under the store's exclusive lock against what is durably on disk. A failed
 condition is a lost race, not an error: the commit reports it and writes
 nothing.
@@ -59,9 +63,9 @@ nothing.
 the store's exclusive lock the writer reads what is durably in the store now,
 applies only what it staged (writes and removals) and, for a commit, its batch,
 and replaces the store with the result. Every other record, and every catalog
-entry the result references, is copied forward as stored: key, schema id,
-storedAt, payload and variant, and a catalog entry's exact bytes, unknown
-fields included. No type interprets a copied record: a write may hash another
+entry the result references, is copied forward as stored: a record's exact bytes
+and a catalog entry's exact bytes, unknown fields included, so a copied record
+keeps its version. No type interprets a copied record: a write may hash another
 record's bytes to compare versions, and reads its header (key, schema id, variant
 slot), but never decodes its payload.
 A record written over one the store holds gets a storedAt later than the one it

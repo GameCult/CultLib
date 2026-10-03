@@ -306,6 +306,12 @@ public static class CultDocumentMessagePackSerialization
 
     private static void WritePersistedRecord(ref MessagePackWriter writer, CultPersistedRecord record)
     {
+        if (record.RawBytes is { } raw)
+        {
+            writer.WriteRaw(new ReadOnlySpan<byte>(raw));
+            return;
+        }
+
         writer.WriteArrayHeader(record.Variant == null ? PersistedRecordFieldCount : VariantRecordFieldCount);
         writer.Write(record.Key);
         writer.Write(record.SchemaId);
@@ -389,6 +395,7 @@ public static class CultDocumentMessagePackSerialization
 
     public static CultPersistedRecord ReadPersistedRecord(ref MessagePackReader reader)
     {
+        var start = reader.Position;
         var fieldCount = reader.ReadArrayHeader();
         var record = new CultPersistedRecord();
 
@@ -429,6 +436,7 @@ public static class CultDocumentMessagePackSerialization
             }
         }
 
+        record.RawBytes = reader.Sequence.Slice(start, reader.Position).ToArray();
         return record;
     }
 
