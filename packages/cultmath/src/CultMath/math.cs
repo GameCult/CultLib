@@ -388,6 +388,7 @@ public static partial class math
     public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
 
     public static uint asuint(float value) => (uint)BitConverter.SingleToInt32Bits(value);
+    public static float asfloat(uint value) => BitConverter.Int32BitsToSingle((int)value);
 
     // PCG hashes from Jarzynski and Olano, "Hash Functions for GPU Rendering" (JCGT 9(3), 2020). Integer-only, so
     // dxc and C# agree bit for bit. pcg3d/pcg4d carry uint bit patterns in int3/int4; float overloads hash IEEE bits.
@@ -599,6 +600,8 @@ public static partial class math
     // src/noise3D.glsl at 22434e04d7 (kernel radius^2 0.5, scale 105, permute (34x+10)x); see
     // THIRD-PARTY-NOTICES.md. Continuous across simplex-cell boundaries
     // (NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries).
+    // SNOISE_LIPSCHITZ (math.Interval.cs) is measured from this kernel: a change here must re-run
+    // NoiseBoundTests.MeasureLipschitz and re-pin it.
     public static float snoise(float3 value)
     {
         const float cx = 1.0f / 6.0f;

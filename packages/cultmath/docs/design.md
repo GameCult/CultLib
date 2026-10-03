@@ -341,6 +341,230 @@ Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
 
+## Intervals
+
+`math.Interval.cs` and `shaders/CultMath.Interval.hlsl` (included from
+`CultMath.hlsl` after the Phacelle include) carry interval arithmetic for
+culling empty space with a proof. Their invariant, **intervals-enclose**: every
+interval function returns a `[lo, hi]` that contains `f(x)` for every `x` in
+its input region, where `f(x)` is the same function evaluated pointwise in
+float32. A consumer that skips a region because `hi < cutoff` has skipped
+nothing that was there.
+
+Representation: an interval is `float2(lo, hi)` with `lo <= hi`, both finite.
+There is no empty interval; a caller that needs "provably empty" tests
+`hi < cutoff`. `iv_point(x)` is `float2(x, x)`.
+
+Ops: `iv_point`, `iv_add`, `iv_sub`, `iv_neg`, `iv_mul` (the least and greatest
+of the four corner products), `iv_scale(iv, float)`, `iv_abs` and `iv_sqr`
+(an interval straddling zero starts at 0), `iv_min`, `iv_max`, `iv_sqrt`
+(`lo` clamped at 0), `iv_exp`, `iv_clamp(iv, float, float)`, `iv_saturate`,
+`iv_smoothstep(float, float, iv)` (its ordered endpoints) and
+`iv_lerp(iv, iv, float)`. No others until a consumer names one. Each has an
+HLSL mirror named `cultmath_iv_*`, compared bit for bit by
+`HlslSourceCompatibilityTests`.
+
+The ulp-widening rule. Each bound is computed with the pointwise function's
+own float32 operations. IEEE round-to-nearest is monotone, so an op that is
+monotone on its region encloses its float32 evaluation exactly, with no
+widening; that covers every op above except two, which widen by exactly one
+ulp, in the implementation and never in the test:
+
+- `iv_exp`: `exp` is not required to be correctly rounded, so a libm need not
+  be monotone. .NET's `MathF.Exp` on Linux steps down 0 times over every float
+  in [-87, 88.7] (`IntervalTests.MeasureMonotonicity`), so on that CPU the
+  widening is a margin; it is there for other libms and GPUs.
+- `iv_smoothstep`: `t * t * (3 - 2t)` in float32 steps down 337,095 times over
+  the floats in [0, 1], each time by at most 1 ulp (`MeasureMonotonicity`).
+  Since `t = saturate((x - minimum) / (maximum - minimum))` is itself monotone
+  in `x`, that covers every `smoothstep`.
+
+`iv_lerp` is the natural interval extension of `x + (y - x) * amount`, which is
+how `lerp` evaluates; every step is monotone, so it encloses with no widening
+for any `amount`, and it is tight only when `a` is a point, because `x` appears
+twice.
+
+`IntervalTests` runs every op over 10,000 seeded intervals (centres in
+[-20, 20], widths log-uniform in [1e-4, 10], every eighth a point) and 16
+points inside each, endpoints and zero included, with no tolerance; and for
+every op it raises `lo` and lowers `hi` by one ulp and requires the harness to
+catch each. A new op is one entry in that table.
+
+Noise bounds. `iv_snoise_ball(c, r)` is `[n - L r, n + L r]` intersected with
+`[-1, 1]`, where `n = snoise(c)` and `L = SNOISE_LIPSCHITZ`: one `snoise`, value
+only. No interval function reads `snoise_grad`, and none has a value-only or
+gradient twin. `iv_fbm_ball(c, r, octaves, lacunarity, gain)` is the octave sum
+of `iv_snoise_ball(c * f_i, r * |f_i|)` scaled by `a_i`, compounding frequency
+and amplitude exactly as `fbm_grad` does, octaves clamped to [0, 16]. A domain
+warp that moves a point by at most `D` is enclosed by the radius `r + D`
+(`NoiseBoundTests.WarpedPointsStayEnclosed`); this is what the gamecult.org
+ground's march rests on.
+
+`iv_frustum_ball(m_c, z0, z1, footprintPerDepth, warp)` is the ball one probe
+serves a whole screen tile with. In a pinhole camera frame looking down `+z`,
+where the ray of slope `m` is the points `(m z, z)`, it encloses every point of
+every ray whose slope lies within `footprintPerDepth` of `m_c` (`N / (sqrt(2) f)`
+for an `N x N` tile at focal length `f` pixels: the full pixel footprint, so
+sub-pixel jitter is covered), over depths `[z0, z1]`, each point moved by a warp
+of length at most `warp`. The centre is `(m_c z_m, z_m)`, `z_m` the mid-depth;
+the radius is `((z1 - z0) / 2) |(m_c, 1)| + z1 footprintPerDepth + warp`. A point
+of slope `m_c + e` at depth `z` is the centre plus `(z - z_m)(m_c, 1)` plus
+`z (e, 0)`. The returned ball is float32, and on a degenerate (`z0 == z1`),
+thin or far segment the rounding of the centre alone exceeds the gap the
+triangle inequality leaves, so the radius is widened by
+`(|c|_1 + radius) 2^-20`. With `u = 2^-24`, each centre component carries at most
+two roundings (`z_m`, then the product), so the float centre is within
+`2u |c|_1` of the exact one; the radius carries at most seven (`z1 - z0`, the
+axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
+the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
+once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
+contraction only removes roundings, so HLSL and GLSL compilers are covered by
+the same bound. The caller rotates and translates the centre into world space and scales
+centre and radius by its noise frequency; the rounding of that transform is the
+caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
+tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of
+seven extreme families (`z0 == z1`, `z1 - z0 = 1e-6 z1`, `|m_c|` to 1000, `z` to
+`1e7`, `z0 = 0` with `z1` to `1e-3`, `f` down to 1, warp to `1e6`), corner flows
+full-length and outward, distances in double, with no tolerance. It pins the ball
+to the derivation both ways (`r <= ball.w <= r + 2^-19 (r + |c|_1)`), so a ball
+that forgets the widening fails and one grown past it fails too. A moving camera needs nothing
+more: each frame's probes use that frame's camera, and no ball, mask or probe
+result is carried from one frame to the next.
+
+The noise ball alone proves little: at `L` near 10 it bounds `snoise` to a width
+of `2 L r`, which covers all of `[-1, 1]` once `L r` reaches 1. Empty space
+becomes provable through an analytic envelope. The consumer's density is a
+pre-distortion SDF (a height fog, a well map, a carved sphere) that noise
+displaces only near its surface, and the consumer composes the bound from `iv_*`
+ops. The envelope is taken over the slice's exact box (`iv_mul` of the depth
+range by each slope range, then the SDF's own monotone pieces), together with its
+fade. The noise is `iv_snoise_ball` over `iv_frustum_ball`, scaled by the noise
+frequency. The warp moves only the noise argument, so it enlarges the ball and
+the envelope's box takes none of it. Where the fade's upper end is 0 the noise
+term is identically 0 and no `snoise` is evaluated. Where the envelope already
+proves the slice empty with the noise at its full range, the ball is not
+evaluated either. A probe is worth attempting only when the best result any
+centre value could give would prove the slice, and a ball with `L r >= 2` is
+`[-1, 1]` whatever `snoise(c)` is, so it costs nothing. CultMath owns none of the
+envelope: the interval files have no envelope function, and each consumer composes
+its own. `NoiseBoundTests.EnvelopeBoundEnclosesDensity` checks that composition,
+the one the site and Aetheria use, over 2,000 seeded slices x 64 warped points
+with no tolerance.
+
+`L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
+explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
+[-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
+(9.181147), and multiplies by 1.10: `L = 10.099261`. It also reaches
+`|snoise| = 0.9718335` by the same ascent on the value, which is what lets the
+bound intersect with `[-1, 1]`. `LipschitzConstantPinsSampledGradients`
+checks 1e5 more seeded points against `L` and climbs again from the start
+`MeasureLipschitz` prints as its witness, failing if `L` is not 1.10 times that
+maximum to within half a percent, so a 1% move of `L` fails. The enclosure tests
+over 2,000 balls x 64 points are the defence. A change to the `snoise` kernel
+must re-run `MeasureLipschitz` and re-pin `L` and the witness.
+
+What the ball bounds guarantee: enclosure of `snoise` and `fbm_grad(...).w` over
+the ball, in float32. What they do not: anything about tapes, pruning, choice
+tracking or affine forms; those are later steps of
+`docs/cultmath-tape-target.md` (CultLib root). How loose they are is a number:
+`NoiseBoundTests.TightnessReport` prints the mean interval width over the
+sampled range: 5.08 for `iv_snoise_ball` at `r = 0.05`, 1.96 at 0.25 and 1.28
+at 1.0; 6.64 and 2.82 for 4-octave `iv_fbm_ball` at 0.05 and 0.25.
+
+The saving is measured where there is empty space to find.
+`NoiseBoundTests.IntervalSkipHalvesEvaluations` draws screen tiles, each with
+its own camera, and runs one pre-pass per tile over the dense grid's cell ranges:
+it starts with the whole grid, skips and doubles a range it proves empty, halves
+one it cannot, and runs to the grid's end. It then draws the tile's `N^2` ray
+slopes, one per pixel, jittered inside it. Each ray is marched three times with
+the same integrator and the same early-out at transmittance 0.02: over every
+cell (dense), over the tile's unproven cells (the tile march), and over the
+oracle mask, the cells whose mid-depth density is nonzero for at least one of
+the tile's rays. The tile march and the oracle march integrate the dense march's
+nonzero cells, so their transmittance agrees with it exactly in every
+configuration. The oracle is a ceiling the pre-pass cannot move: dense cost over
+oracle cost. Against it the test prints the efficiency (oracle cost over the
+tile march's cost with its probes) and the cull fraction (the oracle-empty cells
+the pre-pass proves empty). The probe overhead is the tile march's cost over that
+cost plus the probes'. Cost is counted in `snoise` evaluations, with an envelope
+evaluation or probe weighted 0.2. That weight is an estimate, and both counts are
+printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
+256-cell quadratic grid out to the Main Camera's far plane, 2048:
+
+- (a) Height fog, camera above the safety band, rays level and up: the whole
+  grid is one envelope probe per tile, against 256 envelope evaluations per ray,
+  16384x. Every cell is oracle-empty and the pre-pass proves them all.
+- (b) Inside the fog: 1.15x, and 0.99x with the warp. Most cells are fog, and
+  the pre-pass probes each one.
+- (c) The zone bowl and four wells, the camera gazing across. With no warp:
+  2.74x, oracle ceiling 7.26x, efficiency 0.378, cull fraction 0.952, probe
+  overhead 0.961. With the warp `D = 60`: 1.39x, oracle ceiling 7.17x,
+  efficiency 0.194, cull fraction 0.842, probe overhead 0.993. With the warp the
+  pre-pass cuts envelope evaluations from 177.46 to 33.49 per ray, but the
+  oracle march costs 0.194 of the tile march, so about four fifths of the tile
+  march's cost goes to cells no ray samples nonzero: the warp bound swamps the
+  noise ball, so the ball cannot prove those cells empty. That gap belongs to
+  the tape target's affine forms, not to a better pre-pass.
+- (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
+- (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
+  `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
+  shipped camera, 200 tiles. The fixed-step reference takes 36.34 steps per
+  pixel. The same cells masked by the pre-pass take 20.13, with identical
+  transmittance. The footprint-aware march takes 13.54: 2.68x fewer. `snoise`
+  per pixel goes from 32.98 to 26.69, and combined cost from 40.25 to 29.52 with
+  the probes, 1.36x. Every one of the 200 tiles proves a body. Before the body
+  both marches are measured against a converged one (midpoint quadrature at
+  `h = 0.5` over every cell, trusting no pre-pass): the relative optical-depth
+  error at the body start is at most 0.0608 for the fixed-step march and 0.08639
+  for the footprint march, 1.42x. Over the grid of hollow radius, camera offset
+  and ramp width the steps ratio runs from 1.57x (`Rh = 100`, low, `S = 150`) to
+  27.45x (`Rh = 1000`, centred, `S = 10`), the cost ratio from 1.26x to 3.89x,
+  and the depth-error ratio from 0.85 to 4.72 (`Rh = 200`, centred, `S = 150`,
+  where the errors are 0.01504 and 0.003188). LOD-far takes 14.19x fewer steps;
+  its depth errors, 0.2849 and 0.205, are not comparable, because its
+  fixed-step reference keeps the octaves the footprint march truncates.
+
+The analytic body (ruling `operator-analytic-wall-body`). When a single dense
+cell's own bound is a positive point, the pre-pass spends one more probe over
+the rest of the grid. If that bound is a positive point too, every point of
+every ray of the tile from there on has exactly that density, so the footprint
+march takes one closed-form step, `exp(-BodyDepth)`, from the body start to the
+grid's end and stops. `BodyDepth` is density x extinction x length x `|dir|`.
+`NoiseBoundTests.AnalyticBodyMatchesFineMarch` pins it: the bound, the mask and
+the pointwise densities agree exactly at the body, and `BodyDepth` equals the
+summed fixed-step depth of the body cells within 1e-4 relative. The comparison
+is in the depth domain, so LOD-far's deep bodies do not underflow.
+
+The footprint-truncated void weights its octaves by `w_i(z)`, decreasing in `z`.
+Its bound takes each weight over `[w_i(z1), 1]` rather than
+`[w_i(z1), w_i(z0)]`, because one bound serves both the full field (`w = 1`) and
+the truncated one. `[w_i(z1), 1]` contains both, and `iv_mul` is monotone in its
+interval argument, so the composed interval encloses both fields.
+`NoiseBoundTests.WeightBoundEnclosesOneSignedNoise` checks it on LOD-far over
+2,000 segments: each weight lies in its bound, and `w(z) n` lies in
+`iv_mul(bound, n)` for a one-signed `n`. A lower end of `w(z0)` fails it.
+
+The contracts, at `N = 8`, the lower of warp 0 and `D`:
+
+- (a) at least 2x combined cost;
+- (c) (ruling `wells-overhead-plus-floor`): probe overhead, the tile march over
+  the tile march plus its probes, at least 0.90; and, hard, the pre-pass proves
+  at least half of the oracle-empty cells empty, so a pre-pass that skips
+  nothing fails. The oracle ceiling, the efficiency against it and the cull
+  fraction are printed, not asserted;
+- (e) at the shipped void: the masked fixed-step march agrees with the reference
+  exactly; the footprint march's optical depth at the body start is off the
+  converged march's by at most twice the fixed-step march's error; and it takes
+  at most half the reference's steps per pixel.
+
+This run meets every contract: (a) 16384x, (c) probe overhead 0.961 and cull
+fraction 0.842, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step
+march's. The fields, the grids and the 0.2 weight are not tuned toward the
+contracts.
+
+Consumers: the gamecult.org ground shader (through the GLSL lowering) and
+Aetheria's nebula raymarch at its CultMath pin bump.
+
 ## Rules
 
 - Keep type names HLSL-shaped: `float2`, `float3`, `float4`, `float3x3`, and `math`.
