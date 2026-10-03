@@ -2,6 +2,9 @@ param(
     # A GLSL source to append after the generated wrapper's library instead of the call-every-function
     # body; tools\compile-glsl.ps1 -Body 'float x = lerp(0.0, 1.0, 0.5);' is the negative control.
     [string]$Body = "",
+    # Also concatenate shaders\CultMath.Phacelle.glsl (MPL-2.0) after CultMath.glsl, as a consumer that
+    # calls cultmath_phacelle does. Without it the wrapper is the MIT library alone.
+    [switch]$Phacelle,
     [string]$GlslangPath = ""
 )
 
@@ -17,6 +20,9 @@ if (-not $GlslangPath) {
 # by string concatenation (GLSL has no #include), then a fragment shader that calls every public
 # function once with zero arguments of its declared types.
 $library = Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.glsl") -Raw
+if ($Phacelle) {
+    $library += Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.Phacelle.glsl") -Raw
+}
 $calls = foreach ($match in [regex]::Matches($library, '(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)')) {
     $arguments = foreach ($parameter in ($match.Groups[2].Value -split ',')) {
         $type = ($parameter.Trim() -split '\s+')[0]
