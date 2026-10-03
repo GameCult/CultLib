@@ -111,7 +111,7 @@ swap under "Changed" rather than "Breaking".
 
 ## Pre-1.0 packages
 
-A package at `0.y.z` (currently `org.gamecult.cultmath`, at `0.2.x`) uses the
+A package at `0.y.z` (currently `org.gamecult.cultmath`, at `0.3.x`) uses the
 standard pre-1.0 convention: `MAJOR` stays `0` during initial development, so
 `MINOR` carries what `MAJOR` means once the package reaches `1.0.0`. Concretely:
 
@@ -279,6 +279,13 @@ It is wired into:
 - `packages/cultmath/scripts/build-unity-package.ps1`, for
   `org.gamecult.cultmath`;
 - `scripts/verify-caching-unity-release.ps1`, for `org.gamecult.caching.unity`.
+
+`org.gamecult.cultlib` compiles CultMath from source and ships beside
+`org.gamecult.cultmath`, so its build refuses unless it declares exactly the
+CultMath package's version and every `CultMath.dll` it built equals the one
+that package tracks, byte for byte. Any CultMath source change therefore means:
+release `org.gamecult.cultmath`, declare its new version in
+`org.gamecult.cultlib`, then release `org.gamecult.cultlib`.
 
 ### Coverage gaps
 

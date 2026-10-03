@@ -9,13 +9,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$projectPath = Join-Path $repoRoot "src\GameCult.Mesh\GameCult.Mesh.csproj"
-$webSocketProjectPath = Join-Path $repoRoot "src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj"
-$quicProjectPath = Join-Path $repoRoot "src\GameCult.Mesh.Quic.Native\GameCult.Mesh.Quic.Native.csproj"
 $templateRoot = Join-Path $repoRoot "unity\org.gamecult.cultlib"
-$publishRoot = Join-Path $repoRoot "artifacts\unity-publish"
-$webSocketPublishRoot = Join-Path $repoRoot "artifacts\unity-websocket-publish"
-$quicPublishRoot = Join-Path $repoRoot "artifacts\unity-quic-publish"
+# Every managed publish the package is assembled from, in the order $publishedByName fills (last wins).
+# This list is the one owner of publish-root identity: the clean step, the publish loop, the assembly
+# lookup, the CultMath byte gate and the semver check's --api-refs all read it.
+$managedPublishes = @(
+  @{ Project = "src\GameCult.Mesh\GameCult.Mesh.csproj"; Root = "artifacts\unity-publish"; Extra = @(); Label = "CultLib" },
+  @{ Project = "src\GameCult.Mesh.Quic.Native\GameCult.Mesh.Quic.Native.csproj"; Root = "artifacts\unity-quic-publish"; Extra = @(); Label = "CultLib native QUIC managed" },
+  @{ Project = "src\GameCult.Networking.WebSockets\GameCult.Networking.WebSockets.csproj"; Root = "artifacts\unity-websocket-publish"; Extra = @("-f", "netstandard2.1"); Label = "CultLib WebSocket" }
+)
+foreach ($publish in $managedPublishes) {
+  $publish.Root = Join-Path $repoRoot $publish.Root
+}
 $quicNativeRoot = Join-Path $repoRoot "artifacts\unity-quic-native"
 $outputRoot = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
   $OutputDirectory
@@ -24,28 +29,21 @@ $outputRoot = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
 }
 $pluginRoot = Join-Path $outputRoot "Runtime\Plugins"
 
-if (Test-Path -LiteralPath $publishRoot) {
-  Remove-Item -LiteralPath $publishRoot -Recurse -Force
-}
-if (Test-Path -LiteralPath $quicPublishRoot) {
-  Remove-Item -LiteralPath $quicPublishRoot -Recurse -Force
-}
-if (Test-Path -LiteralPath $webSocketPublishRoot) {
-  Remove-Item -LiteralPath $webSocketPublishRoot -Recurse -Force
-}
-if (Test-Path -LiteralPath $outputRoot) {
-  Remove-Item -LiteralPath $outputRoot -Recurse -Force
+foreach ($root in @($managedPublishes | ForEach-Object { $_.Root }) + $outputRoot) {
+  if (Test-Path -LiteralPath $root) {
+    Remove-Item -LiteralPath $root -Recurse -Force
+  }
 }
 
 $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
 
-# Release gate: cultlib's Unity package resolves CultMath through the org.gamecult.cultmath
-# dependency, so a cultlib release must not run ahead of the CultMath package it names.
-# (1) The declared dependency version must not exceed the CultMath package's own version.
-# (2) The CultMath.dll that package tracks must define every type CultMathResolver formats.
-#     The names come from the resolver source (its Shape<T> entries); scripts\check-cultmath-types.cs
-#     looks them up in the assembly's type-definition table, which Windows PowerShell cannot load
-#     the assembly to do. It checks type names, not signatures.
+# Release gate: cultlib compiles CultMath from source and ships beside org.gamecult.cultmath, which owns
+# CultMath.dll and is resolved through the package.json dependency. Two gates bind the two:
+# (1) The declared dependency version must equal the CultMath package's own version. Checked here,
+#     before anything is built.
+# (2) Every CultMath.dll the publishes below produce must equal, byte for byte, the one that package
+#     tracks. Checked once they exist. The builds are deterministic, so a mismatch means the CultMath
+#     source changed since that package was released.
 $cultMathPackageRoot = Join-Path $repoRoot "packages\cultmath\unity\org.gamecult.cultmath"
 $cultMathDeclared = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
 $cultMathAvailable = (Get-Content -LiteralPath (Join-Path $cultMathPackageRoot "package.json") -Raw | ConvertFrom-Json).version
@@ -57,20 +55,8 @@ foreach ($declared in @(@("org.gamecult.cultlib's org.gamecult.cultmath dependen
     throw "$($declared[0]) is '$($declared[1])'. The release gate compares exact release versions (major.minor.patch); prerelease and range versions are not supported."
   }
 }
-if ([version]$cultMathDeclared -gt [version]$cultMathAvailable) {
-  throw "Release order: org.gamecult.cultlib depends on org.gamecult.cultmath $cultMathDeclared, but the CultMath package is at $cultMathAvailable. Release CultMath first."
-}
-$resolverSource = Get-Content -LiteralPath (Join-Path $repoRoot "src\GameCult.Caching.MessagePack\CultMathResolver.cs") -Raw
-$resolverTypes = @([regex]::Matches($resolverSource, '\bShape<(?!T>)(\w+)>\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-if ($resolverTypes.Count -eq 0) {
-  throw "Found no CultMath types in CultMathResolver.cs; the release gate cannot check the CultMath package."
-}
-$missingTypes = & dotnet run (Join-Path $PSScriptRoot "check-cultmath-types.cs") -- (Join-Path $cultMathPackageRoot "Runtime\Plugins\CultMath.dll") @resolverTypes
-if ($LASTEXITCODE -eq 1) {
-  throw "The CultMath.dll in org.gamecult.cultmath $cultMathAvailable lacks types CultMathResolver formats: $missingTypes. Release CultMath first."
-}
-if ($LASTEXITCODE -ne 0) {
-  throw "scripts\check-cultmath-types.cs failed with exit code $LASTEXITCODE."
+if ([version]$cultMathDeclared -ne [version]$cultMathAvailable) {
+  throw "Release order: org.gamecult.cultlib declares org.gamecult.cultmath $cultMathDeclared but the CultMath package is at $cultMathAvailable; cultlib compiles against that package's source, so they must be equal. Release CultMath first, then declare its version."
 }
 # The tracked DLLs and pdbs are committed beside their source, so none may name a commit or a worktree:
 # Source Link writes the commit SHA into the pdb, the informational version carries it too, and each DLL
@@ -84,33 +70,33 @@ Get-ChildItem -LiteralPath (Join-Path $repoRoot "obj\src") -Directory -ErrorActi
 $deterministicArguments = @("--disable-build-servers", "-p:UseSharedCompilation=false",
   "-p:ContinuousIntegrationBuild=true", "-p:EnableSourceLink=false",
   "-p:IncludeSourceRevisionInInformationalVersion=false", "-m:1")
-$publishArguments = @("publish", $projectPath, "-c", $Configuration, "-o", $publishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
-if ($NoRestore) { $publishArguments += "--no-restore" }
-if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
-  $publishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
+foreach ($publish in $managedPublishes) {
+  $publishArguments = @("publish", (Join-Path $repoRoot $publish.Project), "-c", $Configuration) + $publish.Extra +
+    @("-o", $publish.Root, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
+  if ($NoRestore) { $publishArguments += "--no-restore" }
+  if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
+    $publishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
+  }
+  & dotnet @publishArguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "$($publish.Label) publish failed with exit code $LASTEXITCODE"
+  }
 }
-& dotnet @publishArguments
-if ($LASTEXITCODE -ne 0) {
-  throw "CultLib publish failed with exit code $LASTEXITCODE"
+# Gate (2): the CultMath bytes cultlib was built against are the bytes org.gamecult.cultmath ships.
+$cultMathTrackedHash = (Get-FileHash -LiteralPath (Join-Path $cultMathPackageRoot "Runtime\Plugins\CultMath.dll") -Algorithm SHA256).Hash
+$cultMathComparedRoots = @()
+foreach ($publish in $managedPublishes) {
+  $builtCultMath = Join-Path $publish.Root "CultMath.dll"
+  if (-not (Test-Path -LiteralPath $builtCultMath)) { continue }
+  if ((Get-FileHash -LiteralPath $builtCultMath -Algorithm SHA256).Hash -ne $cultMathTrackedHash) {
+    throw "Release order: the CultMath.dll built into $($publish.Root) differs from the one org.gamecult.cultmath $cultMathAvailable tracks; CultMath source changed since that release. Release CultMath first, then declare its version."
+  }
+  $cultMathComparedRoots += $publish.Root
 }
-$webSocketPublishArguments = @("publish", $webSocketProjectPath, "-c", $Configuration, "-f", "netstandard2.1", "-o", $webSocketPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
-if ($NoRestore) { $webSocketPublishArguments += "--no-restore" }
-if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
-  $webSocketPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
+if ($cultMathComparedRoots.Count -eq 0) {
+  throw "No managed publish produced CultMath.dll, so the CultMath byte gate measured nothing."
 }
-& dotnet @webSocketPublishArguments
-if ($LASTEXITCODE -ne 0) {
-  throw "CultLib WebSocket publish failed with exit code $LASTEXITCODE"
-}
-$quicPublishArguments = @("publish", $quicProjectPath, "-c", $Configuration, "-o", $quicPublishRoot, "-p:CultLibPackageVersion=$unityPackageVersion") + $deterministicArguments
-if ($NoRestore) { $quicPublishArguments += "--no-restore" }
-if (-not [string]::IsNullOrWhiteSpace($NuGetConfig)) {
-  $quicPublishArguments += "-p:RestoreConfigFile=$([IO.Path]::GetFullPath($NuGetConfig))"
-}
-& dotnet @quicPublishArguments
-if ($LASTEXITCODE -ne 0) {
-  throw "CultLib native QUIC managed publish failed with exit code $LASTEXITCODE"
-}
+Write-Host "CultMath byte gate: CultMath.dll in $($cultMathComparedRoots -join ', ') equals org.gamecult.cultmath $cultMathAvailable's tracked DLL."
 & (Join-Path $PSScriptRoot "build-quic-native.ps1") `
   -Configuration $Configuration `
   -OutputDirectory $quicNativeRoot
@@ -157,14 +143,10 @@ if (($referencedAssemblies -join "|") -ne ($declaredAssemblies -join "|")) {
   throw "GameCult.CultLib.asmdef precompiledReferences differ from the shipped plus external assembly lists."
 }
 $publishedByName = @{}
-foreach ($assembly in Get-ChildItem -LiteralPath $publishRoot -Filter "*.dll") {
-  $publishedByName[$assembly.Name] = $assembly
-}
-foreach ($assembly in Get-ChildItem -LiteralPath $quicPublishRoot -Filter "*.dll") {
-  $publishedByName[$assembly.Name] = $assembly
-}
-foreach ($assembly in Get-ChildItem -LiteralPath $webSocketPublishRoot -Filter "*.dll") {
-  $publishedByName[$assembly.Name] = $assembly
+foreach ($publish in $managedPublishes) {
+  foreach ($assembly in Get-ChildItem -LiteralPath $publish.Root -Filter "*.dll") {
+    $publishedByName[$assembly.Name] = $assembly
+  }
 }
 foreach ($assemblyName in $expectedAssemblies) {
   if (-not $publishedByName.ContainsKey($assemblyName)) {
@@ -182,8 +164,8 @@ $measuredArguments = @()
 foreach ($assemblyName in $expectedAssemblies) {
   $measuredArguments += @("--api-built", $publishedByName[$assemblyName].FullName)
 }
-foreach ($refRoot in @($publishRoot, $quicPublishRoot, $webSocketPublishRoot)) {
-  $measuredArguments += @("--api-refs", $refRoot)
+foreach ($publish in $managedPublishes) {
+  $measuredArguments += @("--api-refs", $publish.Root)
 }
 # The suite pins the checker's rules and the declared tag prefixes, so it runs first.
 & node --test (Join-Path $repoRoot "scripts\check-changelog-semver.test.mjs")
