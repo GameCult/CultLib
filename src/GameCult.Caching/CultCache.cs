@@ -3622,10 +3622,9 @@ namespace GameCult.Caching
         }
 
         // The one decision of whether a write may proceed over what the file holds as foreign, for every store kind. A key this
-        // cache writes or removes (staged, or in a batch) that the file now holds foreign is refused, every such key at once.
-        // Only those leave: the store forgets its staged change (unstage), and the cache drops its copy through the path a pull
-        // drops what the file no longer holds for it, so the store, the cache and the file agree on what is held. A record this
-        // cache holds but did not write is not refused: it stays until a pull drops it, and the write that never touched it lands.
+        // cache writes or removes (staged, or in a batch) that the file now holds foreign is refused, every such key at once,
+        // through Refuse: a foreign record is not held, so the cache drops its copy and the store forgets its staged change. A record
+        // this cache holds but did not write is not refused: it stays until a pull drops it, and the write that never touched it lands.
         protected void RefuseForeign(IEnumerable<string> written, Func<string, CultForeignRecord?> foreignAt, Action<string> unstage)
         {
             var refused = written.Distinct(StringComparer.Ordinal)
@@ -3635,18 +3634,59 @@ namespace GameCult.Caching
                 .ToArray();
             if (refused.Length == 0)
                 return;
-            var dropped = refused
-                .Select(record => Entries.TryGetValue(record.Key, out var held) ? held : null)
-                .OfType<CultStoredDocument>()
-                .ToArray();
-            foreach (var record in refused)
-                unstage(record.Key);
-            if (dropped.Length > 0)
-                Loaded?.Invoke(Array.Empty<CultStoredDocument>(), dropped);
+            Refuse(refused.Select(record => record.Key), _ => null, unstage, _ => Overwrites(refused));
+        }
+
+        /// <summary>
+        /// The one refusal of a write, for every store kind: it reloads what it refuses, or changes nothing. For each key,
+        /// <paramref name="durableAt"/> gives the durable record decoded as a load would (null when the store holds none, or holds
+        /// it as a foreign record). What differs from this store's view is handed to <see cref="Loaded"/>, the path a pull uses;
+        /// only when that succeeds does the store forget its staged change at each key (<paramref name="unstage"/>) and take the
+        /// loaded and dropped records into its view. If the reload throws, nothing has changed and the refusal carries that
+        /// exception. Always throws what <paramref name="refusal"/> returns.
+        /// </summary>
+        protected void Refuse(IEnumerable<string> keys, Func<string, CultStoredDocument?> durableAt, Action<string> unstage, Func<Exception?, Exception> refusal)
+        {
+            var refused = keys.Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            var loaded = new List<CultStoredDocument>();
+            var dropped = new List<CultStoredDocument>();
+            try
+            {
+                foreach (var key in refused)
+                {
+                    Entries.TryGetValue(key, out var held);
+                    var durable = durableAt(key);
+                    if (durable == null)
+                    {
+                        if (held != null)
+                            dropped.Add(held);
+                    }
+                    else if (held == null || !SameStoredIdentity(held.StoredSchemaId, held.StoredAt, durable.StoredSchemaId, durable.StoredAt))
+                        loaded.Add(durable);
+                }
+
+                if (loaded.Count > 0 || dropped.Count > 0)
+                    Loaded?.Invoke(loaded, dropped);
+            }
+            catch (Exception ex)
+            {
+                throw refusal(ex);
+            }
+
+            foreach (var key in refused)
+                unstage(key);
             foreach (var held in dropped)
                 Entries.TryRemove(held.Key.Value, out _);
-            throw Overwrites(refused);
+            foreach (var stored in loaded)
+                Entries[stored.Key.Value] = stored;
+            throw refusal(null);
         }
+
+        // Two stored records are the same stored bytes when they carry one stored schema id and one storedAt, compared exactly. The
+        // one place a pull's reload filter, the staleness check and a refusal's reload decide it.
+        protected static bool SameStoredIdentity(string? schemaId, string? storedAt, string? otherSchemaId, string? otherStoredAt) =>
+            string.Equals(schemaId, otherSchemaId, StringComparison.Ordinal) &&
+            string.Equals(storedAt, otherStoredAt, StringComparison.Ordinal);
 
         protected CultSchemaConflictException Overwrites(params CultForeignRecord[] foreign) => new(
             $"{(foreign.Length == 1 ? "Record" : "Records")} {string.Join(", ", foreign.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this} " +
@@ -3676,6 +3716,10 @@ namespace GameCult.Caching
         // A key is staged exactly while the store is dirty with it, and a pull runs only on a clean store.
         private readonly HashSet<string> _staged = new(StringComparer.Ordinal);
 
+        // The header of every record the store held when this store last read it, as this store last wrote it for keys it wrote.
+        // A write into a store holding a variant lands only while the durable headers still equal these.
+        private readonly Dictionary<string, (string SchemaId, string StoredAt)> _lastRead = new(StringComparer.Ordinal);
+
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
 
         /// <summary>
@@ -3703,6 +3747,7 @@ namespace GameCult.Caching
             var snapshot = ReadSnapshot();
             if (snapshot == null)
             {
+                _lastRead.Clear();
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
                 SetForeignRecords(Array.Empty<CultForeignRecord>());
                 return;
@@ -3726,8 +3771,7 @@ namespace GameCult.Caching
 
             var loaded = persisted.Values
                 .Where(stored => !Entries.TryGetValue(stored.Key.Value, out var existing) ||
-                                 existing.StoredAt != stored.StoredAt ||
-                                 existing.StoredSchemaId != stored.StoredSchemaId)
+                                 !SameStoredIdentity(existing.StoredSchemaId, existing.StoredAt, stored.StoredSchemaId, stored.StoredAt))
                 .ToArray();
             var dropped = Entries.Values.Where(existing => !persisted.ContainsKey(existing.Key.Value)).ToArray();
             if (loaded.Length > 0 || dropped.Length > 0)
@@ -3737,9 +3781,13 @@ namespace GameCult.Caching
                 Entries.TryRemove(stored.Key.Value, out _);
             foreach (var stored in loaded)
                 Entries[stored.Key.Value] = stored;
+            _lastRead.Clear();
+            foreach (var record in snapshot.Records)
+                _lastRead[record.Key] = (record.SchemaId, record.StoredAt);
             SetLastSchemaMigrationReports(reports);
             SetForeignRecords(foreign);
         }
+
         public override void Push(CultStoredDocument entry)
         {
             ThrowIfReadOnly();
@@ -3765,8 +3813,8 @@ namespace GameCult.Caching
 
         // A flush applies this store's staged writes and removals onto what the file holds now, under the lock: two writers never
         // interleave bytes, every record this cache did not stage stays as the file has it, and a plain flush is last-writer-wins
-        // only per staged key. A file it cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused
-        // and left as it is.
+        // only per staged key. In a store holding a variant it lands only onto the store as this cache last read it (ApplyWriteSet).
+        // A file it cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused and left as it is.
         public override void PushAll()
         {
             ThrowIfReadOnly();
@@ -3777,8 +3825,7 @@ namespace GameCult.Caching
                     var disk = ReadSnapshot();
                     RefuseForeign(_staged, ForeignOnDisk(disk));
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
-                    ApplyWriteSet(disk, upserts, removals);
-                    Wrote(upserts);
+                    Wrote(ApplyWriteSet(disk, upserts, removals));
                 }
 
                 _staged.Clear();
@@ -3806,12 +3853,12 @@ namespace GameCult.Caching
 
             RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), ForeignOnDisk(disk));
             var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
-            ApplyWriteSet(disk, upserts, removals);
+            var written = ApplyWriteSet(disk, upserts, removals);
             foreach (var entry in request.Deletes)
                 Entries.TryRemove(entry.Key.Value, out _);
             foreach (var entry in request.Upserts)
                 Entries[entry.Key.Value] = entry;
-            Wrote(upserts);
+            Wrote(written);
             _staged.Clear();
             MarkFlushSucceeded();
             return CultCommitOutcome.Committed;
@@ -3863,12 +3910,16 @@ namespace GameCult.Caching
         internal void ApplyWriteSet(IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals) => Held(() =>
         {
             using (AcquireLock(wait: true))
-                ApplyWriteSet(ReadSnapshot(), upserts, removals);
+                _ = ApplyWriteSet(ReadSnapshot(), upserts, removals);
         });
 
-        // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold.
-        private void ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. A store that holds
+        // a variant, or would after this write, is written only while its record headers are what this store last read: a variant
+        // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Headers
+        // only. Otherwise the whole write is refused and what it refused is reloaded (Refuse). Returns the records written.
+        private IReadOnlyCollection<CultStagedRecord> ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
+            RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
             var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);
             var removed = removals.ToHashSet(StringComparer.Ordinal);
             var copied = (durable?.Records ?? Array.Empty<CultPersistedRecord>())
@@ -3897,6 +3948,64 @@ namespace GameCult.Caching
 
             Directory.CreateDirectory(FileInfo.DirectoryName!);
             WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
+            foreach (var key in removed)
+                _lastRead.Remove(key);
+            foreach (var staged in upserts)
+                _lastRead[staged.Record.Key] = (staged.Record.SchemaId, staged.Record.StoredAt);
+            return upserts;
+        }
+
+        private void RefuseWriteIntoMovedVariantStore(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        {
+            var records = durable?.Records ?? Array.Empty<CultPersistedRecord>();
+            if (records.All(record => record.Variant == null) && upserts.All(staged => staged.Record.Variant == null))
+                return;
+            var changed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var record in records)
+            {
+                if (!_lastRead.TryGetValue(record.Key, out var read) || !SameStoredIdentity(read.SchemaId, read.StoredAt, record.SchemaId, record.StoredAt))
+                    changed.Add(record.Key);
+            }
+
+            var durableKeys = records.Select(record => record.Key).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in _lastRead.Keys)
+            {
+                if (!durableKeys.Contains(key))
+                    changed.Add(key);
+            }
+
+            if (changed.Count == 0)
+                return;
+            var byKey = records.ToDictionary(record => record.Key, StringComparer.Ordinal);
+            var recordKeys = _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals)
+                .Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            var changedKeys = changed.OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            Refuse(
+                recordKeys.Concat(changedKeys),
+                key => Cache == null || !byKey.TryGetValue(key, out var record) || Foreign(record, durable!.SchemaCatalog) != null
+                    ? null
+                    : ToStoredDocument(record, durable!.SchemaCatalog, DeserializePayload, out _),
+                key =>
+                {
+                    _staged.Remove(key);
+                    IsDirty = _staged.Count > 0;
+                    if (byKey.TryGetValue(key, out var record))
+                        _lastRead[key] = (record.SchemaId, record.StoredAt);
+                    else
+                        _lastRead.Remove(key);
+                },
+                inner => new CultWriteConflictException(
+                    Cache == null
+                        ? $"{this} holds a variant and was written by a writer with no CultCache, which cannot resolve variants; nothing was written. " +
+                          $"Records it would have written or removed: {string.Join(", ", recordKeys.Select(key => $"'{key}'"))}; records that differ from what the writer has read: {string.Join(", ", changedKeys.Select(key => $"'{key}'"))}."
+                        : $"{this} changed since this cache last read it, and it holds a variant, which resolves against other records; nothing was written. " +
+                          $"Records this write would have written or removed: {string.Join(", ", recordKeys.Select(key => $"'{key}'"))}; records that changed: {string.Join(", ", changedKeys.Select(key => $"'{key}'"))}. " +
+                          (inner == null
+                              ? "The cache reloaded them; retry the write against what the store holds now."
+                              : "Reloading them failed, so the cache is unchanged."),
+                    recordKeys,
+                    changedKeys,
+                    inner));
         }
 
         private void RefuseForeign(
@@ -3909,6 +4018,10 @@ namespace GameCult.Caching
                 {
                     _staged.Remove(key);
                     IsDirty = _staged.Count > 0;
+                    if (foreign.TryGetValue(key, out var carried))
+                        _lastRead[key] = (carried.Record.SchemaId, carried.Record.StoredAt);
+                    else
+                        _lastRead.Remove(key);
                 });
 
         // The records the file holds that no registered type claims, by key.
