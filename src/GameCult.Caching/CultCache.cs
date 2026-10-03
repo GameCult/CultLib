@@ -475,6 +475,7 @@ namespace GameCult.Caching
             StoredAt = storedAt;
             Descriptor = descriptor;
             StoredSchemaId = descriptor.SchemaId;
+            StoredVersion = UnstoredVersion();
             _document = document;
         }
 
@@ -491,6 +492,7 @@ namespace GameCult.Caching
             StoredAt = storedAt;
             Descriptor = descriptor;
             StoredSchemaId = descriptor.SchemaId;
+            StoredVersion = UnstoredVersion();
             Variant = variant;
             _document = resolved;
             _codec = codec;
@@ -503,15 +505,20 @@ namespace GameCult.Caching
 
         public CultRecordKey Key { get; }
 
-        // When the record was stored. With StoredSchemaId it names the record's stored bytes: a write that stores the record
-        // mints it a storedAt later than the one it replaces.
+        // When the record was stored: metadata. A write that stores the record mints it a storedAt later than the one it replaces;
+        // no condition reads it.
         public string StoredAt { get; internal set; }
         public CultDocumentDescriptor Descriptor { get; }
 
         // The schema id the record carries in its store: the id it was loaded under, which may be an older or foreign id that
-        // resolved to Descriptor, until a write of this record puts it under Descriptor's id. With StoredAt it is the record's
-        // identity on disk, and a commit condition compares the pair with the store's bytes exactly.
+        // resolved to Descriptor, until a write of this record puts it under Descriptor's id.
         public string StoredSchemaId { get; internal set; }
+
+        // Names the bytes this record was read from or written as: the SHA-256 of its persisted encoding, set by the store that
+        // read or wrote them. A record no store has read or written has a version of its own that equals nothing else.
+        internal string StoredVersion { get; set; }
+
+        private static string UnstoredVersion() => "unstored:" + Guid.NewGuid().ToString("N");
 
         // The complete document. For a variant, the resolved view: derived, never written back.
         public object Document => _document ??
@@ -546,7 +553,7 @@ namespace GameCult.Caching
         }
 
         internal CultStoredDocument Resolved(object document, CultVariantDelta delta, bool idsInMemoryOnly, CultCodec codec) =>
-            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId };
+            new(Key, StoredAt, Descriptor, delta, document, codec) { IdsInMemoryOnly = idsInMemoryOnly, StoredSchemaId = StoredSchemaId, StoredVersion = StoredVersion };
     }
 
     public sealed class CultDocumentRegistry
@@ -1845,7 +1852,7 @@ namespace GameCult.Caching
         internal CultCommitRequest(
             IReadOnlyList<CultStoredDocument> upserts,
             IReadOnlyList<CultStoredDocument> deletes,
-            IReadOnlyList<(CultRecordKey Key, string? SchemaId, string? StoredAt)> expected,
+            IReadOnlyList<(CultRecordKey Key, string? Version)> expected,
             bool expectUnchanged)
         {
             Upserts = upserts;
@@ -1856,35 +1863,30 @@ namespace GameCult.Caching
 
         public IReadOnlyList<CultStoredDocument> Upserts { get; }
         public IReadOnlyList<CultStoredDocument> Deletes { get; }
-        public IReadOnlyList<(CultRecordKey Key, string? SchemaId, string? StoredAt)> Expected { get; }
+        public IReadOnlyList<(CultRecordKey Key, string? Version)> Expected { get; }
         public bool ExpectUnchanged { get; }
         public bool HasConditions => Expected.Count > 0 || ExpectUnchanged;
 
-        // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
-        // Identity is (stored schema id, storedAt), compared exactly. It names the stored bytes: every write that stores a record
-        // mints it a storedAt later than the one it replaces.
-        public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
+        // durable is the version of each record the store holds on disk now, by key; observed is what its cache last loaded or
+        // committed. Identity is the record's version, the SHA-256 of its stored bytes, which names its schema id and storedAt too.
+        public bool ConditionsHold(IReadOnlyDictionary<string, string> durable, IEnumerable<CultStoredDocument> observed)
         {
-            var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
-            foreach (var (key, schemaId, storedAt) in Expected)
+            foreach (var (key, version) in Expected)
             {
-                byKey.TryGetValue(key.Value, out var record);
-                var holds = schemaId == null
-                    ? record == null
-                    : record != null && record.SchemaId == schemaId && record.StoredAt == storedAt;
+                var holds = durable.TryGetValue(key.Value, out var stored)
+                    ? version != null && string.Equals(stored, version, StringComparison.Ordinal)
+                    : version == null;
                 if (!holds)
                     return false;
             }
 
             return !ExpectUnchanged ||
-                   durable.Select(record => Identity(record.Key, record.SchemaId, record.StoredAt))
-                       .OrderBy(identity => identity, StringComparer.Ordinal)
+                   durable.Select(pair => (pair.Key, Version: pair.Value))
+                       .OrderBy(pair => pair.Key, StringComparer.Ordinal)
                        .SequenceEqual(observed
-                           .Select(stored => Identity(stored.Key.Value, stored.StoredSchemaId, stored.StoredAt))
-                           .OrderBy(identity => identity, StringComparer.Ordinal));
+                           .Select(stored => (Key: stored.Key.Value, Version: stored.StoredVersion))
+                           .OrderBy(pair => pair.Key, StringComparer.Ordinal));
         }
-
-        private static string Identity(string key, string schemaId, string storedAt) => $"{key}\n{schemaId}\n{storedAt}";
     }
 
     // One staged write: a plain record (Stored), a variant (Variant), a flatten, or, with none of those, a removal.
@@ -1910,7 +1912,7 @@ namespace GameCult.Caching
     {
         private readonly CultCache _cache;
         internal readonly Dictionary<string, StagedOperation> Operations = new(StringComparer.Ordinal);
-        internal readonly List<(CultRecordKey Key, string? SchemaId, string? StoredAt)> Expected = new();
+        internal readonly List<(CultRecordKey Key, string? Version)> Expected = new();
         internal bool ExpectsUnchanged;
         internal bool Sealed;
 
@@ -1958,7 +1960,7 @@ namespace GameCult.Caching
         {
             ThrowIfSealed();
             var observed = _cache.Observe(key, current);
-            Expected.Add((key, observed?.StoredSchemaId, observed?.StoredAt));
+            Expected.Add((key, observed?.StoredVersion));
         }
 
         public void ExpectUnchanged()
@@ -2019,17 +2021,18 @@ namespace GameCult.Caching
 
         public CultDocumentRegistry Registry => _registry;
 
-        // A store wrote: every record it wrote is stored under its type's own id at the storedAt the write gave it,
-        // and a plain record carries the ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the
+        // A store wrote: every record it wrote is stored under its type's own id at the storedAt the write gave it, with the
+        // version of the bytes it wrote, and a plain record carries the ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the
         // store wrote the delta it was handed, and only a write of the variant changes that.
-        internal void Wrote(IEnumerable<CultPersistedRecord> written) => Held(() =>
+        internal void Wrote(IEnumerable<(CultPersistedRecord Record, string Version)> written) => Held(() =>
         {
-            foreach (var record in written)
+            foreach (var (record, version) in written)
             {
                 if (!_entries.TryGetValue(record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = record.SchemaId;
                 entry.StoredAt = record.StoredAt;
+                entry.StoredVersion = version;
                 if (entry.Variant == null)
                     entry.IdsInMemoryOnly = false;
             }
@@ -2627,9 +2630,7 @@ namespace GameCult.Caching
 
                     if (request.HasConditions && _stores.Count > 0)
                         throw new InvalidOperationException("A conditional batch names its home store through a record it upserts or removes.");
-                    var inMemory = _entries.Values
-                        .Select(entry => new CultPersistedRecord { Key = entry.Key.Value, SchemaId = entry.StoredSchemaId, StoredAt = entry.StoredAt })
-                        .ToArray();
+                    var inMemory = _entries.Values.ToDictionary(entry => entry.Key.Value, entry => entry.StoredVersion, StringComparer.Ordinal);
                     return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
             });
@@ -3114,7 +3115,9 @@ namespace GameCult.Caching
                     ? variant.Resolved(document, minted ? new CultVariantDelta(delta.BaseKey, overrides) : delta, variant.IdsInMemoryOnly || (minted && source != null), _codec)
                     : new CultStoredDocument(variant.Key, variant.StoredAt, variant.Descriptor, document)
                     {
-                        Flattens = true
+                        Flattens = true,
+                        StoredSchemaId = variant.StoredSchemaId,
+                        StoredVersion = variant.StoredVersion
                     };
             }
         }
@@ -3527,9 +3530,11 @@ namespace GameCult.Caching
         // resolution shed. A plain record sheds a member its type dropped by never carrying it into the document; a variant
         // sheds the override of such a slot by never carrying it into the delta, so a later type reusing the slot number
         // cannot resurrect it and a flush needs no rule of its own. The report is the schema diff's ignored slots plus the
-        // overrides whose slot the type does not have, including one the persisted schema never listed.
+        // overrides whose slot the type does not have, including one the persisted schema never listed. The version is the reading
+        // store's: it read the bytes.
         protected CultStoredDocument ToStoredDocument(
             CultPersistedRecord record,
+            string version,
             IReadOnlyCollection<CultSchemaCatalogEntry> catalog,
             Func<Type, byte[], object> deserializePayload,
             out CultSchemaMigrationReport report)
@@ -3568,7 +3573,8 @@ namespace GameCult.Caching
                     null,
                     Cache?.Codec)
                 {
-                    StoredSchemaId = record.SchemaId
+                    StoredSchemaId = record.SchemaId,
+                    StoredVersion = version
                 };
             }
 
@@ -3579,7 +3585,8 @@ namespace GameCult.Caching
                 resolution.Descriptor,
                 document)
             {
-                StoredSchemaId = record.SchemaId
+                StoredSchemaId = record.SchemaId,
+                StoredVersion = version
             };
         }
 
@@ -3648,7 +3655,7 @@ namespace GameCult.Caching
                         if (held != null)
                             dropped.Add(held);
                     }
-                    else if (held == null || !SameStoredIdentity(held.StoredSchemaId, held.StoredAt, durable.StoredSchemaId, durable.StoredAt))
+                    else if (held == null || !SameStoredIdentity(held.StoredVersion, durable.StoredVersion))
                         loaded.Add(durable);
                 }
 
@@ -3669,11 +3676,13 @@ namespace GameCult.Caching
             throw refusal(null);
         }
 
-        // Two stored records are the same stored bytes when they carry one stored schema id and one storedAt, compared exactly. The
-        // one place a pull's reload filter, the staleness check and a refusal's reload decide it.
-        protected static bool SameStoredIdentity(string? schemaId, string? storedAt, string? otherSchemaId, string? otherStoredAt) =>
-            string.Equals(schemaId, otherSchemaId, StringComparison.Ordinal) &&
-            string.Equals(storedAt, otherStoredAt, StringComparison.Ordinal);
+        // Two stored records are the same stored bytes when their versions are equal. The one place a pull's reload filter, the
+        // staleness check and a refusal's reload decide it.
+        protected static bool SameStoredIdentity(string? version, string? otherVersion) =>
+            string.Equals(version, otherVersion, StringComparison.Ordinal);
+
+        // The one spelling of a version in both store kinds: the lowercase hex of the SHA-256 of a record's persisted encoding.
+        protected static string VersionOf(byte[] sha256) => Convert.ToHexString(sha256).ToLowerInvariant();
 
         // The one re-mint, for every store kind (storedat-on-change): a record written over one the store holds is stored at a storedAt
         // later than the one it replaces, whoever wrote that. The staged storedAt stands only when it is already later (both parsed
@@ -3720,11 +3729,16 @@ namespace GameCult.Caching
         // A key is staged exactly while the store is dirty with it, and a pull runs only on a clean store.
         private readonly HashSet<string> _staged = new(StringComparer.Ordinal);
 
-        // The header of every record the store held when this store last read it, as this store last wrote it for keys it wrote.
-        // A write into a store holding a variant lands only while the durable headers still equal these.
-        private readonly Dictionary<string, (string SchemaId, string StoredAt)> _lastRead = new(StringComparer.Ordinal);
+        // The version of every record the store held when this store last read it, as this store last wrote it for keys it wrote.
+        // A write into a store holding a variant lands only while the durable versions still equal these.
+        private readonly Dictionary<string, string> _lastRead = new(StringComparer.Ordinal);
 
         protected abstract byte[] SerializeSnapshot(CultPersistedStoreSnapshot snapshot);
+
+        // One record's persisted encoding: the bytes a version names.
+        protected abstract byte[] SerializeRecord(CultPersistedRecord record);
+
+        private string Version(CultPersistedRecord record) => VersionOf(SHA256.HashData(SerializeRecord(record)));
 
         /// <summary>
         /// This store's one reader of a non-empty store file, and so its one verdict on whether the file may be replaced: open,
@@ -3760,22 +3774,24 @@ namespace GameCult.Caching
             var reports = new List<CultSchemaMigrationReport>(snapshot.Records.Length);
             var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
             var foreign = new List<CultForeignRecord>();
+            var versions = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
+                var version = versions[record.Key] = Version(record);
                 if (Foreign(record, snapshot.SchemaCatalog) is { } carried)
                 {
                     foreign.Add(carried);
                     continue;
                 }
 
-                var stored = ToStoredDocument(record, snapshot.SchemaCatalog, DeserializePayload, out var report);
+                var stored = ToStoredDocument(record, version, snapshot.SchemaCatalog, DeserializePayload, out var report);
                 reports.Add(report);
                 persisted[stored.Key.Value] = stored;
             }
 
             var loaded = persisted.Values
                 .Where(stored => !Entries.TryGetValue(stored.Key.Value, out var existing) ||
-                                 !SameStoredIdentity(existing.StoredSchemaId, existing.StoredAt, stored.StoredSchemaId, stored.StoredAt))
+                                 !SameStoredIdentity(existing.StoredVersion, stored.StoredVersion))
                 .ToArray();
             var dropped = Entries.Values.Where(existing => !persisted.ContainsKey(existing.Key.Value)).ToArray();
             if (loaded.Length > 0 || dropped.Length > 0)
@@ -3786,8 +3802,8 @@ namespace GameCult.Caching
             foreach (var stored in loaded)
                 Entries[stored.Key.Value] = stored;
             _lastRead.Clear();
-            foreach (var record in snapshot.Records)
-                _lastRead[record.Key] = (record.SchemaId, record.StoredAt);
+            foreach (var (key, version) in versions)
+                _lastRead[key] = version;
             SetLastSchemaMigrationReports(reports);
             SetForeignRecords(foreign);
         }
@@ -3852,7 +3868,8 @@ namespace GameCult.Caching
                 return CultCommitOutcome.Contended;
 
             var disk = ReadSnapshot() ?? new CultPersistedStoreSnapshot();
-            if (!request.ConditionsHold(disk.Records, Entries.Values))
+            if (request.HasConditions && !request.ConditionsHold(
+                    disk.Records.ToDictionary(record => record.Key, Version, StringComparer.Ordinal), Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
             RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), ForeignOnDisk(disk));
@@ -3918,10 +3935,11 @@ namespace GameCult.Caching
         });
 
         // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. A store that holds
-        // a variant, or would after this write, is written only while its record headers are what this store last read: a variant
-        // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Headers
-        // only. Otherwise the whole write is refused and what it refused is reloaded (Refuse). Returns the records written.
-        private IReadOnlyCollection<CultStagedRecord> ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
+        // a variant, or would after this write, is written only while its record versions are what this store last read: a variant
+        // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Versions
+        // only: a write hashes other records' bytes, never decodes them. Otherwise the whole write is refused and what it refused is
+        // reloaded (Refuse). Returns the records written, each with the version of the bytes written.
+        private IReadOnlyCollection<(CultStagedRecord Staged, string Version)> ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
             RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
             // A record written over one the store holds is stored at a storedAt later than the one it replaces, whoever wrote that.
@@ -3958,13 +3976,14 @@ namespace GameCult.Caching
                 Records = records
             };
 
+            var versions = upserts.Select(staged => (staged, Version(staged.Record))).ToArray();
             Directory.CreateDirectory(FileInfo.DirectoryName!);
             WriteSnapshotAtomically(FileInfo.FullName, SerializeSnapshot(snapshot));
             foreach (var key in removed)
                 _lastRead.Remove(key);
-            foreach (var staged in upserts)
-                _lastRead[staged.Record.Key] = (staged.Record.SchemaId, staged.Record.StoredAt);
-            return upserts;
+            foreach (var (staged, version) in versions)
+                _lastRead[staged.Record.Key] = version;
+            return versions;
         }
 
         private void RefuseWriteIntoMovedVariantStore(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
@@ -3973,10 +3992,11 @@ namespace GameCult.Caching
             if (records.All(record => record.Variant == null) && upserts.All(staged => staged.Record.Variant == null))
                 return;
             var changed = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var record in records)
+            var versions = records.ToDictionary(record => record.Key, Version, StringComparer.Ordinal);
+            foreach (var (key, version) in versions)
             {
-                if (!_lastRead.TryGetValue(record.Key, out var read) || !SameStoredIdentity(read.SchemaId, read.StoredAt, record.SchemaId, record.StoredAt))
-                    changed.Add(record.Key);
+                if (!_lastRead.TryGetValue(key, out var read) || !SameStoredIdentity(read, version))
+                    changed.Add(key);
             }
 
             var durableKeys = records.Select(record => record.Key).ToHashSet(StringComparer.Ordinal);
@@ -3996,13 +4016,13 @@ namespace GameCult.Caching
                 recordKeys.Concat(changedKeys),
                 key => Cache == null || !byKey.TryGetValue(key, out var record) || Foreign(record, durable!.SchemaCatalog) != null
                     ? null
-                    : ToStoredDocument(record, durable!.SchemaCatalog, DeserializePayload, out _),
+                    : ToStoredDocument(record, versions[key], durable!.SchemaCatalog, DeserializePayload, out _),
                 key =>
                 {
                     _staged.Remove(key);
                     IsDirty = _staged.Count > 0;
-                    if (byKey.TryGetValue(key, out var record))
-                        _lastRead[key] = (record.SchemaId, record.StoredAt);
+                    if (versions.TryGetValue(key, out var version))
+                        _lastRead[key] = version;
                     else
                         _lastRead.Remove(key);
                 },
@@ -4031,7 +4051,7 @@ namespace GameCult.Caching
                     _staged.Remove(key);
                     IsDirty = _staged.Count > 0;
                     if (foreign.TryGetValue(key, out var carried))
-                        _lastRead[key] = (carried.Record.SchemaId, carried.Record.StoredAt);
+                        _lastRead[key] = Version(carried.Record);
                     else
                         _lastRead.Remove(key);
                 });
@@ -4049,21 +4069,22 @@ namespace GameCult.Caching
             return foreign;
         }
 
-        // The file now holds every record written, under the id and at the storedAt the write gave it: the store's entries and the
-        // cache's say so. A copied record is on disk as the file had it, so nothing learns anything new about it: in particular the
+        // The file now holds every record written, under the id and at the storedAt the write gave it, and the version of those bytes:
+        // the store's entries and the cache's say so. A copied record is on disk as the file had it, so nothing learns anything new about it: in particular the
         // ids it minted at load are still in memory only.
-        private void Wrote(IEnumerable<CultStagedRecord> written)
+        private void Wrote(IEnumerable<(CultStagedRecord Staged, string Version)> written)
         {
             var staged = written.ToArray();
-            foreach (var write in staged)
+            foreach (var (write, version) in staged)
             {
                 if (!Entries.TryGetValue(write.Record.Key, out var entry))
                     continue;
                 entry.StoredSchemaId = write.Record.SchemaId;
                 entry.StoredAt = write.Record.StoredAt;
+                entry.StoredVersion = version;
             }
 
-            Cache?.Wrote(staged.Select(write => write.Record));
+            Cache?.Wrote(staged.Select(write => (write.Staged.Record, write.Version)));
         }
 
         // Open, flush and commit read the file through this one call, so they agree on which files are stores. A file that is

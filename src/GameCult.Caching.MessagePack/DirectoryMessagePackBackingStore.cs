@@ -111,8 +111,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var arrived = loaded
             .Where(pair => !Staged(pair.Key) &&
                            (!Entries.TryGetValue(pair.Key, out var existing) ||
-                            existing.StoredAt != pair.Value.StoredAt ||
-                            existing.StoredSchemaId != pair.Value.StoredSchemaId))
+                            !SameStoredIdentity(existing.StoredVersion, pair.Value.StoredVersion)))
             .Select(pair => pair.Value)
             .ToArray();
         var departed = _hydratedKeys
@@ -183,7 +182,8 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             if (commitLease == null)
                 return CultCommitOutcome.Contended;
             var manifest = ReadManifest();
-            if (!request.ConditionsHold(manifest.Records, Entries.Values))
+            if (request.HasConditions && !request.ConditionsHold(
+                    manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
             RefuseForeign(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value));
@@ -291,6 +291,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     Registry));
             var pagePayload = CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
             var indexRecord = ToContentAddressedIndexRecord(record, pagePayload);
+            stored.StoredVersion = VersionOf(indexRecord.Payload);
             currentIndex[key] = indexRecord;
             WriteFileAtomically(
                 ContentAddressedRecordPath(indexRecord),
@@ -384,10 +385,11 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 var record = ReadPersistedRecordPage(metadata, out var pagePayload);
                 var stored = ToStoredDocument(
                     record,
+                    VersionOf(metadata.Payload),
                     catalogEntries,
                     (type, payload) => CultDocumentMessagePackSerialization.DeserializeUntyped(type, payload, Registry),
                     out recordReports[index]);
-                // The manifest is this store's record of what is on disk, and what a commit condition compares with.
+                // The manifest is this store's record of what is on disk: the stored id and the version a commit condition compares with.
                 stored.StoredSchemaId = metadata.SchemaId;
                 storedRecords[index] = stored;
                 if (tracePages)

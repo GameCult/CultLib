@@ -617,6 +617,11 @@ public class SingleFileMessagePackBackingStore : SingleFileBackingStore
         return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
     }
 
+    protected override byte[] SerializeRecord(CultPersistedRecord record)
+    {
+        return CultDocumentMessagePackSerialization.SerializePersistedRecord(record);
+    }
+
     protected override CultPersistedStoreSnapshot DeserializeSnapshot(byte[] data)
     {
         var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(data);
