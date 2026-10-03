@@ -9,6 +9,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+# The CultMath byte gate below needs a git checkout: ContinuousIntegrationBuild maps the repo root to /_/
+# through the SDK's git source root, so in a tree without .git (git archive, a source zip) the DLL names
+# the absolute obj path and its bytes change with the directory.
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot ".git"))) {
+  throw "$repoRoot has no .git, so CultMath.dll would carry this directory's path and fail the CultMath byte gate. Build from a git clone, not an archive or source zip."
+}
 $templateRoot = Join-Path $repoRoot "unity\org.gamecult.cultlib"
 # Every managed publish the package is assembled from, in the order $publishedByName fills (last wins).
 # This list is the one owner of publish-root identity: the clean step, the publish loop, the assembly
@@ -42,9 +48,10 @@ $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "packa
 # (1) The declared dependency version must equal the CultMath package's own version. Checked here,
 #     before anything is built.
 # (2) Every CultMath.dll the publishes below produce must equal, byte for byte, the one that package
-#     tracks. Checked once they exist. The builds are deterministic for one toolchain, so a mismatch
-#     means the CultMath source changed since that package was released, or this SDK, compiler or host
-#     builds different bytes from the one that built the tracked DLL (no global.json pins the SDK).
+#     tracks. Checked once they exist. The builds are deterministic for one toolchain and checkout, so a
+#     mismatch means the CultMath source changed since that package was released, its checkout's line
+#     endings differ from the CRLF that .gitattributes pins, or this SDK, compiler or host builds
+#     different bytes from the one that built the tracked DLL (no global.json pins the SDK).
 $cultMathPackageRoot = Join-Path $repoRoot "packages\cultmath\unity\org.gamecult.cultmath"
 $cultMathDeclared = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
 $cultMathAvailable = (Get-Content -LiteralPath (Join-Path $cultMathPackageRoot "package.json") -Raw | ConvertFrom-Json).version
@@ -92,7 +99,7 @@ foreach ($publish in $managedPublishes) {
   $builtCultMath = Join-Path $publish.Root "CultMath.dll"
   if (-not (Test-Path -LiteralPath $builtCultMath)) { continue }
   if ((Get-FileHash -LiteralPath $builtCultMath -Algorithm SHA256).Hash -ne $cultMathTrackedHash) {
-    throw "Release order: the CultMath.dll built into $($publish.Root) differs from the one org.gamecult.cultmath $cultMathAvailable tracks. Either CultMath source changed since that release, or this toolchain builds different bytes from the one that built the tracked DLL. Check first: git log cultmath-unity-v$cultMathAvailable.. -- packages/cultmath/src for a source change, then dotnet --version and the host against the build that produced the tracked DLL. A source change means release CultMath first, then declare its version; a toolchain difference means build with the toolchain that produced the tracked DLL."
+    throw "Release order: the CultMath.dll built into $($publish.Root) differs from the one org.gamecult.cultmath $cultMathAvailable tracks. Either CultMath source changed since that release, its checkout has other line endings, or this toolchain builds different bytes from the one that built the tracked DLL. Check first: git log cultmath-unity-v$cultMathAvailable.. -- packages/cultmath/src for a source change; git ls-files --eol packages/cultmath/src, where every file must read w/crlf (.gitattributes pins it; a clone checked out before that rule needs the files checked out again); then dotnet --version and the host against the build that produced the tracked DLL. A source change means release CultMath first, then declare its version; a toolchain difference means build with the toolchain that produced the tracked DLL."
   }
   $cultMathComparedRoots += $publish.Root
 }

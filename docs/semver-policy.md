@@ -301,9 +301,16 @@ CultMath package's version and every `CultMath.dll` it built equals the one
 that package tracks, byte for byte. Any CultMath source change therefore means:
 release `org.gamecult.cultmath`, declare its new version in
 `org.gamecult.cultlib`, then release `org.gamecult.cultlib`. The bytes also
-depend on the .NET SDK and host, which no `global.json` pins, so the same
-refusal at unchanged CultMath source means this toolchain differs from the one
-that built the tracked DLL.
+depend on the checkout and the toolchain. `.gitattributes` pins CultMath
+source to CRLF on every checkout, because the tracked DLL was built from CRLF
+source and line endings reach the DLL through the pdb's document checksums; a
+clone checked out before that rule may still hold LF files (`git ls-files
+--eol packages/cultmath/src` shows `w/lf`) until they are checked out again.
+The build needs a git checkout, and refuses up front without `.git`: the repo
+root maps to `/_/` through git, so an archive or source zip would write its
+own path into the DLL. No `global.json` pins the .NET SDK, so the same refusal
+at unchanged source and CRLF checkout means this SDK or host differs from the
+one that built the tracked DLL.
 
 ### Coverage gaps
 
