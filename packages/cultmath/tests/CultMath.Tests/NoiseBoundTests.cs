@@ -250,11 +250,12 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// intervals-enclose for the composition the site and Aetheria use: over 2,000 seeded tile slices
-    /// (Aetheria's wells, inside the fog, the void at every grid point; N in {1, 4, 8, 16}; a camera drawn
-    /// per tile) the bound composed from the envelope over the slice's box, its fade, and the noise ball
-    /// enlarged by the warp encloses the density at 64 points of the slice, each sampled through the field's
-    /// own warp, with no tolerance. The void's footprint-truncated density (octave weights) is checked
-    /// against the same bound.
+    /// (Aetheria's wells, inside the fog, the void at every grid point, the shipped void and LOD-far;
+    /// N in {1, 4, 8, 16}; a camera drawn per tile) the bound composed from the envelope over the slice's
+    /// box, its fade, and the noise ball enlarged by the warp encloses the density at 64 points of the
+    /// slice, each sampled through the field's own warp, with no tolerance. The void's footprint-truncated density (octave weights) is checked
+    /// against the same bound; a quarter of the slices are LOD-far's, where the weights are strictly
+    /// between 0 and 1 and at 0, and the test asserts it sampled both.
     /// </summary>
     [Fact]
     public void EnvelopeBoundEnclosesDensity()
@@ -266,10 +267,13 @@ public sealed class NoiseBoundTests
         foreach (var offset in VoidField.CameraOffsets)
         foreach (var ramp in VoidField.Ramps)
             fields.Add(new VoidField(rh, ramp, offset.Fraction, offset.Name));
+        fields.Add(VoidField.Shipped());
+        fields.Add(VoidField.LodFar());
         var counts = new Counts();
+        var (partial, zero) = (0, 0);
         for (var t = 0; t < 2000; t++)
         {
-            var field = t % 2 == 0 ? fields[(t / 2) % 2] : fields[2 + random.Next(fields.Count - 2)];
+            var field = t % 2 == 0 ? fields[(t / 2) % 2] : t % 4 == 1 ? fields[^1] : fields[2 + random.Next(fields.Count - 2)];
             var tile = field.DrawTile(random, sizes[random.Next(sizes.Length)]);
             var near = field.Grid[0];
             var far = field.Grid[^1];
@@ -282,13 +286,20 @@ public sealed class NoiseBoundTests
                 var z = i < 2 ? (i == 0 ? z0 : z1) : Uniform(random, z0, z1);
                 var density = field.Density(tile, m, z, lod: false, counts);
                 Assert.True(Inside(density, bound), $"{field.Name}: bound {bound} over [{z0:R}, {z1:R}] misses density {density:R} at slope {m}, depth {z:R}");
-                if (field is VoidField)
+                if (field is VoidField voidField)
                 {
+                    var (wc, wd) = voidField.Weights(z);
+                    partial += (wc > 0.0f && wc < 1.0f) || (wd > 0.0f && wd < 1.0f) ? 1 : 0;
+                    zero += wd == 0.0f ? 1 : 0;
                     var truncated = field.Density(tile, m, z, lod: true, counts);
                     Assert.True(Inside(truncated, bound), $"{field.Name}: bound {bound} misses the truncated density {truncated:R} at slope {m}, depth {z:R}");
                 }
             }
         }
+
+        // The truncated check is not vacuous: some samples carry an octave weight strictly inside (0, 1)
+        // and some a fine weight of 0 (LOD-far reaches both).
+        Assert.True(partial > 0 && zero > 0, $"octave weights in (0, 1) at {partial} samples and fine weight 0 at {zero}");
     }
 
     // ---- The Lipschitz constant ----
@@ -899,19 +910,32 @@ public sealed class NoiseBoundTests
     }
 
     /// <summary>
-    /// (e) The void, the shipped scene: a cloud volume everywhere, carved by one negative pseudo-Gaussian
-    /// sphere. Authored knobs: hollow radius Rh (density exactly 0 inside) and ramp width S (the density
-    /// rises to full over [Rh, Rh + S]). The brush (1 - (d / Rc)^2)^e with CARVE = 1.5 reaches full at Rc,
-    /// so Rc = Rh + S, and Rh = Rc sqrt(1 - CARVE^(-1/e)) gives e = -ln CARVE / ln(1 - (Rh / Rc)^2):
-    /// density = K max(0, 1 - CARVE (1 - (d' / Rc)^2)^e), exactly 0 for d' &lt;= Rh and K for d' &gt;= Rc,
-    /// K = 1/30. The noise displaces the wall: fade = smoothstep(Rh - S, Rh, d), d' = d + A fade n(warp(p)),
-    /// A = 20, F0 = 0.01 (wavelengths 100 and 25), warp D = 10. The sun orbits the origin at radius 175 with
-    /// period 72 s and rests on the hollow's bottom (c_v = sun + (0, Rh - 12.5, 0)); the camera looks at
-    /// sun + (0, 60, 0) and, shipped, sits 120 behind the sun along the orbit tangent and 45 above it. The
-    /// footprint-truncated field (lod) weights octave i by w_i(z) = 1 - smoothstep(l_i / 2m, l_i / m,
-    /// z theta), m = 4, theta = 1 / f; the bound takes each weight over [w_i(z1), 1], which holds both the
-    /// truncated and the full field. The dense grid is the fixed-step reference's: cells of min(10, S / 4)
-    /// out to |camera - c_v| + Rc + 5 / K, past where every ray has gone opaque.
+    /// (e) The void: a cloud volume everywhere, carved by one negative pseudo-Gaussian sphere. Authored
+    /// knobs: hollow radius Rh (density exactly 0 inside) and ramp width S (the density rises to full over
+    /// [Rh, Rh + S]); everything else is derived from them. The brush (1 - (d / Rc)^2)^e with CARVE = 1.5
+    /// reaches full at Rc, so Rc = Rh + S, and Rh = Rc sqrt(1 - CARVE^(-1/e)) gives
+    /// e = -ln CARVE / ln(1 - (Rh / Rc)^2): density = K max(0, 1 - CARVE (1 - (d' / Rc)^2)^e), exactly 0 for
+    /// d' &lt;= Rh and K for d' &gt;= Rc, K = 1/30. The noise displaces the wall: fade =
+    /// smoothstep(Rh - S, Rh, d), d' = d + A fade n(warp(p)), A = 20, F0 = 0.01 (wavelengths 100 and 25),
+    /// warp D = 10. The sun orbits the origin at radius 175 with period 72 s and rests on the hollow's
+    /// bottom (c_v = sun + (0, Rh - 12.5, 0)); the camera looks at sun + (0, 60, 0) and, shipped, sits 120
+    /// behind the sun along the orbit tangent and 45 above it.
+    ///
+    /// The one shipped void (ruling operator-shipped-void) is Shipped(): (Rh, S) = (198, 50), so Rc = 248
+    /// and e = -ln 1.5 / ln(1 - (198 / 248)^2), which the constructor derives; no other void is shipped.
+    ///
+    /// The footprint-truncated field (lod) weights octave i by w_i(z) = 1 - smoothstep(l_i / 2m, l_i / m,
+    /// z theta), m = 4, theta = 1 / f. Deviation from the spec's [w_i(z1), w_i(z0)]: the bound takes each
+    /// weight over [w_i(z1), 1], because one Bound serves the full field (w = 1) and the truncated one
+    /// (w in [w_i(z1), w_i(z0)], w decreasing in z); [w_i(z1), 1] contains both and iv_mul is monotone in
+    /// its interval argument, so the composed interval encloses both fields. The slack is only in far
+    /// tiles, whose step the footprint already sets. At f = 935 every weight is 1 inside every grid;
+    /// LodFar() (f = 467) reaches weights in (0, 1) and at 0.
+    ///
+    /// The dense grid is the fixed-step reference's: cells of min(10, S / 4) out to
+    /// |camera - c_v| + Rc + 6 / K. The density is provably K only from d &gt;= Rc + A 1.5 (the free noise
+    /// interval), so 6 / K leaves at least 4.9 of optical depth past it and every ray goes opaque before
+    /// the grid ends.
     /// </summary>
     internal sealed class VoidField : Scenario
     {
@@ -940,8 +964,9 @@ public sealed class NoiseBoundTests
         private float Theta => 1.0f / Focal;
 
         [System.Diagnostics.CodeAnalysis.SetsRequiredMembers]
-        public VoidField(float hollowRadius, float ramp, float cameraFraction, string camera)
+        public VoidField(float hollowRadius, float ramp, float cameraFraction, string camera, float focal = 935.0f)
         {
+            Focal = focal;
             HollowRadius = hollowRadius;
             Ramp = ramp;
             CarveRadius = hollowRadius + ramp;
@@ -949,12 +974,22 @@ public sealed class NoiseBoundTests
             RampStart = hollowRadius - ramp;
             FixedStep = min(10.0f, ramp / 4.0f);
             CameraFraction = cameraFraction;
-            Name = $"(e) void Rh={hollowRadius:R} camera={camera} S={ramp:R}";
+            Name = $"(e) void Rh={hollowRadius:R} camera={camera} S={ramp:R}" + (focal == 935.0f ? "" : $" f={focal:R}");
             var reach = cameraFraction < 0.0f ? length(new float2(120.0f, 45.0f - (hollowRadius - 12.5f))) : cameraFraction * hollowRadius;
-            Grid = Cells(FixedStep, reach + CarveRadius + 5.0f / K);
+            Grid = Cells(FixedStep, reach + CarveRadius + 6.0f / K);
         }
 
         public static VoidField Shipped() => new(198.0f, 50.0f, -1.0f, "shipped");
+
+        /// <summary>
+        /// The configuration that reaches the octave weights: Rh = 4000, S = 50, the low camera, f = 467
+        /// (1080 rows at a 98 degree vertical field of view). The fine weight is below 1 past z = 1460 and 0
+        /// past 2920, the coarse below 1 past 5840, and the grid reaches about 7990. Printed, not asserted.
+        /// </summary>
+        public static VoidField LodFar() => new(4000.0f, 50.0f, 0.94f, "low", 467.0f);
+
+        /// <summary>The coarse and fine octave weights at depth z (1 for the full field).</summary>
+        public (float Coarse, float Fine) Weights(float z) => (Weight(CoarseWavelength, z * Theta), Weight(FineWavelength, z * Theta));
 
         private sealed class VoidTile : Tile
         {
@@ -1048,6 +1083,26 @@ public sealed class NoiseBoundTests
             return Profile(d + fade * (coverage + detail) * Amplitude);
         }
 
+        /// <summary>
+        /// The field with no envelope gate: both noise terms always evaluated, the profile applied to the
+        /// displaced distance. Density's shortcuts go through Compose; this does not, so it is the value a
+        /// wrong Compose cannot also corrupt. Not counted.
+        /// </summary>
+        public float Exact(Tile t, float2 slope, float z, bool lod)
+        {
+            var tile = (VoidTile)t;
+            var counts = new Counts();
+            var (x, y) = (slope.x * z, slope.y * z);
+            var (dx, dy, dz) = (x - tile.Cavity.x, y - tile.Cavity.y, z - tile.Cavity.z);
+            var d = sqrt(dx * dx + dy * dy + dz * dz);
+            var fade = smoothstep(RampStart, HollowRadius, d);
+            var p = tile.World(new float3(x, y, z));
+            var wc = lod ? Weight(CoarseWavelength, z * Theta) : 1.0f;
+            var wd = lod ? Weight(FineWavelength, z * Theta) : 1.0f;
+            var n = Noise.Coverage(p, tile.Time, counts) * wc + Noise.Detail(p, counts) * 0.5f * wd;
+            return Profile(d + fade * n * Amplitude);
+        }
+
         public override float2 Bound(Tile t, float z0, float z1, bool gated, Counts counts)
         {
             var tile = (VoidTile)t;
@@ -1092,8 +1147,15 @@ public sealed class NoiseBoundTests
     /// doubles the next range; otherwise a range of more than one cell halves, and a single cell is dense.
     /// It starts with the whole grid, runs to the grid's end (a pre-pass knows no ray's transmittance) and
     /// yields the dense cells in order. Its probes are counted once per tile.
+    ///
+    /// The body (ruling operator-analytic-wall-body): when a single dense cell's own bound is a positive
+    /// point (the cell is provably constant), one more probe over [grid[j], grid end]; if that is a
+    /// positive point too, every point of every ray of the tile over the rest of the grid has exactly that
+    /// density, so BodyStart = j, BodyDensity = its value, and every remaining cell is appended dense
+    /// without probing (adding cells is always sound, so the mask keeps its meaning). BodyStart is -1 when
+    /// no body is proven.
     /// </summary>
-    private static List<int> MarchTile(Scenario field, Tile tile, Counts probes)
+    private static (List<int> Dense, int BodyStart, float BodyDensity) MarchTile(Scenario field, Tile tile, Counts probes)
     {
         var grid = field.Grid;
         var cells = grid.Length - 1;
@@ -1103,7 +1165,8 @@ public sealed class NoiseBoundTests
         while (j < cells)
         {
             var end = Math.Min(j + span, cells);
-            if (field.Bound(tile, grid[j], grid[end], gated: true, probes).y <= 0.0f)
+            var bound = field.Bound(tile, grid[j], grid[end], gated: true, probes);
+            if (bound.y <= 0.0f)
             {
                 j = end;
                 span = Math.Min(span * 2, cells);
@@ -1114,19 +1177,35 @@ public sealed class NoiseBoundTests
             }
             else
             {
+                if (bound.x == bound.y && bound.x > 0.0f)
+                {
+                    var rest = field.Bound(tile, grid[j], grid[cells], gated: true, probes);
+                    if (rest.x == rest.y && rest.x > 0.0f)
+                    {
+                        dense.AddRange(Enumerable.Range(j, cells - j));
+                        return (dense, j, rest.x);
+                    }
+                }
+
                 dense.Add(j);
                 j++;
             }
         }
 
-        return dense;
+        return (dense, -1, 0.0f);
     }
 
+    // The body's one closed-form Beer-Lambert step from z to the grid's end, at the density the field's
+    // pointwise envelope gives at z (one envelope evaluation; no probe in the main pass).
+    private static float BodyFactor(Scenario field, Tile tile, float2 slope, float z, bool lod, Counts counts) =>
+        exp(-(field.Density(tile, slope, z, lod, counts) * field.Extinction) * ((field.Grid[^1] - z) * sqrt(slope.x * slope.x + slope.y * slope.y + 1.0f)));
+
     // The footprint-aware march, the void's shipped one: steps of LodStep(z) inside the unmasked runs only,
-    // octave weights applied.
-    private static float MarchLod(VoidField field, Tile tile, float2 slope, List<int> cells, Counts counts, ref long steps)
+    // octave weights applied; at the body's start, one analytic step to the grid's end, and stop.
+    private static float MarchLod(VoidField field, Tile tile, float2 slope, List<int> cells, int bodyStart, Counts counts, ref long steps, ref long bodySteps)
     {
         var grid = field.Grid;
+        var body = bodyStart >= 0 ? grid[bodyStart] : float.PositiveInfinity;
         var transmittance = 1.0f;
         var k = 0;
         while (k < cells.Count && transmittance >= 0.02f)
@@ -1137,7 +1216,15 @@ public sealed class NoiseBoundTests
                 end++;
             while (z < grid[end] && transmittance >= 0.02f)
             {
-                var next = min(z + field.LodStep(z), grid[end]);
+                if (z >= body)
+                {
+                    transmittance *= BodyFactor(field, tile, slope, z, lod: true, counts);
+                    steps++;
+                    bodySteps++;
+                    return transmittance;
+                }
+
+                var next = min(min(z + field.LodStep(z), grid[end]), z < body ? body : grid[end]);
                 transmittance *= Integrate(field, tile, slope, z, next, lod: true, counts);
                 steps++;
                 z = next;
@@ -1158,6 +1245,8 @@ public sealed class NoiseBoundTests
         public long DenseSteps;
         public long MaskedSteps;
         public long LodSteps;
+        public long BodySteps;
+        public long BodyTiles;
         public long Unfinished;
         public float MaxDifference;
         public float MaxLodDifference;
@@ -1186,8 +1275,10 @@ public sealed class NoiseBoundTests
         for (var t = 0; t < tiles; t++)
         {
             var tile = field.DrawTile(random, n);
-            var cells = MarchTile(field, tile, stats.Probes);
+            var (cells, bodyStart, _) = MarchTile(field, tile, stats.Probes);
+            Assert.True(field is VoidField || bodyStart < 0, $"{field.Name}: a body reported at cell {bodyStart}; only the void's density can be provably constant");
             stats.Tiles++;
+            stats.BodyTiles += bodyStart >= 0 ? 1 : 0;
             for (var j = 0; j < n; j++)
             for (var i = 0; i < n; i++)
             {
@@ -1204,7 +1295,7 @@ public sealed class NoiseBoundTests
                     stats.Unfinished++;
                 if (lod)
                 {
-                    var marched = MarchLod((VoidField)field, tile, slope, cells, stats.Lod, ref stats.LodSteps);
+                    var marched = MarchLod((VoidField)field, tile, slope, cells, bodyStart, stats.Lod, ref stats.LodSteps, ref stats.BodySteps);
                     stats.MaxLodDifference = MathF.Max(stats.MaxLodDifference, MathF.Abs(dense - marched));
                 }
             }
@@ -1223,19 +1314,103 @@ public sealed class NoiseBoundTests
         $"IV-REPORT {label}: steps/px ref {s.PerRay(s.DenseSteps):F2}, masked {s.PerRay(s.MaskedSteps):F2}, LOD {s.PerRay(s.LodSteps):F2} ({(double)s.DenseSteps / s.LodSteps:F2}x fewer); "
         + $"snoise/px ref {s.PerRay(s.Dense.Snoise):F2}, masked {s.PerRay(s.Masked.Snoise):F2}, LOD {s.PerRay(s.Lod.Snoise):F2}; "
         + $"cost/px ref {s.PerRay(s.Dense.Cost):F2}, masked {s.PerRay(s.Masked.Cost + s.Probes.Cost):F2}, LOD {s.PerRay(s.Lod.Cost + s.Probes.Cost):F2} incl. probes (ref/LOD {s.LodRatio:F2}x, ref/masked {s.Ratio:F2}x); "
-        + $"probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; max |dT| masked {s.MaxDifference:R}, LOD {s.MaxLodDifference:R}; unfinished rays {s.Unfinished}");
+        + $"probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; body tiles {s.BodyTiles}/{s.Tiles}, analytic steps/px {s.PerRay(s.BodySteps):F2}; "
+        + $"max |dT| masked {s.MaxDifference:R}, LOD {s.MaxLodDifference:R}; unfinished rays {s.Unfinished}");
 
     /// <summary>
-    /// The proving ground (docs/cultmath-interval-ground-cut.md, "Pass 3"). Scenarios (a) height fog,
-    /// (b) inside the fog, (c) Aetheria's wells and (d) r1's uniform slab, each over 64 tiles at
-    /// N in {1, 4, 8, 16} and warp in {0, D}: the tile march integrates exactly the dense march's cells, so
-    /// the transmittance agrees within 1e-3 (a difference would be a skipped cell that was not empty), and
-    /// its combined cost must be at most half the dense march's for (a) and (c) at N = 8. (e) the void: the
-    /// grid over hollow radius, camera offset and ramp width (32 tiles at N = 8) and the shipped point
-    /// (200 tiles), three marches each; at the shipped point the masked fixed-step march agrees with the
-    /// reference exactly, the footprint-aware march within 0.02, and it must take at most half the
-    /// reference's steps per pixel. A shortfall in (a), (c) or (e) skips naming saving-2x-scenarios; the
-    /// fields, the grids and the envelope cost are not tuned toward it.
+    /// The analytic body's soundness pin (ruling operator-analytic-wall-body). Over 2,000 seeded tiles of
+    /// the (e) grid, the shipped void and LOD-far at N in {1, 4, 8, 16}, wherever the pre-pass reports a
+    /// body start b: (1) the gated bound over [grid[b], grid end] is a positive point equal to the reported
+    /// density, every cell from b to the end is in the mask, and at 64 random (pixel, sub-pixel, cell &gt;= b,
+    /// depth in cell) points the full and the truncated Density and the ungated Exact field all equal it
+    /// exactly, no tolerance; (2) the one closed-form factor exp(-density ext L) over the body equals the
+    /// fixed-step product of the body cells' Integrate factors (no early-out, same cells) within 1e-4
+    /// relative. (3) No tile of (a)-(d), at either warp, reports a body: their bounds are never a positive
+    /// point.
+    /// </summary>
+    [Fact]
+    public void AnalyticBodyMatchesFineMarch()
+    {
+        var random = new System.Random(0xB0D1);
+        int[] sizes = { 1, 4, 8, 16 };
+        var voids = new List<VoidField>();
+        foreach (var rh in VoidField.HollowRadii)
+        foreach (var offset in VoidField.CameraOffsets)
+        foreach (var ramp in VoidField.Ramps)
+            voids.Add(new VoidField(rh, ramp, offset.Fraction, offset.Name));
+        voids.Add(VoidField.Shipped());
+        voids.Add(VoidField.LodFar());
+        var counts = new Counts();
+        var bodies = new Dictionary<string, int>();
+        for (var t = 0; t < 2000; t++)
+        {
+            var field = t % 4 == 0 ? voids[^2] : t % 4 == 1 ? voids[^1] : voids[random.Next(voids.Count)];
+            var tile = field.DrawTile(random, sizes[random.Next(sizes.Length)]);
+            var (cells, b, density) = MarchTile(field, tile, counts);
+            if (b < 0)
+                continue;
+            bodies[field.Name] = bodies.GetValueOrDefault(field.Name) + 1;
+            var grid = field.Grid;
+            var last = grid.Length - 1;
+            var rest = field.Bound(tile, grid[b], grid[last], gated: true, counts);
+            Assert.True(rest.x == rest.y && rest.x > 0.0f && rest.x == density, $"{field.Name}: body at cell {b} with density {density:R}, but the bound over the rest is {rest}");
+            Assert.Equal(Enumerable.Range(b, last - b), cells.Skip(cells.Count - (last - b)));
+            for (var i = 0; i < 64; i++)
+            {
+                var slope = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
+                var c = random.Next(b, last);
+                var z = Uniform(random, grid[c], grid[c + 1]);
+                foreach (var lod in new[] { false, true })
+                {
+                    var pointwise = field.Density(tile, slope, z, lod, counts);
+                    var exact = field.Exact(tile, slope, z, lod);
+                    Assert.True(pointwise == density && exact == density, $"{field.Name}: body from cell {b} claims {density:R}; at slope {slope}, depth {z:R} (cell {c}, lod {lod}) Density is {pointwise:R} and the ungated field {exact:R}");
+                }
+            }
+
+            var ray = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
+            var product = 1.0;
+            for (var c = b; c < last; c++)
+                product *= Integrate(field, tile, ray, grid[c], grid[c + 1], lod: true, counts);
+            var tau = density * field.Extinction * ((grid[last] - grid[b]) * sqrt(ray.x * ray.x + ray.y * ray.y + 1.0f));
+            var analytic = Math.Exp(-(double)tau);
+            Assert.True(Math.Abs(analytic - product) <= 1.0e-4 * product, $"{field.Name}: the analytic body factor {analytic:R} differs from the fixed-step product {product:R} over cells {b}..{last}");
+        }
+
+        output.WriteLine("IV-REPORT analytic body: tiles with a body " + string.Join(", ", bodies.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}")));
+        Assert.True(bodies.ContainsKey(VoidField.Shipped().Name) && bodies.ContainsKey(VoidField.LodFar().Name), "no body proven at the shipped void or at LOD-far");
+
+        var scenarios = new (float Warp, Func<float, Scenario> Make)[]
+        {
+            (FogField.AetheriaWarp, FogField.HeightFog), (FogField.AetheriaWarp, FogField.InsideFog),
+            (FogField.AetheriaWarp, FogField.Wells), (SlabField.SlabWarp, SlabField.Create),
+        };
+        foreach (var (warp, make) in scenarios)
+        foreach (var w in new[] { 0.0f, warp })
+        {
+            var field = make(w);
+            for (var t = 0; t < 250; t++)
+            {
+                var (_, b, _) = MarchTile(field, field.DrawTile(random, sizes[random.Next(sizes.Length)]), counts);
+                Assert.True(b < 0, $"{field.Name} warp {w:R}: a body reported at cell {b}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The proving ground (docs/cultmath-interval-ground-cut.md, "Pass 3" and "Pass 4"). Scenarios
+    /// (a) height fog, (b) inside the fog, (c) Aetheria's wells and (d) r1's uniform slab, each over 64
+    /// tiles at N in {1, 4, 8, 16} and warp in {0, D}: the tile march integrates exactly the dense march's
+    /// cells, so the transmittance agrees within 1e-3 (a difference would be a skipped cell that was not
+    /// empty), and no (a)-(d) tile reports a body. (e) the void: the grid over hollow radius, camera offset
+    /// and ramp width (32 tiles at N = 8), LOD-far (32 tiles) and the one shipped void (200 tiles), three
+    /// marches each, the footprint-aware one taking the analytic body step. Contracts at N = 8, the lower
+    /// of warp 0 and D: (a) at least 2x combined cost; (c) at least 0.90 of its probe-free ceiling
+    /// (ruling operator-wells-contract-vs-ceiling: the ceiling is what intervals control, the fog band's
+    /// cost is the field's); (e) at the shipped void the masked fixed-step march agrees with the reference
+    /// exactly, the footprint-aware march within 0.02, and it takes at most half the reference's steps per
+    /// pixel. A shortfall skips naming saving-2x-scenarios and every shortfall; the fields, the grids and
+    /// the envelope cost are not tuned toward it.
     /// </summary>
     [Fact]
     public void IntervalSkipHalvesEvaluations()
@@ -1259,7 +1434,7 @@ public sealed class NoiseBoundTests
             if (key == "d")
                 output.WriteLine($"IV-REPORT (d) N={n} warp={w:R}: ungated dense snoise/ray {3.0 * stats.PerRay(stats.DenseSteps):F2} (three per dense sample, as r1 counted)");
             if (n == 8)
-                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), stats.Ratio);
+                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), key == "c" ? stats.Ratio / stats.Ceiling : stats.Ratio);
         }
 
         foreach (var rh in VoidField.HollowRadii)
@@ -1270,6 +1445,9 @@ public sealed class NoiseBoundTests
             ReportVoid($"{field.Name} N=8", Run(field, 8, 32, 0x701D, lod: true));
         }
 
+        var lodFar = VoidField.LodFar();
+        ReportVoid($"{lodFar.Name} N=8 (LOD far)", Run(lodFar, 8, 32, 0x701D, lod: true));
+
         var shipped = VoidField.Shipped();
         var headline = Run(shipped, 8, 200, 0x5417, lod: true);
         ReportVoid($"{shipped.Name} N=8 (headline, 200 tiles)", headline);
@@ -1277,7 +1455,15 @@ public sealed class NoiseBoundTests
         Assert.True(headline.MaxLodDifference <= 0.02f, $"the footprint-aware march differs from the reference by {headline.MaxLodDifference:R}");
         var steps = (double)headline.DenseSteps / headline.LodSteps;
 
-        if (ratios["a"] < 2.0 || ratios["c"] < 2.0 || steps < 2.0)
-            Assert.Skip($"saving-2x-scenarios: at N = 8, (a) saves {ratios["a"]:F2}x and (c) {ratios["c"]:F2}x combined cost (the lower of warp 0 and D); (e) takes {steps:F2}x fewer steps per pixel at the shipped point; the contract is 2x each");
+        var shortfalls = new List<string>();
+        if (ratios["a"] < 2.0)
+            shortfalls.Add($"(a) saves {ratios["a"]:F2}x combined cost, under 2x");
+        if (ratios["c"] < 0.90)
+            shortfalls.Add($"(c) reaches {ratios["c"]:F2} of its probe-free ceiling, under 0.90");
+        if (steps < 2.0)
+            shortfalls.Add($"(e) takes {steps:F2}x fewer steps per pixel at the shipped void, under 2x");
+        output.WriteLine($"IV-REPORT contracts at N=8 (lower of warp 0 and D): (a) {ratios["a"]:F2}x cost, (c) {ratios["c"]:F2} of ceiling, (e) {steps:F2}x fewer steps/px");
+        if (shortfalls.Count > 0)
+            Assert.Skip("saving-2x-scenarios: " + string.Join("; ", shortfalls));
     }
 }
