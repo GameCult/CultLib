@@ -783,11 +783,14 @@ namespace GameCult.Caching.Tests
             {
                 Assert.That(reopened.BackingStores[0].LastSchemaMigrationReports.SelectMany(report => report.IgnoredExtraSlots), Is.EqualTo(new[] { 99 }));
                 Assert.That(reopened.Get<VariantGear>(new CultRecordKey("hand-variant"))!.Name, Is.EqualTo("hand variant"));
-                reopened.Commit(batch => batch.UpsertVariant(new CultRecordKey("hand-variant"), new CultRecordKey("hand-base"),
-                    new[] { reopened.Override<VariantGear>(nameof(VariantGear.Name), "hand variant") }));
+                reopened.Commit(batch => batch.UpsertVariant(new CultRecordKey("hand-variant"), new CultRecordKey("hand-base"), new[]
+                {
+                    reopened.Override<VariantGear>(nameof(VariantGear.Name), "hand variant"),
+                    reopened.Override<VariantGear>(nameof(VariantGear.Code), "hand-code")
+                }));
             }
 
-            Assert.That(OverriddenSlotsOn(path, "hand-variant"), Is.EqualTo(new[] { 0 }), "a write of the variant stores only what it was given");
+            Assert.That(OverriddenSlotsOn(path, "hand-variant").OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }), "a write of the variant stores only what it was given");
         }
 
         private static int[] OverriddenSlotsOn(string path, string key) =>

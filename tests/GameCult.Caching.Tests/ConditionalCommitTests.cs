@@ -604,7 +604,7 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void UnconditionalCommitIsLastWriterWinsLikeFlush()
+        public void UnconditionalCommitIsLastWriterWinsPerKeyLikeFlush()
         {
             var committed = LastWriter(SingleFile(PathOf("commit.cc")), (cache, key) =>
                 Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
@@ -614,10 +614,10 @@ namespace GameCult.Caching.Tests
                 cache.FlushAllBackingStores();
             });
 
-            Assert.That(committed, Is.EqualTo(new[] { "a", "x" }), "an unconditional commit kept a record its cache never saw");
+            Assert.That(committed, Is.EqualTo(new[] { "a", "c", "x" }), "an unconditional commit dropped a record another writer added");
             Assert.That(committed, Is.EqualTo(flushed));
 
-            // A directory store's flush lands staged keys onto the current manifest, and its commit does exactly the same.
+            // A directory store's flush lands staged keys onto the current manifest, and its commit does exactly the same: so does a single file's.
             var directoryCommitted = LastWriter(DirectoryStore(PathOf("commit-dir.cc")), (cache, key) =>
                 Assert.That(cache.Commit(batch => batch.Upsert(new Counter { Name = key.Value }, new CultRecordHandle<Counter>(key))), Is.True));
             var directoryFlushed = LastWriter(DirectoryStore(PathOf("flush-dir.cc")), (cache, key) =>

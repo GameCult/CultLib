@@ -110,6 +110,12 @@ public sealed class CultMeshSingleFileStoreTests
         }
     }
 
+    private static byte[] EntryBytes(CultPersistedStoreSnapshot snapshot, string schemaId) =>
+        CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+        {
+            SchemaCatalog = snapshot.SchemaCatalog.Where(entry => entry.SchemaId == schemaId).ToArray()
+        });
+
     private static CultPersistedStoreSnapshot Snapshot(string path) =>
         CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
 
@@ -141,7 +147,7 @@ public sealed class CultMeshSingleFileStoreTests
             kept.Payload.Should().Equal(was.Payload);
         }
 
-        after.SchemaCatalog.Single(entry => entry.SchemaId == SchemaId()).RawBytes.Should().Equal(before.SchemaCatalog.Single(entry => entry.SchemaId == SchemaId()).RawBytes);
+        EntryBytes(after, SchemaId()).Should().Equal(EntryBytes(before, SchemaId()));
         after.SchemaCatalog.Should().Contain(entry => entry.SchemaId == "raw:schema");
 
         CultMesh.WriteSingleFileDocumentPayload(path, Key, Raw, null, new byte[] { 0x91, 0x01 });

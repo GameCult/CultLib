@@ -225,9 +225,9 @@ namespace GameCult.Caching.Tests
             return -1;
         }
 
-        // The condition is the only difference between a conditional and an unconditional commit: one staged set, one apply.
+        // The condition is the only difference between a conditional and an unconditional commit: one batch, one apply.
         [Test]
-        public void AConditionalAndAnUnconditionalCommitOfOneStagedSetOntoOneStoreWriteTheSameBytes()
+        public void AConditionalAndAnUnconditionalCommitOfOneBatchOntoOneStoreWriteTheSameBytes()
         {
             var first = PathOf("unconditional.cc");
             var second = PathOf("conditional.cc");
@@ -237,7 +237,6 @@ namespace GameCult.Caching.Tests
             foreach (var (path, conditional) in new[] { (first, false), (second, true) })
             {
                 using var cache = Open(path, false);
-                cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-s", Note = "staged" }, new CultRecordKey("s")).GetAwaiter().GetResult();
                 var current = cache.Get<WsItem>(A)!;
                 Assert.That(cache.Commit(batch =>
                 {
@@ -251,13 +250,30 @@ namespace GameCult.Caching.Tests
             byte[] Normalized(string path)
             {
                 var snapshot = Read(path);
-                foreach (var record in snapshot.Records.Where(record => record.Key is "s" or "z"))
+                foreach (var record in snapshot.Records.Where(record => record.Key == "z"))
                     record.StoredAt = string.Empty;
                 return CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot);
             }
 
-            Assert.That(Keys(first), Is.EqualTo(new[] { "a", "s", "z" }));
+            Assert.That(Keys(first), Is.EqualTo(new[] { "a", "z" }));
             Assert.That(Normalized(second), Is.EqualTo(Normalized(first)));
+        }
+
+        // An unconditional commit also lands what was staged before it, on the store as it is now.
+        [Test]
+        public void AnUnconditionalCommitLandsEarlierStagedWritesWithItsBatchOntoWhatAnotherWriterWrote([Values] bool directory)
+        {
+            var path = PathOf("staged.cc");
+            Seed(path, directory, "a");
+            using var cache = Open(path, directory);
+            using (var other = Open(path, directory))
+                other.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X));
+            cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-s" }, new CultRecordKey("s")).GetAwaiter().GetResult();
+
+            Assert.That(cache.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-y" }, new CultRecordKey("y"))), Is.True);
+
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "s", "x", "y" }));
+            Assert.That(cache.IsDirty, Is.False);
         }
 
         private static void MarkAs(string path, string header)

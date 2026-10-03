@@ -515,14 +515,15 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AnUnconditionalWritePersistsLoadMintedIdsAndTakesThemOffTheList()
+        public void AnUnconditionalWriteLeavesTheLoadMintedIdsOfTheRecordsItDidNotStageOnTheList()
         {
             var path = PathOf("unconditional.cc");
             WritePreIdStore(path, null, ("a", "a", 1), ("b", "b", 1));
             using var cache = Open(path);
             cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("other"), new CultRecordKey("other")));
-            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "b").Payload)), Has.All.Not.Empty, "the write persisted b's ids");
-            Assert.That(cache.MintElementIds(), Is.EqualTo(0), "nothing is left that exists only in memory");
+            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "b").Payload)), Has.All.Empty, "the write did not touch b");
+            Assert.That(cache.MintElementIds(), Is.EqualTo(2), "a and b exist with ids only in memory until MintElementIds writes them");
+            Assert.That(AllIds(MessagePackSerializer.Deserialize<IdDeck>(DiskRecord(path, "b").Payload)), Has.All.Not.Empty);
         }
 
         [Test]
@@ -772,10 +773,11 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "the last id taken away after staging unmarks it");
         }
 
-        // A store with no cache has no codec to read a variant's override values with, so it cannot see whether they hold an id: the
-        // variant counts as holding one. The same record read through a cache is marked by what its values hold.
+        // A store with no cache has no codec to read a variant's override values with, so it cannot see whether they hold an id: a
+        // variant it writes counts as holding one. The same record read through a cache is marked by what its values hold. A
+        // flush that stages nothing copies the variant as stored.
         [Test]
-        public void AVariantAStoreCannotReadCountsAsHoldingIds()
+        public void AVariantAStoreCannotReadCountsAsHoldingIdsWhenItWritesIt()
         {
             var path = PathOf("detached-variant.cc");
             using (var cache = Open(path))
@@ -795,7 +797,17 @@ namespace GameCult.Caching.Tests
             blind.AttachRegistry(Registry);
             blind.PullAll();
             blind.PushAll();
-            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without one, it cannot be seen, so it is marked");
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "a flush that staged nothing copies the variant and its header");
+
+            blind.Push(new CultStoredDocument(
+                new CultRecordKey("v"),
+                DateTimeOffset.UtcNow.ToString("O"),
+                Registry.GetRequired(typeof(IdDeck)),
+                new CultVariantDelta("base", Array.Empty<CultVariantOverride>()),
+                null,
+                null));
+            blind.PushAll();
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v3"), "read without a codec, the variant it writes cannot be seen, so it is marked");
         }
 
         [Test]
