@@ -292,10 +292,11 @@ Python packages the sdist and wheel build, whose output is all the PyPI upload
 step uploads. The checks run without `NODE_OPTIONS`, `NODE_TEST_CONTEXT`, any
 other `NODE_TEST_*` variable and `NODE_AUTH_TOKEN`, so no inherited variable can
 make the tests run nothing and pass; only the release action receives the token.
-The gate is that call, not a step condition, so no `if:`, `continue-on-error` or
-`shell` on another step can release what a check refused. The tests compare
-each job's release steps with their expected text exactly, less the steps' `if:`
-lines. Removing the call is still possible, but only as a visible edit to those
+The gate is that call, not a step condition, so no `if:` or `continue-on-error`
+can release what a check refused. The tests compare each job's release steps
+with their expected text exactly, less the steps' `if:` lines, and refuse `shell`
+and `defaults` anywhere in the workflow, which could run a release step's line
+through another command. Removing the call is still possible, but only as a visible edit to those
 steps and to the tests.
 
 `org.gamecult.cultlib` compiles CultMath from source and ships beside

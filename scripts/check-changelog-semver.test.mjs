@@ -744,10 +744,11 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
 // The suite is what pins the declared prefixes and the checker's rules, so nothing releases without it.
 // publish-packages.yml releases only through scripts/release-after-suite.mjs, which runs the tag check, the
 // suite, the semver policy check and the package's tests and then the release action from one process, so no
-// if:, continue-on-error or shell on any other step can release what those checks did not pass. This pin
-// reads no condition. It compares each job's release steps whole, less their own if: line, with the text
-// below, so a release step that does anything else is a mismatch. Each Unity release script runs the suite
-// itself, before it calls the checker.
+// if: or continue-on-error on any step can release what those checks did not pass. This pin reads no
+// condition. It compares each job's release steps whole, less their own if: line, with the text below, so a
+// release step that does anything else is a mismatch, and it refuses shell and defaults anywhere, which could
+// run the pinned line through another command. Each Unity release script runs the suite itself, before it
+// calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
@@ -804,6 +805,10 @@ function workflowReleaseProblems(workflow) {
       from = at + 1;
     }
   });
+  // A job's or the workflow's defaults.run.shell would run the pinned release line through any command.
+  if (/\bshell\b|\bdefaults\b/.test(code(workflow))) {
+    problems.push("the workflow says shell or defaults: a release step must run its pinned line through the default shell");
+  }
   return problems;
 }
 
@@ -828,14 +833,15 @@ test("workflow: each job releases only through release-after-suite.mjs", () => {
     assert.match(edit("run: |\n          node --test scripts/check-changelog-semver.test.mjs\n          true"), exact, run);
     assert.match(edit(run.replace("release-after-suite.mjs", "check-changelog-semver.mjs")), exact, run);
     assert.match(edit(run.replace('"$GITHUB_REF"', "refs/tags/cultcache-ts-v0.14.0")), exact, run);
-    assert.match(edit(`${run}\n        shell: bash`), exact, run);
+    assert.match(edit(`${run}\n        shell: bash`), /another command|default shell/, run);
     assert.match(edit(`${run}\n        continue-on-error: true`), exact, run);
   }
   // the guard runs every release check itself, so neither the release steps' conditions nor a job allowed
   // to fail can release what a check refused
   assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: node)/, "if: always()$1")), []);
   assert.deepEqual(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    continue-on-error: true\n")), []);
-  // a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
+  // a job's default shell, a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
+  assert.match(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    defaults:\n      run:\n        shell: sh -c 'npm publish' {0}\n")).join("\n"), /default shell/);
   assert.match(workflowReleaseProblems(workflow.replace("- name: Build sdist and wheel", "- name: Build")).join("\n"), /needs exactly one step "- name: Build sdist and wheel"/);
   assert.match(workflowReleaseProblems(workflow.replace("- name: Build and test", "- name: Publish\n        run: npm publish\n\n      - name: Build and test")).join("\n"), /needs exactly one step "- name: Publish"/);
   assert.match(workflowReleaseProblems(workflow.replace("packages-dir: packages/${{ matrix.package }}/dist", "packages-dir: dist")).join("\n"), exact);
