@@ -61,6 +61,9 @@ namespace GameCult.Caching.Tests
                 .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                 .Select(cells => new TestCaseData(cells[0], cells[CSharp] == "reads").SetName($"{cells[0]} {cells[CSharp]}"));
 
+        private static bool HoldsAVariant(byte[] bytes) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(bytes).Records.Any(record => record.Variant != null);
+
         private static string Header(string path) => CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
 
         private string Seed(string name)
@@ -94,6 +97,14 @@ namespace GameCult.Caching.Tests
             File.WriteAllBytes(path, bytes);
             var store = cache.BackingStores[0];
 
+            if (reads && HoldsAVariant(bytes))
+            {
+                // The cache has read nothing of this file, and a variant resolves against records it has not read.
+                Assert.That(() => store.PushAll(), Throws.TypeOf<CultWriteConflictException>());
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a write into a store holding a variant this cache never read changed it");
+                return;
+            }
+
             if (reads)
             {
                 store.PushAll();
@@ -114,6 +125,13 @@ namespace GameCult.Caching.Tests
             using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry });
             var bytes = File.ReadAllBytes(Path.Combine(VectorRoot(), vector));
             File.WriteAllBytes(path, bytes);
+
+            if (reads && HoldsAVariant(bytes))
+            {
+                Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))), Throws.TypeOf<CultWriteConflictException>());
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(bytes), "a write into a store holding a variant this cache never read changed it");
+                return;
+            }
 
             if (reads)
             {

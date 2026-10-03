@@ -443,7 +443,7 @@ namespace GameCult.Caching.Tests
             var path = PathOf("undecodable-variant.cc");
             Seed(path, false, "a");
             using (var seed = Open(path, false))
-                seed.Commit(batch => batch.UpsertVariant(new CultRecordKey("v"), A, new[] { seed.Override<WsItem>(nameof(WsItem.Note), "variant") }));
+                seed.Commit(batch => batch.UpsertVariant(new CultRecordKey("v"), A, new[] { seed.Override<WsItem>(nameof(WsItem.Name), "name-v"), seed.Override<WsItem>(nameof(WsItem.Note), "variant") }));
             var a = Open(path, false);
             AddUndecodableRecord(path, "r");
             var before = File.ReadAllBytes(path);
