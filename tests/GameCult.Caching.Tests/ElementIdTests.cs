@@ -248,6 +248,34 @@ namespace GameCult.Caching.Tests
             Assert.That(reader.MintElementIds(), Is.EqualTo(0));
         }
 
+        // A pre-id record this cache reads only through the catalog's schema name is read-only, so the rewrite that would persist its
+        // minted ids is refused typed, naming it, and the store is left byte for byte.
+        [Test]
+        public void MintElementIdsIsRefusedByAReadOnlyRecordWithMintedIds()
+        {
+            const string otherRuntimeId = "other.runtime.id_deck";
+            var path = PathOf("mint-read-only.cc");
+            WritePreIdStore(path, null, ("a", "a", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+            var entry = snapshot.SchemaCatalog.Single();
+            entry.SchemaId = otherRuntimeId;
+            entry.ContentHash = otherRuntimeId;
+            entry.CompatibleSchemaIds = new[] { otherRuntimeId };
+            snapshot.Records.Single().SchemaId = otherRuntimeId;
+            File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            var before = File.ReadAllBytes(path);
+
+            using (var cache = Open(path))
+            {
+                Assert.That(AllIds(cache.Get<IdDeck>(new CultRecordKey("a"))!), Has.All.Not.Empty, "the load minted ids in memory");
+                var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.MintElementIds())!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo(("a", otherRuntimeId)));
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+        }
+
         [Test]
         public void TheByteCostOfAnIdIsMeasured()
         {

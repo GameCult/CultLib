@@ -904,6 +904,73 @@ namespace GameCult.Caching.Tests
             Assert.That(reused.Get<DriftReused>(DriftVariant)!.Colour, Is.Empty, "the variant inherits its base's colour, not the old wing");
         }
 
+        public enum UndeclaredWrite
+        {
+            UpsertBase,
+            UpsertVariant,
+            FlattenVariant,
+            RemoveBase,
+            RemoveVariant
+        }
+
+        // Narrow reads Wide's records through the schema name and does not list Wide's id, so they are read-only to it: a staged write,
+        // flatten or removal of either is refused typed, and the store keeps them as Wide stored them, the dropped slot's override too.
+        [Test]
+        public void AnUndeclaredDroppedSlotRecordThatIsWrittenIsRefused([Values] UndeclaredWrite write)
+        {
+            var path = PathOf("drift-undeclared-" + write + ".cc");
+            SeedDrift(path);
+            var before = File.ReadAllBytes(path);
+
+            using (var narrow = Open(path, registry: CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) })))
+            {
+                var key = write is UndeclaredWrite.UpsertBase or UndeclaredWrite.RemoveBase ? DriftBase : DriftVariant;
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                {
+                    switch (write)
+                    {
+                        case UndeclaredWrite.UpsertBase:
+                            narrow.Commit(batch => batch.Upsert(typeof(DriftNarrow), new DriftNarrow { Name = "changed" }, DriftBase));
+                            break;
+                        case UndeclaredWrite.UpsertVariant:
+                            narrow.Commit(batch => batch.UpsertVariant(DriftVariant, DriftBase, new[] { narrow.Override<DriftNarrow>(nameof(DriftNarrow.Name), "changed") }));
+                            break;
+                        case UndeclaredWrite.FlattenVariant:
+                            narrow.FlattenAsync(DriftVariant).GetAwaiter().GetResult();
+                            break;
+                        case UndeclaredWrite.RemoveBase:
+                            narrow.Commit(batch => batch.Remove(DriftBase));
+                            break;
+                        case UndeclaredWrite.RemoveVariant:
+                            narrow.Commit(batch => batch.Remove(DriftVariant));
+                            break;
+                    }
+                })!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((key.Value, DriftWideId)));
+                narrow.FlushAllBackingStores();
+            }
+
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
+            Assert.That(OverriddenSlotsOn(path, DriftVariant.Value).OrderBy(slot => slot), Is.EqualTo(new[] { 0, 2 }));
+        }
+
+        // Only the read-only key is read-only: a variant of a read-only base, written at a new key, is a write of the variant alone and lands.
+        [Test]
+        public void AVariantOfAReadOnlyBaseLands()
+        {
+            var path = PathOf("drift-read-only-base.cc");
+            SeedDrift(path);
+            var fresh = new CultRecordKey("fresh-variant");
+            var narrowRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(DriftNarrow) });
+
+            using (var narrow = Open(path, registry: narrowRegistry))
+                narrow.Commit(batch => batch.UpsertVariant(fresh, DriftBase, new[] { narrow.Override<DriftNarrow>(nameof(DriftNarrow.Name), "fresh") }));
+
+            using var reopened = Open(path, registry: narrowRegistry);
+            Assert.That(reopened.Get<DriftNarrow>(fresh)!.Name, Is.EqualTo("fresh"));
+            Assert.That(ReadStore(path).Records.Single(record => record.Key == DriftBase.Value).SchemaId, Is.EqualTo(DriftWideId));
+        }
+
         [Test]
         public void AnOverrideOfASlotTheTypeNeverHadIsReportedOnEveryLoadAndStaysStoredUntilTheVariantIsWritten()
         {

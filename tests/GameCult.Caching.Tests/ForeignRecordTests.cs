@@ -13,6 +13,10 @@ namespace GameCult.Caching.Tests
     public class ForeignRecordTests
     {
         private static readonly Type Deck = Emit("ForeignSuiteDeck", "tests.foreign_deck", "tests.foreign_deck.v1", new[] { new Field("Name", typeof(string), 0, IsName: true) });
+        // The deck's schema declaring another runtime's id compatible (OtherRuntimeId below): one under the deck's own version, and a
+        // later version that a registry holding the deck can register beside it.
+        private static readonly Type ClaimingDeck = Emit("ForeignSuiteClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v1", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
+        private static readonly Type LateClaimingDeck = Emit("ForeignSuiteLateClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v2", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
         private static readonly Type Widget = Emit("ForeignSuiteWidget", "tests.foreign_widget", "tests.foreign_widget.v1", new[] { new Field("Label", typeof(string), 0, IsName: true) });
 
         // A build that has both types, and one that has only the deck: to it the widget is foreign.
@@ -23,6 +27,7 @@ namespace GameCult.Caching.Tests
         private static readonly CultRecordKey D = new("d");
         private static readonly CultRecordKey E = new("e");
         private static readonly CultRecordKey W = new("w");
+        private static readonly CultRecordKey V = new("v");
         private const string Canary = "CANARY-7f3c-payload-value";
 
         public enum Write
@@ -570,17 +575,23 @@ namespace GameCult.Caching.Tests
 
         // A deck another runtime wrote under its own id for the deck's schema. This build reads it through the catalog's schema name,
         // but does not own the id.
-        private string OtherRuntimeStore(string name)
+        private string OtherRuntimeStore(string name, bool withVariant = false)
         {
             var path = PathOf(name);
             using (var cache = Open(path, DeckOnly, directory: false))
+            {
                 cache.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+                if (withVariant)
+                    cache.Commit(batch => batch.UpsertVariant(V, D, new[] { cache.Override(Deck, "Name", "v") }));
+            }
+
             var snapshot = Read(path);
             var entry = snapshot.SchemaCatalog.Single();
             entry.SchemaId = OtherRuntimeId;
             entry.ContentHash = OtherRuntimeId;
             entry.CompatibleSchemaIds = new[] { OtherRuntimeId };
-            snapshot.Records.Single().SchemaId = OtherRuntimeId;
+            foreach (var record in snapshot.Records)
+                record.SchemaId = OtherRuntimeId;
             // An older entry that also lists the id, first in the catalog: the entry that owns the id is the one that publishes it.
             snapshot.SchemaCatalog = new[]
             {
@@ -643,6 +654,8 @@ namespace GameCult.Caching.Tests
 
             Assert.That(Stored(path, D), Is.EqualTo(before));
             Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(entry));
+            using var reopened = Open(path, DeckOnly, directory: false);
+            Assert.That(EmittedDocumentTypes.Read(reopened.Get(E)!, "Name"), Is.EqualTo("e"), "the write beside the read-only record landed");
         }
 
         // The entry that publishes a copied record is the one the store holds when the write lands, not the one the record loaded with.
@@ -661,18 +674,116 @@ namespace GameCult.Caching.Tests
             Assert.That(CatalogEntryBytes(path, OtherRuntimeId), Is.EqualTo(current));
         }
 
-        // A write of the record itself stores what the cache holds, under the type's own id.
+        // A record read through the catalog's schema name under an id this build neither owns nor declares is read-only: a write of
+        // it is refused typed before anything is staged, the store is left byte for byte, and the record is still served.
         [Test]
-        public void AWriteOfTheRecordItselfStoresItUnderTheTypesOwnId([Values(Write.Flush, Write.Commit)] Write write)
+        public void ARecordReadByNameIsReadOnly([Values(Write.Flush, Write.Commit)] Write write)
         {
-            var path = OtherRuntimeStore("rewritten.cc");
+            var path = OtherRuntimeStore("read-only.cc");
+            var before = Fingerprint(path);
 
             using (var cache = Open(path, DeckOnly, directory: false))
-                Land(cache, write, D, DeckOf("changed"));
+            {
+                var refusal = Assert.Throws<CultSchemaConflictException>(() => Land(cache, write, D, DeckOf("changed")))!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((D.Value, OtherRuntimeId)));
+                Assert.That(refusal.SchemaNames, Is.EqualTo(new[] { "tests.foreign_deck" }), "it names the type that reads it");
+                Assert.That(cache.IsDirty, Is.False);
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("d"));
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
 
-            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(DeckOnly.GetRequired(Deck).SchemaId));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        public enum ReadOnlyWrite
+        {
+            Upsert,
+            UpsertVariantAtItsKey,
+            Flatten,
+            Remove,
+            CommitUpsert,
+            CommitRemove
+        }
+
+        // Every cache write path refuses a staged write or removal of a read-only record before staging: the typed conflict, nothing
+        // dirty, the store byte for byte after a later flush, and the record still served.
+        [Test]
+        public void EveryWritePathRefusesAReadOnlyRecord([Values] ReadOnlyWrite path)
+        {
+            var file = OtherRuntimeStore("every-path-" + path + ".cc", withVariant: true);
+            var before = Fingerprint(file);
+
+            using (var cache = Open(file, DeckOnly, directory: false))
+            {
+                var key = path is ReadOnlyWrite.UpsertVariantAtItsKey or ReadOnlyWrite.Flatten ? V : D;
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                {
+                    switch (path)
+                    {
+                        case ReadOnlyWrite.Upsert:
+                            cache.UpsertAsync(Deck, DeckOf("changed"), D).GetAwaiter().GetResult();
+                            break;
+                        case ReadOnlyWrite.UpsertVariantAtItsKey:
+                            cache.UpsertVariantAsync(V, D, new[] { cache.Override(Deck, "Name", "changed") }).GetAwaiter().GetResult();
+                            break;
+                        case ReadOnlyWrite.Flatten:
+                            cache.FlattenAsync(V).GetAwaiter().GetResult();
+                            break;
+                        case ReadOnlyWrite.Remove:
+                            cache.Remove(D);
+                            break;
+                        case ReadOnlyWrite.CommitUpsert:
+                            cache.Commit(batch => batch.Upsert(Deck, DeckOf("changed"), D));
+                            break;
+                        case ReadOnlyWrite.CommitRemove:
+                            cache.Commit(batch => batch.Remove(D));
+                            break;
+                    }
+                })!;
+
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((key.Value, OtherRuntimeId)));
+                Assert.That(cache.IsDirty, Is.False, "nothing was staged");
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("d"));
+                Assert.That(EmittedDocumentTypes.Read(cache.Get(V)!, "Name"), Is.EqualTo("v"));
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+
+            Assert.That(Fingerprint(file), Is.EqualTo(before));
+        }
+
+        // A type that declares the id compatible owns the record: its write lands under the type's own id and reopens.
+        [Test]
+        public void DeclaringTheIdClaimsTheRecord()
+        {
+            var path = OtherRuntimeStore("declared.cc");
+            var claiming = CultDocumentRegistry.ForTypes(new[] { ClaimingDeck });
+
+            using (var cache = Open(path, claiming, directory: false))
+                cache.Commit(batch => batch.Upsert(ClaimingDeck, New(ClaimingDeck, ("Name", "claimed")), D));
+
+            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(claiming.GetRequired(ClaimingDeck).SchemaId));
+            using var reopened = Open(path, claiming, directory: false);
+            Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("claimed"));
+        }
+
+        // Whether a record is read-only is read live from the registry at the write, not fixed at load: a type registered after the
+        // load that declares the id claims the record.
+        [Test]
+        public void ATypeRegisteredAfterLoadThatDeclaresTheIdClaimsIt()
+        {
+            var path = OtherRuntimeStore("late.cc");
+            var registry = CultDocumentRegistry.ForTypes(new[] { Deck });
+
+            using (var cache = Open(path, registry, directory: false))
+            {
+                Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Upsert(Deck, DeckOf("refused"), D)));
+                registry.GetRequired(LateClaimingDeck);
+                cache.Commit(batch => batch.Upsert(Deck, DeckOf("claimed"), D));
+            }
+
+            Assert.That(Read(path).Records.Single().SchemaId, Is.EqualTo(registry.GetRequired(Deck).SchemaId));
             using var reopened = Open(path, DeckOnly, directory: false);
-            Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("changed"));
+            Assert.That(EmittedDocumentTypes.Read(reopened.Get(D)!, "Name"), Is.EqualTo("claimed"));
         }
 
         // A commit onto the file that involves a variant is judged on the set the file will hold. A foreign record is not decoded

@@ -494,38 +494,38 @@ namespace GameCult.Caching.Tests
             Assert.That(Extra(reopened.Get(RollY)), Is.EqualTo("derived-from-important"));
         }
 
-        // v1 writes k itself: a write of the record, so it stores what v1 holds, under v1's id and without the member v1 lacks.
-        private void OlderWritesK()
-        {
-            using var older = OpenRoll(RollV1);
-            older.Commit(batch => batch.Upsert(RollV1, older.Get(RollK)!, RollK));
-        }
-
-        // v1 writes k and sheds Extra, then another v2 cache (a restart is enough) loads k under v1's id and writes another record.
-        // It copies k as v1 left it, under v1's id, so the first v2 cache's condition on k fails, through commits and through plain
-        // flushes alike.
-        [TestCase(false, false)]
-        [TestCase(true, false)]
-        [TestCase(false, true)]
-        [TestCase(true, true)]
-        public void AnotherNewerCacheRestoringTheIdAfterAnOlderRewriteStillFailsTheCondition(bool unchangedOnly, bool viaFlush)
+        // v1 reads v2's k through v2's entry, which lists v1's id: the list is the writer's statement, not v1's declaration, so to v1
+        // k is read-only. v1's write of k is refused typed before anything is staged, the file is left byte for byte, and a v2
+        // cache's condition on k still holds.
+        [Test]
+        public void AnOlderVersionCannotWriteANewerRecordItReadsThroughTheNewerEntry([Values] bool commit)
         {
             WriteImportant();
-            var written = Read(RollPath).Records.Single();
-            using var held = OpenRoll(RollV2);
-            var current = held.Get(RollK)!;
+            var before = File.ReadAllBytes(RollPath);
+            using var newer = OpenRoll(RollV2);
+            var current = newer.Get(RollK)!;
 
-            OlderWritesK();
-            Assert.That(Read(RollPath).Records.Single().SchemaId, Is.EqualTo(RollV1Id), "v1 wrote k under its id");
-            UnrelatedWrite(RollV2, viaFlush);
-            var copied = Read(RollPath).Records.Single();
-            Assert.That(copied.SchemaId, Is.EqualTo(RollV1Id), "the second v2 cache copied k under v1's id");
-            Assert.That(copied.Payload, Is.Not.EqualTo(written.Payload), "without Extra");
+            using (var older = OpenRoll(RollV1))
+            {
+                var k = older.Get(RollK)!;
+                Assert.That(EmittedDocumentTypes.Read(k, "Name"), Is.EqualTo("k"), "v1 reads k");
+                var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+                {
+                    if (commit)
+                        older.Commit(batch => batch.Upsert(RollV1, k, RollK));
+                    else
+                        older.UpsertAsync(RollV1, k, RollK).GetAwaiter().GetResult();
+                })!;
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((RollK.Value, Read(RollPath).Records.Single().SchemaId)));
+                Assert.That(older.BackingStores.Single().IsDirty, Is.False, "nothing was staged");
+                older.FlushAsync().GetAwaiter().GetResult();
+            }
 
-            Assert.That(Derive(held, current, unchangedOnly), Is.EqualTo(CultCommitOutcome.Mismatch));
+            Assert.That(File.ReadAllBytes(RollPath), Is.EqualTo(before));
+            Assert.That(Derive(newer, current, unchangedOnly: false), Is.EqualTo(CultCommitOutcome.Committed));
             using var reopened = OpenRoll(RollV2);
-            Assert.That(reopened.Get(RollY), Is.Null, "nothing derived from the shed member landed");
-            Assert.That(Extra(reopened.Get(RollK)), Is.Empty);
+            Assert.That(Extra(reopened.Get(RollK)), Is.EqualTo("important"));
+            Assert.That(Extra(reopened.Get(RollY)), Is.EqualTo("derived-from-important"));
         }
 
         // A record a write copies keeps its storedAt, so a condition another cache holds on it survives an unrelated write.
