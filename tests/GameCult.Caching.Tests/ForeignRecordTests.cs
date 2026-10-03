@@ -551,27 +551,19 @@ namespace GameCult.Caching.Tests
         }
 
         // A writer cannot see whether a foreign record holds element ids, so a store marked as holding them stays marked while it
-        // carries one. Without one, a whole-view write decides by what it writes, and nothing here holds an id.
+        // carries one: a write that copies any record forward keeps the mark.
         [Test]
-        public void AMarkedHeaderStaysMarkedWhileTheStoreCarriesAForeignRecord(
-            [Values(Write.Flush, Write.Commit)] Write write,
-            [Values] bool carriesForeign)
+        public void AMarkedHeaderStaysMarkedWhileTheStoreCarriesAForeignRecord([Values(Write.Flush, Write.Commit)] Write write)
         {
             var path = Seeded("marked.cc", directory: false);
             var snapshot = Read(path);
             snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV3;
-            if (!carriesForeign)
-            {
-                snapshot.Records = snapshot.Records.Where(record => record.Key != W.Value).ToArray();
-                snapshot.SchemaCatalog = snapshot.SchemaCatalog.Where(entry => entry.SchemaId != WidgetId).ToArray();
-            }
-
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
 
             using (var cache = Open(path, DeckOnly, directory: false))
                 Land(cache, write, E, DeckOf("e"));
 
-            Assert.That(Read(path).FormatVersion, Is.EqualTo(carriesForeign ? CultPersistedStoreSnapshot.FormatV3 : CultPersistedStoreSnapshot.FormatV1));
+            Assert.That(Read(path).FormatVersion, Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
         }
 
         private const string OtherRuntimeId = "other.runtime.deck";

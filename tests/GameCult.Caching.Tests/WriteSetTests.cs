@@ -565,11 +565,23 @@ namespace GameCult.Caching.Tests
             Seed(path, directory, "k");
             var k = new CultRecordKey("k");
             var ahead = DateTimeOffset.UtcNow.AddHours(1).ToString("O", CultureInfo.InvariantCulture);
-            var snapshot = Read(path);
-            snapshot.Records.Single(record => record.Key == "k").StoredAt = ahead;
-            Write(path, snapshot);
+            // A single file holds the record at that storedAt. A directory store loads a record from its page, which the manifest
+            // does not own, so there both writers are made to hold it ahead: a stage then mints from it, as a skewed clock does.
+            if (!directory)
+            {
+                var snapshot = Read(path);
+                snapshot.Records.Single(record => record.Key == "k").StoredAt = ahead;
+                Write(path, snapshot);
+            }
+
             using var a = Open(path, directory);
             using var b = Open(path, directory);
+            if (directory)
+            {
+                a.GetStored(k)!.StoredAt = ahead;
+                b.GetStored(k)!.StoredAt = ahead;
+            }
+
             if (commit)
                 b.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "by-b" }, k));
             else
