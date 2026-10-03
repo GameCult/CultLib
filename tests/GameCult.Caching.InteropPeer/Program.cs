@@ -148,11 +148,15 @@ static async Task EditInPlaceAsync(string file, string kind)
             await cache.UpsertVariantAsync(
                 new CultRecordKey("note:variant"),
                 new CultRecordKey(note.DocumentId),
-                new[] { cache.Override<CultCacheInteropNote>(nameof(CultCacheInteropNote.Title), "variant title") });
+                new[]
+                {
+                    cache.Override<CultCacheInteropNote>(nameof(CultCacheInteropNote.DocumentId), "note:variant"),
+                    cache.Override<CultCacheInteropNote>(nameof(CultCacheInteropNote.Title), "variant title")
+                });
             cache.FlushAllBackingStores();
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
             var variant = snapshot.Records.Single(record => record.Variant != null).Variant!;
-            OverwriteInPlace(variant.Overrides.Single().Value, "variant", "VARIANT");
+            OverwriteInPlace(variant.Overrides.Single(entry => entry.Path[0].Slot == 3).Value, "variant", "VARIANT");
             File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
             break;
         }

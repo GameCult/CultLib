@@ -1399,7 +1399,7 @@ test("C# writes an edit made in place, and Rust and Python read the new value", 
   await csharp("csharp-write", ["write", "--file", override, "--runtime-id", "csharp-writer"]);
   await edit(override, "override");
   const variant = (await dump(override)).find((record: any) => record.key === "note:variant");
-  assert.deepEqual(variant.overrides, ["VARIANT title"]);
+  assert.deepEqual(variant.overrides, ["note:variant", "VARIANT title"]);
 
   const object = join(tempDir, "object.cc");
   await csharp("csharp-write-deck", ["write-deck", "--file", object]);
