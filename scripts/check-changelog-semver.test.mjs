@@ -508,7 +508,9 @@ test("CLI: a tag that cannot be read at its ancestry or its files refuses", () =
     commitAndTag(dir, "other-v1.0.0");
     writeFileSync(join(dir, ".git", "refs", "tags", "other-v2.0.0"), "1".repeat(40) + "\n");
     writeChangelog(dir, "1.0.0");
-    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /could not be read, so a first release cannot be told from a mistyped prefix/);
+    const refused = runCheckerExpectFailure(dir, widgetArgs("1.0.0"));
+    assert.match(refused, /could not be read, so a first release cannot be told from a mistyped prefix/);
+    assert.doesNotMatch(refused, /fatal|bad object|1111111/); // git's own complaint is not forwarded
   });
 });
 

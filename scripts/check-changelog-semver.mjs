@@ -239,15 +239,14 @@ function resolveRelease(tagPrefix, versionText, cwd, folder) {
 // The first of the tags that tracks any file under `folder`, or none. A tag that cannot be read
 // is a refusal, never a tag that tracks nothing.
 function firstTagTracking(tags, folder, cwd) {
-  const pathspec = folder === "." ? [] : ["--", `${folder}/`];
   for (const tag of tags) {
     try {
-      const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", `refs/tags/${tag}`, ...pathspec], {
+      const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", `refs/tags/${tag}`, "--", `${folder}/`], {
         cwd,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
       });
-      if (listing.trim() !== "") return { tag };
+      if (listing !== "") return { tag };
     } catch {
       return { failure: `the files ${tag} tracks under ${folder} could not be read, so a first release cannot be told from a mistyped prefix` };
     }
