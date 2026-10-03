@@ -503,8 +503,8 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
   pre-pass cuts envelope evaluations from 177.46 to 33.49 per ray, but the
   oracle march costs 0.194 of the tile march, so about four fifths of the tile
   march's cost goes to cells no ray samples nonzero: the warp bound swamps the
-  noise ball, so the ball cannot prove those cells empty. That gap belongs to the tape target's affine forms, not to a
-  better pre-pass.
+  noise ball, so the ball cannot prove those cells empty. That gap belongs to
+  the tape target's affine forms, not to a better pre-pass.
 - (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
 - (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
   `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
