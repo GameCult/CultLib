@@ -3925,7 +3925,7 @@ namespace GameCult.Caching
             foreach (var staged in upserts)
             {
                 if (replaced.TryGetValue(staged.Record.Key, out var durableAt) && !StoredLater(staged.Record.StoredAt, durableAt))
-                    staged.Record.StoredAt = MintStoredAt(durableAt);
+                    staged.Record.StoredAt = CultCache.MintStoredAt(durableAt);
             }
 
             var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);

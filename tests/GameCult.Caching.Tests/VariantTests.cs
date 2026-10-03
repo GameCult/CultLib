@@ -752,6 +752,51 @@ namespace GameCult.Caching.Tests
             Assert.That(a.Get<VariantGear>(BigKey)!.Power, Is.EqualTo(99), "the cache serves the other writer's override after the refusal");
         }
 
+        // A write that would add a variant is judged like one into a variant store: a plain store another writer changed refuses it.
+        [Test]
+        public void AVariantWrittenIntoAPlainStoreAnotherWriterChangedIsRefusedThenLandsOnRetry()
+        {
+            var path = PathOf("plain-then-variant.cc");
+            var z = new CultRecordKey("z");
+            using (var seed = Open(path))
+                SeedBase(seed);
+            using (var a = Open(path))
+            {
+                using (var b = Open(path))
+                    b.Commit(batch => batch.Upsert(typeof(VariantGear), Other("zc"), z));
+
+                var conflict = Assert.Throws<CultWriteConflictException>(() => SeedBig(a))!;
+
+                Assert.That(conflict.RecordKeys, Does.Contain(BigKey.Value));
+                Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { z.Value }));
+                Assert.That(a.Get(z), Is.Not.Null, "the refusal reloaded the record that moved");
+                Assert.DoesNotThrow(() => SeedBig(a));
+            }
+
+            using var reopened = Open(path);
+            Assert.That(reopened.Get(BigKey), Is.Not.Null);
+            Assert.That(reopened.Get(z), Is.Not.Null);
+        }
+
+        // A plain write copies another writer's record forward without reading it: this cache has still not read it, so a variant
+        // written next is refused.
+        [Test]
+        public void ARecordACachePlainWriteCopiedForwardIsStillUnreadWhenAVariantIsWrittenNext()
+        {
+            var path = PathOf("copied-unread.cc");
+            var z = new CultRecordKey("z");
+            using (var seed = Open(path))
+                SeedBase(seed);
+            using var a = Open(path);
+            using (var b = Open(path))
+                b.Commit(batch => batch.Upsert(typeof(VariantGear), Other("zc"), z));
+            a.Commit(batch => batch.Upsert(typeof(VariantGear), Other("yc"), new CultRecordKey("y")));
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() => SeedBig(a))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { z.Value }));
+        }
+
         // ---- a write copies what it did not stage, and re-encodes what it stages under the type's own id ----
 
         private static readonly string DriftWideId = CultDocumentRegistry.ForTypes(new[] { typeof(DriftWide) }).GetRequired(typeof(DriftWide)).SchemaId;
