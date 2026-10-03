@@ -827,6 +827,8 @@ test("workflow: every job runs the suite first, with every tag fetched; removing
   assert.match(workflowSuiteProblems(npmSuiteIf("false")).join("\n"), narrower);
   assert.match(workflowSuiteProblems(pythonSuiteIf("false")).join("\n"), narrower);
   assert.match(workflowSuiteProblems(npmSuiteIf("github.event_name == 'workflow_dispatch'")).join("\n"), narrower);
+  // a textual prefix that is not a whole conjunct proves nothing
+  assert.match(workflowSuiteProblems(pythonSuiteIf("steps.selected.outputs.run")).join("\n"), narrower);
   // a leading conjunct is not enough once Publish's condition has an ||
   const pythonPublishOr = workflow.replace(/(- name: Publish\r?\n\s+if: steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, "$1 || true");
   assert.match(workflowSuiteProblems(pythonPublishOr).join("\n"), narrower);
