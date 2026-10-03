@@ -2024,9 +2024,6 @@ namespace GameCult.Caching
 
         public CultDocumentRegistry Registry => _registry;
 
-        // Read under the gate, by a store judging a merge.
-        internal bool HoldsVariants => _variantKeys.Count > 0;
-
         // A store wrote: every record it wrote is stored under its type's own id at the storedAt the write gave it,
         // and a plain record carries the ids it held, so it is no longer in-memory only. A variant's ids are not cleared here: the
         // store wrote the delta it was handed, and only a write of the variant changes that.
@@ -2243,7 +2240,6 @@ namespace GameCult.Caching
                 store.AttachRegistry(_registry);
                 store.Cache = this;
                 store.Loaded = (loaded, dropped) => Admit(loaded, dropped, store, (_, _) => CultCommitOutcome.Committed);
-                store.Judging = (arriving, departing) => { Resolve(arriving, departing, store); };
                 _stores.Add(candidate);
                 try
                 {
@@ -2253,7 +2249,6 @@ namespace GameCult.Caching
                 {
                     _stores.Remove(candidate);
                     store.Loaded = null;
-                    store.Judging = null;
                     store.Cache = null;
                     throw;
                 }
@@ -3439,11 +3434,6 @@ namespace GameCult.Caching
         // any of it; if the cache refuses a record the call throws and the store keeps its previous view.
         protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Loaded;
 
-        // Set by the cache at attach: the cache's own resolution (variants, their indexed values, their bases) run over a
-        // set of records a store is about to hold, mutating nothing. It throws the refusal the cache would give the same
-        // set arriving as a load.
-        protected internal Action<IReadOnlyList<CultStoredDocument>, IReadOnlyList<CultStoredDocument>>? Judging;
-
         private readonly object _detachedGate = new();
         internal CultCache? Cache;
 
@@ -3786,7 +3776,6 @@ namespace GameCult.Caching
                 {
                     var disk = ReadSnapshot();
                     RefuseForeign(_staged, ForeignOnDisk(disk));
-                    JudgeMerge(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>(), disk ?? new CultPersistedStoreSnapshot());
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
                     ApplyWriteSet(disk, upserts, removals);
                     Wrote(upserts);
@@ -3816,7 +3805,6 @@ namespace GameCult.Caching
                 return CultCommitOutcome.Mismatch;
 
             RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), ForeignOnDisk(disk));
-            JudgeMerge(request.Upserts, request.Deletes, disk);
             var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
             ApplyWriteSet(disk, upserts, removals);
             foreach (var entry in request.Deletes)
@@ -3952,49 +3940,6 @@ namespace GameCult.Caching
             }
 
             Cache?.Wrote(staged.Select(write => write.Record));
-        }
-
-        // Only a variant makes a merge more than the committer's own judgement: a variant it lands, one another writer wrote
-        // (read from the record's header, never its payload), or one this cache holds. A plain-only store never decodes
-        // another writer's records, so a schema this cache does not register cannot fail a write that involves no variant.
-        private bool MergeInvolvesVariants(IReadOnlyList<CultStoredDocument> batchUpserts, CultPersistedStoreSnapshot disk) =>
-            Cache?.HoldsVariants == true ||
-            batchUpserts.Any(entry => entry.Variant != null) ||
-            disk.Records.Any(record => record.Variant != null);
-
-        // A write lands on the file as it is now, so the set the file will hold is judged exactly as that set would be judged
-        // loading: what other processes wrote (arriving), what they removed (departing), and this write's batch. A staged key is this
-        // cache's own, already judged when it was staged, so it is neither arriving nor departing.
-        private void JudgeMerge(IReadOnlyList<CultStoredDocument> batchUpserts, IReadOnlyList<CultStoredDocument> batchDeletes, CultPersistedStoreSnapshot disk)
-        {
-            if (Judging == null || !MergeInvolvesVariants(batchUpserts, disk))
-                return;
-            var landing = batchUpserts.Select(entry => entry.Key.Value).Concat(_staged).ToHashSet(StringComparer.Ordinal);
-            var removing = batchDeletes.Select(entry => entry.Key.Value).ToHashSet(StringComparer.Ordinal);
-            var onDisk = disk.Records.Select(record => record.Key).ToHashSet(StringComparer.Ordinal);
-            var arriving = new List<CultStoredDocument>(batchUpserts);
-            var departing = new List<CultStoredDocument>(batchDeletes);
-            foreach (var record in disk.Records)
-            {
-                if (landing.Contains(record.Key) || removing.Contains(record.Key))
-                    continue;
-                // A foreign record is not part of what the cache judges; one that replaced a record this store holds takes it away.
-                if (Foreign(record, disk.SchemaCatalog) != null)
-                {
-                    if (Entries.TryGetValue(record.Key, out var replaced))
-                        departing.Add(replaced);
-                    continue;
-                }
-
-                if (Entries.TryGetValue(record.Key, out var known) && known.StoredAt == record.StoredAt && known.StoredSchemaId == record.SchemaId)
-                    continue;
-                arriving.Add(ToStoredDocument(record, disk.SchemaCatalog, DeserializePayload, out _));
-            }
-
-            departing.AddRange(Entries.Values.Where(known =>
-                !onDisk.Contains(known.Key.Value) && !landing.Contains(known.Key.Value) && !removing.Contains(known.Key.Value)));
-            if (arriving.Count > 0 || departing.Count > 0)
-                Judging(arriving, departing);
         }
 
         // Open, flush and commit read the file through this one call, so they agree on which files are stores. A file that is
