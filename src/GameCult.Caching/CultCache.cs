@@ -3682,7 +3682,13 @@ namespace GameCult.Caching
             string.Equals(version, otherVersion, StringComparison.Ordinal);
 
         // The one spelling of a version in both store kinds: the lowercase hex of the SHA-256 of a record's persisted encoding.
-        protected static string VersionOf(byte[] sha256) => Convert.ToHexString(sha256).ToLowerInvariant();
+        protected static string VersionOf(byte[] sha256)
+        {
+            var hex = new StringBuilder(sha256.Length * 2);
+            foreach (var value in sha256)
+                hex.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+            return hex.ToString();
+        }
 
         // The one re-mint, for every store kind (storedat-on-change): a record written over one the store holds is stored at a storedAt
         // later than the one it replaces, whoever wrote that. The staged storedAt stands only when it is already later (both parsed
@@ -3738,7 +3744,11 @@ namespace GameCult.Caching
         // One record's persisted encoding: the bytes a version names.
         protected abstract byte[] SerializeRecord(CultPersistedRecord record);
 
-        private string Version(CultPersistedRecord record) => VersionOf(SHA256.HashData(SerializeRecord(record)));
+        private string Version(CultPersistedRecord record)
+        {
+            using var sha256 = SHA256.Create();
+            return VersionOf(sha256.ComputeHash(SerializeRecord(record)));
+        }
 
         /// <summary>
         /// This store's one reader of a non-empty store file, and so its one verdict on whether the file may be replaced: open,
