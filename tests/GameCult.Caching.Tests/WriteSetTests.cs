@@ -661,8 +661,14 @@ namespace GameCult.Caching.Tests
             using (var seed = Open(path, false))
                 AddVariant(seed, "v", A);
             File.WriteAllBytes(path, WidenEveryRecord(File.ReadAllBytes(path), out var slices));
-            Assert.That(slices["k"], Is.Not.EqualTo(CultDocumentMessagePackSerialization.SerializePersistedRecord(
-                Read(path).Records.Single(record => record.Key == "k"))), "the stored bytes are not the canonical encoding of the record");
+            var wide = Read(path).Records.Single(record => record.Key == "k");
+            Assert.That(slices["k"], Is.Not.EqualTo(CultDocumentMessagePackSerialization.SerializePersistedRecord(new CultPersistedRecord
+            {
+                Key = wide.Key,
+                SchemaId = wide.SchemaId,
+                StoredAt = wide.StoredAt,
+                Payload = wide.Payload
+            })), "the stored bytes are not the canonical encoding of the record");
 
             using var cache = Open(path, false);
             foreach (var (key, slice) in slices)
@@ -688,7 +694,7 @@ namespace GameCult.Caching.Tests
         private static string HexOfSha256(byte[] bytes) =>
             Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
 
-        private static bool Contains(byte[] haystack, byte[] needle) => haystack.AsSpan().IndexOf(needle) >= 0;
+        private static bool Contains(byte[] haystack, byte[] needle) => IndexOf(haystack, needle) >= 0;
 
         // The same store with every array, string and byte string written in its widest MessagePack form, and each record's slice.
         private static byte[] WidenEveryRecord(byte[] bytes, out Dictionary<string, byte[]> slices)
@@ -728,7 +734,7 @@ namespace GameCult.Caching.Tests
                         }
                         else if (reader.NextMessagePackType == MessagePackType.Binary)
                         {
-                            var blob = reader.ReadBytes()!.Value.ToArray();
+                            var blob = reader.ReadBytes()?.ToArray() ?? Array.Empty<byte>();
                             output.AddRange(new byte[] { 0xc6, (byte)(blob.Length >> 24), (byte)(blob.Length >> 16), (byte)(blob.Length >> 8), (byte)blob.Length });
                             output.AddRange(blob);
                         }
