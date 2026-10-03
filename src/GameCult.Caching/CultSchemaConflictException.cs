@@ -18,6 +18,15 @@ namespace GameCult.Caching
             RecordKey = recordKey;
         }
 
+        /// <summary>The same refusal when the reload it owes (what the store holds now, loaded into the cache) itself failed: that failure is the inner exception.</summary>
+        public CultSchemaConflictException(string message, string schemaId, string[] schemaNames, string recordKey, Exception? innerException)
+            : base(message, innerException)
+        {
+            SchemaId = schemaId;
+            SchemaNames = schemaNames;
+            RecordKey = recordKey;
+        }
+
         public string SchemaId { get; }
         public string[] SchemaNames { get; }
         public string RecordKey { get; }

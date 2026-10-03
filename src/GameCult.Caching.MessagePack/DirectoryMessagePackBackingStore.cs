@@ -262,6 +262,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
     {
         Directory.CreateDirectory(_recordDirectory.FullName);
         var currentIndex = currentManifest.Records.ToDictionary(record => record.Key, record => record, StringComparer.Ordinal);
+        var replaced = currentManifest.Records.ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
         foreach (var key in _deletedKeys.Keys)
             currentIndex.Remove(key);
         foreach (var key in _dirtyKeys.Keys)
@@ -280,6 +281,9 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 continue;
             }
 
+            // A record this write replaces is stored later than it: the one re-mint every store kind shares (StoredAtOver).
+            if (replaced.TryGetValue(key, out var replacedAt))
+                stored.StoredAt = StoredAtOver(stored.StoredAt, replacedAt);
             var record = ToPersistedRecord(stored, document =>
                 CultDocumentMessagePackSerialization.SerializeUntyped(
                     document,

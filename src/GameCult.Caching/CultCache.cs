@@ -3634,7 +3634,7 @@ namespace GameCult.Caching
                 .ToArray();
             if (refused.Length == 0)
                 return;
-            Refuse(refused.Select(record => record.Key), _ => null, unstage, _ => Overwrites(refused));
+            Refuse(refused.Select(record => record.Key), _ => null, unstage, inner => Overwrites(inner, refused));
         }
 
         /// <summary>
@@ -3688,13 +3688,30 @@ namespace GameCult.Caching
             string.Equals(schemaId, otherSchemaId, StringComparison.Ordinal) &&
             string.Equals(storedAt, otherStoredAt, StringComparison.Ordinal);
 
-        protected CultSchemaConflictException Overwrites(params CultForeignRecord[] foreign) => new(
+        // The one re-mint, for every store kind (storedat-on-change): a record written over one the store holds is stored at a storedAt
+        // later than the one it replaces, whoever wrote that. The staged storedAt stands only when it is already later (both parsed
+        // RoundtripKind; an unparsable one counts as not later); otherwise it is minted from the replaced one.
+        protected static string StoredAtOver(string storedAt, string replacedAt) =>
+            StoredLater(storedAt, replacedAt) ? storedAt : CultCache.MintStoredAt(replacedAt);
+
+        private static bool StoredLater(string storedAt, string than) =>
+            DateTimeOffset.TryParse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var later) &&
+            DateTimeOffset.TryParse(than, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var earlier) &&
+            later > earlier;
+
+        // A record this store carries for a schema it does not know: a write that would replace or remove it is refused. When the
+        // reload that refusal owes failed, the refusal carries that failure as its inner exception.
+        protected CultSchemaConflictException Overwrites(params CultForeignRecord[] foreign) => Overwrites(null, foreign);
+
+        protected CultSchemaConflictException Overwrites(Exception? inner, CultForeignRecord[] foreign) => new(
             $"{(foreign.Length == 1 ? "Record" : "Records")} {string.Join(", ", foreign.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this} " +
             "no registered type owns or lists as compatible. The store carries what it holds under such a schema untouched and refuses a write that would replace or remove it; " +
-            "declare the id on a type to claim it.",
+            "declare the id on a type to claim it." +
+            (inner == null ? string.Empty : " Reloading what the write refused failed, so the cache is unchanged."),
             foreign[0].SchemaId,
             foreign.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
-            foreign[0].Key);
+            foreign[0].Key,
+            inner);
 
         protected void MarkFlushSucceeded()
         {
@@ -3924,8 +3941,8 @@ namespace GameCult.Caching
             var replaced = (durable?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
             foreach (var staged in upserts)
             {
-                if (replaced.TryGetValue(staged.Record.Key, out var durableAt) && !StoredLater(staged.Record.StoredAt, durableAt))
-                    staged.Record.StoredAt = CultCache.MintStoredAt(durableAt);
+                if (replaced.TryGetValue(staged.Record.Key, out var durableAt))
+                    staged.Record.StoredAt = StoredAtOver(staged.Record.StoredAt, durableAt);
             }
 
             var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);
@@ -3962,11 +3979,6 @@ namespace GameCult.Caching
                 _lastRead[staged.Record.Key] = (staged.Record.SchemaId, staged.Record.StoredAt);
             return upserts;
         }
-
-        private static bool StoredLater(string storedAt, string than) =>
-            DateTimeOffset.TryParse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var later) &&
-            DateTimeOffset.TryParse(than, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var earlier) &&
-            later > earlier;
 
         private void RefuseWriteIntoMovedVariantStore(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
