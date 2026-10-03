@@ -747,10 +747,14 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
 // before it calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
+// A status function replaces a step's implicit success(), so Publish would run after the suite failed:
+// the same bypass as continue-on-error. "!cancelled()" matches through "cancelled(".
+const STATUS_FUNCTION = /\b(?:always|cancelled|failure)\s*\(/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
 // The if: of the step that holds offset `at` in a job's text, or null when the step has none. A step
-// runs from its "- name:" line to the next one.
+// runs from its "- name:" line to the next one. Only the if: line is read, so a block scalar
+// (if: >- or if: |) comes back as its indicator; workflowSuiteProblems refuses it.
 function stepCondition(job, at) {
   const names = [...job.matchAll(/^\s+- name:/gm)].map((match) => match.index);
   const start = names.filter((index) => index <= at).at(-1) ?? 0;
@@ -762,6 +766,10 @@ function stepCondition(job, at) {
 // shapes prove that textually: the suite step has no if:, the two conditions are equal, or Publish's
 // is the suite's followed by " && ". The last is sound only when Publish's condition holds no "||":
 // && binds tighter than ||, so "S && c || d" publishes on d alone, and "a || b && c" splits S itself.
+// Matching text rather than parsing GitHub's expression language refuses some sound conditions too:
+// a parenthesised "S && (c || d)", conjuncts in another order ("c && S"), and a condition wrapped in
+// ${{ }} or spaced differently on one step only. Such a refusal costs a rewrite into one of the three
+// shapes; a wrong pass would publish a package the suite never checked.
 function suiteConditionCovers(suite, publish) {
   if (suite === null || suite === publish) return true;
   return publish !== null && publish.startsWith(`${suite} && `) && !publish.includes("||");
@@ -786,8 +794,14 @@ function workflowSuiteProblems(workflow) {
       else if (at(pattern) < suite) problems.push(`${label} reaches ${what} before the suite`);
     }
     const publish = at(/^\s+- name: Publish\b/m);
-    if (publish >= 0 && !suiteConditionCovers(stepCondition(job, suite), stepCondition(job, publish))) {
-      problems.push(`${label} runs the suite under a narrower condition than Publish`);
+    if (publish < 0) return;
+    const [suiteIf, publishIf] = [stepCondition(job, suite), stepCondition(job, publish)];
+    if ([suiteIf, publishIf].some((condition) => /^[>|]/.test(condition ?? ""))) {
+      problems.push(`${label} gives the suite or Publish a block-scalar if:, which the pin does not read; write it on one line`);
+    } else if (STATUS_FUNCTION.test(publishIf ?? "")) {
+      problems.push(`${label} lets Publish run after the suite fails or is skipped: its if: calls always(), cancelled() or failure()`);
+    } else if (!suiteConditionCovers(suiteIf, publishIf)) {
+      problems.push(`${label} runs the suite under a condition the pin cannot prove Publish implies; it accepts no suite if:, an equal if:, or Publish's if: as the suite's followed by " && " with no "||"`);
     }
   });
   return problems;
@@ -823,7 +837,7 @@ test("workflow: every job runs the suite first, with every tag fetched; removing
   };
   const pythonSuiteIf = (condition) =>
     workflow.replace(/if: steps\.selected\.outputs\.run == 'true'(\r?\n\s+run: node --test scripts\/check-changelog-semver\.test\.mjs)/, `if: ${condition}$1`);
-  const narrower = /runs the suite under a narrower condition than Publish/;
+  const narrower = /runs the suite under a condition the pin cannot prove Publish implies; it accepts no suite if:, an equal if:/;
   assert.match(workflowSuiteProblems(npmSuiteIf("false")).join("\n"), narrower);
   assert.match(workflowSuiteProblems(pythonSuiteIf("false")).join("\n"), narrower);
   assert.match(workflowSuiteProblems(npmSuiteIf("github.event_name == 'workflow_dispatch'")).join("\n"), narrower);
@@ -832,6 +846,23 @@ test("workflow: every job runs the suite first, with every tag fetched; removing
   // a leading conjunct is not enough once Publish's condition has an ||
   const pythonPublishOr = workflow.replace(/(- name: Publish\r?\n\s+if: steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, "$1 || true");
   assert.match(workflowSuiteProblems(pythonPublishOr).join("\n"), narrower);
+  // a sound condition outside the three shapes is refused too, and the message says why
+  const pythonPublishIf = (rewrite) =>
+    workflow.replace(/(- name: Publish\r?\n\s+if: )(steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, (_, head, condition) => `${head}${rewrite(condition)}`);
+  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => condition.replace("startsWith(github.ref, 'refs/tags/')", "(startsWith(github.ref, 'refs/tags/') || false)"))).join("\n"), narrower);
+  // a status function in Publish's if: runs it after the suite failed or was skipped
+  const npmPublishIf = (prefix) => workflow.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, `$1${prefix}$2`);
+  const status = /lets Publish run after the suite fails or is skipped/;
+  for (const prefix of ["always() && ", "!cancelled() && ", "cancelled() || ", "failure() && "]) {
+    assert.match(workflowSuiteProblems(npmPublishIf(prefix)).join("\n"), status, prefix);
+  }
+  assert.match(workflowSuiteProblems(pythonPublishIf((condition) => condition.replace(" && ", " && always() && "))).join("\n"), status);
+  // a block-scalar if: on either step is refused rather than compared by its indicator
+  const blockScalar = /gives the suite or Publish a block-scalar if:/;
+  const npmBlockSuite = npmSuiteIf(">-\n          false");
+  assert.match(workflowSuiteProblems(npmBlockSuite.replace(/(- name: Publish\r?\n\s+if: )(startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\))/, "$1>-\n          $2")).join("\n"), blockScalar);
+  assert.match(workflowSuiteProblems(npmSuiteIf("|\n          true")).join("\n"), blockScalar);
+  assert.match(workflowSuiteProblems(npmPublishIf(">-\n          ")).join("\n"), blockScalar);
   // a suite condition equal to Publish's passes
   assert.deepEqual(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref, 'refs/tags/cultcache-ts-v')")), []);
 });

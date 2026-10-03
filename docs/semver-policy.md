@@ -280,6 +280,19 @@ It is wired into:
   `org.gamecult.cultmath`;
 - `scripts/verify-caching-unity-release.ps1`, for `org.gamecult.caching.unity`.
 
+Each of those runs the check's own tests first, and the tests pin that order.
+In `publish-packages.yml` the test step must run whenever the job's Publish
+step does. The pin proves that from the text of the two `if:` conditions, so it
+accepts only three shapes: no `if:` on the test step, the same `if:` on both,
+or Publish's `if:` as the test step's followed by ` && ` with no `||`. A
+block-scalar `if:` (`>-`, `|`) is refused, and so is a Publish `if:` calling
+`always()`, `cancelled()` or `failure()`, which would publish after the tests
+failed. Matching text rather than parsing GitHub's expression language also
+refuses some sound conditions: a parenthesised `S && (c || d)`, conjuncts in
+another order, and a condition wrapped in `${{ }}` or spaced differently on one
+step only. Rewrite those into an accepted shape; a wrong pass would publish a
+package the tests never checked.
+
 `org.gamecult.cultlib` compiles CultMath from source and ships beside
 `org.gamecult.cultmath`, so its build refuses unless it declares exactly the
 CultMath package's version and every `CultMath.dll` it built equals the one
