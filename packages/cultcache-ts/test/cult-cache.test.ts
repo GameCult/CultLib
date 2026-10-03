@@ -1365,6 +1365,50 @@ test("CultCache element ids cross C#, TypeScript, Python and Rust as ordinary me
   assert.deepEqual(back.ids, tsIds);
 });
 
+// A C# record edited in place is written as edited, however the consumer reached it: a decoded snapshot record's payload bytes, a
+// variant override's value bytes, a collection element or a nested object of the document the cache holds. Rust and Python read the
+// edit through their own readers; the variant and the nested object are read by decoding the file with Python's msgpack.
+test("C# writes an edit made in place, and Rust and Python read the new value", async () => {
+  await buildInteropPeers();
+  const tempDir = await mkdtemp(join(tmpdir(), "cultcache-edit-in-place-"));
+  const csharp = (name: string, args: string[]) => runJsonCommand(name, dotnetCommand, [csharpInteropDll, ...args], cultLibRoot);
+  const edit = (file: string, kind: string) => csharp(`csharp-edit-${kind}`, ["edit-in-place", "--file", file, "--kind", kind]);
+  const readers = (file: string) => [
+    runJsonCommand("rust-read", rustInteropBinary, ["read", "--file", file], cultcacheRsRoot),
+    runJsonCommand("python-read", pythonCommand, ["-m", "cultcache_py.interop", "read", "--file", file], cultcachePyRoot, { PYTHONPATH: cultcachePySrc }),
+  ];
+  const dump = (file: string) => runJsonCommand("python-dump", pythonCommand, [
+    "-c",
+    "import msgpack,json,sys\n"
+      + "s=msgpack.unpackb(open(sys.argv[1],'rb').read(),raw=False)\n"
+      + "print(json.dumps([{'key':r[0],'overrides':[o[3] for o in r[4][1]]} if len(r)>4 else {'key':r[0],'payload':msgpack.unpackb(r[3],raw=False)} for r in s[2]]))",
+    file,
+  ], cultcachePyRoot);
+
+  const payload = join(tempDir, "payload.cc");
+  await csharp("csharp-write", ["write", "--file", payload, "--runtime-id", "csharp-writer"]);
+  await edit(payload, "payload");
+  for (const read of await Promise.all(readers(payload))) assert.equal(read.title, "csharp-writer WROTE a CultCache note");
+
+  const collection = join(tempDir, "collection.cc");
+  await csharp("csharp-write", ["write", "--file", collection, "--runtime-id", "csharp-writer"]);
+  await edit(collection, "collection");
+  for (const read of await Promise.all(readers(collection))) assert.deepEqual(read.tags, ["EDITED", "csharp", "interop"]);
+
+  const override = join(tempDir, "override.cc");
+  await csharp("csharp-write", ["write", "--file", override, "--runtime-id", "csharp-writer"]);
+  await edit(override, "override");
+  const variant = (await dump(override)).find((record: any) => record.key === "note:variant");
+  assert.deepEqual(variant.overrides, ["VARIANT title"]);
+
+  const object = join(tempDir, "object.cc");
+  await csharp("csharp-write-deck", ["write-deck", "--file", object]);
+  await edit(object, "object");
+  const deck = (await dump(object)).find((record: any) => record.key === "deck:csharp");
+  assert.equal(deck.payload[1][0][0], "EDITED");
+  assert.equal(deck.payload[1][1][0], "twin", "the neighbouring mark is untouched");
+});
+
 test("CultCache interop reader accepts missing compatible trailing slots and rejects mismatched slots", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "cultcache-interop-"));
   const compatible = join(tempDir, "compatible.msgpack");

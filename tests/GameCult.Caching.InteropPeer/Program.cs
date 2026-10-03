@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -46,6 +47,9 @@ static async Task<int> ProgramMainAsync(string[] args)
                 return 0;
             case "read-deck":
                 await ReadDeckAsync(file);
+                return 0;
+            case "edit-in-place":
+                await EditInPlaceAsync(file, RequireArg(options, "kind"));
                 return 0;
             default:
                 throw new InvalidOperationException($"Unknown mode {mode}.");
@@ -121,6 +125,73 @@ static async Task ReadDeckAsync(string file)
 
 static void WriteDeckJsonLine(CultCacheInteropDeck deck) =>
     Console.Out.WriteLine(JsonSerializer.Serialize(new { documentId = deck.DocumentId, ids = deck.Marks.Select(mark => mark.Id).ToArray() }));
+
+// Edits a stored record in place, as a consumer holding the object would, and writes it: the file must hold the edit, in whatever
+// runtime reads it. payload and override go through the public snapshot API (a decoded record's bytes edited, then
+// SerializeSnapshot); collection and object edit the document the cache holds and put the same instance back.
+static async Task EditInPlaceAsync(string file, string kind)
+{
+    switch (kind)
+    {
+        case "payload":
+        {
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+            OverwriteInPlace(snapshot.Records.Single().Payload, "wrote", "WROTE");
+            File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            break;
+        }
+        case "override":
+        {
+            var cache = BuildCache(file);
+            await cache.PullAllBackingStoresAsync();
+            var note = cache.AllEntries.OfType<CultCacheInteropNote>().Single();
+            await cache.UpsertVariantAsync(
+                new CultRecordKey("note:variant"),
+                new CultRecordKey(note.DocumentId),
+                new[] { cache.Override<CultCacheInteropNote>(nameof(CultCacheInteropNote.Title), "variant title") });
+            cache.FlushAllBackingStores();
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(file));
+            var variant = snapshot.Records.Single(record => record.Variant != null).Variant!;
+            OverwriteInPlace(variant.Overrides.Single().Value, "variant", "VARIANT");
+            File.WriteAllBytes(file, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            break;
+        }
+        case "collection":
+        {
+            var cache = BuildCache(file);
+            await cache.PullAllBackingStoresAsync();
+            var note = cache.AllEntries.OfType<CultCacheInteropNote>().Single();
+            note.Tags[0] = "EDITED";
+            await cache.UpsertAsync(note, new CultRecordHandle<CultCacheInteropNote>(new CultRecordKey(note.DocumentId)));
+            cache.FlushAllBackingStores();
+            break;
+        }
+        case "object":
+        {
+            var cache = BuildCache(file);
+            await cache.PullAllBackingStoresAsync();
+            var deck = cache.AllEntries.OfType<CultCacheInteropDeck>().Single();
+            deck.Marks[0].Label = "EDITED";
+            await cache.UpsertAsync(deck, new CultRecordHandle<CultCacheInteropDeck>(new CultRecordKey(deck.DocumentId)));
+            cache.FlushAllBackingStores();
+            break;
+        }
+        default:
+            throw new InvalidOperationException($"Unknown edit kind {kind}.");
+    }
+
+    Console.Out.WriteLine(JsonSerializer.Serialize(new { kind }));
+}
+
+static void OverwriteInPlace(byte[] bytes, string from, string to)
+{
+    var was = System.Text.Encoding.UTF8.GetBytes(from);
+    var now = System.Text.Encoding.UTF8.GetBytes(to);
+    var at = bytes.AsSpan().IndexOf(was);
+    if (at < 0 || now.Length != was.Length)
+        throw new InvalidOperationException($"Cannot overwrite '{from}' with '{to}' in place.");
+    now.CopyTo(bytes, at);
+}
 
 // Two routed single-file stores: each file is a complete single-store snapshot holding only its own type.
 static void WriteRouted(string catalogFile, string runFile)
