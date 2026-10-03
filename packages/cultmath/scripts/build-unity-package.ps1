@@ -27,25 +27,6 @@ if (Test-Path -LiteralPath $outputRoot) {
   Remove-Item -LiteralPath $outputRoot -Recurse -Force
 }
 
-# docs/semver-policy.md (CultLib root, two levels up from this script):
-# refuse to build a release whose CHANGELOG.md entry claims a breaking change
-# under too small a bump, or whose version skips or reverses the previous
-# published tag. Runs before the build below so a bad version number fails
-# fast. cultmath is pre-1.0 (0.y.z): a breaking change must be at least a
-# minor bump. $repoRoot above is this package's own root (packages\cultmath),
-# not CultLib's; the shared checker script lives one level above that.
-$cultLibRoot = Split-Path -Parent (Split-Path -Parent $repoRoot)
-$cultmathVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
-& node (Join-Path $cultLibRoot "scripts\check-changelog-semver.mjs") `
-  --package "org.gamecult.cultmath" `
-  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
-  --version $cultmathVersion `
-  --tag-prefix "cultmath-unity" `
-  --cwd $cultLibRoot
-if ($LASTEXITCODE -ne 0) {
-  throw "CultMath Unity package failed the semver policy check (see docs/semver-policy.md)."
-}
-
 # The tracked DLL and pdb are committed beside their source, so neither may name a commit: Source Link
 # writes the commit SHA into the pdb, and the DLL carries that pdb's content id.
 dotnet build $projectPath -c $Configuration -f netstandard2.1 -o $buildRoot --no-incremental `
@@ -58,6 +39,27 @@ foreach ($path in @($freshAssembly, $freshSymbols)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "CultMath Unity build is missing $path"
   }
+}
+
+# docs/semver-policy.md (CultLib root, two levels up from this script): refuse a release whose version
+# does not tell the truth. The check measures the freshly built CultMath.dll's public API against the
+# DLL the previous cultmath-unity tag tracked (read from git), so it runs once the build exists.
+# cultmath is pre-1.0 (0.y.z): a break must be at least a minor bump. $repoRoot above is this package's
+# own root (packages\cultmath), not CultLib's; the shared checker script lives one level above that.
+$cultLibRoot = Split-Path -Parent (Split-Path -Parent $repoRoot)
+$cultmathVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
+# The suite pins the checker's rules and the declared tag prefixes, so it runs first.
+& node --test (Join-Path $cultLibRoot "scripts\check-changelog-semver.test.mjs")
+if ($LASTEXITCODE -ne 0) {
+  throw "The release check suite failed (scripts/check-changelog-semver.test.mjs); not releasing."
+}
+& node (Join-Path $cultLibRoot "scripts\check-changelog-semver.mjs") `
+  --package "org.gamecult.cultmath" `
+  --version $cultmathVersion `
+  --cwd $cultLibRoot `
+  --api-built $freshAssembly
+if ($LASTEXITCODE -ne 0) {
+  throw "CultMath Unity package failed the semver policy check (see docs/semver-policy.md)."
 }
 
 $requiredTemplateFiles = @(
