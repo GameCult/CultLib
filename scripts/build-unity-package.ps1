@@ -185,6 +185,11 @@ foreach ($assemblyName in $expectedAssemblies) {
 foreach ($refRoot in @($publishRoot, $quicPublishRoot, $webSocketPublishRoot)) {
   $measuredArguments += @("--api-refs", $refRoot)
 }
+# The suite pins the checker's rules and the declared tag prefixes, so it runs first.
+& node --test (Join-Path $repoRoot "scripts\check-changelog-semver.test.mjs")
+if ($LASTEXITCODE -ne 0) {
+  throw "The release check suite failed (scripts/check-changelog-semver.test.mjs); not releasing."
+}
 & node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
   --package "org.gamecult.cultlib" `
   --version $unityPackageVersion `

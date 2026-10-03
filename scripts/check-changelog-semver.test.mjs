@@ -663,10 +663,27 @@ test("CLI: the flags the declaration replaced are usage errors, as is any unknow
 });
 
 // The prefix of a package that declares no assemblies is proven by no tag's bytes, so this pin is
-// its only guard against a typo in the declaration. Every workflow tag trigger must be a declared
-// prefix, and every assembly-less package's prefix must be a workflow trigger or, for a package
-// the workflow does not build, a prefix some tag in the repository already carries.
-function prefixPinProblems(declared, workflow, tagNames) {
+// its only guard against a typo in the declaration. Every prefix is declared once, every workflow
+// tag trigger is a declared prefix, and every assembly-less package's prefix is a workflow trigger
+// or, for a package the workflow does not build, names a family of tags that are that package's own:
+// each tag '<prefix>-vX.Y.Z' carries the package's manifest, named and versioned as the tag is.
+const familyProblem = (name, entry, tags, readFile) => {
+  const own = tags.filter((tag) => new RegExp(`^${entry.tagPrefix}-v\\d+\\.\\d+\\.\\d+$`).test(tag));
+  if (own.length === 0) return `${name} declares no assemblies and its prefix ${entry.tagPrefix} is neither a workflow trigger nor the prefix of any tag (are the tags fetched?)`;
+  const manifest = posixPath.join(posixPath.dirname(entry.changelog), "package.json");
+  for (const tag of own) {
+    let found;
+    try {
+      found = JSON.parse(readFile(tag, manifest));
+    } catch {
+      return `${name}: ${tag} holds no readable ${manifest}`;
+    }
+    if (found.name !== name || `${entry.tagPrefix}-v${found.version}` !== tag) return `${name}: ${tag} is not that package's release (${manifest} there is ${found.name} ${found.version})`;
+  }
+  return null;
+};
+
+function prefixPinProblems(declared, workflow, tagNames, readFile) {
   const triggers = [...workflow.match(/^\s+tags:\r?\n((?:\s+- "[^"]+"\r?\n)+)/m)[1].matchAll(/- "([^"]+)-v\*"/g)].map((match) => match[1]);
   const problems = [];
   const prefixes = Object.values(declared).map((entry) => entry.tagPrefix);
@@ -674,19 +691,20 @@ function prefixPinProblems(declared, workflow, tagNames) {
     if (!prefixes.includes(trigger)) problems.push(`${trigger}-v* triggers the workflow but no package declares that prefix`);
   }
   for (const [name, entry] of Object.entries(declared)) {
-    if (entry.assemblies !== undefined) continue;
-    if (!triggers.includes(entry.tagPrefix) && !tagNames.some((tag) => tag.startsWith(`${entry.tagPrefix}-v`))) {
-      problems.push(`${name} declares no assemblies and its prefix ${entry.tagPrefix} is neither a workflow trigger nor a prefix any tag carries (are the tags fetched?)`);
-    }
+    if (prefixes.filter((prefix) => prefix === entry.tagPrefix).length > 1) problems.push(`${name} declares the prefix ${entry.tagPrefix}, which another package declares too`);
+    if (entry.assemblies !== undefined || triggers.includes(entry.tagPrefix)) continue;
+    const problem = familyProblem(name, entry, tagNames, readFile);
+    if (problem !== null) problems.push(problem);
   }
   return problems;
 }
 
 const workflowText = () => readFileSync(workflowFile, "utf8");
 const repoTags = () => execFileSync("git", ["tag", "-l"], { cwd: repoRoot, encoding: "utf8" }).split("\n").filter(Boolean);
+const readAtTag = (tag, path) => execFileSync("git", ["show", `refs/tags/${tag}:${path}`], { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 
 test("workflow: the declared prefixes are pinned to the tag triggers, and every declared assemblies directory is tracked", () => {
-  assert.deepEqual(prefixPinProblems(releasePackages, workflowText(), repoTags()), []);
+  assert.deepEqual(prefixPinProblems(releasePackages, workflowText(), repoTags(), readAtTag), []);
   for (const [name, entry] of Object.entries(releasePackages)) {
     if (entry.assemblies === undefined) continue;
     assert.notEqual(execFileSync("git", ["ls-files", "--", entry.assemblies], { cwd: repoRoot, encoding: "utf8" }).trim(), "", `${name} declares ${entry.assemblies}, which tracks nothing`);
@@ -699,12 +717,97 @@ test("workflow: a typo in the declared prefix of any assembly-less package fails
   for (const [name, entry] of assemblyLess) {
     for (const tagPrefix of [entry.tagPrefix.slice(0, -1), `${entry.tagPrefix}s`, entry.tagPrefix.replace("-", "_")]) {
       const typo = { ...releasePackages, [name]: { ...entry, tagPrefix } };
-      assert.notDeepEqual(prefixPinProblems(typo, workflowText(), repoTags()), [], `${name} with prefix ${tagPrefix} passed the pin`);
+      assert.notDeepEqual(prefixPinProblems(typo, workflowText(), repoTags(), readAtTag), [], `${name} with prefix ${tagPrefix} passed the pin`);
     }
   }
   const withoutTrigger = workflowText().replace(/^\s+- "cultmesh-py-v\*"\r?\n/m, "");
   assert.notEqual(withoutTrigger, workflowText());
-  assert.notDeepEqual(prefixPinProblems(releasePackages, withoutTrigger, repoTags().filter((tag) => !tag.startsWith("cultmesh-py-v"))), []);
+  assert.notDeepEqual(prefixPinProblems(releasePackages, withoutTrigger, repoTags().filter((tag) => !tag.startsWith("cultmesh-py-v")), readAtTag), []);
+});
+
+test("workflow: the Caching Unity prefix is its own tag family, not another package's prefix or a prefix some tag happens to carry", () => {
+  const cachingUnity = releasePackages["org.gamecult.caching.unity"];
+  // another package's declared prefix, and a prefix tags carry that no package declares
+  for (const tagPrefix of [...Object.values(releasePackages).map((entry) => entry.tagPrefix).filter((prefix) => prefix !== cachingUnity.tagPrefix), "cultmath-core-rs", "cultmath", "cultlib", "cultnet-ts"]) {
+    const copied = { ...releasePackages, "org.gamecult.caching.unity": { ...cachingUnity, tagPrefix } };
+    assert.notDeepEqual(prefixPinProblems(copied, workflowText(), repoTags(), readAtTag), [], `Caching Unity declaring ${tagPrefix} passed the pin`);
+  }
+  // a tag that merely starts with the prefix is not that package's tag
+  const tags = [...repoTags(), "caching-unity-v1.5.0-rc1", "caching-unity-extra-v1.0.0"];
+  assert.deepEqual(prefixPinProblems(releasePackages, workflowText(), tags, readAtTag), []);
+  // an own-looking tag whose tree is another package's release refuses
+  assert.notDeepEqual(prefixPinProblems(releasePackages, workflowText(), [...tags, "caching-unity-v9.9.9"], readAtTag), []);
+  // no tags at all (a clone without them) refuses rather than passing
+  assert.match(prefixPinProblems(releasePackages, workflowText(), [], readAtTag).join("\n"), /are the tags fetched\?/);
+});
+
+// The suite is what pins the declared prefixes and the checker's rules, so the places that release
+// run it first: every job of publish-packages.yml, on a checkout that holds every tag, with .NET set
+// up for the API gate, before any step that checks or publishes; and each Unity release script,
+// before it calls the checker.
+const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
+const CHECKER = /check-changelog-semver\.mjs/;
+const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
+
+function workflowSuiteProblems(workflow) {
+  const [, jobs] = workflow.split(/^jobs:\r?\n/m);
+  const starts = [...jobs.matchAll(/^  ([\w-]+):\r?\n/gm)];
+  const problems = [];
+  if (starts.length === 0) problems.push("the workflow has no jobs");
+  starts.forEach((start, index) => {
+    const job = code(jobs.slice(start.index, starts[index + 1]?.index ?? jobs.length));
+    const at = (pattern) => job.search(pattern);
+    const suite = at(SUITE);
+    const label = `job ${start[1]}`;
+    if (suite < 0) return problems.push(`${label} does not run the suite`);
+    if (/continue-on-error/.test(job)) problems.push(`${label} lets a step fail without failing the job`);
+    if (at(/fetch-depth:\s*0\b/) < 0 || at(/fetch-depth:\s*0\b/) > suite) problems.push(`${label} runs the suite before checking out with fetch-depth: 0`);
+    if (at(/actions\/setup-dotnet@/) < 0 || at(/actions\/setup-dotnet@/) > suite) problems.push(`${label} runs the suite before setting up .NET`);
+    for (const [what, pattern] of [["the checker", CHECKER], ["a publish step", /^\s+- name: Publish\b/m]]) {
+      if (at(pattern) < 0) problems.push(`${label} has no ${what}`);
+      else if (at(pattern) < suite) problems.push(`${label} reaches ${what} before the suite`);
+    }
+  });
+  return problems;
+}
+
+function scriptSuiteProblems(script) {
+  const body = code(script);
+  if (!SUITE.test(body)) return ["does not run the suite"];
+  return body.search(CHECKER) < body.search(SUITE) ? ["calls the checker before the suite"] : [];
+}
+
+test("workflow: every job runs the suite first, with every tag fetched; removing or moving the step fails this test", () => {
+  const workflow = workflowText();
+  assert.deepEqual(workflowSuiteProblems(workflow), []);
+  const suiteLines = /^\s+run: node --test scripts\/check-changelog-semver\.test\.mjs\r?\n/gm;
+  assert.equal(workflow.match(suiteLines).length, 2);
+  // the step removed from either job, or from both
+  let removed = 0;
+  assert.deepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => (removed++ === 0 ? "        run: true\n" : line))).length, 1);
+  assert.equal(workflowSuiteProblems(workflow.replace(suiteLines, "        run: true\n")).length, 2);
+  // the step moved after the checker, a shallow checkout, no .NET, and a step allowed to fail
+  const moved = workflow
+    .replace(suiteLines, "        run: true\n")
+    .replace(/(\s+- name: Verify semver policy\b)/, "\n      - name: Late\n        run: node --test scripts/check-changelog-semver.test.mjs$1");
+  assert.notDeepEqual(workflowSuiteProblems(moved), []);
+  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/fetch-depth: 0/g, "fetch-depth: 1")), []);
+  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/actions\/setup-dotnet@/g, "actions/setup-other@")), []);
+  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => `${line}        continue-on-error: true\n`)), []);
+});
+
+test("the Unity release scripts run the suite before the checker; removing it fails this test", () => {
+  const scripts = ["scripts/build-unity-package.ps1", "packages/cultmath/scripts/build-unity-package.ps1", "scripts/verify-caching-unity-release.ps1"];
+  for (const script of scripts) {
+    const text = readFileSync(join(repoRoot, script), "utf8");
+    assert.deepEqual(scriptSuiteProblems(text), [], script);
+    assert.deepEqual(scriptSuiteProblems(text.replace(new RegExp(SUITE.source, "g"), "node --version")), ["does not run the suite"], script);
+    assert.deepEqual(scriptSuiteProblems(`${text.replace(new RegExp(SUITE.source, "g"), "")}\n& node --test scripts/check-changelog-semver.test.mjs`), ["calls the checker before the suite"], script);
+  }
+});
+
+test("the checker's source is text: it holds no NUL byte, so grep reads it", () => {
+  assert.equal(readFileSync(checkerPath).includes(0), false);
 });
 
 // --- Measured public API. The fixtures are real assemblies, built here with

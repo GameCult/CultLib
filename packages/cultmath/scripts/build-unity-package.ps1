@@ -48,6 +48,11 @@ foreach ($path in @($freshAssembly, $freshSymbols)) {
 # own root (packages\cultmath), not CultLib's; the shared checker script lives one level above that.
 $cultLibRoot = Split-Path -Parent (Split-Path -Parent $repoRoot)
 $cultmathVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
+# The suite pins the checker's rules and the declared tag prefixes, so it runs first.
+& node --test (Join-Path $cultLibRoot "scripts\check-changelog-semver.test.mjs")
+if ($LASTEXITCODE -ne 0) {
+  throw "The release check suite failed (scripts/check-changelog-semver.test.mjs); not releasing."
+}
 & node (Join-Path $cultLibRoot "scripts\check-changelog-semver.mjs") `
   --package "org.gamecult.cultmath" `
   --version $cultmathVersion `

@@ -178,10 +178,14 @@ or a missing declaration refuses), and:
    at the previous tag. A package that declares no assemblies directory (the
    Python and TypeScript packages and the Caching Unity package) has no such
    proof: with no tag of its own prefix it is a first release. The suite test
-   that pins every declared prefix guards it: each workflow tag trigger must be a
-   declared prefix, and each such package's prefix must be a workflow trigger or
-   a prefix some tag in the repository already carries, so a typo in the
-   declaration fails the suite before any release.
+   that pins every declared prefix guards it: each prefix is declared once, each
+   workflow tag trigger must be a declared prefix, and each such package's prefix
+   must be a workflow trigger or, for the Caching Unity package the workflow does
+   not build, the prefix of tags that hold its own manifest at the tag's own
+   version, so a typo or a copied prefix fails the suite. The workflow and the
+   three Unity release scripts run the suite before any check or publish step.
+   Releases run from a full clone with every tag (`fetch-depth: 0` in CI), the
+   recorded `partial-tags-first-release`.
    Tags that cannot be read (a `--cwd` that is not a git repository, or a tag
    whose tree cannot be listed) refuse;
 2. requires a `## [<version>]` changelog entry to exist at all;

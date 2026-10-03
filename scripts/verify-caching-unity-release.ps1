@@ -14,6 +14,12 @@ $manifestPath = Join-Path $packageRoot "package.json"
 
 $version = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).version
 
+# The suite pins the checker's rules and the declared tag prefixes, so it runs first.
+& node --test (Join-Path $repoRoot "scripts\check-changelog-semver.test.mjs")
+if ($LASTEXITCODE -ne 0) {
+  throw "The release check suite failed (scripts/check-changelog-semver.test.mjs); not releasing."
+}
+
 & node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
   --package "org.gamecult.caching.unity" `
   --version $version `
