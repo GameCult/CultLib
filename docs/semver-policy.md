@@ -163,12 +163,21 @@ or a missing declaration refuses), and:
    the version's own refuses, because a first release cannot be told from a
    missing record. Older tags of which none is an ancestor leave the
    predecessor unknown and refuse. Otherwise it is a first release, which no
-   caller declares; it is refused when the package's changelog already lists an
-   earlier version, because then the declared prefix names none of its
-   releases.
-   Tags that cannot be read (a `--cwd` that is not a git repository) refuse. A
-   deleted predecessor tag leaves nothing in git to find, so in a checkout that
-   holds other tags it cannot be told from a first release;
+   caller declares, only when no tag in the repository, under any prefix, tracks
+   a file under the package's folder (its declared assemblies directory, else
+   the directory of its changelog): a tag that tracks one means the package has
+   shipped, so the declared prefix is wrong and the check refuses, naming the
+   tag. This is read from git, never from the changelog's prose. The version's
+   own tag does not count, so a first release can be rebuilt. Only the declared
+   folder counts: a package whose folder moved after its releases has none of
+   its old path's tags counted, so its release under a misspelled prefix reads
+   as new, and the move itself is caught only under the right prefix, where
+   the declared folder holds no managed assembly at the previous tag. A
+   package whose files other packages' tags track (a monorepo tag tracks every
+   package in the tree) cannot be released first through this check once such a
+   tag exists.
+   Tags that cannot be read (a `--cwd` that is not a git repository, or a tag
+   whose tree cannot be listed) refuse;
 2. requires a `## [<version>]` changelog entry to exist at all;
 3. classifies the version bump (major/minor/patch) against the previous
    version, refusing anything that is not exactly the next version in some
