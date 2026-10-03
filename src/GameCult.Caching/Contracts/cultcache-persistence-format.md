@@ -192,8 +192,15 @@ therefore opens in every runtime that holds the id.
 under any other id that a type can read, through the catalog's schema name or an entry listing a
 local id, is loaded read-only: Get and queries serve it, a write of another record copies it as
 stored, and a staged write or removal of it (upsert, variant upsert, flatten, remove, commit) is
-refused with the typed schema conflict before anything is staged. Declaring its id compatible on a
-type claims it: the next write stores it under that type's own id.
+refused with the typed schema conflict before anything is staged. Declaring its id compatible on any
+registered type makes it writable: the next write stores it under the writing type's own id.
+
+The rule is checked again where the write lands, under the store's lock: a write or removal at a key
+whose durable record is under an undeclared id, because another writer rewrote it after this cache
+loaded, is refused typed, and the record is reloaded as the store holds it, read-only when a type can
+read it. This holds for every write through the store, the store's own `Push`, `Delete` and
+`CommitBatch` included. A CultMesh single-file write declares the ids of the catalog entry it writes,
+its own and those it lists compatible, and is refused the same way.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it

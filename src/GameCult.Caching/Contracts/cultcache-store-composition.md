@@ -258,6 +258,11 @@ refuses to replace a file whose header it cannot read, and leaves it as it was.
 - A single-file store and a directory store apply this cache's staged writes and
   removals onto what the store holds now: another writer's unrelated records
   survive as stored, a key both wrote holds the last write.
+- In both store kinds, a write or removal at a key whose durable record is under
+  an id the writer does not declare is refused with the typed schema conflict
+  before anything is written, and that record is reloaded as the store holds
+  it: dropped when foreign, held read-only when a type reads it
+  (cultcache-persistence-format.md, ownership by declaration).
 - A single-file store holding a variant (the directory store refuses variants)
   is written only from what its writer last read. A record that moved refuses
   the whole write with the typed write conflict, and the refused and moved keys

@@ -794,9 +794,9 @@ namespace GameCult.Caching.Tests
         }
 
         // Whether a record is read-only is read live from the registry at the write, not fixed at load: a type registered after the
-        // load that declares the id claims the record.
+        // load that declares the id makes the record writable, and the write stores it under the writing type's id, not the declarer's.
         [Test]
-        public void ATypeRegisteredAfterLoadThatDeclaresTheIdClaimsIt()
+        public void ATypeRegisteredAfterLoadThatDeclaresTheIdMakesItWritable()
         {
             var path = OtherRuntimeStore("late.cc");
             var registry = CultDocumentRegistry.ForTypes(new[] { Deck });
