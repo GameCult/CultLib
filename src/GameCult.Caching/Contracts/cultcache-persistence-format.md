@@ -206,7 +206,7 @@ A record that resolves to no local type is a foreign record, for example one of 
 have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it
 byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
 in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
-naming its key and id, and nothing is written. The refused keys are reloaded as the store holds them (a foreign record is not held), and their staged changes are forgotten. A write that carries a record forward keeps a marked header marked. Declaring its id on a type claims it at the next load.
+naming its key and id, and nothing is written. A removal of a key the cache does not hold is judged against the store as it is at the removal, so it is refused also when the foreign record arrived after the load. The refused keys are reloaded as the store holds them (a foreign record is not held, and is listed as foreign from then on, so its next write is refused before staging), and their staged changes are forgotten. A write that carries a record forward keeps a marked header marked. Declaring its id on a type claims it at the next load.
 
 A reader resolves a record's schema id to the entry that owns it, that entry's own `schemaId`, and
 only when no entry owns the id to an entry that lists it as a compatible id (the first such entry
