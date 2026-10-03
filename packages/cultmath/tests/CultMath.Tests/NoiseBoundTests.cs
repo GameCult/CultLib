@@ -121,7 +121,7 @@ public sealed class NoiseBoundTests
 
     // One tile case of TileBallEnclosesEveryRaySegment: the r2 domain, or one of the extreme families
     // where float32 rounding of the centre is largest against the radius (Soul's verdict s1).
-    private static (int N, float Focal, float2 Slope, float Z0, float Z1, float Warp) DrawBallCase(System.Random random, string family)
+    internal static (int N, float Focal, float2 Slope, float Z0, float Z1, float Warp) DrawBallCase(System.Random random, string family)
     {
         int[] sizes = { 1, 4, 8, 16 };
         float[] depths = { 12.0f, 1000.0f, 2400.0f };

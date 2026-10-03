@@ -20,6 +20,14 @@ public static partial class math
     // snoise kernel must re-run MeasureLipschitz and re-pin this constant.
     public const float SNOISE_LIPSCHITZ = 10.099261f;
 
+    // Lipschitz constant of snoise(float2) in its input, with SNOISE_LIPSCHITZ's provenance rule:
+    // NoiseBoundTests.MeasureLipschitz2 (slow, explicit) takes the largest gradient length (central
+    // differences over exact float steps) over 1e6 seeded points, refines the 1e4 largest by ascent and
+    // multiplies by 1.10; NoiseBoundTests.Lipschitz2ConstantPins pins it against a fast re-measure and
+    // the ascent from MeasureLipschitz2's witness. A change to the 2D snoise kernel must re-run
+    // MeasureLipschitz2 and re-pin this constant.
+    public const float SNOISE2_LIPSCHITZ = 9.19f;
+
     /// <summary>The point interval [x, x].</summary>
     public static float2 iv_point(float value) => new(value, value);
 
@@ -139,6 +147,19 @@ public static partial class math
     {
         var n = snoise(centre);
         var e = SNOISE_LIPSCHITZ * radius;
+        return new(max(n - e, -1.0f), min(n + e, 1.0f));
+    }
+
+    /// <summary>
+    /// Encloses snoise(x) for every 2D x within distance radius of centre: [n - L2 r, n + L2 r] intersected
+    /// with [-1, 1], n = snoise(centre), L2 = SNOISE2_LIPSCHITZ. radius must be at least 0. One snoise
+    /// evaluation, value only. A consumer's 2D flow built from snoise(float2) varies over a ball by at
+    /// most the width this gives (NoiseBoundTests.CentredWarpStaysEnclosed).
+    /// </summary>
+    public static float2 iv_snoise_ball(float2 centre, float radius)
+    {
+        var n = snoise(centre);
+        var e = SNOISE2_LIPSCHITZ * radius;
         return new(max(n - e, -1.0f), min(n + e, 1.0f));
     }
 
