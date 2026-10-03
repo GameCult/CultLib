@@ -471,13 +471,16 @@ namespace GameCult.Caching.Tests
             Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
             Assert.That(cache.IsDirty, Is.False, "nothing is left staged");
 
-            cache.UpsertAsync(Deck, DeckOf(Canary), D).GetAwaiter().GetResult();
-            cache.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
+            cache.Commit(batch => batch.Upsert(Deck, DeckOf("e"), E));
+            cache.UpsertAsync(Deck, DeckOf(Canary), E).GetAwaiter().GetResult();
+            cache.UpsertAsync(Deck, DeckOf("v"), V).GetAwaiter().GetResult();
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), E));
             Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
-            Assert.That(cache.IsDirty, Is.True, "e is still staged");
+            Assert.That(cache.IsDirty, Is.True, "v is still staged");
             cache.FlushAsync().GetAwaiter().GetResult();
 
-            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("e"));
+            Assert.That(Read(path).Records.Select(record => record.Key), Does.Contain("v"));
             Assert.That(cache.IsDirty, Is.False);
         }
 
