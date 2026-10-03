@@ -862,8 +862,8 @@ public sealed class NoiseBoundTests
     /// the pixel's centre) is marched densely for its transmittance and over each tile mask and the oracle
     /// mask (the cells some ray of the tile samples nonzero), with the early-out at 0.02. The PNG is
     /// 1920 x 1080 in four panels: top left the cells per ray the interval march integrates, top right the
-    /// affine march's, bottom left the oracle march's (all three on one viridis scale, 0 to the largest
-    /// count), bottom right the transmittance (black opaque, white clear). It is written only when
+    /// affine march's, bottom left the oracle march's (all three on one viridis scale, logarithmic,
+    /// log(1 + n) / log(1 + the largest count)), bottom right the transmittance (black opaque, white clear). It is written only when
     /// CULTMATH_WRITE_CULLMAP names a directory; the mean cells per ray are printed either way.
     /// </summary>
     [Fact(Explicit = true)]
@@ -940,9 +940,9 @@ public sealed class NoiseBoundTests
         for (var x = 0; x < width; x++)
         {
             var p = y * width + x;
-            Put(x, y, Colour(cellsInterval[p] / (double)most));
-            Put(width + x, y, Colour(cellsAffine[p] / (double)most));
-            Put(x, height + y, Colour(cellsOracle[p] / (double)most));
+            Put(x, y, Colour(Math.Log(1.0 + cellsInterval[p]) / Math.Log(1.0 + most)));
+            Put(width + x, y, Colour(Math.Log(1.0 + cellsAffine[p]) / Math.Log(1.0 + most)));
+            Put(x, height + y, Colour(Math.Log(1.0 + cellsOracle[p]) / Math.Log(1.0 + most)));
             var grey = (byte)Math.Round(255.0 * transmittance[p]);
             Put(width + x, height + y, (grey, grey, grey));
         }
