@@ -1,12 +1,13 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status: Imagination pass 3, 2026-10-02. Pass 1's Q1–Q3 are answered (below);
-the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 (section
-"Pass 3" near the end) revises the two CultLib cuts after their first Hands
-reports and the operator's challenge to the march, and changes the site field
-to envelope-then-noise. Where pass 3 and an earlier section disagree, pass 3
-wins. Where this map and the Body disagree, the Body wins and this map is
-stale.
+Status: Imagination pass 4, 2026-10-03. Pass 1's Q1–Q3 are answered (below);
+the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 revises the
+two CultLib cuts after their first Hands reports and the operator's challenge
+to the march, and changes the site field to envelope-then-noise; pass 4
+(section "Pass 4") revises `interval-ops` to r3 after its second Hands report
+and Soul's verdict, and names the one shipped void (Q9). Where a later pass and
+an earlier section disagree, the later pass wins. Where this map and the Body
+disagree, the Body wins and this map is stale.
 
 Pinned HEADs (every `file:line` below is against these):
 
@@ -409,7 +410,9 @@ Specs: `docs/cultmath-interval-ground-cut-glsl-lowering.spec.json`,
 `docs/cultmath-interval-ground-cut-site-stardust.spec.json`. Revision 2 of
 the two CultLib cuts (pass 3):
 `docs/cultmath-interval-ground-cut-interval-ops.r2.spec.json`,
-`docs/cultmath-interval-ground-cut-glsl-lowering.r2.spec.json`.
+`docs/cultmath-interval-ground-cut-glsl-lowering.r2.spec.json`. Revision 3 of
+`interval-ops` (pass 4): `docs/cultmath-interval-ground-cut-interval-ops.r3.spec.json`;
+`glsl-lowering` r2 and `site-ground` r3 now depend on it.
 
 ## Standing design decisions (means; Self may overrule)
 
@@ -559,7 +562,9 @@ The cavity is parametrised by the hollow radius `Rh` and the ramp width `S`;
 the brush `(1 − (d/Rc)²)^e` with `CARVE` gives `Rh = Rc √(1 − CARVE^(−1/e))`
 and `S` from the exponent (`e = 4` gives `S ≈ 1.3 Rh`, `e = 0.25` gives
 `S ≈ 0.12 Rh`), so `(Rh, S)` are the knobs and `(Rc, e)` derived. Shipped:
-`Rh = 198`, `S = 50` (`e ≈ 0.6`, `Rc ≈ 220`), `K = 1/30`.
+`Rh = 198`, `S = 50`, so `Rc = Rh + S = 248` and `e = −ln CARVE / ln(1 −
+(Rh/Rc)²) = 0.40`, `K = 1/30` (pass 4 corrects this line's `e ≈ 0.6, Rc ≈
+220`, which did not satisfy the formula; Q9 holds the look question).
 
 Imagination's model (scratchpad `cavity_model.py`; the test confirms or
 refutes), 1080p, `N = 8`, per pixel for a converged frame; "ref" is the
@@ -632,7 +637,9 @@ ruled (Q7, `operator-void-true-cavity`) that the site's void is a true 3D
 hollow inside a cloud volume that surrounds it on every side, including
 above. Everything else recovered carries over.
 
-**The site scene** (`site-ground` r3): the original's units. Outer volume: an
+**The site scene** (`site-ground` r3; the brush parameters in this paragraph,
+`Rc = 640`, `e = 4`, are superseded by pass 4's one shipped void, `Rh = 198`,
+`S = 50`, `Rc = 248`, `e = 0.40`, pending Q9): the original's units. Outer volume: an
 unbounded uniform fill (chosen over a shell: every ray then ends in a wall
 and the march terminates by opacity, never by a far plane; `Z1 = 2 Rc` bounds
 the pre-pass range only). The carve: `d = |p − c_v|`, `g(d) = (1 −
@@ -714,6 +721,9 @@ envelope gate (the proving-ground contract's second half).
 
 ### The split Phacelle and the compile checks (glsl-lowering r2)
 
+Pass 4: the glsl branch rebases onto interval-ops **r3**'s head, because r3
+changes `cultmath_iv_frustum_ball`'s radius and the fixture family with it.
+
 - Transformation step 1 gains one licence-keyed entry: an include under its
   own licence is lowered into its own file. `CultMath.glsl` (MIT: `CultMath.hlsl`
   + `CultMath.Interval.hlsl`) and `CultMath.Phacelle.glsl` (MPL-2.0,
@@ -733,7 +743,220 @@ Carried, still out of scope: the Unity `CultMath.dll` rebuild (no release in
 the sequence); the fixture's ulp bounds on WebGL2 (site cut); Stryker's
 timeouts are reported as timeouts, not kills.
 
+## Pass 4: Soul's five findings, the analytic body, the one shipped void
+
+Pinned: CultLib `main` `780d8cfa` (docs only since `d0ea37f8`);
+`hands/cultmath-interval-ops` at `43183276` (report `cut-interval-ops.h2`,
+verdict `cut-interval-ops.s1`, worktree `F:\Projects\CultLib-iv`). Rulings new
+in this pass: `operator-wells-contract-vs-ceiling` ((c) is held to at least 90%
+of its probe-free ceiling, not 2x: the ceiling is what intervals control; the
+fog band's cost belongs to the field) and `operator-analytic-wall-body` (where
+the envelope interval proves the density constant, one closed-form
+Beer-Lambert step instead of sampling at the content limits). Spec:
+`docs/cultmath-interval-ground-cut-interval-ops.r3.spec.json`.
+
+### What r2 measured
+
+| Scenario | r2 result | Pass 3 prediction |
+| --- | --- | --- |
+| (a) height fog | 16384x | > 50x |
+| (b) inside the fog | 0.99x | 0.8–1.0x |
+| (c) Aetheria wells | 1.41x at warp D (3.32x at warp 0); probe-free ceiling 1.42x (3.46x) | 2–4x |
+| (d) uniform slab | 1.23x | 1.3–1.5x |
+| (e) void, shipped | steps per pixel 36.34 → 16.45 (2.21x fewer), cost 1.34x, snoise 26.6 | 35 → 6 (5–8x), cost 1.7x |
+
+Two things the pass 3 model got wrong, both now owned by r3: the footprint
+step kept its content limits (`S/4`, the detail half-wavelength 12.5) inside
+the wall's constant-density body, which the model had costed at two steps; and
+the noise band does not end at `Rc`: with `A = 20` and the free noise interval
+`[−1.5, 1.5]`, the density is provably `K` only from `d ≥ Rc + 30`. The ruling
+answers the first; the second is content and stays.
+
+### Soul's findings and what r3 does with each
+
+| Finding | Severity | r3 |
+| --- | --- | --- |
+| `frustum-ball-float-crossing` | Medium | the radius is widened by a derived float32 bound (below); seven extreme families join the enclosure test; the strictness sentence leaves the C#, the HLSL and `design.md` |
+| `aetheria-far-plane-miscited` | Low | `far = 2048`, the Main Camera's (`ARPG.unity:31777`, `:31830`); the Tint camera's 1000 was the wrong camera |
+| `shipped-void-two-scenes` | Medium | one shipped void, `(Rh, S) = (198, 50)`, `(Rc, e) = (248, 0.40)` derived; the map, the site-ground spec and the test agree; the look question is Q9 |
+| `lod-weights-never-exercised` | Low | configuration "LOD far" (`Rh = 4000`, `S = 50`, low camera, `f = 467`) reaches weights in `(0, 1)` and at 0; the `[w(z1), 1]` bound is recorded as a deviation with its soundness argument |
+| `stryker-timeout-survivor` | Low | 2525 named equivalent; ball radii to `1e3` so `L/r` dies to an enclosure test; every timeout hand-run; the report claims only demonstrated kills |
+
+### The float widening rule (finding 1)
+
+`iv_frustum_ball` returns a float32 ball; its promise is that every exact
+point `(m z, z)` of every ray of the tile, `m` in the footprint, `z ∈ [z0,
+z1]`, moved by at most the warp, lies inside it. Soul showed the r2 ball misses
+such points by up to `5.7e-4 r` when `z0 == z1`, `3.3e-4 r` at `z ≈ 1e7` and
+19% of `r` at `|m_c| ≈ 1000`: the triangle inequality is an equality on the
+degenerate slice and the centre's own rounding crosses it. The rule, in C# and
+both HLSL copies, after the r2 radius:
+
+```text
+radius += (|c.x| + |c.y| + |c.z| + radius) · 2^-20        (9.5367431640625e-7, exact)
+```
+
+Derivation with `u = 2^-24`: the centre `c = (m_c z_m, z_m)` carries at most
+two roundings per component (`z_m = fl(z0 + z1) · 0.5`, then the product), so
+`|c_float − c_exact| ≤ 2u |c|₁`; the radius carries at most seven first-order
+roundings (`z1 − z0`; the axis `sqrt(mx² + my² + 1)` at `3u`; the product; `z1
+· footprint`; the sum; `+ warp`), so `r_exact ≤ r_float (1 + 7u)`; the
+widening's own addition rounds once more. `2^-20 = 16u` covers `8u (|c|₁ + r)`
+twice over. fma contraction removes roundings and only tightens, so dxc's HLSL
+and any driver's GLSL are covered by the same bound. Cost at the shipped
+scales: `|c|₁ ≈ 600`, `r ≈ 5` → `6e-4` units, 0.01% of the radius. The
+enclosure test computes distances in double from the float ball and the float
+ray, no tolerance, over the r2 domain and the extreme families (`z0 == z1`;
+`z1 − z0 = 1e-6 z1`; `|m_c| ≤ 1000`; `z ≤ 1e7`; `z0 = 0, z1 ≥ 1e-3`; `f ≥ 1`;
+warp to `1e6`), corners at both depth ends with the flow pointed outward. The
+derivation pin becomes two-sided (`r_exact ≤ ball.w ≤ r_exact + 2^-19 (r_exact
++ |c|₁)`), so a ball that forgets the widening fails and one that grows past
+the rule fails. The caller's world transform and its own point rounding remain
+the caller's; the function says so in its doc instead of a false proof.
+
+### The one shipped void (finding 3) and Q9
+
+The map held two voids: the Footprint-LOD section's `(Rh, S) = (198, 50)`
+(with an `e ≈ 0.6, Rc ≈ 220` that did not satisfy its own formula) and the site
+section's `Rc = 640, e = 4` (a 442-wide ramp with a 50-wide fade band). Hands
+implemented the first with the arithmetic corrected (`Rc = Rh + S = 248`, `e =
+0.40`) and measured 2.21x; Soul measured the second at 1.93x. Under the
+analytic body the second gains nothing: across a 442-wide ramp the optical
+depth exceeds 4 before the density is provably constant, so rays end inside the
+ramp and the body is never proven. The map's own rule says `(Rh, S)` are the
+knobs, so the honest choice is the first; it changes the look relative to the
+site section, hence Q9 (below). For `CARVE = 1.5` the ramp width is tied to the
+exponent (`S/Rh = 1/√(1 − 1.5^(−1/e)) − 1`: `e = 0.4 → 0.25`, `e = 0.7 →
+0.5`, `e = 1 → 0.73`, `e = 4 → 2.2`), so "pseudo-Gaussian" and "narrow" cannot
+both be had without a third knob, and a narrow wall at `e = 4` needs
+`CARVE ≈ 58`, which is a hard wall again. The ramp width is the look-cost knob.
+
+### The analytic body (ruling `operator-analytic-wall-body`)
+
+Consumer-side, no new CultMath function; the saving test and the site mirror
+each other.
+
+- **When it applies.** The consumer's `Bound` over the whole remaining range
+  `[z, z_end]`, gated, is a point interval with positive value: for the void,
+  the envelope with the free noise interval `[−1.5, 1.5]` proves `fade = 1`
+  and `d_lo + A · (fade n)_lo ≥ Rc`, so every point of every ray of the tile
+  over the rest of the grid has density exactly `K` for any noise value. For
+  (a)–(d) no bound is a positive point (the fog's density varies with `s'`),
+  so the step never applies there, and the test asserts it.
+- **Pre-pass.** `MarchTile` returns `(dense cells, bodyStart, bodyDensity)`:
+  when a single cell is not provably empty and its own bound is a positive
+  point, one more probe over `[z_j, z_end]`; if that is a positive point too,
+  `bodyStart = j` and every remaining cell is appended dense without probing
+  (always sound; it also drops the body's probes). The site writes the cell in
+  the mask texel's fourth word, `0xFFFFFFFF` when none.
+- **Main pass.** Unmasked cells before `bodyStart` as before; at `bodyStart`,
+  `T *= exp(−K · (z_end − z) · |dir|)`, one step, stop. The grid end for every
+  void configuration becomes `|camera − c_v| + Rc + 6/K` (was `5/K`): the
+  body starts at `d ≥ Rc + 30` plus box slack, so `6/K` leaves at least 4.9 of
+  optical depth and `T ≤ 0.0075`. No probe in the main pass: the constant is
+  the field's pointwise envelope value at that cell.
+- **Pin.** `AnalyticBodyMatchesFineMarch`: wherever a body is reported, the
+  bound over the rest of the grid is a positive point and the full and the
+  truncated density at 64 sampled points of the body equal it exactly; the
+  analytic factor equals the fixed-step product over the same cells within
+  `1e-4` relative; no (a)–(d) tile reports a body. The masked fixed-step march
+  stays the mask's soundness pin (exact agreement with the reference); only
+  the LOD march takes the step. Hand mutation that must fail: in
+  `VoidField.Compose`, `CarveRadius → HollowRadius` in the lo test.
+
+### Footprint LOD, exercised (finding 4)
+
+At `f = 935` every octave weight is 1 inside every r2 grid (the fine weight
+drops below 1 past `z = 2922`; the largest grid ends at 2240). `VoidField`
+takes a focal length, and one configuration reaches the weights: `Rh = 4000`,
+`S = 50`, low camera, `f = 467` (a 98° vertical FOV at 1080 rows): fine weight
+below 1 past 1460 and 0 past 2920, coarse below 1 past 5840, grid to ≈ 7990;
+the footprint term `4 z θ` also exceeds 12.5 past 1460, so `LodStep` is
+footprint-set there. It joins the enclosure test's field list and is printed by
+the saving test, not asserted. Deviation recorded: the bound takes each weight
+over `[w(z1), 1]`, not `[w(z1), w(z0)]`, because one `Bound` serves the full
+field (`w = 1`) and the truncated one (`w ∈ [w(z1), w(z0)]`); `[w(z1), 1]`
+contains both and `iv_mul` is monotone in its interval argument, so the
+composed interval encloses both fields; the slack is only in far tiles whose
+step the footprint already sets. Hand mutation that must fail the truncated
+check there: `w(z0)` for `w(z1)`.
+
+### Contracts after r3 (asserted at `N = 8`)
+
+- (a): at least 2x combined cost. Measured 16384x.
+- (c): at least 0.90 of its probe-free ceiling (`Ratio / Ceiling`, the lower
+  of warp 0 and D). Measured 0.99 at warp D, 0.96 at warp 0.
+- (e): at least 2x fewer LOD steps per pixel than the fixed-step reference at
+  the one shipped void; the masked march exact; the LOD march within 0.02.
+- (b), (d), the (e) grid and LOD-far: printed only.
+
+### Predictions (Imagination's rule, not a measurement)
+
+From r2's printed rows: the LOD steps that evaluated noise are about
+`snoise / 2.8` plus two pre-band steps; the rest were constant-body steps,
+which the analytic step makes one. Ref/LOD steps:
+
+| `Rh`, camera | `S = 10` r2 → r3 | `S = 50` r2 → r3 | `S = 150` r2 → r3 |
+| --- | --- | --- | --- |
+| 100, low | 2.1 → 5.3x | 1.8 → 2.5x | 1.6 → 1.6x |
+| 200, low | 2.7 → 5.8x | 2.2 → 2.8x | 1.8 → 1.8x |
+| 400, low | 3.4 → 6.2x | 2.9 → 3.5x | 2.2 → 2.2x |
+| 1000, low | 6.8 → 10.9x | 4.5 → 5.2x | 3.3 → 3.3x |
+| 1000, centred | 12.4 → 30x | | |
+| **shipped** (198, low, 50) | | **2.21 → ≈ 2.9x (12.5 steps), cost 1.34 → 1.38x, snoise 26.6 unchanged** | |
+
+At `S = 150` rays end inside the ramp before the body is proven, so nothing
+changes there. If the shipped point lands under 2.6x, the report says which
+assumption failed: the pre-band's 0-snoise steps, or a body start later than
+`Rc + 30` by box slack.
+
+### Authority map delta (against pass 3's)
+
+- `iv_frustum_ball` is now the owner of its own float32 rounding: the
+  widening is part of the function. Consumers add nothing for it and remain
+  owners of their world transform.
+- The body proof is derived from the same `Bound` the mask is derived from, by
+  one more probe; the main pass reads it and never decides it. The Beer-Lambert
+  step is the consumer's integration, not a CultMath function.
+- `(Rc, e)` are no longer authored; they are derived from `(Rh, S)`. The site
+  section's `Rc = 640, e = 4` is no longer an owner of the look (Q9 pending).
+- (c)'s contract is derived from its own run (0.90 of the ceiling); no absolute
+  target is written for (c).
+- Deletion line: the false strictness sentence, the Tint camera citation, the
+  (c) 2x assertion and the second shipped void leave before their replacements
+  are written. Net in `src`: one line and a doc comment.
+
+### Dependent specs
+
+`glsl-lowering` r2 now depends on `interval-ops` r3 and rebases onto its head
+(the fixture family for `cultmath_iv_frustum_ball` changes with the widening).
+`site-ground` r3 now depends on `interval-ops` r3; its field item carries the
+one shipped void with `(Rc, e)` derived, its pre-pass writes the body-start
+cell in the texel's fourth word, its main pass takes the one analytic step,
+and `Z1 = |camera − c_v| + Rc + 6/K` (614 at the shipped point, 62 cells of
+10; the mask has 96 bits). Both files are edited in place on `main`; the
+mind's copies need re-admission by Self.
+
 ## Questions
+
+**Q9. The one shipped void** (pass 4; finding `shipped-void-two-scenes`).
+Authored as `(Rh, S)` with `(Rc, e)` derived; `CARVE = 1.5`, `A = 20`,
+`F0 = 0.01`, `K = 1/30`, the camera as site-ground r3.
+- (a) `Rh = 198`, `S = 50` → `Rc = 248`, `e = 0.40`. The scene r2 measured
+  (2.21x; predicted ≈ 2.9x with the analytic body). A 50-wide noisy wall whose
+  outer edge has a kink (`e < 1`), softened by the ±20 noise displacement and
+  the TAA. **Recommended**: the map's own rule, the measured scene and the
+  ruling's analytic body all point at it.
+- (b) `Rc = 640`, `e = 4` (`Rh = 198`, a 442-wide pseudo-Gaussian ramp, fade
+  band 50): the site section's soft wall. Measured 1.93x; the body is never
+  proven, so the analytic step never fires; the (e) contract fails unless it
+  is dropped to printed or the detail octave is removed where the ramp is
+  wide, both of which are the operator's to decide.
+- (c) `Rh = 198`, `S = 100` → `Rc = 298`, `e = 0.70`: the compromise, a
+  softer 100-wide wall; predicted ≈ 2.4x; not in the r2 grid, so unmeasured.
+
+Hands codes (a); another ruling moves only the shipped constants here, in the
+r3 spec and in the site-ground spec.
 
 **Q6. The site ground's envelope look.** Answered outside the options by
 `cultmath-tapes:ruling:operator-ground-void-brush`: the old main menu's void
