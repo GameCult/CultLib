@@ -1024,14 +1024,28 @@ namespace GameCult.Caching.Tests
         }
 
         // A removal of a foreign record, which the cache does not hold, is refused typed: the caller is never told it removed what the
-        // store still carries.
+        // store still carries. The store is read as it is at the removal, so a foreign record another writer added after the load
+        // is refused too, and listed foreign from then on.
         [Test]
-        public void RemovingAForeignRecordIsRefusedNotReportedAsDone([Values] bool directory, [Values] bool batch)
+        public void RemovingAForeignRecordIsRefusedNotReportedAsDone([Values] bool directory, [Values] bool batch, [Values] bool appearedAfterLoad)
         {
-            var path = Seeded(directory ? "remove-foreign-dir.cc" : "remove-foreign-file.cc", directory);
-            var before = Fingerprint(path);
+            var path = PathOf(directory ? "remove-foreign-dir.cc" : "remove-foreign-file.cc");
+            using (var seed = Open(path, Full, directory))
+            {
+                seed.Commit(stage => stage.Upsert(Deck, DeckOf("d"), D));
+                if (!appearedAfterLoad)
+                    seed.Commit(stage => stage.Upsert(Widget, WidgetOf("w"), W));
+            }
+
             using (var cache = Open(path, DeckOnly, directory))
             {
+                if (appearedAfterLoad)
+                {
+                    using var other = Open(path, Full, directory);
+                    other.Commit(stage => stage.Upsert(Widget, WidgetOf("w"), W));
+                }
+
+                var before = Fingerprint(path);
                 var refusal = Assert.Throws<CultSchemaConflictException>(() =>
                 {
                     if (batch)
@@ -1041,10 +1055,10 @@ namespace GameCult.Caching.Tests
                 })!;
                 Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
                 Assert.That(cache.IsDirty, Is.False);
+                Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
                 Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False, "a key nothing holds is still no removal");
+                Assert.That(Fingerprint(path), Is.EqualTo(before));
             }
-
-            Assert.That(Fingerprint(path), Is.EqualTo(before));
         }
     }
 }

@@ -185,7 +185,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                     manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
-            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value));
+            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(StagedKeys));
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
             var previousDeletedKeys = _deletedKeys.Keys.ToArray();
@@ -236,10 +236,17 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
             var (manifest, catalogBytes) = ReadManifest();
-            RefuseUndeclaredOnDisk(manifest, Array.Empty<string>());
+            RefuseUndeclaredOnDisk(manifest, StagedKeys);
             WriteGeneration(manifest, catalogBytes);
         });
     }
+
+    private IEnumerable<string> StagedKeys => _deletedKeys.Keys.Concat(_dirtyKeys.Keys);
+
+    // The manifest as it is now, read without the commit lease: nothing is written after the read, the manifest is only ever
+    // replaced whole, and a read-only store must not create the lease.
+    protected internal override void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys) =>
+        Held(() => RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys));
 
     // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
     // record the manifest holds under an id no registered type declares is refused before any page is written, by the one rule every
@@ -249,7 +256,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         CultPersistedRecord? HeldAt(string key) =>
             currentManifest.Records.FirstOrDefault(record => string.Equals(record.Key, key, StringComparison.Ordinal));
         RefuseUndeclaredOnDisk(
-            written.Concat(_deletedKeys.Keys).Concat(_dirtyKeys.Keys),
+            written,
             key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Declares) : null,
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)

@@ -2358,7 +2358,7 @@ namespace GameCult.Caching
         {
             if (!_entries.TryGetValue(key.Value, out var existing))
             {
-                RefuseRemovalOfForeign(key.Value);
+                RefuseRemovalOfUndeclared(new[] { key.Value });
                 return false;
             }
             Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, (home, _) =>
@@ -2631,8 +2631,10 @@ namespace GameCult.Caching
                         : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant)
                         : StampFlatten(op.Key))
                     .ToArray();
-                foreach (var op in batch.Operations.Values.Where(op => op.IsRemoval && !_entries.ContainsKey(op.Key.Value)))
-                    RefuseRemovalOfForeign(op.Key.Value);
+                RefuseRemovalOfUndeclared(batch.Operations.Values
+                    .Where(op => op.IsRemoval && !_entries.ContainsKey(op.Key.Value))
+                    .Select(op => op.Key.Value)
+                    .ToArray());
                 var deletes = batch.Operations.Values
                     .Where(op => op.IsRemoval && _entries.ContainsKey(op.Key.Value))
                     .Select(op => _entries[op.Key.Value])
@@ -2656,12 +2658,15 @@ namespace GameCult.Caching
             });
         }
 
-        // A removal of a key the cache does not hold removes nothing, so no store sees it; but a store that carries a foreign record
-        // at the key refuses it, as it refuses every write of that record, rather than let the caller believe it was removed.
-        private void RefuseRemovalOfForeign(string key)
+        // A removal of a key the cache does not hold removes nothing, so no write carries it to a store; but a store that holds a
+        // record there under an id no registered type declares refuses it, as it refuses every write of that record, rather than let
+        // the caller believe it was removed.
+        private void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys)
         {
+            if (keys.Count == 0)
+                return;
             foreach (var (store, _) in _stores)
-                store.RefuseUndeclared(key);
+                store.RefuseRemovalOfUndeclared(keys);
         }
 
         // Every add and remove passes here: single writes, committed batches, and loads (source set).
@@ -3649,6 +3654,16 @@ namespace GameCult.Caching
                 throw Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
         }
 
+        // The apply's refusal for removals of keys the cache does not hold. Such a removal writes nothing, so no write carries it to
+        // where the store is read; this reads it instead. A key whose durable record is under an id no registered type declares is
+        // refused and reloaded as the apply refuses and reloads it, including a record another writer put there after the load.
+        // A store kind that cannot read its durable state answers from its view (RefuseUndeclared).
+        protected internal virtual void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys)
+        {
+            foreach (var key in keys)
+                RefuseUndeclared(key);
+        }
+
         // A stored record under an id the writer does not declare, named by the catalog entry that publishes the id. Header only: no
         // payload is decoded. Null for a record under a declared id.
         protected static (string Key, string SchemaId, string SchemaName)? Undeclared(
@@ -4164,6 +4179,11 @@ namespace GameCult.Caching
                     changedKeys,
                     inner));
         }
+
+        // The file as it is now, read as a pull reads it, without the lock: nothing is written after the read, and the file is only
+        // ever replaced whole.
+        protected internal override void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys) =>
+            Held(() => RefuseUndeclaredOnDisk(ReadSnapshot(), keys, Registry.Declares));
 
         // A cache declares through its registry. A cacheless CultMesh write declares the ids of the catalog entry it writes: its own id
         // and the ids it lists compatible.
