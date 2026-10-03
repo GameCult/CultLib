@@ -741,33 +741,72 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
   assert.match(prefixPinProblems(releasePackages, workflowText(), [], readAtTag).join("\n"), /are the tags fetched\?/);
 });
 
-// The suite is what pins the declared prefixes and the checker's rules, so the places that release
-// run it first: every job of publish-packages.yml, on a checkout that holds every tag, with .NET set
-// up for the API gate, before any step that checks or publishes; and each Unity release script,
-// before it calls the checker.
+// The suite is what pins the declared prefixes and the checker's rules, so nothing releases without it.
+// publish-packages.yml releases only through scripts/release-after-suite.mjs, which runs the suite and then
+// the release action from one process, so no if: on any step can release what the suite did not pass. This
+// pin reads no condition. It compares each job's release steps whole, less their own if: line, with the
+// text below, so a release step that does anything else is a mismatch, and it refuses any step or job that
+// may fail without failing the job, or that runs through another shell. Each Unity release script runs the
+// suite itself, before it calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
-function workflowSuiteProblems(workflow) {
-  const [, jobs] = workflow.split(/^jobs:\r?\n/m);
+const RELEASE_STEPS = {
+  "cultcache-ts": [
+    ["- name: Publish", "  run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts", "  env:", "    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"],
+  ],
+  // Publish uploads only the dist the guarded step built, so it has nothing to upload unless the suite passed.
+  python: [
+    ["- name: Build sdist and wheel", "  run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }}"],
+    ["- name: Publish", "  uses: pypa/gh-action-pypi-publish@release/v1", "  with:", "    packages-dir: packages/${{ matrix.package }}/dist"],
+  ],
+};
+
+// A job's steps, each as its lines relative to its "- name:" line, without comments, blank lines or the
+// step's own one-line if:. A line indented less than the step stays whole, so it cannot match.
+function jobSteps(job) {
+  const steps = [];
+  for (const line of job.split(/\r?\n/)) {
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    const name = line.match(/^( *)- name:/);
+    if (name) steps.push({ indent: name[1], lines: [] });
+    const step = steps.at(-1);
+    if (step === undefined) continue;
+    const relative = line.startsWith(step.indent) ? line.slice(step.indent.length) : line;
+    if (!/^  if: .*$/.test(relative)) step.lines.push(relative);
+  }
+  return steps;
+}
+
+function workflowReleaseProblems(workflow) {
+  const [, jobs = ""] = workflow.split(/^jobs:\r?\n/m);
   const starts = [...jobs.matchAll(/^  ([\w-]+):\r?\n/gm)];
   const problems = [];
-  if (starts.length === 0) problems.push("the workflow has no jobs");
+  for (const id of Object.keys(RELEASE_STEPS)) {
+    if (!starts.some((start) => start[1] === id)) problems.push(`the workflow has no job ${id}`);
+  }
   starts.forEach((start, index) => {
-    const job = code(jobs.slice(start.index, starts[index + 1]?.index ?? jobs.length));
-    const at = (pattern) => job.search(pattern);
-    const suite = at(SUITE);
     const label = `job ${start[1]}`;
-    if (suite < 0) return problems.push(`${label} does not run the suite`);
-    if (/continue-on-error/.test(job)) problems.push(`${label} lets a step fail without failing the job`);
-    if (at(/fetch-depth:\s*0\b/) < 0 || at(/fetch-depth:\s*0\b/) > suite) problems.push(`${label} runs the suite before checking out with fetch-depth: 0`);
-    if (at(/actions\/setup-dotnet@/) < 0 || at(/actions\/setup-dotnet@/) > suite) problems.push(`${label} runs the suite before setting up .NET`);
-    for (const [what, pattern] of [["the checker", CHECKER], ["a publish step", /^\s+- name: Publish\b/m]]) {
-      if (at(pattern) < 0) problems.push(`${label} has no ${what}`);
-      else if (at(pattern) < suite) problems.push(`${label} reaches ${what} before the suite`);
+    if (!Object.hasOwn(RELEASE_STEPS, start[1])) return problems.push(`${label} is not a job this pin knows; give it its release steps in RELEASE_STEPS`);
+    const steps = jobSteps(jobs.slice(start.index, starts[index + 1]?.index ?? jobs.length));
+    let from = 0;
+    for (const want of RELEASE_STEPS[start[1]]) {
+      const named = steps.filter((step) => step.lines[0] === want[0]);
+      const at = steps.findIndex((step, i) => i >= from && step.lines[0] === want[0]);
+      if (named.length !== 1 || at < 0) {
+        problems.push(`${label} needs exactly one step "${want[0]}", after the release step before it`);
+        continue;
+      }
+      if (steps[at].lines.join("\n") !== want.join("\n")) {
+        problems.push(`${label} step "${want[0]}" is not exactly the release call:\n${steps[at].lines.join("\n")}`);
+      }
+      from = at + 1;
     }
   });
+  if (/continue-on-error|\bshell\b|\bdefaults\b/.test(code(workflow))) {
+    problems.push("the workflow says continue-on-error, shell or defaults: no step may fail without failing its job, or run through another shell");
+  }
   return problems;
 }
 
@@ -777,23 +816,59 @@ function scriptSuiteProblems(script) {
   return body.search(CHECKER) < body.search(SUITE) ? ["calls the checker before the suite"] : [];
 }
 
-test("workflow: every job runs the suite first, with every tag fetched; removing or moving the step fails this test", () => {
+test("workflow: each job releases only through release-after-suite.mjs, and no step may fail without failing its job", () => {
   const workflow = workflowText();
-  assert.deepEqual(workflowSuiteProblems(workflow), []);
-  const suiteLines = /^\s+run: node --test scripts\/check-changelog-semver\.test\.mjs\r?\n/gm;
-  assert.equal(workflow.match(suiteLines).length, 2);
-  // the step removed from either job, or from both
-  let removed = 0;
-  assert.deepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => (removed++ === 0 ? "        run: true\n" : line))).length, 1);
-  assert.equal(workflowSuiteProblems(workflow.replace(suiteLines, "        run: true\n")).length, 2);
-  // the step moved after the checker, a shallow checkout, no .NET, and a step allowed to fail
-  const moved = workflow
-    .replace(suiteLines, "        run: true\n")
-    .replace(/(\s+- name: Verify semver policy\b)/, "\n      - name: Late\n        run: node --test scripts/check-changelog-semver.test.mjs$1");
-  assert.notDeepEqual(workflowSuiteProblems(moved), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/fetch-depth: 0/g, "fetch-depth: 1")), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/actions\/setup-dotnet@/g, "actions/setup-other@")), []);
-  assert.notDeepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => `${line}        continue-on-error: true\n`)), []);
+  assert.deepEqual(workflowReleaseProblems(workflow), []);
+  const npmRun = "run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts";
+  const pythonRun = "run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }}";
+  const exact = /is not exactly the release call/;
+  for (const run of [npmRun, pythonRun]) {
+    assert.equal(workflow.split(run).length, 2, run);
+    const edit = (replacement) => workflowReleaseProblems(workflow.replace(run, replacement)).join("\n");
+    // anything else on the line, on a continuation line, or in a block; another call; another shell
+    assert.match(edit(`${run} || true`), exact, run);
+    assert.match(edit(`${run}\n          || true`), exact, run);
+    assert.match(edit("run: |\n          node --test scripts/check-changelog-semver.test.mjs\n          true"), exact, run);
+    assert.match(edit(run.replace("release-after-suite.mjs", "check-changelog-semver.mjs")), exact, run);
+    assert.match(edit(`${run}\n        shell: bash`), /another shell/, run);
+    assert.match(edit(`${run}\n        continue-on-error: true`), /no step may fail/, run);
+  }
+  // the guard runs the suite itself, so the release steps' conditions are free
+  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: node)/, "if: always()$1")), []);
+  // a job allowed to fail, a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
+  assert.match(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    continue-on-error: true\n")).join("\n"), /no step may fail/);
+  assert.match(workflowReleaseProblems(workflow.replace("- name: Build sdist and wheel", "- name: Build")).join("\n"), /needs exactly one step "- name: Build sdist and wheel"/);
+  assert.match(workflowReleaseProblems(workflow.replace("- name: Build and test", "- name: Publish\n        run: npm publish\n\n      - name: Build and test")).join("\n"), /needs exactly one step "- name: Publish"/);
+  assert.match(workflowReleaseProblems(workflow.replace("packages-dir: packages/${{ matrix.package }}/dist", "packages-dir: dist")).join("\n"), exact);
+  assert.match(workflowReleaseProblems(`${workflow}\n  other:\n    runs-on: ubuntu-latest\n`).join("\n"), /job other is not a job this pin knows/);
+});
+
+test("release-after-suite runs the suite first, and the release action only when the suite passed", async () => {
+  const { releaseAfterSuite, suite } = await import("./release-after-suite.mjs");
+  const calls = [];
+  const runner = (suiteStatus, actionStatus = 0) => (command, args, cwd) => {
+    calls.push([command, args, cwd]);
+    return command === process.execPath ? suiteStatus : actionStatus;
+  };
+  const suiteCall = [process.execPath, ["--test", suite], undefined];
+  assert.equal(releaseAfterSuite(["npm-publish", "packages/cultcache-ts"], runner(0)), 0);
+  assert.deepEqual(calls, [suiteCall, ["npm", ["publish", "--access", "public"], "packages/cultcache-ts"]]);
+  calls.length = 0;
+  assert.equal(releaseAfterSuite(["python-build", "packages/cultnet-py"], runner(0, 3)), 3);
+  assert.deepEqual(calls, [suiteCall, ["python", ["-m", "build", "packages/cultnet-py"], undefined]]);
+  for (const action of ["npm-publish", "python-build"]) {
+    calls.length = 0;
+    assert.equal(releaseAfterSuite([action, "packages/x"], runner(1)), 1);
+    assert.deepEqual(calls, [suiteCall], action);
+  }
+  for (const argv of [[], ["npm-publish"], ["constructor", "x"], ["npm-publish", "x", "y"]]) {
+    calls.length = 0;
+    assert.equal(releaseAfterSuite(argv, runner(0)), 2, argv.join(" "));
+    assert.deepEqual(calls, []);
+  }
+  // run as a script, a usage error exits 2 before the suite runs
+  const script = fileURLToPath(new URL("./release-after-suite.mjs", import.meta.url));
+  assert.throws(() => execFileSync(process.execPath, [script], { stdio: "pipe" }), (error) => error.status === 2);
 });
 
 test("the Unity release scripts run the suite before the checker; removing it fails this test", () => {

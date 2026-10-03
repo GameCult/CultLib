@@ -29,3 +29,12 @@ packages/cultmesh-ts/native/**/*.so.* binary
 # ends in `\r`) while CI, checking out on Linux, stays green.
 packages/cultmesh-ts/native/SHA256SUMS text eol=lf
 packages/cultmesh-ts/native/MANIFEST.txt text eol=lf
+
+# CultMath source keeps CRLF in the working tree on every checkout. The release
+# gate compares the CultMath.dll it builds with the one org.gamecult.cultmath
+# tracks, byte for byte, and the bytes follow the checkout's line endings: the
+# pdb's document checksums feed the DLL's pdb id, timestamp and MVID. The
+# tracked DLL was built from CRLF source, so CRLF here keeps it valid, and an
+# LF-configured or Linux clone builds the same bytes as a Windows one. The index
+# stays LF; only the checkout changes.
+packages/cultmath/src/** text eol=crlf
