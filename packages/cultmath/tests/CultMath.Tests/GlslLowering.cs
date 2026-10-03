@@ -4,24 +4,66 @@ using System.Text.RegularExpressions;
 namespace CultMath.Tests;
 
 /// <summary>
-/// The HLSL to GLSL ES 3.00 transformation that produces <c>shaders/CultMath.glsl</c> from
-/// <c>shaders/CultMath.hlsl</c>. The steps below, in order, are the complete list documented in
-/// docs/design.md (GLSL Target: Source Transformations). A dialect gap outside the list is fixed in the
-/// HLSL, in the subset both languages share, never by a special case here; GlslMirrorTests fails on any
-/// HLSL-only token that survives.
+/// The HLSL to GLSL ES 3.00 transformation that produces <c>shaders/CultMath.glsl</c>, and one file per
+/// <see cref="SeparateFiles"/> entry, from <c>shaders/CultMath.hlsl</c> and its includes. The steps below,
+/// in order, are the complete list documented in docs/design.md (GLSL Target: Source Transformations).
+/// A dialect gap outside the list is fixed in the HLSL, in the subset both languages share, never by a
+/// special case here; GlslMirrorTests fails on any HLSL-only token that survives.
 /// </summary>
 internal static class GlslLowering
 {
-    internal const string ProvenanceLine =
-        "// Generated from shaders/CultMath.hlsl and its includes by GlslLowering " +
-        "(packages/cultmath/tests/CultMath.Tests/GlslLowering.cs). Do not edit; regenerate with " +
+    /// <summary>
+    /// Includes under a file-level licence of their own: each is lowered into its own output file instead
+    /// of being inlined, so CultMath.glsl stays MIT. This table is the lowering's only rule keyed by name.
+    /// </summary>
+    internal static readonly IReadOnlyDictionary<string, (string Glsl, string Licence)> SeparateFiles =
+        new Dictionary<string, (string, string)>
+        {
+            // Phacelle is a port of MPL-2.0 code, and MPL-2.0 covers the files that carry it.
+            ["CultMath.Phacelle.hlsl"] = ("CultMath.Phacelle.glsl", "MPL-2.0"),
+        };
+
+    private const string Regenerate =
+        "by GlslLowering (packages/cultmath/tests/CultMath.Tests/GlslLowering.cs). Do not edit; regenerate with " +
         "CULTMATH_WRITE_GLSL=1 dotnet test --filter GlslMirrorTests.";
 
     /// <summary>
-    /// Lowers the HLSL text whose includes are already inlined in place (step 1:
-    /// <see cref="HlslSourceCompatibilityTests.ReadShaderSource"/>, the C# mirror's own resolver).
+    /// The lowered files as (name under shaders/, text): CultMath.glsl first, then one per
+    /// <see cref="SeparateFiles"/> entry, which requires CultMath.glsl before it.
     /// </summary>
-    internal static string Lower(string hlsl)
+    internal static IReadOnlyList<(string File, string Text)> Lower(string cultMathRoot)
+    {
+        // 1. Each #include is inlined in place by the C# mirror's own resolver, except a SeparateFiles
+        //    include, which leaves nothing behind and is lowered into its own file.
+        var inlined = new List<string>();
+        var library = HlslSourceCompatibilityTests.ReadShaderSource(cultMathRoot, name =>
+        {
+            if (SeparateFiles.ContainsKey(name))
+                return false;
+            inlined.Add(name);
+            return true;
+        });
+
+        var outputs = new List<(string File, string Text)>();
+        var pointers = new List<string>();
+        foreach (var (hlsl, (glsl, licence)) in SeparateFiles)
+        {
+            var text = LowerText(
+                File.ReadAllText(Path.Combine(cultMathRoot, "shaders", hlsl)),
+                $"// Generated from shaders/{hlsl} {Regenerate} {licence}; requires CultMath.glsl before it.",
+                glsl);
+            var functions = Regex.Matches(text, @"(?m)^\w+\s+(cultmath_\w+)\s*\(").Select(m => m.Groups[1].Value);
+            pointers.Add($" {string.Join(", ", functions)} is in {glsl}, to be concatenated after this file by consumers that call it.");
+            outputs.Add((glsl, text));
+        }
+
+        var includes = string.Concat(inlined.Select(name => " and " + name));
+        outputs.Insert(0, ("CultMath.glsl", LowerText(
+            library, $"// Generated from shaders/CultMath.hlsl{includes} {Regenerate} MIT.{string.Concat(pointers)}", "CultMath.glsl")));
+        return outputs;
+    }
+
+    private static string LowerText(string hlsl, string provenance, string file)
     {
         var source = hlsl.ReplaceLineEndings("\n");
 
@@ -56,8 +98,9 @@ internal static class GlslLowering
 
         // 7. Float literals pass through: HLSL's unsuffixed 0.5 and 1.0e30 are GLSL literals already.
 
-        // 8. The CULTMATH_GLSL guard, and 9. the provenance line.
-        return ProvenanceLine + "\n#ifndef CULTMATH_GLSL\n#define CULTMATH_GLSL\n" + source.Trim('\n') + "\n\n#endif\n";
+        // 8. The guard named for the file (CultMath.glsl -> CULTMATH_GLSL), and 9. the provenance line.
+        var guard = file.ToUpperInvariant().Replace('.', '_');
+        return provenance + "\n#ifndef " + guard + "\n#define " + guard + "\n" + source.Trim('\n') + "\n\n#endif\n";
     }
 
     private static readonly Regex Cast = new(@"\((float|int|uint)\)");

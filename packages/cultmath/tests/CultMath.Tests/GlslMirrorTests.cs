@@ -1,5 +1,7 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CultMath;
 using Xunit;
@@ -7,34 +9,40 @@ using Xunit;
 namespace CultMath.Tests;
 
 /// <summary>
-/// shaders/CultMath.glsl is derived: it is exactly <see cref="GlslLowering.Lower"/> of the committed HLSL,
-/// no HLSL-only token survives the lowering, no public function is dropped except the texture samplers,
-/// and the golden fixture a WebGL2 consumer evaluates is C#'s current output. With CULTMATH_WRITE_GLSL=1
-/// set, the first and last tests write the committed files before comparing, which is the one
-/// regeneration path.
+/// shaders/CultMath.glsl and shaders/CultMath.Phacelle.glsl are derived: each is exactly its
+/// <see cref="GlslLowering.Lower"/> output from the committed HLSL, no HLSL-only token survives the
+/// lowering, no public function is dropped except the texture samplers, the MPL-2.0 Phacelle code lives
+/// only in its own file, and the golden fixture a WebGL2 consumer evaluates is C#'s current output. With
+/// CULTMATH_WRITE_GLSL=1 set, the first and last tests write the committed files before comparing, which
+/// is the one regeneration path.
 /// </summary>
 public sealed class GlslMirrorTests
 {
+    private readonly ITestOutputHelper output;
+
+    public GlslMirrorTests(ITestOutputHelper output) => this.output = output;
+
     private static bool Write => Environment.GetEnvironmentVariable("CULTMATH_WRITE_GLSL") == "1";
 
     private static string Root => HlslSourceCompatibilityTests.FindCultMathRoot();
-
-    private static string GlslPath => Path.Combine(Root, "shaders", "CultMath.glsl");
 
     private static string FixturePath => Path.Combine(Root, "tests", "CultMath.Tests", "fixtures", "glsl-parity.json");
 
     private static string Hlsl => HlslSourceCompatibilityTests.ReadShaderSource(Root).ReplaceLineEndings("\n");
 
-    private static string Lowered => GlslLowering.Lower(HlslSourceCompatibilityTests.ReadShaderSource(Root));
+    private static IReadOnlyList<(string File, string Text)> Lowered => GlslLowering.Lower(Root);
 
     [Fact]
     public void CommittedGlslEqualsLowering()
     {
-        var expected = Lowered;
-        if (Write)
-            File.WriteAllText(GlslPath, expected);
-        var committed = File.ReadAllText(GlslPath).ReplaceLineEndings("\n");
-        Assert.True(committed == expected, "shaders/CultMath.glsl is not the lowering of the committed HLSL (regenerate with CULTMATH_WRITE_GLSL=1):\n" + UnifiedDiff(committed, expected));
+        foreach (var (file, expected) in Lowered)
+        {
+            var path = Path.Combine(Root, "shaders", file);
+            if (Write)
+                File.WriteAllText(path, expected);
+            var committed = File.ReadAllText(path).ReplaceLineEndings("\n");
+            Assert.True(committed == expected, $"shaders/{file} is not the lowering of the committed HLSL (regenerate with CULTMATH_WRITE_GLSL=1):\n" + UnifiedDiff(committed, expected));
+        }
     }
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
@@ -44,8 +52,11 @@ public sealed class GlslMirrorTests
     [Fact]
     public void NoHlslOnlyTokensSurvive()
     {
-        var survivors = HlslOnly.Matches(Lowered).Select(m => m.Value).Distinct().ToArray();
-        Assert.True(survivors.Length == 0, "HLSL-only tokens in the lowering: " + string.Join(", ", survivors));
+        foreach (var (file, text) in Lowered)
+        {
+            var survivors = HlslOnly.Matches(text).Select(m => m.Value).Distinct().ToArray();
+            Assert.True(survivors.Length == 0, $"HLSL-only tokens in {file}: " + string.Join(", ", survivors));
+        }
     }
 
     private static readonly Regex Definition = new(@"(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)");
@@ -53,11 +64,21 @@ public sealed class GlslMirrorTests
     [Fact]
     public void EveryPublicFunctionIsLowered()
     {
+        var lowered = Lowered;
         var hlsl = Definition.Matches(Hlsl).Where(m => !Regex.IsMatch(m.Groups[2].Value, @"\b(Texture2D|SamplerState)\b"))
             .Select(m => m.Groups[1].Value).ToHashSet();
-        var glsl = Definition.Matches(Lowered).Select(m => m.Groups[1].Value).ToHashSet();
+        var glsl = lowered.SelectMany(output => Definition.Matches(output.Text)).Select(m => m.Groups[1].Value).ToHashSet();
         Assert.Contains("cultmath_snoise", glsl);
         Assert.True(hlsl.SetEquals(glsl), "HLSL only: " + string.Join(", ", hlsl.Except(glsl)) + "; GLSL only: " + string.Join(", ", glsl.Except(hlsl)));
+
+        // The MPL-2.0 code is in its own file and nowhere in the MIT library.
+        var library = lowered.Single(output => output.File == "CultMath.glsl").Text;
+        var phacelle = lowered.Single(output => output.File == "CultMath.Phacelle.glsl").Text;
+        foreach (var token in new[] { "cultmath_phacelle(", "CultPhasor" })
+        {
+            Assert.DoesNotContain(token, library);
+            Assert.Contains(token, phacelle);
+        }
     }
 
     [Fact]
@@ -70,9 +91,58 @@ public sealed class GlslMirrorTests
             File.WriteAllText(FixturePath, expected);
         }
 
-        var committed = File.ReadAllText(FixturePath).ReplaceLineEndings("\n");
-        Assert.True(committed == expected, "fixtures/glsl-parity.json is not C#'s current output (regenerate with CULTMATH_WRITE_GLSL=1):\n" + UnifiedDiff(committed, expected));
+        // Family by family: every family is compared as text, except one whose tolerance names the
+        // platform, whose results are compared case by case within one ulp.
+        var committed = JsonNode.Parse(File.ReadAllText(FixturePath))!.AsObject();
+        var current = JsonNode.Parse(expected)!.AsObject();
+        var committedFamilies = committed["functions"]!.AsArray();
+        var currentFamilies = current["functions"]!.AsArray();
+        Assert.Equal(currentFamilies.Count, committedFamilies.Count);
+        for (var f = 0; f < currentFamilies.Count; f++)
+        {
+            var want = currentFamilies[f]!.AsObject();
+            var have = committedFamilies[f]!.AsObject();
+            var name = (string)want["glsl"]!;
+            Assert.Equal(name, (string?)have["glsl"]);
+            Assert.Equal((string)want["tolerance"]!, (string?)have["tolerance"]);
+            if (((string)want["tolerance"]!).Contains(PlatformTolerance))
+            {
+                var ulps = MaxUlps(have["cases"]!.AsArray(), want["cases"]!.AsArray(), name);
+                output.WriteLine($"{name}: within {ulps} ulp of this platform's exp ({RuntimeInformation.OSDescription}); fixture generated on {have["platform"]}");
+                Assert.True(ulps <= 1, $"{name}: {ulps} ulp from this platform's result, more than 1");
+            }
+            else
+            {
+                Assert.True(JsonNode.DeepEquals(want, have), $"fixtures/glsl-parity.json family {name} is not C#'s current output (regenerate with CULTMATH_WRITE_GLSL=1)");
+            }
+        }
+
+        committed.Remove("functions");
+        current.Remove("functions");
+        Assert.True(JsonNode.DeepEquals(current, committed), "fixtures/glsl-parity.json header is not the generator's (regenerate with CULTMATH_WRITE_GLSL=1)");
     }
+
+    // The largest distance in float32 ulps between two families' results; arguments must be identical.
+    private static long MaxUlps(JsonArray committed, JsonArray current, string name)
+    {
+        Assert.Equal(current.Count, committed.Count);
+        long max = 0;
+        for (var c = 0; c < current.Count; c++)
+        {
+            var have = ((string)committed[c]!).Split(" -> ");
+            var want = ((string)current[c]!).Split(" -> ");
+            Assert.True(have[0] == want[0], $"{name} case {c}: arguments differ");
+            var haveBits = have[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
+            var wantBits = want[1].Split(' ').Select(h => (int)Convert.ToUInt32(h, 16)).ToArray();
+            Assert.Equal(wantBits.Length, haveBits.Length);
+            max = Math.Max(max, haveBits.Zip(wantBits, (x, y) => Math.Abs((long)Ordered(x) - Ordered(y))).Max());
+        }
+
+        return max;
+    }
+
+    // A float32 bit pattern as an integer whose order and differences are the floats' order and ulps.
+    private static int Ordered(int bits) => bits < 0 ? int.MinValue - bits : bits;
 
     // ---- The golden fixture ----
 
@@ -92,9 +162,14 @@ public sealed class GlslMirrorTests
         return new float2(centre - width * 0.5f, centre + width * 0.5f);
     }
 
-    // Every family the site's WebGL2 readback evaluates. pcg3d and pcg4d are integer-only and must match
-    // exactly; the float families are ulp-bounded, with the bound measured on the device by the consumer.
-    // iv_exp is left out: it calls the platform's exp, so its C# bits are not the same on every OS.
+    // A tolerance containing this names a family whose C# bits come from the platform's exp and so differ
+    // by OS: GoldenFixtureMatchesCSharp compares it within one ulp, and its entry records the platform.
+    private const string PlatformTolerance = "platform exp";
+
+    // Every family the site's WebGL2 readback evaluates, in a fixed order. A new family is appended, so the
+    // seeded stream and every earlier family's cases stay as they were. pcg3d, pcg4d and iv_frustum_ball
+    // are "exact"; the other float families are ulp-bounded, with the bound measured on the device by the
+    // consumer.
     private static readonly Family[] Families =
     {
         new("float cultmath_snoise(vec3)", "ulp-bounded", r => new object[] { Point3(r) }),
@@ -122,6 +197,13 @@ public sealed class GlslMirrorTests
         new("vec2 cultmath_iv_lerp(vec2, vec2, float)", "ulp-bounded", r => new object[] { Interval(r), Interval(r), Uniform(r, 0.0f, 1.0f) }),
         new("vec2 cultmath_iv_snoise_ball(vec3, float)", "ulp-bounded", r => new object[] { Point3(r), Uniform(r, 0.001f, 2.0f) }),
         new("vec2 cultmath_iv_fbm_ball(vec3, float, int, float, float)", "ulp-bounded", r => new object[] { Point3(r), Uniform(r, 0.001f, 2.0f), 4, 2.0f, 0.5f }),
+        new("vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)", "exact", r =>
+        {
+            var slope = new float2(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f));
+            var z0 = Uniform(r, 0.1f, 100.0f);
+            return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
+        }),
+        new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, " + PlatformTolerance, r => new object[] { Interval(r) }),
     };
 
     private static string GoldenFixture()
@@ -141,6 +223,8 @@ public sealed class GlslMirrorTests
             json.Append("    {\n");
             json.Append($"      \"glsl\": \"{family.Glsl}\",\n");
             json.Append($"      \"tolerance\": \"{family.Tolerance}\",\n");
+            if (family.Tolerance.Contains(PlatformTolerance))
+                json.Append($"      \"platform\": \"{RuntimeInformation.OSDescription}; {RuntimeInformation.FrameworkDescription}\",\n");
             json.Append("      \"cases\": [\n");
             for (var p = 0; p < Points; p++)
             {
