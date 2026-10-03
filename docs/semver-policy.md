@@ -163,19 +163,25 @@ or a missing declaration refuses), and:
    the version's own refuses, because a first release cannot be told from a
    missing record. Older tags of which none is an ancestor leave the
    predecessor unknown and refuse. Otherwise it is a first release, which no
-   caller declares, only when no tag in the repository, under any prefix, tracks
-   a file under the package's folder (its declared assemblies directory, else
-   the directory of its changelog): a tag that tracks one means the package has
+   caller declares. A package that declares an assemblies directory is a first
+   release only when no tag in the repository, under any prefix, tracks a
+   managed assembly under that directory: such a tag means the package has
    shipped, so the declared prefix is wrong and the check refuses, naming the
-   tag. This is read from git, never from the changelog's prose. The version's
-   own tag does not count, so a first release can be rebuilt. Only the declared
-   folder counts: a package whose folder moved after its releases has none of
-   its old path's tags counted, so its release under a misspelled prefix reads
-   as new, and the move itself is caught only under the right prefix, where
-   the declared folder holds no managed assembly at the previous tag. A
-   package whose files other packages' tags track (a monorepo tag tracks every
-   package in the tree) cannot be released first through this check once such a
-   tag exists.
+   tag and the assembly. A tag snapshots the whole tree of this monorepo, so a
+   tag tracking a package's directory proves nothing; only a managed assembly in
+   the declared directory does. This is read from git, never from the changelog's
+   prose. The version's own tag does not count, so a first release can be
+   rebuilt. Only the declared directory counts: a package whose directory moved
+   after its releases has none of its old path's tags counted, so its release
+   under a misspelled prefix reads as new, and the move itself is caught only
+   under the right prefix, where the declared directory holds no managed assembly
+   at the previous tag. A package that declares no assemblies directory (the
+   Python and TypeScript packages and the Caching Unity package) has no such
+   proof: with no tag of its own prefix it is a first release. The suite test
+   that pins every declared prefix guards it: each workflow tag trigger must be a
+   declared prefix, and each such package's prefix must be a workflow trigger or
+   a prefix some tag in the repository already carries, so a typo in the
+   declaration fails the suite before any release.
    Tags that cannot be read (a `--cwd` that is not a git repository, or a tag
    whose tree cannot be listed) refuse;
 2. requires a `## [<version>]` changelog entry to exist at all;
