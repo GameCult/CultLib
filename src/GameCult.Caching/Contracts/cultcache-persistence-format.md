@@ -178,23 +178,25 @@ A schema type declares the older ids its records may sit under: `CultDocumentAtt
 (C#), `compatibleSchemaIds` (TypeScript, Python). The registered catalog entry lists them after its own id, and
 the cache restamps a record loaded under one to the type's own id, so the next write of that record carries the
 registered id. A record another writer left under a declared id, and that a commit does not rewrite, stays under it
-and the registered entry publishes it. Without the declaration, a C# commit onto a file that holds a record under an
-id only the file's entry lists is refused, typed, and the file is left as it was. Rust has no such declaration.
+and the registered entry publishes it. Without the declaration such a record is read-only to the cache (see
+ownership by declaration, below). Rust has no such declaration.
 
 A cache resolves a record to a local type by the record's schema id: the registered type that owns
 the id, else one that lists it as compatible. The name the catalog entry carries is metadata. It
-names a local type only when no local type has the id, for a store written by a runtime whose
-schema ids this one cannot know (a Rust type's schema id is its entry type). A schema renamed under
-a stable id therefore opens in every runtime that holds the id.
+names a local type only when no local type has the id, and then only to read with: a record so
+resolved is read-only (below). That serves a store written by a runtime whose schema ids this one
+cannot know (a Rust type's schema id is its entry type). A schema renamed under a stable id
+therefore opens in every runtime that holds the id.
 
-A write copies forward what it did not stage. A record a cache resolved through the catalog's schema
-name, or through an entry pointing at a local id, is readable, but its id is not one its type owns
-or declares compatible: a write of another record copies it with its id, storedAt, bytes and
-catalog entry exactly as they were stored. Only a write of that record itself stores it under the
-type's own id.
+**A cache owns exactly the schema ids its types register or declare compatible.** A record stored
+under any other id that a type can read, through the catalog's schema name or an entry listing a
+local id, is loaded read-only: Get and queries serve it, a write of another record copies it as
+stored, and a staged write or removal of it (upsert, variant upsert, flatten, remove, commit) is
+refused with the typed schema conflict before anything is staged. Declaring its id compatible on a
+type claims it: the next write stores it under that type's own id.
 
 A record that resolves to no local type is a foreign record, for example one of a type this build does not
-have, or one renamed without declaring its old id. A store never destroys or relabels it: the store carries it
+have, or one renamed under a new schema name without declaring its old id. A store never destroys or relabels it: the store carries it
 byte for byte under its own id and its own catalog entry, lists it as foreign (`CacheBackingStore.ForeignRecords`
 in C#), and the cache never holds it. Writes of other records proceed and copy it forward as the file holds it. A write that would replace or remove it is refused with the typed schema conflict
 naming its key and id, and nothing is written. The refused keys are reloaded as the store holds them (a foreign record is not held), and their staged changes are forgotten. A write that carries a record forward keeps a marked header marked. Declaring its id on a type claims it at the next load.

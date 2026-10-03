@@ -154,10 +154,12 @@ namespace GameCult.Caching
     }
 
     /// <summary>
-    /// A record a store carries untouched because no registered type owns its schema id or lists it as compatible, for example a
-    /// record of a type this build does not have, or one renamed without declaring its old id. The store keeps its bytes as the
-    /// file holds them, a write of another record keeps it, and a write that would replace or remove it is refused with a
+    /// A record a store carries untouched because no registered type can read it, for example a record of a type this build does
+    /// not have, or one renamed under a new schema name without declaring its old id. The store keeps its bytes as the file holds
+    /// them, a write of another record keeps it, and a write that would replace or remove it is refused with a
     /// <see cref="CultSchemaConflictException"/>. The cache never holds it. Declaring its schema id on a type claims it at the next load.
+    /// A record a type can read (through the catalog's schema name) but no type owns or declares is not foreign: the cache holds it
+    /// read-only, and the same refusal applies to a write or removal of it.
     /// </summary>
     public sealed class CultForeignRecord
     {
@@ -2060,7 +2062,8 @@ namespace GameCult.Caching
 
         // The one-shot rewrite for stores written before element ids existed: upserts every record whose ids exist only in
         // memory (minted when it loaded), through the normal write path, one commit per home store. Returns how many records
-        // it rewrote; a second call finds none.
+        // it rewrote; a second call finds none. A selected record stored under an id no registered type declares is read-only,
+        // so its home store's commit is refused with CultSchemaConflictException; commits to earlier stores stand.
         public int MintElementIds()
         {
             var groups = Held(() => _entries.Values
@@ -2302,12 +2305,14 @@ namespace GameCult.Caching
             return UpsertAsync(document, handle);
         }
 
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public Task<CultRecordHandle<T>> UpsertAsync<T>(T document, CultRecordHandle<T>? handle = null)
         {
             if (document == null) throw new ArgumentNullException(nameof(document));
             return Task.FromResult(new CultRecordHandle<T>(Write(document, handle?.Key)));
         }
 
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public Task<CultRecordKey> UpsertAsync(Type documentType, object document, CultRecordKey? key = null)
         {
             RequireInstanceOf(documentType, document);
@@ -2315,6 +2320,7 @@ namespace GameCult.Caching
         }
 
         // A single-call variant write; a batch stages the same thing with CultCacheBatch.UpsertVariant.
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public Task<CultRecordKey> UpsertVariantAsync(CultRecordKey key, CultRecordKey baseKey, IEnumerable<CultVariantOverride>? overrides = null)
         {
             var delta = new CultVariantDelta(baseKey.Value, (overrides ?? Array.Empty<CultVariantOverride>()).ToArray());
@@ -2331,6 +2337,7 @@ namespace GameCult.Caching
         }
 
         // Replaces a variant with a plain record holding its resolved document (Q1a's explicit operation).
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public Task<CultRecordKey> FlattenAsync(CultRecordKey key) => Task.FromResult(Held(() =>
         {
             var stored = StampFlatten(key);
@@ -2342,6 +2349,7 @@ namespace GameCult.Caching
             return key;
         }));
 
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
         public bool Remove(CultRecordKey key) => Held(() =>
         {
             if (!_entries.TryGetValue(key.Value, out var existing))
