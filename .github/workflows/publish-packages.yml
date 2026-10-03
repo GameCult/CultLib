@@ -10,8 +10,8 @@ name: Publish packages
 #
 # Tag a release to publish, for example `cultcache-ts-v0.13.6` or
 # `cultnet-py-v0.1.0`. The tag's version must match the version in the package
-# manifest; the workflow refuses the publish otherwise rather than shipping a
-# mislabelled artifact.
+# manifest; scripts/release-after-suite.mjs refuses the release otherwise rather
+# than shipping a mislabelled artifact.
 
 on:
   push:
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # fetch-depth: 0 so the semver check below can see every previously
+      # fetch-depth: 0 so the semver check in the release step can see every previously
       # published tag, not just the one that triggered this run.
       - name: Check out CultLib
         uses: actions/checkout@v4
@@ -64,34 +64,20 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
-      - name: Verify the tag matches the manifest version
-        if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
-        run: |
-          manifest="$(node -p "require('./packages/cultcache-ts/package.json').version")"
-          tagged="${GITHUB_REF_NAME#cultcache-ts-v}"
-          if [ "$manifest" != "$tagged" ]; then
-            echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
-            exit 1
-          fi
-
-      # docs/semver-policy.md: a breaking change under too small a bump, or a
-      # version that skips or reverses the previous release, fails here
-      # instead of shipping with a number that lies.
-      - name: Verify semver policy
-        if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
-        run: |
-          tagged="${GITHUB_REF_NAME#cultcache-ts-v}"
-          node scripts/check-changelog-semver.mjs --package "@gamecult/cultcache-ts" --version "$tagged"
-
+      # Manual runs publish nothing, so they build and test here. A tag run's
+      # Publish runs these tests itself.
       - name: Build and test
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         working-directory: packages/cultcache-ts
         run: npm test
 
-      # Runs the release-checks suite, then npm publish --access public, in one
-      # process that publishes only if the suite passed (docs/semver-policy.md).
+      # One process checks that the tag is the manifest version, runs the
+      # release-checks suite, the semver policy check (docs/semver-policy.md)
+      # and npm test, and only then runs npm publish --access public. Only
+      # npm publish receives the token.
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
-        run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts
+        run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -123,7 +109,7 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # fetch-depth: 0 so the semver check below can see every previously
+      # fetch-depth: 0 so the semver check in the release step can see every previously
       # published tag, not just the one that triggered this run.
       - name: Check out CultLib
         if: steps.selected.outputs.run == 'true'
@@ -149,40 +135,20 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Verify the tag matches the manifest version
-        if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          manifest="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('packages/${{ matrix.package }}/pyproject.toml').read_text())['project']['version'])")"
-          tagged="${GITHUB_REF_NAME#${{ matrix.package }}-v}"
-          if [ "$manifest" != "$tagged" ]; then
-            echo "tag $GITHUB_REF_NAME does not match manifest version $manifest" >&2
-            exit 1
-          fi
-
-      # docs/semver-policy.md: a breaking change under too small a bump, or a
-      # version that skips or reverses the previous release, fails here
-      # instead of shipping with a number that lies.
-      - name: Verify semver policy
-        if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          tagged="${GITHUB_REF_NAME#${{ matrix.package }}-v}"
-          node scripts/check-changelog-semver.mjs --package "${{ matrix.package }}" --version "$tagged"
-
       # Lower layers install from source so a release of one package is tested
       # against the sibling revision it was cut with, not whatever PyPI has.
-      - name: Install and test
+      - name: Install
         if: steps.selected.outputs.run == 'true'
-        run: |
-          python -m pip install --upgrade build -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py
-          python -m unittest discover -s packages/${{ matrix.package }}/tests
+        run: python -m pip install --upgrade build -e packages/cultcache-py -e packages/cultnet-py -e packages/cultmesh-py
 
-      # Runs the release-checks suite, then builds the sdist and wheel, in one
-      # process that builds only if the suite passed (docs/semver-policy.md).
-      # Publish uploads only what this step built, so it has nothing to upload
-      # unless the suite passed.
+      # One process checks, on a tag, that the tag is the manifest version, runs
+      # the release-checks suite, on a tag the semver policy check
+      # (docs/semver-policy.md), and the package's unit tests, and only then
+      # builds the sdist and wheel. Publish uploads only what this step built,
+      # so it has nothing to upload unless every check passed.
       - name: Build sdist and wheel
         if: steps.selected.outputs.run == 'true'
-        run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }}
+        run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"
 
       - name: Publish
         if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
