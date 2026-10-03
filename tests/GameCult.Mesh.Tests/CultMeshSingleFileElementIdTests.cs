@@ -17,6 +17,8 @@ public sealed class CultMeshSingleFileElementIdTests
 {
     private const string HexA = "aaaaaaaaaaaa";
     private static readonly CultRecordKey Key = new("publication");
+    // A raw write lands beside the typed record, never over it: neither declares the other's schema id.
+    private static readonly CultRecordKey RawKey = new("raw");
 
     private string _root = null!;
 
@@ -84,12 +86,12 @@ public sealed class CultMeshSingleFileElementIdTests
         var schema = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
         var payload = new byte[] { 0x90 };
 
-        CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, payload);
+        CultMesh.WriteSingleFileDocumentPayload(path, RawKey, schema, null, payload);
         HeaderOf(path).Should().Be("cultcache.store.v1");
 
         CultMesh.WriteSingleFileDocument(path, Key, Publication(Descriptor()));
         HeaderOf(path).Should().Be("cultcache.store.v3");
-        CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, payload);
+        CultMesh.WriteSingleFileDocumentPayload(path, RawKey, schema, null, payload);
         HeaderOf(path).Should().Be("cultcache.store.v3", "the payload's ids are not the writer's to see");
     }
 
@@ -102,7 +104,7 @@ public sealed class CultMeshSingleFileElementIdTests
         var marked = Path_("marked.cc");
         CultMesh.WriteSingleFileDocument(marked, Key, Publication(Descriptor()));
 
-        CultMesh.WriteSingleFileDocumentPayload(marked, Key, schema, null, new byte[] { 0x90 });
+        CultMesh.WriteSingleFileDocumentPayload(marked, RawKey, schema, null, new byte[] { 0x90 });
         HeaderOf(marked).Should().Be("cultcache.store.v3", "a whole marked file is still written and stays marked");
     }
 

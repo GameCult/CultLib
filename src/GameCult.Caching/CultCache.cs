@@ -693,9 +693,7 @@ namespace GameCult.Caching
             if (indexes.BySchemaId.TryGetValue(schemaId, out var exact))
                 return exact;
 
-            // A schema is published by its id or as a compatible id.
-            persisted = catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
-                        ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
+            persisted = PublishedBy(schemaId, catalog);
             if (persisted == null)
             {
                 throw new InvalidOperationException($"Persisted schema '{schemaId}' is not present in the embedded catalog.");
@@ -734,6 +732,11 @@ namespace GameCult.Caching
 
             return null;
         }
+
+        // The catalog entry a record under this id is published by: the entry that owns the id, else the first that lists it compatible.
+        internal static CultSchemaCatalogEntry? PublishedBy(string schemaId, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+            catalog.FirstOrDefault(entry => string.Equals(entry.SchemaId, schemaId, StringComparison.Ordinal))
+            ?? catalog.FirstOrDefault(entry => entry.CompatibleSchemaIds.Contains(schemaId, StringComparer.Ordinal));
 
         // The one answer to whether a cache may write, relabel or remove a record stored under this id: a registered type owns it or
         // declares it compatible. Read live, so a type registered later that declares the id claims its records at their next write.
@@ -3632,21 +3635,32 @@ namespace GameCult.Caching
                 throw Overwrites(null, new[] { (key, held.StoredSchemaId, held.Descriptor.SchemaName) });
         }
 
-        // The one decision of whether a write may proceed over what the file holds as foreign, for every store kind. A key this
-        // cache writes or removes (staged, or in a batch) that the file now holds foreign is refused, every such key at once,
-        // through Refuse: a foreign record is not held, so the cache drops its copy and the store forgets its staged change. A record
-        // this cache holds but did not write is not refused: it stays until a pull drops it, and the write that never touched it lands.
-        protected void RefuseForeign(IEnumerable<string> written, Func<string, CultForeignRecord?> foreignAt, Action<string> unstage)
+        // A stored record under an id the writer does not declare, named by the catalog entry that publishes the id. Header only: no
+        // payload is decoded. Null for a record under a declared id.
+        protected static (string Key, string SchemaId, string SchemaName)? Undeclared(
+            CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog, Func<string, bool> declares) =>
+            declares(record.SchemaId)
+                ? null
+                : (record.Key, record.SchemaId, CultDocumentRegistry.PublishedBy(record.SchemaId, catalog)?.SchemaName ?? string.Empty);
+
+        // The apply half of rule 3, for every store kind, checked where the write lands under the store's lock. A key this write names
+        // whose durable record is under an id no registered type declares is refused, every such key at once, through Refuse, which
+        // reloads it as the store holds it: dropped when foreign, held read-only when a type reads it.
+        protected void RefuseUndeclaredOnDisk(
+            IEnumerable<string> written,
+            Func<string, (string Key, string SchemaId, string SchemaName)?> undeclaredAt,
+            Func<string, CultStoredDocument?> durableAt,
+            Action<string> unstage,
+            bool cacheless = false)
         {
             var refused = written.Distinct(StringComparer.Ordinal)
-                .Select(foreignAt)
-                .OfType<CultForeignRecord>()
+                .Select(undeclaredAt)
+                .OfType<(string Key, string SchemaId, string SchemaName)>()
                 .OrderBy(record => record.Key, StringComparer.Ordinal)
                 .ToArray();
             if (refused.Length == 0)
                 return;
-            Refuse(refused.Select(record => record.Key), _ => null, unstage,
-                inner => Overwrites(inner, refused.Select(record => (record.Key, record.SchemaId, record.SchemaName)).ToArray()));
+            Refuse(refused.Select(record => record.Key), durableAt, unstage, inner => Overwrites(inner, refused, cacheless));
         }
 
         /// <summary>
@@ -3722,10 +3736,14 @@ namespace GameCult.Caching
         // The one refusal of a write onto records stored under ids no registered type declares, carried foreign or held read-only.
         // It names each record's key, stored id and schema name, never its payload. When the reload that refusal owes failed, the
         // refusal carries that failure as its inner exception.
-        protected CultSchemaConflictException Overwrites(Exception? inner, (string Key, string SchemaId, string SchemaName)[] refused) => new(
+        // A cacheless writer (a CultMesh single-file write) declares only the catalog entry it writes, and has nothing to reload.
+        protected CultSchemaConflictException Overwrites(Exception? inner, (string Key, string SchemaId, string SchemaName)[] refused, bool cacheless = false) => new(
             $"{(refused.Length == 1 ? "Record" : "Records")} {string.Join(", ", refused.Select(record => $"'{record.Key}' (schema id '{record.SchemaId}', '{record.SchemaName}')"))} in {this}: " +
-            "no registered type owns this schema id or declares it compatible, so this cache never writes, relabels or removes it. " +
-            "Declare the id compatible on the type that should own it." +
+            (cacheless
+                ? "the catalog entry this write publishes neither owns this schema id nor lists it compatible, so the write never relabels or removes it; nothing was written and nothing was reloaded. " +
+                  "List the id as compatible on the schema that should own it."
+                : "no registered type owns this schema id or declares it compatible, so this cache never writes, relabels or removes it. " +
+                  "Declare the id compatible on the type that should own it.") +
             (inner == null ? string.Empty : " Reloading what the write refused failed, so the cache is unchanged."),
             refused[0].SchemaId,
             refused.Select(record => record.SchemaName).Distinct(StringComparer.Ordinal).ToArray(),
@@ -3911,7 +3929,8 @@ namespace GameCult.Caching
 
         // A flush applies this store's staged writes and removals onto what the file holds now, under the lock: two writers never
         // interleave bytes, every record this cache did not stage stays as the file has it, and a plain flush is last-writer-wins
-        // only per staged key. In a store holding a variant it lands only onto the store as this cache last read it (ApplyWriteSet).
+        // only per staged key. A key whose durable record is under an id this cache does not declare refuses the write, and in a store
+        // holding a variant it lands only onto the store as this cache last read it (both ApplyWriteSet).
         // A file it cannot read (truncated, trailing bytes, not a store, a format it does not read) is refused and left as it is.
         public override void PushAll()
         {
@@ -3921,7 +3940,6 @@ namespace GameCult.Caching
                 using (AcquireLock(wait: true))
                 {
                     var disk = ReadSnapshot();
-                    RefuseForeign(_staged, disk);
                     var (upserts, removals) = StagedWrites(Array.Empty<CultStoredDocument>(), Array.Empty<CultStoredDocument>());
                     Wrote(ApplyWriteSet(disk, upserts, removals));
                 }
@@ -3951,7 +3969,6 @@ namespace GameCult.Caching
                     Entries.Values))
                 return CultCommitOutcome.Mismatch;
 
-            RefuseForeign(request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(_staged), disk);
             var (upserts, removals) = StagedWrites(request.Upserts, request.Deletes);
             var written = ApplyWriteSet(disk, upserts, removals);
             foreach (var entry in request.Deletes)
@@ -4013,7 +4030,8 @@ namespace GameCult.Caching
                 _ = ApplyWriteSet(ReadSnapshot(), upserts, removals);
         });
 
-        // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. A store that holds
+        // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. First, a key the write
+        // names whose durable record is under an id the writer does not declare refuses the write (RefuseUndeclaredOnDisk). Then a store that holds
         // a variant, or would after this write, is written only while its record versions are what this store last read: a variant
         // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Versions
         // only: a write hashes other records' bytes, never decodes them. Otherwise the whole write is refused and what it refused is
@@ -4022,6 +4040,7 @@ namespace GameCult.Caching
         // the bytes written.
         private IReadOnlyCollection<(CultStagedRecord Staged, string Version)> ApplyWriteSet(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
+            RefuseUndeclaredOnDisk(durable, upserts, removals);
             RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
             var durableRecords = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
             // A record written over one the store holds is stored at a storedAt later than the one it replaces, whoever wrote that.
@@ -4091,15 +4110,12 @@ namespace GameCult.Caching
 
             if (changed.Count == 0)
                 return;
-            var byKey = records.ToDictionary(record => record.Key, StringComparer.Ordinal);
             var recordKeys = _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals)
                 .Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).ToArray();
             var changedKeys = changed.OrderBy(key => key, StringComparer.Ordinal).ToArray();
             Refuse(
                 recordKeys.Concat(changedKeys),
-                key => Cache == null || !byKey.TryGetValue(key, out var record) || Foreign(record, durable!.Snapshot.SchemaCatalog) != null
-                    ? null
-                    : ToStoredDocument(record, versions[key], durable!.Snapshot.SchemaCatalog, DeserializePayload, out _),
+                key => Cache == null ? null : DurableAt(durable, key),
                 key =>
                 {
                     _staged.Remove(key);
@@ -4123,34 +4139,52 @@ namespace GameCult.Caching
                     inner));
         }
 
-        private void RefuseForeign(IEnumerable<string> written, Durable? disk)
+        // A cache declares through its registry. A cacheless CultMesh write declares the ids of the catalog entry it writes: its own id
+        // and the ids it lists compatible. A refused key's durable version is what this store has now read of it.
+        private void RefuseUndeclaredOnDisk(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
-            var foreign = ForeignOnDisk(disk);
-            RefuseForeign(
-                written,
-                key => foreign.TryGetValue(key, out var carried) ? carried : null,
+            Func<string, bool> declares = Cache != null
+                ? Registry.Declares
+                : id => upserts.Any(staged =>
+                    string.Equals(staged.Entry.SchemaId, id, StringComparison.Ordinal) ||
+                    staged.Entry.CompatibleSchemaIds.Contains(id, StringComparer.Ordinal));
+            var undeclared = UndeclaredOnDisk(durable, declares);
+            if (undeclared.Count == 0)
+                return;
+            RefuseUndeclaredOnDisk(
+                _staged.Concat(upserts.Select(staged => staged.Record.Key)).Concat(removals),
+                key => undeclared.TryGetValue(key, out var carried) ? carried : null,
+                key => Cache == null ? null : DurableAt(durable, key),
                 key =>
                 {
                     _staged.Remove(key);
                     IsDirty = _staged.Count > 0;
-                    if (foreign.ContainsKey(key))
-                        _lastRead[key] = disk!.Version(key);
-                    else
-                        _lastRead.Remove(key);
-                });
+                    _lastRead[key] = durable!.Version(key);
+                },
+                cacheless: Cache == null);
         }
 
-        // The records the file holds that no registered type claims, by key.
-        private Dictionary<string, CultForeignRecord> ForeignOnDisk(Durable? disk)
+        // Every durable record under an id the writer does not declare, by key, named by the catalog entry that publishes its id.
+        private static Dictionary<string, (string Key, string SchemaId, string SchemaName)> UndeclaredOnDisk(Durable? durable, Func<string, bool> declares)
         {
-            var foreign = new Dictionary<string, CultForeignRecord>(StringComparer.Ordinal);
-            foreach (var record in disk?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>())
+            var undeclared = new Dictionary<string, (string Key, string SchemaId, string SchemaName)>(StringComparer.Ordinal);
+            foreach (var record in durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>())
             {
-                if (Foreign(record, disk!.Snapshot.SchemaCatalog) is { } carried)
-                    foreign[record.Key] = carried;
+                if (Undeclared(record, durable!.Snapshot.SchemaCatalog, declares) is { } carried)
+                    undeclared[record.Key] = carried;
             }
 
-            return foreign;
+            return undeclared;
+        }
+
+        // The durable record at a key decoded as a load decodes it, at its durable version: null when the store holds none there or
+        // holds it foreign. The one decode both refusals reload through.
+        private CultStoredDocument? DurableAt(Durable? durable, string key)
+        {
+            var record = durable?.Snapshot.Records.FirstOrDefault(candidate => string.Equals(candidate.Key, key, StringComparison.Ordinal));
+            if (record == null || Foreign(record, durable!.Snapshot.SchemaCatalog) != null)
+                return null;
+            return ToStoredDocument(record, durable.Version(key), durable.Snapshot.SchemaCatalog, DeserializePayload, out _);
         }
 
         // The file now holds every record written, under the id and at the storedAt the write gave it, and the version of those bytes:

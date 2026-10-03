@@ -183,15 +183,20 @@ public sealed class CultMeshSingleFileStoreTests
         Snapshot(path).Records.Should().Contain(record => record.Variant != null);
         var key = new CultRecordKey(target switch { "variant" => "v", "base" => "a", _ => "z" });
 
-        var conflict = Assert.Throws<CultWriteConflictException>(() =>
+        void Write()
         {
             if (typed)
                 CultMesh.WriteSingleFileDocument(path, key, PublicationOf("z"));
             else
                 CultMesh.WriteSingleFileDocumentPayload(path, key, Raw, null, new byte[] { 0x90 });
-        })!;
+        }
 
-        conflict.Message.Should().Contain("CultCache");
+        // A raw write at the variant's or the base's key names a record under an id its entry does not declare, and that refusal is
+        // checked first.
+        if (!typed && target != "unrelated")
+            Assert.Throws<CultSchemaConflictException>(Write)!.RecordKey.Should().Be(key.Value);
+        else
+            Assert.Throws<CultWriteConflictException>(Write)!.Message.Should().Contain("CultCache");
         File.ReadAllBytes(path).Should().Equal(bytes);
     }
 
