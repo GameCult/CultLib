@@ -74,10 +74,11 @@ jobs:
       # One process checks that the tag is the manifest version, runs the
       # release-checks suite, the semver policy check (docs/semver-policy.md)
       # and npm test, and only then runs npm publish --access public. Only
-      # npm publish receives the token.
+      # npm publish receives the token. It starts without NODE_OPTIONS, so no
+      # preloaded module runs inside it.
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
-        run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"
+        run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

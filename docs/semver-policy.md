@@ -126,7 +126,9 @@ considered stable), not something the checker infers on its own.
 Every published package keeps a `CHANGELOG.md` beside its manifest
 (`unity/org.gamecult.cultlib/CHANGELOG.md` and
 `src/GameCult.Unity/Assets/Caching/CHANGELOG.md` are the existing precedent).
-Each release adds a `## [<version>]` section containing:
+Each release adds a `## [<version>]` section (the check also reads
+`## <version>`, and either form followed by Keep a Changelog's
+` - YYYY-MM-DD` date, such as `## [0.4.0] - 2026-10-03`) containing:
 
 - a category subsection per change (`### Added`, `### Changed`, `### Fixed`,
   etc., following Keep a Changelog style);
@@ -139,6 +141,22 @@ Each release adds a `## [<version>]` section containing:
 A version with no changelog entry at all fails the check below, the same as
 a mislabelled one — an undocumented release is not a smaller sin than a
 mislabelled one.
+
+### First release of a package
+
+A package with no `CHANGELOG.md` yet cannot release: the check refuses with
+"changelog not found". Its first release writes the file at the declared path,
+`packages/<package>/CHANGELOG.md`, with one section for the version being
+released. That version must still be exactly the next one after the package's
+nearest ancestor tag. As of 2026-10-03 the valid next versions are:
+
+- `cultcache-ts`, after `cultcache-ts-v0.14.0`: `0.14.1`, `0.15.0` or `1.0.0`;
+- `cultcache-py`, after `cultcache-py-v0.3.0`: `0.3.1`, `0.4.0` or `1.0.0`;
+- `cultnet-py` and `cultmesh-py`, which have no tags: `0.1.0`, their manifest
+  version, as a first release. Run it from a clone with the tags fetched, or
+  the check cannot tell a first release from a missing record.
+
+On `0.y.z` a `### Breaking` section needs at least a minor bump.
 
 ## Enforcement
 
@@ -289,15 +307,32 @@ check for the tagged version, runs the package's own tests (`npm test`, or the
 Python package's unit tests), and only then the release action: `npm publish`
 for `cultcache-ts`, which it refuses on any ref but a release tag, and for the
 Python packages the sdist and wheel build, whose output is all the PyPI upload
-step uploads. The checks run without `NODE_OPTIONS`, `NODE_TEST_CONTEXT`, any
-other `NODE_TEST_*` variable and `NODE_AUTH_TOKEN`, so no inherited variable can
-make the tests run nothing and pass; only the release action receives the token.
+step uploads. The checks run with the known test-runner and token variables
+removed (`NODE_OPTIONS`, `NODE_TEST_CONTEXT`, any other `NODE_TEST_*` variable,
+and `NODE_AUTH_TOKEN`), so none of those can make the tests run nothing and
+pass, and only the release action receives the token. That list names known
+variables; it does not prove that no other inherited variable can affect a
+check. The npm Publish step starts the guard under `env -u NODE_OPTIONS`, so a
+`NODE_OPTIONS` preload set in the workflow's or job's `env:` cannot run code
+inside the guard before its first line.
 The gate is that call, not a step condition, so no `if:` or `continue-on-error`
 can release what a check refused. The tests compare each job's release steps
-with their expected text exactly, less the steps' `if:` lines, and refuse `shell`
-and `defaults` anywhere in the workflow, which could run a release step's line
-through another command. Removing the call is still possible, but only as a visible edit to those
-steps and to the tests.
+with their expected text exactly, less the steps' `if:` lines. Removing the call
+is still possible, but only as a visible edit to those steps and to the tests.
+
+The guard and that pin stop accidental workflow edits. They do not stop a
+deliberate one: an extra step that publishes, a workflow-level `defaults:` or
+`env:`, or a fake `node` on `$GITHUB_PATH` all pass them. Deliberate edits are
+review's job, as ruled in `suite-gate-structural-not-parsed`, and the pin
+does not try to parse the workflow for them. For the same reason it has no ban
+on `shell` or `defaults`: such a ban defends only against a deliberate edit,
+and it also refused harmless settings such as `defaults.run.working-directory`.
+A step-level `shell:` on a release step still fails the exact comparison.
+A recommendation for the operator, not something this repository can set: the
+Python job already runs in the `pypi` GitHub environment, as PyPI trusted
+publishing expects. Putting the npm job in an environment with required
+reviewers would make every npm release wait for a person's approval. That is a
+GitHub settings change.
 
 `org.gamecult.cultlib` compiles CultMath from source and ships beside
 `org.gamecult.cultmath`, so its build refuses unless it declares exactly the
