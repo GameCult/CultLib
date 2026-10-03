@@ -419,8 +419,7 @@ axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
 the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
 once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
 contraction only removes roundings, so HLSL and GLSL compilers are covered by
-the same bound. At the shipped scales (`|c|_1` near 600, `r` near 5) it adds
-`6e-4`. The caller rotates and translates the centre into world space and scales
+the same bound. The caller rotates and translates the centre into world space and scales
 centre and radius by its noise frequency; the rounding of that transform is the
 caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
 tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of
@@ -476,39 +475,92 @@ The saving is measured where there is empty space to find.
 `NoiseBoundTests.IntervalSkipHalvesEvaluations` draws screen tiles, each with
 its own camera, and runs one pre-pass per tile over the dense grid's cell ranges:
 it starts with the whole grid, skips and doubles a range it proves empty, halves
-one it cannot, and runs to the grid's end. Each of the tile's `N^2` rays is then
-marched twice with the same integrator and the same early-out at transmittance
-0.02: once over every cell, once over the tile's unproven cells only. The two
-integrate the same cells, so their transmittance agrees exactly in every
-configuration. Cost is counted in `snoise` evaluations, with an envelope
+one it cannot, and runs to the grid's end. It then draws the tile's `N^2` ray
+slopes, one per pixel, jittered inside it. Each ray is marched three times with
+the same integrator and the same early-out at transmittance 0.02: over every
+cell (dense), over the tile's unproven cells (the tile march), and over the
+oracle mask, the cells whose mid-depth density is nonzero for at least one of
+the tile's rays. The tile march and the oracle march integrate the dense march's
+nonzero cells, so their transmittance agrees with it exactly in every
+configuration. The oracle is a ceiling the pre-pass cannot move: dense cost over
+oracle cost. Against it the test prints the efficiency (oracle cost over the
+tile march's cost with its probes) and the cull fraction (the oracle-empty cells
+the pre-pass proves empty). The probe overhead is the tile march's cost over that
+cost plus the probes'. Cost is counted in `snoise` evaluations, with an envelope
 evaluation or probe weighted 0.2. That weight is an estimate, and both counts are
-printed. The flow is not counted. At `N = 8` with the warp on, in Aetheria's units
-on its 256-cell quadratic grid:
+printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
+256-cell quadratic grid out to the Main Camera's far plane, 2048:
 
 - (a) Height fog, camera above the safety band, rays level and up: the whole
   grid is one envelope probe per tile, against 256 envelope evaluations per ray,
-  16384x.
-- (b) Inside the fog: 0.99x. Every cell is fog, and the pre-pass probes each one.
-- (c) The zone bowl and four wells, the camera gazing across: 1.41x, and 3.32x
-  with no warp. The pre-pass cuts envelope evaluations from 212.93 to 37.12 per
-  ray. Almost all of the dense march's 78.67 `snoise` per ray fall in the noise
-  band, where the rays need them (ceiling 1.42x). The warp bound `D = 60` is what
-  leaves the noise ball unable to prove anything at this noise scale.
+  16384x. Every cell is oracle-empty and the pre-pass proves them all.
+- (b) Inside the fog: 1.15x, and 0.99x with the warp. Most cells are fog, and
+  the pre-pass probes each one.
+- (c) The zone bowl and four wells, the camera gazing across. With no warp:
+  2.74x, oracle ceiling 7.26x, efficiency 0.378, cull fraction 0.952, probe
+  overhead 0.961. With the warp `D = 60`: 1.39x, oracle ceiling 7.17x,
+  efficiency 0.194, cull fraction 0.842, probe overhead 0.993. With the warp the
+  pre-pass cuts envelope evaluations from 177.46 to 33.49 per ray, but the
+  oracle march costs 0.194 of the tile march, so about four fifths of the tile
+  march's cost goes to cells no ray samples nonzero: the warp bound swamps the
+  noise ball, so the ball cannot prove those cells empty. That gap belongs to the tape target's affine forms, not to a
+  better pre-pass.
 - (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
-- (e) The void at the shipped point (`Rh = 198`, `S = 50`, the low camera,
-  200 tiles), with three marches. The fixed-step reference takes 36.34 steps per
+- (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
+  `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
+  shipped camera, 200 tiles. The fixed-step reference takes 36.34 steps per
   pixel. The same cells masked by the pre-pass take 20.13, with identical
-  transmittance. The footprint-aware march takes 16.45 inside the unmasked
-  cells, within 0.008339431 of the reference's transmittance: 2.21x fewer steps.
-  `snoise` per pixel goes from 32.98 to 26.56, and combined cost improves 1.34x.
-  Over the grid of hollow radius, camera offset and ramp width the steps ratio
-  runs from 1.57x (`Rh = 100`, low, `S = 150`) to 12.40x (`Rh = 1000`, centred,
-  `S = 10`), and the cost ratio from 1.12x to 3.47x.
+  transmittance. The footprint-aware march takes 13.54: 2.68x fewer. `snoise`
+  per pixel goes from 32.98 to 26.69, and combined cost from 40.25 to 29.52 with
+  the probes, 1.36x. Every one of the 200 tiles proves a body. Before the body
+  both marches are measured against a converged one (midpoint quadrature at
+  `h = 0.5` over every cell, trusting no pre-pass): the relative optical-depth
+  error at the body start is at most 0.0608 for the fixed-step march and 0.08639
+  for the footprint march, 1.42x. Over the grid of hollow radius, camera offset
+  and ramp width the steps ratio runs from 1.57x (`Rh = 100`, low, `S = 150`) to
+  27.45x (`Rh = 1000`, centred, `S = 10`), the cost ratio from 1.26x to 3.89x,
+  and the depth-error ratio from 0.85 to 4.72 (`Rh = 200`, centred, `S = 150`,
+  where the errors are 0.01504 and 0.003188). LOD-far takes 14.19x fewer steps;
+  its depth errors, 0.2849 and 0.205, are not comparable, because its
+  fixed-step reference keeps the octaves the footprint march truncates.
 
-The contract is 2x on combined cost for (a) and (c) and 2x fewer steps per pixel
-for (e). (a) and (e) meet it. (c) does not, so the test skips naming
-`saving-2x-scenarios`. The fields, the grids and the 0.2 weight are not tuned
-toward the contract.
+The analytic body (ruling `operator-analytic-wall-body`). When a single dense
+cell's own bound is a positive point, the pre-pass spends one more probe over
+the rest of the grid. If that bound is a positive point too, every point of
+every ray of the tile from there on has exactly that density, so the footprint
+march takes one closed-form step, `exp(-BodyDepth)`, from the body start to the
+grid's end and stops. `BodyDepth` is density x extinction x length x `|dir|`.
+`NoiseBoundTests.AnalyticBodyMatchesFineMarch` pins it: the bound, the mask and
+the pointwise densities agree exactly at the body, and `BodyDepth` equals the
+summed fixed-step depth of the body cells within 1e-4 relative. The comparison
+is in the depth domain, so LOD-far's deep bodies do not underflow.
+
+The footprint-truncated void weights its octaves by `w_i(z)`, decreasing in `z`.
+Its bound takes each weight over `[w_i(z1), 1]` rather than
+`[w_i(z1), w_i(z0)]`, because one bound serves both the full field (`w = 1`) and
+the truncated one. `[w_i(z1), 1]` contains both, and `iv_mul` is monotone in its
+interval argument, so the composed interval encloses both fields.
+`NoiseBoundTests.WeightBoundEnclosesOneSignedNoise` checks it on LOD-far over
+2,000 segments: each weight lies in its bound, and `w(z) n` lies in
+`iv_mul(bound, n)` for a one-signed `n`. A lower end of `w(z0)` fails it.
+
+The contracts, at `N = 8`, the lower of warp 0 and `D`:
+
+- (a) at least 2x combined cost;
+- (c) (ruling `wells-overhead-plus-floor`): probe overhead, the tile march over
+  the tile march plus its probes, at least 0.90; and, hard, the pre-pass proves
+  at least half of the oracle-empty cells empty, so a pre-pass that skips
+  nothing fails. The oracle ceiling, the efficiency against it and the cull
+  fraction are printed, not asserted;
+- (e) at the shipped void: the masked fixed-step march agrees with the reference
+  exactly; the footprint march's optical depth at the body start is off the
+  converged march's by at most twice the fixed-step march's error; and it takes
+  at most half the reference's steps per pixel.
+
+This run meets every contract: (a) 16384x, (c) probe overhead 0.961 and cull
+fraction 0.842, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step
+march's. The fields, the grids and the 0.2 weight are not tuned toward the
+contracts.
 
 Consumers: the gamecult.org ground shader (through the GLSL lowering) and
 Aetheria's nebula raymarch at its CultMath pin bump.
