@@ -749,6 +749,24 @@ const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
+// The if: of the step that holds offset `at` in a job's text, or null when the step has none. A step
+// runs from its "- name:" line to the next one.
+function stepCondition(job, at) {
+  const names = [...job.matchAll(/^\s+- name:/gm)].map((match) => match.index);
+  const start = names.filter((index) => index <= at).at(-1) ?? 0;
+  const end = names.find((index) => index > at) ?? job.length;
+  return job.slice(start, end).match(/^\s+if:\s*(.*?)\s*$/m)?.[1] ?? null;
+}
+
+// The suite must run whenever Publish does, so Publish's condition has to imply the suite's. Three
+// shapes prove that textually: the suite step has no if:, the two conditions are equal, or Publish's
+// is the suite's followed by " && ". The last is sound only when Publish's condition holds no "||":
+// && binds tighter than ||, so "S && c || d" publishes on d alone, and "a || b && c" splits S itself.
+function suiteConditionCovers(suite, publish) {
+  if (suite === null || suite === publish) return true;
+  return publish !== null && publish.startsWith(`${suite} && `) && !publish.includes("||");
+}
+
 function workflowSuiteProblems(workflow) {
   const [, jobs] = workflow.split(/^jobs:\r?\n/m);
   const starts = [...jobs.matchAll(/^  ([\w-]+):\r?\n/gm)];
@@ -767,6 +785,10 @@ function workflowSuiteProblems(workflow) {
       if (at(pattern) < 0) problems.push(`${label} has no ${what}`);
       else if (at(pattern) < suite) problems.push(`${label} reaches ${what} before the suite`);
     }
+    const publish = at(/^\s+- name: Publish\b/m);
+    if (publish >= 0 && !suiteConditionCovers(stepCondition(job, suite), stepCondition(job, publish))) {
+      problems.push(`${label} runs the suite under a narrower condition than Publish`);
+    }
   });
   return problems;
 }
@@ -777,7 +799,7 @@ function scriptSuiteProblems(script) {
   return body.search(CHECKER) < body.search(SUITE) ? ["calls the checker before the suite"] : [];
 }
 
-test("workflow: every job runs the suite first, with every tag fetched; removing or moving the step fails this test", () => {
+test("workflow: every job runs the suite first, with every tag fetched; removing, moving or disabling the step fails this test", () => {
   const workflow = workflowText();
   assert.deepEqual(workflowSuiteProblems(workflow), []);
   const suiteLines = /^\s+run: node --test scripts\/check-changelog-semver\.test\.mjs\r?\n/gm;
@@ -794,6 +816,22 @@ test("workflow: every job runs the suite first, with every tag fetched; removing
   assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/fetch-depth: 0/g, "fetch-depth: 1")), []);
   assert.notDeepEqual(workflowSuiteProblems(workflow.replace(/actions\/setup-dotnet@/g, "actions/setup-other@")), []);
   assert.notDeepEqual(workflowSuiteProblems(workflow.replace(suiteLines, (line) => `${line}        continue-on-error: true\n`)), []);
+  // the suite step disabled, or run under a condition Publish does not imply
+  const npmSuiteIf = (condition) => {
+    let seen = 0;
+    return workflow.replace(suiteLines, (line) => (seen++ === 0 ? `        if: ${condition}\n${line}` : line));
+  };
+  const pythonSuiteIf = (condition) =>
+    workflow.replace(/if: steps\.selected\.outputs\.run == 'true'(\r?\n\s+run: node --test scripts\/check-changelog-semver\.test\.mjs)/, `if: ${condition}$1`);
+  const narrower = /runs the suite under a narrower condition than Publish/;
+  assert.match(workflowSuiteProblems(npmSuiteIf("false")).join("\n"), narrower);
+  assert.match(workflowSuiteProblems(pythonSuiteIf("false")).join("\n"), narrower);
+  assert.match(workflowSuiteProblems(npmSuiteIf("github.event_name == 'workflow_dispatch'")).join("\n"), narrower);
+  // a leading conjunct is not enough once Publish's condition has an ||
+  const pythonPublishOr = workflow.replace(/(- name: Publish\r?\n\s+if: steps\.selected\.outputs\.run == 'true' && startsWith\(github\.ref, 'refs\/tags\/'\))/, "$1 || true");
+  assert.match(workflowSuiteProblems(pythonPublishOr).join("\n"), narrower);
+  // a suite condition equal to Publish's passes
+  assert.deepEqual(workflowSuiteProblems(npmSuiteIf("startsWith(github.ref, 'refs/tags/cultcache-ts-v')")), []);
 });
 
 test("the Unity release scripts run the suite before the checker; removing it fails this test", () => {
