@@ -2352,11 +2352,15 @@ namespace GameCult.Caching
             return key;
         }));
 
-        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares.
+        // Refused with CultSchemaConflictException when the key holds a record stored under an id no registered type declares,
+        // read-only or foreign. False when the cache holds nothing there and no store carries a foreign record there.
         public bool Remove(CultRecordKey key) => Held(() =>
         {
             if (!_entries.TryGetValue(key.Value, out var existing))
+            {
+                RefuseRemovalOfForeign(key.Value);
                 return false;
+            }
             Admit(Array.Empty<CultStoredDocument>(), new[] { existing }, null, (home, _) =>
             {
                 home?.Delete(existing);
@@ -2627,6 +2631,8 @@ namespace GameCult.Caching
                         : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant)
                         : StampFlatten(op.Key))
                     .ToArray();
+                foreach (var op in batch.Operations.Values.Where(op => op.IsRemoval && !_entries.ContainsKey(op.Key.Value)))
+                    RefuseRemovalOfForeign(op.Key.Value);
                 var deletes = batch.Operations.Values
                     .Where(op => op.IsRemoval && _entries.ContainsKey(op.Key.Value))
                     .Select(op => _entries[op.Key.Value])
@@ -2648,6 +2654,14 @@ namespace GameCult.Caching
                     return request.ConditionsHold(inMemory, _entries.Values) ? CultCommitOutcome.Committed : CultCommitOutcome.Mismatch;
                 });
             });
+        }
+
+        // A removal of a key the cache does not hold removes nothing, so no store sees it; but a store that carries a foreign record
+        // at the key refuses it, as it refuses every write of that record, rather than let the caller believe it was removed.
+        private void RefuseRemovalOfForeign(string key)
+        {
+            foreach (var (store, _) in _stores)
+                store.RefuseUndeclared(key);
         }
 
         // Every add and remove passes here: single writes, committed batches, and loads (source set).
