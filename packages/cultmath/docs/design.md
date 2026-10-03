@@ -209,25 +209,41 @@ exact; the float families are ulp-bounded, the bound measured on the device.
 3.00 does not require to be correctly rounded, and WebGL2 compilers may
 reassociate. On a GTX 1070 under ANGLE's D3D11 backend its radius differs from
 C# by up to 2 ulp in 43 of 256 cases, sometimes smaller. What the march needs
-is enclosure, so the family's fixture entry carries a `check` the consumer
-applies to every case: from the case's arguments `(mx, my, z0, z1, fp, warp)`,
-compute in double `zm = (z0 + z1) / 2`, the centre `c = (mx zm, my zm, zm)`
-and the radius `r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp`, and
-require GPU radius >= `r + |GPU centre - c|`. Only that fails the check; the
-largest ulp distance is reported as for any ulp-bounded family.
+is enclosure, and what culling needs is a ball no wider than its rounding
+widening, so the family's fixture entry carries a `check` the consumer applies
+to every case: from the case's arguments `(mx, my, z0, z1, fp, warp)`, compute
+in double `zm = (z0 + z1) / 2`, the centre `c = (mx zm, my zm, zm)`, its
+`|c|_1 = |mx zm| + |my zm| + |zm|`, the radius
+`r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp` and
+`d = |GPU centre - c|`, and require
+`r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1)`. The lower side is
+enclosure; the upper side is the bound `NoiseBoundTests` pins in C#, so a
+lowering that inflates the ball fails too. Only those two bounds fail the
+check; the largest ulp distance is reported as for any ulp-bounded family.
 `GoldenFixtureMatchesCSharp` applies the same check to C#'s own results.
 
-`iv_exp` and `phacelle` take their C# bits from the platform's `exp`, `sin`
-and `cos`, which differ by OS: their tolerances name the platform functions
-("ulp-bounded, platform exp" and "ulp-bounded, platform exp, sin, cos"), their
-entries name the platform that generated them, and `GoldenFixtureMatchesCSharp`
-compares them case by case within one ulp of the running platform, printing the
-largest distance. Every other
-family is compared as text. `phacelle` is in `CultMath.Phacelle.glsl`, so the
-evaluator concatenates `CultMath.Phacelle.glsl` after `CultMath.glsl` for that
-family, with normalization 0.5. The site does not vendor the MPL file and
-skips the family; CultLib's own browser-pane WebGL2 run, under the follow-up
-`gpu-snoise-parity`, evaluates it.
+`GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
+arguments. Arguments are drawn only when the fixture is regenerated
+(`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose
+bits differ by OS. `iv_exp` and `phacelle` take their C# results from the
+platform's `exp`, `sin` and `cos`, which also differ by OS, so their entries
+name the platform that generated them and the test compares them case by case
+against the running platform, printing the largest distance. `iv_exp`
+("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
+("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
+max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
+ulps mean nothing, and Windows differs from the Linux fixture by up to
+`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`CultMath.Phacelle.glsl`, so the evaluator concatenates
+`CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
+normalization 0.5. The site does not vendor the MPL file and skips the family.
+Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
+by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
+fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
+`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
+readback of `snoise`, and evaluates no GLSL.
 
 ## Invariant 8: Value-and-Gradient Primitives
 
