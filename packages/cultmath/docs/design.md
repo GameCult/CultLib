@@ -581,9 +581,9 @@ over 2,000 balls x 64 points are the defence. A change to the `snoise` kernel
 must re-run `MeasureLipschitz` and re-pin `L` and the witness.
 
 What the ball bounds guarantee: enclosure of `snoise` and `fbm_grad(...).w` over
-the ball, in float32. What they do not: anything about tapes, pruning, choice
-tracking or affine forms; those are later steps of
-`docs/cultmath-tape-target.md` (CultLib root). How loose they are is a number:
+the ball, in float32. What they do not: anything about tapes, pruning or choice tracking. Correlation
+between the operands of one expression is what "Affine forms" below adds.
+How loose the ball bounds are is a number:
 `NoiseBoundTests.TightnessReport` prints the mean interval width over the
 sampled range: 5.08 for `iv_snoise_ball` at `r = 0.05`, 1.96 at 0.25 and 1.28
 at 1.0; 6.64 and 2.82 for 4-octave `iv_fbm_ball` at 0.05 and 0.25.
@@ -611,17 +611,29 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
 - (a) Height fog, camera above the safety band, rays level and up: the whole
   grid is one envelope probe per tile, against 256 envelope evaluations per ray,
   16384x. Every cell is oracle-empty and the pre-pass proves them all.
-- (b) Inside the fog: 1.15x, and 0.99x with the warp. Most cells are fog, and
+- (b) Inside the fog: 1.15x, and 1.09x with the warp. Most cells are fog, and
   the pre-pass probes each one.
-- (c) The zone bowl and four wells, the camera gazing across. With no warp:
-  2.74x, oracle ceiling 7.26x, efficiency 0.378, cull fraction 0.952, probe
-  overhead 0.961. With the warp `D = 60`: 1.39x, oracle ceiling 7.17x,
-  efficiency 0.194, cull fraction 0.842, probe overhead 0.993. With the warp the
-  pre-pass cuts envelope evaluations from 177.46 to 33.49 per ray, but the
-  oracle march costs 0.194 of the tile march, so about four fifths of the tile
-  march's cost goes to cells no ray samples nonzero: the warp bound swamps the
-  noise ball, so the ball cannot prove those cells empty. That gap belongs to
-  the tape target's affine forms, not to a better pre-pass.
+- (c) The deep well (ruling `wells-scale-order-of-magnitude`): the zone bowl
+  plus one well at its centre, `PowerPulse` exponent 2, scale 2220, depth 600.
+  The band `G = 60` is where only the noise decides density (`s` within
+  `F -+ 1.5 A` with the fade at 1); depth and half-depth radius are each
+  `10 G`. The camera's `xz` is uniform within 300 of the centre, at
+  `y = F - h(xz) / 2`, so it looks across the bowl from inside it. Both rows run
+  on the same seeds. With no warp, the centred interval takes 3.10x (oracle
+  ceiling 5.24x, efficiency 0.591, cull fraction 0.986, probe overhead 0.943)
+  and the affine bound 3.57x (efficiency 0.682, cull 0.993, overhead 0.905). With
+  the warp `D = 60`: 2.99x (ceiling 5.31x, efficiency 0.563, cull 0.985, overhead
+  0.935) against 3.46x (efficiency 0.651, cull 0.993, overhead 0.880), so affine
+  is 1.15x and 1.16x cheaper. The range mask (the oracle cells plus every cell
+  where any of 5 x 5 slopes x 9 depths has density above zero) gives a range
+  ceiling of 0.859 (0.848 with the warp), the cost a bound that proves exactly
+  the range-empty cells would reach against the oracle's; the efficiencies
+  against it are 0.794 and 0.688 (warp 0), 0.768 and 0.665 (warp `D`).
+- (c-band) The shallow wells, four mass-derived wells in the zone bowl with
+  the camera gazing across, whose geometry is band-dominated, printed only.
+  Centred interval 2.74x (efficiency 0.378, cull 0.952, overhead 0.961), affine
+  3.95x (0.544, 0.980, 0.901); with the warp 2.53x (0.353, 0.945, 0.948) against
+  3.54x (0.494, 0.976, 0.865).
 - (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
 - (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
   `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
@@ -664,23 +676,116 @@ interval argument, so the composed interval encloses both fields.
 The contracts, at `N = 8`, the lower of warp 0 and `D`:
 
 - (a) at least 2x combined cost;
-- (c) (ruling `wells-overhead-plus-floor`): probe overhead, the tile march over
-  the tile march plus its probes, at least 0.90; and, hard, the pre-pass proves
-  at least half of the oracle-empty cells empty, so a pre-pass that skips
-  nothing fails. The oracle ceiling, the efficiency against it and the cull
-  fraction are printed, not asserted;
+- (c) on the deep well (rulings `affine-wells-contract-cheaper-than-interval`
+  and `wells-overhead-plus-floor`): the affine bound's combined cost ratio is
+  above the centred interval's at warp 0 and at warp `D`; and, hard, the
+  pre-pass proves at least half of the oracle-empty cells empty under both
+  bounds, so a pre-pass that skips nothing fails. The probe overhead, the
+  efficiencies against the oracle and the range ceiling, the ceilings and the
+  cull fraction are printed, not asserted; (c-band) is printed only;
 - (e) at the shipped void: the masked fixed-step march agrees with the reference
   exactly; the footprint march's optical depth at the body start is off the
   converged march's by at most twice the fixed-step march's error; and it takes
   at most half the reference's steps per pixel.
 
-This run meets every contract: (a) 16384x, (c) probe overhead 0.961 and cull
-fraction 0.842, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step
-march's. The fields, the grids and the 0.2 weight are not tuned toward the
-contracts.
+This run meets every contract: (a) 16384x, (c) affine 3.57x and 3.46x against
+the centred interval's 3.10x and 2.99x, with a cull fraction of 0.985 at the
+lowest, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step march's.
+The fields, the grids, the 0.2 envelope weight and the 2.0 gradient weight are
+not tuned toward the contracts. An affine probe is one `snoise_grad`, counted at
+2.0 `snoise` evaluations (an estimate, printed beside the count).
 
 Consumers: the gamecult.org ground shader (through the GLSL lowering) and
 Aetheria's nebula raymarch at its CultMath pin bump.
+
+## Affine forms
+
+`math.Affine.cs` carries reduced affine forms with one shared symbol: a
+`float3(x0, a, e)` is the set `x0 + a eps + e delta` with `eps` and `delta` in
+`[-1, 1]` and `e >= 0` (Messine's AF1, as Gamito and Maddock use it for gradient
+noise, in one register as an interval is a `float2`). `eps` is shared by every
+form over one region (for a screen-tile slice, the depth parameter, `z = z_m +
+h eps`), so `af_sub(x, x)` has `a = 0`; `delta` is private to the form, and
+every term that cannot be tracked is condensed into `e`. A slice is a
+`float4(centre, radius)` with a `float3` axis. No op takes a compound type, a
+reference parameter or a swizzle write, so each mirrors into the HLSL common
+subset.
+
+The ops: `af_point`, `af_symbol`, `af_from_iv`, `af_range` (the bridge back to
+`iv_*`), `af_add`, `af_sub`, `af_neg`, `af_scale`, `af_add_iv`, `af_mul` (the
+product `|a_x a_y|` and the cross-error terms condensed into `e`, so there is
+no `af_sqr`), `af_snoise` and `af_fbm`, and the slice pair `af_frustum_axis` and
+`af_frustum_ball`.
+
+Rounding. Every op returns a form whose set at each `eps` contains the float32
+value of its function at every point of its operands' sets at that `eps`. Each
+op folds its own float32 rounding into `e` as `S 2^-20`, `S` the sum of the
+magnitudes its roundings are relative to (named in the op's comment): at most
+`8u S` is needed with `u = 2^-24`, and the factor of two over that is the
+allowance for a device whose `+` and `*` are faithful rather than correctly
+rounded. `AffineTests.EveryOpEnclosesItsPoints` evaluates the form's set in
+double and the function in float32 with no tolerance.
+
+`af_snoise(centre, axis, radius)` encloses `snoise` over `centre + axis eps + w`,
+`|w| <= radius`, from one `snoise_grad`. It returns the narrower of the
+Lipschitz form `(n, 0, L R)` and the centred form `(n, g . axis, |g| radius +
+M R^2 / 2)` (`R = |axis| + radius`, `L = SNOISE_LIPSCHITZ`, `M =
+SNOISE_HESSIAN`), so its total width is never more than the Lipschitz form's.
+The centred form is Taylor's theorem, which is why it beats the ball when the
+radius is small and the axis carries the variation. `af_fbm` compounds octaves
+as `iv_fbm_ball` does. The float32 evaluation allowance is derived in
+`af_snoise`'s comment.
+
+`SNOISE_HESSIAN = 56.050385` is 1.10 times the refined maximum of the spectral
+norm of the Hessian of `snoise(float3)`, measured by
+`NoiseBoundTests.MeasureHessian` over 1e6 seeded points (central differences of
+`snoise_grad`) and refined by ascent from the 1e4 largest: sampled 50.1366,
+refined 50.9549, witness (-245.19885, -53.01323, -91.47363).
+`HessianConstantPinsSampledCurvature` fails on a 1% move.
+`SNOISE2_LIPSCHITZ = 8.117002` is the same for the gradient of `snoise(float2)`
+(`MeasureLipschitz2`: sampled 7.2575, refined 7.3791, witness (-67.12454,
+-129.53296), `|snoise2|` at most 0.99964), and it backs `iv_snoise_ball(float2,
+float)`. Both are empirical with a margin, not proofs; the enclosure tests are
+the defence, and a change to the kernels must re-run the measurements.
+
+The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
+warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1
+footprintPerDepth + warpVariation`, with `af_frustum_axis` the axis `(m_c, 1) h`:
+every ray point at depth `z` is `centre + axis eps(z) + w`. Its derivation
+and the clamp residual are in the comment. The caller rotates, translates and
+scales the slice into the noise's frame, and owns the rounding of that.
+
+The centred warp. A flow-warped sample reads `snoise` at `p + flow(p) shift`. The
+caller does not enlarge the ball by the whole displacement `|flow| shift`; it
+moves the centre by the flow at the centre, `c + flow(c) shift`, and widens the
+radius by the flow's variation across the ball, `r + |shift| rho` with `rho =
+FlowAmplitude SNOISE2_LIPSCHITZ FlowFrequency r sqrt 2` (the clamp to the unit
+disc is nonexpansive). CultMath owns neither the flow nor the envelope: the warp's
+centre and variation are the caller's, and a consumer adds them to the slice's
+`warpVariation` or to the form's radius. With two phases that cross-fade, each
+phase takes its own centre; one ball serves when the phases' centres coincide
+(warp 0). `NoiseBoundTests.CentredWarpStaysEnclosed` checks 2,000 balls and
+fails when `rho` is dropped.
+
+The deep well is the representative Aetheria case: the camera inside a sun's
+bowl, looking across. `DeepWellIsTenBandsDeepAndWide` computes the band `G` from
+`FogField`'s own floor offset, amplitude and noise range (60) and requires the
+depth (633 at the centre against the rim) and the half-depth radius to be at
+least `10 G`, every drawn camera sitting inside the well below the rim; a well of
+depth 150 fails. The shallow wells stay as the printed shallow-well, band-dominated row (c-band).
+
+The test field's affine bound takes depth as `af_symbol(z_m, h)`, builds `s`
+affine in it with the height interval, the footprint and the slope-depth
+product in `e` through `af_add_iv`, takes the noise through `af_frustum_*` and
+`af_snoise` per phase and for the detail octave, fades by `af_from_iv` and
+`af_mul`, reads the range with `af_range`, and intersects with the centred
+interval's bound (both sound). `FogField.Bound` makes no direct `snoise` call.
+The cull-map render (`DeepWellCullMap`, explicit) writes a PNG when
+`CULTMATH_WRITE_CULLMAP` names a directory: one deep-well camera at warp `D`,
+960 x 540 in 8 x 8 tiles, with panels for dense cells per ray under the centred
+interval, under the affine bound and under the oracle mask (one logarithmic
+scale) and the transmittance. Its run: 4.51, 3.60 and 2.02 cells per ray on
+average, 45 the most, mean transmittance 0.278.
 
 ## Rules
 
