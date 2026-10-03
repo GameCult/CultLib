@@ -1032,6 +1032,24 @@ namespace GameCult.Caching.Tests
             Assert.That(StoreSlices.CatalogEntry(path, ItemId), Is.EqualTo(entry));
         }
 
+        // The catalog entry for a staged record's id is the writer's, encoded from its object, even where the file publishes another
+        // entry under that id: a type that adds a compatible id keeps its id, and only the writer's entry carries the change. Here the
+        // file's ItemId entry differs from the writer's by a slot this runtime does not read, and a WsItem is staged.
+        [Test]
+        public void ACatalogEntryForAStagedRecordsIdIsTheWritersEncodingNotTheFilesSlice([Values] bool directory, [Values] bool commit)
+        {
+            var path = PathOf("catalog-writer-entry.cc");
+            Seed(path, directory, "a");
+            var writers = StoreSlices.CatalogEntry(path, ItemId);
+            File.WriteAllBytes(path, AddAnUnreadSlotToEveryCatalogEntry(File.ReadAllBytes(path)));
+            Assert.That(StoreSlices.CatalogEntry(path, ItemId), Is.Not.EqualTo(writers));
+            using var cache = Open(path, directory);
+
+            Land(cache, commit, typeof(WsItem), new WsItem { Name = "name-x" }, X);
+
+            Assert.That(StoreSlices.CatalogEntry(path, ItemId), Is.EqualTo(writers));
+        }
+
         // The same store with every catalog entry one slot longer than this runtime reads, as a newer writer's would be.
         private static byte[] AddAnUnreadSlotToEveryCatalogEntry(byte[] bytes)
         {
