@@ -84,6 +84,19 @@ test("hasBreakingSection scopes to the named version's section only", () => {
   assert.throws(() => hasBreakingSection(text, "0.9.0"), /no "## \[0\.9\.0\]" entry/);
 });
 
+test("hasBreakingSection reads Keep a Changelog's dated heading beside the plain forms", () => {
+  const text = ["## [0.4.0] - 2026-10-03", "### Breaking", "- x", "## 0.3.1 - 2026-09-01", "### Breaking", "## [0.3.0]", "### Fixed", ""].join("\n");
+  assert.equal(hasBreakingSection(text, "0.4.0"), true);
+  assert.equal(hasBreakingSection(text, "0.3.1"), true);
+  assert.equal(hasBreakingSection(text, "0.3.0"), false);
+  // a dated section ends at the next heading, dated or not
+  assert.equal(hasBreakingSection(["## [0.4.0] - 2026-10-03", "### Fixed", "## [0.3.9] - 2026-09-01", "### Breaking"].join("\n"), "0.4.0"), false);
+  // only a date may follow the version
+  for (const heading of ["## [0.4.0] - soon", "## [0.4.0] 2026-10-03", "## [0.4.0] - 2026-10-03 extra", "## [0.4.0.1] - 2026-10-03"]) {
+    assert.throws(() => hasBreakingSection(`${heading}\n### Breaking\n`, "0.4.0"), /no "## \[0\.4\.0\]" entry/, heading);
+  }
+});
+
 // Table-driven per the operator's required cases (spec: breaking+major=pass,
 // breaking+patch=fail, breaking+minor=fail, non-breaking+minor=pass,
 // 0.y.z breaking+minor=pass, skipped version=fail, downgrade=fail).
@@ -746,20 +759,20 @@ test("workflow: the Caching Unity prefix is its own tag family, not another pack
 // suite, the semver policy check and the package's tests and then the release action from one process, so no
 // if: or continue-on-error on any step can release what those checks did not pass. This pin reads no
 // condition. It compares each job's release steps whole, less their own if: line, with the text below, so a
-// release step that does anything else is a mismatch, and it refuses shell and defaults anywhere, which could
-// run the pinned line through another command. Each Unity release script runs the suite itself, before it
-// calls the checker.
+// release step that does anything else is a mismatch. It stops accidental edits; a deliberate one, such as a
+// workflow-level defaults or env or an extra step, is review's job (ruling suite-gate-structural-not-parsed).
+// Each Unity release script runs the suite itself, before it calls the checker.
 const SUITE = /node\s+--test[^\n]*check-changelog-semver\.test\.mjs/;
 const CHECKER = /check-changelog-semver\.mjs/;
 const code = (text) => text.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
 
 const RELEASE_STEPS = {
   "cultcache-ts": [
-    ["- name: Publish", "  run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts \"$GITHUB_REF\"", "  env:", "    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"],
+    ["- name: Publish", "  run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts \"$GITHUB_REF\"", "  env:", "    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}"],
   ],
   // Publish uploads only the dist the guarded step built, so it has nothing to upload unless the suite passed.
   python: [
-    ["- name: Build sdist and wheel", "  run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} \"$GITHUB_REF\""],
+    ["- name: Build sdist and wheel", "  run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} \"$GITHUB_REF\""],
     ["- name: Publish", "  uses: pypa/gh-action-pypi-publish@release/v1", "  with:", "    packages-dir: packages/${{ matrix.package }}/dist"],
   ],
 };
@@ -805,10 +818,6 @@ function workflowReleaseProblems(workflow) {
       from = at + 1;
     }
   });
-  // A job's or the workflow's defaults.run.shell would run the pinned release line through any command.
-  if (/\bshell\b|\bdefaults\b/.test(code(workflow))) {
-    problems.push("the workflow says shell or defaults: a release step must run its pinned line through the default shell");
-  }
   return problems;
 }
 
@@ -821,8 +830,8 @@ function scriptSuiteProblems(script) {
 test("workflow: each job releases only through release-after-suite.mjs", () => {
   const workflow = workflowText();
   assert.deepEqual(workflowReleaseProblems(workflow), []);
-  const npmRun = 'run: node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"';
-  const pythonRun = 'run: node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"';
+  const npmRun = 'run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs npm-publish packages/cultcache-ts "$GITHUB_REF"';
+  const pythonRun = 'run: env -u NODE_OPTIONS node scripts/release-after-suite.mjs python-build packages/${{ matrix.package }} "$GITHUB_REF"';
   const exact = /is not exactly the release call/;
   for (const run of [npmRun, pythonRun]) {
     assert.equal(workflow.split(run).length, 2, run);
@@ -833,15 +842,14 @@ test("workflow: each job releases only through release-after-suite.mjs", () => {
     assert.match(edit("run: |\n          node --test scripts/check-changelog-semver.test.mjs\n          true"), exact, run);
     assert.match(edit(run.replace("release-after-suite.mjs", "check-changelog-semver.mjs")), exact, run);
     assert.match(edit(run.replace('"$GITHUB_REF"', "refs/tags/cultcache-ts-v0.14.0")), exact, run);
-    assert.match(edit(`${run}\n        shell: bash`), /another command|default shell/, run);
+    assert.match(edit(`${run}\n        shell: bash`), exact, run);
     assert.match(edit(`${run}\n        continue-on-error: true`), exact, run);
   }
   // the guard runs every release check itself, so neither the release steps' conditions nor a job allowed
   // to fail can release what a check refused
-  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: node)/, "if: always()$1")), []);
+  assert.deepEqual(workflowReleaseProblems(workflow.replace(/if: startsWith\(github\.ref, 'refs\/tags\/cultcache-ts-v'\)(\r?\n\s+run: env -u NODE_OPTIONS node)/, "if: always()$1")), []);
   assert.deepEqual(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    continue-on-error: true\n")), []);
-  // a job's default shell, a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
-  assert.match(workflowReleaseProblems(workflow.replace(/(    runs-on: ubuntu-latest\r?\n)/, "$1    defaults:\n      run:\n        shell: sh -c 'npm publish' {0}\n")).join("\n"), /default shell/);
+  // a release step removed, renamed or doubled, a Publish that uploads another dist, an unknown job
   assert.match(workflowReleaseProblems(workflow.replace("- name: Build sdist and wheel", "- name: Build")).join("\n"), /needs exactly one step "- name: Build sdist and wheel"/);
   assert.match(workflowReleaseProblems(workflow.replace("- name: Build and test", "- name: Publish\n        run: npm publish\n\n      - name: Build and test")).join("\n"), /needs exactly one step "- name: Publish"/);
   assert.match(workflowReleaseProblems(workflow.replace("packages-dir: packages/${{ matrix.package }}/dist", "packages-dir: dist")).join("\n"), exact);

@@ -73,12 +73,13 @@ export function classifyBump(prev, next) {
   return { invalid: compareVersions(next, prev) < 0 ? "reverse" : "skip" };
 }
 
-// Extracts the `## [<version>]` section of a changelog and reports whether it
-// carries a BREAKING_HEADING subsection. Throws if the version has no entry
+// Extracts the `## [<version>]` section of a changelog (also `## <version>`,
+// and either with Keep a Changelog's ` - YYYY-MM-DD` date) and reports whether
+// it carries a BREAKING_HEADING subsection. Throws if the version has no entry
 // at all — an undocumented release is refused the same as a mislabelled one.
 export function hasBreakingSection(changelogText, version) {
   const sectionHeading = new RegExp(
-    `^##\\s*\\[?${version.replace(/\./g, "\\.")}\\]?\\s*$`,
+    `^##\\s*\\[?${version.replace(/\./g, "\\.")}\\]?(\\s+-\\s+\\d{4}-\\d{2}-\\d{2})?\\s*$`,
     "m",
   );
   const startMatch = sectionHeading.exec(changelogText);
