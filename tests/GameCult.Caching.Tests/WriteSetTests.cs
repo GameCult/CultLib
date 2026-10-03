@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -646,6 +647,221 @@ namespace GameCult.Caching.Tests
                 batch.Expect(K, seen);
                 batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "stale" }, K);
             }), Is.False);
+        }
+
+        // A version is the SHA-256 of the bytes as the file holds them, not of a re-encoding. A writer may legally encode a record
+        // wider than needed (a str16 for a short string, a bin32, an array16); the file below holds every record that way. Each
+        // held record's version is the hash of its slice of the file; a pull over the unchanged file replaces nothing; and a write
+        // copies the records it did not stage byte for byte, so they keep their version and the next write is not refused.
+        [Test]
+        public void AVersionIsTheHashOfTheBytesTheFileHoldsWhateverTheirEncoding()
+        {
+            var path = PathOf("wide.cc");
+            Seed(path, false, "a", "k");
+            using (var seed = Open(path, false))
+                AddVariant(seed, "v", A);
+            File.WriteAllBytes(path, WidenEveryRecord(File.ReadAllBytes(path), out var slices));
+            Assert.That(slices["k"], Is.Not.EqualTo(CultDocumentMessagePackSerialization.SerializePersistedRecord(
+                Read(path).Records.Single(record => record.Key == "k"))), "the stored bytes are not the canonical encoding of the record");
+
+            using var cache = Open(path, false);
+            foreach (var (key, slice) in slices)
+                Assert.That(cache.GetStored(new CultRecordKey(key))!.StoredVersion, Is.EqualTo(HexOfSha256(slice)), key);
+
+            var before = cache.GetStored(K);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            Assert.That(ReferenceEquals(cache.GetStored(K), before), Is.True, "an unchanged file is not read as changed");
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(K, cache.Get<WsItem>(K)!);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X);
+            }), Is.True);
+            var file = File.ReadAllBytes(path);
+            foreach (var key in new[] { "a", "v" })
+                Assert.That(Contains(file, slices[key]), Is.True, $"{key} was copied as the file held it");
+            Land(cache, false, typeof(WsItem), new WsItem { Name = "name-x", Note = "again" }, X);
+            Assert.That(Keys(path), Is.EqualTo(new[] { "a", "k", "v", "x" }), "a second write into the variant store is not refused");
+        }
+
+        private static string HexOfSha256(byte[] bytes) =>
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+
+        private static bool Contains(byte[] haystack, byte[] needle) => haystack.AsSpan().IndexOf(needle) >= 0;
+
+        // The same store with every array, string and byte string written in its widest MessagePack form, and each record's slice.
+        private static byte[] WidenEveryRecord(byte[] bytes, out Dictionary<string, byte[]> slices)
+        {
+            slices = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            var output = new List<byte>();
+            var reader = new MessagePackReader(bytes);
+            var top = reader.ReadArrayHeader();
+            output.AddRange(new byte[] { 0xdc, (byte)(top >> 8), (byte)top });
+            for (var slot = 0; slot < top; slot++)
+            {
+                if (slot != 2)
+                {
+                    var from = (int)reader.Consumed;
+                    reader.Skip();
+                    output.AddRange(bytes.Skip(from).Take((int)reader.Consumed - from));
+                    continue;
+                }
+
+                var count = reader.ReadArrayHeader();
+                output.AddRange(new byte[] { 0xdc, (byte)(count >> 8), (byte)count });
+                for (var index = 0; index < count; index++)
+                {
+                    var start = output.Count;
+                    var fields = reader.ReadArrayHeader();
+                    output.AddRange(new byte[] { 0xdc, (byte)(fields >> 8), (byte)fields });
+                    string? key = null;
+                    for (var field = 0; field < fields; field++)
+                    {
+                        if (reader.NextMessagePackType == MessagePackType.String)
+                        {
+                            var text = reader.ReadString()!;
+                            key ??= text;
+                            var utf8 = System.Text.Encoding.UTF8.GetBytes(text);
+                            output.AddRange(new byte[] { 0xda, (byte)(utf8.Length >> 8), (byte)utf8.Length });
+                            output.AddRange(utf8);
+                        }
+                        else if (reader.NextMessagePackType == MessagePackType.Binary)
+                        {
+                            var blob = reader.ReadBytes()!.Value.ToArray();
+                            output.AddRange(new byte[] { 0xc6, (byte)(blob.Length >> 24), (byte)(blob.Length >> 16), (byte)(blob.Length >> 8), (byte)blob.Length });
+                            output.AddRange(blob);
+                        }
+                        else
+                        {
+                            var from = (int)reader.Consumed;
+                            reader.Skip();
+                            output.AddRange(bytes.Skip(from).Take((int)reader.Consumed - from));
+                        }
+                    }
+
+                    slices[key!] = output.Skip(start).ToArray();
+                }
+            }
+
+            return output.ToArray();
+        }
+
+        // A condition on a record fails when another writer removed it: the removal stands and the writer does not bring it back.
+        [Test]
+        public void AnExpectFailsWhenAnotherWriterRemovedTheRecord([Values] bool directory)
+        {
+            var path = PathOf("gone.cc");
+            Seed(path, directory, "k");
+            using var a = Open(path, directory);
+            var observed = a.Get<WsItem>(K)!;
+            using (var b = Open(path, directory))
+                Assert.That(b.Commit(batch => batch.Remove(K)), Is.True);
+
+            var committed = a.Commit(batch =>
+            {
+                batch.Expect(K, observed);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-k", Note = "resurrected" }, K);
+            });
+
+            Assert.That(committed, Is.False);
+            Assert.That(Keys(path), Is.Empty);
+        }
+
+        // The cache's own held record, not only the store's, learns the version of the bytes written. A variant staged and then
+        // re-resolved (its base edited before the flush) is held by the cache as a new object the store never saw, so only the
+        // cache's own line gives it the version of the bytes it was written as.
+        [Test]
+        public void AVariantReResolvedBeforeItsFlushIsKnownByItsWrittenVersion()
+        {
+            var path = PathOf("reresolved.cc");
+            Seed(path, false, "a");
+            using var cache = Open(path, false);
+            var v = new CultRecordKey("v");
+            cache.UpsertVariantAsync(v, A, new[] { cache.Override<WsItem>(nameof(WsItem.Name), "name-v") }).GetAwaiter().GetResult();
+            var staged = cache.GetStored(v);
+            cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "name-a", Note = "edited" }, A).GetAwaiter().GetResult();
+            Assert.That(ReferenceEquals(cache.GetStored(v), staged), Is.False, "the base edit re-resolved the variant into a new held copy");
+            cache.FlushAllBackingStores();
+
+            var held = cache.GetStored(v)!;
+            Assert.That(held.StoredVersion, Is.EqualTo(HexOfSha256(CultDocumentMessagePackSerialization.SerializePersistedRecord(
+                Read(path).Records.Single(record => record.Key == "v")))));
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(v, cache.Get<WsItem>(v)!);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X);
+            }), Is.True, "the writer's own condition on the variant holds");
+        }
+
+        private sealed class CountingStore : SingleFileMessagePackBackingStore
+        {
+            public CountingStore(string path) : base(path) { }
+
+            public int Encoded;
+
+            protected override byte[] SerializeRecord(CultPersistedRecord record)
+            {
+                Encoded++;
+                return base.SerializeRecord(record);
+            }
+        }
+
+        // A commit with no condition decides nothing about the other records, so it hashes none of them: only the record it writes
+        // is encoded to be named. A commit with a condition compares every durable record's version.
+        [Test]
+        public void AnUnconditionalCommitHashesOnlyTheRecordsItWrites()
+        {
+            var path = PathOf("cost.cc");
+            Seed(path, false, "a", "b", "c", "d", "e");
+            var store = new CountingStore(path);
+            using var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry));
+            cache.AddBackingStore(store);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+
+            store.Encoded = 0;
+            Assert.That(cache.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x" }, X)), Is.True);
+            Assert.That(store.Encoded, Is.EqualTo(1));
+
+            store.Encoded = 0;
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Expect(X, cache.Get<WsItem>(X)!);
+                batch.Upsert(typeof(WsItem), new WsItem { Name = "name-x", Note = "again" }, X);
+            }), Is.True);
+            Assert.That(store.Encoded, Is.GreaterThanOrEqualTo(6), "a condition hashes every durable record, which is how the count proves itself");
+        }
+
+        // Records no store has read or written are told apart however many are made in one clock tick.
+        [Test]
+        public void UnstoredRecordsMadeBackToBackHaveDistinctVersions()
+        {
+            using var cache = new CultCache(Registry);
+            var keys = Enumerable.Range(0, 2000).Select(index => new CultRecordKey("r" + index)).ToArray();
+            foreach (var key in keys)
+                cache.UpsertAsync(typeof(WsItem), new WsItem { Name = "same" }, key).GetAwaiter().GetResult();
+
+            Assert.That(keys.Select(key => cache.GetStored(key)!.StoredVersion).Distinct().Count(), Is.EqualTo(keys.Length));
+        }
+
+        // A write into a store holding a variant is refused when any record it read has moved, including one the writer is itself
+        // writing: it must not overwrite another writer's edit with a copy it read before that edit.
+        [Test]
+        public void AWriteIntoAVariantStoreIsRefusedWhenARecordItWritesMovedAfterItRead()
+        {
+            var path = PathOf("own-upsert.cc");
+            Seed(path, false, "a");
+            using var a = Open(path, false);
+            AddVariant(a, "v", A);
+            using (var peer = Open(path, false))
+                Assert.That(peer.Commit(batch => batch.Upsert(typeof(WsItem), new WsItem { Name = "name-a", Note = "by-peer" }, A)), Is.True);
+            var before = File.ReadAllBytes(path);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+                Land(a, true, typeof(WsItem), new WsItem { Name = "name-a", Note = "stale" }, A))!;
+
+            Assert.That(conflict.ChangedKeys, Is.EqualTo(new[] { "a" }));
+            Assert.That(File.ReadAllBytes(path), Is.EqualTo(before));
         }
 
         // A commit that removes a key this cache staged removes it everywhere: the staged write does not survive the batch.
