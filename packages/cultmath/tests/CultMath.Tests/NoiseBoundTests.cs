@@ -15,9 +15,10 @@ namespace CultMath.Tests;
 /// Hand mutations of iv_frustum_ball that TileBallEnclosesEveryRaySegment must kill: z0 for z1 in the
 /// lateral term (z0 * footprintPerDepth); |m_c| for |(m_c, 1)| in the depth term; the warp dropped; the
 /// rounding widening dropped (which the degenerate family's enclosure check alone must catch). Hand
-/// mutations of the test's own fields: w(z0) for w(z1) in VoidField.WeightBound must fail the truncated
-/// check of EnvelopeBoundEnclosesDensity on the LOD-far configuration; CarveRadius for HollowRadius in
-/// the lo test of VoidField.Compose must fail AnalyticBodyMatchesFineMarch.
+/// mutations of the test's own fields and marches: w(z0) for w(z1) in VoidField.WeightBound must fail
+/// WeightBoundEnclosesOneSignedNoise; CarveRadius for HollowRadius in the lo test of VoidField.Compose
+/// and BodyDepth without |dir| must fail AnalyticBodyMatchesFineMarch; the footprint march's pre-body
+/// integration dropped, or LodStep doubled, must fail IntervalSkipHalvesEvaluations's depth agreement.
 /// </summary>
 public sealed class NoiseBoundTests
 {
@@ -300,6 +301,40 @@ public sealed class NoiseBoundTests
         // The truncated check is not vacuous: some samples carry an octave weight strictly inside (0, 1)
         // and some a fine weight of 0 (LOD-far reaches both).
         Assert.True(partial > 0 && zero > 0, $"octave weights in (0, 1) at {partial} samples and fine weight 0 at {zero}");
+    }
+
+    /// <summary>
+    /// VoidField's octave weight bound over [z0, z1] encloses each octave's weight at every depth of the
+    /// segment, and, for a one-signed noise interval n = [0.25, 1], the weighted noise w(z) n_s lies in
+    /// iv_mul(bound, n). 2,000 LOD-far segments with z0 ~ U(1460, 0.95 grid end), z1 ~ U(z0, grid end),
+    /// 16 depths each including both ends. A bound whose lower end is w(z0) misses w(z1) 0.25 wherever the
+    /// weight falls across the segment.
+    /// </summary>
+    [Fact]
+    public void WeightBoundEnclosesOneSignedNoise()
+    {
+        var field = VoidField.LodFar();
+        var random = new System.Random(0x3B0D);
+        var end = field.Grid[^1];
+        var n = new float2(0.25f, 1.0f);
+        for (var i = 0; i < 2000; i++)
+        {
+            var z0 = Uniform(random, 1460.0f, 0.95f * end);
+            var z1 = Uniform(random, z0, end);
+            var (coarseBound, fineBound) = field.WeightBounds(z0, z1);
+            for (var s = 0; s < 16; s++)
+            {
+                var z = s == 0 ? z0 : s == 15 ? z1 : Uniform(random, z0, z1);
+                var (coarse, fine) = field.Weights(z);
+                foreach (var (octave, w, bound) in new[] { ("coarse", coarse, coarseBound), ("fine", fine, fineBound) })
+                {
+                    Assert.True(Inside(w, bound), $"{octave} weight {w:R} at depth {z:R} lies outside its bound {bound} over [{z0:R}, {z1:R}]");
+                    var weighted = iv_mul(bound, n);
+                    foreach (var ns in new[] { 0.25f, Uniform(random, 0.25f, 1.0f), 1.0f })
+                        Assert.True(Inside(w * ns, weighted), $"{octave} weight {w:R} x noise {ns:R} at depth {z:R} lies outside iv_mul({bound}, {n}) = {weighted} over [{z0:R}, {z1:R}]");
+                }
+            }
+        }
     }
 
     // ---- The Lipschitz constant ----
@@ -991,6 +1026,9 @@ public sealed class NoiseBoundTests
         /// <summary>The coarse and fine octave weights at depth z (1 for the full field).</summary>
         public (float Coarse, float Fine) Weights(float z) => (Weight(CoarseWavelength, z * Theta), Weight(FineWavelength, z * Theta));
 
+        /// <summary>The coarse and fine octave weight bounds Bound uses over [z0, z1].</summary>
+        public (float2 Coarse, float2 Fine) WeightBounds(float z0, float z1) => (WeightBound(CoarseWavelength, z0, z1), WeightBound(FineWavelength, z0, z1));
+
         private sealed class VoidTile : Tile
         {
             public float3 Cavity;  // c_v in the camera frame
@@ -1195,33 +1233,36 @@ public sealed class NoiseBoundTests
         return (dense, -1, 0.0f);
     }
 
-    // The body's one closed-form Beer-Lambert step from z to the grid's end, at the density the field's
-    // pointwise envelope gives at z (one envelope evaluation; no probe in the main pass).
-    private static float BodyFactor(Scenario field, Tile tile, float2 slope, float z, bool lod, Counts counts) =>
-        exp(-(field.Density(tile, slope, z, lod, counts) * field.Extinction) * ((field.Grid[^1] - z) * sqrt(slope.x * slope.x + slope.y * slope.y + 1.0f)));
+    // The body's optical depth from z to the grid's end, at the density the field's pointwise envelope gives
+    // at z (one envelope evaluation; no probe in the main pass). MarchLod takes exp(-BodyDepth) as one step.
+    private static float BodyDepth(Scenario field, Tile tile, float2 slope, float z, bool lod, Counts counts) =>
+        field.Density(tile, slope, z, lod, counts) * field.Extinction * ((field.Grid[^1] - z) * sqrt(slope.x * slope.x + slope.y * slope.y + 1.0f));
 
     // The footprint-aware march, the void's shipped one: steps of LodStep(z) inside the unmasked runs only,
-    // octave weights applied; at the body's start, one analytic step to the grid's end, and stop.
-    private static float MarchLod(VoidField field, Tile tile, float2 slope, List<int> cells, int bodyStart, Counts counts, ref long steps, ref long bodySteps)
+    // octave weights applied, early-out below cutoff; at the body's start, one analytic step to the grid's
+    // end, and stop. AtBody is the transmittance when the march reaches the body's start, before that step,
+    // or the final transmittance when there is no body.
+    private static (float Transmittance, float AtBody) MarchLod(VoidField field, Tile tile, float2 slope, List<int> cells, int bodyStart, float cutoff, Counts counts, ref long steps, ref long bodySteps)
     {
         var grid = field.Grid;
         var body = bodyStart >= 0 ? grid[bodyStart] : float.PositiveInfinity;
         var transmittance = 1.0f;
         var k = 0;
-        while (k < cells.Count && transmittance >= 0.02f)
+        while (k < cells.Count && transmittance >= cutoff)
         {
             var z = grid[cells[k]];
             var end = cells[k] + 1;
             for (k++; k < cells.Count && cells[k] == end; k++)
                 end++;
-            while (z < grid[end] && transmittance >= 0.02f)
+            while (z < grid[end] && transmittance >= cutoff)
             {
                 if (z >= body)
                 {
-                    transmittance *= BodyFactor(field, tile, slope, z, lod: true, counts);
+                    var atBody = transmittance;
+                    transmittance *= exp(-BodyDepth(field, tile, slope, z, lod: true, counts));
                     steps++;
                     bodySteps++;
-                    return transmittance;
+                    return (transmittance, atBody);
                 }
 
                 var next = min(min(z + field.LodStep(z), grid[end]), z < body ? body : grid[end]);
@@ -1231,7 +1272,26 @@ public sealed class NoiseBoundTests
             }
         }
 
-        return transmittance;
+        return (transmittance, transmittance);
+    }
+
+    // The accuracy oracle before the body: the optical depth over every grid cell below `stop` (never the
+    // mask's, so it trusts no pre-pass), by midpoint quadrature at step h, accumulated in double. Not counted.
+    private static double ConvergedDepth(Scenario field, Tile tile, float2 slope, int stop, float h, bool lod)
+    {
+        var grid = field.Grid;
+        var counts = new Counts();
+        var dir = Math.Sqrt(slope.x * (double)slope.x + slope.y * (double)slope.y + 1.0);
+        var tau = 0.0;
+        for (var c = 0; c < stop; c++)
+        {
+            var samples = Math.Max(1, (int)Math.Ceiling((grid[c + 1] - grid[c]) / h));
+            var dz = (grid[c + 1] - grid[c]) / (double)samples;
+            for (var s = 0; s < samples; s++)
+                tau += field.Density(tile, slope, (float)(grid[c] + (s + 0.5) * dz), lod, counts) * (double)field.Extinction * dz * dir;
+        }
+
+        return tau;
     }
 
     internal sealed class RunStats
@@ -1240,6 +1300,7 @@ public sealed class NoiseBoundTests
         public readonly Counts Masked = new();
         public readonly Counts Probes = new();
         public readonly Counts Lod = new();
+        public readonly Counts Oracle = new();
         public long Rays;
         public long Tiles;
         public long DenseSteps;
@@ -1250,27 +1311,46 @@ public sealed class NoiseBoundTests
         public long Unfinished;
         public float MaxDifference;
         public float MaxLodDifference;
+        public float MaxOracleDifference;
+        public long OracleEmpty;
+        public long OracleEmptySkipped;
+        public double MaxLodDepthError;
+        public double MaxRefDepthError;
 
         public double PerRay(double value) => value / Rays;
 
         // Dense cost over the tile march's: each ray's own dense cells plus the tile's probes, shared.
         public double Ratio => Dense.Cost / (Masked.Cost + Probes.Cost);
 
-        // What no amortization can beat: the dense cost over the cost of the dense cells alone.
-        public double Ceiling => Dense.Cost / Masked.Cost;
-
         public double LodRatio => Dense.Cost / (Lod.Cost + Probes.Cost);
+
+        // The oracle mask (the cells some ray of the tile samples nonzero) is a ceiling no pre-pass can move.
+        public double OracleCeiling => Dense.Cost / Oracle.Cost;
+
+        public double Efficiency => Oracle.Cost / (Masked.Cost + Probes.Cost);
+
+        // The tile march over the tile march plus its probes: what the probes cost, not what they cull.
+        public double ProbeOverhead => Masked.Cost / (Masked.Cost + Probes.Cost);
+
+        // The oracle-empty cells the pre-pass proves empty; a pre-pass that skips nothing scores 0.
+        public double CullFraction => (double)OracleEmptySkipped / OracleEmpty;
     }
 
     /// <summary>
-    /// Draws `tiles` tiles, runs the pre-pass once per tile, and marches each of the N^2 rays (one per pixel,
-    /// jittered inside it) densely over every cell and masked over the tile's dense cells, both with the
-    /// early-out at 0.02 and the same Integrate; with lod, the footprint-aware march as well.
+    /// Draws `tiles` tiles, runs the pre-pass once per tile, draws the tile's N^2 ray slopes (one per pixel,
+    /// jittered inside it), builds the oracle mask (the cells whose mid-depth density is nonzero for at least
+    /// one of those slopes), and marches each ray densely over every cell, masked over the tile's dense cells
+    /// and over the oracle cells, all with the early-out at 0.02 and the same Integrate. With lod, the
+    /// footprint-aware march as well, and the agreement at the body start (or the grid's end): the optical
+    /// depth of a cutoff-0 footprint march and of the fixed-step cells, each against ConvergedDepth at
+    /// h = 0.5. The oracle mask and the agreement marches count into throwaway Counts, the oracle march into
+    /// its own, so the cost rows do not move.
     /// </summary>
     private static RunStats Run(Scenario field, int n, int tiles, int seed, bool lod = false)
     {
         var random = new System.Random(seed);
         var stats = new RunStats();
+        var scratch = new Counts();
         var grid = field.Grid;
         for (var t = 0; t < tiles; t++)
         {
@@ -1279,24 +1359,58 @@ public sealed class NoiseBoundTests
             Assert.True(field is VoidField || bodyStart < 0, $"{field.Name}: a body reported at cell {bodyStart}; only the void's density can be provably constant");
             stats.Tiles++;
             stats.BodyTiles += bodyStart >= 0 ? 1 : 0;
+            var slopes = new List<float2>();
             for (var j = 0; j < n; j++)
             for (var i = 0; i < n; i++)
+                slopes.Add(tile.PixelSlope(i, j, random.NextSingle(), random.NextSingle()));
+            var inMask = new HashSet<int>(cells);
+            var oracle = new List<int>();
+            for (var c = 0; c < grid.Length - 1; c++)
             {
-                var slope = tile.PixelSlope(i, j, random.NextSingle(), random.NextSingle());
+                var mid = (grid[c] + grid[c + 1]) * 0.5f;
+                if (slopes.Any(s => field.Density(tile, s, mid, false, scratch) > 0.0f))
+                {
+                    oracle.Add(c);
+                }
+                else
+                {
+                    stats.OracleEmpty++;
+                    stats.OracleEmptySkipped += inMask.Contains(c) ? 0 : 1;
+                }
+            }
+
+            var stop = bodyStart >= 0 ? bodyStart : grid.Length - 1;
+            foreach (var slope in slopes)
+            {
                 var dense = 1.0f;
                 for (var c = 0; c < grid.Length - 1 && dense >= 0.02f; c++, stats.DenseSteps++)
                     dense *= Integrate(field, tile, slope, grid[c], grid[c + 1], lod: false, stats.Dense);
                 var masked = 1.0f;
                 for (var c = 0; c < cells.Count && masked >= 0.02f; c++, stats.MaskedSteps++)
                     masked *= Integrate(field, tile, slope, grid[cells[c]], grid[cells[c] + 1], lod: false, stats.Masked);
+                var exact = 1.0f;
+                for (var c = 0; c < oracle.Count && exact >= 0.02f; c++)
+                    exact *= Integrate(field, tile, slope, grid[oracle[c]], grid[oracle[c] + 1], lod: false, stats.Oracle);
                 stats.Rays++;
                 stats.MaxDifference = MathF.Max(stats.MaxDifference, MathF.Abs(dense - masked));
+                stats.MaxOracleDifference = MathF.Max(stats.MaxOracleDifference, MathF.Abs(dense - exact));
                 if (dense >= 0.02f)
                     stats.Unfinished++;
                 if (lod)
                 {
-                    var marched = MarchLod((VoidField)field, tile, slope, cells, bodyStart, stats.Lod, ref stats.LodSteps, ref stats.BodySteps);
+                    var (marched, _) = MarchLod((VoidField)field, tile, slope, cells, bodyStart, 0.02f, stats.Lod, ref stats.LodSteps, ref stats.BodySteps);
                     stats.MaxLodDifference = MathF.Max(stats.MaxLodDifference, MathF.Abs(dense - marched));
+                    long ignoredSteps = 0, ignoredBody = 0;
+                    var (_, atBody) = MarchLod((VoidField)field, tile, slope, cells, bodyStart, 0.0f, scratch, ref ignoredSteps, ref ignoredBody);
+                    var reference = 1.0;
+                    for (var c = 0; c < stop; c++)
+                        reference *= Integrate(field, tile, slope, grid[c], grid[c + 1], lod: false, scratch);
+                    var tauConv = ConvergedDepth(field, tile, slope, stop, 0.5f, lod: true);
+                    var tauLod = -Math.Log(Math.Max(atBody, 1.0e-30f));
+                    var tauRef = -Math.Log(Math.Max(reference, 1.0e-300));
+                    var scale = Math.Max(tauConv, 1.0e-3);
+                    stats.MaxLodDepthError = Math.Max(stats.MaxLodDepthError, Math.Abs(tauLod - tauConv) / scale);
+                    stats.MaxRefDepthError = Math.Max(stats.MaxRefDepthError, Math.Abs(tauRef - tauConv) / scale);
                 }
             }
         }
@@ -1308,14 +1422,16 @@ public sealed class NoiseBoundTests
         $"IV-REPORT {label}: dense snoise/ray {s.PerRay(s.Dense.Snoise):F2} env/ray {s.PerRay(s.Dense.Envelope):F2} (samples/ray {s.PerRay(s.DenseSteps):F2}); "
         + $"tile snoise/ray {s.PerRay(s.Masked.Snoise + (double)s.Probes.Snoise):F2} env/ray {s.PerRay(s.Masked.Envelope + (double)s.Probes.Envelope):F2} "
         + $"(probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; dense cells/ray {s.PerRay(s.MaskedSteps):F2}); "
-        + $"cost ratio {s.Ratio:F2}x, ceiling {s.Ceiling:F2}x; max |dT| {s.MaxDifference:R}; unfinished rays {s.Unfinished}");
+        + $"cost ratio {s.Ratio:F2}x, oracle ceiling {s.OracleCeiling:F2}x, efficiency {s.Efficiency:F3}, cull fraction {s.CullFraction:F3} ({s.OracleEmptySkipped}/{s.OracleEmpty}), "
+        + $"probe overhead {s.ProbeOverhead:F3}; max |dT| {s.MaxDifference:R}, oracle {s.MaxOracleDifference:R}; unfinished rays {s.Unfinished}");
 
     private void ReportVoid(string label, RunStats s) => output.WriteLine(
         $"IV-REPORT {label}: steps/px ref {s.PerRay(s.DenseSteps):F2}, masked {s.PerRay(s.MaskedSteps):F2}, LOD {s.PerRay(s.LodSteps):F2} ({(double)s.DenseSteps / s.LodSteps:F2}x fewer); "
         + $"snoise/px ref {s.PerRay(s.Dense.Snoise):F2}, masked {s.PerRay(s.Masked.Snoise):F2}, LOD {s.PerRay(s.Lod.Snoise):F2}; "
         + $"cost/px ref {s.PerRay(s.Dense.Cost):F2}, masked {s.PerRay(s.Masked.Cost + s.Probes.Cost):F2}, LOD {s.PerRay(s.Lod.Cost + s.Probes.Cost):F2} incl. probes (ref/LOD {s.LodRatio:F2}x, ref/masked {s.Ratio:F2}x); "
         + $"probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; body tiles {s.BodyTiles}/{s.Tiles}, analytic steps/px {s.PerRay(s.BodySteps):F2}; "
-        + $"max |dT| masked {s.MaxDifference:R}, LOD {s.MaxLodDifference:R}; unfinished rays {s.Unfinished}");
+        + $"depth error at the body start vs converged: LOD {s.MaxLodDepthError:G4}, fixed-step {s.MaxRefDepthError:G4} (ratio {s.MaxLodDepthError / s.MaxRefDepthError:F2}); "
+        + $"end-of-ray max |dT| masked {s.MaxDifference:R}, LOD {s.MaxLodDifference:R}; unfinished rays {s.Unfinished}");
 
     /// <summary>
     /// The analytic body's soundness pin (ruling operator-analytic-wall-body). Over 2,000 seeded tiles of
@@ -1323,9 +1439,9 @@ public sealed class NoiseBoundTests
     /// body start b: (1) the gated bound over [grid[b], grid end] is a positive point equal to the reported
     /// density, every cell from b to the end is in the mask, and at 64 random (pixel, sub-pixel, cell &gt;= b,
     /// depth in cell) points the full and the truncated Density and the ungated Exact field all equal it
-    /// exactly, no tolerance; (2) the one closed-form factor exp(-density ext L) over the body equals the
-    /// fixed-step product of the body cells' Integrate factors (no early-out, same cells) within 1e-4
-    /// relative. (3) No tile of (a)-(d), at either warp, reports a body: their bounds are never a positive
+    /// exactly, no tolerance; (2) BodyDepth, the optical depth MarchLod's one closed-form step uses, equals
+    /// the summed fixed-step depth -ln Integrate of the body cells (no early-out, same cells) within 1e-4
+    /// relative, compared in the depth domain so LOD-far's deep bodies do not underflow. (3) No tile of (a)-(d), at either warp, reports a body: their bounds are never a positive
     /// point.
     /// </summary>
     [Fact]
@@ -1369,12 +1485,11 @@ public sealed class NoiseBoundTests
             }
 
             var ray = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
-            var product = 1.0;
+            var depth = BodyDepth(field, tile, ray, grid[b], lod: true, counts);
+            var sum = 0.0;
             for (var c = b; c < last; c++)
-                product *= Integrate(field, tile, ray, grid[c], grid[c + 1], lod: true, counts);
-            var tau = density * field.Extinction * ((grid[last] - grid[b]) * sqrt(ray.x * ray.x + ray.y * ray.y + 1.0f));
-            var analytic = Math.Exp(-(double)tau);
-            Assert.True(Math.Abs(analytic - product) <= 1.0e-4 * product, $"{field.Name}: the analytic body factor {analytic:R} differs from the fixed-step product {product:R} over cells {b}..{last}");
+                sum += -Math.Log(Integrate(field, tile, ray, grid[c], grid[c + 1], lod: true, counts));
+            Assert.True(Math.Abs(depth - sum) <= 1.0e-4 * sum, $"{field.Name}: the body's depth from cell {b}, BodyDepth {depth:R}, differs from the fixed-step cells' summed depth {sum:R} over cells {b}..{last}");
         }
 
         output.WriteLine("IV-REPORT analytic body: tiles with a body " + string.Join(", ", bodies.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}")));
@@ -1402,20 +1517,25 @@ public sealed class NoiseBoundTests
     /// (a) height fog, (b) inside the fog, (c) Aetheria's wells and (d) r1's uniform slab, each over 64
     /// tiles at N in {1, 4, 8, 16} and warp in {0, D}: the tile march integrates exactly the dense march's
     /// cells, so the transmittance agrees within 1e-3 (a difference would be a skipped cell that was not
-    /// empty), and no (a)-(d) tile reports a body. (e) the void: the grid over hollow radius, camera offset
-    /// and ramp width (32 tiles at N = 8), LOD-far (32 tiles) and the one shipped void (200 tiles), three
-    /// marches each, the footprint-aware one taking the analytic body step. Contracts at N = 8, the lower
-    /// of warp 0 and D: (a) at least 2x combined cost; (c) at least 0.90 of its probe-free ceiling
-    /// (ruling operator-wells-contract-vs-ceiling: the ceiling is what intervals control, the fog band's
-    /// cost is the field's); (e) at the shipped void the masked fixed-step march agrees with the reference
-    /// exactly, the footprint-aware march within 0.02, and it takes at most half the reference's steps per
-    /// pixel. A shortfall skips naming saving-2x-scenarios and every shortfall; the fields, the grids and
-    /// the envelope cost are not tuned toward it.
+    /// empty), the oracle march (each ray over the oracle mask: the cells whose mid-depth density is nonzero
+    /// for at least one of the tile's rays) agrees with the dense march exactly, and no (a)-(d) tile reports
+    /// a body. (e) the void: the grid over hollow radius, camera offset and ramp width (32 tiles at N = 8),
+    /// LOD-far (32 tiles) and the one shipped void (200 tiles), three marches each, the footprint-aware one
+    /// taking the analytic body step. Contracts at N = 8, the lower of warp 0 and D: (a) at least 2x
+    /// combined cost; (c) (ruling wells-overhead-plus-floor) probe overhead, the tile march over the tile
+    /// march plus its probes, at least 0.90, and, hard, the pre-pass proves at least half of the
+    /// oracle-empty cells empty; the oracle ceiling, the efficiency against it and the cull fraction are
+    /// printed; (e) at the shipped void the masked fixed-step march agrees with the reference exactly, the
+    /// footprint-aware march's optical depth at the body start is off a converged march (h = 0.5, every
+    /// cell) by at most twice the fixed-step march's error, and it takes at most half the reference's
+    /// steps per pixel. A shortfall skips naming saving-2x-scenarios and every shortfall; the fields, the
+    /// grids and the envelope cost are not tuned toward it.
     /// </summary>
     [Fact]
     public void IntervalSkipHalvesEvaluations()
     {
         var ratios = new Dictionary<string, double>();
+        var cullFloor = double.MaxValue;
         var scenarios = new (string Key, float Warp, Func<float, Scenario> Make)[]
         {
             ("a", FogField.AetheriaWarp, FogField.HeightFog),
@@ -1431,10 +1551,16 @@ public sealed class NoiseBoundTests
             var stats = Run(field, n, 64, 0x5A7E + n);
             Report($"{field.Name} N={n} warp={w:R}", stats);
             Assert.True(stats.MaxDifference <= 1.0e-3f, $"{field.Name} N={n} warp={w:R}: transmittance differs by {stats.MaxDifference:R}");
+            Assert.True(stats.MaxOracleDifference == 0.0f, $"{field.Name} N={n} warp={w:R}: the oracle march differs from the dense march by {stats.MaxOracleDifference:R}");
             if (key == "d")
                 output.WriteLine($"IV-REPORT (d) N={n} warp={w:R}: ungated dense snoise/ray {3.0 * stats.PerRay(stats.DenseSteps):F2} (three per dense sample, as r1 counted)");
             if (n == 8)
-                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), key == "c" ? stats.Ratio / stats.Ceiling : stats.Ratio);
+                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), key == "c" ? stats.ProbeOverhead : stats.Ratio);
+            if (n == 8 && key == "c")
+            {
+                Assert.True(stats.CullFraction >= 0.5, $"(c) warp={w:R}: the pre-pass proves {stats.CullFraction:F3} of the oracle-empty cells empty, under the 0.5 floor (ruling wells-overhead-plus-floor)");
+                cullFloor = Math.Min(cullFloor, stats.CullFraction);
+            }
         }
 
         foreach (var rh in VoidField.HollowRadii)
@@ -1452,17 +1578,18 @@ public sealed class NoiseBoundTests
         var headline = Run(shipped, 8, 200, 0x5417, lod: true);
         ReportVoid($"{shipped.Name} N=8 (headline, 200 tiles)", headline);
         Assert.True(headline.MaxDifference == 0.0f, $"the masked fixed-step march differs from the reference by {headline.MaxDifference:R}");
-        Assert.True(headline.MaxLodDifference <= 0.02f, $"the footprint-aware march differs from the reference by {headline.MaxLodDifference:R}");
+        Assert.True(headline.MaxLodDepthError <= 2.0 * headline.MaxRefDepthError, $"at the body start the footprint-aware march's optical depth is off the converged march's by {headline.MaxLodDepthError:G6} relative, more than twice the fixed-step march's {headline.MaxRefDepthError:G6}");
         var steps = (double)headline.DenseSteps / headline.LodSteps;
 
         var shortfalls = new List<string>();
         if (ratios["a"] < 2.0)
             shortfalls.Add($"(a) saves {ratios["a"]:F2}x combined cost, under 2x");
         if (ratios["c"] < 0.90)
-            shortfalls.Add($"(c) reaches {ratios["c"]:F2} of its probe-free ceiling, under 0.90");
+            shortfalls.Add($"(c) probe overhead {ratios["c"]:F3}, under 0.90");
         if (steps < 2.0)
             shortfalls.Add($"(e) takes {steps:F2}x fewer steps per pixel at the shipped void, under 2x");
-        output.WriteLine($"IV-REPORT contracts at N=8 (lower of warp 0 and D): (a) {ratios["a"]:F2}x cost, (c) {ratios["c"]:F2} of ceiling, (e) {steps:F2}x fewer steps/px");
+        output.WriteLine($"IV-REPORT contracts at N=8 (lower of warp 0 and D): (a) {ratios["a"]:F2}x cost; (c) probe overhead {ratios["c"]:F3} (at least 0.90), cull fraction {cullFloor:F3} (at least 0.5, hard); "
+            + $"(e) {steps:F2}x fewer steps/px, depth error at the body start LOD {headline.MaxLodDepthError:G4} vs fixed-step {headline.MaxRefDepthError:G4} (at most 2x)");
         if (shortfalls.Count > 0)
             Assert.Skip("saving-2x-scenarios: " + string.Join("; ", shortfalls));
     }
