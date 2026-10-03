@@ -949,6 +949,28 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.IsDirty, Is.False);
         }
 
+        // A refusal reads the record it refused: in a store holding a variant, where a write lands only onto the store as this cache
+        // last read it, the next write of another record lands at once instead of being refused for the record already refused.
+        [Test]
+        public void AfterAnUndeclaredRefusalTheNextWriteIntoAVariantStoreLands([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = PathOf("variant-store.cc");
+            using var cache = Open(path, DeckOnly, directory: false);
+            cache.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf("d"), D);
+                batch.Upsert(Deck, DeckOf("e"), E);
+                batch.UpsertVariant(V, E, new[] { cache.Override(Deck, "Name", "v") });
+            });
+            Move(path, D, "moved", directory: false);
+
+            RefusedOnDisk(Assert.Throws<CultSchemaConflictException>(() => Land(cache, write, D, DeckOf(Canary)))!, D);
+            Land(cache, write, new CultRecordKey("f"), DeckOf("f"));
+
+            Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e", "f", "v" }));
+            Assert.That(Read(path).Records.Single(record => record.Key == D.Value).SchemaId, Is.EqualTo(MovingId));
+        }
+
         public enum DirectWrite
         {
             Push,
