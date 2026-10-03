@@ -1,0 +1,292 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "interval-ops",
+  "revision": 4,
+  "title": "Interval ops r4: LOD agreement against a converged march at the body start, BodyDepth pinned, (c) against an oracle ceiling, WeightBound pinned, design.md from r4's own run",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-interval-ops",
+  "base": "3ac7250a",
+  "depends_on": [],
+  "first": [
+    "Follow-up on verdict cultmath-tapes:verdict:cut-interval-ops.s2 (range 43183276..3ac7250a, worktree F:\\Projects\\CultLib-iv), four findings, one item each below. Touches packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs and packages/cultmath/docs/design.md only: no src, no HLSL, no README. Question cultmath-tapes:question:wells-ceiling-oracle decides only (c)'s assertion lines (item 9). Self dispatches with its ruling in the brief. Line numbers are at 3ac7250a. Every probe number quoted here is from Imagination's scratch probe at 3ac7250a, with the test's own seeds, tiles and N = 8. It is never committed; r4's run reprints its own numbers.",
+    "Finding lod-agreement-blind-past-body (High), measured. Comparing with the 10-unit fixed-step march cannot pin LodStep. At the shipped void, the LOD march's T at the body start differs from it by up to 0.300 of max(T, 0.02). LodStep doubled differs by 0.309. Both are unconverged midpoint quadratures of a ramp with 25-unit detail. A converged march separates them: h = 0.5, which agrees with h = 1 to 0.0065. Relative optical-depth error per ray, max at the headline: fixed-step 0.061, LOD 0.086, LodStep x2 0.177, LodStep x0.5 0.036. With the pre-body integration dropped, T is wrong by 26.5x max(T, 0.02). So the LOD march is 1.4x less accurate than the dense march before the body. Report it; it is not tuned.",
+    "The agreement rule. MarchLod gains `float cutoff`; Run's costed march passes 0.02, as now. It returns (Transmittance, AtBody). AtBody is T when z first reaches the body start, before the body step, or the final T when there is no body. New helper ConvergedDepth(field, tile, slope, stop, h, lod) returns the optical depth in double, by midpoint quadrature at step h. It runs over EVERY grid cell before `stop`, never the mask's, so it trusts no pre-pass, using the field's Density.",
+    "(Agreement, continued.) In Run with lod, per ray, with stop = bodyStart, or the cell count (grid.Length - 1) when there is none:\n- tauConv = ConvergedDepth(..., stop, 0.5, lod: true).\n- tauLod = -ln(max(AtBody, 1e-30)) from a second MarchLod at cutoff 0.\n- tauRef = -ln of the product of Integrate over cells < stop, lod: false, with no early-out.\nRunStats keeps MaxLodDepthError and MaxRefDepthError, each max |tau - tauConv| / max(tauConv, 1e-3). The converged march and the cutoff-0 march count into a throwaway Counts and no steps, so cost rows do not move.",
+    "The (e) agreement contract replaces 'LOD within 0.02 at the end': at the shipped headline, MaxLodDepthError <= 2 x MaxRefDepthError. The footprint march may be at most twice as wrong as the dense march it is measured against. This mirrors the 2x step contract and is Imagination's default; Self may put it to the operator. Measured 0.086 <= 0.122. LodStep x2 and the dropped pre-body integration fail it. The end-of-ray assertion :1455 is deleted. End-of-ray |dT| stays printed. Every (e) row and LOD-far prints both errors and their ratio, which is printed and not asserted. LOD-far's tauRef carries the deliberate octave truncation, so its ratio is not comparable.",
+    "BodyFactor becomes BodyDepth (:1198-1201). It returns the optical depth Density x ext x (grid end - z) x |dir| as a float. MarchLod multiplies by exp(-BodyDepth(...)). AnalyticBodyMatchesFineMarch part (2) deletes its own tau and analytic (:1375-1377). It compares BodyDepth(field, tile, ray, grid[b], lod: true, counts) with the double sum over body cells of -ln(Integrate(cell, lod: true)), within 1e-4 relative. Probe: in the T domain the comparison underflows at LOD-far (float exp of about -256 is 0, relative error 1); in the depth domain it does not. With |dir| dropped, the depth error is |dir| - 1, at least 0.00145 at the shipped camera, so the mutant dies on every tile.",
+    "Finding wells-ceiling-contract-vacuous (Medium), measured at N = 8. Warp 0: ratio 2.744x, mask ceiling 2.855x (0.961), oracle ceiling 7.263x (0.378), oracle-empty cells skipped 0.952, skip-nothing pre-pass 0.136. Warp D: 1.391x, 1.401x (0.993), 7.165x (0.194), 0.842, 0.139. At warp D about 80% of the masked cost lies in cells where every ray's sample is 0, so design.md's 'where the rays need them' is false. The ruling's reason needs a ceiling the pre-pass cannot move. Hence the question.",
+    "Measurement, whatever the ruling. Run draws a tile's N^2 slopes first, then marches. The random stream reorders, so every IV-REPORT row reprints. The oracle mask is the cells whose Density at mid-depth is > 0 for at least one of those slopes, evaluated into a throwaway Counts. The oracle march runs each ray over the oracle cells only, with the same Integrate and early-out, costed into a new RunStats.Oracle. Assert its T equals the dense march's exactly (probe max |dT| 0). RunStats.Ceiling (:1259-1260) goes. In its place: OracleCeiling = Dense.Cost / Oracle.Cost; Efficiency = Oracle.Cost / (Masked.Cost + Probes.Cost); ProbeOverhead = Masked.Cost / (Masked.Cost + Probes.Cost); CullFraction = oracle-empty cells the mask skips / oracle-empty cells. Report prints all four.",
+    "(c)'s assertion, at N = 8, the lower of warp 0 and D, per the ruling on wells-ceiling-oracle. :1437 records the chosen value. For the cull floor, Assert.True fails rather than skips.\n- oracle-target-cull-floor (recommended): hard CullFraction >= 0.5, plus Efficiency >= 0.90 in the shortfall list.\n- oracle-target-only: the shortfall alone.\n- cull-fraction: CullFraction >= 0.90 in the shortfall list.\n- overhead-plus-floor: ProbeOverhead >= 0.90 in the shortfall list, plus the hard floor.\nThe contracts line names the measured quantity. Note: under options 1 and 2 the test skips today, naming saving-2x-scenarios with (c)'s shortfall; (a) and (e) are still evaluated and listed.",
+    "Finding weightbound-mutation-survives (Low). VoidField gains public (float2 Coarse, float2 Fine) WeightBounds(float z0, float z1) beside Weights(z) (:992). WeightBound (:1035) stays private and is what WeightBounds calls. New Fact WeightBoundEnclosesOneSignedNoise on LodFar, 2,000 cases: z0 ~ U(1460, 0.95 x grid end), z1 ~ U(z0, grid end), 16 depths in [z0, z1] including both ends. Each octave weight lies in its bound. For the one-signed noise interval n = [0.25, 1] and n_s in {0.25, U(0.25, 1), 1}, w(z) n_s lies in iv_mul(bound, n). Probe: the spec's mutant [w(z0), 1] misses w(z1) x 0.25 in 2000 of 2000 fine-octave cases on (1460, 2920). The header (:14-20) moves that mutant to this test.",
+    "Finding design-saving-section-stale (Medium). Rewrite design.md :475-512 from r4's final run, where every figure appears in an IV-REPORT line the report pastes. Delete :422-423's '6e-4 at the shipped scales' sentence, which no test prints. Contents:\n- the tile march and its marches;\n- (a)-(d) at far 2048, with (c)'s oracle ceiling, efficiency, cull fraction and probe overhead;\n- (e) at the shipped void, Rh 198, S 50, Rc = Rh + S, e = -ln 1.5 / ln(1 - (Rh/Rc)^2): steps, snoise, cost, body tiles, the two depth errors;\n- the analytic body (condition, one probe, one step, the pin);\n- the WeightBound [w(z1), 1] deviation and why it encloses;\n- the contracts as asserted, (c) in the ruling's words.\n'The test skips' appears only if this run skips. No r2 or r3 number survives.",
+    "Site-ground's dense-reference browser check has the same blind spot (its converged mean luminance is compared after the walls' bodies). It is follow-up cultmath-tapes:follow_up:site-ground-dense-check-blind-past-body, owned by the next site-ground spec. Not this cut.",
+    "Mutation evidence, cheap by design. src is untouched, so Stryker has nothing in scope and is not run; the negative check proves the premise. Run ONE tools/mutation-table.sh job on Yggdrasil against the final head, test filter FullyQualifiedName~NoiseBoundTests, with these rows:\n- MarchLod `transmittance *= Integrate(field, tile, slope, z, next, lod: true, counts);` -> `transmittance *= 1.0f;` must fail IntervalSkipHalvesEvaluations;\n- LodStep's return wrapped in `2.0f * (...)`: same test;\n- BodyDepth without its sqrt factor: AnalyticBodyMatchesFineMarch;\n- WeightBound `).x, 1.0f)` -> `).y, 1.0f)`: WeightBoundEnclosesOneSignedNoise;\n- MarchTile `if (bound.y <= 0.0f)` -> `if (bound.y <= 0.0f && !field.Name.Contains(\"wells\"))`: IntervalSkipHalvesEvaluations, under the floor options; a survivor under oracle-target-only, by that option's design;\n- Compose `CarveRadius` -> `HollowRadius` in the lo test: AnalyticBodyMatchesFineMarch (carried).\nNo per-mutant hand loops, no Starfire jobs.",
+    "Budget: under 200k Hands tokens. Read NoiseBoundTests.cs :480-1469 and design.md :344-515 once; no other file. Verification is one full CultMath.Tests run on Yggdrasil after the code commits (paste counts and every IV-REPORT line), the mutation-table job, and one fix round. If the headline agreement fails at r4's own numbers, do not move the factor or the step: report the measured errors as a fork."
+  ],
+  "deletes": [
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 1,
+      "note": ":1455 the end-of-ray assertion 'the footprint-aware march differs from the reference by'; blind past the body (finding lod-agreement-blind-past-body)."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 4,
+      "note": ":1198-1201 BodyFactor and its comment; replaced by BodyDepth, the one owner of the body's optical depth."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 3,
+      "note": ":1375-1377 the test's own tau, its exp and the T-domain comparison; replaced by BodyDepth against the cells' summed depth."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 2,
+      "note": ":1259-1260 RunStats.Ceiling and 'What no amortization can beat'; the mask-derived ceiling stops being a contract owner."
+    },
+    {
+      "path": "packages/cultmath/docs/design.md",
+      "lines": 38,
+      "note": ":475-512 the saving section with r2's rows (1.41x, 16.45, 2.21x, 1.34x) and '(c) does not, so the test skips'."
+    },
+    {
+      "path": "packages/cultmath/docs/design.md",
+      "lines": 2,
+      "note": ":422-423 'At the shipped scales (|c|_1 near 600, r near 5) it adds 6e-4.'; printed by no test."
+    }
+  ],
+  "keeps_moves": [
+    "packages/cultmath/src, both CultMath.Interval.hlsl copies, README.md and every other test file: untouched.",
+    "Fields, grids (6/K end), seeds, e = 0.2, LodStep, Density, Bound, Compose, MarchTile, Integrate, the masked fixed-step march's exactness asserts, the (a) and (e) step contracts and the Skip mechanism: unchanged.",
+    "TileBallEnclosesEveryRaySegment, EnvelopeBoundEnclosesDensity, the Lipschitz tests, TightnessReport, IntervalTests, HlslSourceCompatibilityTests: unchanged.",
+    "AnalyticBodyMatchesFineMarch parts (1) and (3): unchanged; part (2) changes domain and owner only.",
+    "design.md :344-474 (Intervals up to the saving section, with the r3 frustum-ball paragraph minus the 6e-4 sentence) and every other section: unchanged."
+  ],
+  "adds": [
+    "NoiseBoundTests.cs: BodyDepth; MarchLod's cutoff and (Transmittance, AtBody) return; ConvergedDepth; Run's slope-first draw, oracle mask, oracle march and the cutoff-0 agreement march; RunStats Oracle, OracleCeiling, Efficiency, ProbeOverhead, CullFraction, MaxOracleDifference, MaxLodDepthError, MaxRefDepthError; Report and ReportVoid fields; the (e) depth contract; (c)'s assertion per the ruling.",
+    "NoiseBoundTests.cs: VoidField.WeightBounds(z0, z1); Fact WeightBoundEnclosesOneSignedNoise; the header's mutation list updated.",
+    "design.md: the saving section rewritten from r4's run."
+  ],
+  "file_changes": [
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 14,
+        "end_line": 20
+      },
+      "change": "Header mutation list: w(z0) for w(z1) now fails WeightBoundEnclosesOneSignedNoise. Add: the dropped pre-body integration and LodStep x2 fail IntervalSkipHalvesEvaluations's depth agreement; BodyDepth without |dir| fails AnalyticBodyMatchesFineMarch."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 992
+      },
+      "change": "Beside Weights(z): public (float2 Coarse, float2 Fine) WeightBounds(float z0, float z1) => (WeightBound(CoarseWavelength, z0, z1), WeightBound(FineWavelength, z0, z1))."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1198,
+        "end_line": 1201
+      },
+      "change": "BodyFactor -> BodyDepth(Scenario field, Tile tile, float2 slope, float z, bool lod, Counts counts): the float optical depth Density x Extinction x (Grid[^1] - z) x sqrt(m.x^2 + m.y^2 + 1), with no exp."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1205,
+        "end_line": 1235
+      },
+      "change": "MarchLod(..., float cutoff, ref long steps, ref long bodySteps) returns (float Transmittance, float AtBody). Both loop guards use cutoff. At z >= body: AtBody = transmittance, then transmittance *= exp(-BodyDepth(...)), steps++, bodySteps++, return. Without a body, AtBody = final T."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1236
+      },
+      "change": "New ConvergedDepth(Scenario field, Tile tile, float2 slope, int stop, float h, bool lod): sum over cells c < stop of ceil(len / h) midpoint samples, Density(field, tile, slope, z, lod, throwaway) x Extinction x dz x |dir| in double. Every cell, not the mask's."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1237,
+        "end_line": 1265
+      },
+      "change": "RunStats:\n- Counts Oracle; OracleEmpty and OracleEmptySkipped; MaxOracleDifference; MaxLodDepthError; MaxRefDepthError.\n- OracleCeiling, Efficiency, ProbeOverhead and CullFraction as the spec's 'first' defines them.\n- Ceiling deleted.\nRatio and LodRatio are unchanged."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1270,
+        "end_line": 1305
+      },
+      "change": "Run, per tile:\n- MarchTile.\n- Draw N^2 slopes.\n- Oracle mask over all cells (mid-depth Density > 0 for any slope; throwaway Counts); count oracle-empty cells and those the mask skips.\n- Per ray: dense, masked and oracle marches (oracle into stats.Oracle; MaxOracleDifference).\n- With lod: the costed MarchLod (cutoff 0.02), then a cutoff-0 MarchLod and ConvergedDepth at h 0.5 into throwaway Counts, and tauRef with no early-out; update both depth errors."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1307,
+        "end_line": 1318
+      },
+      "change": "Report prints oracle ceiling, efficiency, cull fraction (with counts), probe overhead and max oracle |dT| in place of 'ceiling'. ReportVoid adds the depth errors of LOD and fixed-step against the converged march and their ratio; the end-of-ray |dT| stays."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1332
+      },
+      "change": "AnalyticBodyMatchesFineMarch part (2): depth = BodyDepth(field, tile, ray, grid[b], lod: true, counts); sum = the double sum over c in [b, last) of -Math.Log(Integrate(field, tile, ray, grid[c], grid[c + 1], lod: true, counts)); assert |depth - sum| <= 1e-4 x sum, naming field, b and both values. The doc comment says so."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1430,
+        "end_line": 1440
+      },
+      "change": "(a)-(d) loop: Assert MaxOracleDifference == 0 beside the existing <= 1e-3. :1437 records the ruling's (c) quantity (Efficiency, CullFraction or ProbeOverhead), the lower of warp 0 and D at N = 8, and the CullFraction floor value when the ruling has one."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1453,
+        "end_line": 1466
+      },
+      "change": "Headline:\n- MaxDifference == 0 stays.\n- :1455 is replaced by Assert MaxLodDepthError <= 2 x MaxRefDepthError, with both values in the message.\n- Under a floor option: Assert CullFraction >= 0.5 for (c) at both warps (hard).\n- Shortfalls: (c) per the ruling.\n- The contracts line names the quantity and prints the (e) depth errors."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1402,
+        "end_line": 1414
+      },
+      "change": "IntervalSkipHalvesEvaluations doc comment:\n- the (e) agreement is the converged depth, 2x the fixed-step's;\n- (c) per the ruling, citing it;\n- the oracle is defined;\n- 'within 0.02' leaves."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 304
+      },
+      "change": "After EnvelopeBoundEnclosesDensity: Fact WeightBoundEnclosesOneSignedNoise, as item 10 of 'first'. Its message names z0, z1, z, the octave, the weight and the bound."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/docs/design.md",
+        "line": 475,
+        "end_line": 512
+      },
+      "change": "The saving section is rewritten from r4's IV-REPORT lines (contents in item 11 of 'first'). The next paragraph, 'Consumers: ...' at :514, is kept."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/docs/design.md",
+        "line": 422,
+        "end_line": 423
+      },
+      "change": "Delete the sentence 'At the shipped scales (|c|_1 near 600, r near 5) it adds 6e-4.' Leave the rest of the paragraph."
+    }
+  ],
+  "authority_map": {
+    "owner": "The saving test owns the proving-ground numbers and their oracles. The converged march (h = 0.5) is the accuracy oracle before the body. The oracle mask (cells some ray of the tile samples nonzero) is (c)'s ceiling oracle. BodyDepth is the one owner of the body's optical depth, in the march and in its pin. CultMath src is untouched. The operator owns the contracts: the rulings and the answer to wells-ceiling-oracle.",
+    "inputs": [
+      "the r3 fields, grids, seeds, tiles and marches at 3ac7250a",
+      "the ruling answering cultmath-tapes:question:wells-ceiling-oracle"
+    ],
+    "outputs": [
+      "IV-REPORT rows: the LOD and fixed-step depth errors against the converged march; (c)'s oracle ceiling, efficiency, cull fraction and probe overhead",
+      "design.md's saving section, every figure from those rows"
+    ],
+    "derived_state": [
+      "(c)'s ceiling is no longer derived from the pre-pass's own mask; it is derived from the oracle mask, which the pre-pass cannot move.",
+      "Dense/Masked is no longer a contract owner; Masked/(Masked+Probes) is printed as probe overhead (an owner only under overhead-plus-floor).",
+      "The fixed-step march is no longer the LOD march's accuracy oracle; it is a peer measured against the converged march, and its error sets the LOD's allowance (2x).",
+      "End-of-ray |dT| is display-only.",
+      "The body's optical depth is derived once, by BodyDepth; the test no longer re-derives it."
+    ],
+    "forbidden_writers": [
+      "no assertion compares the LOD march with the fixed-step march directly, or after the body",
+      "AnalyticBodyMatchesFineMarch does not compute the body's depth itself; it calls BodyDepth",
+      "neither the oracle mask nor ConvergedDepth reads MarchTile's output",
+      "no change to src, the HLSL, the fields, grids, LodStep, seeds, the 0.2 weight or the 2x factor toward a contract",
+      "no figure in design.md that this run's IV-REPORT lines do not print"
+    ],
+    "shared_paths": [
+      "MarchLod is one function for the costed march (cutoff 0.02) and the agreement march (cutoff 0)",
+      "one Run computes dense, masked, oracle, LOD and converged for every scenario; the headline and the grid print the same fields",
+      "the site's mirror of the march inherits the same check through follow-up site-ground-dense-check-blind-past-body"
+    ],
+    "deletion_line": "The end-of-ray LOD assertion, BodyFactor, the test's own tau, RunStats.Ceiling, the (c) Ratio/Ceiling special case, design.md's r2 rows and the unprinted 6e-4 sentence all leave before their replacements are written. Net: about +170 / -60 in tests and docs, nothing in src. What that buys: (e) can now fail on a wrong pre-body march, the body depth can fail on a wrong |dir|, (c) can fail on a pre-pass that proves nothing, and the WeightBound mutant dies."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests -c Release green or skipped only by saving-2x-scenarios as the ruling implies (MeasureLipschitz/MeasureMonotonicity excluded by trait); paste counts and every IV-REPORT line",
+      "Yggdrasil: one tools/mutation-table.sh job at the final head with the six rows in 'first' item 13; the table pasted; every row CAUGHT by the named test except the wells row under oracle-target-only",
+      "No Stryker run and no Starfire job: no src or HLSL change in 3ac7250a..HEAD (negative check)"
+    ],
+    "tests": [
+      {
+        "name": "NoiseBoundTests.IntervalSkipHalvesEvaluations",
+        "pins": "At the shipped void the footprint march's optical depth at the body start is within 2x the fixed-step march's error of a converged march; the oracle march equals the dense march exactly; (c) is asserted per the ruling against a ceiling the pre-pass cannot move; (a) and (e) step contracts as before."
+      },
+      {
+        "name": "NoiseBoundTests.AnalyticBodyMatchesFineMarch",
+        "pins": "BodyDepth, the depth MarchLod uses, equals the summed fixed-step depth of the body cells within 1e-4 relative, in the depth domain (no underflow), so a body depth without |dir| fails on every tile; parts (1) and (3) unchanged."
+      },
+      {
+        "name": "NoiseBoundTests.WeightBoundEnclosesOneSignedNoise",
+        "pins": "Each octave weight at every sampled depth in [z0, z1] lies in WeightBounds(z0, z1), and w(z) n lies in iv_mul(bound, n) for a one-signed n, so a lower end above w(z1) fails."
+      },
+      {
+        "name": "NoiseBoundTests (rest) and CultMath.Tests (rest)",
+        "pins": "unchanged and green."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "git diff --name-only 3ac7250a..HEAD",
+        "scope": "exactly NoiseBoundTests.cs and design.md under packages/cultmath."
+      },
+      {
+        "pattern": "git diff 3ac7250a..HEAD -- packages/cultmath/src packages/cultmath/shaders packages/cultmath/unity",
+        "scope": "empty."
+      },
+      {
+        "pattern": "BodyFactor|Ceiling =>|\\.Ceiling\\b|MaxLodDifference <= ",
+        "scope": "NoiseBoundTests.cs: 0 matches."
+      },
+      {
+        "pattern": "Math\\.Exp\\(-\\(double\\)tau\\)|var tau = density",
+        "scope": "NoiseBoundTests.cs: 0 matches (the test does not re-derive the body)."
+      },
+      {
+        "pattern": "1\\.41x|16\\.45|2\\.21x|1\\.34x|6e-4|does not, so the test skips|where the rays need them",
+        "scope": "packages/cultmath/docs/design.md: 0 matches."
+      },
+      {
+        "pattern": "Assert\\.Skip",
+        "scope": "NoiseBoundTests.cs: at most one, in IntervalSkipHalvesEvaluations, naming saving-2x-scenarios."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 170,
+    "lines_removed": 60,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "cultmath-tapes:ruling:operator-wells-contract-vs-ceiling",
+    "cultmath-tapes:ruling:operator-analytic-wall-body",
+    "cultmath-tapes:ruling:operator-footprint-lod-march",
+    "cultmath-tapes:ruling:operator-measure-with-empty-space",
+    "cultmath-tapes:ruling:operator-tile-amortized-march",
+    "cultmath-tapes:ruling:operator-shipped-void"
+  ],
+  "questions": [
+    "cultmath-tapes:question:wells-ceiling-oracle"
+  ]
+}
