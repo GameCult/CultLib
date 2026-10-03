@@ -297,14 +297,23 @@ public sealed class AffineTests
     }
 
     // A float32 point of the set centre + axis eps + w, |w| <= radius, checked in double; the first eight
-    // w are on the surface (pulled in by 2^-20 so their rounding stays inside). NaN-free: a point whose
-    // rounding leaves the set is reported as null and skipped.
+    // w are on the surface. Where the float32 sum rounds a point out of the set, w is pulled in by the
+    // overshoot and 2^-21 (|centre|_1 + |axis|_1) and the sum retried; a point that still rounds out is
+    // reported as null and skipped.
     private static float3? PointOf(System.Random random, float3 centre, float3 axis, float radius, float eps, int index)
     {
-        var w = UnitVector(random) * (index < 8 ? radius * (1.0f - 9.5367431640625e-7f) : radius * MathF.Cbrt(random.NextSingle()));
-        var p = centre + axis * eps + w;
-        var (dx, dy, dz) = (p.x - (centre.x + (double)axis.x * eps), p.y - (centre.y + (double)axis.y * eps), p.z - (centre.z + (double)axis.z * eps));
-        return Math.Sqrt(dx * dx + dy * dy + dz * dz) <= radius ? p : null;
+        var w = UnitVector(random) * (index < 8 ? radius : radius * MathF.Cbrt(random.NextSingle()));
+        for (var k = 0; k < 6; k++)
+        {
+            var p = centre + axis * eps + w;
+            var (dx, dy, dz) = (p.x - (centre.x + (double)axis.x * eps), p.y - (centre.y + (double)axis.y * eps), p.z - (centre.z + (double)axis.z * eps));
+            var distance = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance <= radius)
+                return p;
+            w *= (float)(Math.Max(0.0, 2.0 * radius - distance - Math.ScaleB(Math.Abs(centre.x) + Math.Abs(centre.y) + Math.Abs(centre.z) + Math.Abs(axis.x) + Math.Abs(axis.y) + Math.Abs(axis.z), -21)) / radius);
+        }
+
+        return null;
     }
 
     /// <summary>

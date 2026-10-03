@@ -27,7 +27,7 @@ public static partial class math
     // NoiseBoundTests.HessianConstantPinsSampledCurvature pins this value against a fast re-measure and
     // the ascent from MeasureHessian's witness. Empirical with a margin, not a proof; the enclosure
     // tests are the defence. A change to the snoise kernel must re-run MeasureHessian and re-pin it.
-    public const float SNOISE_HESSIAN = 68.94f;
+    public const float SNOISE_HESSIAN = 56.050385f;
 
     /// <summary>The point form (x, 0, 0): the value x at every eps. Exact.</summary>
     public static float3 af_point(float value) => new(value, 0.0f, 0.0f);

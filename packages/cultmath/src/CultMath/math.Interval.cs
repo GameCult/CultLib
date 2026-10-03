@@ -26,7 +26,7 @@ public static partial class math
     // multiplies by 1.10; NoiseBoundTests.Lipschitz2ConstantPins pins it against a fast re-measure and
     // the ascent from MeasureLipschitz2's witness. A change to the 2D snoise kernel must re-run
     // MeasureLipschitz2 and re-pin this constant.
-    public const float SNOISE2_LIPSCHITZ = 9.19f;
+    public const float SNOISE2_LIPSCHITZ = 8.117002f;
 
     /// <summary>The point interval [x, x].</summary>
     public static float2 iv_point(float value) => new(value, value);
