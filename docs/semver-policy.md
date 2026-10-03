@@ -285,7 +285,10 @@ It is wired into:
 CultMath package's version and every `CultMath.dll` it built equals the one
 that package tracks, byte for byte. Any CultMath source change therefore means:
 release `org.gamecult.cultmath`, declare its new version in
-`org.gamecult.cultlib`, then release `org.gamecult.cultlib`.
+`org.gamecult.cultlib`, then release `org.gamecult.cultlib`. The bytes also
+depend on the .NET SDK and host, which no `global.json` pins, so the same
+refusal at unchanged CultMath source means this toolchain differs from the one
+that built the tracked DLL.
 
 ### Coverage gaps
 

@@ -42,8 +42,9 @@ $unityPackageVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "packa
 # (1) The declared dependency version must equal the CultMath package's own version. Checked here,
 #     before anything is built.
 # (2) Every CultMath.dll the publishes below produce must equal, byte for byte, the one that package
-#     tracks. Checked once they exist. The builds are deterministic, so a mismatch means the CultMath
-#     source changed since that package was released.
+#     tracks. Checked once they exist. The builds are deterministic for one toolchain, so a mismatch
+#     means the CultMath source changed since that package was released, or this SDK, compiler or host
+#     builds different bytes from the one that built the tracked DLL (no global.json pins the SDK).
 $cultMathPackageRoot = Join-Path $repoRoot "packages\cultmath\unity\org.gamecult.cultmath"
 $cultMathDeclared = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).dependencies.'org.gamecult.cultmath'
 $cultMathAvailable = (Get-Content -LiteralPath (Join-Path $cultMathPackageRoot "package.json") -Raw | ConvertFrom-Json).version
@@ -91,7 +92,7 @@ foreach ($publish in $managedPublishes) {
   $builtCultMath = Join-Path $publish.Root "CultMath.dll"
   if (-not (Test-Path -LiteralPath $builtCultMath)) { continue }
   if ((Get-FileHash -LiteralPath $builtCultMath -Algorithm SHA256).Hash -ne $cultMathTrackedHash) {
-    throw "Release order: the CultMath.dll built into $($publish.Root) differs from the one org.gamecult.cultmath $cultMathAvailable tracks; CultMath source changed since that release. Release CultMath first, then declare its version."
+    throw "Release order: the CultMath.dll built into $($publish.Root) differs from the one org.gamecult.cultmath $cultMathAvailable tracks. Either CultMath source changed since that release, or this toolchain builds different bytes from the one that built the tracked DLL. Check first: git log cultmath-unity-v$cultMathAvailable.. -- packages/cultmath/src for a source change, then dotnet --version and the host against the build that produced the tracked DLL. A source change means release CultMath first, then declare its version; a toolchain difference means build with the toolchain that produced the tracked DLL."
   }
   $cultMathComparedRoots += $publish.Root
 }
