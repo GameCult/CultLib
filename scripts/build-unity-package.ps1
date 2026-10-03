@@ -10,10 +10,18 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 # The CultMath byte gate below needs a git checkout: ContinuousIntegrationBuild maps the repo root to /_/
-# through the SDK's git source root, so in a tree without .git (git archive, a source zip) the DLL names
-# the absolute obj path and its bytes change with the directory.
-if (-not (Test-Path -LiteralPath (Join-Path $repoRoot ".git"))) {
-  throw "$repoRoot has no .git, so CultMath.dll would carry this directory's path and fail the CultMath byte gate. Build from a git clone, not an archive or source zip."
+# through the SDK's git source root, so in a tree that is not the top of a git checkout (git archive, a
+# source zip, an empty .git) the DLL names the absolute obj path and its bytes change with the directory.
+# Git itself answers, so a worktree, where .git is a file, passes.
+$gitErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$gitTop = & git -C $repoRoot rev-parse --show-toplevel 2>$null
+$gitExit = $LASTEXITCODE
+$ErrorActionPreference = $gitErrorAction
+$isGitTop = $gitExit -eq 0 -and $gitTop -and
+  ([System.IO.Path]::GetFullPath("$gitTop").TrimEnd('\', '/') -eq [System.IO.Path]::GetFullPath($repoRoot).TrimEnd('\', '/'))
+if (-not $isGitTop) {
+  throw "$repoRoot is not the top of a git checkout (git rev-parse --show-toplevel: '$gitTop', exit $gitExit), so CultMath.dll would carry this directory's path and fail the CultMath byte gate. Build from a git clone or worktree, not an archive or source zip."
 }
 $templateRoot = Join-Path $repoRoot "unity\org.gamecult.cultlib"
 # Every managed publish the package is assembled from, in the order $publishedByName fills (last wins).
