@@ -95,17 +95,23 @@ public sealed class CultMeshSingleFileElementIdTests
         HeaderOf(path).Should().Be("cultcache.store.v3", "the payload's ids are not the writer's to see");
     }
 
-    // A raw write does not read the store's records, so a file already marked stays marked. (Which files it may replace is
-    // CultMeshSingleFileReadabilityTests, over the shared vectors.)
+    // A raw write at the typed record's own key, by an entry that lists the typed record's id compatible and so may replace it:
+    // the file then holds only the opaque payload, whose ids the writer cannot see, so the marked file stays marked. (Which files
+    // a raw write may replace is CultMeshSingleFileReadabilityTests, over the shared vectors.)
     [Test]
-    public void RawPayloadWriteOverAMarkedFileKeepsItMarked()
+    public void RawPayloadReplacingTheOnlyMarkedRecordKeepsTheFileMarked()
     {
-        var schema = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
-        var marked = Path_("marked.cc");
-        CultMesh.WriteSingleFileDocument(marked, Key, Publication(Descriptor()));
+        var path = Path_("replaced.cc");
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(Descriptor()));
+        HeaderOf(path).Should().Be("cultcache.store.v3");
+        var typed = CultDocumentRegistry.Shared.GetRequired<CultMeshBodyPublicationDocument>().SchemaId;
+        var schema = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1") { CompatibleSchemaIds = new[] { typed } };
 
-        CultMesh.WriteSingleFileDocumentPayload(marked, RawKey, schema, null, new byte[] { 0x90 });
-        HeaderOf(marked).Should().Be("cultcache.store.v3", "a whole marked file is still written and stays marked");
+        CultMesh.WriteSingleFileDocumentPayload(path, Key, schema, null, new byte[] { 0x90 });
+
+        CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Should().ContainSingle()
+            .Which.SchemaId.Should().Be("raw:schema");
+        HeaderOf(path).Should().Be("cultcache.store.v3", "the payload's ids are not the writer's to see");
     }
 
     [Test]
