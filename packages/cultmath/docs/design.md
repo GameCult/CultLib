@@ -133,6 +133,118 @@ as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
+### GLSL Target: Source Transformations
+
+`shaders/CultMath.glsl` is a GLSL ES 3.00 (WebGL2) library generated from
+`shaders/CultMath.hlsl` by `GlslLowering` (in the test project), and
+`shaders/CultMath.Phacelle.glsl` is generated beside it from
+`shaders/CultMath.Phacelle.hlsl`. Both are derived files: never edit them by
+hand. Regenerate them, and the golden fixture
+`tests/CultMath.Tests/fixtures/glsl-parity.json`, with:
+
+```powershell
+$env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
+```
+
+`GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between
+either committed file and the lowering of the committed HLSL. These
+transformations, in order, are the complete list:
+
+1. Each `#include "name"` is replaced in place by the included file, by the
+   same resolver the C# mirror uses; GLSL has no `#include`. The exception is
+   an include under a file-level licence of its own, listed in one table,
+   `GlslLowering.SeparateFiles`: its line is dropped and the file is lowered on
+   its own, by the same steps, into its own output. The table has one entry,
+   `CultMath.Phacelle.hlsl` to `CultMath.Phacelle.glsl`, because Phacelle is
+   MPL-2.0 and MPL-2.0 is file-level: kept separate, it leaves
+   `CultMath.glsl` MIT. Nothing else in the lowering is keyed by name.
+2. Include guards are dropped, and so are the functions taking
+   `Texture2D`/`SamplerState`; the host shader samples its own textures.
+3. Type names: `floatN`, `intN`, `uintN` and `boolN` become `vecN`, `ivecN`,
+   `uvecN` and `bvecN`.
+4. File-scope `static const` becomes `const`.
+5. C-style casts `(float)x`, `(int)x` and `(uint)x` become `float(x)`, `int(x)`
+   and `uint(x)`. The operand is found by a balanced-bracket scanner:
+   `(int)((state >> 28) + 4u)` nests parentheses.
+6. Intrinsics are renamed: `lerp` to `mix`, `frac` to `fract`, `rsqrt` to
+   `inversesqrt`, `asuint` to `floatBitsToUint`, `asfloat` to
+   `uintBitsToFloat`, and `saturate(x)` becomes `clamp(x, 0.0, 1.0)`.
+7. Float literals pass through unchanged.
+8. Each output is wrapped in a guard named for its file: `CULTMATH_GLSL`,
+   `CULTMATH_PHACELLE_GLSL`.
+9. The first line names the file as generated, its sources and its licence,
+   and says how to regenerate it; `CultMath.glsl`'s also says which
+   functions live in the separate file.
+
+GLSL ES 3.00 is stricter than HLSL: no implicit conversions between int, uint
+and float, no C-style casts, and no `step(genType, float)` overload. Those gaps
+are closed in the HLSL, never in the lowering: the HLSL is written in the subset
+both languages share, with edits that are legal HLSL and compute the same bits
+(`step(h, float4(0.0, 0.0, 0.0, 0.0))` rather than `step(h, 0.0)`, `+ 4u` where
+a uint is added, `(float)((uint)hash.x >> 8)` before a float multiply). The C#
+mirror and the FXC and dxc compiles keep those edits honest. A body that needs a
+transformation outside the list fails `GlslMirrorTests.NoHlslOnlyTokensSurvive`
+rather than gaining a special case.
+
+The library declares no precision. The host shader does, and it must be
+`precision highp float; precision highp int;`: the PCG hashes need 32-bit
+integers. `tools/compile-glsl.ps1` writes such a wrapper (its own `#version
+300 es` line, the precision, the library by string concatenation, and one call
+of every public function) and compiles it with glslang, which
+`tools/get-glslang.ps1` fetches pinned. It runs twice: over `CultMath.glsl`
+alone, and with `-Phacelle` over `CultMath.glsl` followed by
+`CultMath.Phacelle.glsl`, the order a consumer that calls `cultmath_phacelle`
+concatenates them in. Two negative controls must fail: `-Body` with an HLSL
+token (`float x = lerp(0.0, 1.0, 0.5);`), and `-Body` calling
+`cultmath_phacelle` without `-Phacelle`, which proves the MIT file does not
+carry it. The Unity package ships neither GLSL file.
+
+Parity runs in two legs, each with one owner: HLSL against C# by the mirror
+test, bit for bit; GLSL against C# by the golden fixture, which records 256
+seeded cases per function family as float32 bit patterns, evaluated by the
+consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
+exact; the float families are ulp-bounded, the bound measured on the device.
+
+`iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
+3.00 does not require to be correctly rounded, and WebGL2 compilers may
+reassociate. On a GTX 1070 under ANGLE's D3D11 backend its radius differs from
+C# by up to 2 ulp in 43 of 256 cases, sometimes smaller. What the march needs
+is enclosure, and what culling needs is a ball no wider than its rounding
+widening, so the family's fixture entry carries a `check` the consumer applies
+to every case: from the case's arguments `(mx, my, z0, z1, fp, warp)`, compute
+in double `zm = (z0 + z1) / 2`, the centre `c = (mx zm, my zm, zm)`, its
+`|c|_1 = |mx zm| + |my zm| + |zm|`, the radius
+`r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp` and
+`d = |GPU centre - c|`, and require
+`r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1)`. The lower side is
+enclosure; the upper side is the bound `NoiseBoundTests` pins in C#, so a
+lowering that inflates the ball fails too. Only those two bounds fail the
+check; the largest ulp distance is reported as for any ulp-bounded family.
+`GoldenFixtureMatchesCSharp` applies the same check to C#'s own results.
+
+`GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
+arguments. Arguments are drawn only when the fixture is regenerated
+(`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose
+bits differ by OS. `iv_exp` and `phacelle` take their C# results from the
+platform's `exp`, `sin` and `cos`, which also differ by OS, so their entries
+name the platform that generated them and the test compares them case by case
+against the running platform, printing the largest distance. `iv_exp`
+("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
+("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
+max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
+ulps mean nothing, and Windows differs from the Linux fixture by up to
+`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`CultMath.Phacelle.glsl`, so the evaluator concatenates
+`CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
+normalization 0.5. The site does not vendor the MPL file and skips the family.
+Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
+by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
+fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
+`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
+readback of `snoise`, and evaluates no GLSL.
+
 ## Invariant 8: Value-and-Gradient Primitives
 
 A primitive tagged invariant 8 returns its value and analytic gradient
@@ -418,8 +530,13 @@ two roundings (`z_m`, then the product), so the float centre is within
 axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
 the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
 once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
-contraction only removes roundings, so HLSL and GLSL compilers are covered by
-the same bound. The caller rotates and translates the centre into world space and scales
+contraction only removes roundings. The axis count assumes a correctly rounded
+`sqrt`, which IEEE gives C#. GLSL ES 3.00 does not: it inherits `sqrt`'s
+precision from `inversesqrt`, and D3D-backed compilers may reassociate. So the
+bound is proven for C# and HLSL on IEEE hardware, and on GLSL it is measured:
+on a GTX 1070 under ANGLE's D3D11 backend the fixture's 256 cases keep a
+minimum relative slack of `1.98e-6` (about `33u`), the same as C#'s. The
+fixture's enclosure check is what measures it on each device. The caller rotates and translates the centre into world space and scales
 centre and radius by its noise frequency; the rounding of that transform is the
 caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
 tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of

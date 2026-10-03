@@ -315,13 +315,17 @@ public sealed class HlslSourceCompatibilityTests
     /// <summary>
     /// The text of <c>CultMath.hlsl</c> with each <c>#include "name"</c> replaced in place by the
     /// included file from the same directory, as the shader compiler would resolve it. Only the
-    /// package's own includes exist, so a missing file is an error rather than a skip.
+    /// package's own includes exist, so a missing file is an error rather than a skip. An include for
+    /// which <paramref name="inline"/> returns false is dropped with its line instead (the GLSL
+    /// lowering's separately licensed files); the C# mirror inlines every one.
     /// </summary>
-    internal static string ReadShaderSource(string cultMathRoot)
+    internal static string ReadShaderSource(string cultMathRoot, Func<string, bool>? inline = null)
     {
         var shaders = Path.Combine(cultMathRoot, "shaders");
-        return Regex.Replace(File.ReadAllText(Path.Combine(shaders, "CultMath.hlsl")), @"(?m)^#include ""([^""]+)""[ \t]*\r?$",
-            match => File.ReadAllText(Path.Combine(shaders, match.Groups[1].Value)));
+        return Regex.Replace(File.ReadAllText(Path.Combine(shaders, "CultMath.hlsl")), @"(?m)^#include ""([^""]+)""[ \t]*\r?$(\n?)",
+            match => inline is null || inline(match.Groups[1].Value)
+                ? File.ReadAllText(Path.Combine(shaders, match.Groups[1].Value)) + match.Groups[2].Value
+                : string.Empty);
     }
 
     /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
@@ -374,7 +378,7 @@ public sealed class HlslSourceCompatibilityTests
         return (result.Success ? Assembly.Load(stream.ToArray()) : null, errors);
     }
 
-    private static string FindCultMathRoot()
+    internal static string FindCultMathRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "packages", "cultmath", "shaders", "CultMath.hlsl")))

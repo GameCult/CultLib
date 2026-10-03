@@ -49,9 +49,9 @@ CultPhasor cultmath_phacelle(float3 p, float3 side, float offset, float normaliz
                 float3 gridStep = float3(dx, dy, dz);
                 int3 hash = cultmath_pcg3d(int3(cell + gridStep));
                 float3 jitter = float3(
-                    ((uint)hash.x >> 8) * (1.0 / 16777216.0) - 0.5,
-                    ((uint)hash.y >> 8) * (1.0 / 16777216.0) - 0.5,
-                    ((uint)hash.z >> 8) * (1.0 / 16777216.0) - 0.5);
+                    (float)((uint)hash.x >> 8) * (1.0 / 16777216.0) - 0.5,
+                    (float)((uint)hash.y >> 8) * (1.0 / 16777216.0) - 0.5,
+                    (float)((uint)hash.z >> 8) * (1.0 / 16777216.0) - 0.5);
                 float3 v = local - gridStep - jitter;
                 float falloff = exp(-2.0 * dot(v, v));
                 float w = max(0.0, falloff - 0.01111);
