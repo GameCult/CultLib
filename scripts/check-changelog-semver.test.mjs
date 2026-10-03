@@ -411,6 +411,30 @@ function tagWithFiles(dir, tag, files) {
   commitAndTag(dir, tag);
 }
 
+// A PE image written byte by byte. A managed assembly's CLI header is data directory 14; a
+// native DLL has none.
+function peImage({ plus = true, directories = 16, cli = null } = {}) {
+  const pe = 0x40;
+  const optionalSize = (plus ? 112 : 96) + directories * 8;
+  const bytes = Buffer.alloc(pe + 24 + optionalSize);
+  bytes.writeUInt16LE(0x5a4d, 0);
+  bytes.writeUInt32LE(pe, 0x3c);
+  bytes.writeUInt32LE(0x00004550, pe);
+  bytes.writeUInt16LE(plus ? 0x8664 : 0x14c, pe + 4);
+  bytes.writeUInt16LE(optionalSize, pe + 20);
+  const optional = pe + 24;
+  bytes.writeUInt16LE(plus ? 0x20b : 0x10b, optional);
+  const dirs = optional + (plus ? 112 : 96);
+  bytes.writeUInt32LE(directories, dirs - 4);
+  if (cli) {
+    bytes.writeUInt32LE(cli.rva, dirs + 14 * 8);
+    bytes.writeUInt32LE(cli.size, dirs + 14 * 8 + 4);
+  }
+  return bytes;
+}
+
+const CLI = { rva: 0x2000, size: 0x48 };
+
 test("CLI: a mistyped declared prefix of a Unity package is refused, because a tag under another prefix tracks its managed assembly", () => {
   // The real entries of CultMath and cultlib, each released once under its real prefix, then
   // the declaration misspelled. Nothing is measured: the refusal comes from git.
@@ -463,6 +487,31 @@ test("CLI: only a managed assembly under the declared assemblies directory prove
     writeFileSync(junk, "junk");
     assert.match(runCheckerExpectFailure(dir, [...widgetArgs("1.0.0"), "--api-built", junk]), /bogus\.dll at other-v1\.0\.0 is a \.dll but not a PE image/);
   });
+});
+
+test("CLI: the first-release probe reads the repository of --cwd and a blob of any size, and reads no tree for a package without assemblies", () => {
+  const elsewhere = mkdtempSync(join(tmpdir(), "cultlib-semver-elsewhere-"));
+  try {
+    withTempGitRepo((dir) => {
+      declare(dir, { widget: { ...WIDGET, assemblies: PLUGINS } });
+      // a managed assembly larger than the default 1 MiB buffer of a child process
+      tagWithFiles(dir, "other-v1.0.0", { [`${PLUGINS}/Big.dll`]: Buffer.concat([peImage({ cli: CLI }), Buffer.alloc(2 << 20)]) });
+      writeChangelog(dir, "1.0.0");
+      const junk = join(dir, "junk.dll");
+      writeFileSync(junk, "junk");
+      const refused = runCheckerExpectFailure(dir, [...widgetArgs("1.0.0"), "--api-built", junk], { processCwd: elsewhere });
+      assert.ok(refused.includes(`other-v1.0.0 tracks the managed assembly ${PLUGINS}/Big.dll`), refused);
+    });
+    withTempGitRepo((dir) => {
+      commitAndTag(dir, "other-v1.0.0");
+      writeFileSync(join(dir, ".git", "refs", "tags", "other-v2.0.0"), "1".repeat(40) + "\n");
+      writeChangelog(dir, "1.0.0");
+      // an unreadable tag matters only to a package whose assemblies it could have shipped
+      assert.match(runChecker(dir, widgetArgs("1.0.0")), /first release \(1\.0\.0\)/);
+    });
+  } finally {
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
 });
 
 test("CLI: a package with no assemblies is a first release when no tag of its own prefix exists, whatever other tags track", () => {
@@ -815,30 +864,6 @@ test("measured: an assembly tracked in a subdirectory is measured, and is a brea
     assert.match(runChecker(dir, measuredArgs(dir, "1.0.1", [widget, sub])), /1\.0\.1 is a patch bump/);
   });
 });
-
-// A PE image written byte by byte. A managed assembly's CLI header is data directory 14; a
-// native DLL has none.
-function peImage({ plus = true, directories = 16, cli = null } = {}) {
-  const pe = 0x40;
-  const optionalSize = (plus ? 112 : 96) + directories * 8;
-  const bytes = Buffer.alloc(pe + 24 + optionalSize);
-  bytes.writeUInt16LE(0x5a4d, 0);
-  bytes.writeUInt32LE(pe, 0x3c);
-  bytes.writeUInt32LE(0x00004550, pe);
-  bytes.writeUInt16LE(plus ? 0x8664 : 0x14c, pe + 4);
-  bytes.writeUInt16LE(optionalSize, pe + 20);
-  const optional = pe + 24;
-  bytes.writeUInt16LE(plus ? 0x20b : 0x10b, optional);
-  const dirs = optional + (plus ? 112 : 96);
-  bytes.writeUInt32LE(directories, dirs - 4);
-  if (cli) {
-    bytes.writeUInt32LE(cli.rva, dirs + 14 * 8);
-    bytes.writeUInt32LE(cli.size, dirs + 14 * 8 + 4);
-  }
-  return bytes;
-}
-
-const CLI = { rva: 0x2000, size: 0x48 };
 
 test("isManagedAssembly: a non-empty CLI header makes an assembly managed, nothing else does", () => {
   assert.equal(isManagedAssembly(peImage({ cli: CLI })), true);
