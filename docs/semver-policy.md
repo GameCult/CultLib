@@ -41,8 +41,9 @@ own header comment) and are out of scope for tagged-release semver policing;
 a `Cargo.toml` version still exists and should follow this policy by
 convention, but nothing in this repo checks it mechanically today.
 
-Tag naming stays `<package>-v<version>` for every package above, matching the
-prefixes already in use.
+Releases are tags named `<tagPrefix>-v<version>`, with the prefix declared in
+`scripts/release-packages.mjs`. The check refuses a declaration in which two
+packages share a prefix or an entry lacks a string prefix or changelog.
 
 ## What counts as breaking
 
@@ -150,14 +151,21 @@ or a missing declaration refuses), and:
    is one that starts `<prefix>-v`; one that is not
    `<prefix>-vMAJOR.MINOR.PATCH` refuses, naming the tag, and is never
    skipped. The previous release is the newest same-prefix tag strictly older
-   than the version being released. A tag equal to the version does not exempt
+   than the version being released, by version order, that is also an ancestor
+   of the commit being checked: a backport tagged later on another branch is
+   not part of that history, so it never moves a rebuild's predecessor. A tag
+   equal to the version does not exempt
    it and does not count as a previous release: there is no "already
    published" skip, so a rebuild or a CI re-run at a tagged version is
    measured against that version's predecessor, exactly as at release, and
    gets the same verdict. With no older tag, a newer one refuses (the version
    is older than every release), and a repository that holds no tag other than
    the version's own refuses, because a first release cannot be told from a
-   missing record. Otherwise it is a first release, which no caller declares.
+   missing record. Older tags of which none is an ancestor leave the
+   predecessor unknown and refuse. Otherwise it is a first release, which no
+   caller declares; it is refused when the package's changelog already lists an
+   earlier version, because then the declared prefix names none of its
+   releases.
    Tags that cannot be read (a `--cwd` that is not a git repository) refuse. A
    deleted predecessor tag leaves nothing in git to find, so in a checkout that
    holds other tags it cannot be told from a first release;
