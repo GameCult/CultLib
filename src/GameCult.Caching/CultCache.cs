@@ -504,7 +504,7 @@ namespace GameCult.Caching
         public CultRecordKey Key { get; }
 
         // When the record was stored. With StoredSchemaId it names the record's stored bytes: a write that stores the record
-        // differently mints it again, including a whole-view write that re-encodes it.
+        // mints it a storedAt later than the one it replaces.
         public string StoredAt { get; internal set; }
         public CultDocumentDescriptor Descriptor { get; }
 
@@ -1867,7 +1867,7 @@ namespace GameCult.Caching
 
         // durable is what the store holds on disk now; observed is what its cache last loaded or committed.
         // Identity is (stored schema id, storedAt), compared exactly. It names the stored bytes: every write that stores a record
-        // differently mints it a later storedAt, including a whole-view write that re-encodes a record it loaded.
+        // mints it a storedAt later than the one it replaces.
         public bool ConditionsHold(IReadOnlyCollection<CultPersistedRecord> durable, IEnumerable<CultStoredDocument> observed)
         {
             var byKey = durable.ToDictionary(record => record.Key, StringComparer.Ordinal);
@@ -3920,6 +3920,14 @@ namespace GameCult.Caching
         private IReadOnlyCollection<CultStagedRecord> ApplyWriteSet(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
             RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
+            // A record written over one the store holds is stored at a storedAt later than the one it replaces, whoever wrote that.
+            var replaced = (durable?.Records ?? Array.Empty<CultPersistedRecord>()).ToDictionary(record => record.Key, record => record.StoredAt, StringComparer.Ordinal);
+            foreach (var staged in upserts)
+            {
+                if (replaced.TryGetValue(staged.Record.Key, out var durableAt) && !StoredLater(staged.Record.StoredAt, durableAt))
+                    staged.Record.StoredAt = MintStoredAt(durableAt);
+            }
+
             var written = upserts.Select(staged => staged.Record.Key).ToHashSet(StringComparer.Ordinal);
             var removed = removals.ToHashSet(StringComparer.Ordinal);
             var copied = (durable?.Records ?? Array.Empty<CultPersistedRecord>())
@@ -3954,6 +3962,11 @@ namespace GameCult.Caching
                 _lastRead[staged.Record.Key] = (staged.Record.SchemaId, staged.Record.StoredAt);
             return upserts;
         }
+
+        private static bool StoredLater(string storedAt, string than) =>
+            DateTimeOffset.TryParse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var later) &&
+            DateTimeOffset.TryParse(than, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var earlier) &&
+            later > earlier;
 
         private void RefuseWriteIntoMovedVariantStore(CultPersistedStoreSnapshot? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)
         {
