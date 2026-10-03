@@ -75,17 +75,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/cultcache-ts-v')
         run: |
           tagged="${GITHUB_REF_NAME#cultcache-ts-v}"
-          # The package's first release carries --first-release. The checker believes it only
-          # when no other cultcache-ts tag exists, so this test only avoids refusing the
-          # releases that follow; it does not decide anything.
-          first=""
-          if [ -z "$(git tag -l 'cultcache-ts-v*' | grep -vxF "$GITHUB_REF_NAME" || true)" ]; then first="--first-release"; fi
-          node scripts/check-changelog-semver.mjs \
-            --package "@gamecult/cultcache-ts" \
-            --changelog packages/cultcache-ts/CHANGELOG.md \
-            --version "$tagged" \
-            --tag-prefix cultcache-ts \
-            $first
+          node scripts/check-changelog-semver.mjs --package "@gamecult/cultcache-ts" --version "$tagged"
 
       - name: Build and test
         working-directory: packages/cultcache-ts
@@ -165,15 +155,7 @@ jobs:
         if: steps.selected.outputs.run == 'true' && startsWith(github.ref, 'refs/tags/')
         run: |
           tagged="${GITHUB_REF_NAME#${{ matrix.package }}-v}"
-          # See the cultcache-ts job: the checker, not this test, decides whether a first release is real.
-          first=""
-          if [ -z "$(git tag -l '${{ matrix.package }}-v*' | grep -vxF "$GITHUB_REF_NAME" || true)" ]; then first="--first-release"; fi
-          node scripts/check-changelog-semver.mjs \
-            --package "${{ matrix.package }}" \
-            --changelog packages/${{ matrix.package }}/CHANGELOG.md \
-            --version "$tagged" \
-            --tag-prefix "${{ matrix.package }}" \
-            $first
+          node scripts/check-changelog-semver.mjs --package "${{ matrix.package }}" --version "$tagged"
 
       # Lower layers install from source so a release of one package is tested
       # against the sibling revision it was cut with, not whatever PyPI has.

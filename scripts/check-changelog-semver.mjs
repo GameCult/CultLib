@@ -5,8 +5,8 @@
 // enforces; this script is only the mechanical check.
 //
 // Pure, testable logic lives in the exported functions below. `main()` is the
-// CLI wrapper that reads the changelog file and asks git for the previous
-// published tag, then calls `evaluateRelease`.
+// CLI wrapper that reads the package's declaration (scripts/release-packages.mjs),
+// its changelog and the repository's tags, then calls `evaluateRelease`.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -164,40 +164,53 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
   return { ok: true, reason: `${packageName}: ${version} is a ${bump} bump over ${previousVersion} and has ${evidence}, which agree` };
 }
 
-// --- CLI wrapper: resolves the previous published tag via git and reads the
-// changelog off disk, then delegates to the pure functions above. ---
+// --- CLI wrapper: reads the package's declaration, the release record (git tags) and the
+// changelog, then delegates to the pure functions above. ---
 
-// The previous release is the newest same-prefix tag strictly older than the version.
-// `other` is any same-prefix tag that is not the version itself, older or newer: a
-// package with one has been released before, whatever the version arithmetic says.
-function resolvePreviousVersion(tagPrefix, currentVersion, cwd) {
-  // A directory that cannot list tags (not a git repository, git missing) throws: that
-  // is not evidence that there was no previous release.
-  const tags = execFileSync("git", ["tag", "-l", `${tagPrefix}-v*`], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+// The release record, derived from `git tag -l` in --cwd. The previous release is the
+// newest '<prefix>-vMAJOR.MINOR.PATCH' tag strictly older than the version; the version's own
+// tag is ignored, so a rebuild at a tagged version gets its release-time verdict. A same-prefix
+// tag that does not parse is never skipped. A first release is the absence of any older tag in
+// a checkout that holds other tags, because a checkout with none cannot tell a first release
+// from a missing record.
+function resolveRelease(tagPrefix, versionText, cwd) {
+  let tags;
+  try {
+    tags = execFileSync("git", ["tag", "-l"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return { failure: "the tags of --cwd could not be read (not a git repository?), so the previous release is unknown" };
+  }
   const prefix = `${tagPrefix}-v`;
-  const current = parseVersion(currentVersion);
+  const current = parseVersion(versionText);
+  const own = `${prefix}${formatVersion(current)}`;
   let best = null;
-  let other = null;
+  let newer = null;
   for (const tag of tags) {
     if (!tag.startsWith(prefix)) continue;
-    const versionText = tag.slice(prefix.length);
-    let candidate;
-    try {
-      candidate = parseVersion(versionText);
-    } catch {
-      continue;
+    const text = tag.slice(prefix.length);
+    if (!VERSION_PATTERN.test(text)) {
+      return { failure: `${tag} starts with ${prefix} but is not ${prefix}MAJOR.MINOR.PATCH, so it cannot be ordered among the releases` };
     }
-    if (sameVersion(candidate, current)) continue; // the tag being released itself
-    other ??= tag;
-    if (compareVersions(candidate, current) >= 0) continue; // ignore anything not older
-    if (best === null || compareVersions(candidate, best) > 0) {
+    const candidate = parseVersion(text);
+    const order = compareVersions(candidate, current);
+    if (order === 0) continue; // the tag being released itself
+    if (order > 0) {
+      newer ??= tag;
+    } else if (best === null || compareVersions(candidate, best) > 0) {
       best = candidate;
     }
   }
-  return { previous: best ? formatVersion(best) : null, other };
+  if (best !== null) return { previous: formatVersion(best) };
+  if (newer !== null) {
+    return { failure: `${newer} exists but no ${prefix} tag is older than ${formatVersion(current)}: the version is older than every release` };
+  }
+  if (!tags.some((tag) => tag !== own)) {
+    return { failure: "this checkout holds no tags; a first release cannot be told from a missing record (fetch the tags)" };
+  }
+  return { previous: null };
 }
 
 // --- Measured public API: the built DLLs are compared with the DLLs the
@@ -252,57 +265,83 @@ function prepareGate() {
   return { refs };
 }
 
-// The DLLs the previous tag tracked under `baselinePath`, as git blobs: no
-// worktree, no network, and unaffected by what the working tree holds now. A git
-// failure is a refusal that names the step, never git's own output.
-function extractBaseline({ tag, baselinePath, into, cwd }) {
-  const dir = baselinePath.replace(/\\/g, "/").replace(/\/+$/, "");
+// Whether a PE image is a managed assembly: its optional header's data directory 14 (the
+// CLI header) is non-empty. A PE without one is native and ApiCompat cannot read it. A buffer
+// that is not a PE image, or is cut short, throws: decided from the bytes, never from the
+// file's name or place.
+export function isManagedAssembly(bytes) {
+  const need = (end) => {
+    if (end > bytes.length) throw new RangeError("not a PE image");
+  };
+  need(0x40);
+  if (bytes.readUInt16LE(0) !== 0x5a4d) throw new RangeError("not a PE image");
+  const pe = bytes.readUInt32LE(0x3c);
+  need(pe + 24);
+  if (bytes.readUInt32LE(pe) !== 0x00004550) throw new RangeError("not a PE image");
+  const optionalSize = bytes.readUInt16LE(pe + 20);
+  const optional = pe + 24;
+  const magic = bytes.readUInt16LE(optional);
+  if (magic !== 0x10b && magic !== 0x20b) throw new RangeError("not a PE image");
+  const directories = optional + (magic === 0x10b ? 96 : 112);
+  need(directories);
+  if (bytes.readUInt32LE(directories - 4) <= 14 || optionalSize < directories + 15 * 8 - optional) return false;
+  need(directories + 15 * 8);
+  return bytes.readUInt32LE(directories + 14 * 8) !== 0 && bytes.readUInt32LE(directories + 14 * 8 + 4) !== 0;
+}
+
+// The managed assemblies the previous tag tracked anywhere under `dir`, as git blobs: no
+// worktree, no network, and unaffected by what the working tree holds now. Each is written to
+// `into` by file name. A git failure is a refusal that names the step, never git's own output.
+function extractBaseline({ tag, dir, into, cwd }) {
   const git = (args, options) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], ...options });
+  const blobs = [];
   try {
-    const listing = git(["ls-tree", "--name-only", tag, "--", `${dir}/`], { encoding: "utf8" });
-    const names = listing.split("\n").map((line) => basename(line.trim())).filter((name) => name.toLowerCase().endsWith(".dll"));
-    for (const name of names) {
-      writeFileSync(join(into, name), git(["show", `${tag}:${dir}/${name}`], { maxBuffer: 1 << 28 }));
-    }
-    return { dir, names };
+    const paths = git(["ls-tree", "-r", "-z", "--name-only", tag, "--", `${dir}/`], { encoding: "utf8" })
+      .split("\0")
+      .filter((path) => path.toLowerCase().endsWith(".dll"));
+    for (const path of paths) blobs.push({ path, bytes: git(["show", `${tag}:${path}`], { maxBuffer: 1 << 28 }) });
   } catch {
     return { failure: `git could not read the assemblies tracked under ${dir} at ${tag}` };
   }
+  const names = [];
+  for (const { path, bytes } of blobs) {
+    let managed;
+    try {
+      managed = isManagedAssembly(bytes);
+    } catch {
+      return { failure: `${path} at ${tag} is a .dll but not a PE image` };
+    }
+    if (!managed) continue;
+    const name = basename(path);
+    if (names.includes(name)) return { failure: `${tag} tracks two managed assemblies named ${name} under ${dir}` };
+    writeFileSync(join(into, name), bytes);
+    names.push(name);
+  }
+  return { names };
 }
 
-// Compares each built assembly with its namesake at the previous tag. Measuring
-// nothing is a failure: the baseline path must hold DLLs at the tag, every
-// built assembly must have a namesake there unless the caller declares it new
-// (`declaredNew`), and at least one comparison must run. An assembly the tag
-// tracked and the build no longer produces is itself a break, whatever its name.
-export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, built, refs, declaredNew = [], cwd }) {
+// Compares each built assembly with its namesake at the previous tag. Measuring nothing is a
+// failure: the declared directory must hold a managed assembly at the tag. A managed assembly
+// the tag tracked and the build no longer hands over is itself a break, whatever its name or
+// place; a built assembly with no namesake is an addition and is not examined.
+export function measureApiBreaks({ tagPrefix, previousVersion, assemblies, built, refs, cwd }) {
   const tag = `${tagPrefix}-v${previousVersion}`;
   const work = mkdtempSync(join(tmpdir(), "cultlib-apicompat-"));
   try {
     const left = join(work, "left");
     mkdirSync(left);
-    const baseline = extractBaseline({ tag, baselinePath, into: left, cwd });
+    const baseline = extractBaseline({ tag, dir: assemblies, into: left, cwd });
     if (baseline.failure) return baseline;
-    const { dir, names: baselineNames } = baseline;
+    const baselineNames = baseline.names;
     if (baselineNames.length === 0) {
-      return { failure: `${tag} tracks no assembly under ${dir}: the baseline path is missing or moved, or that tag does not track the DLLs` };
-    }
-    const builtNames = new Set(built.map((path) => basename(path)));
-    for (const name of declaredNew) {
-      if (baselineNames.includes(name)) return { failure: `${name} is declared new but ${tag} already tracks it under ${dir}` };
-    }
-    for (const name of builtNames) {
-      if (!baselineNames.includes(name) && !declaredNew.includes(name)) {
-        return { failure: `${name} is built but ${tag} does not track it under ${dir}; if it is a new assembly, declare it with --api-new ${name}` };
-      }
+      return { failure: `${tag} tracks no managed assembly under ${assemblies}: the declared directory is missing or moved, or that tag does not track the DLLs` };
     }
     const gate = prepareGate();
     if (gate.failure) return gate;
-    const unbuilt = baselineNames.filter((name) => !builtNames.has(name));
-    if (unbuilt.length === baselineNames.length) {
-      return { failure: `no built assembly has a namesake tracked at ${tag}, so nothing was compared (${tag} tracks ${baselineNames.join(", ")})` };
-    }
-    const breaks = unbuilt.map((name) => `assembly ${name} exists at ${tag} but is no longer built`);
+    const builtNames = new Set(built.map((path) => basename(path)));
+    const breaks = baselineNames
+      .filter((name) => !builtNames.has(name))
+      .map((name) => `assembly ${name} exists at ${tag} but is no longer built`);
     for (const path of built) {
       const name = basename(path);
       if (!baselineNames.includes(name)) continue;
@@ -318,9 +357,9 @@ export function measureApiBreaks({ tagPrefix, previousVersion, baselinePath, bui
   }
 }
 
-// Repeatable options collect into arrays; flags take no value.
-const REPEATABLE = new Set(["api-built", "api-refs", "api-new"]);
-const FLAGS = new Set(["first-release"]);
+// Repeatable options collect into arrays. Any other option is a usage error.
+const KNOWN = new Set(["package", "version", "cwd", "api-built", "api-refs"]);
+const REPEATABLE = new Set(["api-built", "api-refs"]);
 
 function parseArgs(argv) {
   const args = {};
@@ -328,10 +367,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (!arg.startsWith("--")) continue;
     const key = arg.slice(2);
-    if (FLAGS.has(key)) {
-      args[key] = true;
-      continue;
-    }
+    if (!KNOWN.has(key)) return { unknown: arg };
     if (REPEATABLE.has(key)) {
       (args[key] ??= []).push(argv[i + 1]);
     } else {
@@ -350,15 +386,14 @@ function refuse(message) {
 const UNMEASURED_NOTICE =
   'public API measured; changes ApiCompat cannot see (see "Unmeasured changes" in docs/semver-policy.md) must still be declared under "### Breaking"';
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const { package: packageName, changelog, version, "tag-prefix": tagPrefix, cwd = process.cwd() } = args;
+  const { package: packageName, version, cwd = process.cwd() } = args;
   // The tool runs from scripts/api-gate, so a path given relative to this process is made absolute first.
   const built = (args["api-built"] ?? []).map((path) => resolve(path));
-  if (!packageName || !changelog || !version || !tagPrefix || (built.length > 0) !== Boolean(args["api-baseline-path"])) {
+  if (args.unknown || !packageName || !version) {
     console.error(
-      "usage: check-changelog-semver.mjs --package <name> --changelog <path> --version <x.y.z> --tag-prefix <prefix> [--cwd <dir>] [--first-release]\n" +
-        "         [--api-baseline-path <repo-relative dir of tracked DLLs> --api-built <dll>... [--api-refs <dir>...] [--api-new <dll name>...]]",
+      "usage: check-changelog-semver.mjs --package <name> --version <x.y.z> [--cwd <dir>] [--api-built <dll>... [--api-refs <dir>...]]",
     );
     process.exitCode = 2;
     return;
@@ -369,6 +404,21 @@ function main() {
     refuse(`${packageName}: --version is not a MAJOR.MINOR.PATCH version`);
     return;
   }
+  // The package's release identity is declared once, in the repository being released.
+  let declared;
+  try {
+    declared = (await import(pathToFileURL(resolve(cwd, "scripts", "release-packages.mjs")).href)).default;
+  } catch {
+    refuse(`${packageName}: scripts/release-packages.mjs could not be loaded from --cwd`);
+    return;
+  }
+  const entry = Object.hasOwn(declared ?? {}, packageName) ? declared[packageName] : null;
+  if (entry == null || typeof entry.tagPrefix !== "string" || typeof entry.changelog !== "string") {
+    refuse(`${packageName}: not a package declared in scripts/release-packages.mjs`);
+    return;
+  }
+  const { tagPrefix, assemblies } = entry;
+  const changelog = resolve(cwd, entry.changelog);
   let changelogText;
   try {
     changelogText = readFileSync(changelog, "utf8");
@@ -376,44 +426,28 @@ function main() {
     refuse(`${packageName}: ${err.code === "ENOENT" ? "changelog not found" : "changelog cannot be read"} at ${changelog}`);
     return;
   }
-  const firstRelease = args["first-release"] === true;
-  let previousVersion;
-  let otherTag = null;
-  try {
-    ({ previous: previousVersion, other: otherTag } = resolvePreviousVersion(tagPrefix, version, cwd));
-  } catch {
-    if (!firstRelease) {
-      refuse(`${packageName}: the tags of --cwd could not be read (not a git repository?), so the previous release is unknown; ` +
-        "if this is the package's first release, declare it with --first-release");
-      return;
-    }
-    previousVersion = null;
-  }
-  if (previousVersion == null && !firstRelease) {
-    refuse(`${packageName}: no ${tagPrefix}-v tag older than ${version} exists, so there is nothing to compare against; ` +
-      "if this is the package's first release, declare it with --first-release");
+  if (typeof assemblies === "string" && built.length === 0) {
+    refuse(`${packageName}: ships the assemblies under ${assemblies}, so the release must hand them over with --api-built`);
     return;
   }
-  if (firstRelease && otherTag != null) {
-    refuse(`${packageName}: --first-release was declared but ${otherTag} already exists`);
+  if (typeof assemblies !== "string" && built.length > 0) {
+    refuse(`${packageName}: declares no assemblies directory, so --api-built has nothing to be measured against`);
     return;
   }
-  // A package's tag prefix is its directory under packages/ (the workflow's tag triggers and
-  // job matrix spell it the same way), so a first release is believed only for the prefix
-  // its changelog's directory names.
-  if (firstRelease && basename(dirname(resolve(changelog))) !== tagPrefix) {
-    refuse(`${packageName}: --first-release is accepted only when --tag-prefix names the directory that holds the changelog`);
+  const release = resolveRelease(tagPrefix, version, cwd);
+  if (release.failure) {
+    refuse(`${packageName}: ${release.failure}`);
     return;
   }
+  const previousVersion = release.previous;
   let measuredBreaks = [];
-  if (built.length > 0 && previousVersion != null) {
+  if (previousVersion != null && built.length > 0) {
     const measurement = measureApiBreaks({
       tagPrefix,
       previousVersion,
-      baselinePath: args["api-baseline-path"],
+      assemblies,
       built,
       refs: (args["api-refs"] ?? []).map((path) => resolve(path)),
-      declaredNew: args["api-new"] ?? [],
       cwd,
     });
     if (measurement.failure) {
@@ -435,5 +469,5 @@ function main() {
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
-  main();
+  await main();
 }

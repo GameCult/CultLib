@@ -50,11 +50,8 @@ $cultLibRoot = Split-Path -Parent (Split-Path -Parent $repoRoot)
 $cultmathVersion = (Get-Content -LiteralPath (Join-Path $templateRoot "package.json") -Raw | ConvertFrom-Json).version
 & node (Join-Path $cultLibRoot "scripts\check-changelog-semver.mjs") `
   --package "org.gamecult.cultmath" `
-  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
   --version $cultmathVersion `
-  --tag-prefix "cultmath-unity" `
   --cwd $cultLibRoot `
-  --api-baseline-path "packages/cultmath/unity/org.gamecult.cultmath/Runtime/Plugins" `
   --api-built $freshAssembly
 if ($LASTEXITCODE -ne 0) {
   throw "CultMath Unity package failed the semver policy check (see docs/semver-policy.md)."

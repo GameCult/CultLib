@@ -176,6 +176,8 @@ foreach ($assemblyName in $expectedAssemblies) {
 # the public API of every shipped assembly against the DLLs the previous cultlib-unity tag
 # tracked (read from git), so it runs here, once the assemblies under judgement exist. Every
 # tracked assembly the build does not hand over counts as removed, so all of them are handed over.
+# The package's tag prefix, changelog and assemblies directory are declared in
+# scripts/release-packages.mjs; this call passes only the version and the built assemblies.
 $measuredArguments = @()
 foreach ($assemblyName in $expectedAssemblies) {
   $measuredArguments += @("--api-built", $publishedByName[$assemblyName].FullName)
@@ -185,11 +187,8 @@ foreach ($refRoot in @($publishRoot, $quicPublishRoot, $webSocketPublishRoot)) {
 }
 & node (Join-Path $repoRoot "scripts\check-changelog-semver.mjs") `
   --package "org.gamecult.cultlib" `
-  --changelog (Join-Path $templateRoot "CHANGELOG.md") `
   --version $unityPackageVersion `
-  --tag-prefix "cultlib-unity" `
   --cwd $repoRoot `
-  --api-baseline-path "unity/org.gamecult.cultlib/Runtime/Plugins" `
   @measuredArguments
 if ($LASTEXITCODE -ne 0) {
   throw "CultLib Unity package failed the semver policy check (see docs/semver-policy.md)."
