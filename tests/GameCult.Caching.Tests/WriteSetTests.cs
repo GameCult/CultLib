@@ -1016,6 +1016,56 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.GetStored(K)!.StoredVersion, Is.Not.EqualTo(HexOfSha256(slices["k"])));
         }
 
+        // A catalog entry the writer did not choose to replace is carried as the bytes the file holds, a slot this runtime does not
+        // read included, in either store kind. The ItemId entry is carried: a WsItem stays in the store and only a WsOther is staged.
+        [Test]
+        public void ACatalogEntryWithASlotThisRuntimeDoesNotReadSurvivesAWriteOfANeighbour([Values] bool directory, [Values] bool commit)
+        {
+            var path = PathOf("catalog-unknown-slot.cc");
+            Seed(path, directory, "a");
+            File.WriteAllBytes(path, AddAnUnreadSlotToEveryCatalogEntry(File.ReadAllBytes(path)));
+            var entry = StoreSlices.CatalogEntry(path, ItemId);
+            using var cache = Open(path, directory);
+
+            Land(cache, commit, typeof(WsOther), new WsOther { Name = "name-x" }, X);
+
+            Assert.That(StoreSlices.CatalogEntry(path, ItemId), Is.EqualTo(entry));
+        }
+
+        // The same store with every catalog entry one slot longer than this runtime reads, as a newer writer's would be.
+        private static byte[] AddAnUnreadSlotToEveryCatalogEntry(byte[] bytes)
+        {
+            var output = new List<byte>();
+            var reader = new MessagePackReader(bytes);
+            var top = reader.ReadArrayHeader();
+            output.Add((byte)(0x90 | top));
+            for (var slot = 0; slot < top; slot++)
+            {
+                if (slot != 1)
+                {
+                    var from = (int)reader.Consumed;
+                    reader.Skip();
+                    output.AddRange(bytes.Skip(from).Take((int)reader.Consumed - from));
+                    continue;
+                }
+
+                var count = reader.ReadArrayHeader();
+                output.AddRange(new byte[] { 0xdc, (byte)(count >> 8), (byte)count });
+                for (var index = 0; index < count; index++)
+                {
+                    var from = (int)reader.Consumed;
+                    reader.Skip();
+                    var entry = bytes.Skip(from).Take((int)reader.Consumed - from).ToArray();
+                    Assert.That(entry[0] & 0xf0, Is.EqualTo(0x90), "a catalog entry is a fixarray");
+                    output.Add((byte)(entry[0] + 1));
+                    output.AddRange(entry.Skip(1));
+                    output.AddRange(new byte[] { 0xa3, (byte)'x', (byte)'y', (byte)'z' });
+                }
+            }
+
+            return output.ToArray();
+        }
+
         private static void OverwriteInPlace(byte[] bytes, string from, string to)
         {
             var was = System.Text.Encoding.UTF8.GetBytes(from);
