@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   BREAKING_HEADING,
+  checkDeclaration,
   classifyBump,
   evaluateRelease,
   hasBreakingSection,
@@ -243,7 +244,7 @@ function runCheckerExpectFailure(cwd, args, { status = 1, ...options } = {}) {
 
 const git = (dir, ...args) => execFileSync("git", args, { cwd: dir });
 const commitAndTag = (dir, ...tags) => {
-  git(dir, "commit", "--allow-empty", "-q", "-m", "init");
+  git(dir, "commit", "--allow-empty", "-q", "-m", `init ${tags.join(" ")}`);
   for (const tag of tags) git(dir, "tag", tag);
 };
 const writeChangelog = (dir, version, options) => writeFileSync(join(dir, "CHANGELOG.md"), changelogFor(version, options));
@@ -346,6 +347,108 @@ test("CLI: a version older than every release refuses", () => {
     const output = runCheckerExpectFailure(dir, widgetArgs("0.9.0"));
     assert.match(output, /widget-v(1|2)\.0\.0 exists but no widget-v tag is older than 0\.9\.0: the version is older than every release/);
   });
+});
+
+test("CLI: the previous release is the newest older tag by version order, not git's string order", () => {
+  withTempGitRepo((dir) => {
+    // git tag -l lists these as 1.0.0, 1.0.5, 1.10.0, 1.2.0, 1.9.0, 2.0.0: 1.10.0 sorts before 1.2.0
+    commitAndTag(dir, "widget-v1.0.0", "widget-v1.2.0", "widget-v1.10.0", "widget-v1.9.0", "widget-v2.0.0", "other-v9.9.9");
+    git(dir, "tag", "-a", "-m", "annotated", "widget-v1.0.5");
+    const previousOf = (version) => {
+      writeChangelog(dir, version);
+      return runChecker(dir, widgetArgs(version));
+    };
+    assert.match(previousOf("1.10.1"), /1\.10\.1 is a patch bump over 1\.10\.0/);
+    assert.match(previousOf("1.11.0"), /1\.11\.0 is a minor bump over 1\.10\.0/);
+    assert.match(previousOf("1.3.0"), /1\.3\.0 is a minor bump over 1\.2\.0/);
+    assert.match(previousOf("1.0.6"), /1\.0\.6 is a patch bump over 1\.0\.5/);
+    assert.match(previousOf("2.0.1"), /2\.0\.1 is a patch bump over 2\.0\.0/);
+    assert.match(previousOf("3.0.0"), /3\.0\.0 is a major bump over 2\.0\.0/);
+  });
+});
+
+test("CLI: a later backport tag on another branch does not change a rebuild's predecessor", () => {
+  const head = (dir) => git(dir, "rev-parse", "HEAD").toString().trim();
+  withTempGitRepo((dir) => {
+    commitAndTag(dir, "widget-v0.2.0");
+    const older = head(dir);
+    commitAndTag(dir, "widget-v0.3.0");
+    const rebuilt = head(dir);
+    writeChangelog(dir, "0.3.0");
+    const atRelease = runChecker(dir, widgetArgs("0.3.0"));
+    assert.match(atRelease, /0\.3\.0 is a minor bump over 0\.2\.0/);
+    // the backport is cut from the older release, later, and is never merged
+    git(dir, "checkout", "-q", older);
+    commitAndTag(dir, "widget-v0.2.5");
+    const backport = head(dir);
+    git(dir, "checkout", "-q", rebuilt);
+    assert.equal(runChecker(dir, widgetArgs("0.3.0")), atRelease);
+    // history that does contain the backport still measures against it
+    git(dir, "checkout", "-q", backport);
+    writeChangelog(dir, "0.2.6");
+    assert.match(runChecker(dir, widgetArgs("0.2.6")), /0\.2\.6 is a patch bump over 0\.2\.5/);
+  });
+  // older tags that are all outside the history leave the predecessor unknown
+  withTempGitRepo((dir) => {
+    commitAndTag(dir, "other-v1.0.0");
+    const root = head(dir);
+    git(dir, "checkout", "-q", "--detach");
+    commitAndTag(dir, "widget-v0.1.0");
+    git(dir, "checkout", "-q", root);
+    writeChangelog(dir, "0.2.0");
+    assert.match(runCheckerExpectFailure(dir, widgetArgs("0.2.0")), /none is an ancestor of the commit being checked/);
+  });
+});
+
+test("CLI: a declared prefix that names no release is not a first release when the changelog lists earlier versions", () => {
+  // CultMath's shape: 0.3.0 is released and tracks the DLL; 0.3.1 removes a member.
+  const cultMath = buildAssembly("CultMath", WITH_GONE);
+  const trimmed = buildAssembly("CultMath", WITHOUT_GONE);
+  withReleasedBaseline({ baseline: { "CultMath.dll": cultMath }, previous: "0.3.0" }, (dir) => {
+    const entry = { ...WIDGET, assemblies: PLUGINS };
+    const args = measuredArgs(dir, "0.3.1", [trimmed]);
+    writeFileSync(join(dir, "CHANGELOG.md"), `${changelogFor("0.3.1")}\n## [0.3.0]\n\n- the release\n`);
+    assert.match(runCheckerExpectFailure(dir, args), /Gone/);
+    // one mistyped character in the declaration
+    declare(dir, { widget: { ...entry, tagPrefix: "widgt" } });
+    const typo = runCheckerExpectFailure(dir, args);
+    assert.match(typo, /0\.3\.1 would be a first release, but the changelog already lists 0\.3\.0/);
+    assert.doesNotMatch(typo, /first release \(/);
+    // a release the changelog lists nothing before is still a first release
+    writeChangelog(dir, "0.3.1");
+    assert.match(runChecker(dir, args), /first release \(0\.3\.1\)/);
+  });
+});
+
+test("CLI: two packages that share a tag prefix are refused, and so is an entry that is not whole", () => {
+  withTempGitRepo((dir) => {
+    commitAndTag(dir, "widget-v1.0.0");
+    writeChangelog(dir, "1.0.1");
+    declare(dir, { widget: WIDGET, gadget: { ...WIDGET } });
+    for (const name of ["widget", "gadget"]) {
+      const output = runCheckerExpectFailure(dir, ["--package", name, "--version", "1.0.1"]);
+      assert.match(output, /scripts\/release-packages\.mjs is malformed: widget and gadget share one tag prefix/);
+    }
+    // distinct prefixes pass
+    declare(dir, { widget: WIDGET, gadget: { ...WIDGET, tagPrefix: "gadget" } });
+    assert.match(runChecker(dir, widgetArgs("1.0.1")), /patch bump over 1\.0\.0/);
+    for (const broken of [
+      { changelog: "CHANGELOG.md" },
+      { tagPrefix: 7, changelog: "CHANGELOG.md" },
+      { tagPrefix: "widget" },
+      { tagPrefix: "widget", changelog: ["CHANGELOG.md"] },
+      null,
+    ]) {
+      declare(dir, { widget: WIDGET, gadget: broken });
+      const output = runCheckerExpectFailure(dir, widgetArgs("1.0.1"));
+      assert.match(output, /scripts\/release-packages\.mjs is malformed: gadget must declare a string tagPrefix and a string changelog/);
+    }
+  });
+});
+
+test("the real declaration is whole and shares no tag prefix", () => {
+  assert.equal(checkDeclaration(releasePackages), null);
+  assert.equal(new Set(Object.values(releasePackages).map((entry) => entry.tagPrefix)).size, Object.keys(releasePackages).length);
 });
 
 test("CLI: the tag prefix is the declaration's, not a spelling the caller or the directory supplies", () => {

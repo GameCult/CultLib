@@ -168,11 +168,18 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
 // changelog, then delegates to the pure functions above. ---
 
 // The release record, derived from `git tag -l` in --cwd. The previous release is the
-// newest '<prefix>-vMAJOR.MINOR.PATCH' tag strictly older than the version; the version's own
-// tag is ignored, so a rebuild at a tagged version gets its release-time verdict. A same-prefix
-// tag that does not parse is never skipped. A first release is the absence of any older tag in
-// a checkout that holds other tags, because a checkout with none cannot tell a first release
-// from a missing record.
+// newest '<prefix>-vMAJOR.MINOR.PATCH' tag strictly older than the version, by version order
+// (never git's string order), that is also an ancestor of the commit being checked (HEAD of
+// --cwd): a backport tagged later on another branch is not in this commit's history, so it
+// never changes a rebuild's predecessor. The version's own tag is ignored, so a rebuild at a
+// tagged version gets its release-time verdict. A same-prefix tag that does not parse is never
+// skipped. A first release is the absence of any older tag in a checkout that holds other tags,
+// because a checkout with none cannot tell a first release from a missing record.
+function isAncestorOfHead(tag, cwd) {
+  const run = spawnSync("git", ["merge-base", "--is-ancestor", `refs/tags/${tag}`, "HEAD"], { cwd, stdio: "ignore" });
+  return run.status === 0 ? true : run.status === 1 ? false : null;
+}
+
 function resolveRelease(tagPrefix, versionText, cwd) {
   let tags;
   try {
@@ -186,7 +193,7 @@ function resolveRelease(tagPrefix, versionText, cwd) {
   const prefix = `${tagPrefix}-v`;
   const current = parseVersion(versionText);
   const own = `${prefix}${formatVersion(current)}`;
-  let best = null;
+  const older = [];
   let newer = null;
   for (const tag of tags) {
     if (!tag.startsWith(prefix)) continue;
@@ -199,11 +206,19 @@ function resolveRelease(tagPrefix, versionText, cwd) {
     if (order === 0) continue; // the tag being released itself
     if (order > 0) {
       newer ??= tag;
-    } else if (best === null || compareVersions(candidate, best) > 0) {
-      best = candidate;
+    } else {
+      older.push({ tag, version: candidate });
     }
   }
-  if (best !== null) return { previous: formatVersion(best) };
+  older.sort((a, b) => compareVersions(b.version, a.version));
+  for (const { tag, version } of older) {
+    const ancestor = isAncestorOfHead(tag, cwd);
+    if (ancestor === null) return { failure: `whether ${tag} is an ancestor of the commit being checked could not be read` };
+    if (ancestor) return { previous: formatVersion(version) };
+  }
+  if (older.length > 0) {
+    return { failure: `${older.length} older ${prefix} tag(s) exist but none is an ancestor of the commit being checked, so the previous release is unknown` };
+  }
   if (newer !== null) {
     return { failure: `${newer} exists but no ${prefix} tag is older than ${formatVersion(current)}: the version is older than every release` };
   }
@@ -211,6 +226,34 @@ function resolveRelease(tagPrefix, versionText, cwd) {
     return { failure: "this checkout holds no tags; a first release cannot be told from a missing record (fetch the tags)" };
   }
   return { previous: null };
+}
+
+// The newest `## [x.y.z]` entry of the changelog older than the version, or null. A release with
+// no previous tag whose changelog already lists an earlier version is not a first release: the
+// declared tag prefix names none of the package's releases.
+function earlierChangelogVersion(changelogText, versionText) {
+  const current = parseVersion(versionText);
+  let newest = null;
+  for (const match of changelogText.matchAll(/^##\s*\[?(\d+\.\d+\.\d+)\]?\s*$/gm)) {
+    const entry = parseVersion(match[1]);
+    if (compareVersions(entry, current) < 0 && (newest === null || compareVersions(entry, newest) > 0)) newest = entry;
+  }
+  return newest === null ? null : formatVersion(newest);
+}
+
+// The declaration as a whole: every entry names a string tagPrefix and changelog, and no two
+// packages share a prefix (each would be measured against the other's releases). Returns a
+// refusal text, or null.
+export function checkDeclaration(declared) {
+  const seen = new Map();
+  for (const [name, entry] of Object.entries(declared ?? {})) {
+    if (entry == null || typeof entry.tagPrefix !== "string" || typeof entry.changelog !== "string") {
+      return `${name} must declare a string tagPrefix and a string changelog`;
+    }
+    if (seen.has(entry.tagPrefix)) return `${seen.get(entry.tagPrefix)} and ${name} share one tag prefix`;
+    seen.set(entry.tagPrefix, name);
+  }
+  return null;
 }
 
 // --- Measured public API: the built DLLs are compared with the DLLs the
@@ -412,8 +455,13 @@ async function main() {
     refuse(`${packageName}: scripts/release-packages.mjs could not be loaded from --cwd`);
     return;
   }
+  const malformed = checkDeclaration(declared);
+  if (malformed) {
+    refuse(`${packageName}: scripts/release-packages.mjs is malformed: ${malformed}`);
+    return;
+  }
   const entry = Object.hasOwn(declared ?? {}, packageName) ? declared[packageName] : null;
-  if (entry == null || typeof entry.tagPrefix !== "string" || typeof entry.changelog !== "string") {
+  if (entry == null) {
     refuse(`${packageName}: not a package declared in scripts/release-packages.mjs`);
     return;
   }
@@ -440,6 +488,11 @@ async function main() {
     return;
   }
   const previousVersion = release.previous;
+  const earlier = previousVersion == null ? earlierChangelogVersion(changelogText, version) : null;
+  if (earlier !== null) {
+    refuse(`${packageName}: ${version} would be a first release, but the changelog already lists ${earlier} and no ${tagPrefix}-v tag is an earlier release: the declared tag prefix is wrong`);
+    return;
+  }
   let measuredBreaks = [];
   if (previousVersion != null && built.length > 0) {
     const measurement = measureApiBreaks({
