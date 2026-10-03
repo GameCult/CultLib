@@ -202,15 +202,32 @@ carry it. The Unity package ships neither GLSL file.
 Parity runs in two legs, each with one owner: HLSL against C# by the mirror
 test, bit for bit; GLSL against C# by the golden fixture, which records 256
 seeded cases per function family as float32 bit patterns, evaluated by the
-consumer on WebGL2 and read back. The families `pcg3d`, `pcg4d` and
-`iv_frustum_ball` are marked exact; the other float families are ulp-bounded,
-the bound measured on the device. `iv_exp` is in the fixture so the site can
-measure WebGL2's `exp`, but its C# bits come from the platform's `exp` and
-differ by OS: its tolerance is "ulp-bounded, platform exp", its entry names the
-platform that generated it, and `GoldenFixtureMatchesCSharp` compares it case
-by case within one ulp of the running platform, printing the largest distance.
-Every other family is compared as text. Every fixture family is in
-`CultMath.glsl`, so the parity run needs no `CultMath.Phacelle.glsl`.
+consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
+exact; the float families are ulp-bounded, the bound measured on the device.
+
+`iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
+3.00 does not require to be correctly rounded, and WebGL2 compilers may
+reassociate. On a GTX 1070 under ANGLE's D3D11 backend its radius differs from
+C# by up to 2 ulp in 43 of 256 cases, sometimes smaller. What the march needs
+is enclosure, so the family's fixture entry carries a `check` the consumer
+applies to every case: from the case's arguments `(mx, my, z0, z1, fp, warp)`,
+compute in double `zm = (z0 + z1) / 2`, the centre `c = (mx zm, my zm, zm)`
+and the radius `r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp`, and
+require GPU radius >= `r + |GPU centre - c|`. Only that fails the check; the
+largest ulp distance is reported as for any ulp-bounded family.
+`GoldenFixtureMatchesCSharp` applies the same check to C#'s own results.
+
+`iv_exp` and `phacelle` take their C# bits from the platform's `exp`, `sin`
+and `cos`, which differ by OS: their tolerances name the platform functions
+("ulp-bounded, platform exp" and "ulp-bounded, platform exp, sin, cos"), their
+entries name the platform that generated them, and `GoldenFixtureMatchesCSharp`
+compares them case by case within one ulp of the running platform, printing the
+largest distance. Every other
+family is compared as text. `phacelle` is in `CultMath.Phacelle.glsl`, so the
+evaluator concatenates `CultMath.Phacelle.glsl` after `CultMath.glsl` for that
+family, with normalization 0.5. The site does not vendor the MPL file and
+skips the family; CultLib's own browser-pane WebGL2 run, under the follow-up
+`gpu-snoise-parity`, evaluates it.
 
 ## Invariant 8: Value-and-Gradient Primitives
 
@@ -497,9 +514,14 @@ two roundings (`z_m`, then the product), so the float centre is within
 axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
 the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
 once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
-contraction only removes roundings, so HLSL and GLSL compilers are covered by
-the same bound. At the shipped scales (`|c|_1` near 600, `r` near 5) it adds
-`6e-4`. The caller rotates and translates the centre into world space and scales
+contraction only removes roundings. The axis count assumes a correctly rounded
+`sqrt`, which IEEE gives C#. GLSL ES 3.00 does not: it inherits `sqrt`'s
+precision from `inversesqrt`, and D3D-backed compilers may reassociate. So the
+bound is proven for C# and HLSL on IEEE hardware, and on GLSL it is measured:
+on a GTX 1070 under ANGLE's D3D11 backend the fixture's 256 cases keep a
+minimum relative slack of `1.98e-6` (about `33u`), the same as C#'s. The
+fixture's enclosure check is what measures it on each device. At the shipped
+scales (`|c|_1` near 600, `r` near 5) the widening adds `6e-4`. The caller rotates and translates the centre into world space and scales
 centre and radius by its noise frequency; the rounding of that transform is the
 caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
 tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of
