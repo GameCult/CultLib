@@ -6,18 +6,16 @@ at test time. Run: python generate.py  (needs msgpack).
   extra-slot-full-payload.msgpack v1 header, record item:anvil gains slot 4, payload stays full
   legacy-catalog-extra-slot.msgpack
                                   v1 header, catalog entry in the older layout (contentHash at slot
-                                  5), so CultMesh's legacy snapshot reader takes it, plus the
-                                  extra-slot record
-  legacy-catalog-plain.msgpack    v1 header, the older-layout catalog entry, the plain v1 records: a store CultMesh's
-                                  legacy reader accepts
-  legacy-catalog-trailing.msgpack legacy-catalog-plain plus three bytes after the array: one array is
-                                  required of the legacy layout too
+                                  5), plus the extra-slot record; no C# reader reads the older layout
+  legacy-catalog-plain.msgpack    v1 header, the older-layout catalog entry, the plain v1 records: refused by
+                                  every C# reader, CultMesh included
+  legacy-catalog-trailing.msgpack legacy-catalog-plain plus three bytes after the array
   current-catalog-bad-canonical.msgpack
   current-catalog-bad-members.msgpack
   current-catalog-bad-compat.msgpack
                                   v1 header, plain records, and the first catalog entry of the current layout with one slot
-                                  malformed (canonical schema json an int; members an int; a compatible id an int). Not the
-                                  older layout, so CultMesh refuses them as CultCache does
+                                  malformed (canonical schema json an int; members an int; a compatible id an int). Refused
+                                  by every C# reader, CultMesh included
   current-catalog-bad-slot5-nil.msgpack
   current-catalog-bad-slot5-int.msgpack
                                   the same, with slot 5 (the compatible ids) nil or an integer: neither is a string, so neither is

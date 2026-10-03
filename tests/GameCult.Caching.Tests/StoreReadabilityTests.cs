@@ -230,6 +230,27 @@ namespace GameCult.Caching.Tests
             Assert.That(File.Exists(target), Is.False, "a write went through the link");
         }
 
+        // A directory at the path is something at the path: it is an I/O error on open and on commit, never an empty store, and
+        // it is left as it was.
+        [Test]
+        public void ADirectoryAtTheStorePathIsAnIoErrorOnOpenAndOnCommitNotAnEmptyStore()
+        {
+            var path = Path.Combine(_directory, "directory.cc");
+            Directory.CreateDirectory(path);
+
+            Assert.That(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry }),
+                Throws.TypeOf<IOException>().With.Message.Contains("directory"));
+
+            var later = Path.Combine(_directory, "later.cc");
+            using var cache = CultCacheMessagePack.Create(later, new CultCacheOpenOptions { Registry = Registry });
+            Directory.CreateDirectory(later);
+            Assert.That(() => cache.Commit(batch => batch.Upsert(typeof(IdDeck), new IdDeck { Name = "e" }, new CultRecordKey("e"))),
+                Throws.TypeOf<IOException>().With.Message.Contains("directory"));
+
+            Assert.That(Directory.GetFileSystemEntries(path), Is.Empty);
+            Assert.That(Directory.GetFileSystemEntries(later), Is.Empty);
+        }
+
         // A link whose target is gone. A directory junction needs no privilege on Windows, where a file symlink needs one this
         // workstation lacks; elsewhere a symlink to a missing directory is the same thing.
         private static void CreateDanglingDirectoryLink(string path, string target)

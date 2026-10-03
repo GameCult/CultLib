@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using FluentAssertions;
 using GameCult.Caching;
+using GameCult.Caching.MessagePack;
 using NUnit.Framework;
 
 #nullable enable
@@ -36,6 +37,38 @@ public sealed class CultMeshVariantRefusalTests
     {
         var message = Refusal("extra-slot-full-payload.msgpack").Message;
         message.Should().Contain("item:anvil").And.Contain(ItemSchemaId);
+    }
+
+    // The older catalog layout (the content hash at entry slot 5) is a store no C# reader reads: CultMesh refuses it as CultCache
+    // does, on a read and on a raw write, and a refused write leaves the bytes as they were.
+    [TestCase("legacy-catalog-plain.msgpack")]
+    [TestCase("legacy-catalog-extra-slot.msgpack")]
+    [TestCase("legacy-catalog-trailing.msgpack")]
+    public void TheOlderCatalogLayoutIsRefusedByMeshAndCultCacheAlike(string vector)
+    {
+        Refusal(vector).Path.Should().Be(VectorPath(vector));
+
+        var directory = Path.Combine(Path.GetTempPath(), "cultmesh-legacy-layout", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, vector);
+            File.Copy(VectorPath(vector), path);
+            var bytes = File.ReadAllBytes(path);
+            var raw = new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1");
+
+            Assert.Throws<CultStoreUnreadableException>(() =>
+                CultMesh.WriteSingleFileDocumentPayload(path, new CultRecordKey("item:bellows"), raw, null, new byte[] { 0x90 }))!
+                .Path.Should().Be(path);
+            File.ReadAllBytes(path).Should().Equal(bytes);
+
+            Assert.Throws<CultStoreUnreadableException>(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { FlushOnDispose = false, StoreFlushOnDispose = false }))!
+                .Path.Should().Be(path);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
     }
 
     // A store in the current layout with one catalog slot malformed is refused as CultCache refuses it.
