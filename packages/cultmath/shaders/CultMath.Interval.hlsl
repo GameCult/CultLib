@@ -104,4 +104,19 @@ float2 cultmath_iv_fbm_ball(float3 centre, float radius, int octaves, float lacu
     return sum;
 }
 
+// A ball (xyz centre, w radius) enclosing every point of every ray of a screen tile over the depth segment
+// [z0, z1], warped by at most warp. Camera frame: pinhole at the origin looking down +z, ray (m z, z).
+// footprintPerDepth = N / (sqrt(2) f) for an N x N tile at focal length f. The radius is widened by
+// (|c|_1 + radius) 2^-20, which covers the ball's own float32 rounding. Derivation in math.Interval.cs.
+float4 cultmath_iv_frustum_ball(float2 centreSlope, float z0, float z1, float footprintPerDepth, float warp)
+{
+    float zm = (z0 + z1) * 0.5;
+    float axis = sqrt(centreSlope.x * centreSlope.x + centreSlope.y * centreSlope.y + 1.0);
+    float cx = centreSlope.x * zm;
+    float cy = centreSlope.y * zm;
+    float radius = (z1 - z0) * 0.5 * axis + z1 * footprintPerDepth + warp;
+    radius += (abs(cx) + abs(cy) + abs(zm) + radius) * 9.5367431640625e-7;
+    return float4(cx, cy, zm, radius);
+}
+
 #endif

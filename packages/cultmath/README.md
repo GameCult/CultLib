@@ -38,9 +38,15 @@ shader semantics.
 - interval arithmetic for culling empty space with a proof: `iv_*` functions
   over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
   and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
-  ball. Every one returns an interval containing the function's value at every
-  point of its input, so a raymarch can skip a segment whose `hi` is below its
-  cutoff; `cultmath_iv_*` in HLSL. See `docs/design.md`, "Intervals".
+  ball, and `iv_frustum_ball`, the ball around a screen tile's rays over a depth
+  segment, so one probe serves the whole tile (its radius carries its own
+  float32 rounding bound). Every one returns an interval
+  containing the function's value at every point of its input, so a raymarch
+  can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
+  The bounds compose with a consumer's own analytic envelope (a height fog, a
+  carved sphere): its interval over the segment proves empty space in one probe,
+  and the noise ball is consulted only near the surface. See `docs/design.md`,
+  "Intervals".
 - `shaders/CultMath.glsl`, the same `cultmath_*` library in GLSL ES 3.00 for
   WebGL2, generated from `CultMath.hlsl` (never edited by hand). GLSL has no
   `#include`: a WebGL consumer concatenates the file's text after its own
