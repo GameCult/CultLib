@@ -411,73 +411,81 @@ function tagWithFiles(dir, tag, files) {
   commitAndTag(dir, tag);
 }
 
-test("CLI: a mistyped declared prefix is refused, because a tag under another prefix tracks the package's files", () => {
-  // The real entries of CultMath, cultlib and a Python package, each released once under its
-  // real prefix, then the declaration misspelled. Nothing is measured: the refusal comes from git.
+test("CLI: a mistyped declared prefix of a Unity package is refused, because a tag under another prefix tracks its managed assembly", () => {
+  // The real entries of CultMath and cultlib, each released once under its real prefix, then
+  // the declaration misspelled. Nothing is measured: the refusal comes from git.
   const cases = [
     { name: "org.gamecult.cultmath", released: "0.3.0", next: "0.3.1", file: "CultMath.dll" },
     { name: "org.gamecult.cultlib", released: "1.0.60", next: "1.0.61", file: "GameCult.Core.dll" },
-    { name: "cultcache-py", released: "0.1.0", next: "0.1.1", file: "cultcache/__init__.py" },
   ];
   for (const { name, released, next, file } of cases) {
     const real = releasePackages[name];
-    const folder = real.assemblies ?? posixPath.dirname(real.changelog);
     withTempGitRepo((dir) => {
       declare(dir, { [name]: real });
-      tagWithFiles(dir, `${real.tagPrefix}-v${released}`, { [`${folder}/${file}`]: "released" });
+      tagWithFiles(dir, `${real.tagPrefix}-v${released}`, { [`${real.assemblies}/${file}`]: peImage({ cli: CLI }) });
       mkdirSync(dirname(join(dir, real.changelog)), { recursive: true });
       writeFileSync(join(dir, real.changelog), changelogFor(next));
       const junk = join(dir, "junk.dll");
       writeFileSync(junk, "junk");
-      const args = ["--package", name, "--version", next, ...(real.assemblies ? ["--api-built", junk] : [])];
+      const args = ["--package", name, "--version", next, "--api-built", junk];
       declare(dir, { [name]: { ...real, tagPrefix: real.tagPrefix.slice(0, -1) } });
       const refused = runCheckerExpectFailure(dir, args);
-      assert.match(refused, new RegExp(`${real.tagPrefix}-v${released} tracks files under `));
+      assert.ok(refused.includes(`${real.tagPrefix}-v${released} tracks the managed assembly ${real.assemblies}/${file}`), refused);
       assert.doesNotMatch(refused, /first release \(/);
-      // the same release under the real prefix is a bump over its predecessor, not a first release
-      if (!real.assemblies) {
-        declare(dir, { [name]: real });
-        assert.match(runChecker(dir, args), /patch bump over/);
-      }
     });
   }
 });
 
-test("CLI: no tag tracks the package's folder, so a release is a first release however many other tags exist", () => {
+test("CLI: only a managed assembly under the declared assemblies directory proves an earlier release", () => {
   withTempGitRepo((dir) => {
-    declare(dir, { widget: { ...WIDGET, changelog: "widget/CHANGELOG.md", assemblies: PLUGINS } });
+    declare(dir, { widget: { ...WIDGET, assemblies: PLUGINS } });
     tagWithFiles(dir, "other-v1.0.0", { "other/file.txt": "other" });
-    tagWithFiles(dir, "other-v1.1.0", { "other/more.txt": "more" });
-    // the package's folder arrives after every tag, and its files are not tracked by any of them
-    mkdirSync(join(dir, "widget"), { recursive: true });
-    writeFileSync(join(dir, "widget", "CHANGELOG.md"), changelogFor("1.0.0"));
+    // files under the directory that are not managed assemblies prove nothing: text, and a native DLL
+    tagWithFiles(dir, "other-v1.1.0", { [`${PLUGINS}/notes.txt`]: "text", [`${PLUGINS}/x86_64/native.dll`]: peImage() });
+    writeChangelog(dir, "1.0.0");
     const junk = join(dir, "junk.dll");
     writeFileSync(junk, "junk");
     const args = [...widgetArgs("1.0.0"), "--api-built", junk];
     assert.match(runChecker(dir, args), /first release \(1\.0\.0\)/);
     // its own tag does not stop a rebuild of that first release
-    tagWithFiles(dir, "widget-v1.0.0", { [`${PLUGINS}/GameCult.Widget.dll`]: "shipped" });
+    tagWithFiles(dir, "widget-v1.0.0", { [`${PLUGINS}/GameCult.Widget.dll`]: peImage({ cli: CLI }) });
     assert.match(runChecker(dir, args), /first release \(1\.0\.0\)/);
-    // but the same files under any other tag make a later release with no same-prefix baseline a refusal
-    declare(dir, { widget: { ...WIDGET, changelog: "widget/CHANGELOG.md", assemblies: PLUGINS, tagPrefix: "widgt" } });
-    assert.match(runCheckerExpectFailure(dir, args), /widget-v1\.0\.0 tracks files under unity\/widget\/Runtime\/Plugins/);
+    // but a managed assembly under any other tag makes a release with no same-prefix baseline a refusal
+    declare(dir, { widget: { ...WIDGET, assemblies: PLUGINS, tagPrefix: "widgt" } });
+    const refused = runCheckerExpectFailure(dir, args);
+    assert.ok(refused.includes(`widget-v1.0.0 tracks the managed assembly ${PLUGINS}/GameCult.Widget.dll`), refused);
+  });
+  withTempGitRepo((dir) => {
+    declare(dir, { widget: { ...WIDGET, assemblies: PLUGINS } });
+    tagWithFiles(dir, "other-v1.0.0", { [`${PLUGINS}/bogus.dll`]: "not a PE image" });
+    writeChangelog(dir, "1.0.0");
+    const junk = join(dir, "junk.dll");
+    writeFileSync(junk, "junk");
+    assert.match(runCheckerExpectFailure(dir, [...widgetArgs("1.0.0"), "--api-built", junk]), /bogus\.dll at other-v1\.0\.0 is a \.dll but not a PE image/);
   });
 });
 
-test("CLI: a package without assemblies is told from a new one by its own directory, and a changelog at the root by the whole tree", () => {
+test("CLI: a package with no assemblies is a first release when no tag of its own prefix exists, whatever other tags track", () => {
   withTempGitRepo((dir) => {
     declare(dir, { widget: { ...WIDGET, changelog: "pkg/CHANGELOG.md" } });
     tagWithFiles(dir, "other-v1.0.0", { "elsewhere.txt": "x" });
-    mkdirSync(join(dir, "pkg"));
+    tagWithFiles(dir, "other-v1.1.0", { "pkg/code.py": "x" });
+    mkdirSync(join(dir, "pkg"), { recursive: true });
     writeFileSync(join(dir, "pkg", "CHANGELOG.md"), changelogFor("1.0.0"));
     assert.match(runChecker(dir, widgetArgs("1.0.0")), /first release \(1\.0\.0\)/);
-    tagWithFiles(dir, "other-v1.1.0", { "pkg/code.py": "x" });
-    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /other-v1\.1\.0 tracks files under pkg/);
+    // once it has a tag of its own prefix, that tag is the baseline
+    git(dir, "tag", "widget-v1.0.0");
+    writeFileSync(join(dir, "pkg", "CHANGELOG.md"), changelogFor("1.0.1"));
+    assert.match(runChecker(dir, widgetArgs("1.0.1")), /patch bump over 1\.0\.0/);
   });
+  // the real entry of cultnet-py, whose directory every other package's tag tracks
   withTempGitRepo((dir) => {
-    tagWithFiles(dir, "other-v1.0.0", { "elsewhere.txt": "x" });
-    writeChangelog(dir, "1.0.0");
-    assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /other-v1.0.0 tracks files under ./);
+    const real = releasePackages["cultnet-py"];
+    declare(dir, { "cultnet-py": real });
+    tagWithFiles(dir, "caching-unity-v1.2.0", { "packages/cultnet-py/cultnet/__init__.py": "x" });
+    mkdirSync(dirname(join(dir, real.changelog)), { recursive: true });
+    writeFileSync(join(dir, real.changelog), changelogFor("0.1.0"));
+    assert.match(runChecker(dir, ["--package", "cultnet-py", "--version", "0.1.0"]), /first release \(0\.1\.0\)/);
   });
 });
 
@@ -490,7 +498,7 @@ test("CLI: a folder that moved is the declared folder alone: the old path does n
     declare(dir, { widget: { ...WIDGET, assemblies: moved } });
     writeChangelog(dir, "1.0.1");
     assert.match(runCheckerExpectFailure(dir, [...widgetArgs("1.0.1"), "--api-built", built]), /tracks no managed assembly under unity\/widget2\/Runtime\/Plugins/);
-    // under a mistyped prefix, no tag tracks the new folder, and the old one is not looked at
+    // under a mistyped prefix, no tag tracks a managed assembly in the new folder, and the old one is not looked at
     declare(dir, { widget: { ...WIDGET, assemblies: moved, tagPrefix: "widgt" } });
     assert.match(runChecker(dir, [...widgetArgs("1.0.1"), "--api-built", built]), /first release \(1\.0\.1\)/);
   });
@@ -505,10 +513,12 @@ test("CLI: a tag that cannot be read at its ancestry or its files refuses", () =
     assert.match(runCheckerExpectFailure(dir, widgetArgs("1.0.0")), /whether widget-v0\.9\.0 is an ancestor of the commit being checked could not be read/);
   });
   withTempGitRepo((dir) => {
+    declare(dir, { widget: { ...WIDGET, assemblies: PLUGINS } });
     commitAndTag(dir, "other-v1.0.0");
     writeFileSync(join(dir, ".git", "refs", "tags", "other-v2.0.0"), "1".repeat(40) + "\n");
-    writeChangelog(dir, "1.0.0");
-    const refused = runCheckerExpectFailure(dir, widgetArgs("1.0.0"));
+    const junk = join(dir, "junk.dll");
+    writeFileSync(junk, "junk");
+    const refused = runCheckerExpectFailure(dir, measuredArgs(dir, "1.0.0", [junk]));
     assert.match(refused, /could not be read, so a first release cannot be told from a mistyped prefix/);
     assert.doesNotMatch(refused, /fatal|bad object|1111111/); // git's own complaint is not forwarded
   });
@@ -603,16 +613,49 @@ test("CLI: the flags the declaration replaced are usage errors, as is any unknow
   });
 });
 
-test("workflow: every tag trigger is a declared prefix, and every declared assemblies directory is tracked", () => {
-  const workflow = readFileSync(workflowFile, "utf8");
+// The prefix of a package that declares no assemblies is proven by no tag's bytes, so this pin is
+// its only guard against a typo in the declaration. Every workflow tag trigger must be a declared
+// prefix, and every assembly-less package's prefix must be a workflow trigger or, for a package
+// the workflow does not build, a prefix some tag in the repository already carries.
+function prefixPinProblems(declared, workflow, tagNames) {
   const triggers = [...workflow.match(/^\s+tags:\r?\n((?:\s+- "[^"]+"\r?\n)+)/m)[1].matchAll(/- "([^"]+)-v\*"/g)].map((match) => match[1]);
-  assert.ok(triggers.length >= 4, "the workflow triggers on the npm and PyPI packages' tags");
-  const prefixes = Object.values(releasePackages).map((entry) => entry.tagPrefix);
-  for (const trigger of triggers) assert.ok(prefixes.includes(trigger), `${trigger}-v* triggers the workflow but no package declares that prefix`);
+  const problems = [];
+  const prefixes = Object.values(declared).map((entry) => entry.tagPrefix);
+  for (const trigger of triggers) {
+    if (!prefixes.includes(trigger)) problems.push(`${trigger}-v* triggers the workflow but no package declares that prefix`);
+  }
+  for (const [name, entry] of Object.entries(declared)) {
+    if (entry.assemblies !== undefined) continue;
+    if (!triggers.includes(entry.tagPrefix) && !tagNames.some((tag) => tag.startsWith(`${entry.tagPrefix}-v`))) {
+      problems.push(`${name} declares no assemblies and its prefix ${entry.tagPrefix} is neither a workflow trigger nor a prefix any tag carries (are the tags fetched?)`);
+    }
+  }
+  return problems;
+}
+
+const workflowText = () => readFileSync(workflowFile, "utf8");
+const repoTags = () => execFileSync("git", ["tag", "-l"], { cwd: repoRoot, encoding: "utf8" }).split("\n").filter(Boolean);
+
+test("workflow: the declared prefixes are pinned to the tag triggers, and every declared assemblies directory is tracked", () => {
+  assert.deepEqual(prefixPinProblems(releasePackages, workflowText(), repoTags()), []);
   for (const [name, entry] of Object.entries(releasePackages)) {
     if (entry.assemblies === undefined) continue;
     assert.notEqual(execFileSync("git", ["ls-files", "--", entry.assemblies], { cwd: repoRoot, encoding: "utf8" }).trim(), "", `${name} declares ${entry.assemblies}, which tracks nothing`);
   }
+});
+
+test("workflow: a typo in the declared prefix of any assembly-less package fails the pin, and so does a deleted trigger", () => {
+  const assemblyLess = Object.entries(releasePackages).filter(([, entry]) => entry.assemblies === undefined);
+  assert.deepEqual(assemblyLess.map(([name]) => name).sort(), ["@gamecult/cultcache-ts", "cultcache-py", "cultmesh-py", "cultnet-py", "org.gamecult.caching.unity"]);
+  for (const [name, entry] of assemblyLess) {
+    for (const tagPrefix of [entry.tagPrefix.slice(0, -1), `${entry.tagPrefix}s`, entry.tagPrefix.replace("-", "_")]) {
+      const typo = { ...releasePackages, [name]: { ...entry, tagPrefix } };
+      assert.notDeepEqual(prefixPinProblems(typo, workflowText(), repoTags()), [], `${name} with prefix ${tagPrefix} passed the pin`);
+    }
+  }
+  const withoutTrigger = workflowText().replace(/^\s+- "cultmesh-py-v\*"\r?\n/m, "");
+  assert.notEqual(withoutTrigger, workflowText());
+  assert.notDeepEqual(prefixPinProblems(releasePackages, withoutTrigger, repoTags().filter((tag) => !tag.startsWith("cultmesh-py-v"))), []);
 });
 
 // --- Measured public API. The fixtures are real assemblies, built here with

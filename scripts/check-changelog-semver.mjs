@@ -11,7 +11,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, posix, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // The exact heading spelling the policy mandates for a breaking-change
@@ -173,15 +173,17 @@ export function evaluateRelease({ packageName, changelogText, version, previousV
 // --cwd): a backport tagged later on another branch is not in this commit's history, so it
 // never changes a rebuild's predecessor. The version's own tag is ignored, so a rebuild at a
 // tagged version gets its release-time verdict. A same-prefix tag that does not parse is never
-// skipped. A first release is the absence of any older tag in a checkout that holds other tags
-// (a checkout with none cannot tell a first release from a missing record), none of which, under
-// any prefix, tracks a file under the package's folder.
+// skipped. A first release is the absence of any older tag in a checkout that holds other tags (a
+// checkout with none cannot tell a first release from a missing record), none of which, under
+// any prefix, tracks a managed assembly under the package's declared assemblies directory. A
+// package that declares none has no such proof: the prefix of an assembly-less package is
+// pinned by the suite test that ties every declared prefix to its tag trigger.
 function isAncestorOfHead(tag, cwd) {
   const run = spawnSync("git", ["merge-base", "--is-ancestor", `refs/tags/${tag}`, "HEAD"], { cwd, stdio: "ignore" });
   return run.status === 0 ? true : run.status === 1 ? false : null;
 }
 
-function resolveRelease(tagPrefix, versionText, cwd, folder) {
+function resolveRelease(tagPrefix, versionText, cwd, assemblies) {
   let tags;
   try {
     tags = execFileSync("git", ["tag", "-l"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
@@ -226,29 +228,49 @@ function resolveRelease(tagPrefix, versionText, cwd, folder) {
   if (!tags.some((tag) => tag !== own)) {
     return { failure: "this checkout holds no tags; a first release cannot be told from a missing record (fetch the tags)" };
   }
-  // Under every other prefix too: a package some tag has shipped is not new, whatever the
-  // declared prefix says. This is read from git, never from the changelog's prose.
-  const tracked = firstTagTracking(tags.filter((tag) => tag !== own), folder, cwd);
-  if (tracked.failure) return tracked;
-  if (tracked.tag) {
-    return { failure: `no ${prefix} tag is an earlier release, but ${tracked.tag} tracks files under ${folder}: the package has shipped before, so the declared tag prefix is wrong` };
+  if (typeof assemblies === "string") {
+    // Under every other prefix too: a package whose assemblies some tag has shipped is not new,
+    // whatever the declared prefix says. This is read from git, never from the changelog's prose.
+    const tracked = firstTagTrackingManaged(tags.filter((tag) => tag !== own), assemblies, cwd);
+    if (tracked.failure) return tracked;
+    if (tracked.tag) {
+      return { failure: `no ${prefix} tag is an earlier release, but ${tracked.tag} tracks the managed assembly ${tracked.path}: the package has shipped before, so the declared tag prefix is wrong` };
+    }
   }
   return { previous: null };
 }
 
-// The first of the tags that tracks any file under `folder`, or none. A tag that cannot be read
-// is a refusal, never a tag that tracks nothing.
-function firstTagTracking(tags, folder, cwd) {
+// The first of the tags that tracks a managed assembly anywhere under `dir`, or none. Whether a
+// blob is managed is decided by its bytes once per blob id, however many tags track it. A tag
+// that cannot be read, or a .dll that is not a PE image, is a refusal, never a tag that tracks
+// nothing.
+function firstTagTrackingManaged(tags, dir, cwd) {
+  const managedBlobs = new Map();
   for (const tag of tags) {
     try {
-      const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", `refs/tags/${tag}`, "--", `${folder}/`], {
+      const entries = execFileSync("git", ["ls-tree", "-r", "-z", `refs/tags/${tag}`, "--", `${dir}/`], {
         cwd,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
-      });
-      if (listing !== "") return { tag };
+      })
+        .split(" ")
+        .filter((entry) => entry.toLowerCase().endsWith(".dll"));
+      for (const entry of entries) {
+        const tab = entry.indexOf("	");
+        const id = entry.slice(0, tab).split(" ")[2];
+        const path = entry.slice(tab + 1);
+        if (!managedBlobs.has(id)) {
+          const bytes = execFileSync("git", ["cat-file", "blob", id], { cwd, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 28 });
+          try {
+            managedBlobs.set(id, isManagedAssembly(bytes));
+          } catch {
+            return { failure: `${path} at ${tag} is a .dll but not a PE image, so a first release cannot be told from a mistyped prefix` };
+          }
+        }
+        if (managedBlobs.get(id)) return { tag, path };
+      }
     } catch {
-      return { failure: `the files ${tag} tracks under ${folder} could not be read, so a first release cannot be told from a mistyped prefix` };
+      return { failure: `the assemblies ${tag} tracks under ${dir} could not be read, so a first release cannot be told from a mistyped prefix` };
     }
   }
   return {};
@@ -495,10 +517,7 @@ async function main() {
     refuse(`${packageName}: declares no assemblies directory, so --api-built has nothing to be measured against`);
     return;
   }
-  // The folder whose tracking by a tag tells a shipped package from a new one: the shipped
-  // assemblies, else the package's own directory (where its changelog lives).
-  const folder = typeof assemblies === "string" ? assemblies : posix.dirname(entry.changelog);
-  const release = resolveRelease(tagPrefix, version, cwd, folder);
+  const release = resolveRelease(tagPrefix, version, cwd, assemblies);
   if (release.failure) {
     refuse(`${packageName}: ${release.failure}`);
     return;
