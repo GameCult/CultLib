@@ -271,8 +271,8 @@ scripts/check-changelog-semver.test.mjs`).
 
 It is wired into:
 
-- `.github/workflows/publish-packages.yml`, right after each job's existing
-  "tag matches manifest version" check, for `cultcache-ts`, `cultcache-py`,
+- `.github/workflows/publish-packages.yml`, through
+  `scripts/release-after-suite.mjs`, for `cultcache-ts`, `cultcache-py`,
   `cultnet-py`, and `cultmesh-py`, with `fetch-depth: 0` so the checkout holds
   the tags;
 - `scripts/build-unity-package.ps1`, for `org.gamecult.cultlib`;
@@ -282,16 +282,21 @@ It is wired into:
 
 Each of those runs the check's own tests before it releases. The Unity release
 scripts run them before they call the check, and the tests pin that order. In
-`publish-packages.yml` the release step runs `scripts/release-after-suite.mjs`,
-which runs the tests and then the release action from one process, and releases
-only if the tests passed: `npm publish` for `cultcache-ts`, and for the Python
-packages the sdist and wheel build, whose output is all the PyPI upload step
-uploads. The gate is that call, not a step condition, so no `if:` can release
-what the tests did not pass. The tests compare each job's release steps with
-their expected text exactly, less the steps' `if:` lines, and refuse
-`continue-on-error`, `shell` and `defaults` anywhere in the workflow. Removing
-the call is still possible, but only as a visible edit to those steps and to the
-tests.
+`publish-packages.yml` the release step runs `scripts/release-after-suite.mjs`
+with the run's git ref. From one process it checks that a tag ref is the
+package's declared prefix and manifest version, runs these tests, runs this
+check for the tagged version, runs the package's own tests (`npm test`, or the
+Python package's unit tests), and only then the release action: `npm publish`
+for `cultcache-ts`, which it refuses on any ref but a release tag, and for the
+Python packages the sdist and wheel build, whose output is all the PyPI upload
+step uploads. The checks run without `NODE_OPTIONS`, `NODE_TEST_CONTEXT`, any
+other `NODE_TEST_*` variable and `NODE_AUTH_TOKEN`, so no inherited variable can
+make the tests run nothing and pass; only the release action receives the token.
+The gate is that call, not a step condition, so no `if:`, `continue-on-error` or
+`shell` on another step can release what a check refused. The tests compare
+each job's release steps with their expected text exactly, less the steps' `if:`
+lines. Removing the call is still possible, but only as a visible edit to those
+steps and to the tests.
 
 `org.gamecult.cultlib` compiles CultMath from source and ships beside
 `org.gamecult.cultmath`, so its build refuses unless it declares exactly the
