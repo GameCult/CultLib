@@ -226,6 +226,13 @@ Every `af_*` function is an ulp-bounded family, and `af_snoise`, `af_fbm` and `a
 of their own, applied the same way: the device's own `snoise` or fBm at 75 sampled points of the case's set must lie in the device's
 form with no tolerance (a device whose gradient error exceeds the allowance fails), its width must not pass the Lipschitz form's
 allowance, and the device's `af_frustum_ball` radius must enclose the sampled ray points and stay within its rounding widening.
+The reference is the device's own noise, which is right for culling soundness but would pass a device whose noise is wrong
+everywhere, so two appended families (`af_snoise` and `af_fbm`, 256 cases each) add the centre leg: the fixture's own `x0`
+(C#'s value at the centre) must lie in the device form's `[x0 - e, x0 + e]`, for every `af_snoise` and `af_fbm` family. They
+also draw reach `|axis| + radius` from 1e-6 to 1e-3, the short slices near a camera, where the float32 allowance is most of `e`:
+the main families' reach is at least about 1e-3, where the second-order remainder is far larger and a device that drops the
+allowance still passes. `GoldenFixtureMatchesCSharp` requires each of the two to hold cases that fail on C#'s own results once
+the allowance is removed.
 
 `GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
 arguments. Arguments are drawn only when the fixture is regenerated

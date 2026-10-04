@@ -234,15 +234,22 @@ public sealed class GlslMirrorTests
 
     // SampledForm applied to C#'s own results, with C#'s own snoise or fBm as the reference value. A form
     // must enclose its reference at every sample, and be no wider than the Lipschitz form's allowance.
-    private static string AssertSampledForm(JsonArray cases, string name, Func<string[], float3, float> reference, Func<string[], double[], double> widthBound)
+    // allowance is the part of e that is the float32 allowance; a family that allowanceDecides must have a
+    // sample that falls outside the form once it is removed, so the family can tell a device whose error
+    // passes the allowance from one that does not.
+    private static string AssertSampledForm(JsonArray cases, string name, Func<string[], float3, float> reference, Func<string[], double[], double> widthBound,
+        Func<string[], double[], double> allowance, bool allowanceDecides)
     {
         double least = double.PositiveInfinity, leastRelative = double.PositiveInfinity, tightest = double.PositiveInfinity;
+        var decided = 0;
         foreach (var entry in cases)
         {
             var sides = ((string)entry!).Split(" -> ");
             var tokens = sides[0].Split(' ');
             double[] a = Floats(string.Join(' ', tokens.Take(7))), form = Floats(sides[1]);
             double x0 = form[0], slope = form[1], e = form[2];
+            var withoutAllowance = e - allowance(tokens, a);
+            var allowanceNeeded = false;
             foreach (var eps in CheckEps)
             foreach (var d in CheckDirections)
             {
@@ -252,42 +259,56 @@ public sealed class GlslMirrorTests
                 Assert.True(inside >= 0.0, $"{name} case {entry}: the reference {value:R} at eps {eps} and direction {d} is outside the form's range [{middle - e:R}, {middle + e:R}] by {-inside:R}");
                 least = Math.Min(least, inside);
                 leastRelative = Math.Min(leastRelative, inside / e);
+                allowanceNeeded |= Math.Abs(value - middle) > withoutAllowance;
             }
+
+            if (allowanceNeeded)
+                decided++;
 
             var bound = widthBound(tokens, a);
             Assert.True(Math.Abs(slope) + e <= bound + Math.ScaleB(1.0 + bound, -16), $"{name} case {entry}: the width {Math.Abs(slope) + e:R} is past B + 2^-16 (1 + B) = {bound + Math.ScaleB(1.0 + bound, -16):R}");
             tightest = Math.Min(tightest, (bound + Math.ScaleB(1.0 + bound, -16) - Math.Abs(slope) - e) / bound);
         }
 
-        return $"least enclosure slack {least:E3} ({leastRelative:E3} of e), least tightness slack {tightest:E3} of B";
+        Assert.True(!allowanceDecides || decided > 0, $"{name}: no sample falls outside the form once the float32 allowance is removed, so the family cannot fail a device whose error passes it");
+        return $"least enclosure slack {least:E3} ({leastRelative:E3} of e), least tightness slack {tightest:E3} of B, {decided} of {cases.Count} cases need the allowance";
     }
 
+    // The float32 allowance of one octave of af_snoise: 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R).
+    private static double SnoiseAllowance(double centre1, double reach) =>
+        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+
     // The Lipschitz form's width bound for one octave of the sampled-form check.
-    private static double SnoiseWidthBound(double centre1, double reach) =>
-        math.SNOISE_LIPSCHITZ * reach + Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+    private static double SnoiseWidthBound(double centre1, double reach) => math.SNOISE_LIPSCHITZ * reach + SnoiseAllowance(centre1, reach);
 
     private static double Length3(double[] a, int first) => Math.Sqrt(a[first] * a[first] + a[first + 1] * a[first + 1] + a[first + 2] * a[first + 2]);
 
-    private static string AssertSnoiseForm(JsonArray cases) =>
-        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
-            (_, a) => SnoiseWidthBound(Math.Abs(a[0]) + Math.Abs(a[1]) + Math.Abs(a[2]), Length3(a, 3) + a[6]));
+    private static double SnoiseOctave(Func<double, double, double> octave, double[] a, double frequency) =>
+        octave((Math.Abs(a[0]) + Math.Abs(a[1]) + Math.Abs(a[2])) * frequency, (Length3(a, 3) + a[6]) * frequency);
 
-    private static string AssertFbmForm(JsonArray cases) =>
+    // The amplitude-weighted sum of a per-octave quantity over the fBm's octaves.
+    private static double FbmOctaves(string[] t, double[] a, Func<double, double, double> octave)
+    {
+        var (octaves, lacunarity, gain) = ((int)Convert.ToUInt32(t[7], 16), Floats(t[8])[0], Floats(t[9])[0]);
+        double sum = 0.0, amplitude = 1.0, frequency = 1.0;
+        for (var i = 0; i < Math.Clamp(octaves, 0, 16); i++)
+        {
+            sum += amplitude * SnoiseOctave(octave, a, frequency);
+            amplitude *= gain;
+            frequency *= lacunarity;
+        }
+
+        return sum;
+    }
+
+    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false) =>
+        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
+            (_, a) => SnoiseOctave(SnoiseWidthBound, a, 1.0), (_, a) => SnoiseOctave(SnoiseAllowance, a, 1.0), allowanceDecides);
+
+    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false) =>
         AssertSampledForm(cases, "af_fbm",
             (t, p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w,
-            (t, a) =>
-            {
-                var (octaves, lacunarity, gain) = ((int)Convert.ToUInt32(t[7], 16), Floats(t[8])[0], Floats(t[9])[0]);
-                double sum = 0.0, amplitude = 1.0, frequency = 1.0;
-                for (var i = 0; i < Math.Clamp(octaves, 0, 16); i++)
-                {
-                    sum += amplitude * SnoiseWidthBound((Math.Abs(a[0]) + Math.Abs(a[1]) + Math.Abs(a[2])) * frequency, (Length3(a, 3) + a[6]) * frequency);
-                    amplitude *= gain;
-                    frequency *= lacunarity;
-                }
-
-                return sum;
-            });
+            (t, a) => FbmOctaves(t, a, SnoiseWidthBound), (t, a) => FbmOctaves(t, a, SnoiseAllowance), allowanceDecides);
 
     // AffineFrustumBall applied to C#'s own results.
     private static string AssertAffineFrustumBall(JsonArray cases)
@@ -425,6 +446,23 @@ public sealed class GlslMirrorTests
 
     private static float BallRadius(System.Random r) => MathF.Pow(10.0f, Uniform(r, -3.0f, -0.3f));
 
+    // A slice of reach 1e-6 to 1e-3, the short slices and small footprints near a camera, where the float32
+    // allowance is most of the form's width: the centre in [-50, 50] or [-1, 1], an axis of random direction
+    // (zero in one case of four) and a radius, each log-uniform in 1e-6 to 1e-3.
+    private static object[] SmallReachSlice(System.Random r)
+    {
+        var span = r.Next(2) == 0 ? 50.0f : 1.0f;
+        var centre = new float3(Uniform(r, -span, span), Uniform(r, -span, span), Uniform(r, -span, span));
+        var axis = new float3(0.0f, 0.0f, 0.0f);
+        if (r.Next(4) != 0)
+        {
+            var direction = math.normalize(new float3(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f)));
+            axis = direction * MathF.Pow(10.0f, Uniform(r, -6.0f, -3.0f));
+        }
+
+        return new object[] { centre, axis, MathF.Pow(10.0f, Uniform(r, -6.0f, -3.0f)) };
+    }
+
     private const string SampledForm =
         "the arguments are (cx, cy, cz, ax, ay, az, radius, ...) and the result is the form (x0, a, e). Enclosure: for eps in " +
         "{-1, -0.5, 0, 0.5, 1} and d in {0, +-ex, +-ey, +-ez, (+-1, +-1, +-1) / sqrt(3)} (15 directions), form the point " +
@@ -439,6 +477,22 @@ public sealed class GlslMirrorTests
     private const string FbmForm = SampledForm +
         "The reference value is cultmath_fbm_grad(p, octaves, lacunarity, gain).w, and B is the sum over octaves i of gain^i B_i, " +
         "where B_i is B for the centre lacunarity^i c, the axis lacunarity^i axis and the radius lacunarity^i radius.";
+
+    // The two small-reach families add the centre leg to every af_snoise and af_fbm family. The device's
+    // reference value is its own noise, so a device whose noise is wrong everywhere encloses its own wrong
+    // values; C#'s value at the centre, the form's own x0 in the fixture, is the independent reading.
+    private const string CentreLeg =
+        " Centre leg, for every cultmath_af_snoise and cultmath_af_fbm family of this fixture, the earlier ones included: " +
+        "the fixture's own x0 in the result (C#'s value at the centre) must lie in [x0 - e, x0 + e] of the GPU's form, with " +
+        "no tolerance, so a device whose noise differs from C#'s by more than its e fails.";
+
+    private const string SmallReach =
+        " These cases have reach |axis| + radius of 1e-6 to 1e-3, where the float32 allowance is most of e and the second order " +
+        "remainder is not; the enclosure above fails a device whose gradient error exceeds the allowance.";
+
+    private const string SnoiseSmallForm = SnoiseForm + SmallReach + CentreLeg;
+
+    private const string FbmSmallForm = FbmForm + SmallReach + CentreLeg;
 
     private const string AffineFrustumBall =
         "enclosure and tightness: from the arguments (mx, my, z0, z1, fp, warpVariation) compute in double zm = (z0 + z1) / 2, " +
@@ -505,8 +559,8 @@ public sealed class GlslMirrorTests
         new("vec3 cultmath_af_scale(vec3, float)", "ulp-bounded", r => new object[] { Form(r), Uniform(r, -4.0f, 4.0f) }),
         new("vec3 cultmath_af_add_iv(vec3, vec2)", "ulp-bounded", r => new object[] { Form(r), Interval(r) }),
         new("vec3 cultmath_af_mul(vec3, vec3)", "ulp-bounded", r => new object[] { Form(r), Form(r) }),
-        new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r) }, SnoiseForm, Verify: AssertSnoiseForm),
-        new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r), 4, 2.0f, 0.5f }, FbmForm, Verify: AssertFbmForm),
+        new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r) }, SnoiseForm, Verify: cases => AssertSnoiseForm(cases)),
+        new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r), 4, 2.0f, 0.5f }, FbmForm, Verify: cases => AssertFbmForm(cases)),
         new("vec3 cultmath_af_frustum_axis(vec2, float, float)", "ulp-bounded", r =>
         {
             var z0 = Uniform(r, 0.1f, 100.0f);
@@ -519,6 +573,8 @@ public sealed class GlslMirrorTests
             return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
         }, AffineFrustumBall, Verify: AssertAffineFrustumBall),
         new("vec2 cultmath_iv_snoise_ball(vec2, float)", "ulp-bounded", r => new object[] { new float2(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f)), Uniform(r, 0.001f, 2.0f) }),
+        new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded, reach 1e-6 to 1e-3", SmallReachSlice, SnoiseSmallForm, Verify: cases => AssertSnoiseForm(cases, allowanceDecides: true)),
+        new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded, reach 1e-6 to 1e-3", r => SmallReachSlice(r).Concat(new object[] { 4, 2.0f, 0.5f }).ToArray(), FbmSmallForm, Verify: cases => AssertFbmForm(cases, allowanceDecides: true)),
     };
 
     // The fixture text, each case's arguments given by family and point index.
