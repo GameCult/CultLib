@@ -627,7 +627,12 @@ public sealed class AffineTests
         foreach (var e in odd)
         {
             var range = af_range(new float3(x0, a, e));
-            if (float.IsNaN(range.x) || float.IsNaN(range.y))
+            // The range encloses x0 -+ (|a| + e) wherever that is a number, and is the whole line on the
+            // side where it is not (infinity minus infinity, a NaN component): the infinity on that side.
+            var spread = Math.Abs((double)a) + e;
+            var enclosesLow = double.IsNaN(x0 - spread) ? range.x == float.NegativeInfinity : range.x <= x0 - spread;
+            var enclosesHigh = double.IsNaN(x0 + spread) ? range.y == float.PositiveInfinity : range.y >= x0 + spread;
+            if (!enclosesLow || !enclosesHigh)
                 misses.Add($"af_range(({x0}, {a}, {e})) = {range}");
         }
 
