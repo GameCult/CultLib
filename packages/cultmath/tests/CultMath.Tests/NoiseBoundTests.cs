@@ -774,6 +774,45 @@ public sealed class NoiseBoundTests
     }
 
     /// <summary>
+    /// FlowVariation's width, pinned both ways: over 2,000 seeded balls (centres in [-2000, 2000]^3, radius
+    /// log-uniform in [1e-3, 500]) it equals min(sqrt(u^2 + v^2), 2) A, A = FlowAmplitude, with each of u and v
+    /// the reach of iv_snoise_ball(float2) at the flow plane's argument (plus its offset) plus the float32
+    /// allowance 2^-14 + L2 2^-20 (|q|_1 + r FlowFrequency), to 0.3% (the float32 sum n + e rounds at 6e-8, against an allowance of 6e-5). The enclosure test sees the
+    /// allowance only where a float32 flow differs from the exact one by more than the bound's slack, which
+    /// on the CPU is rare (CentredWarpStaysEnclosed); this is the test that sees it.
+    /// </summary>
+    [Fact]
+    public void FlowVariationCarriesItsAllowance()
+    {
+        var noise = new WarpedNoise { F0 = 1.0f / FogField.NoiseScale, Warp = FogField.AetheriaWarp };
+        var amplitude = noise.Warp * 2.0 / noise.Period;
+        var random = new System.Random(0xF10E);
+        double Reach(float2 q, double r)
+        {
+            var n = snoise(q);
+            var e = SNOISE2_LIPSCHITZ * r;
+            return Math.Max(Math.Min(e, 1.0 - n), Math.Min(e, n + 1.0));
+        }
+
+        for (var b = 0; b < 2000; b++)
+        {
+            var centre = new float3(Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f));
+            var radius = LogUniform(random, 1.0e-3f, 500.0f);
+            var rq = (double)radius * noise.FlowFrequency;
+            double Component(float2 offset)
+            {
+                var q = new float2(centre.x, centre.z) * noise.FlowFrequency + offset;
+                return Reach(q, rq) + Math.ScaleB(1.0, -14) + SNOISE2_LIPSCHITZ * Math.ScaleB(Math.Abs((double)q.x) + Math.Abs((double)q.y) + rq, -20);
+            }
+
+            var (u, v) = (Component(new float2(17.0f, 3.0f)), Component(new float2(-5.0f, 41.0f)));
+            var expected = Math.Min(Math.Sqrt(u * u + v * v), 2.0) * amplitude;
+            var observed = noise.FlowVariation(centre, radius);
+            Assert.True(Math.Abs(observed - expected) <= 3.0e-3 * expected, $"FlowVariation({centre}, {radius:R}) = {observed:R}, the documented rule gives {expected:R}");
+        }
+    }
+
+    /// <summary>
     /// The centred warp over an affine slice (FogField.Slice, the owner AffineBound reads): over 3,000
     /// seeded tile slices (the deep well, the shallow wells and inside the fog; N in {1, 4, 8, 16}; a
     /// slice of length log-uniform in [0.5, 1500] from a drawn depth, so the axis is from far under to far
