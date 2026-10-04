@@ -356,7 +356,12 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   that permutation helper, so its values changed too, while its own kernel
   (`0.5`) and scale (`130`) already matched upstream.
   `NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries`
-  pins the continuity.
+  pins the continuity. Ties in the offset `x0` resolve in Gustavson's
+  `simplexnoise1234` order (x over y, y over z, x over z), a total order, so the
+  four corners are always a simplex. Upstream's `step` compares are cyclic: where
+  the three components are equal, which includes the origin and every
+  `(t, t, t)`, the corners repeat the origin vertex and the value jumps by up to
+  0.77. `NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal` pins the order.
 - `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
   following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
   Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
