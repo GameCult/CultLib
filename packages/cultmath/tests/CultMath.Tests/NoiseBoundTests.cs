@@ -932,6 +932,42 @@ public sealed class NoiseBoundTests
         Assert.True(intersectionWidth <= 0.995 * intervalWidth, $"the intersection's width {intersectionWidth:F1} is not under 0.995 of the interval piece's {intervalWidth:F1}");
     }
 
+    /// <summary>
+    /// The gate only ever gives up what the probes could not have delivered. Gated, a slice the best
+    /// conceivable probe cannot prove empty returns the envelope; so a slice the ungated bound proves
+    /// empty (its upper density 0) must be proved empty gated too. A gate that errs toward giving up
+    /// (the reach inflated, a gradient or Hessian term overstated) loosens the bound exactly there and
+    /// costs only culling, which no enclosure test sees; a gate that errs the other way only costs probes,
+    /// which the cost contract (IntervalSkipHalvesEvaluations) sees. Over seeded slices of both wells at
+    /// warp 0 and the Aetheria warp, N = 8, in both modes, no slice the ungated bound proves empty is
+    /// left open by the gated one, and at least 200 are proved empty.
+    /// </summary>
+    [Fact]
+    public void GateNeverGivesUpAProvableCull()
+    {
+        var random = new System.Random(0x6A7E);
+        var (proved, lost) = (0, new List<string>());
+        foreach (var mode in new[] { BoundMode.Interval, BoundMode.Affine })
+        foreach (var warp in new[] { 0.0f, FogField.AetheriaWarp })
+        foreach (var field in new[] { FogField.DeepWell(warp, mode), FogField.Wells(warp, mode) })
+        for (var t = 0; t < 1500; t++)
+        {
+            var tile = field.DrawTile(random, 8);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 100.0f), field.Grid[^1]);
+            if (field.Bound(tile, z0, z1, false, new Counts()).y > 0.0f)
+                continue;
+            proved++;
+            var gated = field.Bound(tile, z0, z1, true, new Counts());
+            if (gated.y > 0.0f)
+                lost.Add($"{field.Name} {mode} warp {warp}: slice [{z0:R}, {z1:R}] is proved empty ungated but the gate leaves it at {gated}");
+        }
+
+        output.WriteLine($"IV-REPORT gate: {proved} slices proved empty ungated, {lost.Count} left open by the gate");
+        Assert.True(proved >= 200, $"only {proved} slices are proved empty ungated: the check cannot tell a gate that loses them");
+        Assert.True(lost.Count == 0, $"{lost.Count} provable culls given up by the gate, first: {lost.FirstOrDefault()}");
+    }
+
     // Why a field is not ten bands deep and wide, or null. The band G is the span of s where only the
     // noise decides density: s in [F + A lo, F + A hi] for the free noise range [lo, hi], with the fade at 1.
     private static string? TenBandsShortfall(FogField field, int cameras)
