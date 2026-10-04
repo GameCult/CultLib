@@ -1358,3 +1358,141 @@ deep-well camera at warp `D`.
 The contract question is re-asked against these numbers as
 `cultmath-tapes:question:affine-wells-contract-r2`. The first question was
 withdrawn in its favour, and `affine-forms` r2 supersedes r1.
+
+## Pass 6: the snoise diagonal tie (finding `snoise-diagonal-tie-discontinuity`)
+
+Soul's affine pass found that `snoise(float3)` and `snoise_grad` jump by up to
+0.72 where the three components of `x0` compare equal
+(`cultmath-tapes:finding:cut-affine-forms.s1.snoise-diagonal-tie-discontinuity`).
+The defect predates every cut in this campaign. It came with the Ashima kernel
+and survived the 0.3.0 kernel change. The cut is
+`cultmath-tapes:cut_spec:cut-snoise-tie.r1`.
+
+### Mechanism (probed)
+
+`g = step(x0.yzx, x0.xyz)` makes three pairwise comparisons, all non-strict: x
+wins its tie with y, y wins its tie with z, and z wins its tie with x. That is a
+cycle, not an order. When all three components are equal, `g = (1,1,1)`, so
+`i1 = (0,0,0)` and `i2 = (1,1,1)`, and the four corners are not a simplex.
+
+- Corner 1 is then the origin vertex again, with the offset `x0 + 1/6`. Near a
+  lattice vertex that offset is short (`|x1|^2 = 1/12`), so the origin's
+  gradient is counted a second time.
+- The tie set is the union of the lattice diagonals `v + s(1,1,1)`. It has
+  measure zero in space, but consumers sample it. Every point `(t, t, t)` lies
+  on it exactly in float32, for every `t`, because the three components are
+  computed identically. So does the origin: `snoise(0,0,0)` returns -0.4358730,
+  where the correct value is 0. `HlslSemanticsTests.cs:447` pins the wrong
+  value as golden. A consumer that samples `snoise(float3(t))` or
+  `cultmath_snoise(t.xxx)` reads a different function along the whole line.
+- With the 0.5 kernel, a lattice vertex outside the four summed corners never
+  contributes on a face, because its squared distance from the face is at
+  least 0.5. So any total order of the three comparisons gives the same exact
+  value on every tie. The fix only has to make the comparisons an order; which
+  order it picks does not matter.
+
+### Prior art
+
+- Gustavson's reference C, `simplexnoise1234.c`, picks the 3D simplex with an
+  if-chain on `x0>=y0`, `y0>=z0` and `x0>=z0` and their complements. Ties go x
+  over y, y over z and x over z: a total order.
+- Gustavson and McEwan's later `psrdnoise3.glsl` (JCGT 2022) replaces Ashima's
+  line with `step(f0.xyx, f0.yzz)` and a re-pairing. Its comment says ties
+  resolve "in priority order": also a total order, z over y over x.
+- Upstream `webgl-noise` `noise3D.glsl` still has the cyclic `step`. Soul found
+  no fix in its issues or its git history (`log -S` on the line).
+
+**The fix** makes one comparison strict, z against x:
+`g = (step(x0.y, x0.x), step(x0.z, x0.y), 1 - step(x0.z, x0.x))`. Ties then go
+x over y, y over z and x over z, which is exactly `simplexnoise1234`'s order.
+The probe's double-precision reference uses that if-chain verbatim, and the
+patched float kernel agrees with it to within float noise.
+
+Other total orders are equivalent mutants: one strict compare placed on x, or
+two strict compares. Only two spellings are degenerate, all-strict and today's
+all-non-strict, and the cut's test kills both.
+
+### What the probes measured
+
+Both jobs ran on Yggdrasil, on main `a7966142` and on the affine head
+`4ae986a5`. Each patched C# and both HLSL copies in the container, and
+regenerated GLSL and the fixture.
+
+| Probe | Old rule | Strict-z rule |
+| --- | --- | --- |
+| Random points, \|p\| <= 4, 256, 4096 (1e6 each): old and new bit-equal | | 1e6 of 1e6 at every scale |
+| Random points, \|p\| <= 65536 (1e6) | | 23 differ, each on an exact z = x tie, at ulp level |
+| Lattice-diagonal points and their +-2 ulp neighbourhoods, \|I\| <= 8, 64, 512, 4096 (500k each, about 10.5k exact triple ties each): max \|f32 - ref64\| | 0.772, 0.768, 0.775, 0.774 | 2.9e-6, 2.2e-5, 1.8e-4, 1.6e-3 (float32 at that magnitude) |
+| Pairwise faces x0 = (a,a,b) and permutations (108k), \|I\| <= 8 / 512 | 2.5e-6 / 1.3e-4 | the same |
+| Jump inside a 1e-4 ball at Soul's five witnesses | 0.21 to 0.72 | 0.0016 to 0.0018 (smooth bound 7.6 x 2 sqrt3 x 1e-4 = 0.0026) |
+| Soul's vertex scan, worst jump, \|L\| <= 8, 32, 128 | 0.72, 0.65, 0.65 | 3.7e-4, 1.5e-3, 5.7e-3; 0 of 400 beyond the smooth bound at every scale |
+| `af_snoise` around the old Lipschitz spike (2000 forms x 21 points) | 926 misses, worst 38 e | 0 misses, worst -0.72 e |
+| `MeasureLipschitz` (seed 0x11B5) | refined 9.181147, L = 10.099261 | refined 7.2400064, x 1.10 = **7.9640074**, witness (229.92526, 73.37927, -66.14595) |
+| `MeasureHessian` (affine head) | 50.954895, giving 56.050385 | unchanged, same witness |
+| `snoise_grad(p).w == snoise(p)` in a 1e-4 ball about the old witness | | 0 mismatches |
+
+The full suite passes once four things change together: the tie fix, `L`
+re-pinned, the witness moved, and the origin golden set to 0. It passes
+288 of 288 on main and 300 of 300 on the affine head.
+
+With only the tie fix and nothing re-pinned, exactly two tests fail:
+
+- `LipschitzConstantPinsSampledGradients`, the ratio pin, failing as
+  designed;
+- the origin golden.
+
+`HlslSourceCompatibilityTests` passes. Its special values include all-equal
+triples, so it pins the HLSL tie rule bit for bit against C#.
+
+Fixture bytes:
+
+- The tie fix alone changes no fixture case. The 256 random points per family
+  never land on a tie.
+- Re-pinning `L` changes 41 cases, all in `iv_snoise_ball(vec3)` and
+  `iv_fbm_ball`. These are the cases whose bound is not clamped to `[-1, 1]`.
+- Every other family is byte-identical.
+- `CultMath.glsl` changes 3 lines: the two tie lines and the constant.
+
+### What follows
+
+- **`SNOISE_LIPSCHITZ` narrows by 21%,** from 10.099261 to 7.9640074. Every
+  Lipschitz-form bound narrows with it: `iv_snoise_ball`, `iv_fbm_ball`, the
+  Lipschitz form inside `af_snoise`, and the march's skipping.
+  - The (c) rows in Passes 5 and 5b were measured at the old `L`. They are
+    conservative, not wrong. The affine branch re-measures them after it
+    merges main.
+  - `SNOISE_HESSIAN` does not move.
+- **Release.** `math.snoise` returns different values on the tie set, which
+  includes the origin and every `(t, t, t)`, points ordinary consumers sample.
+  - The precedent is `asura:ruling:qn1-snoise-upstream`: a public snoise value
+    change ships as a minor bump while the package is below 1.0, filed under
+    Breaking. So the next `cultmath-unity` release after this cut is 0.4.0,
+    not 0.3.x.
+  - The intervals and `L` were never released (`cultmath-unity-v0.3.0`
+    predates `math.Interval.cs`), so re-pinning `L` is not a release change.
+  - The release is not part of this cut. Follow-up
+    `cultmath-tapes:follow_up:snoise-tie-release` carries it, together with
+    Aetheria's pin bump to that release.
+- **Consumers.**
+  - gamecult-site vendors no CultMath GLSL yet, because `site-ground` has not
+    landed. It gets the fixed GLSL when it does.
+  - Aetheria pins 0.2.4, the old 0.6 kernel, which has the same cyclic `step`
+    line. Its pin bump (`asura:follow_up:aetheria-snoise-pin-bump`) should
+    target the release that carries this cut.
+  - No other runtime under `packages/` (Rust, TS, Python) carries snoise.
+
+### Merge order
+
+1. `snoise-tie` branches from main `a7966142` as
+   `hands/cultmath-snoise-tie`. It gets its own Soul gate and merges to main
+   first: it is small, independent, and fixes a defect in released code. Its
+   two fixture families go after `phacelle`.
+2. `hands/cultmath-affine-forms` then merges main with a merge commit. It never
+   rebases, because the branch is shared. The job's edits to
+   `math.Interval.cs`, `NoiseBoundTests.cs` and `design.md` applied cleanly to
+   the affine head. The affine fix batch's (c) re-measure and the affine Soul
+   pass run on the merged tree, so they see the new `L`.
+3. `affine-shaders` is revised to r2, which supersedes r1. It depends on
+   `snoise-tie` and starts from the merged tree, so its `af_*` families are
+   appended after the tie families, and its device enclosure checks run on the
+   fixed `cultmath_snoise_grad`. Nothing else in it changes.
