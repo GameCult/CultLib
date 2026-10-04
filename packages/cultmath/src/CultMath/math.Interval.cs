@@ -153,8 +153,11 @@ public static partial class math
     /// <summary>
     /// Encloses snoise(x) for every 2D x within distance radius of centre: [n - L2 r, n + L2 r] intersected
     /// with [-1, 1], n = snoise(centre), L2 = SNOISE2_LIPSCHITZ. radius must be at least 0. One snoise
-    /// evaluation, value only. A consumer's 2D flow built from snoise(float2) varies over a ball by at
-    /// most the width this gives (NoiseBoundTests.CentredWarpStaysEnclosed).
+    /// evaluation, value only. Like iv_snoise_ball(float3) it is exact for the point it is handed and
+    /// carries no allowance for the float32 evaluation: a consumer whose 2D flow is evaluated at points
+    /// it rounds itself (a shifted, scaled or projected point) adds 2^-14 + L2 2^-20 (|centre|_1 + radius)
+    /// to the width, the convention af_snoise carries for the 3D point
+    /// (NoiseBoundTests.FlowVariationCarriesItsAllowance, CentredWarpStaysEnclosed).
     /// </summary>
     public static float2 iv_snoise_ball(float2 centre, float radius)
     {
