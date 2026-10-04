@@ -745,8 +745,14 @@ refined 50.9549, witness (-245.19885, -53.01323, -91.47363).
 `SNOISE2_LIPSCHITZ = 8.117002` is the same for the gradient of `snoise(float2)`
 (`MeasureLipschitz2`: sampled 7.2575, refined 7.3791, witness (-67.12454,
 -129.53296), `|snoise2|` at most 0.99964), and it backs `iv_snoise_ball(float2,
-float)`. Both are empirical with a margin, not proofs; the enclosure tests are
-the defence, and a change to the kernels must re-run the measurements.
+float)`. Both are empirical with a margin, not proofs. A random ball cannot see a
+curvature constant 20% low, so `SNOISE_HESSIAN` is defended by
+`HessianConstantPinsSampledCurvature` and `SnoiseFormEnclosesTheCurvatureWitness`
+(`af_snoise` at the point where the curvature is realised, along 4,000 directions: a
+constant of 40 misses there). The margin over the function itself: a scan of the whole
+289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
+independently over every hash configuration gives 52.22, so 56.05 sits 7% above the
+configuration bound. A change to the kernels must re-run the measurements.
 
 The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
 warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1

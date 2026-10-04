@@ -612,4 +612,62 @@ public sealed class AffineTests
 
         Assert.True(misses.Count == 0, $"{misses.Count} misses:" + Environment.NewLine + string.Join(Environment.NewLine, misses.Take(8)));
     }
+
+    /// <summary>
+    /// af_snoise's width, pinned both ways. Over 6,000 seeded (centre, axis, radius) with reach R from 1e-3
+    /// to 3 (centres in [-20, 20]^3, a third out to [-1000, 1000]^3, a third of the axes and a third of the
+    /// radii 0), the form is the documented rule evaluated in double from snoise_grad: x0 = n; the centred
+    /// form when |g . axis| + |g| radius + M R^2 / 2 is under L R (checked away from that boundary), else
+    /// the Lipschitz form; e = that half-width + the float32 allowance (2^-14 + 2^-12 R + L 2^-20 (|centre|_1 + R))
+    /// plus the form's own rounding absorption (|n| + |a| + e) 2^-20; each of x0, a and e within a part in
+    /// 1e6 of it. The enclosure tests pass on an allowance or an absorption of any size on the CPU, where
+    /// float32 is exact; this is the test that sees them.
+    /// </summary>
+    [Fact]
+    public void SnoiseFormCarriesItsDocumentedWidth()
+    {
+        var u20 = Math.ScaleB(1.0, -20);
+        double lipschitz = SNOISE_LIPSCHITZ, hessian = SNOISE_HESSIAN;
+        var random = new System.Random(0xAF13);
+        var (centred, wide) = (0, 0);
+        for (var t = 0; t < 6_000; t++)
+        {
+            var spread = t % 3 == 2 ? 1000.0f : 20.0f;
+            var centre = new float3(Uniform(random, -spread, spread), Uniform(random, -spread, spread), Uniform(random, -spread, spread));
+            var axis = random.Next(3) == 0 ? new float3(0.0f, 0.0f, 0.0f) : UnitVector(random) * LogUniform(random, 1.0e-3f, 3.0f);
+            var radius = random.Next(3) == 0 ? 0.0f : LogUniform(random, 1.0e-3f, 3.0f);
+            var g = snoise_grad(centre);
+            var reach = (double)length(axis) + radius;
+            var lip = lipschitz * reach;
+            var a = (double)g.x * axis.x + (double)g.y * axis.y + (double)g.z * axis.z;
+            var remainder = Math.Sqrt((double)g.x * g.x + (double)g.y * g.y + (double)g.z * g.z) * radius + 0.5 * hessian * reach * reach;
+            var allowance = Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12)
+                + lipschitz * u20 * (Math.Abs((double)centre.x) + Math.Abs((double)centre.y) + Math.Abs((double)centre.z) + reach);
+
+            double Width(bool useCentred, out double slope)
+            {
+                slope = useCentred ? a : 0.0;
+                var e = (useCentred ? remainder : lip) + allowance;
+                return e + (Math.Abs((double)g.w) + Math.Abs(slope) + e) * u20;
+            }
+
+            var zCentred = Width(true, out var slopeCentred);
+            var zLipschitz = Width(false, out _);
+            var form = af_snoise(centre, axis, radius);
+            var observedCentred = Math.Abs(form.z - zCentred) <= Math.Abs(form.z - zLipschitz);
+            var expectedCentred = Math.Abs(a) + remainder < lip;
+            if (Math.Abs(Math.Abs(a) + remainder - lip) > 1.0e-3 * lip)
+                Assert.True(observedCentred == expectedCentred || zCentred == zLipschitz, $"af_snoise({centre}, {axis}, {radius:R}) = {form} took the {(observedCentred ? "centred" : "Lipschitz")} form; the rule takes the {(expectedCentred ? "centred" : "Lipschitz")} one (|a| + remainder = {Math.Abs(a) + remainder:R}, L R = {lip:R})");
+            var z = observedCentred ? zCentred : zLipschitz;
+            var slope = observedCentred ? slopeCentred : 0.0;
+            Assert.True(form.x == g.w, $"af_snoise({centre}, {axis}, {radius:R}).x0 = {form.x:R}, snoise = {g.w:R}");
+            Assert.True(Math.Abs(form.y - slope) <= 1.0e-5 * Math.Abs((double)length(new float3(g.x, g.y, g.z)) * length(axis)) + 1.0e-12, $"af_snoise({centre}, {axis}, {radius:R}).a = {form.y:R}, g . axis = {slope:R}");
+            Assert.True(Math.Abs(form.z - z) <= 1.0e-6 * z, $"af_snoise({centre}, {axis}, {radius:R}) = {form}: e is {form.z:R}, the documented rule gives {z:R}");
+            centred += observedCentred ? 1 : 0;
+            wide += !observedCentred ? 1 : 0;
+        }
+
+        output.WriteLine($"AF-REPORT af_snoise width: {centred} centred cases, {wide} Lipschitz cases");
+        Assert.True(centred > 1000 && wide > 1000, $"the cases do not exercise both forms: {centred} centred, {wide} Lipschitz");
+    }
 }

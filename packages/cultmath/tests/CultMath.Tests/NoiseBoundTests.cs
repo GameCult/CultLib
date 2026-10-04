@@ -535,7 +535,9 @@ public sealed class NoiseBoundTests
 
     // Hill-climbs f from p as AscendGradientNorm does: the ascent direction is f's central difference,
     // the step grows on success and halves on failure. Returns the largest value reached.
-    private static double Ascend(Func<float3, double> f, float3 p)
+    private static double Ascend(Func<float3, double> f, float3 p) => AscendPoint(f, p).Best;
+
+    private static (double Best, float3 At) AscendPoint(Func<float3, double> f, float3 p)
     {
         const float h = 1.0e-3f;
         var step = 1.0e-2f;
@@ -562,7 +564,7 @@ public sealed class NoiseBoundTests
             }
         }
 
-        return best;
+        return (best, p);
     }
 
     private static double Ascend2(Func<float2, double> f, float2 p) => Ascend(q => f(new float2(q.x, q.y)), new float3(p.x, p.y, 0.0f));
@@ -631,6 +633,39 @@ public sealed class NoiseBoundTests
         Assert.True(refined <= SNOISE_HESSIAN, $"the Hessian norm reaches {refined:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
         var ratio = SNOISE_HESSIAN / (1.10 * refined);
         Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_HESSIAN is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureHessian and re-pin");
+    }
+
+    /// <summary>
+    /// SNOISE_HESSIAN where the curvature is realised. At the point the ascent from MeasureHessian's witness
+    /// reaches, the absolute second difference of snoise along 4,000 seeded directions u at step 0.05 has a
+    /// largest value within 10% of SNOISE_HESSIAN / 1.10 (the realised curvature is there, so the check
+    /// has teeth), and af_snoise(witness, r u, 0) encloses snoise(witness + eps r u) at eps in
+    /// {-1, -1/2, 0, 1/2, 1} for r in {0.1, 0.3} and every one of those directions, no tolerance: a constant
+    /// under the realised curvature (40 against about 50.6) misses on the directions near the top
+    /// eigenvector. The enclosure tests on random balls cannot see a constant 20% low; this and
+    /// HessianConstantPinsSampledCurvature are its defence.
+    /// </summary>
+    [Fact]
+    public void SnoiseFormEnclosesTheCurvatureWitness()
+    {
+        var (_, witness) = AscendPoint(HessianNorm, HessianWitness);
+        var random = new System.Random(0xCA7E);
+        var directions = Enumerable.Range(0, 4000).Select(_ => UnitVector(random)).ToArray();
+        const float step = 0.05f;
+        var centreValue = snoise(witness);
+        var realised = directions.Max(u => Math.Abs(snoise(witness + u * step) + (double)snoise(witness - u * step) - 2.0 * centreValue) / ((double)step * step));
+        output.WriteLine($"IV-REPORT curvature witness ({witness.x:R}, {witness.y:R}, {witness.z:R}): largest second difference {realised:R} against SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
+        Assert.True(realised >= 0.9 * SNOISE_HESSIAN / 1.10, $"the largest second difference at the witness is {realised:R}, under 0.9 SNOISE_HESSIAN / 1.10 = {0.9 * SNOISE_HESSIAN / 1.10:R}: the check has no teeth, or the constant moved");
+        foreach (var u in directions)
+        foreach (var r in new[] { 0.1f, 0.3f })
+        {
+            var form = af_snoise(witness, u * r, 0.0f);
+            foreach (var eps in new[] { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f })
+            {
+                var value = snoise(witness + u * (r * eps));
+                Assert.True(Math.Abs(value - (form.x + (double)form.y * eps)) <= form.z, $"af_snoise(witness, {u * r}, 0) = {form} misses snoise = {value:R} at eps {eps:R}, direction {u}");
+            }
+        }
     }
 
     /// <summary>

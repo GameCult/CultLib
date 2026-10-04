@@ -25,8 +25,13 @@ public static partial class math
     // differences of snoise_grad, largest absolute eigenvalue) over 1e6 seeded points, refines the 1e4
     // largest by ascent, and multiplies the refined maximum by 1.10;
     // NoiseBoundTests.HessianConstantPinsSampledCurvature pins this value against a fast re-measure and
-    // the ascent from MeasureHessian's witness. Empirical with a margin, not a proof; the enclosure
-    // tests are the defence. A change to the snoise kernel must re-run MeasureHessian and re-pin it.
+    // the ascent from MeasureHessian's witness. Empirical with a margin, not a proof. Random balls
+    // cannot see a constant 20% low, so the defence is those two curvature tests plus
+    // NoiseBoundTests.SnoiseFormEnclosesTheCurvatureWitness, where af_snoise misses at the point the
+    // curvature is realised if the constant is under it. The margin over the function: a scan of the
+    // whole 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
+    // independently over every hash configuration gives 52.22 (Soul pass s1). A change to the snoise
+    // kernel must re-run MeasureHessian and re-pin it.
     public const float SNOISE_HESSIAN = 56.050385f;
 
     /// <summary>The point form (x, 0, 0): the value x at every eps. Exact.</summary>
