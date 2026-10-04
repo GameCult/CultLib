@@ -1796,6 +1796,11 @@ public sealed class NoiseBoundTests
             return low ? new float2(-1.0f, min(-1.0f + e, 1.0f)) : new float2(max(1.0f - e, -1.0f), 1.0f);
         }
 
+        // The affine gate takes the detail octave at its full range: its best-case ball never decided a probe
+        // on the gate test's slices or the deep wells, and a gate that skips it proves the same slices with
+        // fewer probes. (The interval gate keeps its detail ball: inside the fog, row (b), it decides.)
+        private static readonly float2 DetailRange = new(-0.5f, 0.5f);
+
         private static float2 Clip(float2 range) => new(max(range.x, -1.0f), min(range.y, 1.0f));
 
         /// <summary>
@@ -1818,7 +1823,7 @@ public sealed class NoiseBoundTests
                 foreach (var low in new[] { true, false })
                 {
                     var coverage = Noise.CoverageBound(BestForm(slice.Coverage0.Reach, low), BestForm(slice.Coverage1.Reach, low), tile.Time);
-                    provable |= Compose(s, fade, iv_add(coverage, iv_scale(BestForm(slice.Detail.Reach, low), 0.5f))).y <= 0.0f;
+                    provable |= Compose(s, fade, iv_add(coverage, DetailRange)).y <= 0.0f;
                 }
 
                 if (!provable)
