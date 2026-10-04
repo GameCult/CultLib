@@ -222,6 +222,11 @@ lowering that inflates the ball fails too. Only those two bounds fail the
 check; the largest ulp distance is reported as for any ulp-bounded family.
 `GoldenFixtureMatchesCSharp` applies the same check to C#'s own results.
 
+Every `af_*` function is an ulp-bounded family, and `af_snoise`, `af_fbm` and `af_frustum_ball` also carry a two-sided `check`
+of their own, applied the same way: the device's own `snoise` or fBm at 75 sampled points of the case's set must lie in the device's
+form with no tolerance (a device whose gradient error exceeds the allowance fails), its width must not pass the Lipschitz form's
+allowance, and the device's `af_frustum_ball` radius must enclose the sampled ray points and stay within its rounding widening.
+
 `GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
 arguments. Arguments are drawn only when the fixture is regenerated
 (`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose
