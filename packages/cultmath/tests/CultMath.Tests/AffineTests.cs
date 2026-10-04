@@ -43,6 +43,19 @@ public sealed class AffineTests
         return new float2(lo, lo + (random.Next(8) == 0 ? 0.0f : LogUniform(random, 1.0e-5f, 40.0f)));
     }
 
+    // The tiny family: magnitudes from 1e-21 to 1e-17, products near and under 2^-126 = 1.2e-38, where a
+    // float32 result rounds to a subnormal and the absorption S 2^-20 is smaller than that loss.
+    private static float3 DrawTiny(System.Random random) =>
+        new(random.Next(8) == 0 ? 0.0f : Signed(random, LogUniform(random, 1.0e-21f, 1.0e-17f)),
+            random.Next(4) == 0 ? 0.0f : Signed(random, LogUniform(random, 1.0e-21f, 1.0e-17f)),
+            random.Next(4) == 0 ? 0.0f : LogUniform(random, 1.0e-21f, 1.0e-17f));
+
+    private static float2 DrawTinyInterval(System.Random random)
+    {
+        var lo = Signed(random, LogUniform(random, 1.0e-21f, 1.0e-17f));
+        return new float2(lo, lo + (random.Next(8) == 0 ? 0.0f : LogUniform(random, 1.0e-21f, 1.0e-17f)));
+    }
+
     // A float32 value in the form's set at eps, delta at an endpoint when asked; NaN when rounding leaves
     // no float of the set near the drawn point (a set narrower than an ulp).
     private static float Member(System.Random random, float3 form, float eps, bool endpoint)
@@ -88,15 +101,16 @@ public sealed class AffineTests
     // four witnesses. The first four draws per form put eps at an endpoint, the first eight delta.
     // af_point and af_symbol are checked on their defining value: the point x0 itself, and x0 + a eps in
     // double (the symbol defines eps, so it has no float32 evaluation to enclose).
-    private static (int Misses, List<string> Witness) Harness(Op op, int seed, int forms = 10_000, Func<System.Random, float3>? draw = null)
+    private static (int Misses, List<string> Witness) Harness(Op op, int seed, int forms = 10_000, Func<System.Random, float3>? draw = null, bool tiny = false)
     {
-        draw ??= DrawForm;
+        draw ??= tiny ? DrawTiny : DrawForm;
         var random = new System.Random(seed);
         var misses = 0;
         var witness = new List<string>();
         for (var t = 0; t < forms; t++)
         {
-            var operands = new Operands(draw(random), draw(random), DrawInterval(random), random.Next(8) == 0 ? 0.0f : Uniform(random, -4.0f, 4.0f));
+            var operands = new Operands(draw(random), draw(random), tiny ? DrawTinyInterval(random) : DrawInterval(random),
+                random.Next(8) == 0 ? 0.0f : tiny ? Signed(random, LogUniform(random, 1.0e-32f, 1.0e-19f)) : Uniform(random, -4.0f, 4.0f));
             var contains = op.Build(operands);
             for (var d = 0; d < 16; d++)
             {
@@ -463,5 +477,139 @@ public sealed class AffineTests
         }
 
         Assert.True(failures.Values.Sum() == 0, string.Join(", ", families.Select(f => $"{f} {failures[f]}")) + Environment.NewLine + string.Join(Environment.NewLine, witness));
+    }
+
+    /// <summary>
+    /// Underflow. Operands of magnitude 1e-21 to 1e-17 put products near and under 2^-126, where float32
+    /// rounds to a subnormal and the relative absorption S 2^-20 is smaller than the loss: every op
+    /// still encloses, no tolerance. af_mul and af_scale carry the 2^-126 term; a mutant that subtracts
+    /// it misses here.
+    /// </summary>
+    [Fact]
+    public void TinyOperandsEncloseTheirPoints()
+    {
+        var failures = new List<string>();
+        foreach (var op in Ops)
+        {
+            var (misses, witness) = Harness(op, 0xAF05, 10_000, tiny: true);
+            if (misses > 0)
+                failures.Add($"{op.Name}: {misses} misses" + Environment.NewLine + string.Join(Environment.NewLine, witness));
+        }
+
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
+    private const float MinNormal = 1.17549435e-38f;
+
+    private static bool Near(double observed, double expected, double relative = 1.0e-5) =>
+        Math.Abs(observed - expected) <= relative * Math.Abs(expected);
+
+    /// <summary>
+    /// The rounding absorption of each op, pinned both ways. With no propagated error in e, af_add,
+    /// af_sub, af_scale, af_mul and af_from_iv return an e equal to their documented absorption (and
+    /// 2^-126 where documented) to a part in 1e5 of its double value, and af_range moves each endpoint
+    /// outward by (|x0| + |a| + e) 2^-20 to 30% (the endpoints round once). A factor, a sign or an
+    /// operator changed in any of them fails here; the one-ulp changes of the worst-case absorption are
+    /// the OneUlpSurvivors set EveryRoundingTermIsCaught names.
+    /// </summary>
+    [Fact]
+    public void AbsorptionsArePinned()
+    {
+        var u20 = Math.ScaleB(1.0, -20);
+        var random = new System.Random(0xAF06);
+        for (var t = 0; t < 2_000; t++)
+        {
+            var (x0, y0) = (Uniform(random, -20.0f, 20.0f), Uniform(random, -20.0f, 20.0f));
+            var (ax, ay) = (Signed(random, LogUniform(random, 1.0e-3f, 20.0f)), Signed(random, LogUniform(random, 1.0e-3f, 20.0f)));
+            var scale = Signed(random, LogUniform(random, 1.0e-2f, 4.0f));
+            var x = new float3(x0, ax, 0.0f);
+            var y = new float3(y0, ay, 0.0f);
+
+            var sum = af_add(x, y);
+            Assert.True(Near(sum.z, (Math.Abs((double)sum.x) + Math.Abs((double)sum.y)) * u20), $"af_add({x}, {y}) = {sum}: e is not (|x0| + |a|) 2^-20");
+            var difference = af_sub(x, y);
+            Assert.True(Near(difference.z, (Math.Abs((double)difference.x) + Math.Abs((double)difference.y)) * u20), $"af_sub({x}, {y}) = {difference}: e is not (|x0| + |a|) 2^-20");
+            var scaled = af_scale(x, scale);
+            Assert.True(Near(scaled.z, (Math.Abs((double)scaled.x) + Math.Abs((double)scaled.y)) * u20 + MinNormal), $"af_scale({x}, {scale:R}) = {scaled}: e is not (|x0| + |a|) 2^-20 + 2^-126");
+
+            // a_x = 0 leaves the product's propagated error 0 and its a = x0 a_y.
+            var px = new float3(x0, 0.0f, 0.0f);
+            var product = af_mul(px, y);
+            var terms = Math.Abs((double)product.x) + Math.Abs((double)x0 * ay);
+            Assert.True(Near(product.z, terms * u20 + MinNormal), $"af_mul({px}, {y}) = {product}: e is not (|x0 y0| + |x0 a_y|) 2^-20 + 2^-126");
+
+            var iv = DrawInterval(random);
+            var form = af_from_iv(iv);
+            var (mid, half) = (((double)iv.x + iv.y) / 2.0, ((double)iv.y - iv.x) / 2.0);
+            var expected = half + (Math.Abs(mid) + half) * u20 + MinNormal;
+            Assert.True(Math.Abs(form.z - expected) <= 1.0e-5 * (Math.Abs(mid) + half) * u20 + 1.0e-6 * half + 1.0e-12 * expected,
+                $"af_from_iv({iv}) = {form}: e is not half-width + (|mid| + half-width) 2^-20 + 2^-126 = {expected:R}");
+
+            var wide = new float3(Uniform(random, -20.0f, 20.0f), Signed(random, LogUniform(random, 1.0e-3f, 20.0f)), LogUniform(random, 1.0e-3f, 20.0f));
+            var range = af_range(wide);
+            var reach = Math.Abs((double)wide.y) + wide.z;
+            var absorption = (Math.Abs((double)wide.x) + reach) * u20;
+            var outward = ((double)range.y - range.x) / 2.0 - reach;
+            Assert.True(Math.Abs(outward - absorption) <= 0.3 * absorption, $"af_range({wide}) = {range}: endpoints are {outward:R} past x0 -+ (|a| + e), not (|x0| + |a| + e) 2^-20 = {absorption:R}");
+        }
+    }
+
+    /// <summary>
+    /// af_from_iv and af_range at the float32 extremes. Subnormal endpoints (including [0, the least
+    /// subnormal], whose halved width underflows to 0) and endpoints near the float maximum (where lo +
+    /// hi, hi - lo or the absorption would overflow) give a form whose set holds both endpoints and the
+    /// midpoint, and an af_range that holds them with no NaN endpoint. A form with an infinite or NaN
+    /// component, as an overflowed op returns, gives an af_range with no NaN endpoint.
+    /// </summary>
+    [Fact]
+    public void FromIntervalAndRangeHoldAtTheExtremes()
+    {
+        var least = BitConverter.Int32BitsToSingle(1);
+        var max = float.MaxValue;
+        var random = new System.Random(0xAF07);
+        var specials = new[] { 0.0f, least, 2 * least, 100 * least, MinNormal - least, MinNormal, 3.0f * MinNormal, 1.0e-30f, 1.0f, 1.0e20f, 1.0e30f, max / 4, max / 2, max * 0.75f, max };
+        var misses = new List<string>();
+        void Check(float lo, float hi)
+        {
+            var form = af_from_iv(new float2(lo, hi));
+            var range = af_range(form);
+            if (float.IsNaN(form.x) || float.IsNaN(form.z) || float.IsNaN(range.x) || float.IsNaN(range.y))
+                misses.Add($"af_from_iv([{lo:R}, {hi:R}]) = {form}, af_range = {range}: NaN");
+            foreach (var value in new[] { lo, hi, (float)(((double)lo + hi) / 2.0) })
+            {
+                if (!InForm(form, 0.0f, value))
+                    misses.Add($"af_from_iv([{lo:R}, {hi:R}]) = {form} misses {value:R}");
+                if (!(range.x <= value && value <= range.y))
+                    misses.Add($"af_range(af_from_iv([{lo:R}, {hi:R}])) = {range} misses {value:R}");
+            }
+        }
+
+        foreach (var a in specials)
+        foreach (var b in specials)
+        {
+            Check(-a, b);
+            Check(-Math.Max(a, b), -Math.Min(a, b));
+            Check(Math.Min(a, b), Math.Max(a, b));
+        }
+
+        for (var t = 0; t < 200_000; t++)
+        {
+            var sign = random.Next(2) == 0 ? 1 : -1;
+            var lo = sign * BitConverter.Int32BitsToSingle(random.Next(0, random.Next(2) == 0 ? 1 << 20 : 0x00800000));
+            var width = BitConverter.Int32BitsToSingle(random.Next(0, random.Next(2) == 0 ? 1 << 12 : 1 << 22));
+            Check(lo, lo + width);
+        }
+
+        var odd = new[] { float.PositiveInfinity, float.NegativeInfinity, float.NaN, 0.0f, 1.0f, max };
+        foreach (var x0 in odd)
+        foreach (var a in odd)
+        foreach (var e in odd)
+        {
+            var range = af_range(new float3(x0, a, e));
+            if (float.IsNaN(range.x) || float.IsNaN(range.y))
+                misses.Add($"af_range(({x0}, {a}, {e})) = {range}");
+        }
+
+        Assert.True(misses.Count == 0, $"{misses.Count} misses:" + Environment.NewLine + string.Join(Environment.NewLine, misses.Take(8)));
     }
 }
