@@ -2251,8 +2251,9 @@ public sealed class NoiseBoundTests
     /// printed only; (e) at the shipped void the masked fixed-step march agrees with the reference exactly, the
     /// footprint-aware march's optical depth at the body start is off a converged march (h = 0.5, every
     /// cell) by at most twice the fixed-step march's error, and it takes at most half the reference's
-    /// steps per pixel. A shortfall skips naming saving-2x-scenarios and every shortfall; the fields, the
-    /// grids and the envelope cost are not tuned toward it.
+    /// steps per pixel. A broken (c) contract fails the test; a shortfall of the (a) or (e) saving skips
+    /// naming saving-2x-scenarios and every such shortfall. The fields, the grids and the envelope cost are
+    /// not tuned toward either.
     /// </summary>
     [Fact]
     public void IntervalSkipHalvesEvaluations()
@@ -2289,6 +2290,7 @@ public sealed class NoiseBoundTests
         var cullFloor = double.MaxValue;
         var gains = new List<string>();
         var shortfalls = new List<string>();
+        var broken = new List<string>();
         foreach (var w in warps)
         {
             var interval = atEight[("c interval", w)];
@@ -2304,7 +2306,7 @@ public sealed class NoiseBoundTests
                 + $"efficiency {affine.Efficiency:F3} and {interval.Efficiency:F3} against the oracle, {affine.RangeEfficiency:F3} and {interval.RangeEfficiency:F3} against the range ceiling {affine.RangeCeiling:F3}; "
                 + $"(c-band) {band.Item2.Ratio:F2}x against {band.Item1.Ratio:F2}x ({band.Item2.Ratio / band.Item1.Ratio:F2}x)");
             if (!(affine.Ratio > interval.Ratio))
-                shortfalls.Add($"(c) warp {w:R}: affine {affine.Ratio:F2}x is not cheaper than the centred interval's {interval.Ratio:F2}x");
+                broken.Add($"(c) warp {w:R}: affine {affine.Ratio:F2}x is not cheaper than the centred interval's {interval.Ratio:F2}x");
         }
 
         foreach (var rh in VoidField.HollowRadii)
@@ -2333,6 +2335,7 @@ public sealed class NoiseBoundTests
             + $"(e) {steps:F2}x fewer steps/px, depth error at the body start LOD {headline.MaxLodDepthError:G4} vs fixed-step {headline.MaxRefDepthError:G4} (at most 2x)");
         foreach (var line in gains)
             output.WriteLine($"IV-REPORT (c) at N=8, {line}");
+        Assert.True(broken.Count == 0, "ruling affine-wells-contract-cheaper-than-interval: " + string.Join("; ", broken));
         if (shortfalls.Count > 0)
             Assert.Skip("saving-2x-scenarios: " + string.Join("; ", shortfalls));
     }
