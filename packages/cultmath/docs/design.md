@@ -571,7 +571,7 @@ with no tolerance.
 `L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
 explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
 [-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
-(9.181147), and multiplies by 1.10: `L = 10.099261`. It also reaches
+(7.2400064), and multiplies by 1.10: `L = 7.9640074`. It also reaches
 `|snoise| = 0.9718335` by the same ascent on the value, which is what lets the
 bound intersect with `[-1, 1]`. `LipschitzConstantPinsSampledGradients`
 checks 1e5 more seeded points against `L` and climbs again from the start
