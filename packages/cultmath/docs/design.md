@@ -616,7 +616,7 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
 - (a) Height fog, camera above the safety band, rays level and up: the whole
   grid is one envelope probe per tile, against 256 envelope evaluations per ray,
   16384x. Every cell is oracle-empty and the pre-pass proves them all.
-- (b) Inside the fog: 1.15x, and 1.09x with the warp. Most cells are fog, and
+- (b) Inside the fog: 1.16x, and 1.11x with the warp. Most cells are fog, and
   the pre-pass probes each one.
 - (c) The deep well (ruling `wells-scale-order-of-magnitude`): the zone bowl
   plus one well at its centre, `PowerPulse` exponent 2, scale 2220, depth 600.
@@ -639,19 +639,20 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
   Centred interval 3.01x (efficiency 0.414, cull 0.960, overhead 0.958), affine
   3.95x (0.544, 0.980, 0.901); with the warp 2.75x (0.383, 0.954, 0.944) against
   3.54x (0.494, 0.976, 0.865).
-- (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
+- (d) r1's uniform slab, which has no envelope: 1.38x with the warp 0.05, and
+  1.67x with no warp.
 - (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
   `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
   shipped camera, 200 tiles. The fixed-step reference takes 36.34 steps per
-  pixel. The same cells masked by the pre-pass take 20.13, with identical
-  transmittance. The footprint-aware march takes 13.54: 2.68x fewer. `snoise`
-  per pixel goes from 32.98 to 26.69, and combined cost from 40.25 to 29.52 with
+  pixel. The same cells masked by the pre-pass take 20.08, with identical
+  transmittance. The footprint-aware march takes 13.50: 2.69x fewer. `snoise`
+  per pixel goes from 32.98 to 26.70, and combined cost from 40.25 to 29.54 with
   the probes, 1.36x. Every one of the 200 tiles proves a body. Before the body
   both marches are measured against a converged one (midpoint quadrature at
   `h = 0.5` over every cell, trusting no pre-pass): the relative optical-depth
   error at the body start is at most 0.0608 for the fixed-step march and 0.08639
   for the footprint march, 1.42x. Over the grid of hollow radius, camera offset
-  and ramp width the steps ratio runs from 1.57x (`Rh = 100`, low, `S = 150`) to
+  and ramp width the steps ratio runs from 1.59x (`Rh = 100`, low, `S = 150`) to
   27.45x (`Rh = 1000`, centred, `S = 10`), the cost ratio from 1.26x to 3.89x,
   and the depth-error ratio from 0.85 to 4.72 (`Rh = 200`, centred, `S = 150`,
   where the errors are 0.01504 and 0.003188). LOD-far takes 14.19x fewer steps;
@@ -695,7 +696,7 @@ The contracts, at `N = 8`, the lower of warp 0 and `D`:
 
 This run meets every contract: (a) 16384x, (c) affine 3.57x and 3.46x against
 the centred interval's 3.20x and 3.12x, with a cull fraction of 0.987 at the
-lowest, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step march's.
+lowest, (e) 2.69x fewer steps and a depth error 1.42x the fixed-step march's.
 The fields, the grids, the 0.2 envelope weight and the 2.0 gradient weight are
 not tuned toward the contracts. An affine probe is one `snoise_grad`, counted at
 2.0 `snoise` evaluations (an estimate, printed beside the count).
