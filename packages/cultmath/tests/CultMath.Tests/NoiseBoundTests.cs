@@ -893,17 +893,19 @@ public sealed class NoiseBoundTests
     /// (warp 0 and the Aetheria warp, N = 8, slices of length log-uniform in [0.5, 100] from a drawn
     /// depth), AffineBound is exactly the intersection of its two sound pieces (the affine arithmetic's
     /// own, and the interval composition over the forms' ranges), and where the interval piece does not
-    /// already prove the slice empty the affine piece is the narrower of the two in at least
-    /// MinAffineWins of the slices and narrower in total width by at least MinWidthGain. The
-    /// cost contract (IntervalSkipHalvesEvaluations) sees only the sum, in which af_snoise's Hessian forms
-    /// already beat iv_snoise_ball; this is the test that sees af_add, af_mul and af_range, the shared
-    /// symbol, break.
+    /// already prove the slice empty the affine piece is the narrower of the two in at least MinWins of
+    /// the slices and the intersection is narrower than the interval piece in total width by at least
+    /// MinGain. The affine piece alone is wider in total (the shared symbol pays where the forms are
+    /// correlated and loses to the clipped ranges where they are not), so it is the intersection's gain
+    /// that measures it. The cost contract (IntervalSkipHalvesEvaluations) sees only the sum, in which
+    /// af_snoise's Hessian forms already beat iv_snoise_ball; this is the test that sees af_add, af_mul and
+    /// af_range, the shared symbol, break.
     /// </summary>
     [Fact]
-    public void AffineCompositionIsTighterThanItsRanges()
+    public void AffineCompositionTightensItsRanges()
     {
         var random = new System.Random(0xAC0F);
-        var (open, wins, affineWidth, intervalWidth) = (0, 0, 0.0, 0.0);
+        var (open, wins, intersectionWidth, intervalWidth) = (0, 0, 0.0, 0.0);
         foreach (var warp in new[] { 0.0f, FogField.AetheriaWarp })
         foreach (var field in new[] { FogField.DeepWell(warp, BoundMode.Affine), FogField.Wells(warp, BoundMode.Affine) })
         for (var t = 0; t < 1500; t++)
@@ -918,11 +920,11 @@ public sealed class NoiseBoundTests
                 continue;
             open++;
             wins += affine.y - affine.x < interval.y - interval.x ? 1 : 0;
-            affineWidth += affine.y - affine.x;
+            intersectionWidth += bound.y - bound.x;
             intervalWidth += interval.y - interval.x;
         }
 
-        output.WriteLine($"IV-REPORT affine composition: {open} open slices, affine narrower in {wins}, total width {affineWidth:F1} against {intervalWidth:F1} ({affineWidth / intervalWidth:F3})");
+        output.WriteLine($"IV-REPORT affine composition: {open} open slices, affine narrower in {wins} ({(double)wins / open:F3}), intersection width {intersectionWidth:F1} against the interval piece's {intervalWidth:F1} ({intersectionWidth / intervalWidth:F3})");
         Assert.True(open > 0, "no slice is open");
     }
 
@@ -1665,7 +1667,7 @@ public sealed class NoiseBoundTests
         /// <summary>
         /// The two sound bounds AffineBound intersects, ungated: the affine arithmetic's own (the shared
         /// symbol through af_add, af_mul and af_range), and the interval composition over the same forms'
-        /// ranges (NoiseBoundTests.AffineCompositionIsTighterThanItsRanges).
+        /// ranges (NoiseBoundTests.AffineCompositionTightensItsRanges).
         /// </summary>
         internal (float2 Affine, float2 Interval) AffinePieces(Tile t, float z0, float z1, Counts counts)
         {
