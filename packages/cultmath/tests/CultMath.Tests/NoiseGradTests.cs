@@ -192,7 +192,8 @@ public sealed class NoiseGradTests
 
     // The simplex diagonals are where x0's three components compare equal. The tie rule must be a total
     // order there (math.snoise): with a cyclic or all-strict compare the four corners stop being a
-    // simplex and the value jumps by up to 0.77 on the line (t, t, t), lattice diagonals included.
+    // simplex and the value jumps on the line (t, t, t), lattice diagonals included: about 0.77 near the
+    // origin, up to 1.56 at magnitudes of 64 and above.
     [Fact]
     public void SnoiseIsContinuousOnTheSimplexDiagonal()
     {
