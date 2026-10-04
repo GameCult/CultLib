@@ -743,7 +743,8 @@ add `2^-126`, the most an underflow to a subnormal can lose (`TinyOperandsEnclos
 `af_from_iv` halves its endpoints before it sums and differences them, and `af_range`
 scales its terms before it sums them, so endpoints near the float maximum do not overflow
 in the middle of the op; a form that overflows anyway gives `af_range` infinite endpoints,
-never NaN (`FromIntervalAndRangeHoldAtTheExtremes`). `AbsorptionsArePinned` and
+never NaN (`FromIntervalAndRangeHoldAtTheExtremes`). `af_range` finds a NaN endpoint by its bit pattern, because
+`lo == lo` is a compare dxc marks `fast` and deletes under its default flags. `AbsorptionsArePinned` and
 `SnoiseFormCarriesItsDocumentedWidth` pin each absorption and `af_snoise`'s float32 allowance both
 ways: the enclosure tests alone cannot see them on a CPU, where float32 is exact.
 

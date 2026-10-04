@@ -66,7 +66,8 @@ public static partial class math
     /// (|x0| + |a| + e) 2^-20, formed term by term so that the sum never passes the float maximum before it
     /// is scaled. A form with an infinite component (an overflowed op) gives infinite
     /// endpoints, and an endpoint that would be NaN (infinity minus infinity, or a NaN component) is
-    /// the infinity on its side, so the result is never NaN and still encloses.
+    /// the infinity on its side, so the result is never NaN and still encloses. NaN is found by its bit
+    /// pattern, not by <c>lo == lo</c>, which a compiler that assumes no NaNs (dxc's default) deletes.
     /// </summary>
     public static float2 af_range(float3 x)
     {
@@ -74,7 +75,8 @@ public static partial class math
         var w = abs(x.x) * 9.5367431640625e-7f + r * 9.5367431640625e-7f;
         var lo = x.x - r - w;
         var hi = x.x + r + w;
-        return new float2(lo == lo ? lo : float.NegativeInfinity, hi == hi ? hi : float.PositiveInfinity);
+        return new float2((asuint(lo) & 0x7fffffffu) > 0x7f800000u ? float.NegativeInfinity : lo,
+            (asuint(hi) & 0x7fffffffu) > 0x7f800000u ? float.PositiveInfinity : hi);
     }
 
     /// <summary>

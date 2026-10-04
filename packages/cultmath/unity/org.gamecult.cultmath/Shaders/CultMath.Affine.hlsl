@@ -22,14 +22,16 @@ float3 cultmath_af_from_iv(float2 interval)
     return float3(x0, 0.0, e + (abs(x0) + e) * 9.5367431640625e-7 + 1.17549435e-38);
 }
 
-// An endpoint that would be NaN is the infinity on its side.
+// An endpoint that would be NaN is the infinity on its side. NaN is found by its bit pattern: dxc marks
+// compares fast, so a test that needs NaN to make `lo == lo` false is deleted under its default flags.
 float2 cultmath_af_range(float3 x)
 {
     float r = abs(x.y) + x.z;
     float w = abs(x.x) * 9.5367431640625e-7 + r * 9.5367431640625e-7;
     float lo = x.x - r - w;
     float hi = x.x + r + w;
-    return float2(lo == lo ? lo : asfloat(0xff800000u), hi == hi ? hi : asfloat(0x7f800000u));
+    return float2((asuint(lo) & 0x7fffffffu) > 0x7f800000u ? asfloat(0xff800000u) : lo,
+        (asuint(hi) & 0x7fffffffu) > 0x7f800000u ? asfloat(0x7f800000u) : hi);
 }
 
 float3 cultmath_af_add(float3 x, float3 y)

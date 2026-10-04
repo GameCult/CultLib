@@ -169,6 +169,36 @@ public sealed class HlslSourceCompatibilityTests
         }
     }
 
+
+    /// <summary>
+    /// The generic comparison stops at 1e7, so an HLSL edit of <c>cultmath_af_range</c>'s NaN test that
+    /// misreads the finite values near the float maximum (or an overflowed endpoint) survives it. Forms
+    /// from zero to the float maximum, infinite and NaN components, both signs, in every slot: the mirror
+    /// returns C#'s bits, and neither endpoint is ever NaN.
+    /// </summary>
+    [Fact]
+    public void AffineRangeMirrorMatchesCSharpBitForBitAtTheFloatExtremes()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_af_range", typeof(float3))!;
+
+        var magnitudes = new[] { 0.0f, 1.0f, 1.0e30f, 1.0e38f, float.MaxValue / 2.0f, float.MaxValue, float.PositiveInfinity, float.NaN };
+        var values = magnitudes.Concat(magnitudes.Where(m => !float.IsNaN(m)).Select(m => -m)).ToArray();
+        foreach (var x0 in values)
+        foreach (var a in values)
+        foreach (var e in values)
+        {
+            var form = new float3(x0, a, e);
+            var expected = af_range(form);
+            var actual = Values(mirror.Invoke(shader, new object[] { form })!);
+            Assert.True(BitwiseEqual(Values(expected), actual), $"cultmath_af_range differs from C# at {form}");
+            Assert.False(float.IsNaN(expected.x) || float.IsNaN(expected.y), $"af_range({form}) is {expected}, a NaN endpoint");
+        }
+    }
+
     /// <summary>
     /// The dense sweep almost never meets a cell whose box bound is just under the 2.25 cut and whose
     /// weight is still nonzero: a mirror cut of 2.245, 2.24 or 2.2 survives it. These points sit next

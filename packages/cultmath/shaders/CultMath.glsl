@@ -665,14 +665,16 @@ vec3 cultmath_af_from_iv(vec2 interval)
     return vec3(x0, 0.0, e + (abs(x0) + e) * 9.5367431640625e-7 + 1.17549435e-38);
 }
 
-// An endpoint that would be NaN is the infinity on its side.
+// An endpoint that would be NaN is the infinity on its side. NaN is found by its bit pattern: dxc marks
+// compares fast, so a test that needs NaN to make `lo == lo` false is deleted under its default flags.
 vec2 cultmath_af_range(vec3 x)
 {
     float r = abs(x.y) + x.z;
     float w = abs(x.x) * 9.5367431640625e-7 + r * 9.5367431640625e-7;
     float lo = x.x - r - w;
     float hi = x.x + r + w;
-    return vec2(lo == lo ? lo : uintBitsToFloat(0xff800000u), hi == hi ? hi : uintBitsToFloat(0x7f800000u));
+    return vec2((floatBitsToUint(lo) & 0x7fffffffu) > 0x7f800000u ? uintBitsToFloat(0xff800000u) : lo,
+        (floatBitsToUint(hi) & 0x7fffffffu) > 0x7f800000u ? uintBitsToFloat(0x7f800000u) : hi);
 }
 
 vec3 cultmath_af_add(vec3 x, vec3 y)
