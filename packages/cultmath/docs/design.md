@@ -624,20 +624,20 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
   `F -+ 1.5 A` with the fade at 1); depth and half-depth radius are each
   `10 G`. The camera's `xz` is uniform within 300 of the centre, at
   `y = F - h(xz) / 2`, so it looks across the bowl from inside it. Both rows run
-  on the same seeds. With no warp, the centred interval takes 3.10x (oracle
-  ceiling 5.24x, efficiency 0.591, cull fraction 0.986, probe overhead 0.943)
+  on the same seeds. With no warp, the centred interval takes 3.20x (oracle
+  ceiling 5.24x, efficiency 0.611, cull fraction 0.988, probe overhead 0.940)
   and the affine bound 3.57x (efficiency 0.682, cull 0.993, overhead 0.905). With
-  the warp `D = 60`: 2.99x (ceiling 5.31x, efficiency 0.563, cull 0.985, overhead
-  0.935) against 3.46x (efficiency 0.651, cull 0.993, overhead 0.880), so affine
-  is 1.15x and 1.16x cheaper. The range mask (the oracle cells plus every cell
+  the warp `D = 60`: 3.12x (ceiling 5.31x, efficiency 0.588, cull 0.987, overhead
+  0.929) against 3.46x (efficiency 0.651, cull 0.993, overhead 0.880), so affine
+  is 1.12x and 1.11x cheaper. The range mask (the oracle cells plus every cell
   where any of 5 x 5 slopes x 9 depths has density above zero) gives a range
   ceiling of 0.859 (0.848 with the warp), the cost a bound that proves exactly
   the range-empty cells would reach against the oracle's; the efficiencies
-  against it are 0.794 and 0.688 (warp 0), 0.768 and 0.665 (warp `D`).
+  against it are 0.794 and 0.712 (warp 0), 0.768 and 0.694 (warp `D`).
 - (c-band) The shallow wells, four mass-derived wells in the zone bowl with
   the camera gazing across, whose geometry is band-dominated, printed only.
-  Centred interval 2.74x (efficiency 0.378, cull 0.952, overhead 0.961), affine
-  3.95x (0.544, 0.980, 0.901); with the warp 2.53x (0.353, 0.945, 0.948) against
+  Centred interval 3.01x (efficiency 0.414, cull 0.960, overhead 0.958), affine
+  3.95x (0.544, 0.980, 0.901); with the warp 2.75x (0.383, 0.954, 0.944) against
   3.54x (0.494, 0.976, 0.865).
 - (d) r1's uniform slab, which has no envelope: 1.23x, and 1.48x with no warp.
 - (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
@@ -694,7 +694,7 @@ The contracts, at `N = 8`, the lower of warp 0 and `D`:
   at most half the reference's steps per pixel.
 
 This run meets every contract: (a) 16384x, (c) affine 3.57x and 3.46x against
-the centred interval's 3.10x and 2.99x, with a cull fraction of 0.985 at the
+the centred interval's 3.20x and 3.12x, with a cull fraction of 0.987 at the
 lowest, (e) 2.68x fewer steps and a depth error 1.42x the fixed-step march's.
 The fields, the grids, the 0.2 envelope weight and the 2.0 gradient weight are
 not tuned toward the contracts. An affine probe is one `snoise_grad`, counted at
