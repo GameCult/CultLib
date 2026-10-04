@@ -20,6 +20,14 @@ public static partial class math
     // snoise kernel must re-run MeasureLipschitz and re-pin this constant.
     public const float SNOISE_LIPSCHITZ = 7.9640074f;
 
+    // Lipschitz constant of snoise(float2) in its input, with SNOISE_LIPSCHITZ's provenance rule:
+    // NoiseBoundTests.MeasureLipschitz2 (slow, explicit) takes the largest gradient length (central
+    // differences over exact float steps) over 1e6 seeded points, refines the 1e4 largest by ascent and
+    // multiplies by 1.10; NoiseBoundTests.Lipschitz2ConstantPins pins it against a fast re-measure and
+    // the ascent from MeasureLipschitz2's witness. A change to the 2D snoise kernel must re-run
+    // MeasureLipschitz2 and re-pin this constant.
+    public const float SNOISE2_LIPSCHITZ = 8.117002f;
+
     /// <summary>The point interval [x, x].</summary>
     public static float2 iv_point(float value) => new(value, value);
 
@@ -139,6 +147,22 @@ public static partial class math
     {
         var n = snoise(centre);
         var e = SNOISE_LIPSCHITZ * radius;
+        return new(max(n - e, -1.0f), min(n + e, 1.0f));
+    }
+
+    /// <summary>
+    /// Encloses snoise(x) for every 2D x within distance radius of centre: [n - L2 r, n + L2 r] intersected
+    /// with [-1, 1], n = snoise(centre), L2 = SNOISE2_LIPSCHITZ. radius must be at least 0. One snoise
+    /// evaluation, value only. Like iv_snoise_ball(float3) it is exact for the point it is handed and
+    /// carries no allowance for the float32 evaluation: a consumer whose 2D flow is evaluated at points
+    /// it rounds itself (a shifted, scaled or projected point) adds 2^-14 + L2 2^-20 (|centre|_1 + radius)
+    /// to the width, the convention af_snoise carries for the 3D point
+    /// (NoiseBoundTests.FlowVariationCarriesItsAllowance, CentredWarpStaysEnclosed).
+    /// </summary>
+    public static float2 iv_snoise_ball(float2 centre, float radius)
+    {
+        var n = snoise(centre);
+        var e = SNOISE2_LIPSCHITZ * radius;
         return new(max(n - e, -1.0f), min(n + e, 1.0f));
     }
 

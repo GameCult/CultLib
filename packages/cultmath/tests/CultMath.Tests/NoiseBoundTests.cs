@@ -5,9 +5,9 @@ using static CultMath.math;
 namespace CultMath.Tests;
 
 /// <summary>
-/// The noise bounds (design.md, "Intervals"): iv_snoise_ball and iv_fbm_ball enclose their functions over
-/// a ball, a domain warp bounded by D is enclosed by enlarging the radius by D, SNOISE_LIPSCHITZ has
-/// measured provenance, iv_frustum_ball encloses a screen tile's rays over a depth segment, the bound
+/// The noise bounds (design.md, "Intervals" and "Affine forms"): iv_snoise_ball and iv_fbm_ball enclose
+/// their functions over a ball, a domain warp bounded by D is enclosed by enlarging the radius by D, or
+/// by the centred warp, SNOISE_LIPSCHITZ, SNOISE2_LIPSCHITZ and SNOISE_HESSIAN have measured provenance, iv_frustum_ball encloses a screen tile's rays over a depth segment, the bound
 /// composed from an analytic envelope and the noise ball encloses the density, and a tile march over
 /// fields with authored empty space is measured against a dense one for the same transmittance. Lines
 /// starting IV-REPORT carry the numbers the cut report quotes.
@@ -121,7 +121,7 @@ public sealed class NoiseBoundTests
 
     // One tile case of TileBallEnclosesEveryRaySegment: the r2 domain, or one of the extreme families
     // where float32 rounding of the centre is largest against the radius (Soul's verdict s1).
-    private static (int N, float Focal, float2 Slope, float Z0, float Z1, float Warp) DrawBallCase(System.Random random, string family)
+    internal static (int N, float Focal, float2 Slope, float Z0, float Z1, float Warp) DrawBallCase(System.Random random, string family)
     {
         int[] sizes = { 1, 4, 8, 16 };
         float[] depths = { 12.0f, 1000.0f, 2400.0f };
@@ -251,10 +251,11 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// intervals-enclose for the composition the site and Aetheria use: over 2,000 seeded tile slices
-    /// (Aetheria's wells, inside the fog, the void at every grid point, the shipped void and LOD-far;
-    /// N in {1, 4, 8, 16}; a camera drawn per tile) the bound composed from the envelope over the slice's
-    /// box, its fade, and the noise ball enlarged by the warp encloses the density at 64 points of the
-    /// slice, each sampled through the field's own warp, with no tolerance. The void's footprint-truncated density (octave weights) is checked
+    /// (the deep well, the shallow wells and inside the fog, each under the centred-warp interval bound
+    /// and the affine bound; the void at every grid point, the shipped void and LOD-far; N in
+    /// {1, 4, 8, 16}; a camera drawn per tile) the bound composed from the envelope over the slice's box,
+    /// its fade, and the noise enclosure encloses the density at 64 points of the slice, each sampled
+    /// through the field's own warp, with no tolerance. The void's footprint-truncated density (octave weights) is checked
     /// against the same bound; a quarter of the slices are LOD-far's, where the weights are strictly
     /// between 0 and 1 and at 0, and the test asserts it sampled both.
     /// </summary>
@@ -263,7 +264,15 @@ public sealed class NoiseBoundTests
     {
         var random = new System.Random(0xE7B0);
         int[] sizes = { 1, 4, 8, 16 };
-        var fields = new List<Scenario> { FogField.Wells(FogField.AetheriaWarp), FogField.InsideFog(FogField.AetheriaWarp) };
+        var fog = new List<Scenario>();
+        foreach (var mode in new[] { BoundMode.Interval, BoundMode.Affine })
+        {
+            fog.Add(FogField.DeepWell(FogField.AetheriaWarp, mode));
+            fog.Add(FogField.Wells(FogField.AetheriaWarp, mode));
+            fog.Add(FogField.InsideFog(FogField.AetheriaWarp, mode));
+        }
+
+        var fields = new List<Scenario>();
         foreach (var rh in VoidField.HollowRadii)
         foreach (var offset in VoidField.CameraOffsets)
         foreach (var ramp in VoidField.Ramps)
@@ -274,7 +283,7 @@ public sealed class NoiseBoundTests
         var (partial, zero) = (0, 0);
         for (var t = 0; t < 2000; t++)
         {
-            var field = t % 2 == 0 ? fields[(t / 2) % 2] : t % 4 == 1 ? fields[^1] : fields[2 + random.Next(fields.Count - 2)];
+            var field = t % 2 == 0 ? fog[(t / 2) % fog.Count] : t % 4 == 1 ? fields[^1] : fields[random.Next(fields.Count)];
             var tile = field.DrawTile(random, sizes[random.Next(sizes.Length)]);
             var near = field.Grid[0];
             var far = field.Grid[^1];
@@ -474,6 +483,714 @@ public sealed class NoiseBoundTests
         Assert.True(MathF.Abs(ratio - 1.0f) <= 0.005f, $"SNOISE_LIPSCHITZ is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureLipschitz and re-pin");
     }
 
+    // ---- The curvature and 2D Lipschitz constants (math.Affine.cs, math.Interval.cs) ----
+
+    // Central differences over exact float32 steps: the step actually taken is (p + h) - p in float32, so
+    // the quotient is not skewed by the rounding of p + h far from the origin.
+    private static double Step(float x, float h, out double back) { back = x - (double)(x - h); return (x + h) - (double)x; }
+
+    // The spectral norm (largest absolute eigenvalue) of the symmetrised Hessian of snoise(float3) at p,
+    // from central differences of snoise_grad at h = 1e-3.
+    private static double HessianNorm(float3 p)
+    {
+        const float h = 1.0e-3f;
+        var m = new double[3, 3];
+        for (var a = 0; a < 3; a++)
+        {
+            var e = new float3(a == 0 ? h : 0.0f, a == 1 ? h : 0.0f, a == 2 ? h : 0.0f);
+            var forward = Step(a == 0 ? p.x : a == 1 ? p.y : p.z, h, out var back);
+            var gp = snoise_grad(p + e);
+            var gm = snoise_grad(p - e);
+            m[0, a] = (gp.x - (double)gm.x) / (forward + back);
+            m[1, a] = (gp.y - (double)gm.y) / (forward + back);
+            m[2, a] = (gp.z - (double)gm.z) / (forward + back);
+        }
+
+        var (a00, a11, a22) = (m[0, 0], m[1, 1], m[2, 2]);
+        var (a01, a02, a12) = ((m[0, 1] + m[1, 0]) / 2, (m[0, 2] + m[2, 0]) / 2, (m[1, 2] + m[2, 1]) / 2);
+        var p1 = a01 * a01 + a02 * a02 + a12 * a12;
+        if (p1 == 0.0)
+            return Math.Max(Math.Abs(a00), Math.Max(Math.Abs(a11), Math.Abs(a22)));
+        var q = (a00 + a11 + a22) / 3;
+        var p2 = (a00 - q) * (a00 - q) + (a11 - q) * (a11 - q) + (a22 - q) * (a22 - q) + 2 * p1;
+        var s = Math.Sqrt(p2 / 6);
+        var (b00, b11, b22, b01, b02, b12) = ((a00 - q) / s, (a11 - q) / s, (a22 - q) / s, a01 / s, a02 / s, a12 / s);
+        var r = Math.Clamp((b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02) + b02 * (b01 * b12 - b11 * b02)) / 2, -1.0, 1.0);
+        var phi = Math.Acos(r) / 3;
+        var largest = q + 2 * s * Math.Cos(phi);
+        var smallest = q + 2 * s * Math.Cos(phi + 2 * Math.PI / 3);
+        return Math.Max(Math.Abs(largest), Math.Abs(smallest));
+    }
+
+    // The gradient length of snoise(float2) at p, from central differences at h = 1e-3.
+    private static double Gradient2Norm(float2 p)
+    {
+        const float h = 1.0e-3f;
+        var fx = Step(p.x, h, out var bx);
+        var fy = Step(p.y, h, out var by);
+        var gx = (snoise(p + new float2(h, 0.0f)) - (double)snoise(p - new float2(h, 0.0f))) / (fx + bx);
+        var gy = (snoise(p + new float2(0.0f, h)) - (double)snoise(p - new float2(0.0f, h))) / (fy + by);
+        return Math.Sqrt(gx * gx + gy * gy);
+    }
+
+    // Hill-climbs f from p as AscendGradientNorm does: the ascent direction is f's central difference,
+    // the step grows on success and halves on failure. Returns the largest value reached.
+    private static double Ascend(Func<float3, double> f, float3 p) => AscendPoint(f, p).Best;
+
+    private static (double Best, float3 At) AscendPoint(Func<float3, double> f, float3 p)
+    {
+        const float h = 1.0e-3f;
+        var step = 1.0e-2f;
+        var best = f(p);
+        for (var k = 0; k < 200 && step > 1.0e-6f; k++)
+        {
+            var d = new float3(
+                (float)(f(p + new float3(h, 0.0f, 0.0f)) - f(p - new float3(h, 0.0f, 0.0f))),
+                (float)(f(p + new float3(0.0f, h, 0.0f)) - f(p - new float3(0.0f, h, 0.0f))),
+                (float)(f(p + new float3(0.0f, 0.0f, h)) - f(p - new float3(0.0f, 0.0f, h))));
+            if (dot(d, d) == 0.0f)
+                break;
+            var q = p + normalize(d) * step;
+            var value = f(q);
+            if (value > best)
+            {
+                p = q;
+                best = value;
+                step *= 1.5f;
+            }
+            else
+            {
+                step *= 0.5f;
+            }
+        }
+
+        return (best, p);
+    }
+
+    private static double Ascend2(Func<float2, double> f, float2 p) => Ascend(q => f(new float2(q.x, q.y)), new float3(p.x, p.y, 0.0f));
+
+    // The largest f over `samples` seeded points of [-256, 256]^dims, the largest after refining the
+    // `refine` largest by ascent, and the start whose ascent reached it (the witness).
+    private static (double Sampled, double Refined, float3 Witness) MeasureMax(Func<float3, double> f, bool planar, int seed, int samples, int refine)
+    {
+        var random = new System.Random(seed);
+        var points = new float3[samples];
+        var values = new double[samples];
+        for (var i = 0; i < samples; i++)
+        {
+            points[i] = new float3(Uniform(random, -256.0f, 256.0f), Uniform(random, -256.0f, 256.0f), planar ? 0.0f : Uniform(random, -256.0f, 256.0f));
+            values[i] = f(points[i]);
+        }
+
+        var order = Enumerable.Range(0, samples).OrderByDescending(i => values[i]).Take(Math.Max(refine, 1)).ToArray();
+        var refined = values[order[0]];
+        var witness = points[order[0]];
+        foreach (var i in order.Take(refine))
+        {
+            var value = planar ? Ascend2(q => f(new float3(q.x, q.y, 0.0f)), new float2(points[i].x, points[i].y)) : Ascend(f, points[i]);
+            if (value > refined)
+            {
+                refined = value;
+                witness = points[i];
+            }
+        }
+
+        return (values[order[0]], refined, witness);
+    }
+
+    private static double Gradient2At(float3 p) => Gradient2Norm(new float2(p.x, p.y));
+
+    /// <summary>
+    /// The provenance of SNOISE_HESSIAN: the largest spectral norm of snoise's Hessian (HessianNorm) over
+    /// 1e6 seeded points of [-256, 256]^3, the 1e4 largest refined by ascent, times 1.10. Prints the
+    /// start whose ascent reached the maximum, which HessianConstantPinsSampledCurvature climbs from
+    /// again. Slow; run explicitly after any change to the snoise kernel and re-pin the constant and the
+    /// witness.
+    /// </summary>
+    [Fact(Explicit = true)]
+    [Trait("Category", "Slow")]
+    public void MeasureHessian()
+    {
+        var (sampled, refined, witness) = MeasureMax(HessianNorm, false, 0x4E55, 1_000_000, 10_000);
+        output.WriteLine($"IV-REPORT hessian: max |H| sampled {sampled:R}, refined {refined:R}, x 1.10 = {(float)(refined * 1.10):R}, witness ({witness.x:R}, {witness.y:R}, {witness.z:R})");
+        Assert.True(refined <= SNOISE_HESSIAN, $"measured {refined:R} exceeds SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
+    }
+
+    // The start MeasureHessian printed as its witness.
+    private static readonly float3 HessianWitness = new(-245.19885f, -53.01323f, -91.47363f);
+
+    /// <summary>
+    /// Pins SNOISE_HESSIAN: no Hessian norm over 1e5 seeded points exceeds it, and the ascent from
+    /// MeasureHessian's witness reaches a maximum that, times 1.10, is the constant to within half a
+    /// percent, so a constant moved by 1% fails here.
+    /// </summary>
+    [Fact]
+    public void HessianConstantPinsSampledCurvature()
+    {
+        var (sampled, _, _) = MeasureMax(HessianNorm, false, 0x4E56, 100_000, 0);
+        Assert.True(sampled <= SNOISE_HESSIAN, $"the Hessian norm reaches {sampled:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
+        var refined = Ascend(HessianNorm, HessianWitness);
+        Assert.True(refined <= SNOISE_HESSIAN, $"the Hessian norm reaches {refined:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
+        var ratio = SNOISE_HESSIAN / (1.10 * refined);
+        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_HESSIAN is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureHessian and re-pin");
+    }
+
+    /// <summary>
+    /// SNOISE_HESSIAN where the curvature is realised. At the point the ascent from MeasureHessian's witness
+    /// reaches, the absolute second difference of snoise along 4,000 seeded directions u at step 0.05 has a
+    /// largest value within 10% of SNOISE_HESSIAN / 1.10 (the realised curvature is there, so the check
+    /// has teeth), and af_snoise(witness, r u, 0) encloses snoise(witness + eps r u) at eps in
+    /// {-1, -1/2, 0, 1/2, 1} for r in {0.1, 0.3} and every one of those directions, no tolerance: a constant
+    /// under the realised curvature (40 against about 50.6) misses on the directions near the top
+    /// eigenvector. The enclosure tests on random balls cannot see a constant 20% low; this and
+    /// HessianConstantPinsSampledCurvature are its defence.
+    /// </summary>
+    [Fact]
+    public void SnoiseFormEnclosesTheCurvatureWitness()
+    {
+        var (_, witness) = AscendPoint(HessianNorm, HessianWitness);
+        var random = new System.Random(0xCA7E);
+        var directions = Enumerable.Range(0, 4000).Select(_ => UnitVector(random)).ToArray();
+        const float step = 0.05f;
+        var centreValue = snoise(witness);
+        var realised = directions.Max(u => Math.Abs(snoise(witness + u * step) + (double)snoise(witness - u * step) - 2.0 * centreValue) / ((double)step * step));
+        output.WriteLine($"IV-REPORT curvature witness ({witness.x:R}, {witness.y:R}, {witness.z:R}): largest second difference {realised:R} against SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
+        Assert.True(realised >= 0.9 * SNOISE_HESSIAN / 1.10, $"the largest second difference at the witness is {realised:R}, under 0.9 SNOISE_HESSIAN / 1.10 = {0.9 * SNOISE_HESSIAN / 1.10:R}: the check has no teeth, or the constant moved");
+        foreach (var u in directions)
+        foreach (var r in new[] { 0.1f, 0.3f })
+        {
+            var form = af_snoise(witness, u * r, 0.0f);
+            foreach (var eps in new[] { -1.0f, -0.5f, 0.0f, 0.5f, 1.0f })
+            {
+                var value = snoise(witness + u * (r * eps));
+                Assert.True(Math.Abs(value - (form.x + (double)form.y * eps)) <= form.z, $"af_snoise(witness, {u * r}, 0) = {form} misses snoise = {value:R} at eps {eps:R}, direction {u}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The provenance of SNOISE2_LIPSCHITZ: the largest gradient length of snoise(float2) (Gradient2Norm)
+    /// over 1e6 seeded points of [-256, 256]^2, the 1e4 largest refined by ascent, times 1.10; and the
+    /// largest |snoise(float2)| reached by ascent from 1e4 starts, which is what lets iv_snoise_ball(float2)
+    /// intersect with [-1, 1]. Slow; run explicitly after any change to the 2D kernel and re-pin.
+    /// </summary>
+    [Fact(Explicit = true)]
+    [Trait("Category", "Slow")]
+    public void MeasureLipschitz2()
+    {
+        var (sampled, refined, witness) = MeasureMax(Gradient2At, true, 0x2D15, 1_000_000, 10_000);
+        var random = new System.Random(0x2D16);
+        var maxValue = Enumerable.Range(0, 10_000)
+            .Select(_ => new float2(Uniform(random, -256.0f, 256.0f), Uniform(random, -256.0f, 256.0f)))
+            .Max(p => Ascend2(q => Math.Abs(snoise(q)), p));
+        output.WriteLine($"IV-REPORT lipschitz2: max |grad snoise2| sampled {sampled:R}, refined {refined:R}, x 1.10 = {(float)(refined * 1.10):R}, witness ({witness.x:R}, {witness.y:R}); max |snoise2| refined {maxValue:R}");
+        Assert.True(refined <= SNOISE2_LIPSCHITZ, $"measured {refined:R} exceeds SNOISE2_LIPSCHITZ {SNOISE2_LIPSCHITZ:R}");
+        Assert.True(maxValue < 1.0, $"|snoise2| reaches {maxValue:R}; iv_snoise_ball(float2) may not intersect with [-1, 1]");
+    }
+
+    // The start MeasureLipschitz2 printed as its witness.
+    private static readonly float2 Lipschitz2Witness = new(-67.12454f, -129.53296f);
+
+    /// <summary>
+    /// Pins SNOISE2_LIPSCHITZ as LipschitzConstantPinsSampledGradients pins SNOISE_LIPSCHITZ: 1e5 seeded
+    /// points under it, and the ascent from MeasureLipschitz2's witness within half a percent of it / 1.10.
+    /// </summary>
+    [Fact]
+    public void Lipschitz2ConstantPins()
+    {
+        var (sampled, _, _) = MeasureMax(Gradient2At, true, 0x2D17, 100_000, 0);
+        Assert.True(sampled <= SNOISE2_LIPSCHITZ, $"|grad snoise2| reaches {sampled:R}, above SNOISE2_LIPSCHITZ {SNOISE2_LIPSCHITZ:R}");
+        var refined = Ascend2(Gradient2Norm, Lipschitz2Witness);
+        Assert.True(refined <= SNOISE2_LIPSCHITZ, $"|grad snoise2| reaches {refined:R}, above SNOISE2_LIPSCHITZ {SNOISE2_LIPSCHITZ:R}");
+        var ratio = SNOISE2_LIPSCHITZ / (1.10 * refined);
+        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE2_LIPSCHITZ is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureLipschitz2 and re-pin");
+    }
+
+    /// <summary>
+    /// iv_snoise_ball(float2) encloses snoise(float2) over 2,000 seeded discs of radius log-uniform in
+    /// [1e-3, 1e3] x 64 points (the first eight on the rim), no tolerance.
+    /// </summary>
+    [Fact]
+    public void Snoise2BallEnclosesPoints()
+    {
+        var random = new System.Random(0xBA12);
+        for (var b = 0; b < 2000; b++)
+        {
+            var centre = new float2(Uniform(random, -20.0f, 20.0f), Uniform(random, -20.0f, 20.0f));
+            var radius = LogUniform(random, 1.0e-3f, 1.0e3f);
+            var bound = iv_snoise_ball(centre, radius);
+            for (var i = 0; i < 64; i++)
+            {
+                var angle = Uniform(random, 0.0f, 2.0f * MathF.PI);
+                var x = centre + new float2(MathF.Cos(angle), MathF.Sin(angle)) * (i < 8 ? radius : radius * MathF.Sqrt(random.NextSingle()));
+                Assert.True(Inside(snoise(x), bound), $"iv_snoise_ball({centre}, {radius:R}) = {bound} misses snoise({x}) = {snoise(x):R}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The centred warp (design.md, "Affine forms"): over 2,000 seeded balls of the deep well's flow (warp
+    /// D = 60, period 8, flow frequency 1/512; centres in [-2000, 2000]^3, radius log-uniform in [1e-3, 500],
+    /// a time per ball) x 64 points, each phase's warped point p + flow(p) shift_k lies in the ball
+    /// (c + flow(c) shift_k, r + |shift_k| rho), r the radius widened by (|c|_1 + r) 2^-20 as iv_frustum_ball
+    /// widens its ball (the float32 point p is inside only up to that, which matters below a radius of 1),
+    /// geometry allowing one part in 1e5 for the rounding of the warped point, as WarpedPointsStayEnclosed does, and snoise of it, at the coverage frequency, lies
+    /// in iv_snoise_ball of that ball with no tolerance. Dropping rho fails: some warped points lie
+    /// farther than r from the moved centre.
+    /// </summary>
+    [Fact]
+    public void CentredWarpStaysEnclosed()
+    {
+        var noise = new WarpedNoise { F0 = 1.0f / FogField.NoiseScale, Warp = FogField.AetheriaWarp };
+        var random = new System.Random(0xCE17);
+        var beyond = 0;
+        for (var b = 0; b < 2000; b++)
+        {
+            var centre = new float3(Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f));
+            var radius = LogUniform(random, 1.0e-3f, 500.0f);
+            var reach = radius + (abs(centre.x) + abs(centre.y) + abs(centre.z) + radius) * 9.5367431640625e-7f;
+            var time = Uniform(random, 0.0f, 100.0f);
+            var (_, shift0, shift1) = noise.Phases(time);
+            var (c0, g0, c1, g1) = noise.CentredWarp(centre, reach, time);
+            for (var i = 0; i < 64; i++)
+            {
+                var p = PointInBall(random, centre, radius, i);
+                var flow = noise.Flow(p);
+                foreach (var (shift, moved, grow) in new[] { (shift0, c0, g0), (shift1, c1, g1) })
+                {
+                    var warped = p + flow * shift;
+                    var distance = length(warped - moved);
+                    Assert.True(distance <= (reach + grow) * (1.0f + 1.0e-5f), $"warped point {warped} leaves the centred ball ({moved}, {reach + grow:R})");
+                    beyond += distance > radius ? 1 : 0;
+                    var bound = iv_snoise_ball(moved * noise.F0, (reach + grow) * noise.F0);
+                    var value = snoise(warped * noise.F0);
+                    Assert.True(Inside(value, bound), $"iv_snoise_ball over the centred ball ({moved}, {reach + grow:R}) = {bound} misses snoise = {value:R} at {warped}");
+                }
+            }
+        }
+
+        output.WriteLine($"IV-REPORT centred warp: {beyond} of {2000 * 64 * 2} warped points lie beyond r from the moved centre");
+        Assert.True(beyond > 0, "no warped point needs rho: the check cannot tell a centred warp without it");
+    }
+
+    /// <summary>
+    /// FlowVariation's width, pinned both ways: over 2,000 seeded balls (centres in [-2000, 2000]^3, radius
+    /// log-uniform in [1e-3, 500]) it equals min(sqrt(u^2 + v^2), 2) A, A = FlowAmplitude, with each of u and v
+    /// the reach of iv_snoise_ball(float2) at the flow plane's argument (plus its offset) plus the float32
+    /// allowance 2^-14 + L2 2^-20 (|q|_1 + r FlowFrequency), to 0.3% (the float32 sum n + e rounds at 6e-8, against an allowance of 6e-5). The enclosure test sees the
+    /// allowance only where a float32 flow differs from the exact one by more than the bound's slack, which
+    /// on the CPU is rare (CentredWarpStaysEnclosed); this is the test that sees it.
+    /// </summary>
+    [Fact]
+    public void FlowVariationCarriesItsAllowance()
+    {
+        var noise = new WarpedNoise { F0 = 1.0f / FogField.NoiseScale, Warp = FogField.AetheriaWarp };
+        var amplitude = noise.Warp * 2.0 / noise.Period;
+        var random = new System.Random(0xF10E);
+        double Reach(float2 q, double r)
+        {
+            var n = snoise(q);
+            var e = SNOISE2_LIPSCHITZ * r;
+            return Math.Max(Math.Min(e, 1.0 - n), Math.Min(e, n + 1.0));
+        }
+
+        for (var b = 0; b < 2000; b++)
+        {
+            var centre = new float3(Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f));
+            var radius = LogUniform(random, 1.0e-3f, 500.0f);
+            var rq = (double)radius * noise.FlowFrequency;
+            double Component(float2 offset)
+            {
+                var q = new float2(centre.x, centre.z) * noise.FlowFrequency + offset;
+                return Reach(q, rq) + Math.ScaleB(1.0, -14) + SNOISE2_LIPSCHITZ * Math.ScaleB(Math.Abs((double)q.x) + Math.Abs((double)q.y) + rq, -20);
+            }
+
+            var (u, v) = (Component(new float2(17.0f, 3.0f)), Component(new float2(-5.0f, 41.0f)));
+            var expected = Math.Min(Math.Sqrt(u * u + v * v), 2.0) * amplitude;
+            var observed = noise.FlowVariation(centre, radius);
+            Assert.True(Math.Abs(observed - expected) <= 3.0e-3 * expected, $"FlowVariation({centre}, {radius:R}) = {observed:R}, the documented rule gives {expected:R}");
+        }
+    }
+
+    /// <summary>
+    /// The centred warp over an affine slice (FogField.Slice, the owner AffineBound reads): over 3,000
+    /// seeded tile slices (the deep well, the shallow wells and inside the fog; N in {1, 4, 8, 16}; a
+    /// slice of length log-uniform in [0.5, 1500] from a drawn depth, so the axis is from far under to far
+    /// over the ball's radius) x 64 rays each (the first two at the slice's ends), each phase's warped ray
+    /// point p + flow(p) shift_k lies within radius + growth_k of moved_k + axis eps(z), eps(z) =
+    /// clamp((z - z_m) / h, -1, 1), no tolerance but one part in 1e5 for the rounding of the warped point.
+    /// The check sees each term of the slice: a reach of the ball's radius instead of |axis| + radius, a
+    /// phase's growth dropped, or rho halved leaves rays outside; the report counts the rays that need
+    /// each phase's growth, and the test asserts both phases have some.
+    /// </summary>
+    [Fact]
+    public void AffineWarpStaysEnclosed()
+    {
+        var random = new System.Random(0xAF77);
+        int[] sizes = { 1, 4, 8, 16 };
+        var fields = new[]
+        {
+            FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Affine), FogField.Wells(FogField.AetheriaWarp, BoundMode.Affine), FogField.InsideFog(FogField.AetheriaWarp, BoundMode.Affine),
+        };
+        var needing = new[] { 0, 0 };
+        for (var t = 0; t < 3000; t++)
+        {
+            var field = fields[t % fields.Length];
+            var tile = field.DrawTile(random, sizes[random.Next(sizes.Length)]);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 1500.0f), field.Grid[^1]);
+            var slice = field.Slice(tile, z0, z1);
+            var (_, shift0, shift1) = field.Noise.Phases(tile.Time);
+            var (zm, h) = (slice.Ball.z, slice.AxisCamera.z);
+
+            // The arguments are built from the centred warp of the slice's own centre and reach, the detail
+            // from the unwarped set: no phase takes another's growth, nor the detail a warp.
+            var (moved0, grow0, moved1, grow1) = field.Noise.CentredWarp(slice.Centre, slice.Reach, tile.Time);
+            var (coverageFrequency, detailFrequency) = (field.Noise.F0, 4.0f * field.Noise.F0);
+            var expected = new[]
+            {
+                (slice.Coverage0, moved0 * coverageFrequency, (slice.Ball.w + grow0) * coverageFrequency),
+                (slice.Coverage1, moved1 * coverageFrequency, (slice.Ball.w + grow1) * coverageFrequency),
+                (slice.Detail, slice.Centre * detailFrequency + 17.0f, slice.Ball.w * detailFrequency),
+            };
+            foreach (var (arg, centre, radius) in expected)
+            {
+                Assert.True(length(arg.Centre - centre) <= 1.0e-6f * (1.0f + length(centre)) && Math.Abs(arg.Radius - radius) <= 1.0e-6f * radius, $"{field.Name}: argument ({arg.Centre}, {arg.Radius:R}) is not the documented ({centre}, {radius:R})");
+            }
+
+            var reachRule = length(slice.Coverage0.Axis) / coverageFrequency + slice.Ball.w;
+            Assert.True(Math.Abs(slice.Reach - reachRule) <= 1.0e-5f * reachRule, $"{field.Name}: the reach {slice.Reach:R} is not |axis| + radius = {reachRule:R}");
+            var axisTolerance = 1.0e-6f * length(slice.Coverage0.Axis);
+            Assert.True(length(slice.Coverage1.Axis - slice.Coverage0.Axis) <= axisTolerance && length(slice.Detail.Axis - slice.Coverage0.Axis * (detailFrequency / coverageFrequency)) <= 4.0f * axisTolerance, $"{field.Name}: the arguments do not share one axis");
+
+            for (var i = 0; i < 64; i++)
+            {
+                var m = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
+                var z = i < 2 ? (i == 0 ? z0 : z1) : Uniform(random, z0, z1);
+                var p = tile.World(new float3(m.x * z, m.y * z, z));
+                var flow = field.Noise.Flow(p);
+                var eps = h == 0.0f ? 0.0f : clamp((z - zm) / h, -1.0f, 1.0f);
+                var phases = new[] { (shift0, slice.Coverage0, coverageFrequency), (shift1, slice.Coverage1, coverageFrequency) };
+                for (var k = 0; k < 2; k++)
+                {
+                    var (shift, arg, frequency) = phases[k];
+                    var point = (p + flow * shift) * frequency;
+                    var distance = length(point - (arg.Centre + arg.Axis * eps));
+                    Assert.True(distance <= arg.Radius * (1.0f + 1.0e-5f) + 1.0e-6f * length(point), $"{field.Name}: phase {k} warped ray point at depth {z:R} is {distance:R} from the argument's centre + axis eps, outside radius {arg.Radius:R} (reach {slice.Reach:R}, slice [{z0:R}, {z1:R}])");
+                    needing[k] += distance > slice.Ball.w * frequency ? 1 : 0;
+                }
+
+                var detail = p * detailFrequency + 17.0f;
+                var detailDistance = length(detail - (slice.Detail.Centre + slice.Detail.Axis * eps));
+                Assert.True(detailDistance <= slice.Detail.Radius * (1.0f + 1.0e-5f) + 1.0e-6f * length(detail), $"{field.Name}: the detail ray point at depth {z:R} is {detailDistance:R} from the argument's centre + axis eps, outside radius {slice.Detail.Radius:R} (slice [{z0:R}, {z1:R}])");
+            }
+        }
+
+        output.WriteLine($"IV-REPORT affine warp: rays beyond the unwarped radius, phase 0 {needing[0]}, phase 1 {needing[1]}");
+        Assert.True(needing[0] > 0 && needing[1] > 0, $"no ray needs phase growth ({needing[0]}, {needing[1]}): the check cannot tell a slice without it");
+    }
+
+    /// <summary>
+    /// The affine composition earns its place: over seeded slices of the deep well and the shallow wells
+    /// (warp 0 and the Aetheria warp, N = 8, slices of length log-uniform in [0.5, 100] from a drawn
+    /// depth), AffineBound is exactly the intersection of its two sound pieces (the affine arithmetic's
+    /// own, and the interval composition over the forms' ranges), and where the interval piece does not
+    /// already prove the slice empty the affine piece is the narrower of the two in at least 35% of
+    /// them and the intersection is narrower than the interval piece in total width by at least 0.5%
+    /// (measured: 43% and 1.1%). The affine piece alone is wider in total (the shared symbol pays where the forms are
+    /// correlated and loses to the clipped ranges where they are not), so it is the intersection's gain
+    /// that measures it. The cost contract (IntervalSkipHalvesEvaluations) sees only the sum, in which
+    /// af_snoise's Hessian forms already beat iv_snoise_ball; this is the test that sees af_add, af_mul and
+    /// af_range, the shared symbol, break.
+    /// </summary>
+    [Fact]
+    public void AffineCompositionTightensItsRanges()
+    {
+        var random = new System.Random(0xAC0F);
+        var (open, wins, intersectionWidth, intervalWidth) = (0, 0, 0.0, 0.0);
+        foreach (var warp in new[] { 0.0f, FogField.AetheriaWarp })
+        foreach (var field in new[] { FogField.DeepWell(warp, BoundMode.Affine), FogField.Wells(warp, BoundMode.Affine) })
+        for (var t = 0; t < 1500; t++)
+        {
+            var tile = field.DrawTile(random, 8);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 100.0f), field.Grid[^1]);
+            var (affine, interval) = field.AffinePieces(tile, z0, z1, new Counts());
+            var bound = field.Bound(tile, z0, z1, false, new Counts());
+            Assert.True(bound.x == max(affine.x, interval.x) && bound.y == min(affine.y, interval.y), $"{field.Name}: Bound {bound} is not the intersection of the affine piece {affine} and the interval piece {interval}");
+            if (!(interval.y > 0.0f))
+                continue;
+            open++;
+            wins += affine.y - affine.x < interval.y - interval.x ? 1 : 0;
+            intersectionWidth += bound.y - bound.x;
+            intervalWidth += interval.y - interval.x;
+        }
+
+        output.WriteLine($"IV-REPORT affine composition: {open} open slices, affine narrower in {wins} ({(double)wins / open:F3}), intersection width {intersectionWidth:F1} against the interval piece's {intervalWidth:F1} ({intersectionWidth / intervalWidth:F3})");
+        Assert.True(open > 0, "no slice is open");
+        Assert.True(wins >= 0.35 * open, $"the affine piece is narrower than the interval piece in {wins} of {open} open slices, under 35%");
+        Assert.True(intersectionWidth <= 0.995 * intervalWidth, $"the intersection's width {intersectionWidth:F1} is not under 0.995 of the interval piece's {intervalWidth:F1}");
+    }
+
+    /// <summary>
+    /// The gate only ever gives up what the probes could not have delivered. Gated, a slice the best
+    /// conceivable probe cannot prove empty returns the envelope; so a slice the ungated bound proves
+    /// empty (its upper density 0) must be proved empty gated too. A gate that errs toward giving up
+    /// (the reach inflated, a gradient or Hessian term overstated) loosens the bound exactly there and
+    /// costs only culling, which no enclosure test sees; a gate that errs the other way only costs probes,
+    /// which the cost contract (IntervalSkipHalvesEvaluations) sees. Over seeded slices of both wells and the fog interior at
+    /// warp 0 and the Aetheria warp, N = 8, in both modes, no slice the ungated bound proves empty is
+    /// left open by the gated one, and at least 200 are proved empty.
+    /// </summary>
+    [Fact]
+    public void GateNeverGivesUpAProvableCull()
+    {
+        var random = new System.Random(0x6A7E);
+        var (proved, lost) = (0, new List<string>());
+        foreach (var mode in new[] { BoundMode.Interval, BoundMode.Affine })
+        foreach (var warp in new[] { 0.0f, FogField.AetheriaWarp })
+        foreach (var field in new[] { FogField.DeepWell(warp, mode), FogField.Wells(warp, mode), FogField.InsideFog(warp, mode) })
+        for (var t = 0; t < 1500; t++)
+        {
+            var tile = field.DrawTile(random, 8);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 100.0f), field.Grid[^1]);
+            if (field.Bound(tile, z0, z1, false, new Counts()).y > 0.0f)
+                continue;
+            proved++;
+            var gated = field.Bound(tile, z0, z1, true, new Counts());
+            if (gated.y > 0.0f)
+                lost.Add($"{field.Name} {mode} warp {warp}: slice [{z0:R}, {z1:R}] is proved empty ungated but the gate leaves it at {gated}");
+        }
+
+        output.WriteLine($"IV-REPORT gate: {proved} slices proved empty ungated, {lost.Count} left open by the gate");
+        Assert.True(proved >= 200, $"only {proved} slices are proved empty ungated: the check cannot tell a gate that loses them");
+        Assert.True(lost.Count == 0, $"{lost.Count} provable culls given up by the gate, first: {lost.FirstOrDefault()}");
+    }
+
+    // Why a field is not ten bands deep and wide, or null. The band G is the span of s where only the
+    // noise decides density: s in [F + A lo, F + A hi] for the free noise range [lo, hi], with the fade at 1.
+    private static string? TenBandsShortfall(FogField field, int cameras)
+    {
+        var band = FogField.Amplitude * (FogField.FreeNoise.y - FogField.FreeNoise.x);
+        var well = field.Bowls[^1];
+        var rim = well.Scale / 2.0f;
+        float At(float r) => field.HeightAt(well.Centre + new float2(r, 0.0f));
+        var depth = At(0.0f) - At(rim);
+        var half = (At(0.0f) + At(rim)) / 2.0f;
+        float lo = 0.0f, hi = rim;
+        for (var k = 0; k < 60; k++)
+        {
+            var mid = (lo + hi) / 2.0f;
+            if (At(mid) > half)
+                lo = mid;
+            else
+                hi = mid;
+        }
+
+        var problems = new List<string>();
+        if (depth < 10.0f * band)
+            problems.Add($"depth {depth:R} is under 10 G = {10.0f * band:R}");
+        if (lo < 10.0f * band)
+            problems.Add($"half-depth radius {lo:R} is under 10 G = {10.0f * band:R}");
+        var random = new System.Random(0xD33B);
+        for (var c = 0; c < cameras; c++)
+        {
+            var origin = field.DrawTile(random, 8).Origin;
+            var xz = new float2(origin.x, origin.z);
+            var s = origin.y + field.HeightAt(xz);
+            if (!(length(xz - well.Centre) < lo && origin.y < FogField.FloorOffset - At(rim) && s >= FogField.FloorOffset + FogField.Amplitude * FogField.FreeNoise.y))
+            {
+                problems.Add($"camera {origin} is not inside the well, below the rim's fog surface, in empty air");
+                break;
+            }
+        }
+
+        return problems.Count == 0 ? null : $"{field.Name}: G = {band:R}; " + string.Join("; ", problems);
+    }
+
+    /// <summary>
+    /// Ruling wells-scale-order-of-magnitude: the band G is computed from FogField's FloorOffset, Amplitude
+    /// and free noise range (60). The deep well's depth, h(centre) - h(rim), and its half-depth radius,
+    /// found by bisection on the well map, are each at least 10 G, and each of 1,000 drawn cameras sits
+    /// inside that radius, below the rim's fog surface and in empty air (s above the band). A well of depth
+    /// 150 fails the same check.
+    /// </summary>
+    [Fact]
+    public void DeepWellIsTenBandsDeepAndWide()
+    {
+        var deep = FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Interval);
+        Assert.Null(TenBandsShortfall(deep, 1000));
+        Assert.NotNull(TenBandsShortfall(FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Interval, depth: 150.0f), 1000));
+        var band = FogField.Amplitude * (FogField.FreeNoise.y - FogField.FreeNoise.x);
+        output.WriteLine($"IV-REPORT deep well: G = {band:R}, depth {deep.HeightAt(new float2(0.0f, 0.0f)) - deep.HeightAt(new float2(FogField.DeepWellScale / 2.0f, 0.0f)):R}");
+    }
+
+    // ---- The cull map ----
+
+    // An approximation of viridis at nine anchors, interpolated linearly, for t in [0, 1].
+    private static readonly (byte R, byte G, byte B)[] Viridis =
+    {
+        (68, 1, 84), (72, 40, 120), (62, 74, 137), (49, 104, 142), (38, 130, 142), (31, 158, 137), (53, 183, 121), (110, 206, 88), (253, 231, 37),
+    };
+
+    private static (byte, byte, byte) Colour(double t)
+    {
+        t = Math.Clamp(t, 0.0, 1.0) * (Viridis.Length - 1);
+        var i = Math.Min((int)t, Viridis.Length - 2);
+        var f = t - i;
+        byte Mix(byte a, byte b) => (byte)Math.Round(a + (b - a) * f);
+        return (Mix(Viridis[i].R, Viridis[i + 1].R), Mix(Viridis[i].G, Viridis[i + 1].G), Mix(Viridis[i].B, Viridis[i + 1].B));
+    }
+
+    private static uint[] CrcTable() => Enumerable.Range(0, 256).Select(n =>
+    {
+        var c = (uint)n;
+        for (var k = 0; k < 8; k++)
+            c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+        return c;
+    }).ToArray();
+
+    // A minimal 8-bit RGB PNG: one IDAT of zlib-compressed rows, filter 0.
+    private static void WritePng(string path, int width, int height, byte[] rgb)
+    {
+        var table = CrcTable();
+        using var file = File.Create(path);
+        void Chunk(string type, byte[] data)
+        {
+            var name = System.Text.Encoding.ASCII.GetBytes(type);
+            var length = new[] { (byte)(data.Length >> 24), (byte)(data.Length >> 16), (byte)(data.Length >> 8), (byte)data.Length };
+            file.Write(length);
+            file.Write(name);
+            file.Write(data);
+            var crc = 0xFFFFFFFFu;
+            foreach (var b in name.Concat(data))
+                crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8);
+            crc ^= 0xFFFFFFFFu;
+            file.Write(new[] { (byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8), (byte)crc });
+        }
+
+        file.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        Chunk("IHDR", new byte[] { (byte)(width >> 24), (byte)(width >> 16), (byte)(width >> 8), (byte)width, (byte)(height >> 24), (byte)(height >> 16), (byte)(height >> 8), (byte)height, 8, 2, 0, 0, 0 });
+        using var packed = new MemoryStream();
+        using (var z = new System.IO.Compression.ZLibStream(packed, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+        {
+            for (var y = 0; y < height; y++)
+            {
+                z.WriteByte(0);
+                z.Write(rgb, y * width * 3, width * 3);
+            }
+        }
+
+        Chunk("IDAT", packed.ToArray());
+        Chunk("IEND", Array.Empty<byte>());
+    }
+
+    /// <summary>
+    /// The cull map of one deep-well frame at warp D, for the operator: a camera inside the well at xz
+    /// (0, -200), y = F - h / 2, looking along +z across the well, 960 x 540 pixels at a 60 degree vertical
+    /// field of view, in 8 x 8 tiles (the last row of tiles half off the frame). Each tile runs the
+    /// pre-pass under the centred-warp interval bound and under the affine bound; each pixel's ray (through
+    /// the pixel's centre) is marched densely for its transmittance and over each tile mask and the oracle
+    /// mask (the cells some ray of the tile samples nonzero), with the early-out at 0.02. The PNG is
+    /// 1920 x 1080 in four panels: top left the cells per ray the interval march integrates, top right the
+    /// affine march's, bottom left the oracle march's (all three on one viridis scale, logarithmic,
+    /// log(1 + n) / log(1 + the largest count)), bottom right the transmittance (black opaque, white clear). It is written only when
+    /// CULTMATH_WRITE_CULLMAP names a directory; the mean cells per ray are printed either way.
+    /// </summary>
+    [Fact(Explicit = true)]
+    [Trait("Category", "Slow")]
+    public void DeepWellCullMap()
+    {
+        const int width = 960, height = 540, size = 8;
+        var interval = FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Interval);
+        var affine = FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Affine);
+        var focal = height / 2.0f / MathF.Tan(MathF.PI / 6.0f);
+        var xz = new float2(0.0f, -200.0f);
+        var origin = new float3(xz.x, FogField.FloorOffset - 0.5f * interval.HeightAt(xz), xz.y);
+        var grid = interval.Grid;
+        var (cellsInterval, cellsAffine, cellsOracle) = (new int[width * height], new int[width * height], new int[width * height]);
+        var transmittance = new float[width * height];
+        var (tilesX, tilesY) = (width / size, (height + size - 1) / size);
+        var probes = new Counts[tilesX * tilesY];
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Parallel.For(0, tilesX * tilesY, index =>
+        {
+            var (tx, ty) = (index % tilesX, index / tilesX);
+            var slope = new float2((tx * size + size / 2.0f - width / 2.0f) / focal, (height / 2.0f - (ty * size + size / 2.0f)) / focal);
+            var tile = interval.TileAt(origin, 0.0f, slope, size, focal, 3.0f);
+            probes[index] = new Counts();
+            var (maskInterval, _, _) = MarchTile(interval, tile, probes[index]);
+            var (maskAffine, _, _) = MarchTile(affine, tile, new Counts());
+            var scratch = new Counts();
+            var rays = new List<(int Pixel, float2 Slope)>();
+            for (var j = 0; j < size; j++)
+            for (var i = 0; i < size; i++)
+            {
+                var (px, py) = (tx * size + i, ty * size + (size - 1 - j));
+                rays.Add((py < height ? py * width + px : -1, tile.PixelSlope(i, j, 0.5f, 0.5f)));
+            }
+
+            var oracle = Enumerable.Range(0, grid.Length - 1).Where(c => rays.Any(r => interval.Density(tile, r.Slope, (grid[c] + grid[c + 1]) * 0.5f, false, scratch) > 0.0f)).ToList();
+            foreach (var (pixel, ray) in rays)
+            {
+                if (pixel < 0)
+                    continue;
+                int Steps(List<int> mask)
+                {
+                    var t = 1.0f;
+                    var k = 0;
+                    for (; k < mask.Count && t >= 0.02f; k++)
+                        t *= Integrate(interval, tile, ray, grid[mask[k]], grid[mask[k] + 1], lod: false, scratch);
+                    return k;
+                }
+
+                var dense = 1.0f;
+                for (var c = 0; c < grid.Length - 1 && dense >= 0.02f; c++)
+                    dense *= Integrate(interval, tile, ray, grid[c], grid[c + 1], lod: false, scratch);
+                transmittance[pixel] = dense;
+                cellsInterval[pixel] = Steps(maskInterval);
+                cellsAffine[pixel] = Steps(maskAffine);
+                cellsOracle[pixel] = Steps(oracle);
+            }
+        });
+
+        var most = Math.Max(cellsInterval.Max(), Math.Max(cellsAffine.Max(), cellsOracle.Max()));
+        output.WriteLine($"IV-REPORT cull map (deep well, warp {FogField.AetheriaWarp:R}, {width}x{height}, {size}x{size} tiles, {clock.Elapsed.TotalSeconds:F0} s): cells per ray interval {cellsInterval.Average():F2}, affine {cellsAffine.Average():F2}, oracle {cellsOracle.Average():F2}; "
+            + $"largest {most}; interval probes per tile env {probes.Average(p => p.Envelope):F1} snoise {probes.Average(p => p.Snoise):F2}; mean transmittance {transmittance.Average():F3}");
+        var directory = Environment.GetEnvironmentVariable("CULTMATH_WRITE_CULLMAP");
+        if (string.IsNullOrEmpty(directory))
+            return;
+        var rgb = new byte[2 * width * 2 * height * 3];
+        void Put(int x, int y, (byte R, byte G, byte B) c)
+        {
+            var o = (y * 2 * width + x) * 3;
+            (rgb[o], rgb[o + 1], rgb[o + 2]) = c;
+        }
+
+        for (var y = 0; y < height; y++)
+        for (var x = 0; x < width; x++)
+        {
+            var p = y * width + x;
+            Put(x, y, Colour(Math.Log(1.0 + cellsInterval[p]) / Math.Log(1.0 + most)));
+            Put(width + x, y, Colour(Math.Log(1.0 + cellsAffine[p]) / Math.Log(1.0 + most)));
+            Put(x, height + y, Colour(Math.Log(1.0 + cellsOracle[p]) / Math.Log(1.0 + most)));
+            var grey = (byte)Math.Round(255.0 * transmittance[p]);
+            Put(width + x, height + y, (grey, grey, grey));
+        }
+
+        for (var k = 0; k < 2 * width; k++)
+        for (var d = -1; d <= 0; d++)
+            Put(k, height + d, (255, 255, 255));
+        for (var k = 0; k < 2 * height; k++)
+        for (var d = -1; d <= 0; d++)
+            Put(width + d, k, (255, 255, 255));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "deep-well-cull-map.png");
+        WritePng(path, 2 * width, 2 * height, rgb);
+        output.WriteLine($"IV-REPORT cull map written to {path}");
+    }
+
     /// <summary>
     /// Mean of interval width over the true range (max - min of the 64 sampled values) per ball: how
     /// loose the Lipschitz bound is, for a later affine cut to beat. Asserts only finiteness.
@@ -519,12 +1236,18 @@ public sealed class NoiseBoundTests
     // counts are printed, so any other weight can be applied to them.
     internal const double EnvelopeCost = 0.2;
 
+    // One snoise_grad evaluation (af_snoise's one call) costs this much in snoise units: the value and
+    // three gradient components over the same corners. An estimate, printed beside the count as the
+    // envelope weight is, and not tuned toward any contract.
+    internal const double GradCost = 2.0;
+
     internal sealed class Counts
     {
         public long Snoise;
         public long Envelope;
+        public long Grad;
 
-        public double Cost => Snoise + EnvelopeCost * Envelope;
+        public double Cost => Snoise + EnvelopeCost * Envelope + GradCost * Grad;
     }
 
     /// <summary>
@@ -580,6 +1303,13 @@ public sealed class NoiseBoundTests
     /// noise ball only when the best outcome any centre value could give would prove it; ungated, the ball
     /// is always evaluated.
     /// </summary>
+    /// <summary>FogField's bound: the centred-warp interval composition, or the affine one (design.md, "Affine forms").</summary>
+    internal enum BoundMode
+    {
+        Interval,
+        Affine,
+    }
+
     internal abstract class Scenario
     {
         public required string Name { get; init; }
@@ -645,7 +1375,7 @@ public sealed class NoiseBoundTests
 
         private float FlowAmplitude => Warp * 2.0f / Period;
 
-        private float3 Flow(float3 p)
+        public float3 Flow(float3 p)
         {
             var q = (FlowInXY ? new float2(p.x, p.y) : new float2(p.x, p.z)) * FlowFrequency;
             var v = new float2(snoise(q + new float2(17.0f, 3.0f)), snoise(q + new float2(-5.0f, 41.0f)));
@@ -653,7 +1383,7 @@ public sealed class NoiseBoundTests
             return FlowInXY ? new float3(v.x, v.y, 0.0f) : new float3(v.x, 0.0f, v.y);
         }
 
-        private (float W0, float Shift0, float Shift1) Phases(float time)
+        public (float W0, float Shift0, float Shift1) Phases(float time)
         {
             var phase0 = frac(time / Period);
             var phase1 = frac(time / Period + 0.5f);
@@ -674,12 +1404,54 @@ public sealed class NoiseBoundTests
             return snoise(p * (4.0f * F0) + 17.0f);
         }
 
-        // Both phases' warped points lie in a ball that carries the warp, so one ball encloses both snoise;
-        // the cross-fade is enclosed term by term with the frame's own weights.
-        public float2 CoverageBound(float2 ball, float time)
+        // The cross-fade of the two phases' noise enclosures, term by term with the frame's own weights.
+        // A field whose ball carries the whole warp passes the same enclosure for both phases.
+        public float2 CoverageBound(float2 phase0, float2 phase1, float time)
         {
             var w0 = Phases(time).W0;
-            return iv_add(iv_scale(ball, w0), iv_scale(ball, 1.0f - w0));
+            return iv_add(iv_scale(phase0, w0), iv_scale(phase1, 1.0f - w0));
+        }
+
+        /// <summary>
+        /// How far the flow can move across a ball of radius r about c: each flow component is snoise(float2)
+        /// of the point projected to the flow plane and scaled by FlowFrequency, which varies over the ball by
+        /// at most iv_snoise_ball(float2)'s reach from its centre value, plus Deviation's float32 allowance; the
+        /// projection and the clamp to the unit disc are nonexpansive, and two unit-disc vectors differ by at
+        /// most 2.
+        /// </summary>
+        public float FlowVariation(float3 centre, float radius)
+        {
+            var q = (FlowInXY ? new float2(centre.x, centre.y) : new float2(centre.x, centre.z)) * FlowFrequency;
+            var u = Deviation(q + new float2(17.0f, 3.0f), radius * FlowFrequency);
+            var v = Deviation(q + new float2(-5.0f, 41.0f), radius * FlowFrequency);
+            return min(sqrt(u * u + v * v), 2.0f) * FlowAmplitude;
+        }
+
+        // How far snoise(float2) can differ from its value at q over radius, in float32: the ball's reach plus
+        // the allowance of af_snoise's convention for the 2D value, 2^-14 + L2 2^-20 (|q|_1 + r). The point
+        // q + offset rounds at the magnitude of q + offset (a unit in the last place of 20 is 2^-19), so the
+        // flow at two points of a ball differs by more than the exact function can, and the iv_snoise_ball
+        // bound, which is exact for the point it is given, does not carry that.
+        private static float Deviation(float2 q, float radius)
+        {
+            var n = snoise(q);
+            var ball = iv_snoise_ball(q, radius);
+            var allowance = 6.103515625e-5f + SNOISE2_LIPSCHITZ * 9.5367431640625e-7f * (abs(q.x) + abs(q.y) + radius);
+            return max(ball.y - n, n - ball.x) + allowance;
+        }
+
+        /// <summary>
+        /// The centred warp (design.md, "Affine forms"): phase k moves a point p of a set within reach of c
+        /// to p + flow(p) shift_k, which lies within |shift_k| rho of (p - c) + c + flow(c) shift_k, rho =
+        /// FlowVariation(c, reach). So phase k's noise argument is the set moved by flow(c) shift_k and
+        /// grown by |shift_k| rho, instead of grown by the whole warp. At warp 0 both phases are the set.
+        /// </summary>
+        public (float3 Centre0, float Grow0, float3 Centre1, float Grow1) CentredWarp(float3 centre, float reach, float time)
+        {
+            var (_, shift0, shift1) = Phases(time);
+            var flow = Flow(centre);
+            var rho = FlowVariation(centre, reach);
+            return (centre + flow * shift0, abs(shift0) * rho, centre + flow * shift1, abs(shift1) * rho);
         }
 
         public float2 CoverageBall(float3 centre, float radius, Counts counts) => NoiseBall(centre * F0, radius * F0, counts);
@@ -713,9 +1485,10 @@ public sealed class NoiseBoundTests
         public const float NoiseScale = 414.2167f;  // :409
         public const float AetheriaWarp = 60.0f;    // Flow GlobalAmplitude 15 x Period 8 / 2, :402-405
         public const float ZoneRadius = 2000.0f;
-        private static readonly float2 FreeNoise = new(-1.5f, 1.5f);
+        internal static readonly float2 FreeNoise = new(-1.5f, 1.5f);
 
         public required WarpedNoise Noise { get; init; }
+        public required BoundMode Mode { get; init; }
         public (float2 Centre, float Scale, float Exponent, float Depth)[] Bowls { get; init; } = Array.Empty<(float2, float, float, float)>();
         public required Func<System.Random, FogField, float3> CameraAt { get; init; }
         public required float2 SlopesY { get; init; }
@@ -731,26 +1504,60 @@ public sealed class NoiseBoundTests
 
         private static WarpedNoise AetheriaNoise(float warp) => new() { F0 = 1.0f / NoiseScale, Warp = warp };
 
+        private static string Named(string name, BoundMode mode) => $"{name} [{(mode == BoundMode.Affine ? "affine" : "interval")}]";
+
         /// <summary>(a) Height fog: no wells, the camera above the safety band at y = S + 30, rays level and up.</summary>
-        public static FogField HeightFog(float warp) => new()
+        public static FogField HeightFog(float warp, BoundMode mode) => new()
         {
-            Name = "(a) height fog", Noise = AetheriaNoise(warp), SlopesY = new float2(0.0f, 0.5f),
+            Name = Named("(a) height fog", mode), Mode = mode, Noise = AetheriaNoise(warp), SlopesY = new float2(0.0f, 0.5f),
             CameraAt = (random, _) => new float3(Uniform(random, -1000.0f, 1000.0f), Safety + 30.0f, Uniform(random, -1000.0f, 1000.0f)),
         };
 
         /// <summary>(b) Inside the fog: no wells, the camera at y = F - 10, rays level.</summary>
-        public static FogField InsideFog(float warp) => new()
+        public static FogField InsideFog(float warp, BoundMode mode) => new()
         {
-            Name = "(b) inside the fog", Noise = AetheriaNoise(warp), SlopesY = new float2(-0.05f, 0.05f),
+            Name = Named("(b) inside the fog", mode), Mode = mode, Noise = AetheriaNoise(warp), SlopesY = new float2(-0.05f, 0.05f),
             CameraAt = (random, _) => new float3(Uniform(random, -1000.0f, 1000.0f), FloorOffset - 10.0f, Uniform(random, -1000.0f, 1000.0f)),
         };
 
+        // The deep well's geometry (ruling wells-scale-order-of-magnitude): one PowerPulse well of exponent
+        // 2, scale 2220 and depth 600 at the zone's centre, so its depth and half-depth radius are each
+        // about 600, ten times the band (DeepWellIsTenBandsDeepAndWide measures both).
+        public const float DeepWellScale = 2220.0f;
+        public const float DeepWellDepth = 600.0f;
+        public const float DeepWellCameraRadius = 300.0f;
+
         /// <summary>
-        /// (c) Aetheria-like: the zone bowl R = 2000 and four wells of mass 100, 1000, 10000 and 1000 at seeded
-        /// positions inside it; the camera at a seeded xz in the bowl, above the noise band at
-        /// y = max(0, S + 10 - h), gazing across with m_y in [-0.25, 0.1].
+        /// (c) The deep well, the case Aetheria plays in: there the camera is always in some gravity well,
+        /// gazing across a bowl a sun's gravity carves (ruling wells-scale-order-of-magnitude). The zone bowl
+        /// R = 2000 plus one well at its centre, PowerPulse exponent 2, scale 2220, depth 600, so the well's
+        /// depth and half-depth radius are each about ten times G = 3 A = 60, the band of s where only the
+        /// noise decides density (s in [F - 1.5 A, F + 1.5 A] with the fade at 1). The camera's xz is uniform
+        /// within 300 of the centre, at y = F - h(xz) / 2, halfway between the sunken fog surface and the
+        /// rim's, in empty air; slopes and yaw as the shallow wells, m_y in [-0.25, 0.1]. A level ray crosses
+        /// hundreds of units of empty well before the far wall's band.
         /// </summary>
-        public static FogField Wells(float warp)
+        public static FogField DeepWell(float warp, BoundMode mode, float depth = DeepWellDepth) => new()
+        {
+            Name = Named("(c) deep well", mode), Mode = mode, Noise = AetheriaNoise(warp), SlopesY = new float2(-0.25f, 0.1f),
+            Bowls = new (float2, float, float, float)[] { (new float2(0.0f, 0.0f), 2.0f * ZoneRadius, 2.0f, 64.0f), (new float2(0.0f, 0.0f), DeepWellScale, 2.0f, depth) },
+            CameraAt = (r, field) =>
+            {
+                var angle = Uniform(r, 0.0f, 2.0f * MathF.PI);
+                var radius = DeepWellCameraRadius * MathF.Sqrt(r.NextSingle());
+                var xz = new float2(radius * MathF.Cos(angle), radius * MathF.Sin(angle));
+                return new float3(xz.x, FloorOffset - 0.5f * field.HeightAt(xz), xz.y);
+            },
+        };
+
+        /// <summary>
+        /// (c-band) Shallow wells, the band-dominated row, printed only: the zone bowl R = 2000 (64 deep) and
+        /// four wells of mass 100, 1000, 10000 and 1000 at seeded positions inside it, 30 M^0.175 deep (67 to
+        /// 150, 1.1 to 2.5 times G) and 500 M^0.25 wide at exponent 16; the camera at a seeded xz in the bowl,
+        /// just above the noise band at y = max(0, S + 10 - h), gazing across with m_y in [-0.25, 0.1]. Most
+        /// of its cost is the band itself, which is where affine noise gains most.
+        /// </summary>
+        public static FogField Wells(float warp, BoundMode mode)
         {
             var random = new System.Random(0xA37E);
             var bowls = new List<(float2, float, float, float)> { (new float2(0.0f, 0.0f), 2.0f * ZoneRadius, 2.0f, 64.0f) };
@@ -763,14 +1570,13 @@ public sealed class NoiseBoundTests
 
             return new FogField
             {
-                Name = "(c) Aetheria wells", Noise = AetheriaNoise(warp), Bowls = bowls.ToArray(), SlopesY = new float2(-0.25f, 0.1f),
+                Name = Named("(c-band) shallow wells", mode), Mode = mode, Noise = AetheriaNoise(warp), Bowls = bowls.ToArray(), SlopesY = new float2(-0.25f, 0.1f),
                 CameraAt = (r, field) =>
                 {
                     var angle = Uniform(r, 0.0f, 2.0f * MathF.PI);
                     var radius = ZoneRadius * MathF.Sqrt(r.NextSingle());
                     var xz = new float2(radius * MathF.Cos(angle), radius * MathF.Sin(angle));
-                    var h = field.Height(field.Bowls.Select(b => b.Centre - xz).ToArray(), 0.0f, 0.0f);
-                    return new float3(xz.x, max(0.0f, Safety + 10.0f - h), xz.y);
+                    return new float3(xz.x, max(0.0f, Safety + 10.0f - field.HeightAt(xz)), xz.y);
                 },
             };
         }
@@ -784,11 +1590,15 @@ public sealed class NoiseBoundTests
         {
             var origin = CameraAt(random, this);
             var yaw = Uniform(random, 0.0f, 2.0f * MathF.PI);
-            var tile = new FogTile
-            {
-                Origin = origin, N = n, Focal = Focal, Time = Uniform(random, 0.0f, 100.0f),
-                Slope = new float2(Uniform(random, -1.0f, 1.0f), Uniform(random, SlopesY.x, SlopesY.y)),
-            };
+            var time = Uniform(random, 0.0f, 100.0f);
+            var slope = new float2(Uniform(random, -1.0f, 1.0f), Uniform(random, SlopesY.x, SlopesY.y));
+            return TileAt(origin, yaw, slope, n, Focal, time);
+        }
+
+        /// <summary>The tile of a camera at origin, yawed about y (0 looks along +z), at the given slope, size, focal length and time.</summary>
+        public Tile TileAt(float3 origin, float yaw, float2 slope, int n, float focal, float time)
+        {
+            var tile = new FogTile { Origin = origin, N = n, Focal = focal, Time = time, Slope = slope };
             tile.Look(new float3(MathF.Sin(yaw), 0.0f, MathF.Cos(yaw)));
             tile.Centres = Bowls.Select(b =>
             {
@@ -818,6 +1628,9 @@ public sealed class NoiseBoundTests
 
             return h;
         }
+
+        /// <summary>The well map h at the world point (x, z).</summary>
+        public float HeightAt(float2 xz) => Height(Bowls.Select(b => b.Centre).ToArray(), xz.x, xz.y);
 
         // Each bowl's term over the box is [pulse(far), pulse(near)], pulse decreasing in distance; pow is
         // not required to be correctly rounded, so both ends are widened by one ulp.
@@ -861,34 +1674,183 @@ public sealed class NoiseBoundTests
             return max(0.0f, (FloorOffset - (s + fade * n * Amplitude)) / FloorBlend);
         }
 
+        /// <summary>
+        /// The envelope first: the height and slope intervals over the slice's box, the fade, and the noise
+        /// at its free range. Where that already proves the slice empty the envelope is the answer;
+        /// otherwise Mode's bound, which (gated) returns the envelope when the best any probe could give
+        /// would not prove the slice either.
+        /// </summary>
         public override float2 Bound(Tile t, float z0, float z1, bool gated, Counts counts)
         {
             var tile = (FogTile)t;
+            var frame = FrameOf(tile, z0, z1, counts);
+            if (gated && frame.Envelope.y <= 0.0f)
+                return frame.Envelope;
+            return Mode == BoundMode.Affine
+                ? AffineBound(tile, z0, z1, frame, gated, counts)
+                : IntervalBound(tile, z0, z1, frame.S, frame.Fade, frame.Envelope, gated, counts);
+        }
+
+        // The height interval, the density level s over the slice's box, its fade and the envelope.
+        private readonly record struct Frame(float2 Height, float2 S, float2 Fade, float2 Envelope);
+
+        private Frame FrameOf(FogTile tile, float z0, float z1, Counts counts)
+        {
             var depth = new float2(z0, z1);
             counts.Envelope++;
             var height = HeightBound(tile.Centres, iv_mul(depth, tile.SlopesX), depth);
             var s = iv_add(iv_add(iv_point(tile.Origin.y), iv_mul(depth, tile.SlopesY)), height);
             var fade = iv_sub(iv_point(1.0f), iv_smoothstep(0.75f * Safety, Safety, s));
-            var envelope = Compose(s, fade, FreeNoise);
-            if (gated && envelope.y <= 0.0f)
-                return envelope;
-            var ball = iv_frustum_ball(tile.Slope, z0, z1, tile.Footprint, Noise.Warp);
+            return new Frame(height, s, fade, Compose(s, fade, FreeNoise));
+        }
+
+        /// <summary>
+        /// The two sound bounds AffineBound intersects, ungated: the affine arithmetic's own (the shared
+        /// symbol through af_add, af_mul and af_range), and the interval composition over the same forms'
+        /// ranges (NoiseBoundTests.AffineCompositionTightensItsRanges).
+        /// </summary>
+        internal (float2 Affine, float2 Interval) AffinePieces(Tile t, float z0, float z1, Counts counts)
+        {
+            var tile = (FogTile)t;
+            return AffinePieces(tile, z0, z1, FrameOf(tile, z0, z1, counts), counts);
+        }
+
+        private static bool Same(float3 a, float3 b, float ga, float gb) => all(a == b) && ga == gb;
+
+        /// <summary>
+        /// The centred-warp interval bound. The slice's ball is iv_frustum_ball with no warp; each phase's
+        /// coverage ball is that ball moved by the flow at its centre and grown by what the flow can vary
+        /// across it (WarpedNoise.CentredWarp), one ball when the phases coincide (warp 0). The detail octave
+        /// reads the unwarped point, so its ball is the unwarped one.
+        /// </summary>
+        private float2 IntervalBound(FogTile tile, float z0, float z1, float2 s, float2 fade, float2 envelope, bool gated, Counts counts)
+        {
+            var ball = iv_frustum_ball(tile.Slope, z0, z1, tile.Footprint, 0.0f);
+            var centre = tile.World(new float3(ball.x, ball.y, ball.z));
+            var (c0, g0, c1, g1) = Noise.CentredWarp(centre, ball.w, tile.Time);
             if (gated)
             {
                 var provable = false;
                 foreach (var low in new[] { true, false })
                 {
-                    var best = iv_add(Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w), low), tile.Time), iv_scale(BestBall(Noise.DetailRadius(ball.w), low), 0.5f));
-                    provable |= Compose(s, fade, best).y <= 0.0f;
+                    var coverage = Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w + g0), low), BestBall(Noise.CoverageRadius(ball.w + g1), low), tile.Time);
+                    provable |= Compose(s, fade, iv_add(coverage, iv_scale(BestBall(Noise.DetailRadius(ball.w), low), 0.5f))).y <= 0.0f;
                 }
 
                 if (!provable)
                     return envelope;
             }
 
-            var centre = tile.World(new float3(ball.x, ball.y, ball.z));
-            var noise = iv_add(Noise.CoverageBound(Noise.CoverageBall(centre, ball.w, counts), tile.Time), iv_scale(Noise.DetailBall(centre, ball.w, counts), 0.5f));
+            var n0 = Noise.CoverageBall(c0, ball.w + g0, counts);
+            var n1 = Same(c0, c1, g0, g1) ? n0 : Noise.CoverageBall(c1, ball.w + g1, counts);
+            var noise = iv_add(Noise.CoverageBound(n0, n1, tile.Time), iv_scale(Noise.DetailBall(centre, ball.w, counts), 0.5f));
             return Compose(s, fade, noise);
+        }
+
+        /// <summary>
+        /// The affine slice of a tile over [z0, z1] in the world frame, with the centred warp applied: the
+        /// camera-frame axis and ball (af_frustum_axis, af_frustum_ball with no warp), the ball's world
+        /// centre, the world axis, and the reach R = |axis| + radius of the whole set from that centre (the
+        /// distance the flow is varied over). It returns the final af_snoise arguments, so a consumer has no
+        /// term left to wire: each phase's coverage argument is the set moved by the flow at its centre
+        /// (WarpedNoise.CentredWarp over R) and grown by what the flow can vary across it, and the detail
+        /// argument is the unwarped set. The rays at depth z lie within an argument's radius of its centre
+        /// + axis eps(z), eps(z) = clamp((z - z_m) / h, -1, 1) (NoiseBoundTests.AffineWarpStaysEnclosed).
+        /// </summary>
+        internal AffineSlice Slice(Tile t, float z0, float z1)
+        {
+            var tile = (FogTile)t;
+            var axisCamera = af_frustum_axis(tile.Slope, z0, z1);
+            var ball = af_frustum_ball(tile.Slope, z0, z1, tile.Footprint, 0.0f);
+            var centre = tile.World(new float3(ball.x, ball.y, ball.z));
+            var axis = tile.Right * axisCamera.x + tile.Up * axisCamera.y + tile.Forward * axisCamera.z;
+            var reach = length(axis) + ball.w;
+            var (c0, g0, c1, g1) = Noise.CentredWarp(centre, reach, tile.Time);
+            var coverageFrequency = Noise.F0;
+            var detailFrequency = 4.0f * Noise.F0;
+            return new AffineSlice(
+                axisCamera, ball, centre, reach,
+                new NoiseArg(c0 * coverageFrequency, axis * coverageFrequency, (ball.w + g0) * coverageFrequency),
+                new NoiseArg(c1 * coverageFrequency, axis * coverageFrequency, (ball.w + g1) * coverageFrequency),
+                new NoiseArg(centre * detailFrequency + 17.0f, axis * detailFrequency, ball.w * detailFrequency));
+        }
+
+        /// <summary>One af_snoise argument in noise space: the centre, the axis along eps, and the radius.</summary>
+        internal readonly record struct NoiseArg(float3 Centre, float3 Axis, float Radius)
+        {
+            /// <summary>The distance of the whole set from its centre: the gate's reach.</summary>
+            public float Reach => length(Axis) + Radius;
+
+            public float3 Snoise() => af_snoise(Centre, Axis, Radius);
+        }
+
+        internal readonly record struct AffineSlice(float3 AxisCamera, float4 Ball, float3 Centre, float Reach, NoiseArg Coverage0, NoiseArg Coverage1, NoiseArg Detail);
+
+        // The best interval any centre value and gradient could give af_snoise over a set of reach R (the
+        // gradient 0, the value at the far end), toward low or high values: the affine gate.
+        private static float2 BestForm(float reach, bool low)
+        {
+            var e = min(SNOISE_LIPSCHITZ * reach, 0.5f * SNOISE_HESSIAN * reach * reach);
+            if (e >= 2.0f)
+                return new float2(-1.0f, 1.0f);
+            return low ? new float2(-1.0f, min(-1.0f + e, 1.0f)) : new float2(max(1.0f - e, -1.0f), 1.0f);
+        }
+
+        private static float2 Clip(float2 range) => new(max(range.x, -1.0f), min(range.y, 1.0f));
+
+        /// <summary>
+        /// The affine bound, one shared symbol: depth z = z_m + h eps over the slice (af_frustum_axis and
+        /// af_frustum_ball give the noise argument the same eps). s = O_y + m_c,y z + (m_y - m_c,y) z + h(xz)
+        /// is affine in eps, with the lateral slope-depth term (at most Half z1, plus the rounding of the
+        /// pointwise m_y z) and the height interval in e. Each phase's coverage and the unwarped detail are
+        /// af_snoise over the slice moved and grown by the centred warp, the fade enters as af_from_iv, and
+        /// s' = s + A fade n is ranged by af_range. The result is intersected with the interval composition
+        /// over the same forms' ranges, each clipped to [-1, 1] (both sound, no further evaluation). The gate
+        /// is BestForm's.
+        /// </summary>
+        private float2 AffineBound(FogTile tile, float z0, float z1, Frame frame, bool gated, Counts counts)
+        {
+            if (gated)
+            {
+                var slice = Slice(tile, z0, z1);
+                var (s, fade) = (frame.S, frame.Fade);
+                var provable = false;
+                foreach (var low in new[] { true, false })
+                {
+                    var coverage = Noise.CoverageBound(BestForm(slice.Coverage0.Reach, low), BestForm(slice.Coverage1.Reach, low), tile.Time);
+                    provable |= Compose(s, fade, iv_add(coverage, iv_scale(BestForm(slice.Detail.Reach, low), 0.5f))).y <= 0.0f;
+                }
+
+                if (!provable)
+                    return frame.Envelope;
+            }
+
+            var (affine, interval) = AffinePieces(tile, z0, z1, frame, counts);
+            return new float2(max(affine.x, interval.x), min(affine.y, interval.y));
+        }
+
+        private (float2 Affine, float2 Interval) AffinePieces(FogTile tile, float z0, float z1, Frame frame, Counts counts)
+        {
+            var slice = Slice(tile, z0, z1);
+            var (ball, axisCamera) = (slice.Ball, slice.AxisCamera);
+            var (height, s, fade) = (frame.Height, frame.S, frame.Fade);
+            var shared = slice.Coverage0 == slice.Coverage1;
+            counts.Grad += shared ? 2 : 3;
+            var n0 = slice.Coverage0.Snoise();
+            var n1 = shared ? n0 : slice.Coverage1.Snoise();
+            var nd = slice.Detail.Snoise();
+            var w0 = Noise.Phases(tile.Time).W0;
+            var noise = af_add(af_add(af_scale(n0, w0), af_scale(n1, 1.0f - w0)), af_scale(nd, 0.5f));
+
+            // The clamp residual of z = z_m + h eps(z), 2^-23 (|z_m| + h) (af_frustum_ball).
+            var residual = (abs(ball.z) + axisCamera.z) * 1.1920928955078125e-7f;
+            var depth = af_add_iv(af_symbol(ball.z, axisCamera.z), new float2(-residual, residual));
+            var lateral = tile.Half * z1 + (abs(tile.Slope.y) + tile.Half) * z1 * 2.384185791015625e-7f;
+            var level = af_add_iv(af_add_iv(af_add(af_point(tile.Origin.y), af_scale(depth, tile.Slope.y)), new float2(-lateral, lateral)), height);
+            var displaced = af_range(af_add(level, af_scale(af_mul(af_from_iv(fade), noise), Amplitude)));
+            var affine = new float2(max(0.0f, (FloorOffset - displaced.y) / FloorBlend), max(0.0f, (FloorOffset - displaced.x) / FloorBlend));
+            var interval = Compose(s, fade, iv_add(Noise.CoverageBound(Clip(af_range(n0)), Clip(af_range(n1)), tile.Time), iv_scale(Clip(af_range(nd)), 0.5f)));
+            return (affine, interval);
         }
     }
 
@@ -937,9 +1899,10 @@ public sealed class NoiseBoundTests
         {
             var maybe = new float2(0.0f, float.MaxValue);
             var ball = iv_frustum_ball(tile.Slope, z0, z1, tile.Footprint, Noise.Warp);
-            if (gated && Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w), low: true), tile.Time).y > Cutoff)
+            if (gated && Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w), low: true), BestBall(Noise.CoverageRadius(ball.w), low: true), tile.Time).y > Cutoff)
                 return maybe;
-            var coverage = Noise.CoverageBound(Noise.CoverageBall(tile.World(new float3(ball.x, ball.y, ball.z)), ball.w, counts), tile.Time);
+            var coverageBall = Noise.CoverageBall(tile.World(new float3(ball.x, ball.y, ball.z)), ball.w, counts);
+            var coverage = Noise.CoverageBound(coverageBall, coverageBall, tile.Time);
             return coverage.y <= Cutoff ? new float2(0.0f, 0.0f) : maybe;
         }
     }
@@ -1162,7 +2125,7 @@ public sealed class NoiseBoundTests
                 var provable = false;
                 foreach (var low in new[] { true, false })
                 {
-                    var best = iv_add(iv_mul(Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w), low), tile.Time), wc), iv_mul(iv_scale(BestBall(Noise.DetailRadius(ball.w), low), 0.5f), wd));
+                    var best = iv_add(iv_mul(Noise.CoverageBound(BestBall(Noise.CoverageRadius(ball.w), low), BestBall(Noise.CoverageRadius(ball.w), low), tile.Time), wc), iv_mul(iv_scale(BestBall(Noise.DetailRadius(ball.w), low), 0.5f), wd));
                     provable |= Compose(d, fade, best).y <= 0.0f;
                 }
 
@@ -1171,7 +2134,8 @@ public sealed class NoiseBoundTests
             }
 
             var centre = tile.World(new float3(ball.x, ball.y, ball.z));
-            var noise = iv_add(iv_mul(Noise.CoverageBound(Noise.CoverageBall(centre, ball.w, counts), tile.Time), wc), iv_mul(iv_scale(Noise.DetailBall(centre, ball.w, counts), 0.5f), wd));
+            var coverage = Noise.CoverageBall(centre, ball.w, counts);
+            var noise = iv_add(iv_mul(Noise.CoverageBound(coverage, coverage, tile.Time), wc), iv_mul(iv_scale(Noise.DetailBall(centre, ball.w, counts), 0.5f), wd));
             return Compose(d, fade, noise);
         }
     }
@@ -1301,6 +2265,7 @@ public sealed class NoiseBoundTests
         public readonly Counts Probes = new();
         public readonly Counts Lod = new();
         public readonly Counts Oracle = new();
+        public readonly Counts Range = new();
         public long Rays;
         public long Tiles;
         public long DenseSteps;
@@ -1314,6 +2279,10 @@ public sealed class NoiseBoundTests
         public float MaxOracleDifference;
         public long OracleEmpty;
         public long OracleEmptySkipped;
+        public long RangeEmpty;
+        public long RangeEmptySkipped;
+        public long RangeViolations;
+        public bool Ranged;
         public double MaxLodDepthError;
         public double MaxRefDepthError;
 
@@ -1334,6 +2303,17 @@ public sealed class NoiseBoundTests
 
         // The oracle-empty cells the pre-pass proves empty; a pre-pass that skips nothing scores 0.
         public double CullFraction => (double)OracleEmptySkipped / OracleEmpty;
+
+        // The range ceiling: the oracle march's cost over the range mask's, with probes free. The range
+        // mask is what an exact enclosure of each cell over the tile's whole slice could prove, so no sound
+        // bound can reach the oracle, only this; it is sampled, so it is an upper estimate.
+        public double RangeCeiling => Oracle.Cost / Range.Cost;
+
+        // The tile march's efficiency against the range ceiling: the range mask's cost over the tile
+        // march's with its probes.
+        public double RangeEfficiency => Range.Cost / (Masked.Cost + Probes.Cost);
+
+        public double RangeCull => (double)RangeEmptySkipped / RangeEmpty;
     }
 
     /// <summary>
@@ -1344,12 +2324,15 @@ public sealed class NoiseBoundTests
     /// footprint-aware march as well, and the agreement at the body start (or the grid's end): the optical
     /// depth of a cutoff-0 footprint march and of the fixed-step cells, each against ConvergedDepth at
     /// h = 0.5. The oracle mask and the agreement marches count into throwaway Counts, the oracle march into
-    /// its own, so the cost rows do not move.
+    /// its own, so the cost rows do not move. With range, the range mask as well: the oracle mask plus
+    /// every cell where the density is positive at any of 5 x 5 slopes over the tile's slope square
+    /// (corners included) x 9 depths over the cell; each ray is marched over it into Range, and a cell of
+    /// it the pre-pass skipped is counted as a range violation (a sampled point a bound failed to enclose).
     /// </summary>
-    private static RunStats Run(Scenario field, int n, int tiles, int seed, bool lod = false)
+    private static RunStats Run(Scenario field, int n, int tiles, int seed, bool lod = false, bool range = false)
     {
         var random = new System.Random(seed);
-        var stats = new RunStats();
+        var stats = new RunStats { Ranged = range };
         var scratch = new Counts();
         var grid = field.Grid;
         for (var t = 0; t < tiles; t++)
@@ -1379,6 +2362,34 @@ public sealed class NoiseBoundTests
                 }
             }
 
+            var ranged = new List<int>();
+            if (range)
+            {
+                var inOracle = new HashSet<int>(oracle);
+                for (var c = 0; c < grid.Length - 1; c++)
+                {
+                    var sampled = inOracle.Contains(c);
+                    for (var a = 0; a < 5 && !sampled; a++)
+                    for (var b = 0; b < 5 && !sampled; b++)
+                    for (var k = 0; k < 9 && !sampled; k++)
+                    {
+                        var slope = new float2(tile.SlopesX.x + (tile.SlopesX.y - tile.SlopesX.x) * a / 4.0f, tile.SlopesY.x + (tile.SlopesY.y - tile.SlopesY.x) * b / 4.0f);
+                        sampled = field.Density(tile, slope, grid[c] + (grid[c + 1] - grid[c]) * k / 8.0f, false, scratch) > 0.0f;
+                    }
+
+                    if (sampled)
+                    {
+                        ranged.Add(c);
+                        stats.RangeViolations += inMask.Contains(c) ? 0 : 1;
+                    }
+                    else
+                    {
+                        stats.RangeEmpty++;
+                        stats.RangeEmptySkipped += inMask.Contains(c) ? 0 : 1;
+                    }
+                }
+            }
+
             var stop = bodyStart >= 0 ? bodyStart : grid.Length - 1;
             foreach (var slope in slopes)
             {
@@ -1391,6 +2402,9 @@ public sealed class NoiseBoundTests
                 var exact = 1.0f;
                 for (var c = 0; c < oracle.Count && exact >= 0.02f; c++)
                     exact *= Integrate(field, tile, slope, grid[oracle[c]], grid[oracle[c] + 1], lod: false, stats.Oracle);
+                var rangedT = 1.0f;
+                for (var c = 0; c < ranged.Count && rangedT >= 0.02f; c++)
+                    rangedT *= Integrate(field, tile, slope, grid[ranged[c]], grid[ranged[c] + 1], lod: false, stats.Range);
                 stats.Rays++;
                 stats.MaxDifference = MathF.Max(stats.MaxDifference, MathF.Abs(dense - masked));
                 stats.MaxOracleDifference = MathF.Max(stats.MaxOracleDifference, MathF.Abs(dense - exact));
@@ -1420,10 +2434,13 @@ public sealed class NoiseBoundTests
 
     private void Report(string label, RunStats s) => output.WriteLine(
         $"IV-REPORT {label}: dense snoise/ray {s.PerRay(s.Dense.Snoise):F2} env/ray {s.PerRay(s.Dense.Envelope):F2} (samples/ray {s.PerRay(s.DenseSteps):F2}); "
-        + $"tile snoise/ray {s.PerRay(s.Masked.Snoise + (double)s.Probes.Snoise):F2} env/ray {s.PerRay(s.Masked.Envelope + (double)s.Probes.Envelope):F2} "
-        + $"(probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2}; dense cells/ray {s.PerRay(s.MaskedSteps):F2}); "
+        + $"tile snoise/ray {s.PerRay(s.Masked.Snoise + (double)s.Probes.Snoise):F2} env/ray {s.PerRay(s.Masked.Envelope + (double)s.Probes.Envelope):F2} grad/ray {s.PerRay(s.Probes.Grad):F2} "
+        + $"(probes/tile env {(double)s.Probes.Envelope / s.Tiles:F1} snoise {(double)s.Probes.Snoise / s.Tiles:F2} grad {(double)s.Probes.Grad / s.Tiles:F2}; dense cells/ray {s.PerRay(s.MaskedSteps):F2}); "
         + $"cost ratio {s.Ratio:F2}x, oracle ceiling {s.OracleCeiling:F2}x, efficiency {s.Efficiency:F3}, cull fraction {s.CullFraction:F3} ({s.OracleEmptySkipped}/{s.OracleEmpty}), "
-        + $"probe overhead {s.ProbeOverhead:F3}; max |dT| {s.MaxDifference:R}, oracle {s.MaxOracleDifference:R}; unfinished rays {s.Unfinished}");
+        + $"probe overhead {s.ProbeOverhead:F3}; max |dT| {s.MaxDifference:R}, oracle {s.MaxOracleDifference:R}; unfinished rays {s.Unfinished}"
+        + (s.Ranged
+            ? $"; range ceiling {s.RangeCeiling:F3} (oracle cost over the range mask's), efficiency against it {s.RangeEfficiency:F3}, range cull {s.RangeCull:F3} ({s.RangeEmptySkipped}/{s.RangeEmpty}), range violations {s.RangeViolations}"
+            : ""));
 
     private void ReportVoid(string label, RunStats s) => output.WriteLine(
         $"IV-REPORT {label}: steps/px ref {s.PerRay(s.DenseSteps):F2}, masked {s.PerRay(s.MaskedSteps):F2}, LOD {s.PerRay(s.LodSteps):F2} ({(double)s.DenseSteps / s.LodSteps:F2}x fewer); "
@@ -1497,8 +2514,10 @@ public sealed class NoiseBoundTests
 
         var scenarios = new (float Warp, Func<float, Scenario> Make)[]
         {
-            (FogField.AetheriaWarp, FogField.HeightFog), (FogField.AetheriaWarp, FogField.InsideFog),
-            (FogField.AetheriaWarp, FogField.Wells), (SlabField.SlabWarp, SlabField.Create),
+            (FogField.AetheriaWarp, w => FogField.HeightFog(w, BoundMode.Interval)), (FogField.AetheriaWarp, w => FogField.InsideFog(w, BoundMode.Interval)),
+            (FogField.AetheriaWarp, w => FogField.DeepWell(w, BoundMode.Interval)), (FogField.AetheriaWarp, w => FogField.DeepWell(w, BoundMode.Affine)),
+            (FogField.AetheriaWarp, w => FogField.Wells(w, BoundMode.Interval)), (FogField.AetheriaWarp, w => FogField.Wells(w, BoundMode.Affine)),
+            (SlabField.SlabWarp, SlabField.Create),
         };
         foreach (var (warp, make) in scenarios)
         foreach (var w in new[] { 0.0f, warp })
@@ -1513,34 +2532,41 @@ public sealed class NoiseBoundTests
     }
 
     /// <summary>
-    /// The proving ground (docs/cultmath-interval-ground-cut.md, "Pass 3" and "Pass 4"). Scenarios
-    /// (a) height fog, (b) inside the fog, (c) Aetheria's wells and (d) r1's uniform slab, each over 64
-    /// tiles at N in {1, 4, 8, 16} and warp in {0, D}: the tile march integrates exactly the dense march's
+    /// The proving ground (docs/cultmath-interval-ground-cut.md, "Pass 3", "Pass 4" and "Pass 5b").
+    /// Scenarios (a) height fog and (b) inside the fog under the centred-warp interval bound, (c) the deep
+    /// well and (c-band) the shallow wells each under the centred-warp interval bound and the affine bound
+    /// on the same seeds, and (d) r1's uniform slab, each over 64 tiles at N in {1, 4, 8, 16} and warp in
+    /// {0, D}; (c) and (c-band) also print the range ceiling at N = 8, and no range-mask cell is skipped: the tile march integrates exactly the dense march's
     /// cells, so the transmittance agrees within 1e-3 (a difference would be a skipped cell that was not
     /// empty), the oracle march (each ray over the oracle mask: the cells whose mid-depth density is nonzero
     /// for at least one of the tile's rays) agrees with the dense march exactly, and no (a)-(d) tile reports
     /// a body. (e) the void: the grid over hollow radius, camera offset and ramp width (32 tiles at N = 8),
     /// LOD-far (32 tiles) and the one shipped void (200 tiles), three marches each, the footprint-aware one
-    /// taking the analytic body step. Contracts at N = 8, the lower of warp 0 and D: (a) at least 2x
-    /// combined cost; (c) (ruling wells-overhead-plus-floor) probe overhead, the tile march over the tile
-    /// march plus its probes, at least 0.90, and, hard, the pre-pass proves at least half of the
-    /// oracle-empty cells empty; the oracle ceiling, the efficiency against it and the cull fraction are
-    /// printed; (e) at the shipped void the masked fixed-step march agrees with the reference exactly, the
+    /// taking the analytic body step. Contracts at N = 8: (a) at least 2x combined cost, the lower of warp
+    /// 0 and D; (c) (ruling affine-wells-contract-cheaper-than-interval) on the deep well the affine
+    /// bound's combined cost ratio exceeds the centred interval's at warp 0 and at warp D, and, hard
+    /// (ruling wells-overhead-plus-floor), the pre-pass proves at least half of the oracle-empty cells
+    /// empty under both bounds at both warps; probe overhead, the efficiency against the oracle and against
+    /// the range ceiling, the ceilings and the cull fraction are printed, not asserted; (c-band) is
+    /// printed only; (e) at the shipped void the masked fixed-step march agrees with the reference exactly, the
     /// footprint-aware march's optical depth at the body start is off a converged march (h = 0.5, every
     /// cell) by at most twice the fixed-step march's error, and it takes at most half the reference's
-    /// steps per pixel. A shortfall skips naming saving-2x-scenarios and every shortfall; the fields, the
-    /// grids and the envelope cost are not tuned toward it.
+    /// steps per pixel. A broken (c) contract fails the test; a shortfall of the (a) or (e) saving skips
+    /// naming saving-2x-scenarios and every such shortfall. The fields, the grids and the envelope cost are
+    /// not tuned toward either.
     /// </summary>
     [Fact]
     public void IntervalSkipHalvesEvaluations()
     {
-        var ratios = new Dictionary<string, double>();
-        var cullFloor = double.MaxValue;
+        var atEight = new Dictionary<(string Key, float Warp), RunStats>();
         var scenarios = new (string Key, float Warp, Func<float, Scenario> Make)[]
         {
-            ("a", FogField.AetheriaWarp, FogField.HeightFog),
-            ("b", FogField.AetheriaWarp, FogField.InsideFog),
-            ("c", FogField.AetheriaWarp, FogField.Wells),
+            ("a", FogField.AetheriaWarp, w => FogField.HeightFog(w, BoundMode.Interval)),
+            ("b", FogField.AetheriaWarp, w => FogField.InsideFog(w, BoundMode.Interval)),
+            ("c interval", FogField.AetheriaWarp, w => FogField.DeepWell(w, BoundMode.Interval)),
+            ("c affine", FogField.AetheriaWarp, w => FogField.DeepWell(w, BoundMode.Affine)),
+            ("c-band interval", FogField.AetheriaWarp, w => FogField.Wells(w, BoundMode.Interval)),
+            ("c-band affine", FogField.AetheriaWarp, w => FogField.Wells(w, BoundMode.Affine)),
             ("d", SlabField.SlabWarp, SlabField.Create),
         };
         foreach (var (key, warp, make) in scenarios)
@@ -1548,19 +2574,39 @@ public sealed class NoiseBoundTests
         foreach (var w in new[] { 0.0f, warp })
         {
             var field = make(w);
-            var stats = Run(field, n, 64, 0x5A7E + n);
+            var stats = Run(field, n, 64, 0x5A7E + n, range: n == 8 && key.StartsWith('c'));
             Report($"{field.Name} N={n} warp={w:R}", stats);
+            Assert.True(stats.RangeViolations == 0, $"{field.Name} N={n} warp={w:R}: the pre-pass skipped {stats.RangeViolations} cells where a sampled density is positive");
             Assert.True(stats.MaxDifference <= 1.0e-3f, $"{field.Name} N={n} warp={w:R}: transmittance differs by {stats.MaxDifference:R}");
             Assert.True(stats.MaxOracleDifference == 0.0f, $"{field.Name} N={n} warp={w:R}: the oracle march differs from the dense march by {stats.MaxOracleDifference:R}");
             if (key == "d")
                 output.WriteLine($"IV-REPORT (d) N={n} warp={w:R}: ungated dense snoise/ray {3.0 * stats.PerRay(stats.DenseSteps):F2} (three per dense sample, as r1 counted)");
             if (n == 8)
-                ratios[key] = Math.Min(ratios.GetValueOrDefault(key, double.MaxValue), key == "c" ? stats.ProbeOverhead : stats.Ratio);
-            if (n == 8 && key == "c")
+                atEight[(key, w)] = stats;
+        }
+
+        var warps = new[] { 0.0f, FogField.AetheriaWarp };
+        var costA = warps.Min(w => atEight[("a", w)].Ratio);
+        var cullFloor = double.MaxValue;
+        var gains = new List<string>();
+        var shortfalls = new List<string>();
+        var broken = new List<string>();
+        foreach (var w in warps)
+        {
+            var interval = atEight[("c interval", w)];
+            var affine = atEight[("c affine", w)];
+            foreach (var (mode, stats) in new[] { ("interval", interval), ("affine", affine) })
             {
-                Assert.True(stats.CullFraction >= 0.5, $"(c) warp={w:R}: the pre-pass proves {stats.CullFraction:F3} of the oracle-empty cells empty, under the 0.5 floor (ruling wells-overhead-plus-floor)");
+                Assert.True(stats.CullFraction >= 0.5, $"(c) {mode} warp={w:R}: the pre-pass proves {stats.CullFraction:F3} of the oracle-empty cells empty, under the 0.5 floor (ruling wells-overhead-plus-floor)");
                 cullFloor = Math.Min(cullFloor, stats.CullFraction);
             }
+
+            var band = (atEight[("c-band interval", w)], atEight[("c-band affine", w)]);
+            gains.Add($"warp {w:R}: (c) affine {affine.Ratio:F2}x against centred interval {interval.Ratio:F2}x ({affine.Ratio / interval.Ratio:F2}x), probe overhead {affine.ProbeOverhead:F3} and {interval.ProbeOverhead:F3}, "
+                + $"efficiency {affine.Efficiency:F3} and {interval.Efficiency:F3} against the oracle, {affine.RangeEfficiency:F3} and {interval.RangeEfficiency:F3} against the range ceiling {affine.RangeCeiling:F3}; "
+                + $"(c-band) {band.Item2.Ratio:F2}x against {band.Item1.Ratio:F2}x ({band.Item2.Ratio / band.Item1.Ratio:F2}x)");
+            if (!(affine.Ratio > interval.Ratio))
+                broken.Add($"(c) warp {w:R}: affine {affine.Ratio:F2}x is not cheaper than the centred interval's {interval.Ratio:F2}x");
         }
 
         foreach (var rh in VoidField.HollowRadii)
@@ -1581,15 +2627,15 @@ public sealed class NoiseBoundTests
         Assert.True(headline.MaxLodDepthError <= 2.0 * headline.MaxRefDepthError, $"at the body start the footprint-aware march's optical depth is off the converged march's by {headline.MaxLodDepthError:G6} relative, more than twice the fixed-step march's {headline.MaxRefDepthError:G6}");
         var steps = (double)headline.DenseSteps / headline.LodSteps;
 
-        var shortfalls = new List<string>();
-        if (ratios["a"] < 2.0)
-            shortfalls.Add($"(a) saves {ratios["a"]:F2}x combined cost, under 2x");
-        if (ratios["c"] < 0.90)
-            shortfalls.Add($"(c) probe overhead {ratios["c"]:F3}, under 0.90");
+        if (costA < 2.0)
+            shortfalls.Add($"(a) saves {costA:F2}x combined cost, under 2x");
         if (steps < 2.0)
             shortfalls.Add($"(e) takes {steps:F2}x fewer steps per pixel at the shipped void, under 2x");
-        output.WriteLine($"IV-REPORT contracts at N=8 (lower of warp 0 and D): (a) {ratios["a"]:F2}x cost; (c) probe overhead {ratios["c"]:F3} (at least 0.90), cull fraction {cullFloor:F3} (at least 0.5, hard); "
+        output.WriteLine($"IV-REPORT contracts at N=8: (a) {costA:F2}x cost (lower of warp 0 and D, at least 2x); (c) affine cheaper than the centred interval at both warps, cull fraction {cullFloor:F3} (at least 0.5 under both bounds, hard); "
             + $"(e) {steps:F2}x fewer steps/px, depth error at the body start LOD {headline.MaxLodDepthError:G4} vs fixed-step {headline.MaxRefDepthError:G4} (at most 2x)");
+        foreach (var line in gains)
+            output.WriteLine($"IV-REPORT (c) at N=8, {line}");
+        Assert.True(broken.Count == 0, "ruling affine-wells-contract-cheaper-than-interval: " + string.Join("; ", broken));
         if (shortfalls.Count > 0)
             Assert.Skip("saving-2x-scenarios: " + string.Join("; ", shortfalls));
     }

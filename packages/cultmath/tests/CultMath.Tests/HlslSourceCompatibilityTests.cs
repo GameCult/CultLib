@@ -33,6 +33,10 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_iv_snoise_ball", typeof(float3), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_iv_fbm_ball", typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_iv_snoise_ball", typeof(float2), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_snoise", typeof(float3), typeof(float3), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_fbm", typeof(float3), typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_frustum_ball", typeof(float2), typeof(float), typeof(float), typeof(float), typeof(float)));
     }
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
@@ -133,7 +137,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(53, compared.Count);
+        Assert.Equal(67, compared.Count);
     }
 
     /// <summary>
@@ -162,6 +166,81 @@ public sealed class HlslSourceCompatibilityTests
             var expected = Values(phacelle(p, side, offset, normalization));
             var actual = Values(mirror.Invoke(shader, new object[] { p, side, offset, normalization })!);
             Assert.True(BitwiseEqual(expected, actual), $"mirror differs from C# at p = {p}, side = {side}");
+        }
+    }
+
+    /// <summary>
+    /// The generic comparison draws centre, axis and radius from [-100, 100], where the reach is far past the
+    /// 0.15 or so below which <c>cultmath_af_snoise</c>'s centred form is the narrower one, so an HLSL edit
+    /// of the choice between the centred and the Lipschitz form (a threshold, a reordered sum) survives it.
+    /// This sweep draws realistic slices (axis and radius log-uniform in 1e-3 to 0.5, the reach of a tile
+    /// near a camera), which land on both sides of the choice and next to it, for <c>cultmath_af_snoise</c>
+    /// and <c>cultmath_af_fbm</c>.
+    /// </summary>
+    [Fact]
+    public void AffineSnoiseMirrorMatchesCSharpBitForBitOnBothSidesOfItsBranch()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var snoiseMirror = ShaderFunction(shaderType, "cultmath_af_snoise", typeof(float3), typeof(float3), typeof(float))!;
+        var fbmMirror = ShaderFunction(shaderType, "cultmath_af_fbm", typeof(float3), typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float))!;
+
+        var random = new System.Random(0x5EED3);
+        float Next(float extent) => (random.NextSingle() * 2.0f - 1.0f) * extent;
+        float Reach() => 1.0e-3f * MathF.Pow(500.0f, random.NextSingle());
+        int centred = 0, lipschitz = 0;
+        for (var i = 0; i < 20000; i++)
+        {
+            var centre = new float3(Next(50.0f), Next(50.0f), Next(50.0f));
+            var axis = normalize(new float3(Next(1.0f), Next(1.0f), Next(1.0f))) * Reach();
+            var radius = Reach();
+            var expected = af_snoise(centre, axis, radius);
+            var actual = Values(snoiseMirror.Invoke(shader, new object[] { centre, axis, radius })!);
+            Assert.True(BitwiseEqual(Values(expected), actual), $"cultmath_af_snoise differs from C# at centre = {centre}, axis = {axis}, radius = {radius}");
+            if (expected.y != 0.0f)
+                centred++;
+            else
+                lipschitz++;
+
+            if (i % 8 == 0)
+            {
+                var fbmExpected = Values(af_fbm(centre, axis, radius, 4, 2.0f, 0.5f));
+                var fbmActual = Values(fbmMirror.Invoke(shader, new object[] { centre, axis, radius, 4, 2.0f, 0.5f })!);
+                Assert.True(BitwiseEqual(fbmExpected, fbmActual), $"cultmath_af_fbm differs from C# at centre = {centre}, axis = {axis}, radius = {radius}");
+            }
+        }
+
+        Assert.True(centred > 2000 && lipschitz > 2000, $"the sweep meets one branch too rarely: centred {centred}, Lipschitz {lipschitz} of 20000");
+    }
+
+    /// <summary>
+    /// The generic comparison stops at 1e7, so an HLSL edit of <c>cultmath_af_range</c>'s NaN test that
+    /// misreads the finite values near the float maximum (or an overflowed endpoint) survives it. Forms
+    /// from zero to the float maximum, infinite and NaN components, both signs, in every slot: the mirror
+    /// returns C#'s bits, and neither endpoint is ever NaN.
+    /// </summary>
+    [Fact]
+    public void AffineRangeMirrorMatchesCSharpBitForBitAtTheFloatExtremes()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_af_range", typeof(float3))!;
+
+        var magnitudes = new[] { 0.0f, 1.0f, 1.0e30f, 1.0e38f, float.MaxValue / 2.0f, float.MaxValue, float.PositiveInfinity, float.NaN };
+        var values = magnitudes.Concat(magnitudes.Where(m => !float.IsNaN(m)).Select(m => -m)).ToArray();
+        foreach (var x0 in values)
+        foreach (var a in values)
+        foreach (var e in values)
+        {
+            var form = new float3(x0, a, e);
+            var expected = af_range(form);
+            var actual = Values(mirror.Invoke(shader, new object[] { form })!);
+            Assert.True(BitwiseEqual(Values(expected), actual), $"cultmath_af_range differs from C# at {form}");
+            Assert.False(float.IsNaN(expected.x) || float.IsNaN(expected.y), $"af_range({form}) is {expected}, a NaN endpoint");
         }
     }
 

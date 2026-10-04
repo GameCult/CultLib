@@ -9,6 +9,9 @@
 // Lipschitz constant of cultmath_snoise(float3); provenance in math.Interval.cs (SNOISE_LIPSCHITZ).
 static const float CULTMATH_SNOISE_LIPSCHITZ = 7.9640074;
 
+// Lipschitz constant of cultmath_snoise(float2); provenance in math.Interval.cs (SNOISE2_LIPSCHITZ).
+static const float CULTMATH_SNOISE2_LIPSCHITZ = 8.117002;
+
 float2 cultmath_iv_point(float value) { return float2(value, value); }
 float2 cultmath_iv_add(float2 a, float2 b) { return float2(a.x + b.x, a.y + b.y); }
 float2 cultmath_iv_sub(float2 a, float2 b) { return float2(a.x - b.y, a.y - b.x); }
@@ -84,6 +87,14 @@ float2 cultmath_iv_snoise_ball(float3 centre, float radius)
 {
     float n = cultmath_snoise(centre);
     float e = CULTMATH_SNOISE_LIPSCHITZ * radius;
+    return float2(max(n - e, -1.0), min(n + e, 1.0));
+}
+
+// The 2D overload: [n - L2 r, n + L2 r] intersected with [-1, 1], n = cultmath_snoise(centre). One snoise, value only.
+float2 cultmath_iv_snoise_ball(float2 centre, float radius)
+{
+    float n = cultmath_snoise(centre);
+    float e = CULTMATH_SNOISE2_LIPSCHITZ * radius;
     return float2(max(n - e, -1.0), min(n + e, 1.0));
 }
 

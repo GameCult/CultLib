@@ -163,7 +163,7 @@ public sealed class GlslMirrorTests
             }
 
             if (want["check"] is not null)
-                AssertFrustumBall(want["cases"]!.AsArray());
+                output.WriteLine($"{name}: {Families[f].Verify!(want["cases"]!.AsArray())}");
         }
 
         committed.Remove("functions");
@@ -188,8 +188,9 @@ public sealed class GlslMirrorTests
 
     // FrustumBall applied to C#'s own results: every case's ball encloses the exact one and is no wider
     // than its rounding widening allows.
-    private static void AssertFrustumBall(JsonArray cases)
+    private static string AssertFrustumBall(JsonArray cases)
     {
+        double low = double.PositiveInfinity, high = double.PositiveInfinity;
         foreach (var entry in cases)
         {
             var sides = ((string)entry!).Split(" -> ");
@@ -203,7 +204,148 @@ public sealed class GlslMirrorTests
             var c1 = Math.Abs(mx * zm) + Math.Abs(my * zm) + Math.Abs(zm);
             Assert.True(b[3] >= reach, $"iv_frustum_ball case {entry}: radius short of the exact ball by {reach - b[3]}");
             Assert.True(b[3] <= reach + Math.ScaleB(radius + c1, -19), $"iv_frustum_ball case {entry}: radius past the exact ball by {b[3] - reach}, more than 2^-19 (r + |c|_1)");
+            low = Math.Min(low, (b[3] - reach) / radius);
+            high = Math.Min(high, (reach + Math.ScaleB(radius + c1, -19) - b[3]) / Math.ScaleB(radius + c1, -19));
         }
+        return $"least slack: {low:E3} of r above the exact ball, {high:F3} of 2^-19 (r + |c|_1) below its widening";
+    }
+
+    private static readonly double[] CheckEps = { -1.0, -0.5, 0.0, 0.5, 1.0 };
+
+    // The origin, the six axis directions and the eight cube corners, normalised.
+    private static readonly (double X, double Y, double Z)[] CheckDirections = CheckDirectionList().ToArray();
+
+    private static IEnumerable<(double X, double Y, double Z)> CheckDirectionList()
+    {
+        yield return (0.0, 0.0, 0.0);
+        foreach (var s in new[] { -1.0, 1.0 })
+        {
+            yield return (s, 0.0, 0.0);
+            yield return (0.0, s, 0.0);
+            yield return (0.0, 0.0, s);
+        }
+
+        var corner = 1.0 / Math.Sqrt(3.0);
+        foreach (var sx in new[] { -corner, corner })
+        foreach (var sy in new[] { -corner, corner })
+        foreach (var sz in new[] { -corner, corner })
+            yield return (sx, sy, sz);
+    }
+
+    // SampledForm applied to C#'s own results, with C#'s own snoise or fBm as the reference value. A form
+    // must enclose its reference at every sample, and be no wider than the Lipschitz form's allowance.
+    // allowance is the part of e that is the float32 allowance; a family that allowanceDecides must have a
+    // sample that falls outside the form once it is removed, so the family can tell a device whose error
+    // passes the allowance from one that does not.
+    private static string AssertSampledForm(JsonArray cases, string name, Func<string[], float3, float> reference, Func<string[], double[], double> widthBound,
+        Func<string[], double[], double> allowance, bool allowanceDecides)
+    {
+        double least = double.PositiveInfinity, leastRelative = double.PositiveInfinity, tightest = double.PositiveInfinity;
+        var decided = 0;
+        foreach (var entry in cases)
+        {
+            var sides = ((string)entry!).Split(" -> ");
+            var tokens = sides[0].Split(' ');
+            double[] a = Floats(string.Join(' ', tokens.Take(7))), form = Floats(sides[1]);
+            double x0 = form[0], slope = form[1], e = form[2];
+            var withoutAllowance = e - allowance(tokens, a);
+            var allowanceNeeded = false;
+            foreach (var eps in CheckEps)
+            foreach (var d in CheckDirections)
+            {
+                var p = new float3((float)(a[0] + a[3] * eps + a[6] * d.X), (float)(a[1] + a[4] * eps + a[6] * d.Y), (float)(a[2] + a[5] * eps + a[6] * d.Z));
+                double value = reference(tokens, p), middle = x0 + slope * eps;
+                var inside = Math.Min(value - (middle - e), middle + e - value);
+                Assert.True(inside >= 0.0, $"{name} case {entry}: the reference {value:R} at eps {eps} and direction {d} is outside the form's range [{middle - e:R}, {middle + e:R}] by {-inside:R}");
+                least = Math.Min(least, inside);
+                leastRelative = Math.Min(leastRelative, inside / e);
+                allowanceNeeded |= Math.Abs(value - middle) > withoutAllowance;
+            }
+
+            if (allowanceNeeded)
+                decided++;
+
+            var bound = widthBound(tokens, a);
+            Assert.True(Math.Abs(slope) + e <= bound + Math.ScaleB(1.0 + bound, -16), $"{name} case {entry}: the width {Math.Abs(slope) + e:R} is past B + 2^-16 (1 + B) = {bound + Math.ScaleB(1.0 + bound, -16):R}");
+            tightest = Math.Min(tightest, (bound + Math.ScaleB(1.0 + bound, -16) - Math.Abs(slope) - e) / bound);
+        }
+
+        Assert.True(!allowanceDecides || decided > 0, $"{name}: no sample falls outside the form once the float32 allowance is removed, so the family cannot fail a device whose error passes it");
+        return $"least enclosure slack {least:E3} ({leastRelative:E3} of e), least tightness slack {tightest:E3} of B, {decided} of {cases.Count} cases need the allowance";
+    }
+
+    // The float32 allowance of one octave of af_snoise: 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R).
+    private static double SnoiseAllowance(double centre1, double reach) =>
+        Math.ScaleB(1.0, -14) + Math.ScaleB(reach, -12) + math.SNOISE_LIPSCHITZ * Math.ScaleB(centre1 + reach, -20);
+
+    // The Lipschitz form's width bound for one octave of the sampled-form check.
+    private static double SnoiseWidthBound(double centre1, double reach) => math.SNOISE_LIPSCHITZ * reach + SnoiseAllowance(centre1, reach);
+
+    private static double Length3(double[] a, int first) => Math.Sqrt(a[first] * a[first] + a[first + 1] * a[first + 1] + a[first + 2] * a[first + 2]);
+
+    private static double SnoiseOctave(Func<double, double, double> octave, double[] a, double frequency) =>
+        octave((Math.Abs(a[0]) + Math.Abs(a[1]) + Math.Abs(a[2])) * frequency, (Length3(a, 3) + a[6]) * frequency);
+
+    // The amplitude-weighted sum of a per-octave quantity over the fBm's octaves.
+    private static double FbmOctaves(string[] t, double[] a, Func<double, double, double> octave)
+    {
+        var (octaves, lacunarity, gain) = ((int)Convert.ToUInt32(t[7], 16), Floats(t[8])[0], Floats(t[9])[0]);
+        double sum = 0.0, amplitude = 1.0, frequency = 1.0;
+        for (var i = 0; i < Math.Clamp(octaves, 0, 16); i++)
+        {
+            sum += amplitude * SnoiseOctave(octave, a, frequency);
+            amplitude *= gain;
+            frequency *= lacunarity;
+        }
+
+        return sum;
+    }
+
+    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false) =>
+        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
+            (_, a) => SnoiseOctave(SnoiseWidthBound, a, 1.0), (_, a) => SnoiseOctave(SnoiseAllowance, a, 1.0), allowanceDecides);
+
+    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false) =>
+        AssertSampledForm(cases, "af_fbm",
+            (t, p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w,
+            (t, a) => FbmOctaves(t, a, SnoiseWidthBound), (t, a) => FbmOctaves(t, a, SnoiseAllowance), allowanceDecides);
+
+    // AffineFrustumBall applied to C#'s own results.
+    private static string AssertAffineFrustumBall(JsonArray cases)
+    {
+        double enclosure = double.PositiveInfinity, lower = double.PositiveInfinity, upper = double.PositiveInfinity;
+        var diagonal = new[] { (0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (Math.Sqrt(0.5), Math.Sqrt(0.5)), (Math.Sqrt(0.5), -Math.Sqrt(0.5)), (-Math.Sqrt(0.5), Math.Sqrt(0.5)), (-Math.Sqrt(0.5), -Math.Sqrt(0.5)) };
+        foreach (var entry in cases)
+        {
+            var sides = ((string)entry!).Split(" -> ");
+            var a = Floats(sides[0]);
+            var b = Floats(sides[1]);
+            double mx = a[0], my = a[1], z0 = a[2], z1 = a[3], fp = a[4], warp = a[5];
+            double zm = (z0 + z1) / 2.0, h = (z1 - z0) / 2.0;
+            var r0 = z1 * fp + warp;
+            var c1 = Math.Abs(mx * zm) + Math.Abs(my * zm) + Math.Abs(zm);
+            var spread = (Math.Abs(mx) + Math.Abs(my) + 1.0) * h;
+            double dx = b[0] - mx * zm, dy = b[1] - my * zm, dz = b[2] - zm;
+            var d = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            foreach (var z in new[] { z0, (3.0 * z0 + z1) / 4.0, zm, (z0 + 3.0 * z1) / 4.0, z1 })
+            {
+                var eps = h > 0.0 ? Math.Clamp((z - zm) / h, -1.0, 1.0) : 0.0;
+                foreach (var (ex, ey) in diagonal)
+                {
+                    double px = (mx + fp * ex) * z - (b[0] + mx * h * eps), py = (my + fp * ey) * z - (b[1] + my * h * eps), pz = z - (b[2] + h * eps);
+                    var slack = b[3] - (Math.Sqrt(px * px + py * py + pz * pz) + warp);
+                    Assert.True(slack >= 0.0, $"af_frustum_ball case {entry}: the ray point at depth {z:R} and offset ({ex}, {ey}) is outside the ball by {-slack:R}");
+                    enclosure = Math.Min(enclosure, slack / b[3]);
+                }
+            }
+
+            Assert.True(b[3] >= r0 + d, $"af_frustum_ball case {entry}: radius short of R0 + d by {r0 + d - b[3]}");
+            Assert.True(b[3] <= r0 + d + Math.ScaleB(r0 + c1 + spread, -19), $"af_frustum_ball case {entry}: radius past R0 + d by {b[3] - r0 - d}, more than 2^-19 (R0 + |c0|_1 + spread)");
+            lower = Math.Min(lower, (b[3] - r0 - d) / r0);
+            upper = Math.Min(upper, (r0 + d + Math.ScaleB(r0 + c1 + spread, -19) - b[3]) / Math.ScaleB(r0 + c1 + spread, -19));
+        }
+
+        return $"least enclosure slack {enclosure:E3} of the radius, least slack above R0 + d {lower:E3} of R0, below its widening {upper:F3} of 2^-19 (R0 + |c0|_1 + spread)";
     }
 
     // A committed case's arguments, decoded into the C# method's parameter types in Hex's field order.
@@ -249,7 +391,7 @@ public sealed class GlslMirrorTests
     // phacelle's sums of exp, sin and cos cancel; Windows differs from Linux by up to 3.6e-7 of it.
     private const double ScaledPlatformBound = 9.5367431640625e-7;
 
-    private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null, Platform Platform = Platform.None);
+    private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null, Platform Platform = Platform.None, Func<JsonArray, string>? Verify = null);
 
     private static float Uniform(System.Random r, float lo, float hi) => lo + (hi - lo) * r.NextSingle();
     private static float3 Point3(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
@@ -291,6 +433,76 @@ public sealed class GlslMirrorTests
         "and d = |GPU centre - c| (Euclidean); every case must have r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1). " +
         "Report the largest ulp distance per component as for any ulp-bounded family; only the two bounds fail the check.";
 
+    // An affine form (x0, a, e): e >= 0, spanning the widths a probe's forms take.
+    private static float3 Form(System.Random r) => new(Uniform(r, -20.0f, 20.0f), Uniform(r, -5.0f, 5.0f), MathF.Pow(10.0f, Uniform(r, -4.0f, 1.0f)));
+
+    // A slice's axis and radius in noise space, log-uniform from 1e-3 to 0.5: below about 0.15 the
+    // centred form of af_snoise wins, above it the Lipschitz form does, so both are drawn.
+    private static float3 Axis3(System.Random r)
+    {
+        var scale = MathF.Pow(10.0f, Uniform(r, -3.0f, -0.3f));
+        return new float3(Uniform(r, -1.0f, 1.0f) * scale, Uniform(r, -1.0f, 1.0f) * scale, Uniform(r, -1.0f, 1.0f) * scale);
+    }
+
+    private static float BallRadius(System.Random r) => MathF.Pow(10.0f, Uniform(r, -3.0f, -0.3f));
+
+    // A slice of reach 1e-6 to 1e-3, the short slices and small footprints near a camera, where the float32
+    // allowance is most of the form's width: the centre in [-50, 50] or [-1, 1], an axis of random direction
+    // (zero in one case of four) and a radius, each log-uniform in 1e-6 to 1e-3.
+    private static object[] SmallReachSlice(System.Random r)
+    {
+        var span = r.Next(2) == 0 ? 50.0f : 1.0f;
+        var centre = new float3(Uniform(r, -span, span), Uniform(r, -span, span), Uniform(r, -span, span));
+        var axis = new float3(0.0f, 0.0f, 0.0f);
+        if (r.Next(4) != 0)
+        {
+            var direction = math.normalize(new float3(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f)));
+            axis = direction * MathF.Pow(10.0f, Uniform(r, -6.0f, -3.0f));
+        }
+
+        return new object[] { centre, axis, MathF.Pow(10.0f, Uniform(r, -6.0f, -3.0f)) };
+    }
+
+    private const string SampledForm =
+        "the arguments are (cx, cy, cz, ax, ay, az, radius, ...) and the result is the form (x0, a, e). Enclosure: for eps in " +
+        "{-1, -0.5, 0, 0.5, 1} and d in {0, +-ex, +-ey, +-ez, (+-1, +-1, +-1) / sqrt(3)} (15 directions), form the point " +
+        "p = c + axis eps + radius d in double and round it to float32; the device's own reference value at p must lie in " +
+        "[x0 + a eps - e, x0 + a eps + e] with no tolerance, so a device whose gradient error exceeds the allowance fails. " +
+        "Tightness: with L = 7.9640074 and, for each octave (one for af_snoise), R = |axis| + radius, " +
+        "B = L R + 2^-14 + 2^-12 R + L 2^-20 (|c|_1 + R), the width |a| + e must be at most B + 2^-16 (1 + B). " +
+        "Report the least slack of each side, absolutely and as a fraction of e; only the two bounds fail the check. ";
+
+    private const string SnoiseForm = SampledForm + "The reference value is cultmath_snoise(p).";
+
+    private const string FbmForm = SampledForm +
+        "The reference value is cultmath_fbm_grad(p, octaves, lacunarity, gain).w, and B is the sum over octaves i of gain^i B_i, " +
+        "where B_i is B for the centre lacunarity^i c, the axis lacunarity^i axis and the radius lacunarity^i radius.";
+
+    // The two small-reach families add the centre leg to every af_snoise and af_fbm family. The device's
+    // reference value is its own noise, so a device whose noise is wrong everywhere encloses its own wrong
+    // values; C#'s value at the centre, the form's own x0 in the fixture, is the independent reading.
+    private const string CentreLeg =
+        " Centre leg, for every cultmath_af_snoise and cultmath_af_fbm family of this fixture, the earlier ones included: " +
+        "the fixture's own x0 in the result (C#'s value at the centre) must lie in [x0 - e, x0 + e] of the GPU's form, with " +
+        "no tolerance, so a device whose noise differs from C#'s by more than its e fails.";
+
+    private const string SmallReach =
+        " These cases have reach |axis| + radius of 1e-6 to 1e-3, where the float32 allowance is most of e and the second order " +
+        "remainder is not; the enclosure above fails a device whose gradient error exceeds the allowance.";
+
+    private const string SnoiseSmallForm = SnoiseForm + SmallReach + CentreLeg;
+
+    private const string FbmSmallForm = FbmForm + SmallReach + CentreLeg;
+
+    private const string AffineFrustumBall =
+        "enclosure and tightness: from the arguments (mx, my, z0, z1, fp, warpVariation) compute in double zm = (z0 + z1) / 2, " +
+        "h = (z1 - z0) / 2, axis = (mx h, my h, h), c0 = (mx zm, my zm, zm), |c0|_1 = |mx zm| + |my zm| + |zm|, R0 = z1 fp + warpVariation, " +
+        "spread = (|mx| + |my| + 1) h and d = |GPU centre - c0|. Enclosure: for z in {z0, (3 z0 + z1) / 4, zm, (z0 + 3 z1) / 4, z1}, " +
+        "eps = clamp((z - zm) / h, -1, 1) and the nine footprint offsets e in {(0, 0), (+-1, 0), (0, +-1), (+-1, +-1) / sqrt(2)}, " +
+        "the point P = ((mx + fp e.x) z, (my + fp e.y) z, z) satisfies |P - (GPU centre + axis eps)| + warpVariation <= GPU radius. " +
+        "Tightness: R0 + d <= GPU radius <= R0 + d + 2^-19 (R0 + |c0|_1 + spread). " +
+        "Report the least slack of each side; only the bounds fail the check.";
+
     // A Phacelle stripe wave vector: each component in [-6, 6], about one stripe per cell.
     private static float3 Side(System.Random r) => new(Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f));
 
@@ -331,12 +543,38 @@ public sealed class GlslMirrorTests
             var slope = new float2(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f));
             var z0 = Uniform(r, 0.1f, 100.0f);
             return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
-        }, FrustumBall),
+        }, FrustumBall, Verify: AssertFrustumBall),
         new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, platform exp", r => new object[] { Interval(r) }, Platform: Platform.Ulp),
         new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
             r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }, Platform: Platform.Scaled),
         new("float cultmath_snoise(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
         new("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
+        new("vec3 cultmath_af_point(float)", "ulp-bounded", r => new object[] { Uniform(r, -20.0f, 20.0f) }),
+        new("vec3 cultmath_af_symbol(float, float)", "ulp-bounded", r => new object[] { Uniform(r, -20.0f, 20.0f), Uniform(r, -5.0f, 5.0f) }),
+        new("vec3 cultmath_af_from_iv(vec2)", "ulp-bounded", r => new object[] { Interval(r) }),
+        new("vec2 cultmath_af_range(vec3)", "ulp-bounded", r => new object[] { Form(r) }),
+        new("vec3 cultmath_af_add(vec3, vec3)", "ulp-bounded", r => new object[] { Form(r), Form(r) }),
+        new("vec3 cultmath_af_sub(vec3, vec3)", "ulp-bounded", r => new object[] { Form(r), Form(r) }),
+        new("vec3 cultmath_af_neg(vec3)", "ulp-bounded", r => new object[] { Form(r) }),
+        new("vec3 cultmath_af_scale(vec3, float)", "ulp-bounded", r => new object[] { Form(r), Uniform(r, -4.0f, 4.0f) }),
+        new("vec3 cultmath_af_add_iv(vec3, vec2)", "ulp-bounded", r => new object[] { Form(r), Interval(r) }),
+        new("vec3 cultmath_af_mul(vec3, vec3)", "ulp-bounded", r => new object[] { Form(r), Form(r) }),
+        new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r) }, SnoiseForm, Verify: cases => AssertSnoiseForm(cases)),
+        new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded", r => new object[] { Point3(r), Axis3(r), BallRadius(r), 4, 2.0f, 0.5f }, FbmForm, Verify: cases => AssertFbmForm(cases)),
+        new("vec3 cultmath_af_frustum_axis(vec2, float, float)", "ulp-bounded", r =>
+        {
+            var z0 = Uniform(r, 0.1f, 100.0f);
+            return new object[] { new float2(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f)), z0, z0 + Uniform(r, 0.01f, 50.0f) };
+        }),
+        new("vec4 cultmath_af_frustum_ball(vec2, float, float, float, float)", "ulp-bounded", r =>
+        {
+            var slope = new float2(Uniform(r, -1.0f, 1.0f), Uniform(r, -1.0f, 1.0f));
+            var z0 = Uniform(r, 0.1f, 100.0f);
+            return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
+        }, AffineFrustumBall, Verify: AssertAffineFrustumBall),
+        new("vec2 cultmath_iv_snoise_ball(vec2, float)", "ulp-bounded", r => new object[] { new float2(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f)), Uniform(r, 0.001f, 2.0f) }),
+        new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded, reach 1e-6 to 1e-3", SmallReachSlice, SnoiseSmallForm, Verify: cases => AssertSnoiseForm(cases, allowanceDecides: true)),
+        new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded, reach 1e-6 to 1e-3", r => SmallReachSlice(r).Concat(new object[] { 4, 2.0f, 0.5f }).ToArray(), FbmSmallForm, Verify: cases => AssertFbmForm(cases, allowanceDecides: true)),
     };
 
     // The fixture text, each case's arguments given by family and point index.
