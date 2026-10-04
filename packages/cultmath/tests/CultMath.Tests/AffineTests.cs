@@ -582,6 +582,14 @@ public sealed class AffineTests
                 if (!(range.x <= value && value <= range.y))
                     misses.Add($"af_range(af_from_iv([{lo:R}, {hi:R}])) = {range} misses {value:R}");
             }
+
+            // Tight where the answer is representable: an endpoint is no farther than 2^-18 (|lo| + |hi|)
+            // from the interval's, unless that bound passes the float maximum, where infinity is the answer.
+            var slack = Math.ScaleB(Math.Abs((double)lo) + Math.Abs((double)hi), -18) + 1.0e-37;
+            if ((double)lo - slack > -(double)max && range.x < (double)lo - slack)
+                misses.Add($"af_range(af_from_iv([{lo:R}, {hi:R}])).x = {range.x:R}, more than 2^-18 (|lo| + |hi|) under lo");
+            if ((double)hi + slack < (double)max && range.y > (double)hi + slack)
+                misses.Add($"af_range(af_from_iv([{lo:R}, {hi:R}])).y = {range.y:R}, more than 2^-18 (|lo| + |hi|) over hi");
         }
 
         foreach (var a in specials)

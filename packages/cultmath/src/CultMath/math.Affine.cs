@@ -49,8 +49,9 @@ public static partial class math
     /// overflow in them. Rounding: x0 and e each round once, and a value of the interval is within e of x0
     /// only up to those; S = |x0| + e. Halving a subnormal endpoint loses at most 2^-150, and the sum and
     /// difference of subnormals are exact, so 2^-126 covers the underflow (the e of an interval spanning
-    /// one subnormal step would otherwise round to 0). If e + its absorption exceeds the float maximum
-    /// it is infinity, which still encloses.
+    /// one subnormal step would otherwise round to 0). |x0| + e is at most the larger endpoint
+    /// in magnitude, so it does not overflow. If e + its absorption exceeds the float maximum it is
+    /// infinity, which still encloses.
     /// </summary>
     public static float3 af_from_iv(float2 interval)
     {
@@ -62,14 +63,15 @@ public static partial class math
     /// <summary>
     /// The interval of every value of the form over every eps: x0 -+ (|a| + e), the bridge to iv_*. The
     /// endpoints round inward by at most u (|x0| + |a| + e) each, so each is moved outward by
-    /// (|x0| + |a| + e) 2^-20. A form with an infinite component (an overflowed op) gives infinite
+    /// (|x0| + |a| + e) 2^-20, formed term by term so that the sum never passes the float maximum before it
+    /// is scaled. A form with an infinite component (an overflowed op) gives infinite
     /// endpoints, and an endpoint that would be NaN (infinity minus infinity, or a NaN component) is
     /// the infinity on its side, so the result is never NaN and still encloses.
     /// </summary>
     public static float2 af_range(float3 x)
     {
         var r = abs(x.y) + x.z;
-        var w = (abs(x.x) + r) * 9.5367431640625e-7f;
+        var w = abs(x.x) * 9.5367431640625e-7f + r * 9.5367431640625e-7f;
         var lo = x.x - r - w;
         var hi = x.x + r + w;
         return new float2(lo == lo ? lo : float.NegativeInfinity, hi == hi ? hi : float.PositiveInfinity);
