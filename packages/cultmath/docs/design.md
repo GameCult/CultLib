@@ -724,7 +724,14 @@ magnitudes its roundings are relative to (named in the op's comment): at most
 `8u S` is needed with `u = 2^-24`, and the factor of two over that is the
 allowance for a device whose `+` and `*` are faithful rather than correctly
 rounded. `AffineTests.EveryOpEnclosesItsPoints` evaluates the form's set in
-double and the function in float32 with no tolerance.
+double and the function in float32 with no tolerance. Products and `af_from_iv` also
+add `2^-126`, the most an underflow to a subnormal can lose (`TinyOperandsEncloseTheirPoints`).
+`af_from_iv` halves its endpoints before it sums and differences them, and `af_range`
+scales its terms before it sums them, so endpoints near the float maximum do not overflow
+in the middle of the op; a form that overflows anyway gives `af_range` infinite endpoints,
+never NaN (`FromIntervalAndRangeHoldAtTheExtremes`). `AbsorptionsArePinned` and
+`SnoiseFormCarriesItsDocumentedWidth` pin each absorption and `af_snoise`'s float32 allowance both
+ways: the enclosure tests alone cannot see them on a CPU, where float32 is exact.
 
 `af_snoise(centre, axis, radius)` encloses `snoise` over `centre + axis eps + w`,
 `|w| <= radius`, from one `snoise_grad`. It returns the narrower of the
