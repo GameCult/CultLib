@@ -579,10 +579,7 @@ term is identically 0 and no `snoise` is evaluated. Where the envelope already
 proves the slice empty with the noise at its full range, the ball is not
 evaluated either. A probe is worth attempting only when the best result any
 centre value could give would prove the slice, and a ball with `L r >= 2` is
-`[-1, 1]` whatever `snoise(c)` is, so it costs nothing. The affine test gate takes the detail octave at its full range:
-skipping its best-case ball loses 1 of the deep well's 8074 oracle-empty cells (11 of 11096 in (c-band)) and none of the
-gate test's slices, and saves the probes. The interval gate keeps its detail ball, which decides in row (b): saturating it there takes the fog field's
-cull fraction from 0.663 to 0.585 and its cost ratio from 1.16x to 0.98x. CultMath owns none of the
+`[-1, 1]` whatever `snoise(c)` is, so it costs nothing. CultMath owns none of the
 envelope: the interval files have no envelope function, and each consumer composes
 its own. `NoiseBoundTests.EnvelopeBoundEnclosesDensity` checks that composition,
 the one the site and Aetheria use, over 2,000 seeded slices x 64 warped points
@@ -641,19 +638,19 @@ printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
   `y = F - h(xz) / 2`, so it looks across the bowl from inside it. Both rows run
   on the same seeds. With no warp, the centred interval takes 3.20x (oracle
   ceiling 5.24x, efficiency 0.611, cull fraction 0.988, probe overhead 0.940)
-  and the affine bound 3.62x (efficiency 0.691, cull 0.993, overhead 0.922). With
+  and the affine bound 3.57x (efficiency 0.682, cull 0.993, overhead 0.905). With
   the warp `D = 60`: 3.12x (ceiling 5.31x, efficiency 0.588, cull 0.987, overhead
-  0.929) against 3.54x (efficiency 0.666, cull 0.993, overhead 0.904), so affine
-  is 1.13x cheaper at both. The range mask (the oracle cells plus every cell
+  0.929) against 3.46x (efficiency 0.651, cull 0.993, overhead 0.880), so affine
+  is 1.12x and 1.11x cheaper. The range mask (the oracle cells plus every cell
   where any of 5 x 5 slopes x 9 depths has density above zero) gives a range
   ceiling of 0.859 (0.848 with the warp), the cost a bound that proves exactly
   the range-empty cells would reach against the oracle's; the efficiencies
-  against it are 0.805 and 0.712 (warp 0), 0.785 and 0.694 (warp `D`).
+  against it are 0.794 and 0.712 (warp 0), 0.768 and 0.694 (warp `D`).
 - (c-band) The shallow wells, four mass-derived wells in the zone bowl with
   the camera gazing across, whose geometry is band-dominated, printed only.
   Centred interval 3.01x (efficiency 0.414, cull 0.960, overhead 0.958), affine
-  3.96x (0.545, 0.979, 0.923); with the warp 2.75x (0.383, 0.954, 0.944) against
-  3.60x (0.503, 0.975, 0.893).
+  3.95x (0.544, 0.980, 0.901); with the warp 2.75x (0.383, 0.954, 0.944) against
+  3.54x (0.494, 0.976, 0.865).
 - (d) r1's uniform slab, which has no envelope: 1.38x with the warp 0.05, and
   1.67x with no warp.
 - (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
@@ -709,7 +706,7 @@ The contracts, at `N = 8`, the lower of warp 0 and `D`:
   converged march's by at most twice the fixed-step march's error; and it takes
   at most half the reference's steps per pixel.
 
-This run meets every contract: (a) 16384x, (c) affine 3.62x and 3.54x against
+This run meets every contract: (a) 16384x, (c) affine 3.57x and 3.46x against
 the centred interval's 3.20x and 3.12x, with a cull fraction of 0.987 at the
 lowest, (e) 2.69x fewer steps and a depth error 1.42x the fixed-step march's.
 The fields, the grids, the 0.2 envelope weight and the 2.0 gradient weight are
