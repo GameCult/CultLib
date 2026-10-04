@@ -33,6 +33,10 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_iv_snoise_ball", typeof(float3), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_iv_fbm_ball", typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_iv_snoise_ball", typeof(float2), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_snoise", typeof(float3), typeof(float3), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_fbm", typeof(float3), typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_af_frustum_ball", typeof(float2), typeof(float), typeof(float), typeof(float), typeof(float)));
     }
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
@@ -133,7 +137,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(53, compared.Count);
+        Assert.Equal(67, compared.Count);
     }
 
     /// <summary>

@@ -509,6 +509,7 @@ CultCellular cultmath_cellular(float3 p)
 
 #include "CultMath.Phacelle.hlsl"
 #include "CultMath.Interval.hlsl"
+#include "CultMath.Affine.hlsl"
 
 float cultmath_value_noise(float2 position)
 {
