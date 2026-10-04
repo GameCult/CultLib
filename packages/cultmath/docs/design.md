@@ -787,10 +787,16 @@ centre and variation are the caller's, and a consumer adds them to the slice's
 phase takes its own centre; one ball serves when the phases' centres coincide
 (warp 0). `NoiseBoundTests.CentredWarpStaysEnclosed` checks 2,000 balls, radius 1e-3 to
 500, and fails when `rho` is dropped or halved; `AffineWarpStaysEnclosed` checks
-3,000 tile slices of `FogField.Slice` (the owner the affine bound reads: the reach over
-which the flow is varied is `|axis| + radius`, and each phase carries its own growth)
-and fails when the reach is the ball's radius, a phase's growth is dropped, or `rho`
-is halved.
+3,000 tile slices of `FogField.Slice`, which returns the final `af_snoise` arguments
+(each phase's moved centre and grown radius, the detail's unwarped set, the shared axis),
+so the affine bound wires nothing itself: the reach over which the flow is varied is
+`|axis| + radius`, each phase carries its own growth, and the gate reads each argument's
+reach. It fails when the reach is the ball's radius or the larger of the two, a phase's
+growth is dropped or taken from the other phase, the axis or the detail radius is scaled,
+or `rho` is halved. `AffineCompositionTightensItsRanges` sees the shared-symbol
+composition itself: the bound is exactly the intersection of the affine arithmetic's piece
+and the interval composition over the forms' ranges, and the affine piece is the narrower
+of the two in at least 35% of the open slices (the piece alone is wider in total).
 
 The deep well is the representative Aetheria case: the camera inside a sun's
 bowl, looking across. `DeepWellIsTenBandsDeepAndWide` computes the band `G` from
