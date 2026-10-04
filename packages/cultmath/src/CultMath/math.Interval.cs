@@ -18,7 +18,7 @@ public static partial class math
     // against a fast re-measure and the ascent from MeasureLipschitz's witness.
     // Empirical with a margin, not a proof; the enclosure tests are the defence. A change to the
     // snoise kernel must re-run MeasureLipschitz and re-pin this constant.
-    public const float SNOISE_LIPSCHITZ = 10.099261f;
+    public const float SNOISE_LIPSCHITZ = 7.9640074f;
 
     // Lipschitz constant of snoise(float2) in its input, with SNOISE_LIPSCHITZ's provenance rule:
     // NoiseBoundTests.MeasureLipschitz2 (slow, explicit) takes the largest gradient length (central

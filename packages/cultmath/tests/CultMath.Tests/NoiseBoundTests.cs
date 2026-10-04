@@ -465,7 +465,7 @@ public sealed class NoiseBoundTests
     }
 
     // The start MeasureLipschitz printed as its witness.
-    private static readonly float3 LipschitzWitness = new(-241.98447f, -249.98927f, -60.058212f);
+    private static readonly float3 LipschitzWitness = new(229.92526f, 73.37927f, -66.14595f);
 
     /// <summary>
     /// Pins SNOISE_LIPSCHITZ: no |snoise_grad| over 1e5 seeded points exceeds it, and the ascent from

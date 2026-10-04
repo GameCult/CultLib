@@ -133,7 +133,7 @@ public sealed class NoiseGradTests
     {
         var i = math.floor(p + math.dot(p, new float3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f)));
         var x0 = p - i + math.dot(i, new float3(1.0f / 6.0f, 1.0f / 6.0f, 1.0f / 6.0f));
-        var g = math.step(new float3(x0.y, x0.z, x0.x), x0);
+        var g = new float3(math.step(x0.y, x0.x), math.step(x0.z, x0.y), 1.0f - math.step(x0.z, x0.x));
         var l = 1.0f - g;
         var lzxy = new float3(l.z, l.x, l.y);
         return (i, math.min(g, lzxy), math.max(g, lzxy));
@@ -188,6 +188,64 @@ public sealed class NoiseGradTests
         Assert.Equal(lines, crossings);
         Assert.True(maxValueJump < 1.0e-5f, $"value jump {maxValueJump} across a simplex boundary");
         Assert.True(maxGradientJump < 1.0e-4f, $"gradient jump {maxGradientJump} across a simplex boundary");
+    }
+
+    // The simplex diagonals are where x0's three components compare equal. The tie rule must be a total
+    // order there (math.snoise): with a cyclic or all-strict compare the four corners stop being a
+    // simplex and the value jumps on the line (t, t, t), lattice diagonals included: about 0.77 near the
+    // origin, up to 1.56 at magnitudes of 64 and above.
+    [Fact]
+    public void SnoiseIsContinuousOnTheSimplexDiagonal()
+    {
+        const int vertices = 160;
+        const int perVertex = 8;
+        var random = new System.Random(0x71E5);
+        var points = new System.Collections.Generic.List<float3>();
+        for (var k = 0; k < 400; k++)
+        {
+            var t = (float)(random.NextDouble() * 128.0 - 64.0);
+            points.Add(new float3(t, t, t));
+        }
+
+        points.Add(new float3(0.0f, 0.0f, 0.0f));
+        for (var k = 0; k < vertices; k++)
+        {
+            var lx = random.Next(-64, 65);
+            var ly = random.Next(-64, 65);
+            var lz = random.Next(-64, 65);
+            var shift = (lx + ly + lz) / 6.0f;
+            var v = new float3(lx - shift, ly - shift, lz - shift);
+            for (var j = 0; j < perVertex; j++)
+            {
+                var s = j == 0 ? 0.0f : random.NextSingle();
+                points.Add(new float3(v.x + s, v.y + s, v.z + s));
+            }
+        }
+
+        foreach (var p in points)
+        {
+            var value = math.snoise(p);
+            for (var axis = 0; axis < 3; axis++)
+            {
+                for (var direction = -1; direction <= 1; direction += 2)
+                {
+                    var q = p;
+                    for (var ulp = 1; ulp <= 2; ulp++)
+                    {
+                        var component = axis == 0 ? q.x : axis == 1 ? q.y : q.z;
+                        component = direction < 0 ? MathF.BitDecrement(component) : MathF.BitIncrement(component);
+                        q = axis == 0 ? new float3(component, q.y, q.z) : axis == 1 ? new float3(q.x, component, q.z) : new float3(q.x, q.y, component);
+                        var jump = MathF.Abs(math.snoise(q) - value);
+                        Assert.True(jump <= 1.0e-4f, $"snoise jumps {jump} within {ulp} ulp of {p}");
+                    }
+                }
+            }
+
+            var grad = math.snoise_grad(p);
+            Assert.Equal(BitConverter.SingleToInt32Bits(value), BitConverter.SingleToInt32Bits(grad.w));
+            var slope = math.length(new float3(grad.x, grad.y, grad.z));
+            Assert.True(slope <= math.SNOISE_LIPSCHITZ, $"|snoise_grad| {slope} exceeds SNOISE_LIPSCHITZ at {p}");
+        }
     }
 
     // ---- snoise_grad.w vs snoise ----

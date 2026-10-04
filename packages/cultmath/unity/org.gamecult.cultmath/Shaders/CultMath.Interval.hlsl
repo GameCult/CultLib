@@ -7,7 +7,7 @@
 // Included by CultMath.hlsl after its own definitions of cultmath_smoothstep and cultmath_snoise.
 
 // Lipschitz constant of cultmath_snoise(float3); provenance in math.Interval.cs (SNOISE_LIPSCHITZ).
-static const float CULTMATH_SNOISE_LIPSCHITZ = 10.099261;
+static const float CULTMATH_SNOISE_LIPSCHITZ = 7.9640074;
 
 float2 cultmath_iv_point(float value) { return float2(value, value); }
 float2 cultmath_iv_add(float2 a, float2 b) { return float2(a.x + b.x, a.y + b.y); }

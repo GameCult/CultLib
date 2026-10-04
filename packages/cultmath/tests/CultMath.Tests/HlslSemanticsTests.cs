@@ -444,7 +444,8 @@ public sealed class HlslSemanticsTests
     }
 
     [Theory]
-    [InlineData(0.0f, 0.0f, 0.0f, -0.435872972f)]
+    [InlineData(0.0f, 0.0f, 0.0f, 0.0f)]
+    [InlineData(1.25f, 1.25f, 1.25f, -0.245501652f)]
     [InlineData(0.25f, -0.5f, 1.75f, 0.0492948629f)]
     [InlineData(12.25f, -4.5f, 3.125f, 0.443114728f)]
     [InlineData(-7.3f, 2.9f, 101.4f, -0.10221792f)]
