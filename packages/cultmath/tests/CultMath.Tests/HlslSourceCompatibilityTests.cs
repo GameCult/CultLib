@@ -169,6 +169,51 @@ public sealed class HlslSourceCompatibilityTests
         }
     }
 
+    /// <summary>
+    /// The generic comparison draws centre, axis and radius from [-100, 100], where the reach is far past the
+    /// 0.15 or so below which <c>cultmath_af_snoise</c>'s centred form is the narrower one, so an HLSL edit
+    /// of the choice between the centred and the Lipschitz form (a threshold, a reordered sum) survives it.
+    /// This sweep draws realistic slices (axis and radius log-uniform in 1e-3 to 0.5, the reach of a tile
+    /// near a camera), which land on both sides of the choice and next to it, for <c>cultmath_af_snoise</c>
+    /// and <c>cultmath_af_fbm</c>.
+    /// </summary>
+    [Fact]
+    public void AffineSnoiseMirrorMatchesCSharpBitForBitOnBothSidesOfItsBranch()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var snoiseMirror = ShaderFunction(shaderType, "cultmath_af_snoise", typeof(float3), typeof(float3), typeof(float))!;
+        var fbmMirror = ShaderFunction(shaderType, "cultmath_af_fbm", typeof(float3), typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float))!;
+
+        var random = new System.Random(0x5EED3);
+        float Next(float extent) => (random.NextSingle() * 2.0f - 1.0f) * extent;
+        float Reach() => 1.0e-3f * MathF.Pow(500.0f, random.NextSingle());
+        int centred = 0, lipschitz = 0;
+        for (var i = 0; i < 20000; i++)
+        {
+            var centre = new float3(Next(50.0f), Next(50.0f), Next(50.0f));
+            var axis = normalize(new float3(Next(1.0f), Next(1.0f), Next(1.0f))) * Reach();
+            var radius = Reach();
+            var expected = af_snoise(centre, axis, radius);
+            var actual = Values(snoiseMirror.Invoke(shader, new object[] { centre, axis, radius })!);
+            Assert.True(BitwiseEqual(Values(expected), actual), $"cultmath_af_snoise differs from C# at centre = {centre}, axis = {axis}, radius = {radius}");
+            if (expected.y != 0.0f)
+                centred++;
+            else
+                lipschitz++;
+
+            if (i % 8 == 0)
+            {
+                var fbmExpected = Values(af_fbm(centre, axis, radius, 4, 2.0f, 0.5f));
+                var fbmActual = Values(fbmMirror.Invoke(shader, new object[] { centre, axis, radius, 4, 2.0f, 0.5f })!);
+                Assert.True(BitwiseEqual(fbmExpected, fbmActual), $"cultmath_af_fbm differs from C# at centre = {centre}, axis = {axis}, radius = {radius}");
+            }
+        }
+
+        Assert.True(centred > 2000 && lipschitz > 2000, $"the sweep meets one branch too rarely: centred {centred}, Lipschitz {lipschitz} of 20000");
+    }
 
     /// <summary>
     /// The generic comparison stops at 1e7, so an HLSL edit of <c>cultmath_af_range</c>'s NaN test that
