@@ -858,6 +858,8 @@ public sealed class NoiseBoundTests
                 Assert.True(length(arg.Centre - centre) <= 1.0e-6f * (1.0f + length(centre)) && Math.Abs(arg.Radius - radius) <= 1.0e-6f * radius, $"{field.Name}: argument ({arg.Centre}, {arg.Radius:R}) is not the documented ({centre}, {radius:R})");
             }
 
+            var reachRule = length(slice.Coverage0.Axis) / coverageFrequency + slice.Ball.w;
+            Assert.True(Math.Abs(slice.Reach - reachRule) <= 1.0e-5f * reachRule, $"{field.Name}: the reach {slice.Reach:R} is not |axis| + radius = {reachRule:R}");
             var axisTolerance = 1.0e-6f * length(slice.Coverage0.Axis);
             Assert.True(length(slice.Coverage1.Axis - slice.Coverage0.Axis) <= axisTolerance && length(slice.Detail.Axis - slice.Coverage0.Axis * (detailFrequency / coverageFrequency)) <= 4.0f * axisTolerance, $"{field.Name}: the arguments do not share one axis");
 
