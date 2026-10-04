@@ -842,6 +842,25 @@ public sealed class NoiseBoundTests
             var slice = field.Slice(tile, z0, z1);
             var (_, shift0, shift1) = field.Noise.Phases(tile.Time);
             var (zm, h) = (slice.Ball.z, slice.AxisCamera.z);
+
+            // The arguments are built from the centred warp of the slice's own centre and reach, the detail
+            // from the unwarped set: no phase takes another's growth, nor the detail a warp.
+            var (moved0, grow0, moved1, grow1) = field.Noise.CentredWarp(slice.Centre, slice.Reach, tile.Time);
+            var (coverageFrequency, detailFrequency) = (field.Noise.F0, 4.0f * field.Noise.F0);
+            var expected = new[]
+            {
+                (slice.Coverage0, moved0 * coverageFrequency, (slice.Ball.w + grow0) * coverageFrequency),
+                (slice.Coverage1, moved1 * coverageFrequency, (slice.Ball.w + grow1) * coverageFrequency),
+                (slice.Detail, slice.Centre * detailFrequency + 17.0f, slice.Ball.w * detailFrequency),
+            };
+            foreach (var (arg, centre, radius) in expected)
+            {
+                Assert.True(length(arg.Centre - centre) <= 1.0e-6f * (1.0f + length(centre)) && Math.Abs(arg.Radius - radius) <= 1.0e-6f * radius, $"{field.Name}: argument ({arg.Centre}, {arg.Radius:R}) is not the documented ({centre}, {radius:R})");
+            }
+
+            var axisTolerance = 1.0e-6f * length(slice.Coverage0.Axis);
+            Assert.True(length(slice.Coverage1.Axis - slice.Coverage0.Axis) <= axisTolerance && length(slice.Detail.Axis - slice.Coverage0.Axis * (detailFrequency / coverageFrequency)) <= 4.0f * axisTolerance, $"{field.Name}: the arguments do not share one axis");
+
             for (var i = 0; i < 64; i++)
             {
                 var m = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
@@ -849,19 +868,62 @@ public sealed class NoiseBoundTests
                 var p = tile.World(new float3(m.x * z, m.y * z, z));
                 var flow = field.Noise.Flow(p);
                 var eps = h == 0.0f ? 0.0f : clamp((z - zm) / h, -1.0f, 1.0f);
-                var phases = new[] { (shift0, slice.Centre0, slice.Grow0), (shift1, slice.Centre1, slice.Grow1) };
+                var phases = new[] { (shift0, slice.Coverage0, coverageFrequency), (shift1, slice.Coverage1, coverageFrequency) };
                 for (var k = 0; k < 2; k++)
                 {
-                    var (shift, moved, grow) = phases[k];
-                    var distance = length(p + flow * shift - (moved + slice.Axis * eps));
-                    Assert.True(distance <= (slice.Ball.w + grow) * (1.0f + 1.0e-5f), $"{field.Name}: phase {k} warped ray point at depth {z:R} is {distance:R} from moved + axis eps, outside radius {slice.Ball.w:R} + growth {grow:R} (reach {slice.Reach:R}, slice [{z0:R}, {z1:R}])");
-                    needing[k] += distance > slice.Ball.w ? 1 : 0;
+                    var (shift, arg, frequency) = phases[k];
+                    var point = (p + flow * shift) * frequency;
+                    var distance = length(point - (arg.Centre + arg.Axis * eps));
+                    Assert.True(distance <= arg.Radius * (1.0f + 1.0e-5f) + 1.0e-6f * length(point), $"{field.Name}: phase {k} warped ray point at depth {z:R} is {distance:R} from the argument's centre + axis eps, outside radius {arg.Radius:R} (reach {slice.Reach:R}, slice [{z0:R}, {z1:R}])");
+                    needing[k] += distance > slice.Ball.w * frequency ? 1 : 0;
                 }
+
+                var detail = p * detailFrequency + 17.0f;
+                var detailDistance = length(detail - (slice.Detail.Centre + slice.Detail.Axis * eps));
+                Assert.True(detailDistance <= slice.Detail.Radius * (1.0f + 1.0e-5f) + 1.0e-6f * length(detail), $"{field.Name}: the detail ray point at depth {z:R} is {detailDistance:R} from the argument's centre + axis eps, outside radius {slice.Detail.Radius:R} (slice [{z0:R}, {z1:R}])");
             }
         }
 
         output.WriteLine($"IV-REPORT affine warp: rays beyond the unwarped radius, phase 0 {needing[0]}, phase 1 {needing[1]}");
         Assert.True(needing[0] > 0 && needing[1] > 0, $"no ray needs phase growth ({needing[0]}, {needing[1]}): the check cannot tell a slice without it");
+    }
+
+    /// <summary>
+    /// The affine composition earns its place: over seeded slices of the deep well and the shallow wells
+    /// (warp 0 and the Aetheria warp, N = 8, slices of length log-uniform in [0.5, 100] from a drawn
+    /// depth), AffineBound is exactly the intersection of its two sound pieces (the affine arithmetic's
+    /// own, and the interval composition over the forms' ranges), and where the interval piece does not
+    /// already prove the slice empty the affine piece is the narrower of the two in at least
+    /// MinAffineWins of the slices and narrower in total width by at least MinWidthGain. The
+    /// cost contract (IntervalSkipHalvesEvaluations) sees only the sum, in which af_snoise's Hessian forms
+    /// already beat iv_snoise_ball; this is the test that sees af_add, af_mul and af_range, the shared
+    /// symbol, break.
+    /// </summary>
+    [Fact]
+    public void AffineCompositionIsTighterThanItsRanges()
+    {
+        var random = new System.Random(0xAC0F);
+        var (open, wins, affineWidth, intervalWidth) = (0, 0, 0.0, 0.0);
+        foreach (var warp in new[] { 0.0f, FogField.AetheriaWarp })
+        foreach (var field in new[] { FogField.DeepWell(warp, BoundMode.Affine), FogField.Wells(warp, BoundMode.Affine) })
+        for (var t = 0; t < 1500; t++)
+        {
+            var tile = field.DrawTile(random, 8);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 100.0f), field.Grid[^1]);
+            var (affine, interval) = field.AffinePieces(tile, z0, z1, new Counts());
+            var bound = field.Bound(tile, z0, z1, false, new Counts());
+            Assert.True(bound.x == max(affine.x, interval.x) && bound.y == min(affine.y, interval.y), $"{field.Name}: Bound {bound} is not the intersection of the affine piece {affine} and the interval piece {interval}");
+            if (!(interval.y > 0.0f))
+                continue;
+            open++;
+            wins += affine.y - affine.x < interval.y - interval.x ? 1 : 0;
+            affineWidth += affine.y - affine.x;
+            intervalWidth += interval.y - interval.x;
+        }
+
+        output.WriteLine($"IV-REPORT affine composition: {open} open slices, affine narrower in {wins}, total width {affineWidth:F1} against {intervalWidth:F1} ({affineWidth / intervalWidth:F3})");
+        Assert.True(open > 0, "no slice is open");
     }
 
     // Why a field is not ten bands deep and wide, or null. The band G is the span of s where only the
@@ -1579,17 +1641,36 @@ public sealed class NoiseBoundTests
         public override float2 Bound(Tile t, float z0, float z1, bool gated, Counts counts)
         {
             var tile = (FogTile)t;
+            var frame = FrameOf(tile, z0, z1, counts);
+            if (gated && frame.Envelope.y <= 0.0f)
+                return frame.Envelope;
+            return Mode == BoundMode.Affine
+                ? AffineBound(tile, z0, z1, frame, gated, counts)
+                : IntervalBound(tile, z0, z1, frame.S, frame.Fade, frame.Envelope, gated, counts);
+        }
+
+        // The height interval, the density level s over the slice's box, its fade and the envelope.
+        private readonly record struct Frame(float2 Height, float2 S, float2 Fade, float2 Envelope);
+
+        private Frame FrameOf(FogTile tile, float z0, float z1, Counts counts)
+        {
             var depth = new float2(z0, z1);
             counts.Envelope++;
             var height = HeightBound(tile.Centres, iv_mul(depth, tile.SlopesX), depth);
             var s = iv_add(iv_add(iv_point(tile.Origin.y), iv_mul(depth, tile.SlopesY)), height);
             var fade = iv_sub(iv_point(1.0f), iv_smoothstep(0.75f * Safety, Safety, s));
-            var envelope = Compose(s, fade, FreeNoise);
-            if (gated && envelope.y <= 0.0f)
-                return envelope;
-            return Mode == BoundMode.Affine
-                ? AffineBound(tile, z0, z1, height, s, fade, envelope, gated, counts)
-                : IntervalBound(tile, z0, z1, s, fade, envelope, gated, counts);
+            return new Frame(height, s, fade, Compose(s, fade, FreeNoise));
+        }
+
+        /// <summary>
+        /// The two sound bounds AffineBound intersects, ungated: the affine arithmetic's own (the shared
+        /// symbol through af_add, af_mul and af_range), and the interval composition over the same forms'
+        /// ranges (NoiseBoundTests.AffineCompositionIsTighterThanItsRanges).
+        /// </summary>
+        internal (float2 Affine, float2 Interval) AffinePieces(Tile t, float z0, float z1, Counts counts)
+        {
+            var tile = (FogTile)t;
+            return AffinePieces(tile, z0, z1, FrameOf(tile, z0, z1, counts), counts);
         }
 
         private static bool Same(float3 a, float3 b, float ga, float gb) => all(a == b) && ga == gb;
@@ -1627,11 +1708,12 @@ public sealed class NoiseBoundTests
         /// <summary>
         /// The affine slice of a tile over [z0, z1] in the world frame, with the centred warp applied: the
         /// camera-frame axis and ball (af_frustum_axis, af_frustum_ball with no warp), the ball's world
-        /// centre, the world axis, the reach R = |axis| + radius of the whole set from that centre (the
-        /// distance the flow is varied over), and each phase's moved centre and growth
-        /// (WarpedNoise.CentredWarp over R). The rays at depth z are centre + axis eps(z) + w, and a phase's
-        /// warped point lies within radius + growth of moved + axis eps(z)
-        /// (NoiseBoundTests.AffineWarpStaysEnclosed). AffineBound reads its noise arguments from here.
+        /// centre, the world axis, and the reach R = |axis| + radius of the whole set from that centre (the
+        /// distance the flow is varied over). It returns the final af_snoise arguments, so a consumer has no
+        /// term left to wire: each phase's coverage argument is the set moved by the flow at its centre
+        /// (WarpedNoise.CentredWarp over R) and grown by what the flow can vary across it, and the detail
+        /// argument is the unwarped set. The rays at depth z lie within an argument's radius of its centre
+        /// + axis eps(z), eps(z) = clamp((z - z_m) / h, -1, 1) (NoiseBoundTests.AffineWarpStaysEnclosed).
         /// </summary>
         internal AffineSlice Slice(Tile t, float z0, float z1)
         {
@@ -1642,10 +1724,25 @@ public sealed class NoiseBoundTests
             var axis = tile.Right * axisCamera.x + tile.Up * axisCamera.y + tile.Forward * axisCamera.z;
             var reach = length(axis) + ball.w;
             var (c0, g0, c1, g1) = Noise.CentredWarp(centre, reach, tile.Time);
-            return new AffineSlice(axisCamera, ball, centre, axis, reach, c0, g0, c1, g1);
+            var coverageFrequency = Noise.F0;
+            var detailFrequency = 4.0f * Noise.F0;
+            return new AffineSlice(
+                axisCamera, ball, centre, reach,
+                new NoiseArg(c0 * coverageFrequency, axis * coverageFrequency, (ball.w + g0) * coverageFrequency),
+                new NoiseArg(c1 * coverageFrequency, axis * coverageFrequency, (ball.w + g1) * coverageFrequency),
+                new NoiseArg(centre * detailFrequency + 17.0f, axis * detailFrequency, ball.w * detailFrequency));
         }
 
-        internal readonly record struct AffineSlice(float3 AxisCamera, float4 Ball, float3 Centre, float3 Axis, float Reach, float3 Centre0, float Grow0, float3 Centre1, float Grow1);
+        /// <summary>One af_snoise argument in noise space: the centre, the axis along eps, and the radius.</summary>
+        internal readonly record struct NoiseArg(float3 Centre, float3 Axis, float Radius)
+        {
+            /// <summary>The distance of the whole set from its centre: the gate's reach.</summary>
+            public float Reach => length(Axis) + Radius;
+
+            public float3 Snoise() => af_snoise(Centre, Axis, Radius);
+        }
+
+        internal readonly record struct AffineSlice(float3 AxisCamera, float4 Ball, float3 Centre, float Reach, NoiseArg Coverage0, NoiseArg Coverage1, NoiseArg Detail);
 
         // The best interval any centre value and gradient could give af_snoise over a set of reach R (the
         // gradient 0, the value at the far end), toward low or high values: the affine gate.
@@ -1669,29 +1766,37 @@ public sealed class NoiseBoundTests
         /// over the same forms' ranges, each clipped to [-1, 1] (both sound, no further evaluation). The gate
         /// is BestForm's.
         /// </summary>
-        private float2 AffineBound(FogTile tile, float z0, float z1, float2 height, float2 s, float2 fade, float2 envelope, bool gated, Counts counts)
+        private float2 AffineBound(FogTile tile, float z0, float z1, Frame frame, bool gated, Counts counts)
         {
-            var (axisCamera, ball, centre, axis, reach, c0, g0, c1, g1) = Slice(tile, z0, z1);
-            var coverageFrequency = Noise.F0;
-            var detailFrequency = 4.0f * Noise.F0;
             if (gated)
             {
+                var slice = Slice(tile, z0, z1);
+                var (s, fade) = (frame.S, frame.Fade);
                 var provable = false;
                 foreach (var low in new[] { true, false })
                 {
-                    var coverage = Noise.CoverageBound(BestForm((reach + g0) * coverageFrequency, low), BestForm((reach + g1) * coverageFrequency, low), tile.Time);
-                    provable |= Compose(s, fade, iv_add(coverage, iv_scale(BestForm(reach * detailFrequency, low), 0.5f))).y <= 0.0f;
+                    var coverage = Noise.CoverageBound(BestForm(slice.Coverage0.Reach, low), BestForm(slice.Coverage1.Reach, low), tile.Time);
+                    provable |= Compose(s, fade, iv_add(coverage, iv_scale(BestForm(slice.Detail.Reach, low), 0.5f))).y <= 0.0f;
                 }
 
                 if (!provable)
-                    return envelope;
+                    return frame.Envelope;
             }
 
-            var shared = Same(c0, c1, g0, g1);
+            var (affine, interval) = AffinePieces(tile, z0, z1, frame, counts);
+            return new float2(max(affine.x, interval.x), min(affine.y, interval.y));
+        }
+
+        private (float2 Affine, float2 Interval) AffinePieces(FogTile tile, float z0, float z1, Frame frame, Counts counts)
+        {
+            var slice = Slice(tile, z0, z1);
+            var (ball, axisCamera) = (slice.Ball, slice.AxisCamera);
+            var (height, s, fade) = (frame.Height, frame.S, frame.Fade);
+            var shared = slice.Coverage0 == slice.Coverage1;
             counts.Grad += shared ? 2 : 3;
-            var n0 = af_snoise(c0 * coverageFrequency, axis * coverageFrequency, (ball.w + g0) * coverageFrequency);
-            var n1 = shared ? n0 : af_snoise(c1 * coverageFrequency, axis * coverageFrequency, (ball.w + g1) * coverageFrequency);
-            var nd = af_snoise(centre * detailFrequency + 17.0f, axis * detailFrequency, ball.w * detailFrequency);
+            var n0 = slice.Coverage0.Snoise();
+            var n1 = shared ? n0 : slice.Coverage1.Snoise();
+            var nd = slice.Detail.Snoise();
             var w0 = Noise.Phases(tile.Time).W0;
             var noise = af_add(af_add(af_scale(n0, w0), af_scale(n1, 1.0f - w0)), af_scale(nd, 0.5f));
 
@@ -1703,7 +1808,7 @@ public sealed class NoiseBoundTests
             var displaced = af_range(af_add(level, af_scale(af_mul(af_from_iv(fade), noise), Amplitude)));
             var affine = new float2(max(0.0f, (FloorOffset - displaced.y) / FloorBlend), max(0.0f, (FloorOffset - displaced.x) / FloorBlend));
             var interval = Compose(s, fade, iv_add(Noise.CoverageBound(Clip(af_range(n0)), Clip(af_range(n1)), tile.Time), iv_scale(Clip(af_range(nd)), 0.5f)));
-            return new float2(max(affine.x, interval.x), min(affine.y, interval.y));
+            return (affine, interval);
         }
     }
 
