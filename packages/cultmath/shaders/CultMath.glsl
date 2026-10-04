@@ -80,13 +80,14 @@ vec3 cultmath_snoise_permute(vec3 value) { return cultmath_snoise_mod289(((value
 vec4 cultmath_snoise_permute(vec4 value) { return cultmath_snoise_mod289(((value * 34.0) + 10.0) * value); }
 
 // Ashima Arts / Ian McEwan 3D simplex noise (MIT), same float32 evaluation
-// order as the C# math.snoise(vec3) mirror.
+// order as the C# math.snoise(vec3) mirror. Ties resolve in simplexnoise1234's
+// total order; see math.snoise.
 float cultmath_snoise(vec3 value)
 {
     vec2 c = vec2(1.0 / 6.0, 1.0 / 3.0);
     vec3 i = floor(value + dot(value, c.yyy));
     vec3 x0 = value - i + dot(i, c.xxx);
-    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 g = vec3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     vec3 l = 1.0 - g;
     vec3 i1 = min(g.xyz, l.zxy);
     vec3 i2 = max(g.xyz, l.zxy);
@@ -172,7 +173,7 @@ vec4 cultmath_snoise_grad(vec3 value)
     vec2 c = vec2(1.0 / 6.0, 1.0 / 3.0);
     vec3 i = floor(value + dot(value, c.yyy));
     vec3 x0 = value - i + dot(i, c.xxx);
-    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 g = vec3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     vec3 l = 1.0 - g;
     vec3 i1 = min(g.xyz, l.zxy);
     vec3 i2 = max(g.xyz, l.zxy);
@@ -515,7 +516,7 @@ CultCellular cultmath_cellular(vec3 p)
 // Included by CultMath.hlsl after its own definitions of cultmath_smoothstep and cultmath_snoise.
 
 // Lipschitz constant of cultmath_snoise(vec3); provenance in math.Interval.cs (SNOISE_LIPSCHITZ).
-const float CULTMATH_SNOISE_LIPSCHITZ = 10.099261;
+const float CULTMATH_SNOISE_LIPSCHITZ = 7.9640074;
 
 vec2 cultmath_iv_point(float value) { return vec2(value, value); }
 vec2 cultmath_iv_add(vec2 a, vec2 b) { return vec2(a.x + b.x, a.y + b.y); }

@@ -9,7 +9,9 @@ Gustavson's `webgl-noise` project and Unity Mathematics.
 `math.snoise(float3)` and `cultmath_snoise(float3)` follow `src/noise3D.glsl` and
 `math.snoise(float2)` follows `src/noise2D.glsl` of stegu/webgl-noise at commit
 `22434e04d7753f7e949e8d724ab3da2864c17a0f` (the simplex-boundary fix is
-`21d9fe23d7`, scale `ff3b5d34ea`, permutation `a3e6d57095`).
+`21d9fe23d7`, scale `ff3b5d34ea`, permutation `a3e6d57095`). Modified from upstream:
+the 3D corner tie order follows Gustavson's `simplexnoise1234`, because the
+upstream `step` compares are cyclic where the offset's components are equal.
 
 `math.snoise_grad`/`cultmath_snoise_grad` (and the `fbm_grad`/`ridged_grad`
 octave sums built on them) follow the analytic-gradient differentiation from

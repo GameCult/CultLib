@@ -80,13 +80,14 @@ float3 cultmath_snoise_permute(float3 value) { return cultmath_snoise_mod289(((v
 float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((value * 34.0) + 10.0) * value); }
 
 // Ashima Arts / Ian McEwan 3D simplex noise (MIT), same float32 evaluation
-// order as the C# math.snoise(float3) mirror.
+// order as the C# math.snoise(float3) mirror. Ties resolve in simplexnoise1234's
+// total order; see math.snoise.
 float cultmath_snoise(float3 value)
 {
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
     float3 i = floor(value + dot(value, c.yyy));
     float3 x0 = value - i + dot(i, c.xxx);
-    float3 g = step(x0.yzx, x0.xyz);
+    float3 g = float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     float3 l = 1.0 - g;
     float3 i1 = min(g.xyz, l.zxy);
     float3 i2 = max(g.xyz, l.zxy);
@@ -172,7 +173,7 @@ float4 cultmath_snoise_grad(float3 value)
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
     float3 i = floor(value + dot(value, c.yyy));
     float3 x0 = value - i + dot(i, c.xxx);
-    float3 g = step(x0.yzx, x0.xyz);
+    float3 g = float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     float3 l = 1.0 - g;
     float3 i1 = min(g.xyz, l.zxy);
     float3 i2 = max(g.xyz, l.zxy);

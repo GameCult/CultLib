@@ -253,6 +253,25 @@ public sealed class GlslMirrorTests
 
     private static float Uniform(System.Random r, float lo, float hi) => lo + (hi - lo) * r.NextSingle();
     private static float3 Point3(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
+
+    // A point on the simplex tie set, where snoise's x0 has equal components (NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal):
+    // seven of eight draws lie on a lattice diagonal v + s (1, 1, 1), v = L - sum(L) / 6 for an integer L, and one of eight on
+    // the line (t, t, t). A device that runs a different tie rule reads a different function here.
+    private static float3 TiePoint3(System.Random r)
+    {
+        if (r.Next(8) == 0)
+        {
+            var t = Uniform(r, -50.0f, 50.0f);
+            return new float3(t, t, t);
+        }
+
+        var lx = r.Next(-64, 65);
+        var ly = r.Next(-64, 65);
+        var lz = r.Next(-64, 65);
+        var shift = (lx + ly + lz) / 6.0f;
+        var s = r.NextSingle();
+        return new float3(lx - shift + s, ly - shift + s, lz - shift + s);
+    }
     private static int Bits(System.Random r) => r.Next(int.MinValue, int.MaxValue);
 
     private static float2 Interval(System.Random r)
@@ -316,6 +335,8 @@ public sealed class GlslMirrorTests
         new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, platform exp", r => new object[] { Interval(r) }, Platform: Platform.Ulp),
         new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
             r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }, Platform: Platform.Scaled),
+        new("float cultmath_snoise(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
+        new("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
     };
 
     // The fixture text, each case's arguments given by family and point index.

@@ -356,7 +356,12 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   that permutation helper, so its values changed too, while its own kernel
   (`0.5`) and scale (`130`) already matched upstream.
   `NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries`
-  pins the continuity.
+  pins the continuity. Ties in the offset `x0` resolve in Gustavson's
+  `simplexnoise1234` order (x over y, y over z, x over z), a total order, so the
+  four corners are always a simplex. Upstream's `step` compares are cyclic: where
+  the three components are equal, which includes the origin and every
+  `(t, t, t)`, the corners repeat the origin vertex and the value jumps by about
+  0.77 near the origin and up to 1.56 at magnitudes of 64 and above. `NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal` pins the order.
 - `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
   following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
   Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
@@ -571,7 +576,7 @@ with no tolerance.
 `L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
 explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
 [-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
-(9.181147), and multiplies by 1.10: `L = 10.099261`. It also reaches
+(7.2400064), and multiplies by 1.10: `L = 7.9640074`. It also reaches
 `|snoise| = 0.9718335` by the same ascent on the value, which is what lets the
 bound intersect with `[-1, 1]`. `LipschitzConstantPinsSampledGradients`
 checks 1e5 more seeded points against `L` and climbs again from the start
