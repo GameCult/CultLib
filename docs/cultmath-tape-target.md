@@ -108,6 +108,9 @@ source.
 - Run the (a) spike first, or go straight to (c)?
 - Pick the interval representation (plain intervals or affine arithmetic) and
   the noise bound strategy.
+  Affine forms for noise and warp were unparked on 2026-10-03 (ruling
+  `cultmath-tapes:ruling:affine-forms-unparked`): one shared symbol, mapped in
+  `docs/cultmath-interval-ground-cut.md`, "Pass 5".
 - Choose the bytecode register model for the HLSL interpreter, given GPU
   register pressure.
 - Decide whether the brush-grammar station project lives in Aetheria or in
