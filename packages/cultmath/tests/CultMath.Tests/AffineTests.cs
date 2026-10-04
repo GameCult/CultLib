@@ -454,6 +454,19 @@ public sealed class AffineTests
                         witness.Add($"{family} pin: af_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball}, derivation {r:R}");
                 }
 
+                // The axis is (m_c, 1) h exactly, and the radius carries the documented widening, the
+                // rounding of the centre, the axis (spread) and the radius at 2^-20 each, to 15% (the
+                // radius rounds too).
+                var h = (z1 - z0) * 0.5f;
+                var spread = ((double)Math.Abs(slope.x) + Math.Abs(slope.y) + 1.0) * h;
+                var widening = Math.ScaleB(c1 + spread + r, -20);
+                if (!(axis.z == h && axis.x == slope.x * h && axis.y == slope.y * h && Math.Abs(w - r - widening) <= 0.15 * widening + Math.ScaleB(w, -22)))
+                {
+                    failures[family]++;
+                    if (witness.Count < 8)
+                        witness.Add($"{family} axis or widening: af_frustum_ball({slope}, {z0:R}, {z1:R}, {footprint:R}, {warp:R}) = {ball}, axis {axis}, widening {w - r:R} against {widening:R}");
+                }
+
                 for (var i = 0; i < (family == "r2 domain" ? 64 : 8); i++)
                 {
                     var offset = i < 8
