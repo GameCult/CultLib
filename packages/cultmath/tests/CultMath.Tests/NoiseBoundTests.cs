@@ -730,10 +730,11 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// The centred warp (design.md, "Affine forms"): over 2,000 seeded balls of the deep well's flow (warp
-    /// D = 60, period 8, flow frequency 1/512; centres in [-2000, 2000]^3, radius log-uniform in [1, 500],
+    /// D = 60, period 8, flow frequency 1/512; centres in [-2000, 2000]^3, radius log-uniform in [1e-3, 500],
     /// a time per ball) x 64 points, each phase's warped point p + flow(p) shift_k lies in the ball
-    /// (c + flow(c) shift_k, r + |shift_k| rho) (geometry allows one part in 1e5 for the rounding of the
-    /// warped point, as WarpedPointsStayEnclosed does), and snoise of it, at the coverage frequency, lies
+    /// (c + flow(c) shift_k, r + |shift_k| rho), r the radius widened by (|c|_1 + r) 2^-20 as iv_frustum_ball
+    /// widens its ball (the float32 point p is inside only up to that, which matters below a radius of 1),
+    /// geometry allowing one part in 1e5 for the rounding of the warped point, as WarpedPointsStayEnclosed does, and snoise of it, at the coverage frequency, lies
     /// in iv_snoise_ball of that ball with no tolerance. Dropping rho fails: some warped points lie
     /// farther than r from the moved centre.
     /// </summary>
@@ -746,10 +747,11 @@ public sealed class NoiseBoundTests
         for (var b = 0; b < 2000; b++)
         {
             var centre = new float3(Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f), Uniform(random, -2000.0f, 2000.0f));
-            var radius = LogUniform(random, 1.0f, 500.0f);
+            var radius = LogUniform(random, 1.0e-3f, 500.0f);
+            var reach = radius + (abs(centre.x) + abs(centre.y) + abs(centre.z) + radius) * 9.5367431640625e-7f;
             var time = Uniform(random, 0.0f, 100.0f);
             var (_, shift0, shift1) = noise.Phases(time);
-            var (c0, g0, c1, g1) = noise.CentredWarp(centre, radius, time);
+            var (c0, g0, c1, g1) = noise.CentredWarp(centre, reach, time);
             for (var i = 0; i < 64; i++)
             {
                 var p = PointInBall(random, centre, radius, i);
@@ -758,17 +760,69 @@ public sealed class NoiseBoundTests
                 {
                     var warped = p + flow * shift;
                     var distance = length(warped - moved);
-                    Assert.True(distance <= (radius + grow) * (1.0f + 1.0e-5f), $"warped point {warped} leaves the centred ball ({moved}, {radius + grow:R})");
+                    Assert.True(distance <= (reach + grow) * (1.0f + 1.0e-5f), $"warped point {warped} leaves the centred ball ({moved}, {reach + grow:R})");
                     beyond += distance > radius ? 1 : 0;
-                    var bound = iv_snoise_ball(moved * noise.F0, (radius + grow) * noise.F0);
+                    var bound = iv_snoise_ball(moved * noise.F0, (reach + grow) * noise.F0);
                     var value = snoise(warped * noise.F0);
-                    Assert.True(Inside(value, bound), $"iv_snoise_ball over the centred ball ({moved}, {radius + grow:R}) = {bound} misses snoise = {value:R} at {warped}");
+                    Assert.True(Inside(value, bound), $"iv_snoise_ball over the centred ball ({moved}, {reach + grow:R}) = {bound} misses snoise = {value:R} at {warped}");
                 }
             }
         }
 
         output.WriteLine($"IV-REPORT centred warp: {beyond} of {2000 * 64 * 2} warped points lie beyond r from the moved centre");
         Assert.True(beyond > 0, "no warped point needs rho: the check cannot tell a centred warp without it");
+    }
+
+    /// <summary>
+    /// The centred warp over an affine slice (FogField.Slice, the owner AffineBound reads): over 3,000
+    /// seeded tile slices (the deep well, the shallow wells and inside the fog; N in {1, 4, 8, 16}; a
+    /// slice of length log-uniform in [0.5, 1500] from a drawn depth, so the axis is from far under to far
+    /// over the ball's radius) x 64 rays each (the first two at the slice's ends), each phase's warped ray
+    /// point p + flow(p) shift_k lies within radius + growth_k of moved_k + axis eps(z), eps(z) =
+    /// clamp((z - z_m) / h, -1, 1), no tolerance but one part in 1e5 for the rounding of the warped point.
+    /// The check sees each term of the slice: a reach of the ball's radius instead of |axis| + radius, a
+    /// phase's growth dropped, or rho halved leaves rays outside; the report counts the rays that need
+    /// each phase's growth, and the test asserts both phases have some.
+    /// </summary>
+    [Fact]
+    public void AffineWarpStaysEnclosed()
+    {
+        var random = new System.Random(0xAF77);
+        int[] sizes = { 1, 4, 8, 16 };
+        var fields = new[]
+        {
+            FogField.DeepWell(FogField.AetheriaWarp, BoundMode.Affine), FogField.Wells(FogField.AetheriaWarp, BoundMode.Affine), FogField.InsideFog(FogField.AetheriaWarp, BoundMode.Affine),
+        };
+        var needing = new[] { 0, 0 };
+        for (var t = 0; t < 3000; t++)
+        {
+            var field = fields[t % fields.Length];
+            var tile = field.DrawTile(random, sizes[random.Next(sizes.Length)]);
+            var z0 = Uniform(random, field.Grid[0], field.Grid[^1] * 0.9f);
+            var z1 = MathF.Min(z0 + LogUniform(random, 0.5f, 1500.0f), field.Grid[^1]);
+            var slice = field.Slice(tile, z0, z1);
+            var (_, shift0, shift1) = field.Noise.Phases(tile.Time);
+            var (zm, h) = (slice.Ball.z, slice.AxisCamera.z);
+            for (var i = 0; i < 64; i++)
+            {
+                var m = tile.PixelSlope(random.Next(tile.N), random.Next(tile.N), random.NextSingle(), random.NextSingle());
+                var z = i < 2 ? (i == 0 ? z0 : z1) : Uniform(random, z0, z1);
+                var p = tile.World(new float3(m.x * z, m.y * z, z));
+                var flow = field.Noise.Flow(p);
+                var eps = h == 0.0f ? 0.0f : clamp((z - zm) / h, -1.0f, 1.0f);
+                var phases = new[] { (shift0, slice.Centre0, slice.Grow0), (shift1, slice.Centre1, slice.Grow1) };
+                for (var k = 0; k < 2; k++)
+                {
+                    var (shift, moved, grow) = phases[k];
+                    var distance = length(p + flow * shift - (moved + slice.Axis * eps));
+                    Assert.True(distance <= (slice.Ball.w + grow) * (1.0f + 1.0e-5f), $"{field.Name}: phase {k} warped ray point at depth {z:R} is {distance:R} from moved + axis eps, outside radius {slice.Ball.w:R} + growth {grow:R} (reach {slice.Reach:R}, slice [{z0:R}, {z1:R}])");
+                    needing[k] += distance > slice.Ball.w ? 1 : 0;
+                }
+            }
+        }
+
+        output.WriteLine($"IV-REPORT affine warp: rays beyond the unwarped radius, phase 0 {needing[0]}, phase 1 {needing[1]}");
+        Assert.True(needing[0] > 0 && needing[1] > 0, $"no ray needs phase growth ({needing[0]}, {needing[1]}): the check cannot tell a slice without it");
     }
 
     // Why a field is not ten bands deep and wide, or null. The band G is the span of s where only the
@@ -1218,8 +1272,9 @@ public sealed class NoiseBoundTests
         /// <summary>
         /// How far the flow can move across a ball of radius r about c: each flow component is snoise(float2)
         /// of the point projected to the flow plane and scaled by FlowFrequency, which varies over the ball by
-        /// at most iv_snoise_ball(float2)'s reach from its centre value; the projection and the clamp to the
-        /// unit disc are nonexpansive, and two unit-disc vectors differ by at most 2.
+        /// at most iv_snoise_ball(float2)'s reach from its centre value, plus Deviation's float32 allowance; the
+        /// projection and the clamp to the unit disc are nonexpansive, and two unit-disc vectors differ by at
+        /// most 2.
         /// </summary>
         public float FlowVariation(float3 centre, float radius)
         {
@@ -1229,11 +1284,17 @@ public sealed class NoiseBoundTests
             return min(sqrt(u * u + v * v), 2.0f) * FlowAmplitude;
         }
 
+        // How far snoise(float2) can differ from its value at q over radius, in float32: the ball's reach plus
+        // the allowance of af_snoise's convention for the 2D value, 2^-14 + L2 2^-20 (|q|_1 + r). The point
+        // q + offset rounds at the magnitude of q + offset (a unit in the last place of 20 is 2^-19), so the
+        // flow at two points of a ball differs by more than the exact function can, and the iv_snoise_ball
+        // bound, which is exact for the point it is given, does not carry that.
         private static float Deviation(float2 q, float radius)
         {
             var n = snoise(q);
             var ball = iv_snoise_ball(q, radius);
-            return max(ball.y - n, n - ball.x);
+            var allowance = 6.103515625e-5f + SNOISE2_LIPSCHITZ * 9.5367431640625e-7f * (abs(q.x) + abs(q.y) + radius);
+            return max(ball.y - n, n - ball.x) + allowance;
         }
 
         /// <summary>
@@ -1524,6 +1585,29 @@ public sealed class NoiseBoundTests
             return Compose(s, fade, noise);
         }
 
+        /// <summary>
+        /// The affine slice of a tile over [z0, z1] in the world frame, with the centred warp applied: the
+        /// camera-frame axis and ball (af_frustum_axis, af_frustum_ball with no warp), the ball's world
+        /// centre, the world axis, the reach R = |axis| + radius of the whole set from that centre (the
+        /// distance the flow is varied over), and each phase's moved centre and growth
+        /// (WarpedNoise.CentredWarp over R). The rays at depth z are centre + axis eps(z) + w, and a phase's
+        /// warped point lies within radius + growth of moved + axis eps(z)
+        /// (NoiseBoundTests.AffineWarpStaysEnclosed). AffineBound reads its noise arguments from here.
+        /// </summary>
+        internal AffineSlice Slice(Tile t, float z0, float z1)
+        {
+            var tile = (FogTile)t;
+            var axisCamera = af_frustum_axis(tile.Slope, z0, z1);
+            var ball = af_frustum_ball(tile.Slope, z0, z1, tile.Footprint, 0.0f);
+            var centre = tile.World(new float3(ball.x, ball.y, ball.z));
+            var axis = tile.Right * axisCamera.x + tile.Up * axisCamera.y + tile.Forward * axisCamera.z;
+            var reach = length(axis) + ball.w;
+            var (c0, g0, c1, g1) = Noise.CentredWarp(centre, reach, tile.Time);
+            return new AffineSlice(axisCamera, ball, centre, axis, reach, c0, g0, c1, g1);
+        }
+
+        internal readonly record struct AffineSlice(float3 AxisCamera, float4 Ball, float3 Centre, float3 Axis, float Reach, float3 Centre0, float Grow0, float3 Centre1, float Grow1);
+
         // The best interval any centre value and gradient could give af_snoise over a set of reach R (the
         // gradient 0, the value at the far end), toward low or high values: the affine gate.
         private static float2 BestForm(float reach, bool low)
@@ -1548,12 +1632,7 @@ public sealed class NoiseBoundTests
         /// </summary>
         private float2 AffineBound(FogTile tile, float z0, float z1, float2 height, float2 s, float2 fade, float2 envelope, bool gated, Counts counts)
         {
-            var axisCamera = af_frustum_axis(tile.Slope, z0, z1);
-            var ball = af_frustum_ball(tile.Slope, z0, z1, tile.Footprint, 0.0f);
-            var centre = tile.World(new float3(ball.x, ball.y, ball.z));
-            var axis = tile.Right * axisCamera.x + tile.Up * axisCamera.y + tile.Forward * axisCamera.z;
-            var reach = length(axis) + ball.w;
-            var (c0, g0, c1, g1) = Noise.CentredWarp(centre, reach, tile.Time);
+            var (axisCamera, ball, centre, axis, reach, c0, g0, c1, g1) = Slice(tile, z0, z1);
             var coverageFrequency = Noise.F0;
             var detailFrequency = 4.0f * Noise.F0;
             if (gated)

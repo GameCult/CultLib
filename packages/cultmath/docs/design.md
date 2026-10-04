@@ -765,13 +765,20 @@ The centred warp. A flow-warped sample reads `snoise` at `p + flow(p) shift`. Th
 caller does not enlarge the ball by the whole displacement `|flow| shift`; it
 moves the centre by the flow at the centre, `c + flow(c) shift`, and widens the
 radius by the flow's variation across the ball, `r + |shift| rho` with `rho =
-FlowAmplitude SNOISE2_LIPSCHITZ FlowFrequency r sqrt 2` (the clamp to the unit
-disc is nonexpansive). CultMath owns neither the flow nor the envelope: the warp's
+FlowAmplitude (SNOISE2_LIPSCHITZ FlowFrequency r + a) sqrt 2` (the clamp to the unit
+disc is nonexpansive), where `a = 2^-14 + L2 2^-20 (|q|_1 + r FlowFrequency)` is the
+float32 allowance of the flow's two `snoise(float2)` reads (the point `q` plus its offset rounds at the
+magnitude of `q`, and a float32 flow at two points of a ball differs by more than the exact
+function can). CultMath owns neither the flow nor the envelope: the warp's
 centre and variation are the caller's, and a consumer adds them to the slice's
 `warpVariation` or to the form's radius. With two phases that cross-fade, each
 phase takes its own centre; one ball serves when the phases' centres coincide
-(warp 0). `NoiseBoundTests.CentredWarpStaysEnclosed` checks 2,000 balls and
-fails when `rho` is dropped.
+(warp 0). `NoiseBoundTests.CentredWarpStaysEnclosed` checks 2,000 balls, radius 1e-3 to
+500, and fails when `rho` is dropped or halved; `AffineWarpStaysEnclosed` checks
+3,000 tile slices of `FogField.Slice` (the owner the affine bound reads: the reach over
+which the flow is varied is `|axis| + radius`, and each phase carries its own growth)
+and fails when the reach is the ball's radius, a phase's growth is dropped, or `rho`
+is halved.
 
 The deep well is the representative Aetheria case: the camera inside a sun's
 bowl, looking across. `DeepWellIsTenBandsDeepAndWide` computes the band `G` from
