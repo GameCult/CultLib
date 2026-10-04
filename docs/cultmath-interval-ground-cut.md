@@ -1,6 +1,9 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status: Imagination pass 4, 2026-10-03. Pass 1's Q1–Q3 are answered (below);
+Status, 2026-10-04: interval-ops, glsl-lowering, snoise-tie (48aadda0) and affine-forms with
+affine-shaders (156782da) are on main; the as-built record is the last section. Figures quoted in
+Passes 1-5 at SNOISE_LIPSCHITZ 10.099261 predate the tie fix (now 7.9640074) and are conservative;
+design.md carries the current measurements. Map history: Imagination pass 4, 2026-10-03. Pass 1's Q1–Q3 are answered (below);
 the Self opened the `cultmath-tapes` campaign from pass 2; pass 3 revises the
 two CultLib cuts after their first Hands reports and the operator's challenge
 to the march, and changes the site field to envelope-then-noise; pass 4

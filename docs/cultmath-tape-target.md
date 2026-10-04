@@ -1,9 +1,11 @@
 # CultMath tapes: interval-pruned field evaluation on CPU and GPU
 
-Status: **parked**, 2026-10-02. The operator wants Asura working first. This
-note records the direction so it can be picked up without re-deriving it. It is
-not a cut map: no Imagination pass has run, and nothing here is ruled except
-that the campaign exists and waits.
+Status: steps 2-5 (tape, pruning, HLSL interpreter, meshing) are **parked**
+(2026-10-02; ruling tape-target-unparks-when-asura-stable). The affine-forms
+piece was unparked on 2026-10-03 (ruling affine-forms-unparked) and is on main
+(156782da), alongside step 1's intervals; its map and as-built record are in
+`docs/cultmath-interval-ground-cut.md`. This note records the direction for the
+parked steps so they can be picked up without re-deriving it.
 
 ## Intent
 
