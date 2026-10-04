@@ -832,8 +832,8 @@ The cull-map render (`DeepWellCullMap`, explicit) writes a PNG when
 `CULTMATH_WRITE_CULLMAP` names a directory: one deep-well camera at warp `D`,
 960 x 540 in 8 x 8 tiles, with panels for dense cells per ray under the centred
 interval, under the affine bound and under the oracle mask (one logarithmic
-scale) and the transmittance. Its run: 4.51, 3.60 and 2.02 cells per ray on
-average, 45 the most, mean transmittance 0.278.
+scale) and the transmittance. Its run: 4.23, 3.60 and 2.02 cells per ray on
+average, 44 the most, mean transmittance 0.278.
 
 ## Rules
 
