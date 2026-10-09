@@ -36,14 +36,21 @@ shader semantics.
   It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) and
   `shaders/CultMath.Interval.hlsl` and `shaders/CultMath.Affine.hlsl` from the same
   directory, so ship all four.
-- interval arithmetic for culling empty space with a proof: `iv_*` functions
+- interval arithmetic for culling empty space: `iv_*` functions
   over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
   and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
   ball, and `iv_frustum_ball`, the ball around a screen tile's rays over a depth
   segment, so one probe serves the whole tile (its radius carries its own
-  float32 rounding bound). Every one returns an interval
-  containing the function's value at every point of its input, so a raymarch
+  float32 rounding bound). The arithmetic functions return an interval built to
+  contain the function's value over their operand intervals, so a raymarch
   can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
+  The noise functions rest on empirical constants with a margin, not a proof:
+  `iv_snoise_ball(float3)` on `SNOISE_LIPSCHITZ` (`iv_fbm_ball` through it),
+  `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and `af_snoise` on
+  `SNOISE_HESSIAN` and `SNOISE_LIPSCHITZ` (`af_fbm` through it); the enclosure
+  tests sample them. `iv_frustum_ball` and `af_frustum_ball` read no noise
+  constant: the ball is geometry plus a rounding widening, and the noise call
+  it feeds carries the constant.
   The bounds compose with a consumer's own analytic envelope (a height fog, a
   carved sphere): its interval over the segment proves empty space in one probe,
   and the noise ball is consulted only near the surface. See `docs/design.md`,
@@ -121,6 +128,12 @@ The repository root is not a Unity package. Build the tracked package with
 `packages/cultmath/scripts/build-unity-package.ps1`; the script fresh-builds the netstandard2.1
 assembly and rejects stale binaries, missing metadata, unexpected assemblies,
 or leaked C# source.
+
+Before tagging `cultmath-unity-v*`, run the import and dispatch smoke on a Windows machine with a GPU,
+alone: `packages/cultmath/scripts/unity-smoke/run-unity-smoke.ps1 -UnityExe <path to Unity.exe>`. It
+builds a scratch project outside the repository that references the package by a `file:` path,
+dispatches a compute shader that includes `CultMath.Interval.hlsl` and `CultMath.Affine.hlsl`, requires
+a deliberately broken control shader to be rejected, and deletes the project afterwards.
 
 ## Shader Tooling
 

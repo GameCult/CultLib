@@ -4,7 +4,7 @@
   "version": "1.0.60",
   "unity": "2021.3",
   "dependencies": {
-    "org.gamecult.cultmath": "0.3.0"
+    "org.gamecult.cultmath": "0.4.0"
   },
   "description": "CultCache, CultNet, and CultMesh managed runtime assemblies for Unity.",
   "license": "MIT",
