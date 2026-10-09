@@ -5,6 +5,51 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
+## [0.4.0]
+
+### Breaking
+
+- `math.snoise(float3)` and `math.snoise_grad`, and their HLSL mirrors in
+  `Shaders/CultMath.hlsl`, now resolve ties among the components of the cell
+  offset in a fixed order: x over y, y over z, x over z. The cyclic rule they
+  used before made the origin and every point on the `(t, t, t)` diagonal read a
+  different function from the points beside it. Values change at the origin and
+  on the `(t, t, t)` diagonal and nowhere else; off that tie set the results are
+  bit-identical to 0.3.0. `snoise` is now continuous across the diagonal to
+  within 1e-4 over two ulps either side (`NoiseGradTests`,
+  `SnoiseIsContinuousOnTheSimplexDiagonal`). Content seeded from `snoise` at
+  those points changes; regenerate it when you take this version.
+
+### Added
+
+- Interval arithmetic on `float2(lo, hi)`: `math.iv_point`, `iv_add`, `iv_sub`,
+  `iv_mul`, `iv_neg`, `iv_scale`, `iv_abs`, `iv_min`, `iv_max`, `iv_clamp`,
+  `iv_saturate`, `iv_lerp`, `iv_sqr`, `iv_sqrt`, `iv_exp`, `iv_smoothstep`,
+  `iv_snoise_ball` (`float3` and `float2` centres), `iv_fbm_ball` and
+  `iv_frustum_ball`, with the HLSL mirrors in the new
+  `Shaders/CultMath.Interval.hlsl`. Each function returns an interval that
+  contains the pointwise float32 result for every input in the operand
+  intervals; the enclosure tests check this without a tolerance.
+- Reduced affine forms on `float3(x0, a, e)` that share one symbol over a
+  region: `math.af_point`, `af_symbol`, `af_range`, `af_from_iv`, `af_add`,
+  `af_add_iv`, `af_sub`, `af_neg`, `af_scale`, `af_mul`, `af_snoise`, `af_fbm`,
+  `af_frustum_axis` and `af_frustum_ball`, with the HLSL mirrors in the new
+  `Shaders/CultMath.Affine.hlsl`.
+- Noise bound constants `math.SNOISE_LIPSCHITZ`, `SNOISE2_LIPSCHITZ` and
+  `SNOISE_HESSIAN`: empirical bounds with a margin, re-measured and pinned by
+  `NoiseBoundTests`.
+- `math.asfloat(uint)`, the inverse of `math.asuint`.
+- `BoundedLeastSquares.Solve` overload taking `kktRelativeTolerance`, and the
+  constant `BoundedLeastSquares.DefaultKktRelativeTolerance` (1e-6). The
+  tolerance must be finite and greater than zero, else the result is
+  `InvalidInput`. The overload without it passes the default and returns the same
+  result as before.
+
+### Fixed
+
+- The NuGet package `GameCult.Math` now carries `CultMath.Affine.hlsl` under
+  `contentFiles/any/any/shaders`, as the README says it does.
+
 ## [0.3.0]
 
 ### Breaking

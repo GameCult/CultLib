@@ -10,7 +10,7 @@
     <PackageId>GameCult.Math</PackageId>
     <!-- MIT overall; math.Phacelle.cs and CultPhasor.cs (and the two Phacelle HLSL files) are MPL-2.0. -->
     <PackageLicenseExpression>MIT AND MPL-2.0</PackageLicenseExpression>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Description>Clean-room C# math shaped for HLSL-style renderer code.</Description>
     <Authors>GameCult</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -25,6 +25,7 @@
     <None Include="..\..\shaders\CultMath.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\shaders\CultMath.Phacelle.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.Phacelle.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\shaders\CultMath.Interval.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.Interval.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\shaders\CultMath.Affine.hlsl" Pack="true" PackagePath="contentFiles\any\any\shaders\CultMath.Affine.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
