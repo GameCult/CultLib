@@ -1413,4 +1413,83 @@ public sealed class BoundedLeastSquaresTests
         });
         Assert.NotNull(original);
     }
+
+    // The heavy-row shape with a free light weight w: at (x0, x1) = (0, 1) the gradient of x0 is w^2 against a
+    // gradient scale of 1e4, so x0's release flips where the caller's tolerance crosses the relative gradient
+    // computed here from the inputs alone.
+    private static float[] ShapeA(float w) => new[] { 10f, 100f, w, 0f };
+    private static float[] ShapeB(float w) => new[] { 100f, w };
+
+    private static double ShapeRelativeGradient(float w)
+    {
+        var a = ShapeA(w);
+        var b = ShapeB(w);
+        double atb0 = (double)a[0] * b[0] + (double)a[2] * b[1];
+        double atb1 = (double)a[1] * b[0] + (double)a[3] * b[1];
+        var gScale = Math.Max(Math.Abs(atb0), Math.Abs(atb1));
+        double ata01 = (double)a[0] * a[1] + (double)a[2] * a[3];
+        return Math.Abs(ata01 - atb0) / gScale;
+    }
+
+    private static float ShapeX0(float w, double? tolerance)
+    {
+        var x = new float[2];
+        var lo = new float[2];
+        var hi = Fill(1f, 2);
+        var status = tolerance is { } t
+            ? SolveAt(2, 2, ShapeA(w), ShapeB(w), lo, hi, x, out _, t)
+            : Solve(2, 2, ShapeA(w), ShapeB(w), lo, hi, x, out _);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        return x[0];
+    }
+
+    // Weights put the relative gradient at about 1e-5 (above the default tolerance) and 9e-10, 9e-12, 9e-14 (below it).
+    [Theory]
+    [InlineData(0.316f)]
+    [InlineData(0.03f)]
+    [InlineData(0.003f)]
+    [InlineData(0.0003f)]
+    public void TheReleaseFlipsAtTheCallersToleranceTimesTheGradientScale(float w)
+    {
+        var rel = ShapeRelativeGradient(w);
+        Assert.True(ShapeX0(w, rel * 1.05) == 0f, $"w {w} rel {rel:R}: above the threshold x0 stays at 0");
+        var below = ShapeX0(w, rel * 0.95);
+        Assert.True(Math.Abs(below - 1f) < 1e-4, $"w {w} rel {rel:R}: below the threshold x0 is {below}");
+    }
+
+    // A relative gradient 10% either side of 1e-6: the solve that omits the tolerance releases the one above and
+    // not the one below, and equals the solve that passes the default, so the forwarded default is 1e-6 and no
+    // other value within 10%.
+    [Theory]
+    [InlineData(0.104881f, 1f)]
+    [InlineData(0.094868f, 0f)]
+    public void TheOmittedToleranceReleasesAtOneEMinusSixAndNowhereNear(float w, float expectedX0)
+    {
+        var rel = ShapeRelativeGradient(w);
+        Assert.InRange(rel, 0.9e-6 * 0.99, 1.1e-6 * 1.01);
+        Assert.Equal(expectedX0, ShapeX0(w, null), 1e-4);
+        Assert.Equal(expectedX0, ShapeX0(w, BoundedLeastSquares.DefaultKktRelativeTolerance), 1e-4);
+    }
+
+    // The box is wide enough that no bound is ever released, so any difference between the default and a tight
+    // tolerance is decided by the stationarity test of the free set alone.
+    [Fact]
+    public void AllFreeConditionedProblemsHonourTheToleranceAtTheFreeSetTest()
+    {
+        const int m = 28, n = 24;
+        int differ = 0, total = 0;
+        foreach (var cond in new[] { 1e2, 1e3, 1e4, 1e5, 1e6 })
+            foreach (var along in new[] { true, false })
+                for (uint seed = 1; seed <= 30; seed++)
+                {
+                    var (a, b) = ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: along);
+                    var byDefault = new float[n];
+                    var tight = new float[n];
+                    var s1 = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), byDefault, out var i1);
+                    var s2 = SolveAt(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), tight, out var i2, 1e-12);
+                    total++;
+                    if (Bits(s1, i1, byDefault) != Bits(s2, i2, tight)) differ++;
+                }
+        Assert.True(differ >= total / 10, $"only {differ} of {total} all-free solves changed between the default and 1e-12");
+    }
 }
