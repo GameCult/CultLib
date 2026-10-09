@@ -23,9 +23,9 @@ backfilled here; see `docs/semver-policy.md` for why.
   value; measured over random integer points, about 97% change. The cell offset
   is computed in float32, so an input whose differences `y - x` and `z - x`
   round, in float32, onto whole numbers can tie and change too. How far from the set that
-  reaches grows with the coordinates' magnitude, at about one float32 spacing of the
-  coordinate (1.9e-6 at 30, 6.1e-5 at 1000, 7.8e-3 at 1e5; a probe over random inputs
-  never found a changed one farther than that). Computed coordinates such as `i * 0.1f`
+  reaches scales with the coordinates' magnitude: a few float32 ulps of the largest
+  coordinate (a probe over random inputs found changed inputs up to about two ulps
+  away; measured, not proved). Computed coordinates such as `i * 0.1f`
   can land there, so near large coordinates the band is wide. Elsewhere the results are
   bit-identical to 0.3.0 (`SnoiseTieScopeTests`, goldens computed by the 0.3.0
   DLL). `snoise` is now

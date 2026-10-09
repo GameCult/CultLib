@@ -10,8 +10,8 @@ namespace CultMath.Tests;
 // set and its float32 band (below) the results are bit-identical to 0.3.0. The goldens below were computed by the
 // cultmath-unity-v0.3.0 tag's CultMath.dll (Runtime/Plugins), not by this code. Float32 rounding
 // decides whether a given integer-difference input ties, because x0 is computed in float32: an
-// input whose differences round onto whole numbers can tie too and move, within about one float32
-// spacing of the coordinate magnitude (a band that widens with the magnitude), and some inputs on
+// input whose differences round onto whole numbers can tie too and move, within a few float32
+// ulps of the largest coordinate (a probe found up to about two; the band widens with the magnitude), and some inputs on
 // the set keep their value (about 3% of random integer points). Every input below ties and moves
 // all five outputs (value and the four gradient words).
 // TieSetNow pins what this code returns on the same inputs, so that each of the two tie-rule sites
