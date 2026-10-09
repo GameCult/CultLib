@@ -21,10 +21,12 @@ backfilled here; see `docs/semver-policy.md` for why.
   is 0.671713, and `snoise(1, 2, 3)` was 0.22423841 and is 0. Float32 rounding
   decides whether a given input ties, and an input that ties may still keep its
   value; measured over random integer points, about 97% change. The cell offset
-  is computed in float32, so inputs within a few float32 ulps of that set can tie
-  and change too (a probe over random inputs found none at a distance of 1e-5 or
-  more from the set, and a handful at 1e-6 near magnitude 30; computed
-  coordinates such as `i * 0.1f` can land there). Elsewhere the results are
+  is computed in float32, so an input whose differences `y - x` and `z - x`
+  round, in float32, onto whole numbers can tie and change too. How far from the set that
+  reaches grows with the coordinates' magnitude, at about one float32 spacing of the
+  coordinate (1.9e-6 at 30, 6.1e-5 at 1000, 7.8e-3 at 1e5; a probe over random inputs
+  never found a changed one farther than that). Computed coordinates such as `i * 0.1f`
+  can land there, so near large coordinates the band is wide. Elsewhere the results are
   bit-identical to 0.3.0 (`SnoiseTieScopeTests`, goldens computed by the 0.3.0
   DLL). `snoise` is now
   continuous across the diagonals to within 1e-4 over two ulps either side
@@ -43,10 +45,12 @@ backfilled here; see `docs/semver-policy.md` for why.
   `Shaders/CultMath.Interval.hlsl`. Each function is built to return an interval that
   contains the pointwise float32 result for the operand intervals, but the noise
   functions rest on empirical constants with a margin, not on a proof:
-  `iv_snoise_ball(float3)`, `iv_fbm_ball` and `iv_frustum_ball` on
-  `SNOISE_LIPSCHITZ`, `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and
-  `af_snoise`, `af_fbm` and `af_frustum_ball` (below) on `SNOISE_HESSIAN` and
-  `SNOISE_LIPSCHITZ`. The enclosure tests sample
+  `iv_snoise_ball(float3)` on `SNOISE_LIPSCHITZ`, `iv_fbm_ball` on the same constant through
+  `iv_snoise_ball(float3)`, `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and
+  `af_snoise` on `SNOISE_HESSIAN` and `SNOISE_LIPSCHITZ`, which `af_fbm` reaches through
+  `af_snoise`. `iv_frustum_ball` and `af_frustum_ball` read no noise constant: they are
+  geometry plus a 2^-20 rounding widening, and they return a ball (`float4`) to hand to a noise
+  call, which carries the constant. The enclosure tests sample
   points and check containment without a tolerance; they do not prove it for
   every input.
 - Reduced affine forms on `float3(x0, a, e)` that share one symbol over a

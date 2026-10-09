@@ -45,10 +45,12 @@ shader semantics.
   contain the function's value over their operand intervals, so a raymarch
   can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
   The noise functions rest on empirical constants with a margin, not a proof:
-  `iv_snoise_ball(float3)`, `iv_fbm_ball` and `iv_frustum_ball` on
-  `SNOISE_LIPSCHITZ`, `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and
-  `af_snoise`, `af_fbm` and `af_frustum_ball` on `SNOISE_HESSIAN` and
-  `SNOISE_LIPSCHITZ`; the enclosure tests sample them.
+  `iv_snoise_ball(float3)` on `SNOISE_LIPSCHITZ` (`iv_fbm_ball` through it),
+  `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and `af_snoise` on
+  `SNOISE_HESSIAN` and `SNOISE_LIPSCHITZ` (`af_fbm` through it); the enclosure
+  tests sample them. `iv_frustum_ball` and `af_frustum_ball` read no noise
+  constant: the ball is geometry plus a rounding widening, and the noise call
+  it feeds carries the constant.
   The bounds compose with a consumer's own analytic envelope (a height fog, a
   carved sphere): its interval over the segment proves empty space in one probe,
   and the noise ball is consulted only near the surface. See `docs/design.md`,
