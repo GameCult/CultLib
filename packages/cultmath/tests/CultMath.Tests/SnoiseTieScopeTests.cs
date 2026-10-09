@@ -9,8 +9,12 @@ namespace CultMath.Tests;
 // z - x are whole numbers (every integer point, and the whole (1, 1, 1) line through each). Off that
 // set the results are bit-identical to 0.3.0. The goldens below were computed by the
 // cultmath-unity-v0.3.0 tag's CultMath.dll (Runtime/Plugins), not by this code. Float32 rounding
-// decides whether a given integer-difference input ties: the inputs below tie, and a tie moves the
-// value or the gradient on most, not all, of them.
+// decides whether a given integer-difference input ties, because x0 is computed in float32: an
+// input a few float32 ulps off the set can tie too and move (measured: none at a distance of 1e-5 or
+// more from the set, a handful at 1e-6 near magnitude 30), and an input on the set may keep its
+// value. The inputs below tie, and a tie moves the value or the gradient on most, not all, of them.
+// TieSetNow pins what this code returns on the same inputs, so that each of the two tie-rule sites
+// (the step in snoise, the step in snoise_grad) is pinned on its own.
 public sealed class SnoiseTieScopeTests
 {
     // (input, snoise bits, snoise_grad x y z w bits) from 0.3.0, each on the tie set and moved by the new rule.
@@ -32,6 +36,28 @@ public sealed class SnoiseTieScopeTests
         (new float3(9.495648f, 11.495648f, 15.495648f), 0x3E4FC9B5, new uint[] { 0x3EA26E55, 0x403CE620, 0xBF46F425, 0x3E4FC9B5 }),
         (new float3(-12.66157f, -19.66157f, -9.66157f), 0xBF179BF9, new uint[] { 0x3FD03786, 0x403A1C1E, 0xBEAD7581, 0xBF179BF9 }),
         (new float3(-8.801376f, -1.8013763f, -19.801376f), 0xBE82F2EE, new uint[] { 0xC0DCFC55, 0x405501DB, 0x401E6CF8, 0xBE82F2EE }),
+    };
+
+    // The values this code returns on TieSet's inputs, in the same order (the value, then the four
+    // snoise_grad components).
+    private static readonly (uint Value, uint[] Grad)[] TieSetNow =
+    {
+        (0xB37C25C6, new uint[] { 0x3F281943, 0x40521F92, 0xC0A8193D, 0xB37C25C6 }),
+        (0xBF214750, new uint[] { 0xBD931F34, 0x40260272, 0x3E94E53D, 0xBF214750 }),
+        (0x3F35B75A, new uint[] { 0x3EAD85CB, 0x3E78AB7B, 0x401F83B4, 0x3F35B75A }),
+        (0xBDE33E78, new uint[] { 0x3F0705E4, 0x3FE9CB38, 0xC00DE5C4, 0xBDE33E78 }),
+        (0xBF30DF87, new uint[] { 0x3F76B426, 0xBEAE857A, 0x401A3325, 0xBF30DF87 }),
+        (0x00000000, new uint[] { 0x3FEC7798, 0xBF1DA4FF, 0x40C50E50, 0x00000000 }),
+        (0xBF13F436, new uint[] { 0xC0219F00, 0xBFA829D9, 0x3F629666, 0xBF13F436 }),
+        (0x3F0C1A1C, new uint[] { 0x404F76CC, 0xBFA6560B, 0x402B2291, 0x3F0C1A1C }),
+        (0x3F2E5150, new uint[] { 0xC01F3830, 0x3F007F73, 0x3FD11DF1, 0x3F2E5150 }),
+        (0x3DDE3B0E, new uint[] { 0xBED7A81C, 0xBFC89166, 0x3FE7E3CC, 0x3DDE3B0E }),
+        (0xBF23BB4A, new uint[] { 0xC057D547, 0xBF7B66AE, 0xBFCA313F, 0xBF23BB4A }),
+        (0xBE68D15B, new uint[] { 0xC0391D00, 0x40366C69, 0xBEFFC8AD, 0xBE68D15B }),
+        (0xBF2659BE, new uint[] { 0xC0048291, 0xC00A5FC3, 0xBF21B992, 0xBF2659BE }),
+        (0x3E4630E4, new uint[] { 0x3E35FE51, 0x40306ACC, 0xBF655794, 0x3E4630E4 }),
+        (0xBF117B1D, new uint[] { 0x3F9D6F53, 0x401F35B7, 0xBF31BAFE, 0xBF117B1D }),
+        (0xBDA5A39E, new uint[] { 0xC0B4E453, 0x3FF84A5D, 0x3FA74D5F, 0xBDA5A39E }),
     };
 
     // The same, off the tie set: coordinate differences that are not whole numbers.
@@ -90,20 +116,45 @@ public sealed class SnoiseTieScopeTests
         return a == Math.Floor(a) && b == Math.Floor(b);
     }
 
+    // Each output is asserted on its own: a tie rule reverted at one site must fail here by itself,
+    // whatever the other site returns. A given input moves some outputs and not others, so each
+    // output must differ from 0.3.0 on at least one tie-set input.
     [Fact]
-    public void TieSetInputsMoveFromTheirZeroPointThreeValues()
+    public void EachOutputDiffersFromZeroPointThreeSomewhereOnTheTieSet()
     {
         Assert.NotEmpty(TieSet);
+        var moved = new bool[5];
         foreach (var (p, value, grad) in TieSet)
         {
             Assert.True(OnTieSet(p));
             var g = math.snoise_grad(p);
-            var same = BitConverter.SingleToUInt32Bits(math.snoise(p)) == value
-                && BitConverter.SingleToUInt32Bits(g.x) == grad[0]
-                && BitConverter.SingleToUInt32Bits(g.y) == grad[1]
-                && BitConverter.SingleToUInt32Bits(g.z) == grad[2]
-                && BitConverter.SingleToUInt32Bits(g.w) == grad[3];
-            Assert.False(same, $"snoise at ({p.x}, {p.y}, {p.z}) still reads its 0.3.0 value");
+            moved[0] |= BitConverter.SingleToUInt32Bits(math.snoise(p)) != value;
+            moved[1] |= BitConverter.SingleToUInt32Bits(g.x) != grad[0];
+            moved[2] |= BitConverter.SingleToUInt32Bits(g.y) != grad[1];
+            moved[3] |= BitConverter.SingleToUInt32Bits(g.z) != grad[2];
+            moved[4] |= BitConverter.SingleToUInt32Bits(g.w) != grad[3];
+        }
+        Assert.True(moved[0], "snoise(float3) still reads its 0.3.0 value on the tie set");
+        Assert.True(moved[1], "snoise_grad.x still reads its 0.3.0 value on the tie set");
+        Assert.True(moved[2], "snoise_grad.y still reads its 0.3.0 value on the tie set");
+        Assert.True(moved[3], "snoise_grad.z still reads its 0.3.0 value on the tie set");
+        Assert.True(moved[4], "snoise_grad.w still reads its 0.3.0 value on the tie set");
+    }
+
+    [Fact]
+    public void TieSetInputsReturnTheirZeroPointFourGoldens()
+    {
+        Assert.Equal(TieSet.Length, TieSetNow.Length);
+        for (var k = 0; k < TieSet.Length; k++)
+        {
+            var p = TieSet[k].P;
+            var (value, grad) = TieSetNow[k];
+            var g = math.snoise_grad(p);
+            Assert.Equal(value, BitConverter.SingleToUInt32Bits(math.snoise(p)));
+            Assert.Equal(grad[0], BitConverter.SingleToUInt32Bits(g.x));
+            Assert.Equal(grad[1], BitConverter.SingleToUInt32Bits(g.y));
+            Assert.Equal(grad[2], BitConverter.SingleToUInt32Bits(g.z));
+            Assert.Equal(grad[3], BitConverter.SingleToUInt32Bits(g.w));
         }
     }
 
