@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using CultMath;
 using Xunit;
@@ -1137,5 +1138,89 @@ public sealed class BoundedLeastSquaresTests
             }
             Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
         }
+    }
+
+    // The allocator problem of the Aetheria thrust allocator: four throttles u in [0,1] and four slack pairs
+    // e+x e-x e+y e-y in [0,2]. Rows: x and y translation, yaw, four slack pulls, four throttle regularisers. Duel columns.
+    private static readonly float[] DuelX = { 0f, 0f, 29.08f, -21.80f };
+    private static readonly float[] DuelY = { 53.94f, 61.19f, 0f, 0f };
+    private static readonly float[] DuelYaw = { 49.24f, -55.86f, 166.26f, -124.63f };
+
+    private static (int m, int n, float[] a, float[] b, float[] lo, float[] hi) DuelProblem(float ix, float iy, float iz)
+    {
+        const int m = 11, n = 8;
+        const float h = 100f, wy = 1000f, w = 0.3f, kappa = 10f, rho = 0.1f;
+        var a = new float[m * n];
+        var b = new float[m];
+        var rows = new[] { DuelX, DuelY, DuelYaw };
+        var intent = new[] { ix, iy, iz };
+        for (var r = 0; r < 3; r++)
+        {
+            var pos = 0f;
+            var neg = 0f;
+            foreach (var v in rows[r]) { if (v > 0f) pos += v; else neg -= v; }
+            var s = Math.Max(pos, neg);
+            var d = intent[r] * (intent[r] >= 0f ? pos : neg);
+            var weight = r == 2 ? wy : h;
+            for (var k = 0; k < 4; k++) a[r * n + k] = weight * rows[r][k] / s;
+            if (r < 2)
+            {
+                a[r * n + 4 + 2 * r] = -weight;
+                a[r * n + 5 + 2 * r] = weight;
+            }
+            b[r] = weight * d / s;
+        }
+        for (var k = 0; k < 4; k++)
+        {
+            a[(3 + k) * n + 4 + k] = w;
+            b[3 + k] = -w * kappa;
+            a[(7 + k) * n + k] = rho;
+        }
+        var lo = new float[n];
+        var hi = new float[n];
+        for (var j = 0; j < n; j++) hi[j] = j < 4 ? 1f : 2f;
+        return (m, n, a, b, lo, hi);
+    }
+
+    private static string Bits(BoundedLeastSquaresStatus status, int iterations, float[] x)
+    {
+        var sb = new System.Text.StringBuilder().Append(status).Append(' ').Append(iterations);
+        foreach (var v in x) sb.Append(' ').Append(BitConverter.SingleToInt32Bits(v).ToString("x8"));
+        return sb.ToString();
+    }
+
+    // The before/after pin of the cut that added a tolerance argument: literals recorded by running the pre-cut solver.
+    [Fact]
+    public void DefaultSolvesAreBitIdenticalToTheirGoldenBits()
+    {
+        var cases = new List<string>();
+        {
+            const int m = 5, n = 3;
+            var x = new float[n];
+            var status = Solve(m, n, A54, B5, Fill(-1f, n), Fill(1f, n), x, out var it);
+            cases.Add(Bits(status, it, x));
+        }
+        foreach (var seed in new uint[] { 3, 11, 29 })
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, lo, hi, x, out var it);
+            cases.Add(Bits(status, it, x));
+        }
+        {
+            var (m, n, a, b, lo, hi) = DuelProblem(0f, 0.5f, 0.25f);
+            var x = new float[n];
+            var status = Solve(m, n, a, b, lo, hi, x, out var it);
+            cases.Add(Bits(status, it, x));
+        }
+        var golden = new[]
+        {
+            "Converged 0 3e8cfe03 bdd096e8 3f65616f",
+            "Converged 7 3f800000 00000000 be800000 bdb5b48d 00000000 3f800000 bf3f85df 3dca36f5 3dd187b0 3dcccccd 3f469416 3ea87652 3f4e1a2a",
+            "Converged 2 be800000 be2481b8 bf1f1f78 3eb37f7c 3ec24a46 bdbe3cf6 3dcccccd",
+            "Converged 3 00000000 3d0d206f 3dcccccd 3f800000 3ef2bfd6 3ebe0bf2 bf600698 bf800000 3f528e24 bddf446c 3c173499 00000000",
+            "Converged 5 3f800000 00000000 3ce45d43 00000000 3ce39ffe 00000000 00000000 3d0098ef",
+        };
+        Assert.Equal(string.Join("\n", golden), string.Join("\n", cases));
     }
 }
