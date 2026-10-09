@@ -36,16 +36,19 @@ shader semantics.
   It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) and
   `shaders/CultMath.Interval.hlsl` and `shaders/CultMath.Affine.hlsl` from the same
   directory, so ship all four.
-- interval arithmetic for culling empty space with a proof: `iv_*` functions
+- interval arithmetic for culling empty space: `iv_*` functions
   over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
   and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
   ball, and `iv_frustum_ball`, the ball around a screen tile's rays over a depth
   segment, so one probe serves the whole tile (its radius carries its own
-  float32 rounding bound). Every one returns an interval
-  containing the function's value at every point of its input, so a raymarch
+  float32 rounding bound). The arithmetic functions return an interval built to
+  contain the function's value over their operand intervals, so a raymarch
   can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
-  The two noise balls rest on `SNOISE_LIPSCHITZ`, an empirical bound with a
-  margin that the enclosure tests sample, not a proof.
+  The noise functions rest on empirical constants with a margin, not a proof:
+  `iv_snoise_ball(float3)`, `iv_fbm_ball` and `iv_frustum_ball` on
+  `SNOISE_LIPSCHITZ`, `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and
+  `af_snoise`, `af_fbm` and `af_frustum_ball` on `SNOISE_HESSIAN` and
+  `SNOISE_LIPSCHITZ`; the enclosure tests sample them.
   The bounds compose with a consumer's own analytic envelope (a height fog, a
   carved sphere): its interval over the segment proves empty space in one probe,
   and the noise ball is consulted only near the surface. See `docs/design.md`,

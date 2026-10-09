@@ -20,9 +20,13 @@ backfilled here; see `docs/semver-policy.md` for why.
   `snoise(0, 0, 0)` was -0.4358730 and is 0, `snoise(5, 0, 0)` was 0.7076616 and
   is 0.671713, and `snoise(1, 2, 3)` was 0.22423841 and is 0. Float32 rounding
   decides whether a given input ties, and an input that ties may still keep its
-  value; measured over random integer points, about 97% change. Off that set
-  the results are bit-identical to 0.3.0
-  (`SnoiseTieScopeTests`, goldens computed by the 0.3.0 DLL). `snoise` is now
+  value; measured over random integer points, about 97% change. The cell offset
+  is computed in float32, so inputs within a few float32 ulps of that set can tie
+  and change too (a probe over random inputs found none at a distance of 1e-5 or
+  more from the set, and a handful at 1e-6 near magnitude 30; computed
+  coordinates such as `i * 0.1f` can land there). Elsewhere the results are
+  bit-identical to 0.3.0 (`SnoiseTieScopeTests`, goldens computed by the 0.3.0
+  DLL). `snoise` is now
   continuous across the diagonals to within 1e-4 over two ulps either side
   (`NoiseGradTests`, `SnoiseIsContinuousOnTheSimplexDiagonal`). Anything keyed
   on integer lattice coordinates (voxel or tile seeds, cell centres, generated
@@ -36,12 +40,15 @@ backfilled here; see `docs/semver-policy.md` for why.
   `iv_saturate`, `iv_lerp`, `iv_sqr`, `iv_sqrt`, `iv_exp`, `iv_smoothstep`,
   `iv_snoise_ball` (`float3` and `float2` centres), `iv_fbm_ball` and
   `iv_frustum_ball`, with the HLSL mirrors in the new
-  `Shaders/CultMath.Interval.hlsl`. Each function returns an interval that
-  contains the pointwise float32 result for every input in the operand
-  intervals, except that `iv_snoise_ball` and `iv_fbm_ball` rest on
-  `SNOISE_LIPSCHITZ`, an empirical bound with a margin and not a proof. The
-  enclosure tests sample points and check containment without a tolerance; they
-  do not prove it for every input.
+  `Shaders/CultMath.Interval.hlsl`. Each function is built to return an interval that
+  contains the pointwise float32 result for the operand intervals, but the noise
+  functions rest on empirical constants with a margin, not on a proof:
+  `iv_snoise_ball(float3)`, `iv_fbm_ball` and `iv_frustum_ball` on
+  `SNOISE_LIPSCHITZ`, `iv_snoise_ball(float2)` on `SNOISE2_LIPSCHITZ`, and
+  `af_snoise`, `af_fbm` and `af_frustum_ball` (below) on `SNOISE_HESSIAN` and
+  `SNOISE_LIPSCHITZ`. The enclosure tests sample
+  points and check containment without a tolerance; they do not prove it for
+  every input.
 - Reduced affine forms on `float3(x0, a, e)` that share one symbol over a
   region: `math.af_point`, `af_symbol`, `af_range`, `af_from_iv`, `af_add`,
   `af_add_iv`, `af_sub`, `af_neg`, `af_scale`, `af_mul`, `af_snoise`, `af_fbm`,
