@@ -44,6 +44,8 @@ shader semantics.
   float32 rounding bound). Every one returns an interval
   containing the function's value at every point of its input, so a raymarch
   can skip a segment whose `hi` is below its cutoff; `cultmath_iv_*` in HLSL.
+  The two noise balls rest on `SNOISE_LIPSCHITZ`, an empirical bound with a
+  margin that the enclosure tests sample, not a proof.
   The bounds compose with a consumer's own analytic envelope (a height fog, a
   carved sphere): its interval over the segment proves empty space in one probe,
   and the noise ball is consulted only near the surface. See `docs/design.md`,

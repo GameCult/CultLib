@@ -38,7 +38,10 @@ backfilled here; see `docs/semver-policy.md` for why.
   `iv_frustum_ball`, with the HLSL mirrors in the new
   `Shaders/CultMath.Interval.hlsl`. Each function returns an interval that
   contains the pointwise float32 result for every input in the operand
-  intervals; the enclosure tests check this without a tolerance.
+  intervals, except that `iv_snoise_ball` and `iv_fbm_ball` rest on
+  `SNOISE_LIPSCHITZ`, an empirical bound with a margin and not a proof. The
+  enclosure tests sample points and check containment without a tolerance; they
+  do not prove it for every input.
 - Reduced affine forms on `float3(x0, a, e)` that share one symbol over a
   region: `math.af_point`, `af_symbol`, `af_range`, `af_from_iv`, `af_add`,
   `af_add_iv`, `af_sub`, `af_neg`, `af_scale`, `af_mul`, `af_snoise`, `af_fbm`,
