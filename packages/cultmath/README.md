@@ -127,6 +127,12 @@ The repository root is not a Unity package. Build the tracked package with
 assembly and rejects stale binaries, missing metadata, unexpected assemblies,
 or leaked C# source.
 
+Before tagging `cultmath-unity-v*`, run the import and dispatch smoke on a Windows machine with a GPU,
+alone: `packages/cultmath/scripts/unity-smoke/run-unity-smoke.ps1 -UnityExe <path to Unity.exe>`. It
+builds a scratch project outside the repository that references the package by a `file:` path,
+dispatches a compute shader that includes `CultMath.Interval.hlsl` and `CultMath.Affine.hlsl`, requires
+a deliberately broken control shader to be rejected, and deletes the project afterwards.
+
 ## Shader Tooling
 
 CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
