@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace CultMath;
 
-/// <summary>Outcome of <see cref="BoundedLeastSquares.Solve"/>.</summary>
+/// <summary>Outcome of a <see cref="BoundedLeastSquares"/> solve.</summary>
 public enum BoundedLeastSquaresStatus
 {
     /// <summary>The KKT conditions hold: every free variable has zero gradient and every bound has a gradient pointing into it.</summary>
@@ -61,7 +61,7 @@ public enum BoundedLeastSquaresStatus
 /// </remarks>
 public static class BoundedLeastSquares
 {
-    /// <summary>Default iteration cap for <see cref="Solve"/>.</summary>
+    /// <summary>Default iteration cap for <c>Solve</c>.</summary>
     public const int DefaultMaxIterations = 100;
 
     /// <summary>Default KKT tolerance, relative to the gradient scale; see Stopping in the type remarks.</summary>
