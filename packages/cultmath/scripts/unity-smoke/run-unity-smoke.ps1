@@ -8,7 +8,8 @@
 .DESCRIPTION
   Run it on a Windows machine with a GPU, alone, before tagging cultmath-unity-v*. The scratch
   project is built outside the repository under -WorkRoot, references the package by a file: path,
-  and is deleted afterwards (-Keep leaves it). Exit 0 only when all three tests of SmokeTests.cs
+  and is deleted afterwards (-Keep leaves it). Exit 0 only when Unity exited 0, this run wrote the
+  results file (earlier ones are deleted before launch), and all three tests of SmokeTests.cs
   passed: the C# calls, the real shader dispatched with the right output, and the broken control
   shader detected.
 
@@ -62,22 +63,31 @@ $manifest = [ordered]@{
 
 $log = Join-Path $logs 'unity.log'
 $results = Join-Path $logs 'results.xml'
+# A kept logs folder may hold an earlier run's evidence: nothing from a previous run may decide this one.
+foreach ($stale in $log, $results, (Join-Path $logs 'unity.pid')) { Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue }
+if (Test-Path -LiteralPath $results) { throw "could not clear the previous results file: $results" }
 $unityArgs = @('-batchmode', '-projectPath', $project, '-runTests', '-testPlatform', 'EditMode',
   '-testResults', $results, '-logFile', $log)
+$launched = Get-Date
 $p = Start-Process -PassThru -FilePath $UnityExe -ArgumentList $unityArgs -WindowStyle Hidden
 $p.Id | Out-File (Join-Path $logs 'unity.pid') -Encoding ascii
 "unity pid=$($p.Id) log=$log"
 $p.WaitForExit()
 "unity exit=$($p.ExitCode)"
 
+# Pass needs all of: Unity exited 0; a results file written by this run; the real shader test passed and
+# the broken control test passed (it asserts that the broken shader is rejected).
 $ok = $false
-if (Test-Path -LiteralPath $results) {
+if ($p.ExitCode -ne 0) { "unity exited non-zero: $($p.ExitCode)" }
+elseif (-not (Test-Path -LiteralPath $results)) { 'no results file from this run' }
+elseif ((Get-Item -LiteralPath $results).LastWriteTime -lt $launched) { 'results file predates this run' }
+else {
   $cases = @(([xml](Get-Content -LiteralPath $results -Raw)).SelectNodes('//test-case'))
   $cases | ForEach-Object { "{0} {1}" -f $_.result, $_.name }
   $want = 'CSharpIntervalAndAffineWork', 'RealShaderCompilesAndDispatches', 'BrokenShaderIsDetected'
   $passed = @($cases | Where-Object { $_.result -eq 'Passed' } | ForEach-Object { ($_.name -split '\.')[-1] })
   $ok = (@($want | Where-Object { $passed -contains $_ }).Count -eq $want.Count)
-} else { 'no results file' }
+}
 Get-Content -LiteralPath $log -ErrorAction SilentlyContinue | Select-String -CaseSensitive -Pattern '^SMOKE ' | ForEach-Object { $_.Line }
 
 if (-not $Keep) { Remove-Item -LiteralPath $project -Recurse -Force }
