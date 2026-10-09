@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace CultMath;
 
-/// <summary>Outcome of <see cref="BoundedLeastSquares.Solve"/>.</summary>
+/// <summary>Outcome of a <see cref="BoundedLeastSquares"/> solve.</summary>
 public enum BoundedLeastSquaresStatus
 {
     /// <summary>The KKT conditions hold: every free variable has zero gradient and every bound has a gradient pointing into it.</summary>
@@ -31,9 +31,11 @@ public enum BoundedLeastSquaresStatus
 /// inside the box.
 /// </para>
 /// <para>
-/// Stopping. KKT termination uses a tolerance of 1e-6 times the problem's gradient scale (the largest gradient
-/// component at the box point nearest the origin), so scaling A, b or the bounds, and the choice of warm start, do
-/// not change it. The tolerance is only a resolution: once a stationarity miss or a
+/// Stopping. KKT termination uses a tolerance of <see cref="DefaultKktRelativeTolerance"/> (1e-6) times the problem's
+/// gradient scale (the largest gradient component at the box point nearest the origin), so scaling A, b or the
+/// bounds, and the choice of warm start, do not change it. A caller whose rows span many decades of weight can pass
+/// a smaller <c>kktRelativeTolerance</c>, which changes only this tolerance: the progress rule below and the pivot
+/// threshold are fixed. The tolerance is only a resolution: once a stationarity miss or a
 /// bound release has been followed by a pass that lowers the cost by no more than rounding, the solver reports
 /// <see cref="BoundedLeastSquaresStatus.Converged"/>, so an optimal point whose double gradient sits above the
 /// tolerance costs one confirming iteration rather than the iteration cap.
@@ -48,7 +50,7 @@ public enum BoundedLeastSquaresStatus
 /// </para>
 /// The solver allocates nothing and is deterministic.
 /// <para>
-/// Input contract: <c>a</c> and <c>b</c> must be finite; <c>lo</c> and <c>hi</c> must not be NaN and need
+/// Input contract: <c>kktRelativeTolerance</c> must be finite and greater than zero; <c>a</c> and <c>b</c> must be finite; <c>lo</c> and <c>hi</c> must not be NaN and need
 /// <c>lo &lt;= hi</c>. Infinite bounds are allowed and mean unbounded on that side (<c>lo = -Inf</c>,
 /// <c>hi = +Inf</c>); <c>lo = +Inf</c> or <c>hi = -Inf</c> is invalid. Any violation returns
 /// <see cref="BoundedLeastSquaresStatus.InvalidInput"/> without throwing, with <c>iterations</c> 0 and
@@ -59,11 +61,13 @@ public enum BoundedLeastSquaresStatus
 /// </remarks>
 public static class BoundedLeastSquares
 {
-    /// <summary>Default iteration cap for <see cref="Solve"/>.</summary>
+    /// <summary>Default iteration cap for <c>Solve</c>.</summary>
     public const int DefaultMaxIterations = 100;
 
+    /// <summary>Default KKT tolerance, relative to the gradient scale; see Stopping in the type remarks.</summary>
+    public const double DefaultKktRelativeTolerance = 1e-6;
+
     private const double PivotRelativeTolerance = 1e-12;
-    private const double KktRelativeTolerance = 1e-6;
     private const double StallRelativeTolerance = 1e-15;
 
     /// <summary>Floats of caller-supplied workspace needed for <paramref name="n"/> columns.</summary>
@@ -90,6 +94,33 @@ public static class BoundedLeastSquares
         Span<float> x, Span<float> workspace,
         out int iterations,
         int maxIterations = DefaultMaxIterations)
+        => Solve(m, n, a, b, lo, hi, x, workspace, out iterations, DefaultKktRelativeTolerance, maxIterations);
+
+    /// <summary>
+    /// Minimises <c>||A x - b||^2</c> subject to <c>lo &lt;= x &lt;= hi</c>. <paramref name="x"/> is the warm start
+    /// on entry (clamped to the box first) and the result on exit. <paramref name="kktRelativeTolerance"/> is the
+    /// stationarity resolution relative to the gradient scale defined under Stopping; the overload without it passes
+    /// <see cref="DefaultKktRelativeTolerance"/> and gives the same result.
+    /// </summary>
+    /// <param name="m">Rows of <paramref name="a"/>.</param>
+    /// <param name="n">Columns of <paramref name="a"/>, and length of <paramref name="lo"/>, <paramref name="hi"/> and <paramref name="x"/>.</param>
+    /// <param name="a">Row-major <c>m * n</c> matrix.</param>
+    /// <param name="b">Length <c>m</c> target.</param>
+    /// <param name="lo">Lower bounds; each must be <c>&lt;= hi</c>; <c>-Inf</c> means unbounded below.</param>
+    /// <param name="hi">Upper bounds; <c>+Inf</c> means unbounded above.</param>
+    /// <param name="x">Warm start in, solution out.</param>
+    /// <param name="workspace">At least <see cref="WorkspaceLength"/> floats; contents on entry are ignored.</param>
+    /// <param name="iterations">Active-set iterations used.</param>
+    /// <param name="kktRelativeTolerance">Finite and greater than zero, else <see cref="BoundedLeastSquaresStatus.InvalidInput"/>. Tighten it when rows span many decades of weight; a value below the gradient's rounding noise is harmless because the progress rule ends the solve.</param>
+    /// <param name="maxIterations">Iteration cap.</param>
+    public static BoundedLeastSquaresStatus Solve(
+        int m, int n,
+        ReadOnlySpan<float> a, ReadOnlySpan<float> b,
+        ReadOnlySpan<float> lo, ReadOnlySpan<float> hi,
+        Span<float> x, Span<float> workspace,
+        out int iterations,
+        double kktRelativeTolerance,
+        int maxIterations = DefaultMaxIterations)
     {
         if (m < 0 || n < 0 || a.Length < m * n || b.Length < m || lo.Length < n || hi.Length < n
             || x.Length < n || workspace.Length < WorkspaceLength(n))
@@ -113,6 +144,8 @@ public static class BoundedLeastSquares
         var dependent = Take(ref ints, n);
 
         iterations = 0;
+        if (!(kktRelativeTolerance > 0.0) || double.IsPositiveInfinity(kktRelativeTolerance))
+            return BoundedLeastSquaresStatus.InvalidInput;
         for (var j = 0; j < n; j++)
             if (!(lo[j] <= hi[j]) || float.IsPositiveInfinity(lo[j]) || float.IsNegativeInfinity(hi[j]))
                 return BoundedLeastSquaresStatus.InvalidInput;
@@ -165,7 +198,7 @@ public static class BoundedLeastSquares
                 s += ata[j * n + k] * Math.Clamp(0.0, lo[k], hi[k]);
             gScale = Math.Max(gScale, Math.Abs(s));
         }
-        var kktTol = KktRelativeTolerance * gScale;
+        var kktTol = kktRelativeTolerance * gScale;
 
         // Cost at the last point from which the solver chose to continue past a stationarity miss or a
         // release. A pass that ends without lowering it has nothing left to gain: the tolerance is a
