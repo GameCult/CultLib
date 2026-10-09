@@ -12,13 +12,22 @@ backfilled here; see `docs/semver-policy.md` for why.
 - `math.snoise(float3)` and `math.snoise_grad`, and their HLSL mirrors in
   `Shaders/CultMath.hlsl`, now resolve ties among the components of the cell
   offset in a fixed order: x over y, y over z, x over z. The cyclic rule they
-  used before made the origin and every point on the `(t, t, t)` diagonal read a
-  different function from the points beside it. Values change at the origin and
-  on the `(t, t, t)` diagonal and nowhere else; off that tie set the results are
-  bit-identical to 0.3.0. `snoise` is now continuous across the diagonal to
-  within 1e-4 over two ulps either side (`NoiseGradTests`,
-  `SnoiseIsContinuousOnTheSimplexDiagonal`). Content seeded from `snoise` at
-  those points changes; regenerate it when you take this version.
+  used before read a different function wherever the three components of the
+  cell offset are equal. That is every input whose coordinate differences
+  `y - x` and `z - x` are whole numbers: every integer point (the origin
+  included), and the whole `(1, 1, 1)` line through each of them (`(t, t, t)`
+  among them). On that set values change by up to 0.776; for example
+  `snoise(0, 0, 0)` was -0.4358730 and is 0, `snoise(5, 0, 0)` was 0.7076616 and
+  is 0.671713, and `snoise(1, 2, 3)` was 0.22423841 and is 0. Float32 rounding
+  decides whether a given input ties, and an input that ties may still keep its
+  value; measured over random integer points, about 97% change. Off that set
+  the results are bit-identical to 0.3.0
+  (`SnoiseTieScopeTests`, goldens computed by the 0.3.0 DLL). `snoise` is now
+  continuous across the diagonals to within 1e-4 over two ulps either side
+  (`NoiseGradTests`, `SnoiseIsContinuousOnTheSimplexDiagonal`). Anything keyed
+  on integer lattice coordinates (voxel or tile seeds, cell centres, generated
+  content sampled on a whole-number grid) changes; regenerate it when you take
+  this version.
 
 ### Added
 

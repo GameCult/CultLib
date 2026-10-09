@@ -371,9 +371,11 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   pins the continuity. Ties in the offset `x0` resolve in Gustavson's
   `simplexnoise1234` order (x over y, y over z, x over z), a total order, so the
   four corners are always a simplex. Upstream's `step` compares are cyclic: where
-  the three components are equal, which includes the origin and every
-  `(t, t, t)`, the corners repeat the origin vertex and the value jumps by about
-  0.77 near the origin and up to 1.56 at magnitudes of 64 and above. `NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal` pins the order.
+  the three components are equal, which is every input whose differences `y - x`
+  and `z - x` are whole numbers (every integer point, the origin and every
+  `(t, t, t)` among them), the corners repeat the origin vertex and the value
+  jumps by about 0.77 near the origin and up to 1.56 at magnitudes of 64 and
+  above. `SnoiseTieScopeTests` pins the set against the 0.3.0 values. `NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal` pins the order.
 - `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
   following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
   Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
