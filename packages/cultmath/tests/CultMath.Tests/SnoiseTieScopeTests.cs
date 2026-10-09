@@ -7,12 +7,13 @@ namespace CultMath.Tests;
 // The 0.4.0 tie rule (math.snoise(float3), math.snoise_grad) changes values exactly where the cell
 // offset x0 has three equal components, which is every input whose coordinate differences y - x and
 // z - x are whole numbers (every integer point, and the whole (1, 1, 1) line through each). Off that
-// set the results are bit-identical to 0.3.0. The goldens below were computed by the
+// set and its float32 band (below) the results are bit-identical to 0.3.0. The goldens below were computed by the
 // cultmath-unity-v0.3.0 tag's CultMath.dll (Runtime/Plugins), not by this code. Float32 rounding
 // decides whether a given integer-difference input ties, because x0 is computed in float32: an
-// input a few float32 ulps off the set can tie too and move (measured: none at a distance of 1e-5 or
-// more from the set, a handful at 1e-6 near magnitude 30), and an input on the set may keep its
-// value. The inputs below tie, and a tie moves the value or the gradient on most, not all, of them.
+// input whose differences round onto whole numbers can tie too and move, within about one float32
+// spacing of the coordinate magnitude (a band that widens with the magnitude), and some inputs on
+// the set keep their value (about 3% of random integer points). Every input below ties and moves
+// all five outputs (value and the four gradient words).
 // TieSetNow pins what this code returns on the same inputs, so that each of the two tie-rule sites
 // (the step in snoise, the step in snoise_grad) is pinned on its own.
 public sealed class SnoiseTieScopeTests
