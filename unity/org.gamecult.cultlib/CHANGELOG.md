@@ -2,6 +2,17 @@
 
 All notable changes to this package are documented in this file.
 
+## [Unreleased]
+
+### Breaking
+
+- CultCache refuses an unknown union arm on read and an unnamed union subtype on
+  write. A payload whose arm key the union does not declare used to decode to
+  `null` (and the next save wrote the loss back); a value whose type the union
+  does not name used to be written as `nil`. Both now throw, naming the union and
+  the key or type, and a store pull names the record key and schema id. Known arms
+  encode to the same bytes as before.
+
 ## [1.0.60]
 
 ### Changed

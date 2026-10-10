@@ -73,6 +73,27 @@ Typed lookups and watches (`Get<T>`, `GetAll<T>`, `GetByName<T>`,
 type is assignable to `T`. A single-result lookup with several candidates
 throws.
 
+## Unions
+
+A union is an abstract class or interface carrying `[Union(key, typeof(Arm))]`
+attributes on itself (a union whose arms are also a union has its own key set;
+attributes are not inherited). A union value is `nil` for a null reference, and
+otherwise an arm: the two-element array `[key, armSlots]`, where `armSlots` is the
+arm's own slot array (a unit arm is `[key, []]`). Keys start anywhere and may
+have gaps.
+
+- A key is the identity of an arm. It is never reused, and a retired arm's key
+  stays a gap.
+- An arm key the reader's union does not declare is refused on read, in a field,
+  a list or an arm, with an error naming the union type and the key. The
+  payload is never echoed, and the value is never read back as `null`: a runtime
+  that cannot name an arm cannot re-encode it.
+- A value whose runtime type is not exactly a declared arm is refused on write,
+  naming the union and the type. A subtype of an arm is not the arm.
+- A store that holds a refused arm fails to load, and the error names the record
+  key and its schema id.
+- Arm slots follow the slot rules below; this rule does not change them.
+
 ## Soft-migratable drift
 
 CultCache accepts compatible drift only when the local reader can still map the
