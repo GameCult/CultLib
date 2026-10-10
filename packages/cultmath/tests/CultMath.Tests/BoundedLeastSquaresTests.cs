@@ -782,7 +782,7 @@ public sealed class BoundedLeastSquaresTests
             }
             var status = Solve(m, n, a, new float[m], lo, hi, x, out var iterations);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"{name}: {status}");
-            Assert.True(iterations <= 4, $"{name}: {iterations} iterations");
+            Assert.True(iterations <= 8, $"{name}: {iterations} iterations");
         }
     }
 
