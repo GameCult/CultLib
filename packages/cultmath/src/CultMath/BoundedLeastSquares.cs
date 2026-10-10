@@ -30,8 +30,39 @@ public enum BoundedLeastSquaresInput
     /// <summary>Some entry of <c>a</c> is NaN or infinite.</summary>
     NonFiniteMatrix,
 
-    /// <summary>Some entry of <c>b</c> is NaN or infinite.</summary>
+    /// <summary>Some entry of <c>b</c> is NaN or infinite. With <c>n = 0</c> there is no unknown, <c>b</c> is never read and no entry is judged.</summary>
     NonFiniteTarget,
+}
+
+/// <summary>A decision <see cref="BoundedLeastSquares"/> took, for tests that pin the stopping rule by its decisions.</summary>
+internal enum SolveEvent
+{
+    /// <summary>A step stopped at a bound: column, step length.</summary>
+    Step,
+
+    /// <summary>A bound whose violation beat the best so far, judged against its rounding bound: column, violation, noise, best before.</summary>
+    Candidate,
+
+    /// <summary>A bound released: column, the stall mark after the release.</summary>
+    Release,
+
+    /// <summary>KKT holds and the solve is over: the tolerance.</summary>
+    Kkt,
+
+    /// <summary>A stationarity miss with no release, the cost fell and the solve goes on: cost, mark before, allowance.</summary>
+    Miss,
+
+    /// <summary>A stationarity miss with no release, the cost did not fall: the solve is over: cost, mark, allowance.</summary>
+    Stall,
+
+    /// <summary>The iteration cap ended the solve.</summary>
+    Cap,
+}
+
+/// <summary>Observes the decisions of one solve in order; never changes one.</summary>
+internal interface ISolveTrace
+{
+    void Record(SolveEvent kind, int column, double a, double b, double c);
 }
 
 /// <summary>
@@ -182,8 +213,20 @@ public static class BoundedLeastSquares
         out int iterations,
         double kktRelativeTolerance,
         int maxIterations = DefaultMaxIterations)
+        => SolveTraced(m, n, a, b, lo, hi, x, workspace, out iterations, kktRelativeTolerance, maxIterations, null);
+
+    // The whole solve. A trace sink only observes: every decision below is taken from the same values with or without one.
+    internal static BoundedLeastSquaresStatus SolveTraced(
+        int m, int n,
+        ReadOnlySpan<float> a, ReadOnlySpan<float> b,
+        ReadOnlySpan<float> lo, ReadOnlySpan<float> hi,
+        Span<float> x, Span<float> workspace,
+        out int iterations,
+        double kktRelativeTolerance,
+        int maxIterations,
+        ISolveTrace? trace)
     {
-        if (n < 0 || x.Length < n || workspace.Length < WorkspaceLength(n))
+        if (x.Length < n || workspace.Length < WorkspaceLength(n))
             throw new ArgumentException("BoundedLeastSquares: span shorter than the stated dimensions.");
         iterations = 0;
         if (Validate(m, n, a, b, lo, hi, kktRelativeTolerance) != BoundedLeastSquaresInput.Valid)
@@ -284,8 +327,9 @@ public static class BoundedLeastSquares
 
             if (block >= 0)
             {
-                if (iterations >= maxIterations) { status = BoundedLeastSquaresStatus.IterationLimit; break; }
+                if (iterations >= maxIterations) { trace?.Record(SolveEvent.Cap, -1, 0.0, 0.0, 0.0); status = BoundedLeastSquaresStatus.IterationLimit; break; }
                 iterations++;
+                trace?.Record(SolveEvent.Step, block, t, 0.0, 0.0);
                 for (var i = 0; i < freeCount; i++)
                 {
                     var j = freeIndex[i];
@@ -309,30 +353,9 @@ public static class BoundedLeastSquares
                 if (Math.Abs(g[freeIndex[i]]) > kktTol)
                     freeViolated = true;
 
-            var release = -1;
-            var worst = kktTol;
-            for (var j = 0; j < n; j++)
-            {
-                if (lo[j] == hi[j]) continue;
-                // A bound at lo wants a positive gradient and one at hi a negative one; a free column has state 0.
-                var violation = state[j] * g[j];
-                if (violation > worst && violation > ReleaseNoise(ata, atb, xd, j, n))
-                {
-                    worst = violation;
-                    release = j;
-                }
-            }
-            if (release < 0 && !freeViolated) { status = BoundedLeastSquaresStatus.Converged; break; }
-
-            if (release < 0)
-            {
-                var f = Objective(xd, g, atb, n, out var fScale);
-                if (f >= fMark - StallRelativeTolerance * fScale) { status = BoundedLeastSquaresStatus.Converged; break; }
-                fMark = f;
-            }
-            else
-                fMark = double.PositiveInfinity;
-            if (iterations >= maxIterations) { status = BoundedLeastSquaresStatus.IterationLimit; break; }
+            var release = SelectRelease(ata, atb, xd, g, state, lo, hi, kktTol, n, trace);
+            if (JudgePass(release, freeViolated, kktTol, ref fMark, xd, g, atb, n, trace)) { status = BoundedLeastSquaresStatus.Converged; break; }
+            if (iterations >= maxIterations) { trace?.Record(SolveEvent.Cap, -1, 0.0, 0.0, 0.0); status = BoundedLeastSquaresStatus.IterationLimit; break; }
             iterations++;
             // A stationarity miss re-solves the same free set from the improved point.
             if (release >= 0) state[release] = 0;
@@ -341,6 +364,63 @@ public static class BoundedLeastSquares
         for (var j = 0; j < n; j++)
             x[j] = (float)xd[j];
         return status;
+    }
+
+    // The bound to release: the one with the most violated gradient sign, the first of equal violations, and only if
+    // the violation exceeds both the tolerance (the starting `worst`) and the rounding bound of its own gradient.
+    // -1 when none qualifies.
+    internal static int SelectRelease(
+        ReadOnlySpan<double> ata, ReadOnlySpan<double> atb, ReadOnlySpan<double> x, ReadOnlySpan<double> g,
+        ReadOnlySpan<int> state, ReadOnlySpan<float> lo, ReadOnlySpan<float> hi, double kktTol, int n, ISolveTrace? trace)
+    {
+        var release = -1;
+        var worst = kktTol;
+        for (var j = 0; j < n; j++)
+        {
+            if (lo[j] == hi[j]) continue;
+            // A bound at lo wants a positive gradient and one at hi a negative one; a free column has state 0.
+            var violation = state[j] * g[j];
+            if (violation > worst)
+            {
+                var noise = ReleaseNoise(ata, atb, x, j, n);
+                trace?.Record(SolveEvent.Candidate, j, violation, noise, worst);
+                if (violation > noise)
+                {
+                    worst = violation;
+                    release = j;
+                }
+            }
+        }
+        return release;
+    }
+
+    // What a full step's outcome means for the solve: true when it is over. Nothing to release and a stationary free
+    // set is KKT. Nothing to release with a stationarity miss ends when the cost has not fallen below the last such
+    // miss's by more than rounding, else it records the cost. A release is never judged by the cost and resets the mark.
+    internal static bool JudgePass(
+        int release, bool freeViolated, double kktTol, ref double fMark,
+        ReadOnlySpan<double> x, ReadOnlySpan<double> g, ReadOnlySpan<double> atb, int n, ISolveTrace? trace)
+    {
+        if (release < 0 && !freeViolated)
+        {
+            trace?.Record(SolveEvent.Kkt, -1, kktTol, 0.0, 0.0);
+            return true;
+        }
+        if (release < 0)
+        {
+            var f = Objective(x, g, atb, n, out var fScale);
+            var allowance = StallRelativeTolerance * fScale;
+            var stalled = f >= fMark - allowance;
+            trace?.Record(stalled ? SolveEvent.Stall : SolveEvent.Miss, -1, f, fMark, allowance);
+            if (stalled) return true;
+            fMark = f;
+        }
+        else
+        {
+            fMark = double.PositiveInfinity;
+            trace?.Record(SolveEvent.Release, release, fMark, 0.0, 0.0);
+        }
+        return false;
     }
 
     private static Span<T> Take<T>(ref Span<T> pool, int length)
@@ -365,7 +445,7 @@ public static class BoundedLeastSquares
     }
 
     // Rounding bound of the double gradient component j: gamma_(n+1) (Higham, inner products) times the magnitude of its terms.
-    private static double ReleaseNoise(ReadOnlySpan<double> ata, ReadOnlySpan<double> atb, ReadOnlySpan<double> x, int j, int n)
+    internal static double ReleaseNoise(ReadOnlySpan<double> ata, ReadOnlySpan<double> atb, ReadOnlySpan<double> x, int j, int n)
     {
         var s = Math.Abs(atb[j]);
         for (var k = 0; k < n; k++) s += Math.Abs(ata[j * n + k] * x[k]);
