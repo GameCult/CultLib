@@ -274,15 +274,38 @@ namespace GameCult.Caching.Tests
 
                 var forged = Doc(LeafArm(key, "r", Canary, 7));
                 Assert.That(forged.Length, Is.EqualTo(genuine.Length));
+                // A directory store names a page by the SHA-256 of its bytes and its manifest commits to that hash, so a forged
+                // page is renamed and the manifest told its new hash: the store then holds a well-formed page the reader must refuse.
                 var patched = 0;
-                foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
+                var rehashed = new List<(byte[] Old, byte[] New)>();
+                foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).ToArray())
                 {
                     var bytes = File.ReadAllBytes(file);
                     var at = bytes.AsSpan().IndexOf(genuine);
                     if (at < 0) continue;
+                    var before = System.Security.Cryptography.SHA256.HashData(bytes);
                     forged.CopyTo(bytes, at);
-                    File.WriteAllBytes(file, bytes);
+                    if (file.EndsWith(".msgpack", StringComparison.Ordinal))
+                    {
+                        File.Delete(file);
+                        var after = System.Security.Cryptography.SHA256.HashData(bytes);
+                        File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(file)!, Convert.ToHexString(after).ToLowerInvariant() + ".msgpack"), bytes);
+                        rehashed.Add((before, after));
+                    }
+                    else
+                    {
+                        File.WriteAllBytes(file, bytes);
+                    }
+
                     patched++;
+                }
+
+                foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Where(f => !f.EndsWith(".msgpack", StringComparison.Ordinal)).ToArray())
+                {
+                    var bytes = File.ReadAllBytes(file);
+                    foreach (var (before, after) in rehashed)
+                        for (var at = bytes.AsSpan().IndexOf(before); at >= 0; at = bytes.AsSpan().IndexOf(before)) after.CopyTo(bytes, at);
+                    File.WriteAllBytes(file, bytes);
                 }
 
                 Assert.That(patched, Is.GreaterThan(0), "the genuine payload was found in the store");
