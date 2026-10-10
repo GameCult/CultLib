@@ -294,7 +294,7 @@ namespace GameCult.Caching.Tests
                 Assert.Multiple(() =>
                 {
                     Assert.That(message, Does.Contain("Record 'd1'"));
-                    Assert.That(message, Does.Contain("tests.guard_doc.v1"));
+                    Assert.That(message, Does.Contain($"(schema '{Registry.GetRequired(typeof(GuardDoc)).SchemaId}')"));
                     Assert.That(message, Does.Contain(NodeName));
                     Assert.That(message, Does.Contain($"key {key} "));
                     Assert.That(message, Does.Not.Contain(Canary));
