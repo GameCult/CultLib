@@ -3256,7 +3256,7 @@ namespace GameCult.Caching
                 // The codec knows what it refused but not which record; the store does. Say both, and never null the record.
                 var causes = new List<string>();
                 for (var cause = exception; cause != null; cause = cause.InnerException) causes.Add(cause.Message);
-                throw new InvalidDataException($"Record '{record.Key}' (schema '{record.SchemaId}') cannot be decoded: {string.Join(" <- ", causes)}", exception);
+                throw new InvalidDataException($"Record '{record.Key}' (schema '{record.SchemaId}') cannot be decoded: {string.Join(" <- ", causes.Distinct())}", exception);
             }
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),

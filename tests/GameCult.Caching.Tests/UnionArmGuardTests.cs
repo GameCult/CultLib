@@ -262,6 +262,22 @@ namespace GameCult.Caching.Tests
             Assert.That(MessagePackSerializer.Serialize(new CultRecordRef<GuardDoc>(new CultRecordKey("k")), options), Is.EqualTo(Raw((ref MessagePackWriter w) => w.Write("consumer-ref"))));
         }
 
+        // A consumer resolver may format the union type itself. The guard wraps whatever the rest of the composite hands out,
+        // so that formatter is used and the key check still runs ahead of it.
+        [Test]
+        public void ConsumerFormatterForTheUnionItselfIsWrappedNotReplaced()
+        {
+            var options = CultDocumentMessagePackSerialization.OptionsFor(typeof(GuardDoc).Assembly);
+            Assert.That(MessagePackSerializer.Serialize<Custom>(new CustomArm(), options), Is.EqualTo(Raw((ref MessagePackWriter w) => w.Write("consumer-union"))));
+            Assert.Throws<MessagePackSerializationException>(() => MessagePackSerializer.Deserialize<Custom>(
+                Raw((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(5); w.WriteArrayHeader(0); }), options));
+            Assert.Throws<MessagePackSerializationException>(() => MessagePackSerializer.Serialize<Custom>(new CustomRogue(), options));
+        }
+
+        [Union(0, typeof(CustomArm))] public abstract class Custom { }
+        [MessagePackObject] public sealed class CustomArm : Custom { }
+        [MessagePackObject] public sealed class CustomRogue : Custom { }
+
         // The guard asks for a union's own attributes only. MessagePack declares UnionAttribute not inherited, so an inner union
         // can never see its outer union's keys through the base class; this pins that fact, on which the explicit false rests.
         [Test]
@@ -277,6 +293,7 @@ namespace GameCult.Caching.Tests
 
             public IMessagePackFormatter<T>? GetFormatter<T>() =>
                 typeof(T) == typeof(Overridden) ? (IMessagePackFormatter<T>)(object)new Fixed<Overridden>(new Overridden(), "consumer")
+                : typeof(T) == typeof(Custom) ? (IMessagePackFormatter<T>)(object)new Fixed<Custom>(new CustomArm(), "consumer-union")
                 : typeof(T) == typeof(CultRecordRef<GuardDoc>) ? (IMessagePackFormatter<T>)(object)new Fixed<CultRecordRef<GuardDoc>>(default, "consumer-ref")
                 : null;
 
@@ -350,14 +367,15 @@ namespace GameCult.Caching.Tests
                 {
                     using var cache = await CultCacheMessagePack.OpenAsync(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory, ReadOnly = true });
                 });
-                var message = Chain(thrown!);
+                // The outermost message alone says it: a caller that prints only .Message must see the record and the union.
+                var message = thrown!.Message;
                 Assert.Multiple(() =>
                 {
                     Assert.That(message, Does.Contain("Record 'd1'"));
                     Assert.That(message, Does.Contain($"(schema '{Registry.GetRequired(typeof(GuardDoc)).SchemaId}')"));
                     Assert.That(message, Does.Contain(NodeName));
                     Assert.That(message, Does.Contain($"key {key} "));
-                    Assert.That(message, Does.Not.Contain(Canary));
+                    Assert.That(Chain(thrown), Does.Not.Contain(Canary));
                 });
             }
             finally
