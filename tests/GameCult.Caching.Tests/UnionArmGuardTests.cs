@@ -36,16 +36,16 @@ namespace GameCult.Caching.Tests
         private static readonly Emit Nil = (ref MessagePackWriter w) => w.WriteNil();
 
         // Leaf: slots [id, content, nil (retired 2), weight].
-        private static Emit Leaf(int key, string id, string content, int weight) => (ref MessagePackWriter w) =>
+        private static Emit LeafArm(int key, string id, string content, int weight) => (ref MessagePackWriter w) =>
         {
             w.WriteArrayHeader(2); w.Write(key);
             w.WriteArrayHeader(4); w.Write(id); w.Write(content); w.WriteNil(); w.Write(weight);
         };
 
-        private static Emit Unit(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(0); };
+        private static Emit UnitArm(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(0); };
 
         // Branch: slots [children, next].
-        private static Emit Branch(int key, Emit next, params Emit[] children) => (ref MessagePackWriter w) =>
+        private static Emit BranchArm(int key, Emit next, params Emit[] children) => (ref MessagePackWriter w) =>
         {
             w.WriteArrayHeader(2); w.Write(key);
             w.WriteArrayHeader(2);
@@ -121,22 +121,22 @@ namespace GameCult.Caching.Tests
         [TestCase(7)]
         [TestCase(10)]
         public void UnknownArmInFieldRefused(int key) =>
-            AssertRefused(Doc(Leaf(key, "r", Canary, 7)), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(LeafArm(key, "r", Canary, 7)), NodeName, key, "3, 5, 8, 9");
 
         [TestCase(0)]
         [TestCase(4)]
         [TestCase(10)]
         public void UnknownArmInListRefused(int key) =>
-            AssertRefused(Doc(Leaf(3, "r", "ok", 1), List(Unit(8), Leaf(key, "i", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(LeafArm(3, "r", "ok", 1), List(UnitArm(8), LeafArm(key, "i", Canary, 7))), NodeName, key, "3, 5, 8, 9");
 
         // Inside an arm's own list, and inside an arm's own field: the union nested under a union.
         [TestCase(4)]
         [TestCase(10)]
         public void UnknownArmNestedInArmRefused(int key)
         {
-            AssertRefused(Doc(Branch(5, Nil, Unit(8), Leaf(key, "c", Canary, 7))), NodeName, key, "3, 5, 8, 9");
-            AssertRefused(Doc(Branch(5, Leaf(key, "n", Canary, 7))), NodeName, key, "3, 5, 8, 9");
-            AssertRefused(Doc(Branch(5, Nil, Branch(5, Nil, Branch(5, Nil, Leaf(key, "deep", Canary, 7))))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, Nil, UnitArm(8), LeafArm(key, "c", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, LeafArm(key, "n", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, Nil, BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(key, "deep", Canary, 7))))), NodeName, key, "3, 5, 8, 9");
         }
 
         // A union whose arms are also a union has its own key set: 7 is Outer's (OuterOnly) and not Inner's.
@@ -190,7 +190,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void NullUnionRoundTrips()
         {
-            var bytes = Doc(Nil, List(Nil, Unit(8), Nil));
+            var bytes = Doc(Nil, List(Nil, UnitArm(8), Nil));
             var decoded = (GuardDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(GuardDoc), bytes, Registry);
             Assert.That(decoded.Root, Is.Null);
             Assert.That(decoded.Items, Has.Count.EqualTo(3));
@@ -218,11 +218,11 @@ namespace GameCult.Caching.Tests
         };
 
         private static byte[] KnownArmBytes() => Doc(
-            Branch(5, Leaf(3, "n", "z", 3),
-                Leaf(3, "a", "x", 1),
-                Unit(8),
-                Branch(5, Nil, Branch(5, Nil, Leaf(3, "deep", "y", 2)))),
-            List(Unit(8), Leaf(3, "i", "w", 4), Nil),
+            BranchArm(5, LeafArm(3, "n", "z", 3),
+                LeafArm(3, "a", "x", 1),
+                UnitArm(8),
+                BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(3, "deep", "y", 2)))),
+            List(UnitArm(8), LeafArm(3, "i", "w", 4), Nil),
             InnerArm(1, 9),
             InnerArm(1, 8));
 
@@ -265,14 +265,14 @@ namespace GameCult.Caching.Tests
             try
             {
                 var path = Path.Combine(folder, "guard.cc");
-                var genuine = Doc(Leaf(3, "r", Canary, 7));
+                var genuine = Doc(LeafArm(3, "r", Canary, 7));
                 using (var writer = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory, StoreFlushOnDispose = true }))
                 {
                     await writer.UpsertAsync(typeof(GuardDoc), new GuardDoc { Id = "d1", Root = new Leaf { Id = "r", Content = Canary, Weight = 7 } }, new CultRecordKey("d1"));
                     await writer.FlushAsync();
                 }
 
-                var forged = Doc(Leaf(key, "r", Canary, 7));
+                var forged = Doc(LeafArm(key, "r", Canary, 7));
                 Assert.That(forged.Length, Is.EqualTo(genuine.Length));
                 var patched = 0;
                 foreach (var file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
