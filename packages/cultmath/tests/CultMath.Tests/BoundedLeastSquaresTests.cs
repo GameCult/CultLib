@@ -598,6 +598,152 @@ public sealed class BoundedLeastSquaresTests
     }
 
     [Fact]
+    public void ValidateNamesTheFirstInvalidInput()
+    {
+        const int m = 5, n = 3;
+        var nan = float.NaN;
+        var inf = float.PositiveInfinity;
+        const double goodTol = 1e-6;
+        var cases = new (string name, BoundedLeastSquaresInput expected, double tol, Action<float[], float[], float[], float[]> corrupt)[]
+        {
+            ("valid", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { }),
+            ("infinite bounds are unbounded", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { lo[0] = -inf; hi[1] = inf; }),
+            ("lo = hi", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { lo[2] = 0.5f; hi[2] = 0.5f; }),
+            ("tolerance 0", BoundedLeastSquaresInput.InvalidTolerance, 0.0, (a, b, lo, hi) => { }),
+            ("tolerance negative", BoundedLeastSquaresInput.InvalidTolerance, -1e-6, (a, b, lo, hi) => { }),
+            ("tolerance NaN", BoundedLeastSquaresInput.InvalidTolerance, double.NaN, (a, b, lo, hi) => { }),
+            ("tolerance +Inf", BoundedLeastSquaresInput.InvalidTolerance, double.PositiveInfinity, (a, b, lo, hi) => { }),
+            ("tolerance tiny but positive", BoundedLeastSquaresInput.Valid, double.Epsilon, (a, b, lo, hi) => { }),
+            ("lo NaN", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => lo[1] = nan),
+            ("hi NaN", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => hi[2] = nan),
+            ("lo > hi", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[1] = 0.5f; hi[1] = 0.25f; }),
+            ("lo = +Inf", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[0] = inf; hi[0] = inf; }),
+            ("hi = -Inf", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[0] = -inf; hi[0] = -inf; }),
+            ("A NaN", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[4] = nan),
+            ("A +Inf", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[7] = inf),
+            ("A -Inf in the last entry", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[m * n - 1] = -inf),
+            ("b NaN", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[2] = nan),
+            ("b +Inf in the first entry", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[0] = inf),
+            ("b -Inf in the last entry", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[m - 1] = -inf),
+            // Two faults at once: the earlier member in the order wins, whichever input comes first in the argument list.
+            ("tolerance and bounds", BoundedLeastSquaresInput.InvalidTolerance, 0.0, (a, b, lo, hi) => lo[0] = nan),
+            ("tolerance and A", BoundedLeastSquaresInput.InvalidTolerance, double.NaN, (a, b, lo, hi) => a[0] = nan),
+            ("tolerance and b", BoundedLeastSquaresInput.InvalidTolerance, -1.0, (a, b, lo, hi) => b[0] = nan),
+            ("bounds and A", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { hi[0] = nan; a[0] = nan; }),
+            ("bounds and b", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[2] = 1f; hi[2] = -1f; b[4] = inf; }),
+            ("A and b", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => { a[14] = inf; b[0] = nan; }),
+        };
+        foreach (var (name, expected, tol, corrupt) in cases)
+        {
+            var a = (float[])A54.Clone();
+            var b = (float[])B5.Clone();
+            var lo = Fill(-1f, n);
+            var hi = Fill(1f, n);
+            corrupt(a, b, lo, hi);
+            var verdict = BoundedLeastSquares.Validate(m, n, a, b, lo, hi, tol);
+            Assert.True(expected == verdict, $"{name}: {verdict}");
+
+            var x = new float[n];
+            var status = BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, new float[BoundedLeastSquares.WorkspaceLength(n)], out _, tol);
+            Assert.True((status == BoundedLeastSquaresStatus.InvalidInput) == (expected != BoundedLeastSquaresInput.Valid), $"{name}: Solve {status}");
+        }
+
+        // The overload without a tolerance validates against the default one.
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(m, n, A54, B5, Fill(-1f, n), Fill(1f, n)));
+        Assert.Equal(BoundedLeastSquaresInput.InvalidBounds, BoundedLeastSquares.Validate(m, n, A54, B5, Fill(2f, n), Fill(1f, n)));
+    }
+
+    [Fact]
+    public void ValidateReadsOnlyTheStatedDimensions()
+    {
+        // Entries beyond m * n, m and n are not inputs: a NaN there is not a fault.
+        const int m = 2, n = 2;
+        var a = new[] { 1f, 0f, 0f, 1f, float.NaN };
+        var b = new[] { 1f, 1f, float.NaN };
+        var lo = new[] { -1f, -1f, float.NaN };
+        var hi = new[] { 1f, 1f, float.NaN };
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(m, n, a, b, lo, hi));
+
+        // A problem with no unknown has no use for b, so a non-finite b is not an invalid input there.
+        var nanB = new[] { float.NaN, 1f };
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(2, 0, ReadOnlySpan<float>.Empty, nanB, ReadOnlySpan<float>.Empty, ReadOnlySpan<float>.Empty));
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(2, 0, ReadOnlySpan<float>.Empty, nanB, ReadOnlySpan<float>.Empty, ReadOnlySpan<float>.Empty,
+            Span<float>.Empty, Span<float>.Empty, out _));
+    }
+
+    [Fact]
+    public void ValidateThrowsOnAShortSpanLikeSolve()
+    {
+        const int m = 5, n = 3;
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        // The caller-bug contract holds ahead of any value check: a NaN tolerance does not hide it.
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54.AsSpan(1), B5, lo, hi, double.NaN));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5.AsSpan(1), lo, hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5, lo.AsSpan(1), hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5, lo, hi.AsSpan(1)));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(-1, n, A54, B5, lo, hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, -1, A54, B5, lo, hi));
+    }
+
+    [Fact]
+    public void ValidateAllocatesNothing()
+    {
+        const int m = 5, n = 3;
+        var bad = (float[])A54.Clone();
+        bad[14] = float.NaN;
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        foreach (var (name, a, tol) in new[] { ("valid", A54, 1e-6), ("invalid matrix", bad, 1e-6), ("invalid tolerance", A54, 0.0) })
+        {
+            var bytes = new long[2];
+            for (var call = 0; call < 2; call++)
+            {
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                BoundedLeastSquares.Validate(m, n, a, B5, lo, hi, tol);
+                bytes[call] = GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+            Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
+        }
+    }
+
+    [Fact]
+    public void SolveReturnsInvalidInputExactlyWhenValidateIsNotValid()
+    {
+        var invalid = 0;
+        for (uint seed = 1; seed <= 300; seed++)
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var rng = new CultMath.Random(seed * 104729u);
+            var tol = 1e-6;
+            // Corrupt zero to three inputs, so some problems stay clean.
+            for (var k = rng.NextInt(4); k > 0; k--)
+            {
+                switch (rng.NextInt(5))
+                {
+                    case 0: tol = rng.NextInt(2) == 0 ? 0.0 : double.NaN; break;
+                    case 1: lo[rng.NextInt(n)] = float.NaN; break;
+                    case 2: { var j = rng.NextInt(n); lo[j] = hi[j] + 1f; } break;
+                    case 3: a[rng.NextInt(m * n)] = rng.NextInt(2) == 0 ? float.NaN : float.NegativeInfinity; break;
+                    default: b[rng.NextInt(m)] = float.PositiveInfinity; break;
+                }
+            }
+            var verdict = BoundedLeastSquares.Validate(m, n, a, b, lo, hi, tol);
+            var start = Fill(0.5f, n);
+            var x = (float[])start.Clone();
+            var status = BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, new float[BoundedLeastSquares.WorkspaceLength(n)], out var iterations, tol);
+            Assert.True((status == BoundedLeastSquaresStatus.InvalidInput) == (verdict != BoundedLeastSquaresInput.Valid), $"seed {seed}: {verdict} but {status}");
+            if (verdict != BoundedLeastSquaresInput.Valid)
+            {
+                invalid++;
+                Assert.Equal(0, iterations);
+                Assert.Equal(start, x);
+            }
+        }
+        Assert.InRange(invalid, 100, 280);
+    }
+
+    [Fact]
     public void InfiniteBoundsMeanUnbounded()
     {
         const int m = 5, n = 3;
