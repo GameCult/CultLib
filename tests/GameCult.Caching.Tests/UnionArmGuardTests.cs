@@ -252,6 +252,43 @@ namespace GameCult.Caching.Tests
             Assert.That(back.Root, Is.TypeOf<StubArm>());
         }
 
+        // The guard wraps the composite, so the composite's own order is still the contract: a consumer resolver outranks the
+        // document resolver (CultRecordRef) and MessagePack's own object formatter, here for a type it also knows.
+        [Test]
+        public void ConsumerResolversOutrankTheRestOfTheComposite()
+        {
+            var options = CultDocumentMessagePackSerialization.OptionsFor(typeof(GuardDoc).Assembly);
+            Assert.That(MessagePackSerializer.Serialize(new Overridden { N = 1 }, options), Is.EqualTo(Raw((ref MessagePackWriter w) => w.Write("consumer"))));
+            Assert.That(MessagePackSerializer.Serialize(new CultRecordRef<GuardDoc>(new CultRecordKey("k")), options), Is.EqualTo(Raw((ref MessagePackWriter w) => w.Write("consumer-ref"))));
+        }
+
+        // The guard asks for a union's own attributes only. MessagePack declares UnionAttribute not inherited, so an inner union
+        // can never see its outer union's keys through the base class; this pins that fact, on which the explicit false rests.
+        [Test]
+        public void UnionAttributeIsNotInheritedSoAUnionOwnsItsKeys()
+        {
+            Assert.That(typeof(UnionAttribute).GetCustomAttributes(typeof(AttributeUsageAttribute), false).Cast<AttributeUsageAttribute>().Single().Inherited, Is.False);
+            Assert.That(typeof(Inner).GetCustomAttributes(typeof(UnionAttribute), true).Length, Is.EqualTo(2));
+        }
+
+        public sealed class OrderResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new OrderResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() =>
+                typeof(T) == typeof(Overridden) ? (IMessagePackFormatter<T>)(object)new Fixed<Overridden>(new Overridden(), "consumer")
+                : typeof(T) == typeof(CultRecordRef<GuardDoc>) ? (IMessagePackFormatter<T>)(object)new Fixed<CultRecordRef<GuardDoc>>(default, "consumer-ref")
+                : null;
+
+            private sealed class Fixed<V>(V value, string text) : IMessagePackFormatter<V>
+            {
+                public void Serialize(ref MessagePackWriter writer, V _, MessagePackSerializerOptions options) => writer.Write(text);
+                public V Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.Skip(); return value; }
+            }
+        }
+
+        [MessagePackObject] public sealed class Overridden { [Key(0)] public int N; }
+
         // A store holding an unknown arm fails to load and names the record, its schema, the union and the key; the genuine
         // payload is replaced in the file by one that differs only in the arm key.
         [TestCase(false, 4)]
