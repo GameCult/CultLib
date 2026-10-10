@@ -743,6 +743,73 @@ public sealed class BoundedLeastSquaresTests
         Assert.InRange(invalid, 100, 280);
     }
 
+    // ANoiseLevelViolationIsNeverReleased with the columns rescaled by S (x scales by 1/S, so A x is unchanged): the gate is
+    // the rounding bound of the released column's own gradient, whatever the scale of that column or of its neighbours. A gate
+    // read from another column's row, or one that shrinks as the terms grow, releases rounding noise and spins.
+    [Fact]
+    public void ANoiseLevelViolationIsNeverReleasedAtAnyColumnScale()
+    {
+        const int m = 2, n = 6;
+        var a0 = new[]
+        {
+            1.0213068f, 0.97530603f, -0.5673449f, -0.64136946f, -0.07432885f, -0.35571396f,
+            0.4326824f, 1.1969734f, -0.1343108f, -0.23431005f, -1.4009786f, 0.10656489f,
+        };
+        var lo0 = new[] { -0.44782114f, 0f, -0.008422324f, -0.03878026f, 0f, -6.6434336f };
+        var hi0 = new[] { 0.0448007f, 0f, 0.005942123f, 0.0785512f, 0f, 0.23079813f };
+        var x0 = new[] { -0.28347927f, 0f, 0.0051532285f, -0.03878026f, 0f, 0.23079813f };
+        var patterns = new (string name, float[] scale)[]
+        {
+            ("uniform 1e3", Fill(1e3f, n)),
+            ("uniform 1e-3", Fill(1e-3f, n)),
+            ("ascending", new[] { 1f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f }),
+            ("descending", new[] { 1e5f, 1e4f, 1e3f, 1e2f, 1e1f, 1f }),
+            ("one heavy column", new[] { 1f, 1f, 1e4f, 1f, 1f, 1f }),
+            ("one light column", new[] { 1e3f, 1e3f, 1e-3f, 1e3f, 1e3f, 1e3f }),
+        };
+        foreach (var (name, scale) in patterns)
+        {
+            var a = new float[m * n];
+            var lo = new float[n];
+            var hi = new float[n];
+            var x = new float[n];
+            for (var j = 0; j < n; j++)
+            {
+                for (var i = 0; i < m; i++) a[i * n + j] = a0[i * n + j] * scale[j];
+                lo[j] = lo0[j] / scale[j];
+                hi[j] = hi0[j] / scale[j];
+                x[j] = Math.Clamp(x0[j] / scale[j], lo[j], hi[j]);
+            }
+            var status = Solve(m, n, a, new float[m], lo, hi, x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"{name}: {status}");
+            Assert.True(iterations <= 4, $"{name}: {iterations} iterations");
+        }
+    }
+
+    // Soul's stall-after-a-release family (cut bls-release-stop, s1): after a release the next stationarity miss is not yet
+    // a stall, so the solve takes one more pass to confirm before it stops. Two small problems whose release is followed by
+    // exactly such a miss; ending that first miss at once (a stall mark that starts below every cost) stops one pass early.
+    [Theory]
+    [InlineData(
+        new[] { -0.0067761745f, -207.21786f, -0.004115388f, -751.1994f, -8.1700025E-05f, -481.7794f, 0.0038280683f, 480.12833f },
+        new[] { 1.7477255f, 2.4914713f, -2.3861952f, 2.187128f },
+        -1f, 1f, -0.25f, 0.1f)]
+    [InlineData(
+        new[] { 70.07762f, 5.7015634f, 111.790436f, -12.586686f, 75.29796f, 12.872999f, -402.25464f, -1.8093401f, -524.51056f, -8.649797f },
+        new[] { -1.8312539f, 2.9556413f, 0.7550676f, -2.1365998f, 2.30717f },
+        -1f, 1f, 0f, 1f)]
+    public void AReleaseIsConfirmedByAPassBeforeTheSolveStops(float[] a, float[] b, float lo0, float hi0, float lo1, float hi1)
+    {
+        var m = b.Length;
+        const int n = 2;
+        var lo = new[] { lo0, lo1 };
+        var hi = new[] { hi0, hi1 };
+        var x = (float[])lo.Clone();
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, x, out var iterations, 1e-12));
+        Assert.Equal(2, iterations);
+        AssertKkt(m, n, a, b, lo, hi, x);
+    }
+
     [Fact]
     public void InfiniteBoundsMeanUnbounded()
     {
@@ -1486,22 +1553,7 @@ public sealed class BoundedLeastSquaresTests
     [InlineData(1e-9)]
     public void TheStopAfterAReleaseIsOnTheGradientNotTheCost(double tolerance)
     {
-        const int m = 15, n = 12;
-        var a = new float[m * n];
-        a[0 * n + 2] = 100f; a[0 * n + 8] = -100f; a[0 * n + 9] = 100f;
-        var row1 = new[] { 13.882518f, 20.86695f, 0f, 14.8965845f, 12.38046f, 22.115599f, -13.706654f, 15.85789f, 0f, 0f, -100f, 100f };
-        var row2 = new[] { -187.72859f, 239.31168f, 158.87828f, -270.31165f, 235.38467f, -14.704258f, 121.61232f, 244.81305f };
-        for (var j = 0; j < n; j++) a[1 * n + j] = row1[j];
-        for (var j = 0; j < row2.Length; j++) a[2 * n + j] = row2[j];
-        for (var k = 0; k < 4; k++) a[(3 + k) * n + 8 + k] = 0.3f;
-        for (var i = 0; i < 8; i++) a[(7 + i) * n + i] = 0.1f;
-        var b = new float[m];
-        b[1] = 67.385445f; b[2] = 558.70917f;
-        for (var k = 0; k < 4; k++) b[3 + k] = -3f;
-        var lo = new float[n];
-        var hi = new float[n];
-        for (var j = 0; j < n; j++) hi[j] = j < 8 ? 1f : 2f;
-
+        var (m, n, a, b, lo, hi) = AllocatorW5(0);
         var cold = new float[n];
         Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, cold, out _, tolerance));
         Assert.Equal(0.92221445f, cold[7], 1e-4);
@@ -1510,6 +1562,55 @@ public sealed class BoundedLeastSquaresTests
         Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, again, out var iterations, tolerance));
         Assert.Equal(0, iterations);
         for (var j = 0; j < n; j++) Assert.Equal(cold[j], again[j], 1e-6);
+    }
+
+    // The same problem with its columns rotated by `shift`, so that throttle 7 sits in every column position in turn and the
+    // release the old rule misjudged is a release of column 0, of the last column and of every one between. The stop after a
+    // release reads the gradient of whichever column was released, never a fixed one.
+    [Theory]
+    [InlineData(1e-12)]
+    [InlineData(1e-9)]
+    public void TheStopAfterAReleaseIsOnTheGradientWhicheverColumnWasReleased(double tolerance)
+    {
+        const int n = 12;
+        for (var shift = 0; shift < n; shift++)
+        {
+            var (m, _, a, b, lo, hi) = AllocatorW5(shift);
+            var cold = new float[n];
+            Assert.True(BoundedLeastSquaresStatus.Converged == SolveAt(m, n, a, b, lo, hi, cold, out _, tolerance), $"shift {shift}");
+            Assert.True(Math.Abs(cold[(7 + shift) % n] - 0.92221445f) <= 1e-4, $"shift {shift}: throttle 7 is {cold[(7 + shift) % n]}");
+
+            var again = (float[])cold.Clone();
+            Assert.True(BoundedLeastSquaresStatus.Converged == SolveAt(m, n, a, b, lo, hi, again, out var iterations, tolerance), $"shift {shift}: re-solve");
+            Assert.True(iterations == 0, $"shift {shift}: re-solve took {iterations} iterations");
+        }
+    }
+
+    // Column j of the returned problem is column (j - shift) mod 12 of Soul's W5.
+    private static (int m, int n, float[] a, float[] b, float[] lo, float[] hi) AllocatorW5(int shift)
+    {
+        const int m = 15, n = 12;
+        var w = new float[m * n];
+        w[0 * n + 2] = 100f; w[0 * n + 8] = -100f; w[0 * n + 9] = 100f;
+        var row1 = new[] { 13.882518f, 20.86695f, 0f, 14.8965845f, 12.38046f, 22.115599f, -13.706654f, 15.85789f, 0f, 0f, -100f, 100f };
+        var row2 = new[] { -187.72859f, 239.31168f, 158.87828f, -270.31165f, 235.38467f, -14.704258f, 121.61232f, 244.81305f };
+        for (var j = 0; j < n; j++) w[1 * n + j] = row1[j];
+        for (var j = 0; j < row2.Length; j++) w[2 * n + j] = row2[j];
+        for (var k = 0; k < 4; k++) w[(3 + k) * n + 8 + k] = 0.3f;
+        for (var i = 0; i < 8; i++) w[(7 + i) * n + i] = 0.1f;
+        var b = new float[m];
+        b[1] = 67.385445f; b[2] = 558.70917f;
+        for (var k = 0; k < 4; k++) b[3 + k] = -3f;
+        var lo = new float[n];
+        var hi = new float[n];
+        var a = new float[m * n];
+        for (var j = 0; j < n; j++)
+        {
+            var to = (j + shift) % n;
+            hi[to] = j < 8 ? 1f : 2f;
+            for (var r = 0; r < m; r++) a[r * n + to] = w[r * n + j];
+        }
+        return (m, n, a, b, lo, hi);
     }
 
     // b = 0 with the origin inside the box: the optimum is any x with Ax = 0, the gradient scale is 0 and so is the tolerance, and
