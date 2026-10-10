@@ -20,7 +20,7 @@ namespace GameCult.Caching.Tests
     {
         private const string Canary = "CANARY-9d1e47";
 
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc) });
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc), typeof(ShapeDoc) });
 
         private delegate void Emit(ref MessagePackWriter writer);
 
@@ -306,6 +306,154 @@ namespace GameCult.Caching.Tests
 
         [MessagePackObject] public sealed class Overridden { [Key(0)] public int N; }
 
+        // An arm key outside Int32 or not an integer is the guard's own refusal, naming the union and the arm position, not an
+        // OverflowException from reading it and not an echo of the key or the payload.
+        private static Emit KeyedArm(Emit key) => (ref MessagePackWriter w) =>
+        {
+            w.WriteArrayHeader(2); key(ref w);
+            w.WriteArrayHeader(1); w.Write(Canary);
+        };
+
+        [TestCase(2147483648L, "2147483648")]
+        [TestCase(-2147483649L, "2147483649")]
+        [TestCase(4294967295L, "4294967295")]
+        public void ArmKeyOutsideInt32IsRefusedNamingTheUnion(long key, string digits) =>
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(key))), "outside Int32", digits);
+
+        [Test]
+        public void ArmKeyOfUint64MaxIsRefusedNamingTheUnion() =>
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(ulong.MaxValue))), "outside Int32", "18446744073709551615");
+
+        [Test]
+        public void NegativeArmKeyInInt32IsAnUnknownKey() =>
+            AssertRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(-5))), NodeName, -5, "3, 5, 8, 9");
+
+        [Test]
+        public void NonIntegerArmKeyIsRefusedNamingTheUnion()
+        {
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write("three"))), "non-integer", "three");
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(3.5))), "non-integer", "3.5");
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteNil())), "non-integer", "nil");
+        }
+
+        private static void AssertKeyRefused(byte[] payload, string shape, string echoed)
+        {
+            var exception = Decode(payload);
+            var message = Chain(exception);
+            Assert.Multiple(() =>
+            {
+                Assert.That(message, Does.Contain($"Union {NodeName} has"));
+                Assert.That(message, Does.Contain(shape));
+                Assert.That(message, Does.Contain("(slot 0 of the arm)"));
+                Assert.That(message, Does.Contain("declared keys: 3, 5, 8, 9."));
+                Assert.That(message, Does.Not.Contain(Canary));
+                Assert.That(message, Does.Not.Contain(echoed), "the offending key is not echoed");
+                for (var cause = exception; cause != null; cause = cause.InnerException)
+                    Assert.That(cause, Is.Not.InstanceOf<OverflowException>());
+            });
+        }
+
+        // An interface is a union like an abstract class: the guard reads the interface's own [Union] attributes.
+        private static readonly string ShapeName = typeof(IShape).FullName!;
+
+        // ShapeDoc: slots [id, shape, shapes].
+        private static byte[] Shapes(Emit shape, Emit? shapes = null) => Raw((ref MessagePackWriter w) =>
+        {
+            w.WriteArrayHeader(3);
+            w.Write("s1");
+            shape(ref w);
+            (shapes ?? List())(ref w);
+        });
+
+        private static Emit CircleArm(int key, int radius) => InnerArm(key, radius);
+
+        [TestCase(1)]
+        [TestCase(3)]
+        [TestCase(9)]
+        public void UnknownArmOfAnInterfaceUnionRefused(int key)
+        {
+            foreach (var payload in new[] { Shapes(CircleArm(key, 1)), Shapes(Nil, List(CircleArm(0, 1), CircleArm(key, 1))) })
+            {
+                Exception? thrown = null;
+                try { CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ShapeDoc), payload, Registry); }
+                catch (Exception exception) { thrown = exception; }
+                Assert.That(thrown, Is.Not.Null, "an unknown arm of an interface union was accepted");
+                var message = Chain(thrown!);
+                Assert.That(message, Does.Contain($"Union {ShapeName} has no arm for key {key} "));
+                Assert.That(message, Does.Contain("declared keys: 0, 2."));
+            }
+        }
+
+        [Test]
+        public void UnnamedImplementationOfAnInterfaceUnionWriteRefused()
+        {
+            foreach (var doc in new[] { new ShapeDoc { Shape = new Triangle() }, new ShapeDoc { Shapes = { new Circle(), new Triangle() } }, new ShapeDoc { Shape = new BigCircle() } })
+            {
+                var message = Chain(Assert.Catch<MessagePackSerializationException>(
+                    () => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ShapeDoc), Registry))!);
+                Assert.That(message, Does.Contain("is not an arm of union").And.Contain(ShapeName));
+            }
+        }
+
+        [Test]
+        public void KnownArmsOfAnInterfaceUnionByteIdentical()
+        {
+            var doc = new ShapeDoc { Id = "s1", Shape = new Square { N = 4 }, Shapes = { new Circle { N = 2 }, null! } };
+            var expected = Shapes(CircleArm(2, 4), List(CircleArm(0, 2), Nil));
+            Assert.That(Convert.ToHexString(CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ShapeDoc), Registry)), Is.EqualTo(Convert.ToHexString(expected)));
+            Assert.That(Convert.ToHexString(MessagePackSerializer.Serialize(doc, MessagePackSerializerOptions.Standard)), Is.EqualTo(Convert.ToHexString(expected)));
+            var back = (ShapeDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ShapeDoc), expected, Registry);
+            Assert.That(back.Shape, Is.TypeOf<Square>());
+            Assert.That(back.Shapes[0], Is.TypeOf<Circle>());
+            Assert.That(back.Shapes[1], Is.Null);
+        }
+
+        // A variant record whose override holds an unknown arm is refused naming the record, the schema id, the union and the key.
+        [Test]
+        public void VariantOverrideHoldingAnUnknownArmIsRefusedNamingTheSchema()
+        {
+            var folder = Path.Combine(Path.GetTempPath(), $"cultlib-unionguard-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var descriptor = Registry.GetRequired(typeof(GuardDoc));
+                var path = Path.Combine(folder, "variant.cc");
+                File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(new CultPersistedStoreSnapshot
+                {
+                    FormatVersion = CultPersistedStoreSnapshot.FormatV2,
+                    SchemaCatalog = new[] { descriptor.ToCatalogEntry() },
+                    Records = new[]
+                    {
+                        new CultPersistedRecord
+                        {
+                            Key = "base", SchemaId = descriptor.SchemaId, StoredAt = "2026-01-01T00:00:00.0000000Z",
+                            Payload = Doc(LeafArm(3, "r", "ok", 1))
+                        },
+                        new CultPersistedRecord
+                        {
+                            Key = "variant", SchemaId = descriptor.SchemaId, StoredAt = "2026-01-01T00:00:00.0000000Z",
+                            Payload = Array.Empty<byte>(),
+                            Variant = new CultVariantDelta("base", new[] { CultVariantOverride.Set(1, Raw(LeafArm(4, "r", Canary, 7))) })
+                        }
+                    }
+                }));
+                var thrown = Assert.Catch(() => CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, ReadOnly = true }).Dispose())!;
+                var message = Chain(thrown);
+                Assert.Multiple(() =>
+                {
+                    Assert.That(message, Does.Contain("Variant variant"));
+                    Assert.That(message, Does.Contain($"(schema '{descriptor.SchemaId}')"));
+                    Assert.That(message, Does.Contain(NodeName));
+                    Assert.That(message, Does.Contain("key 4 "));
+                    Assert.That(message, Does.Not.Contain(Canary));
+                });
+            }
+            finally
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+
         // A store holding an unknown arm fails to load and names the record, its schema, the union and the key; the genuine
         // payload is replaced in the file by one that differs only in the arm key.
         [TestCase(false, 4)]
@@ -456,6 +604,24 @@ namespace GameCult.Caching.Tests
             [Key(2)] public List<GuardNode> Items = new();
             [Key(3)] public Inner? Crafted;
             [Key(4)] public Outer? Any;
+        }
+
+        // An interface union: arm keys 0 and 2, so 1 is a retired gap.
+        [Union(0, typeof(Circle)), Union(2, typeof(Square))]
+        public interface IShape { }
+
+        [MessagePackObject] public class Circle : IShape { [Key(0)] public int N; }
+        [MessagePackObject] public sealed class Square : IShape { [Key(0)] public int N; }
+        [MessagePackObject] public sealed class Triangle : IShape { }
+        [MessagePackObject] public sealed class BigCircle : Circle { }
+
+        [CultDocument("tests.shape_doc", "tests.shape_doc.v1")]
+        [MessagePackObject]
+        public sealed class ShapeDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public IShape? Shape;
+            [Key(2)] public List<IShape> Shapes = new();
         }
     }
 }

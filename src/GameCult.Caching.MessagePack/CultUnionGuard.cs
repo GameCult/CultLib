@@ -37,11 +37,36 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
         {
             // Peek only the arm's first two tokens; any other shape is the inner formatter's to refuse.
             var peek = reader.CreatePeekReader();
-            if (!peek.TryReadNil() && peek.NextMessagePackType == MessagePackType.Array && peek.ReadArrayHeader() == 2 &&
-                peek.NextMessagePackType == MessagePackType.Integer && peek.ReadInt32() is var key && !keys.Contains(key))
-                throw new MessagePackSerializationException(
-                    $"Union {typeof(T).FullName} has no arm for key {key} (slot 0 of the arm); declared keys: {string.Join(", ", keys.OrderBy(k => k))}.");
+            if (!peek.TryReadNil() && peek.NextMessagePackType == MessagePackType.Array && peek.ReadArrayHeader() == 2)
+            {
+                var declared = string.Join(", ", keys.OrderBy(k => k));
+                if (peek.NextMessagePackType != MessagePackType.Integer)
+                    throw new MessagePackSerializationException($"Union {typeof(T).FullName} has a non-integer arm key (slot 0 of the arm); declared keys: {declared}.");
+                if (!TryReadKey(ref peek, out var key))
+                    throw new MessagePackSerializationException($"Union {typeof(T).FullName} has an arm key outside Int32 (slot 0 of the arm); declared keys: {declared}.");
+                if (!keys.Contains(key))
+                    throw new MessagePackSerializationException($"Union {typeof(T).FullName} has no arm for key {key} (slot 0 of the arm); declared keys: {declared}.");
+            }
+
             return inner.Deserialize(ref reader, options);
+        }
+
+        // An arm key is an Int32; a wider or unsigned-64 integer is out of range, never an OverflowException.
+        private static bool TryReadKey(ref MessagePackReader reader, out int key)
+        {
+            key = 0;
+            if (reader.NextCode == MessagePackCode.UInt64)
+            {
+                var wide = reader.ReadUInt64();
+                if (wide > int.MaxValue) return false;
+                key = (int)wide;
+                return true;
+            }
+
+            var value = reader.ReadInt64();
+            if (value < int.MinValue || value > int.MaxValue) return false;
+            key = (int)value;
+            return true;
         }
     }
 }

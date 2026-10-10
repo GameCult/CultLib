@@ -12,6 +12,13 @@ All notable changes to this package are documented in this file.
   does not name used to be written as `nil`. Both now throw, naming the union and
   the key or type, and a store pull names the record key and schema id. Known arms
   encode to the same bytes as before.
+- A payload that fails to decode during a store pull (single-file or directory)
+  now throws `InvalidDataException` naming the record key and schema id, with the
+  original exception (for example `MessagePackSerializationException`) as its
+  `InnerException`. Callers that caught the codec's exception type around a store
+  open or pull must catch `InvalidDataException`. An arm key outside Int32 or not
+  an integer is refused with the same union-naming refusal, and a variant
+  override holding an unknown arm names the schema id.
 
 ## [1.0.60]
 

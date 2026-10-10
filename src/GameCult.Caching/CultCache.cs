@@ -2819,7 +2819,7 @@ namespace GameCult.Caching
                     {
                         // A value that no longer decodes refuses exactly as a plain record holding it does.
                         throw new InvalidOperationException(
-                            $"Variant {key} overrides '{member.Member.Name}' (slot {slot}) with a value that does not decode as {member.MemberType.Name}: " +
+                            $"Variant {key} (schema '{descriptor.SchemaId}') overrides '{member.Member.Name}' (slot {slot}) with a value that does not decode as {member.MemberType.Name}: " +
                             exception.GetBaseException().Message, exception);
                     }
 
