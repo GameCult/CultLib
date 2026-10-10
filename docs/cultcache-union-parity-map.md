@@ -21,8 +21,10 @@ committed. Earlier evidence is not repeated here: Eve `docs/thing2-map.md` P12-P
 3. `union-derive-rs` and `union-codec-ts`, in either order or together: cultcache-rs and cultcache-ts gain a
    union (and, in TS, a slot record) codec that writes the reference shape and decodes the golden byte-identically.
    `union-codec-py` follows the same golden for cultcache-py.
-4. `slot-tolerance`: extra trailing slots, per `cultlib-gaps:question:extra-trailing-slots`. Blocked on the
-   operator; it changes every runtime's slot rule at once, so it waits for 1-3 rather than reopening them.
+4. `slot-tolerance` (C# reference), then `slot-readonly-parity` (Rust, TypeScript, Python): a record carrying a
+   slot past its reader's declared slots, at any depth, is read-only (ruling
+   `cultlib-gaps:ruling:extra-trailing-slots`; the refinement is settled by section S). Both change a slot rule the
+   cuts in step 3 build, so they wait for 1-3 rather than reopening them.
 5. `union-parity-release`: changelogs and tags, Breaking where `docs/semver-policy.md` says so.
 
 Thing2's `cut-contract-rs` waits on step 3 (Rust) only: its first step pins cultcache-rs at the commit that lands
@@ -38,7 +40,7 @@ ruled and slots are not, so the slot rule is its own cut rather than a blocked s
 |---|---|---|---|
 | Union arm | An integer key, `[Union(k, typeof(Arm))]` on the abstract base (C#), assigned by the union's author. The wire carries `[k, armSlots]`; the arm's type name never travels. `nil` is a null reference, not an arm. | **Added:** a key never used before. **Retired:** the attribute is removed or commented out and the key is never reused (Aetheria `Behaviors.cs:160,173`; Aetheria-legacy `Behaviors.cs:37-38`). **Renamed type:** free, the key is the identity. **Unknown to a reader** (a newer writer's arm, or a retired arm in an old store): refused, naming the union and the key (ruling). | The union's author assigns keys. The C# reference defines the shape; every runtime keeps parity with it (doctrine, `runtime-parity-scope.md`). |
 | Arm subtype on write | The value's runtime type must be one the union names. | A subtype the union does not name is today written as `nil` (U4). After cut 1 it is refused. | The union's author, by naming the arm. |
-| Arm slots, record slots | `[Key(n)]` integers, base-class keys included (an arm is a flat array). Gaps are written `nil`. | **Added:** appended at the next free key. **Retired:** kept as a gap, never reused (Aetheria `ItemInstance.cs:35`, `EntitySerializer.cs` key 5). **Missing in an older store:** the reader's default (C# field initializer; Rust and Python need a declared default). **Extra past the reader's last key:** skipped silently today in every runtime (U3, U6); the question decides. | The type's author. The slot rule is CultCache's (`src/GameCult.Caching/Contracts/cultcache-schema-compatibility.md`). |
+| Arm slots, record slots | `[Key(n)]` integers, base-class keys included (an arm is a flat array). Gaps are written `nil`. | **Added:** appended at the next free key. **Retired:** kept as a gap, never reused (Aetheria `ItemInstance.cs:35`, `EntitySerializer.cs` key 5). **Missing in an older store:** the reader's default (C# field initializer; Rust and Python need a declared default). **Extra past the reader's last key, at any depth:** the record is read and is read-only; every write or removal of it is refused, and it is persisted from its original bytes (ruling, S). | The type's author. The slot rule is CultCache's (`src/GameCult.Caching/Contracts/cultcache-schema-compatibility.md`). |
 | Serde-enum member (Rust) | serde's external tag: the variant **name** (`{"Name": fields}`, a unit variant the bare string). | Persisted already by Rust consumers (section C). They keep their bytes: the union derive is opt-in and serde enums are untouched. | The Rust consumer. Not a cross-runtime shape. |
 
 ## U. Mechanism facts (C# reference, Rust, TS)
@@ -105,6 +107,73 @@ ruled and slots are not, so the slot rule is its own cut rather than a blocked s
   `tests/GameCult.Caching.Tests/PreCut2StoreFormatTests.cs`, `packages/cultcache-rs/src/lib.rs`,
   `packages/cultcache-ts/test/cult-cache.test.ts` and `packages/cultcache-py/tests/test_cultcache.py`. The CultNet
   precedent for a reference-written vector is `CULTNET_WRITE_VECTORS=1` (`docs/cultnet-error-contract-cut.md:170`).
+
+## S. Slot read-only probe (any depth)
+
+Imagination pass `imagination-cl-slot-readonly` (session `self-2026-10-10c-eureka`), under ruling
+`cultlib-gaps:ruling:extra-trailing-slots` ("b, and probe the any-depth refinement"). Probes live under the session
+scratchpad, `imagination-cl-slot-readonly/` (`cs` C# synthetic, `aeth` C# on Aetheria's game database, `rs`, `py`,
+`ts`, `il` decompiled MessagePack-CSharp 3.1.7). None is committed. The ruling's test: every runtime's decoder
+carries a "slot skipped" mark to the record cheaply, on the one decode path, with no second pass and no per-type
+consumer code.
+
+- **S1. Where C# skips, and why a resolver sees it.**
+  `DynamicObjectTypeBuilder.BuildDeserializeInternalDeserializeLoopIntKey` emits the slot loop's `switch` default as
+  a direct `MessagePackReader.Skip()` call; the source generator's `FormatterTemplate` writes
+  `default: reader.Skip(); break;`. `MessagePackReader` is a struct, and neither path raises an event or reads an
+  option, so the skip itself cannot be observed without a fork. Both fetch every member formatter from
+  `options.Resolver` (the generated code's `formatterResolver = options.Resolver`), and the union formatters fetch arm
+  formatters the same way (U1). A resolver ahead of the composite is therefore handed every nested object, list
+  element and union arm, and can read each one's array header before delegating.
+- **S2. The mark arrives in C#.** Probe `cs`: a guard resolver returns, for each concrete int-keyed
+  `[MessagePackObject]` type, a formatter that reads the array count (from `NextCode` for a fixarray, a peek for
+  array16 and array32), compares it with the highest `[Key]` plus one (base keys included, MessagePack's member
+  visibility rule), notes a skip into a `[ThreadStatic]` scope the decode's caller opened, and delegates to the
+  formatter the rest of the composite hands out. An extra slot at depth 0 (record), depth 1 (nested object), depth 2
+  (object in an object), in a union arm and in a list element each arrives as one mark naming the type and both
+  counts; the clean payload gives none. The guard needs `CompositeResolver.Create` around it so formatters are
+  cached (uncached, it was 40 times slower).
+- **S3. C# cost.** Aetheria `GameData/Aetheria.cc` (12.1 MB; 237 of 238 records decodable with Aetheria.Shared's
+  types; decoded with `OptionsFor` that assembly; best of 9, three rounds): plain 165-209 ms, a second plain composite
+  (A/A) 174-193 ms, guarded 179-196 ms. That is 3.7-8.9% over the best plain run, inside the A/A spread. Worst case,
+  synthetic tiny objects (120,000 records, 23.1 MB, about 24 objects each): plain 618-637 ms with A/A within 4%,
+  guarded 704-705 ms: 11-19%, about 30 ns per decoded object.
+- **S4. A live case in Aetheria.** The same probe, run with the AetherDb release binaries (built 2026-09-30) against
+  today's `Aetheria.cc`, marks 25 records: `WeaponItemData` whose `BehaviorData` arms (`AutoWeaponData`,
+  `ChargedWeaponData` and others) carry 34 slots where that build declares 21 or 33. The extra slot is
+  `WeaponData.Tracking` (key 33, Aetheria `8cd71ed6`, 2026-10-07): inside a union arm, inside a list. Today that tool
+  reads these records and drops `Tracking` from all 25 at its next landing (S5). Refusing nested extra slots would
+  stop it opening `Aetheria.cc` at all; read-only lets it open the store and refuses writes to those 25.
+- **S5. A C# flush re-encodes every held record, not only the edited one.** `PushAll` and an unconditional
+  `CommitBatch` write `ToPersistedRecord(entry, SerializePayload)` for every entry (`CultCache.cs:3191-3201`, `3355`,
+  `3384`), under the local descriptor's schema id and catalog entry. So U6's loss reaches every held record with
+  unread slots at the next flush of anything. Rust (holds payload bytes and decodes on `get`, `lib.rs:2280-2293`),
+  Python (holds envelopes and decodes at load, `cache.py:257-285`) and TypeScript (holds payload bytes) carry an
+  untouched record's bytes. In C#, read-only therefore also means persisted from the original record (bytes, schema
+  id, catalog entry), never from the decoded document.
+- **S6. Rust.** Probe `rs`: the derive's slot loop, with the trailing `IgnoredAny` loop counting into a
+  `thread_local`, marks depth 1, depth 2 and a list element. Depth 0 is the `DatabaseEntry` derive's own trailing
+  loop (`cultcache-rs-derive/src/lib.rs:258`), the same edit. A plain serde struct nested in a record already refuses
+  an extra element (`array had incorrect length, expected 2`), so only derived slot types skip. Cost (120,000
+  records, 21.4 MB): inside the A/A spread (A/A from -3% to +9%; marked against plain from -14% to +13% over six
+  runs). The added code is one branch per object, never taken on a clean payload. Rust decodes on `get`, so whether
+  a held record is writable is answered by decoding its held bytes through the same derive, on the write path only.
+- **S7. Python and TypeScript.** Probes `py` and `ts`: a slot codec tree passing a context argument (the shape
+  `union-codec-py` and `union-codec-ts` build) marks all five positions. Python (40,000 records, 11.1 MB, msgpack
+  unpack included): +14% against an A/A spread of 8%. TypeScript (120,000 decoded records, codec walk only; no
+  msgpack in the scratch copy): +20% against an A/A spread of 18%. The check is one length comparison per object.
+- **S8. Kotlin has no library slot codec.** `CultDocumentCodec<T>.decode` is written per type by the consumer
+  (`packages/cultmesh-kotlin/src/main/kotlin/org/gamecult/cultmesh/CultMesh.kt:31-36`), and the package's own Eve
+  decoders skip extras by hand at 8 sites (`repeat((count - N).coerceAtLeast(0)) { reader.skip() }` in
+  `eve/EveDocuments.kt`). No slot rule, refusal or read-only, can be held by the library there until it owns slot
+  decoding. That is a follow-up, not a per-runtime rule.
+- **S9. CultMesh decode paths** (`CultMesh.cs:2779,3493,3499`, `CultMeshPrimitives.cs:1158,1230,2357`) go through
+  `OptionsFor`, so through the guard, with no scope open: unchanged. Whether a Mesh replica that re-publishes a
+  decoded document drops slots is a follow-up.
+- **S10. The refinement is in.** Every runtime with a library slot decoder (C#, Rust, Python, and the TypeScript
+  codec being built) carries the mark to the record on its one decode path, with no second pass and no consumer
+  code. The cost on Aetheria's real store is inside the A/A noise (S3); the worst synthetic case is 11-19% in C#.
+  A nested extra slot makes the record read-only; it is not refused.
 
 ## A. Aetheria (C#, the only consumer persisting `[Union]`s)
 
@@ -195,7 +264,7 @@ the opt-in derive leaves alone.
 - **Why the slot rule is a separate, asked cut.** The ruling settles arms and asks for extra trailing slots to be
   "settled against the same re-encode rule". Two written contracts disagree (U10), and the current behaviour drops
   data silently (U6), so the choice is the operator's and it should change every runtime at once.
-- **The recommendation on extra slots is refusal.** An extra trailing slot is the slot-level twin of an unknown
+- **The recommendation on extra slots was refusal; the ruling chose read-only, and S settles its depth.** An extra trailing slot is the slot-level twin of an unknown
   arm: data from a newer writer that the reader's types do not describe. The operator ruled refusal for arms
   knowing it costs an older reader the newer record; the same reasoning gives refusal for slots, and record
   envelope slots are already refused in every runtime (U10). The alternative with precedent is
