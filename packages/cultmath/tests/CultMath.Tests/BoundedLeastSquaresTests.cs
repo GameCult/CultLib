@@ -1331,6 +1331,67 @@ public sealed class BoundedLeastSquaresTests
         Assert.True(spread >= 0.5, $"default tolerance: starts differ by only {spread}");
     }
 
+    // Soul's W5 (finding aetheria-release:finding:cut-thrust-allocator-core.s1.solver-converged-early): an allocator
+    // matrix (3 force rows, 4 slack pulls, 8 ridge rows; 8 throttles in [0,1], 4 slacks in [0,2]). From x = 0 the
+    // last release lowered the cost by less than the stall band while throttle 7 still sat at its upper bound
+    // with a gradient ten thousand times the tolerance, and the solver reported Converged there.
+    [Theory]
+    [InlineData(1e-12)]
+    [InlineData(1e-9)]
+    public void TheStopAfterAReleaseIsOnTheGradientNotTheCost(double tolerance)
+    {
+        const int m = 15, n = 12;
+        var a = new float[m * n];
+        a[0 * n + 2] = 100f; a[0 * n + 8] = -100f; a[0 * n + 9] = 100f;
+        var row1 = new[] { 13.882518f, 20.86695f, 0f, 14.8965845f, 12.38046f, 22.115599f, -13.706654f, 15.85789f, 0f, 0f, -100f, 100f };
+        var row2 = new[] { -187.72859f, 239.31168f, 158.87828f, -270.31165f, 235.38467f, -14.704258f, 121.61232f, 244.81305f };
+        for (var j = 0; j < n; j++) a[1 * n + j] = row1[j];
+        for (var j = 0; j < row2.Length; j++) a[2 * n + j] = row2[j];
+        for (var k = 0; k < 4; k++) a[(3 + k) * n + 8 + k] = 0.3f;
+        for (var i = 0; i < 8; i++) a[(7 + i) * n + i] = 0.1f;
+        var b = new float[m];
+        b[1] = 67.385445f; b[2] = 558.70917f;
+        for (var k = 0; k < 4; k++) b[3 + k] = -3f;
+        var lo = new float[n];
+        var hi = new float[n];
+        for (var j = 0; j < n; j++) hi[j] = j < 8 ? 1f : 2f;
+
+        var cold = new float[n];
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, cold, out _, tolerance));
+        Assert.Equal(0.92221445f, cold[7], 1e-4);
+
+        var again = (float[])cold.Clone();
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, again, out var iterations, tolerance));
+        Assert.Equal(0, iterations);
+        for (var j = 0; j < n; j++) Assert.Equal(cold[j], again[j], 1e-6);
+    }
+
+    // b = 0 with the origin inside the box: the optimum is any x with Ax = 0, the gradient scale is 0 and so is the tolerance, and
+    // every gradient component the solve leaves behind is rounding. Releasing on such a violation cycles release /
+    // stationarity miss / re-bind until the iteration cap (the plain-batch problem at seed 141 in miniature).
+    [Fact]
+    public void ANoiseLevelViolationIsNeverReleased()
+    {
+        const int m = 2, n = 6;
+        var a = new[]
+        {
+            1.0213068f, 0.97530603f, -0.5673449f, -0.64136946f, -0.07432885f, -0.35571396f,
+            0.4326824f, 1.1969734f, -0.1343108f, -0.23431005f, -1.4009786f, 0.10656489f,
+        };
+        var b = new float[m];
+        var lo = new[] { -0.44782114f, 0f, -0.008422324f, -0.03878026f, 0f, -6.6434336f };
+        var hi = new[] { 0.0448007f, 0f, 0.005942123f, 0.0785512f, 0f, 0.23079813f };
+        var x = new[] { -0.28347927f, 0f, 0.0051532285f, -0.03878026f, 0f, 0.23079813f };
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(m, n, a, b, lo, hi, x, out var iterations));
+        Assert.True(iterations <= 4, $"{iterations} iterations");
+        for (var i = 0; i < m; i++)
+        {
+            var r = 0.0;
+            for (var j = 0; j < n; j++) r += a[i * n + j] * x[j];
+            Assert.Equal(0.0, r, 1e-5);
+        }
+    }
+
     [Fact]
     public void AnInvalidToleranceIsRejectedAndLeavesXUntouched()
     {

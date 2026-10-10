@@ -34,11 +34,13 @@ public enum BoundedLeastSquaresStatus
 /// Stopping. KKT termination uses a tolerance of <see cref="DefaultKktRelativeTolerance"/> (1e-6) times the problem's
 /// gradient scale (the largest gradient component at the box point nearest the origin), so scaling A, b or the
 /// bounds, and the choice of warm start, do not change it. A caller whose rows span many decades of weight can pass
-/// a smaller <c>kktRelativeTolerance</c>, which changes only this tolerance: the progress rule below and the pivot
-/// threshold are fixed. The tolerance is only a resolution: once a stationarity miss or a
-/// bound release has been followed by a pass that lowers the cost by no more than rounding, the solver reports
-/// <see cref="BoundedLeastSquaresStatus.Converged"/>, so an optimal point whose double gradient sits above the
-/// tolerance costs one confirming iteration rather than the iteration cap.
+/// a smaller <c>kktRelativeTolerance</c>, which changes only this tolerance: the rounding bound and progress rule
+/// below and the pivot threshold are fixed. A bound is released only when its violation exceeds both the tolerance
+/// and the rounding bound of its double gradient, so a tolerance below the noise cannot cycle on a release. The
+/// tolerance is otherwise only a resolution: once a stationarity miss that releases nothing has been followed by a
+/// pass that lowers the cost by no more than rounding, the solver reports
+/// <see cref="BoundedLeastSquaresStatus.Converged"/>, so a free set whose residual is rounding costs one confirming
+/// iteration rather than the iteration cap. A pass that releases a bound is never judged by the cost.
 /// </para>
 /// <para>
 /// Near-singular problems. The normal equations square the condition number, so the cost gap grows with cond(A)
@@ -111,7 +113,7 @@ public static class BoundedLeastSquares
     /// <param name="x">Warm start in, solution out.</param>
     /// <param name="workspace">At least <see cref="WorkspaceLength"/> floats; contents on entry are ignored.</param>
     /// <param name="iterations">Active-set iterations used.</param>
-    /// <param name="kktRelativeTolerance">Finite and greater than zero, else <see cref="BoundedLeastSquaresStatus.InvalidInput"/>. Tighten it when rows span many decades of weight; a value below the gradient's rounding noise is harmless because the progress rule ends the solve.</param>
+    /// <param name="kktRelativeTolerance">Finite and greater than zero, else <see cref="BoundedLeastSquaresStatus.InvalidInput"/>. Tighten it when rows span many decades of weight; releases below the gradient's rounding bound are not taken, and free-set residuals at rounding level end on the progress rule.</param>
     /// <param name="maxIterations">Iteration cap.</param>
     public static BoundedLeastSquaresStatus Solve(
         int m, int n,
@@ -200,9 +202,9 @@ public static class BoundedLeastSquares
         }
         var kktTol = kktRelativeTolerance * gScale;
 
-        // Cost at the last point from which the solver chose to continue past a stationarity miss or a
-        // release. A pass that ends without lowering it has nothing left to gain: the tolerance is a
-        // resolution, not the stopping rule, and a noise floor above it must not spin to the cap.
+        // Cost at the last point from which the solver continued past a stationarity miss with no release; a
+        // release resets it. A stationarity miss that ends without lowering it has nothing left to gain: the
+        // tolerance is a resolution, not the stopping rule, and a noise floor above it must not spin to the cap.
         var fMark = double.PositiveInfinity;
         var status = BoundedLeastSquaresStatus.IterationLimit;
         while (true)
@@ -264,7 +266,7 @@ public static class BoundedLeastSquares
                 if (lo[j] == hi[j]) continue;
                 // A bound at lo wants a positive gradient and one at hi a negative one; a free column has state 0.
                 var violation = state[j] * g[j];
-                if (violation > worst)
+                if (violation > worst && violation > ReleaseNoise(ata, atb, xd, j, n))
                 {
                     worst = violation;
                     release = j;
@@ -272,9 +274,14 @@ public static class BoundedLeastSquares
             }
             if (release < 0 && !freeViolated) { status = BoundedLeastSquaresStatus.Converged; break; }
 
-            var f = Objective(xd, g, atb, n, out var fScale);
-            if (f >= fMark - StallRelativeTolerance * fScale) { status = BoundedLeastSquaresStatus.Converged; break; }
-            fMark = f;
+            if (release < 0)
+            {
+                var f = Objective(xd, g, atb, n, out var fScale);
+                if (f >= fMark - StallRelativeTolerance * fScale) { status = BoundedLeastSquaresStatus.Converged; break; }
+                fMark = f;
+            }
+            else
+                fMark = double.PositiveInfinity;
             if (iterations >= maxIterations) { status = BoundedLeastSquaresStatus.IterationLimit; break; }
             iterations++;
             // A stationarity miss re-solves the same free set from the improved point.
@@ -305,6 +312,14 @@ public static class BoundedLeastSquares
             scale += 0.5 * Math.Abs(x[j]) * (Math.Abs(g[j]) + Math.Abs(atb[j]));
         }
         return f;
+    }
+
+    // Rounding bound of the double gradient component j: gamma_(n+1) (Higham, inner products) times the magnitude of its terms.
+    private static double ReleaseNoise(ReadOnlySpan<double> ata, ReadOnlySpan<double> atb, ReadOnlySpan<double> x, int j, int n)
+    {
+        var s = Math.Abs(atb[j]);
+        for (var k = 0; k < n; k++) s += Math.Abs(ata[j * n + k] * x[k]);
+        return (n + 1) * 2.220446049250313e-16 * s;
     }
 
     private static void Gradient(ReadOnlySpan<double> ata, ReadOnlySpan<double> atb, ReadOnlySpan<double> x, Span<double> g, int n)
