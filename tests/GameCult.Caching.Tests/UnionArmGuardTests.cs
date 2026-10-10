@@ -336,6 +336,34 @@ namespace GameCult.Caching.Tests
             AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteNil())), "non-integer", "nil");
         }
 
+        // The bounds of Int32 are in range (an unknown key, not an out-of-range one), whatever width encodes them.
+        [Test]
+        public void ArmKeysAtTheInt32BoundsAreUnknownKeysNotOutOfRange()
+        {
+            AssertRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(int.MaxValue))), NodeName, int.MaxValue, "3, 5, 8, 9");
+            AssertRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.Write(int.MinValue))), NodeName, int.MinValue, "3, 5, 8, 9");
+            AssertRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteInt64(int.MinValue))), NodeName, int.MinValue, "3, 5, 8, 9");
+            AssertRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue))), NodeName, int.MaxValue, "3, 5, 8, 9");
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteUInt64((ulong)int.MaxValue + 1))), "outside Int32", "2147483648");
+            AssertKeyRefused(Doc(KeyedArm((ref MessagePackWriter w) => w.WriteInt64(int.MinValue - 1L))), "outside Int32", "2147483649");
+        }
+
+        // A known key written at full width is the same key: the guard lets it through to the arm.
+        [Test]
+        public void KnownArmKeyAtFullWidthIsAccepted()
+        {
+            foreach (var key in new Emit[] { (ref MessagePackWriter w) => w.WriteUInt64(3), (ref MessagePackWriter w) => w.WriteInt64(3) })
+            {
+                var payload = Doc((ref MessagePackWriter w) =>
+                {
+                    w.WriteArrayHeader(2); key(ref w);
+                    w.WriteArrayHeader(4); w.Write("r"); w.Write("ok"); w.WriteNil(); w.Write(1);
+                });
+                var decoded = (GuardDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(GuardDoc), payload, Registry);
+                Assert.That(decoded.Root, Is.TypeOf<Leaf>());
+            }
+        }
+
         private static void AssertKeyRefused(byte[] payload, string shape, string echoed)
         {
             var exception = Decode(payload);
