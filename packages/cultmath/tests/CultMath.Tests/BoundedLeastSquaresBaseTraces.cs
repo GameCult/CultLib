@@ -20,6 +20,12 @@ internal static class BlsBaseTraces
             Kkt -1 2E-06 0 0
             end Converged 1 3f800000 00000000 00000000
             """,
+        ["tie-pair-cap-0"] = """
+            Candidate 0 1 6.661338147750939E-16 1E-06
+            Release 0 Infinity 0 0
+            Cap -1 0 0 0
+            end IterationLimit 0 00000000 00000000
+            """,
         ["tie-pair-at-hi"] = """
             Candidate 0 3 1.9984014443252818E-15 1E-06
             Release 0 Infinity 0 0

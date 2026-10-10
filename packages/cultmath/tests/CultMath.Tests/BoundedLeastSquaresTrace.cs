@@ -54,6 +54,8 @@ internal static class BlsTrace
         // Equal violations: which column is released first is the tie-break (min |x0 + x1 - 1| on [0,1]^2, then three copies).
         yield return Make("tie-pair", 1, 2, new[] { 1f, 1f }, new[] { 1f }, new float[2], Fill(1f, 2));
         yield return Make("tie-triple", 2, 3, Fill(1f, 6), new[] { 1f, 1f }, new float[3], Fill(1f, 3));
+        // The cap reached right after a release, before any further step: the other place the cap ends a solve.
+        yield return Make("tie-pair-cap-0", 1, 2, new[] { 1f, 1f }, new[] { 1f }, new float[2], Fill(1f, 2), max: 0);
         yield return Make("tie-pair-at-hi", 1, 2, new[] { 1f, 1f }, new[] { -1f }, new float[2], Fill(1f, 2), Fill(1f, 2));
 
         // A step that lands exactly on a bound is a full step, not a blocked one.
