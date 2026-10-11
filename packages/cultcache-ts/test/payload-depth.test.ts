@@ -164,7 +164,8 @@ test("a document without a codec or formatter writes a value L deep and refuses 
   assert.deepEqual(documentPayloadBytes(atLimit), encode(nest(L), { maxDepth: 1000 }));
   assert.deepEqual(decodeDocumentPayload(anything, atLimit), nest(L));
   assert.throws(() => encodeDocumentPayload(anything, nest(L + 1)), (error: unknown) =>
-    error instanceof CultCachePayloadDepthError && error.depth === L + 1 && error.limit === L);
+    error instanceof CultCachePayloadDepthError && error.depth === L + 1 && error.limit === L
+      && error.message === 'document type "t.any" value nests 257 MessagePack containers deep; the limit is 256.');
   assert.throws(() => decodeDocumentPayload(anything, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
 });
 
