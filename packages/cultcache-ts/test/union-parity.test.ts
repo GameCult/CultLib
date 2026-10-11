@@ -321,7 +321,7 @@ test("leaf codecs refuse the wrong shape on both sides, saying what was expected
 
 test("a list element refusal names the element, and nullable writes nil for null and undefined", () => {
   const numbers = list(number);
-  assert.throws(() => numbers.encode([1, "x"]), /^Error: element 1: expected a number, found string$/u);
+  assert.throws(() => numbers.encode([1, "x" as unknown as number]), /^Error: element 1: expected a number, found string$/u);
   assert.throws(() => numbers.decode([1, 2, null]), /^Error: element 2: expected a number, found nil$/u);
   const maybe = nullable(number);
   assert.equal(maybe.encode(null), null);
