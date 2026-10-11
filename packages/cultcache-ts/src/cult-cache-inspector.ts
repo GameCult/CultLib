@@ -295,8 +295,7 @@ function decodeBoundedPayload(payload: Uint8Array): unknown {
 
 function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPreview" | "payloadDecodeError"> {
   try {
-    checkPayloadDepth(payload);
-    return { payloadPreview: toJsonSafe(decode(payload)) };
+    return { payloadPreview: toJsonSafe(decodeBoundedPayload(payload)) };
   } catch (error) {
     return {
       payloadPreview: {

@@ -222,8 +222,13 @@ test("a 32-bit length or count is read whole: the walk skips a 65539-byte scalar
     assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), scalar, arrays(L - 1))), `${name} of 65539 bytes then a chain at the limit`);
     refused(cat(bytes(0x92), scalar, arrays(L)), `${name} of 65539 bytes then a chain past it`);
   }
-  const nils = repeat(bytes(0xc0), 65540);
-  for (const [name, header] of [["array32", cat(bytes(0xdd), be32(65540))], ["map32", cat(bytes(0xdf), be32(32770))]] as const) {
+  // Both counts exceed 65535 and their low sixteen bits are small (4 children; 1 pair), so a count cut to 16 bits closes the container early.
+  const wide: [string, Uint8Array, number][] = [
+    ["array32", cat(bytes(0xdd), be32(65540)), 65540],
+    ["map32", cat(bytes(0xdf), be32(65537)), 2 * 65537],
+  ];
+  for (const [name, header, children] of wide) {
+    const nils = repeat(bytes(0xc0), children);
     refused(cat(bytes(0x92), header, nils, arrays(L)), `${name} announcing more than 65535: the sibling chain past the limit`);
     assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), header, nils, arrays(L - 1))), `${name}: the sibling chain at the limit`);
   }
