@@ -364,7 +364,7 @@ mod arm_keys {
     fn a_negative_undeclared_key_is_an_unknown_arm_naming_the_key() {
         for (key, shown) in [(&[0xe0][..], "-32"), (&[0xd0, 0xdf], "-33"), (&[0xd1, 0x80, 0x00], "-32768"), (&[0xd2, 0x80, 0x00, 0x00, 0x01], "-2147483647")] {
             let text = message(&pair(key));
-            assert!(text.contains(&format!("unknown arm key {shown};")), "{text}");
+            assert!(text.contains(&format!("unknown arm key {shown} ")), "{text}");
             assert!(text.contains("declared keys: -2147483648, -1, 7, 2147483647"), "{text}");
             assert!(!text.contains("CA"), "{text}");
         }
