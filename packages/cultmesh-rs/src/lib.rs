@@ -727,15 +727,6 @@ impl CultMeshNode {
         let cultnet_rs::CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
             anyhow::bail!("expected cultnet.snapshot_response_raw.v0");
         };
-        self.apply_raw_snapshot_documents(documents)
-    }
-
-    /// Admits a peer's snapshot documents into the cache, the network payloads included: the cache
-    /// refuses one nested past its bound and persists nothing from it.
-    fn apply_raw_snapshot_documents(
-        &mut self,
-        documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
-    ) -> Result<usize> {
         let mut applied = 0usize;
         for document in documents {
             let Some(document_type) =
@@ -1770,20 +1761,72 @@ mod tests {
         }
     }
 
+    // Serves `documents` as the catalog's snapshot until the returned flag is set.
+    fn serve_snapshot(
+        documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
+    ) -> Result<(
+        SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread::JoinHandle<Result<()>>,
+    )> {
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        let target = socket.local_addr()?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            let mut server = CultMeshRudpDocumentServer::new(
+                socket,
+                |_receipt: CultMeshRudpRawDocumentReceipt| Ok(()),
+                move |_query: &CultMeshRudpSnapshotQuery| Ok(documents.clone()),
+                CultMeshSystemClock::default(),
+                CultMeshRudpDocumentServerOptions::default(),
+            )?;
+            while !server_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                server.poll_once()?;
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        });
+        Ok((target, stop, server))
+    }
+
+    fn pull(
+        node: &mut CultMeshNode,
+        documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
+    ) -> Result<usize> {
+        let (target, stop, server) = serve_snapshot(documents)?;
+        let pulled = node.pull_rudp_catalog_snapshot(CultMeshRudpSnapshotOptions {
+            target,
+            runtime_id: "pull-test".into(),
+            message_id: String::new(),
+            connect_timeout: Duration::from_millis(500),
+            response_timeout: Duration::from_secs(2),
+            poll_interval: Duration::from_millis(2),
+            resend_delay_ms: 5,
+            schema_ids: None,
+            record_keys: None,
+        });
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().expect("server thread should not panic")?;
+        pulled
+    }
+
     #[test]
-    fn a_peer_payload_nested_past_the_bound_is_refused_and_nothing_is_persisted() -> Result<()> {
+    fn a_pulled_peer_payload_nested_past_the_bound_is_refused_and_nothing_is_persisted() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store_path = temp.path().join("cultmesh.cc");
         let mut node = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
 
         let limit = cultcache_rs::MAX_PAYLOAD_DEPTH;
-        assert_eq!(node.apply_raw_snapshot_documents(vec![peer_document("at", nest(limit))])?, 1);
+        let pulled = pull(
+            &mut node,
+            vec![peer_document("a", nest(limit)), peer_document("b", nest(limit))],
+        )?;
+        assert_eq!(pulled, 2);
         node.flush()?;
         let held = std::fs::read(&store_path)?;
 
-        let error = node
-            .apply_raw_snapshot_documents(vec![peer_document("past", nest(limit + 1))])
-            .unwrap_err();
+        let error = pull(&mut node, vec![peer_document("past", nest(limit + 1))]).unwrap_err();
         assert_eq!(
             error.downcast_ref::<cultcache_rs::PayloadTooDeep>(),
             Some(&cultcache_rs::PayloadTooDeep { depth: limit + 1, limit })
@@ -1791,8 +1834,10 @@ mod tests {
         node.flush()?;
         assert_eq!(std::fs::read(&store_path)?, held);
         let reloaded = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
-        let keys: Vec<_> = reloaded.cache().snapshot().into_iter().map(|entry| entry.key).collect();
-        assert_eq!(keys, vec!["at".to_string()]);
+        let mut keys: Vec<_> =
+            reloaded.cache().snapshot().into_iter().map(|entry| entry.key).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
         Ok(())
     }
 
