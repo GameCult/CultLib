@@ -398,12 +398,12 @@ def _record_codec(type: str, normalized: list[DatabaseEntryField], cls: type[Any
         for field in normalized:
             if field.key < len(raw):
                 value = decode_slot(field, raw[field.key])
-            elif field.default is not MISSING:
-                value = field.default() if callable(field.default) else field.default
-            else:
+            elif field.default is MISSING:
                 raise ValueError(
                     f"DatabaseEntry document type {type!r} is missing required slot {field.key}"
                 )
+            else:
+                value = None
             if value is None and field.default is not MISSING:
                 value = field.default() if callable(field.default) else field.default
             values[field.name] = value

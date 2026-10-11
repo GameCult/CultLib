@@ -353,6 +353,22 @@ class RecordCodecTests(unittest.TestCase):
             define_record_codec("Nothing", [])
         self.assertEqual(str(empty.exception), "DatabaseEntry document types require at least one field")
 
+    def test_a_plain_field_helper_makes_a_required_slot_with_no_codec(self) -> None:
+        plain = define_record_codec("Plain", [database_entry_field("id", 0), database_entry_field("label", 1)])
+        self.assertEqual(plain.decode(plain.encode({"id": "a", "label": "b"})), {"id": "a", "label": "b"})
+        with self.assertRaises(ValueError) as caught:
+            plain.decode(["a"])
+        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Plain' is missing required slot 1")
+        field = database_entry_field("id", 0)
+        self.assertIsNone(field.codec)
+        self.assertFalse(field.many)
+
+    def test_slot_codecs_and_fields_are_immutable(self) -> None:
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            node.encode = None  # type: ignore[misc]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            database_entry_field("id", 0).key = 1  # type: ignore[misc]
+
     def test_a_negative_slot_key_is_refused_but_zero_is_not(self) -> None:
         database_entry_field("zero", 0)
         with self.assertRaises(ValueError) as caught:
