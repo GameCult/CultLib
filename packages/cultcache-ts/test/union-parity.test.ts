@@ -298,21 +298,72 @@ test("a slot refusal names the field and slot and never the value", () => {
   );
 });
 
-test("leaf codecs hold their types", () => {
-  assert.throws(() => number.encode(Number.NaN), /expected a number/u);
-  assert.throws(() => string.decode(5), /expected a string, found number/u);
-  assert.throws(() => boolean.decode("true"), /expected a boolean/u);
-  assert.equal(boolean.decode(true), true);
+test("leaf codecs refuse the wrong shape on both sides, saying what was expected and what kind was found", () => {
+  const table: [string, Codec<unknown>, string, unknown, string][] = [
+    ["string", string, "a string", 5, "number"],
+    ["number", number, "a number", "5", "string"],
+    ["number", number, "a number", Number.POSITIVE_INFINITY, "number"],
+    ["number", number, "a number", Number.NaN, "number"],
+    ["boolean", boolean, "a boolean", "true", "string"],
+    ["bytes", bytes, "bytes", [1, 2], "array"],
+    ["string", string, "a string", null, "nil"],
+    ["list", list(string), "an array", "abc", "string"],
+  ];
+  for (const [label, codec, what, bad, found] of table) {
+    for (const side of ["encode", "decode"] as const) {
+      assert.throws(() => codec[side](bad), new RegExp(`^Error: expected ${what}, found ${found}$`, "u"), `${label} ${side}`);
+    }
+  }
+  for (const [codec, good] of [[string, "s"], [number, 1.5], [boolean, false], [bytes, new Uint8Array([7])], [list(number), [1, 2]]] as [Codec<unknown>, unknown][]) {
+    assert.deepEqual(codec.decode(codec.encode(good)), good);
+  }
+});
+
+test("a list element refusal names the element, and nullable writes nil for null and undefined", () => {
+  const numbers = list(number);
+  assert.throws(() => numbers.encode([1, "x"]), /^Error: element 1: expected a number, found string$/u);
+  assert.throws(() => numbers.decode([1, 2, null]), /^Error: element 2: expected a number, found nil$/u);
+  const maybe = nullable(number);
+  assert.equal(maybe.encode(null), null);
+  assert.equal(maybe.encode(undefined as unknown as null), null);
+  assert.equal(maybe.encode(0), 0);
+  assert.equal(maybe.decode(null), null);
+  assert.equal(maybe.decode(0), 0);
+  assert.throws(() => maybe.decode("x"), /expected a number/u);
+});
+
+test("a record refuses what is not a record and names the field and slot of a bad value", () => {
+  const record = slots<{ name: string }>({ 3: ["name", string] });
+  assert.throws(() => record.encode(null as unknown as { name: string }), /^Error: expected a record, found nil$/u);
+  assert.throws(() => record.encode("x" as unknown as { name: string }), /^Error: expected a record, found string$/u);
+  assert.throws(() => record.encode({ name: 5 as unknown as string }), /^Error: name \(slot 3\): expected a string, found number$/u);
+});
+
+test("a union names itself, its arm and the field when an arm's slots are refused", () => {
+  assert.throws(() => node.encode({ kind: "Text", id: "a", content: 5 as unknown as string }), /^Error: arm Text: content \(slot 1\): expected a string, found number$/u);
+  assert.throws(() => node.decode([1, ["a", 5]]), /^Error: arm Text: content \(slot 1\): expected a string, found number$/u);
+  assert.equal(node.encode(undefined as unknown as null), null);
+  assert.throws(
+    () => node.encode({ kind: "Nope" } as unknown as Node),
+    /^Error: Union Node: the value's kind is not one of its arms \(Box, Text, Use, Image\)\.$/u,
+  );
+});
+
+test("slot names become catalog member names in Pascal case", () => {
+  const record = slots<{ _hidden: string; two_words: string; Mixed9: string }>({ 0: ["_hidden", string], 1: ["two_words", string], 2: ["Mixed9", string] });
+  assert.deepEqual(record.members.map((member) => member.memberName), ["Hidden", "TwoWords", "Mixed9"]);
 });
 
 test("definitions are refused at definition time", () => {
   assert.throws(() => union<{ kind: "A" }>("U", { 0: ["A", slots<{ kind: string }>({ 0: ["kind", string] })] }), /Union U arm "A" declares a slot named kind/u);
   assert.throws(() => union<{ kind: "A" | "B" }>("U", { 0: ["A", unit], 1: ["A" as "B", unit] }), /declares the arm "A" twice/u);
-  assert.throws(() => union<{ kind: "A" }>("U", { x: ["A", unit] } as never), /not a non-negative integer/u);
-  assert.throws(() => union<{ kind: "A" }>("U", {} as never), /declares no arms/u);
+  assert.throws(() => union<{ kind: "A" }>("U", { x: ["A", unit] } as never), /^Error: Union U declares the key "x", which is not a non-negative integer\.$/u);
+  assert.throws(() => union<{ kind: "A" }>("U", { "01": ["A", unit] } as never), /key "01"/u);
+  assert.throws(() => union<{ kind: "A" }>("U", { "1.5": ["A", unit] } as never), /key "1\.5"/u);
+  assert.throws(() => union<{ kind: "A" }>("U", {} as never), /^Error: Union U declares no arms\.$/u);
   assert.throws(() => slots<{ a: string; b: string }>({ 0: ["a", string], 1: ["a" as "b", string] }), /declares the field "a" twice/u);
   assert.throws(() => slots<{ a: string }>({}), /declares no slots/u);
-  assert.throws(() => slots<{ a: string }>({ [-1]: ["a", string] }), /not a non-negative integer/u);
+  assert.throws(() => slots<{ a: string }>({ [-1]: ["a", string] }), /^Error: A slot record declares the key "-1"/u);
   assert.throws(
     () => defineDocumentType({
       type: "t",

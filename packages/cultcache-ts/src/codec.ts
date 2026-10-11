@@ -86,19 +86,19 @@ type SlotSpec<TValue, TName extends string = string> =
 type SlotsSpec<TValue> = Readonly<Record<number, { [K in keyof TValue & string]: SlotSpec<TValue[K], K> }[keyof TValue & string]>>;
 
 function slotKeys(spec: Readonly<Record<string, unknown>>, owner: string): number[] {
-  const keys = Object.keys(spec).map((text) => {
+  // Object.keys lists integer keys in ascending order, so the declared keys come back sorted.
+  return Object.keys(spec).map((text) => {
     const key = Number(text);
     if (!Number.isInteger(key) || key < 0 || String(key) !== text) {
       throw new Error(`${owner} declares the key "${text}", which is not a non-negative integer.`);
     }
     return key;
   });
-  return keys.sort((left, right) => left - right);
 }
 
 function pascalCase(name: string): string {
   return name
-    .split(/[^A-Za-z0-9]+/u)
+    .split(/[^A-Za-z0-9]/u)
     .filter((part) => part.length > 0)
     .map((part) => part[0].toUpperCase() + part.slice(1))
     .join("");
