@@ -70,16 +70,32 @@ test("an empty map or array as the innermost container counts like any other", (
   refused(cat(bytes(0x82), arrays(L), sibling, bytes(0x01), sibling), "a map key one deeper");
 });
 
+test("a header counts every child it announces, up to the widest of each kind", () => {
+  const nils = (count: number) => repeat(bytes(0xc0), count);
+  const kinds: [string, Uint8Array, number][] = [
+    ["the longest fixarray", bytes(0x9f), 15],
+    ["the longest fixmap", bytes(0x8f), 30],
+    ["array16 of two", bytes(0xdc, 0, 2), 2],
+    ["array32 of two", bytes(0xdd, 0, 0, 0, 2), 2],
+    ["map16 of two pairs", bytes(0xde, 0, 2), 4],
+    ["map32 of two pairs", bytes(0xdf, 0, 0, 0, 2), 4],
+  ];
+  for (const [name, header, elements] of kinds) {
+    assert.doesNotThrow(() => checkPayloadDepth(cat(header, nils(elements - 1), arrays(L - 1))), `${name}: the last child at the limit`);
+    refused(cat(header, nils(elements - 1), arrays(L)), `${name}: the last child past it`);
+  }
+});
+
 test("every scalar is skipped by its length, whatever bytes it holds", () => {
   const filler = (count: number) => repeat(bytes(0x91), count);
   const scalars: [string, Uint8Array][] = [
-    ["nil", bytes(0xc0)], ["false", bytes(0xc2)], ["true", bytes(0xc3)], ["positive fixint", bytes(0x7f)], ["negative fixint", bytes(0xe0)],
+    ["nil", bytes(0xc0)], ["the never-used 0xc1", bytes(0xc1)], ["false", bytes(0xc2)], ["true", bytes(0xc3)], ["positive fixint", bytes(0x7f)], ["negative fixint", bytes(0xe0)],
     ["uint8", bytes(0xcc, 0x91)], ["uint16", cat(bytes(0xcd), filler(2))], ["uint32", cat(bytes(0xce), filler(4))], ["uint64", cat(bytes(0xcf), filler(8))],
     ["int8", bytes(0xd0, 0x91)], ["int16", cat(bytes(0xd1), filler(2))], ["int32", cat(bytes(0xd2), filler(4))], ["int64", cat(bytes(0xd3), filler(8))],
     ["float32", cat(bytes(0xca), filler(4))], ["float64", cat(bytes(0xcb), filler(8))],
     ["fixext1", cat(bytes(0xd4), filler(2))], ["fixext2", cat(bytes(0xd5), filler(3))], ["fixext4", cat(bytes(0xd6), filler(5))],
     ["fixext8", cat(bytes(0xd7), filler(9))], ["fixext16", cat(bytes(0xd8), filler(17))],
-    ["fixstr", cat(bytes(0xa3), filler(3))], ["str8", cat(bytes(0xd9, 3), filler(3))], ["str16", cat(bytes(0xda, 0, 3), filler(3))],
+    ["fixstr", cat(bytes(0xa3), filler(3))], ["the longest fixstr", cat(bytes(0xbf), filler(31))], ["str8", cat(bytes(0xd9, 3), filler(3))], ["str16", cat(bytes(0xda, 0, 3), filler(3))],
     ["str32", cat(bytes(0xdb, 0, 0, 0, 3), filler(3))],
     ["bin8", cat(bytes(0xc4, 3), filler(3))], ["bin16", cat(bytes(0xc5, 0, 3), filler(3))], ["bin32", cat(bytes(0xc6, 0, 0, 0, 3), filler(3))],
     ["ext8", cat(bytes(0xc7, 3, 0x7f), filler(3))], ["ext16", cat(bytes(0xc8, 0, 3, 0x7f), filler(3))],
@@ -89,7 +105,8 @@ test("every scalar is skipped by its length, whatever bytes it holds", () => {
   for (const [name, scalar] of scalars) {
     assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), scalar, arrays(L - 1))), `${name} then a chain at the limit`);
     refused(cat(bytes(0x92), scalar, arrays(L)), `${name} then a chain past it`);
-    assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), arrays(L - 1), scalar)), `${name} after a chain at the limit`);
+    // As the leaf of a chain: a scalar read at the wrong length leaves containers open, and the sibling chain then reads one deeper.
+    assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), arrays(L - 1, scalar), arrays(L - 1))), `${name} closes the chain it ends`);
   }
 });
 
