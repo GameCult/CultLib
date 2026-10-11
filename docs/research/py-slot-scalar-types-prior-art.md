@@ -85,6 +85,40 @@ Verdict `cultlib-gaps:verdict:cut-union-bounds-py.s1`, claim `scalar-type-parity
   scalar types was found by grep in cultcache-py; `canonical_schema_json` in Python is built from `type_name` members.
   Whether a CultNet schema catalog outside the store (cultnet-py) exposes slot scalar types was not checked.
 
+### 1.6 Probe: the C# reference opening Python-written stores (2026-10-11, imagination-cl-py-slot-types)
+
+Section 1.5 left this untested. Python 3.13 and cultcache-py at main 2037dd44 wrote four single-file stores of
+`cultcache.interop-note`. The C# reference at 2037dd44 read them through
+`tests/GameCult.Caching.InteropPeer read --file` (dotnet sdk 10.0 on Yggdrasil, ygg-verify job1). The scripts and
+log are in the Imagination scratchpad `imagination-cl-py-slot-types/` (`write_stores.py`, `cmd.txt`, `job1.log`).
+
+| Store | Python definition | Payload | C# result |
+|---|---|---|---|
+| a | `interop.py` (`define_document_type`, catalog members hand-typed `System.String`, `System.String[]`) | correct | opens, record read |
+| b | `define_database_entry_type`, same schema name and version as C# | correct | refused: `Persisted schema 'cultcache.interop-note' ... is incompatible ...: slot 0 changed type 'System.Object' -> 'System.String'; slot 1 ...` (every slot) |
+| c | as b | `title = 12` | refused at the catalog, as b |
+| d | as a (typed catalog) | `title = 12`, accepted by Python on write | refused at decode: `Record 'note:python-d' ... cannot be decoded ... Unexpected msgpack code 12 (positive fixint)` |
+
+Mechanism (source read): the C# schema id is a SHA-256 of the semantic fingerprint (`CultCache.cs:656-658`), while
+Python's defaults to the type name. A Python-written entry therefore never matches by id. It resolves by schema name
+(`CultCache.cs:518-521`), and the content hashes differ, so `CompareSchemaShapes` runs and refuses any TypeName mismatch
+(`:874-877`). The refusal is thrown from the pull, so the C# cache does not open the store at all.
+
+Consequences:
+- `define_database_entry_type` has no `members` or per-slot type parameter (`documents.py:214-229`). An ordinary
+  Python consumer cannot write a store that a C# peer with the same schema name will open. The only way to get one is
+  to hand-build `define_document_type` with typed members, as `interop.py` does. This is the TS finding
+  `cut-union-codec-ts.s1.codec-catalog-refused-by-reference` again, this time in Python.
+- Store d: a wrong scalar that Python accepts on write makes the store unreadable to the C# reference.
+- A C# `object` member is also cataloged `System.Object`, and MessagePack-CSharp's object formatter accepts any
+  value. Python's current default is therefore true of a C# `object` slot, and false for every typed C# slot.
+
+Real consumer definitions for scale (source read): `cultnet_py/cultmesh_contracts.py:626-698`
+(`CultMeshSimulationFact`, a frozen dataclass annotated `str`, `int`, `float`, `str | None`, passed as `cls=`), and
+`repixelizer/src/repixelizer/verse_state.py:77-118` (dict values with no `cls`; `("value", 0)` and `("surface", 4)`
+hold whole nested structures in one slot, which is a genuine "any" slot). Python annotations do not carry the C# widths:
+`int` cannot say Int32 or Int64, and `float` cannot say Single or Double.
+
 ## 2. Prior art (dynamic host, declared field types)
 
 | System | Types come from | Write | Read | Evidence |
