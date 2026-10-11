@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,7 +19,13 @@ const { boolean, bytes, lazy, list, nullable, number, slots, string, union, unit
 
 // The golden is tests/vectors/union-parity, written by the C# reference. Everything below that is bytes or an expected
 // outcome is read from those committed files; only the value the payload must decode to is spelled here.
-const vectors = resolve(__dirname, "../../../../tests/vectors/union-parity");
+function findVectors(from: string): string {
+  for (let dir = from; ; dir = resolve(dir, "..")) {
+    if (existsSync(join(dir, "tests", "vectors", "union-parity"))) return join(dir, "tests", "vectors", "union-parity");
+    if (resolve(dir, "..") === dir) throw new Error("tests/vectors/union-parity not found above the test.");
+  }
+}
+const vectors = findVectors(__dirname);
 const read = async (name: string) => new Uint8Array(await readFile(join(vectors, name)));
 
 // The string the C# writer put inside every refusal payload, to prove a refusal never echoes the payload.
