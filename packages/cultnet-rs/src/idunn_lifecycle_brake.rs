@@ -68,7 +68,7 @@ impl IdunnLifecycleBrakeRecord {
         if messagepack_array_len(payload) != Some(9) {
             bail!("lifecycle brake is not the 9-field positional contract");
         }
-        let value: Self = cultcache_rs::decode_payload(payload)?;
+        let value: Self = rmp_serde::from_slice(payload)?;
         value.validate()?;
         if rmp_serde::to_vec(&value)? != payload {
             bail!("lifecycle brake encoding is not canonical");

@@ -114,15 +114,21 @@ fn add_unknown_entry(mut map: Vec<u8>, nested: &[u8]) -> Vec<u8> {
 
 /// Adds one trailing slot to a positional record array: the unknown slot the derive skips.
 fn add_trailing_slot(mut array: Vec<u8>, nested: &[u8]) -> Vec<u8> {
-    assert!((0x90..0x9f).contains(&array[0]));
-    array[0] += 1;
+    match array[0] {
+        header @ 0x90..=0x9e => array[0] = header + 1,
+        0xdc => {
+            let count = u16::from_be_bytes([array[1], array[2]]) + 1;
+            array[1..3].copy_from_slice(&count.to_be_bytes());
+        }
+        other => panic!("not a small array: {other:#x}"),
+    }
     array.extend_from_slice(nested);
     array
 }
 
 type Decode = fn(&[u8]) -> Result<()>;
 /// A payload whose free or skipped part is `nested`, deep by `1 + depth(nested)`.
-type Frame = fn(&[u8]) -> Vec<u8>;
+type Frame = Box<dyn Fn(&[u8]) -> Vec<u8>>;
 
 struct Decoder {
     name: &'static str,
@@ -194,54 +200,123 @@ fn hello_bytes() -> Vec<u8> {
     encode_cultnet_message_to_vec(&hello, CultNetWireContract::CultNetSchemaV0).unwrap()
 }
 
-fn media_record() -> GameCultMediaWireRecord {
-    GameCultMediaWireRecord::Video(GameCultMediaVideoAccessUnitRecord {
-        stream_id: "stream".into(),
-        session_id: "session-1".into(),
-        frame_id: 7,
-        codec: "h264".into(),
-        pts_ticks: 90_000,
-        duration_ticks: 3_000,
-        timebase_num: 1,
-        timebase_den: 90_000,
-        keyframe: true,
-        dependency_frame_id: None,
-        deadline_ticks: 108_000,
-        chunk_index: 0,
-        chunk_count: 1,
-        payload: vec![1, 2, 3],
-    })
+fn media_records() -> Vec<GameCultMediaWireRecord> {
+    vec![
+        GameCultMediaWireRecord::Video(GameCultMediaVideoAccessUnitRecord {
+            stream_id: "s".into(),
+            session_id: "x".into(),
+            frame_id: 7,
+            codec: "h264".into(),
+            pts_ticks: 90_000,
+            duration_ticks: 3_000,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            keyframe: true,
+            dependency_frame_id: None,
+            deadline_ticks: 108_000,
+            chunk_index: 0,
+            chunk_count: 1,
+            payload: vec![1, 2, 3],
+        }),
+        GameCultMediaWireRecord::VideoParity(GameCultMediaVideoParityShardRecord {
+            stream_id: "s".into(),
+            session_id: "x".into(),
+            frame_id: 1,
+            codec: "h264".into(),
+            pts_ticks: 0,
+            duration_ticks: 1,
+            timebase_num: 1,
+            timebase_den: 90_000,
+            keyframe: false,
+            dependency_frame_id: Some(0),
+            deadline_ticks: 1,
+            chunk_count: 4,
+            fec_scheme: "rs-gf256-v1".into(),
+            block_index: 0,
+            block_count: 1,
+            block_data_start: 0,
+            block_data_count: 4,
+            parity_index: 1,
+            parity_count: 2,
+            shard_payload_bytes: 3,
+            last_chunk_payload_bytes: 2,
+            payload: vec![1, 2, 3],
+        }),
+        GameCultMediaWireRecord::AudioParity(GameCultMediaAudioParityShardRecord {
+            stream_id: "s".into(),
+            session_id: "x".into(),
+            codec: "opus".into(),
+            fec_scheme: "rs-gf256-v1".into(),
+            base_packet_id: 8,
+            base_pts_ticks: 0,
+            packet_duration_ticks: 960,
+            timebase_num: 1,
+            timebase_den: 48_000,
+            deadline_ticks: 4_000,
+            data_shard_count: 4,
+            parity_index: 0,
+            parity_shard_count: 2,
+            shard_payload_bytes: 3,
+            payload: vec![4, 5, 6],
+        }),
+        GameCultMediaWireRecord::Audio(GameCultMediaAudioPacketRecord {
+            stream_id: "s".into(),
+            session_id: "x".into(),
+            packet_id: 9,
+            codec: "opus".into(),
+            pts_ticks: 0,
+            duration_ticks: 960,
+            timebase_num: 1,
+            timebase_den: 48_000,
+            deadline_ticks: 1,
+            payload: vec![4, 5, 6],
+        }),
+        GameCultMediaWireRecord::Feedback(GameCultMediaReceiverFeedbackRecord {
+            stream_id: "s".into(),
+            session_id: "x".into(),
+            receiver_id: "obs".into(),
+            highest_decodable_frame_id: Some(41),
+            missing_frame_ids: vec![42],
+            late_frame_ids: vec![43],
+            requested_keyframe: true,
+            jitter_us: 500,
+            decode_queue_us: 2_000,
+            observed_at: "unix:1000".into(),
+            missing_video_chunk_keys: vec!["42:1".into()],
+        }),
+    ]
 }
 
-fn media_wire(record_payload: Vec<u8>) -> Vec<u8> {
-    let record = media_record();
-    let message = CultNetMessage::DocumentPutRaw {
-        message_id: "media-1".into(),
-        document: CultNetRawDocumentRecord {
-            schema_id: record.schema_id().to_string(),
-            record_key: record.record_key(),
-            stored_at: "unix:1000".into(),
-            payload_encoding: CultNetRawPayloadEncoding::Messagepack,
-            payload: record_payload,
-            source_runtime_id: None,
-            source_agent_id: None,
-            source_role: None,
-            tags: None,
-        },
-    };
+/// A valid media wire message whose record carries one more, unknown slot holding `nested`.
+fn media_wire_with_unknown_slot(record: &GameCultMediaWireRecord, nested: &[u8]) -> Vec<u8> {
+    let provenance =
+        MediaWireProvenance { stored_at: "unix:1000", runtime_id: "peer", role: "media", producer: "peer" };
+    let wire = encode_media_wire_record(record, provenance).unwrap();
+    let message = decode_cultnet_message_from_slice(&wire, CultNetWireContract::CultNetSchemaV0).unwrap();
+    let CultNetMessage::DocumentPutRaw { message_id, mut document } = message else { unreachable!() };
+    document.payload = add_trailing_slot(document.payload, nested);
+    let message = CultNetMessage::DocumentPutRaw { message_id, document };
     encode_cultnet_message_to_vec(&message, CultNetWireContract::CultNetSchemaV0).unwrap()
 }
+
+const MEDIA_NAMES: [&str; 5] = [
+    "media video record",
+    "media video parity record",
+    "media audio parity record",
+    "media audio record",
+    "media feedback record",
+];
 
 fn decoders() -> Vec<Decoder> {
     vec![
         Decoder {
             name: "provider command document (a free Value field)",
-            frame: |nested| replace_trailing_nil(command_with_nil(), nested),
+            frame: Box::new(|nested| replace_trailing_nil(command_with_nil(), nested)),
             decode: |payload| decode_provider_command_document(&command_document(payload.to_vec())).map(drop),
         },
         Decoder {
             name: "provider session payload (a receipt's free Value field)",
-            frame: |nested| replace_trailing_nil(receipt_with_nil(), nested),
+            frame: Box::new(|nested| replace_trailing_nil(receipt_with_nil(), nested)),
             decode: |payload| {
                 decode_provider_session_payload::<CultMeshProviderCommandReceiptWire>(&STANDARD.encode(payload))
                     .map(drop)
@@ -249,24 +324,22 @@ fn decoders() -> Vec<Decoder> {
         },
         Decoder {
             name: "provider connect evidence (an unknown key a named map skips)",
-            frame: |nested| add_unknown_entry(evidence_bytes(), nested),
+            frame: Box::new(|nested| add_unknown_entry(evidence_bytes(), nested)),
             decode: |payload| decode_provider_connect_evidence(payload).map(drop),
         },
         Decoder {
             name: "CultNet message (a free rmpv::Value tree)",
-            frame: |nested| add_unknown_entry(hello_bytes(), nested),
+            frame: Box::new(|nested| add_unknown_entry(hello_bytes(), nested)),
             decode: |payload| decode_cultnet_message_from_slice(payload, CultNetWireContract::CultNetSchemaV0).map(drop),
         },
-        Decoder {
-            name: "media record (an unknown trailing slot the derive skips)",
-            frame: |nested| {
-                let record = media_record();
-                let GameCultMediaWireRecord::Video(video) = &record else { unreachable!() };
-                add_trailing_slot(rmp_serde::to_vec(video).unwrap(), nested)
-            },
-            decode: |payload| decode_media_wire_record(&media_wire(payload.to_vec())).map(drop),
-        },
     ]
+    .into_iter()
+    .chain(media_records().into_iter().zip(MEDIA_NAMES).map(|(record, name)| Decoder {
+        name,
+        frame: Box::new(move |nested| media_wire_with_unknown_slot(&record, nested)),
+        decode: |wire| decode_media_wire_record(wire).map(drop),
+    }))
+    .collect()
 }
 
 fn refusal(error: &Error) -> Option<PayloadTooDeep> {
