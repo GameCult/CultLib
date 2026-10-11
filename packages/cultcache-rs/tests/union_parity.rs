@@ -63,7 +63,7 @@ struct Composition {
     #[cultcache(key = 0)]
     name: String,
     #[cultcache(key = 1)]
-    body: Option<Node>,
+    body: Option<std::boxed::Box<Node>>,
 }
 
 #[derive(Clone, Debug, PartialEq, CultUnion)]
@@ -171,7 +171,7 @@ fn constructed() -> UnionSurface {
                 text("t1", "hello"),
                 Node::Use(UseArm {
                     id: "u1".into(),
-                    composition: Composition { name: "comp".into(), body: Some(inner) },
+                    composition: Composition { name: "comp".into(), body: Some(std::boxed::Box::new(inner)) },
                     slots: vec![Some(text("s1", "slot")), None, Some(boxed("b2", vec![]))],
                 }),
                 image("i2", "uri://b", ""),
