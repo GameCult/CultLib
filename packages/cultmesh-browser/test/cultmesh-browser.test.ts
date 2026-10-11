@@ -982,3 +982,8 @@ test("decodeCultNetPayload reads a payload through the formatter it is given, an
   assert.deepEqual(decodeCultNetPayload<{ count: number }>(record, formatter), { count: 7 });
   assert.deepEqual(decodeCultNetPayload<number[]>(record), [7]);
 });
+
+test("decodeCultNetPayload refuses a payload that is not messagepack, naming the encoding and not the payload", () => {
+  const record = { schemaId: "t.v0", recordKey: "k", payloadEncoding: "json", payload: encodeWireValue("secret-value") } as unknown as CultNetRawDocumentRecord;
+  assert.throws(() => decodeCultNetPayload(record), (error: Error) => error.message === "Unsupported CultNet document payload 'json'.");
+});

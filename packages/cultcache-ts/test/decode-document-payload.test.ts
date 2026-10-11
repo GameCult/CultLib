@@ -31,3 +31,9 @@ test("a payload is read by its definition's formatter, a codec's, or as a plain 
   // Without the definition the codec payload is its positional array, which is why a caller that holds one passes it.
   assert.deepEqual(decodeDocumentPayload(undefined, encode(["a", 1])), ["a", 1]);
 });
+
+test("a definition that declares both a codec and a formatter is refused where its payload is read", () => {
+  const both = { ...codec, formatter: formatted.formatter } as typeof codec;
+  assert.throws(() => decodeDocumentPayload(both, encode(["a", 1])), (error: Error) =>
+    error.message === 'CultCache document type "t.codec" declares both a codec and a formatter.');
+});
