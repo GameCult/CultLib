@@ -56,6 +56,20 @@
 //! #[derive(CultUnion)]
 //! enum Bad<T> { #[cultcache(key = 0)] A(Arm), #[cultcache(key = 1)] B(std::marker::PhantomData<T>) }
 //! ```
+//!
+//! A CultSlots field without a key, and a generic CultSlots struct:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String, name: String }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm<T> { #[cultcache(key = 0)] id: T }
+//! ```
 
 use anyhow::Context;
 use anyhow::Result;
