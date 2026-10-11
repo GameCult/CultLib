@@ -12,9 +12,10 @@ import { codecs } from "../src";
 import type { Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { readWire, WireFloat, writeWire } from "../src/wire";
+import { referenceReads, referenceWrites } from "./reference-numeric-table";
 import { defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
-import type { CacheBackingStore, CultCacheEnvelope } from "../src/types";
+import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope } from "../src/types";
 
 const { array, boolean, bytes, float32, float64, int32, int64, lazy, list, nullable, slots, string, union, unit } = codecs;
 
@@ -504,10 +505,10 @@ test("a codec and a formatter are refused together wherever the definition enter
 });
 
 test("a definition that skips defineDocumentType still writes its codec's bytes and its derived catalog", async () => {
-  const raw = { type: "tests.union_surface", schemaId: "tests.union_surface.v1", schema: surfaceSchema, codec: surfaceCodec, name: "id" as const };
+  const raw = { type: "tests.union_surface", schemaId: "tests.union_surface.v1", schema: surfaceSchema, codec: surfaceCodec, name: "id" } as unknown as AnyCultCacheDocumentDefinition;
   const holder = memoryStore([]);
   const cache = CultCache.builder().withDocumentType(raw).withGenericStore(holder).build();
-  await cache.put(raw, "surface", golden);
+  await cache.put(raw as never, "surface", golden as never);
   assert.equal(hex(holder.entries[0].payload), hex(await read("union-surface.msgpack")));
   const [snapshot] = cache.snapshot();
   assert.deepEqual(snapshot.catalogEntry!.members!.map((member) => member.typeName).slice(0, 2), ["System.String", "System.Int32"]);
@@ -529,6 +530,47 @@ test("every leaf and wrapper carries the reference's type name, and a catalog is
   assert.throws(() => defineDocumentType({ type: "t", schema: z.any(), codec: unnamed as never }), /what \(slot 1\) has no C# type name/u);
   const given = defineDocumentType({ type: "t", schema: z.any(), codec: unnamed as never, members: [{ slot: 0, memberName: "Id", typeName: "System.String" }] });
   assert.equal(given.members!.length, 1);
+});
+
+// referenceReads and referenceWrites are the C# reference's own answers (see the table's header): a numeric leaf reads
+// and refuses exactly what the reference does, and writes exactly the bytes the reference reads back unchanged.
+const numericLeaves: Record<string, Codec<unknown>> = { int32, int64, float32, float64 };
+const bitsOf = (value: number) => (Number.isNaN(value) ? "NaN" : Buffer.from(new Float64Array([value]).buffer).reverse().toString("hex"));
+
+test("numeric leaves read and refuse exactly what the C# reference does", () => {
+  assert.equal(referenceReads.length, 120);
+  let accepted = 0;
+  let refused = 0;
+  for (const [leaf, value, outcome] of referenceReads) {
+    const record = slots<{ v: unknown }>({ 0: ["v", numericLeaves[leaf]] });
+    let got: string;
+    try {
+      const read = record.decode(readWire(fromHex(`91${value}`))).v;
+      got = `ACCEPT ${leaf.startsWith("float") ? bitsOf(read as number) : String(read)}`;
+      accepted += 1;
+    } catch (error) {
+      assert.ok(!(error as Error).message.includes(value), "a refusal never echoes the value");
+      got = "REFUSE";
+      refused += 1;
+    }
+    assert.equal(got, outcome, `${leaf} ${value}`);
+  }
+  assert.deepEqual([accepted, refused], [referenceReads.filter((row) => row[2].startsWith("ACCEPT")).length, referenceReads.filter((row) => row[2] === "REFUSE").length]);
+  assert.ok(accepted > 40 && refused > 40);
+});
+
+test("numeric leaves write the bytes the C# reference reads back unchanged, and 64-bit values lose nothing", () => {
+  assert.equal(referenceWrites.length, 46);
+  for (const [leaf, text, expected] of referenceWrites) {
+    const value = leaf.startsWith("float") ? (text === "-0" ? -0 : Number(text)) : text.endsWith("n") || Math.abs(Number(text)) > Number.MAX_SAFE_INTEGER ? BigInt(text.replace("n", "")) : Number(text);
+    const record = slots<{ v: unknown }>({ 0: ["v", numericLeaves[leaf]] });
+    assert.equal(hex(writeWire(record.encode({ v: value }))), expected, `${leaf} ${text}`);
+  }
+  const wide = slots<{ v: number | bigint }>({ 0: ["v", int64] });
+  for (const value of [2n ** 53n + 1n, 2n ** 63n - 1n, -(2n ** 63n), -(2n ** 53n) - 1n]) {
+    assert.equal(wide.decode(readWire(writeWire(wide.encode({ v: value })))).v, value);
+  }
+  assert.equal(wide.decode(readWire(writeWire(wide.encode({ v: 2n })))).v, 2, "a bigint that fits comes back a number");
 });
 
 function envelopeOf(payload: Uint8Array): CultCacheEnvelope {
