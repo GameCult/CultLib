@@ -727,6 +727,15 @@ impl CultMeshNode {
         let cultnet_rs::CultNetMessage::SnapshotResponseRaw { documents, .. } = response else {
             anyhow::bail!("expected cultnet.snapshot_response_raw.v0");
         };
+        self.apply_raw_snapshot_documents(documents)
+    }
+
+    /// Admits a peer's snapshot documents into the cache, the network payloads included: the cache
+    /// refuses one nested past its bound and persists nothing from it.
+    fn apply_raw_snapshot_documents(
+        &mut self,
+        documents: Vec<cultnet_rs::CultNetRawDocumentRecord>,
+    ) -> Result<usize> {
         let mut applied = 0usize;
         for document in documents {
             let Some(document_type) =
@@ -1730,6 +1739,60 @@ mod tests {
         let reloaded = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
         assert_eq!(reloaded.get_required::<Note>("note")?.body, "catalog truth");
         assert_eq!(reloaded.cache().snapshot()[0].r#type, Note::TYPE);
+        Ok(())
+    }
+
+    #[derive(serde::Serialize)]
+    struct Nest {
+        inner: Option<Box<Nest>>,
+    }
+
+    // `levels` maps deep, written by the serializer the cache itself uses.
+    fn nest(levels: usize) -> Vec<u8> {
+        let mut value = Nest { inner: None };
+        for _ in 1..levels {
+            value = Nest { inner: Some(Box::new(value)) };
+        }
+        rmp_serde::to_vec_named(&value).unwrap()
+    }
+
+    fn peer_document(key: &str, payload: Vec<u8>) -> cultnet_rs::CultNetRawDocumentRecord {
+        cultnet_rs::CultNetRawDocumentRecord {
+            schema_id: "cultmesh.test.note.v0".to_string(),
+            record_key: key.to_string(),
+            stored_at: "2026-07-03T00:00:00Z".to_string(),
+            payload_encoding: cultnet_rs::CultNetRawPayloadEncoding::Messagepack,
+            payload,
+            source_runtime_id: None,
+            source_agent_id: None,
+            source_role: None,
+            tags: None,
+        }
+    }
+
+    #[test]
+    fn a_peer_payload_nested_past_the_bound_is_refused_and_nothing_is_persisted() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store_path = temp.path().join("cultmesh.cc");
+        let mut node = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
+
+        let limit = cultcache_rs::MAX_PAYLOAD_DEPTH;
+        assert_eq!(node.apply_raw_snapshot_documents(vec![peer_document("at", nest(limit))])?, 1);
+        node.flush()?;
+        let held = std::fs::read(&store_path)?;
+
+        let error = node
+            .apply_raw_snapshot_documents(vec![peer_document("past", nest(limit + 1))])
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<cultcache_rs::PayloadTooDeep>(),
+            Some(&cultcache_rs::PayloadTooDeep { depth: limit + 1, limit })
+        );
+        node.flush()?;
+        assert_eq!(std::fs::read(&store_path)?, held);
+        let reloaded = CultMesh::create_node(&store_path, TestDocuments, Default::default())?;
+        let keys: Vec<_> = reloaded.cache().snapshot().into_iter().map(|entry| entry.key).collect();
+        assert_eq!(keys, vec!["at".to_string()]);
         Ok(())
     }
 
