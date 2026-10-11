@@ -86,6 +86,8 @@ assert.equal(typeof cache.defineDocumentType, "function");
 assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
 assert.equal("resolveDocumentFormatter" in cache, false);
 assert.equal("resolveDocumentFormatter" in documentEntry, false);
+assert.equal("codecFormatter" in cache.codecs, false);
+assert.equal("codecFormatter" in documentEntry, false);
 assert.equal(typeof net.CultNetPeer, "function");
 assert.equal(typeof mesh.CultMesh, "function");
 assert.equal(typeof mesh.CultMeshProviderSession, "function");
@@ -190,6 +192,12 @@ void decodeOwner;
 // @ts-expect-error resolveDocumentFormatter is not exported from the document entry
 import { resolveDocumentFormatter } from "@gamecult/cultcache-ts/document";
 void resolveDocumentFormatter;
+import { codecs } from "@gamecult/cultcache-ts";
+// @ts-expect-error codecFormatter is not exported from the document entry
+import { codecFormatter } from "@gamecult/cultcache-ts/document";
+void codecFormatter;
+// @ts-expect-error codecFormatter is not a member of the root's codecs namespace
+void codecs.codecFormatter;
 `);
   execFileSync(process.execPath, [
     tsc,

@@ -1,5 +1,5 @@
-import type { CultCacheDocumentFormatter, CultCacheSchemaCatalogMember } from "./types";
-import { readWire, WireFloat, writeWire } from "./wire";
+import type { CultCacheSchemaCatalogMember } from "./types";
+import { WireFloat } from "./wire";
 
 // A codec turns a value into the shape the reference runtimes write and back. Slot records are positional arrays with
 // nil gaps; a union value is { kind: armName, ...armFields }, written [armKey, [armSlots...]]. Refusals name the union
@@ -366,13 +366,5 @@ export function union<TValue extends { kind: string }>(
       const fields = arm.body === unit ? {} : at(`arm ${arm.armName}`, () => (arm.body as SlotsCodec<any>).decode(raw[1]));
       return { kind: arm.armName, ...fields } as unknown as TValue;
     },
-  };
-}
-
-// The formatter a document gets from a slot codec: the codec's value as one MessagePack payload.
-export function codecFormatter<TValue extends object>(codec: SlotsCodec<TValue>): CultCacheDocumentFormatter<TValue> {
-  return {
-    encode: (value) => writeWire(codec.encode(value)),
-    decode: (payload) => codec.decode(readWire(payload)),
   };
 }

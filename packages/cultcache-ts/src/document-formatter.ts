@@ -1,7 +1,8 @@
 import { decode, encode } from "@msgpack/msgpack";
 
-import { codecFormatter } from "./codec";
+import type { SlotsCodec } from "./codec";
 import type { AnyCultCacheDocumentDefinition, CultCacheDocumentFormatter } from "./types";
+import { readWire, writeWire } from "./wire";
 
 // The one place that decides how a document is encoded: its own formatter, or its codec's, or a plain map. A codec and a
 // formatter are two answers to one question, so a definition that carries both is refused wherever it enters (the
@@ -18,3 +19,12 @@ const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
   encode: (value: unknown) => encode(value),
   decode: (payload: Uint8Array) => decode(payload),
 };
+
+// The formatter a document gets from a slot codec: the codec's value as one MessagePack payload. Private to this module
+// for the same reason as the resolver: exported, it would read a payload without the schema.
+function codecFormatter<TValue extends object>(codec: SlotsCodec<TValue>): CultCacheDocumentFormatter<TValue> {
+  return {
+    encode: (value) => writeWire(codec.encode(value)),
+    decode: (payload) => codec.decode(readWire(payload)),
+  };
+}
