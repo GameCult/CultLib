@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
 using MessagePack;
@@ -66,9 +67,16 @@ namespace GameCult.Caching.Tests
 
         // ---- the fixture: a recursive union, a unit arm, a union inside a record inside a union, a list of unions ----
 
-        // Keys 0, 1, 2 and 5: 3 and 4 are retired, so the key map is not sequential.
-        [Union(0, typeof(Box)), Union(1, typeof(Text)), Union(2, typeof(Use)), Union(5, typeof(Image))]
+        // Keys 0, 1, 2, 5 and 6: 3 and 4 are retired, so the key map is not sequential. Wrap is the +2 nesting step beside
+        // Box's +3, so any container depth from 4 up is reachable exactly.
+        [Union(0, typeof(Box)), Union(1, typeof(Text)), Union(2, typeof(Use)), Union(5, typeof(Image)), Union(6, typeof(Wrap))]
         public abstract class Node { }
+
+        [MessagePackObject]
+        public sealed class Wrap : Node
+        {
+            [Key(0)] public Node? Inner;
+        }
 
         [MessagePackObject]
         public sealed class Box : Node
@@ -109,13 +117,17 @@ namespace GameCult.Caching.Tests
             [Key(1)] public Node? Body;
         }
 
-        [Union(0, typeof(Pending)), Union(1, typeof(Completed)), Union(2, typeof(Denied))]
+        // Floor and Ceiling are unit arms at the ends of the Int32 key domain.
+        [Union(0, typeof(Pending)), Union(1, typeof(Completed)), Union(2, typeof(Denied)),
+         Union(int.MinValue, typeof(Floor)), Union(int.MaxValue, typeof(Ceiling))]
         public abstract class Outcome { }
 
         [MessagePackObject] public sealed class Pending : Outcome { [Key(0)] public string Message = string.Empty; }
         [MessagePackObject] public sealed class Completed : Outcome { [Key(0)] public int SourceVersion; }
         // A unit arm: written [2, []].
         [MessagePackObject] public sealed class Denied : Outcome { }
+        [MessagePackObject] public sealed class Floor : Outcome { }
+        [MessagePackObject] public sealed class Ceiling : Outcome { }
 
         // Item names Tool and Part under keys 1 and 2; CraftedItem, the inner union both derive from, names them under 0 and 1.
         [Union(0, typeof(Gem)), Union(1, typeof(Tool)), Union(2, typeof(Part))]
@@ -141,11 +153,13 @@ namespace GameCult.Caching.Tests
             [Key(6)] public Node? Missing;
         }
 
-        private static UnionSurface Constructed() => new()
+        private static UnionSurface Constructed() => Constructed(null);
+
+        private static UnionSurface Constructed(Node? root) => new()
         {
             Id = "surface",
             Version = 3,
-            Root = new Box
+            Root = root ?? new Box
             {
                 Id = "root",
                 Children =
@@ -183,6 +197,9 @@ namespace GameCult.Caching.Tests
             Pending p => $"Pending({p.Message})",
             Completed c => $"Completed({c.SourceVersion})",
             Denied => "Denied",
+            Floor => "Floor",
+            Ceiling => "Ceiling",
+            Wrap w => $"Wrap({Describe(w.Inner)})",
             Gem g => $"Gem({g.Name})",
             Tool t => $"Tool({t.Name},{t.Uses})",
             Part p => $"Part({p.Name},{p.Count})",
@@ -234,7 +251,7 @@ namespace GameCult.Caching.Tests
         private static Emit ImageArm(string id, string uri, string alt) => ArmOf(5, Str(id), Str(uri), Nil, Str(alt));
 
         // The constructed value's payload, with a part of the structure replaceable to build a refusal or an extra-slot case.
-        private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null)
+        private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null, Emit? trailing = null)
         {
             extra ??= new Extra();
             root ??= BoxArm("root", Slots(
@@ -245,10 +262,8 @@ namespace GameCult.Caching.Tests
                 ImageArm("i2", "uri://b", "")), extra.RootArm);
             outcomes ??= Slots(ArmOf(0, Str("wait")), ArmOf(1, Num(7)), ArmOf(2));
             crafted ??= ArmOf(1, Str("gear"), Num(4));
-            return Raw(Plus(extra.Record,
-                Str("surface"), Num(3), root, outcomes,
-                ArmOf(1, Str("hammer"), Num(12)),
-                crafted, Nil));
+            var slots = new[] { Str("surface"), Num(3), root, outcomes, ArmOf(1, Str("hammer"), Num(12)), crafted, Nil };
+            return Raw(Slots(trailing != null ? slots.Append(trailing).ToArray() : extra.Record ? slots.Append(ExtraSlot).ToArray() : slots));
         }
 
         private static byte[] SerializeValue(UnionSurface value) => CultDocumentMessagePackSerialization.SerializeUntyped(value, typeof(UnionSurface), Registry);
@@ -258,8 +273,8 @@ namespace GameCult.Caching.Tests
 
         // ---- the refusal and extra-slot vectors, each with its expected outcome as data ----
 
-        // file, outcome ("refused" | "read-only"), union (logical name), arm key (-1 for none), detail.
-        private sealed record Case(string File, string Outcome, string Union, int Key, string Detail, byte[] Payload);
+        // file, outcome ("refused" | "read-only" | "accepted"), union (logical name), arm key (null for none), detail.
+        private sealed record Case(string File, string Outcome, string Union, int? Key, string Detail, byte[] Payload);
 
         private static IReadOnlyList<Case> Cases() => new[]
         {
@@ -273,9 +288,9 @@ namespace GameCult.Caching.Tests
                 Surface(crafted: ArmOf(2, Str("gear"), Num(4)))),
             new Case("arm-arity.msgpack", "refused", "Node", 1, "arity",
                 Surface(root: (ref MessagePackWriter w) => { w.WriteArrayHeader(1); w.Write(1); })),
-            new Case("extra-slot-record.msgpack", "read-only", "UnionSurface", -1, "record",
+            new Case("extra-slot-record.msgpack", "read-only", "UnionSurface", null, "record",
                 Surface(extra: new Extra(Record: true))),
-            new Case("extra-slot-nested-record.msgpack", "read-only", "Composition", -1, "nested-record",
+            new Case("extra-slot-nested-record.msgpack", "read-only", "Composition", null, "nested-record",
                 Surface(extra: new Extra(Composition: true))),
             new Case("extra-slot-arm.msgpack", "read-only", "Node", 0, "arm",
                 Surface(extra: new Extra(RootArm: true))),
@@ -291,7 +306,7 @@ namespace GameCult.Caching.Tests
             {
                 w.WriteArrayHeader(5);
                 w.Write(c.File); w.Write(c.Outcome); w.Write(c.Union);
-                if (c.Key < 0) w.WriteNil(); else w.Write(c.Key);
+                if (c.Key is { } key) w.Write(key); else w.WriteNil();
                 w.Write(c.Detail);
             }
         });
@@ -301,6 +316,7 @@ namespace GameCult.Caching.Tests
             "Node" => typeof(Node).FullName!,
             "Outcome" => typeof(Outcome).FullName!,
             "CraftedItem" => typeof(CraftedItem).FullName!,
+            "UnionSurface" => typeof(UnionSurface).FullName!,
             _ => throw new ArgumentOutOfRangeException(nameof(logical), logical, null)
         };
 
@@ -429,12 +445,288 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // Runs whatever the switch reads when the test starts: it sets the switch itself, and writes only a probe file.
+        // ---- the bounds vectors: arm keys at the ends of the Int32 domain, nil arm slots, payload nesting ----
+
+        private const int Limit = CultMessagePackSecurity.MaximumPayloadDepth;
+
+        // The outermost array is depth 1, a Wrap arm ([6, [inner]]) adds 2, a Box with no children 3, a Text leaf 2.
+        // The at-limit and past-limit payloads are the same chain of Wrap arms; the leaf is what makes the depth odd or even.
+        private const int AtLimitWraps = (Limit - 1 - 3) / 2;
+        private const int PastLimitWraps = (Limit + 1 - 1 - 2) / 2;
+
+        private static Emit RawKey(Emit key, params Emit[] slots) => (ref MessagePackWriter w) =>
+        {
+            w.WriteArrayHeader(2); key(ref w);
+            Slots(slots)(ref w);
+        };
+
+        private static Emit WithOutcome(Emit element) => Slots(ArmOf(0, Str("wait")), ArmOf(1, Num(7)), ArmOf(2), element);
+
+        private static Emit WrapChain(int wraps, Emit leaf) => wraps == 0 ? leaf : ArmOf(6, WrapChain(wraps - 1, leaf));
+
+        private static Node WrapChainValue(int wraps, Node leaf)
+        {
+            for (var i = 0; i < wraps; i++) leaf = new Wrap { Inner = leaf };
+            return leaf;
+        }
+
+        // n arrays nested inside one another around a single string.
+        private static Emit Nested(int n) => n == 1 ? Slots(Str(Canary)) : Slots(Nested(n - 1));
+
+        private static Emit AtLimitLeaf => BoxArm("leaf", Slots());
+        private static Emit PastLimitLeaf => TextArm("leaf", Canary);
+
+        private static IReadOnlyList<Case> BoundsCases() => new[]
+        {
+            new Case("arm-key-int32-min.msgpack", "accepted", "Outcome", int.MinValue, "arm-key-int32-min.msgpack",
+                Surface(outcomes: WithOutcome(ArmOf(int.MinValue)))),
+            new Case("arm-key-int32-max.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
+                Surface(outcomes: WithOutcome(ArmOf(int.MaxValue)))),
+            new Case("arm-key-wide-coding.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue))))),
+            new Case("arm-key-above-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(0x80000000u))))),
+            new Case("arm-key-below-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(-2147483649L))))),
+            new Case("arm-key-float32.msgpack", "refused", "Outcome", null, "key-not-integer",
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(1.0f), Num(7))))),
+            new Case("arm-key-float64-negzero.msgpack", "refused", "Outcome", null, "key-not-integer",
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(-0.0), Str("wait"))))),
+            new Case("nil-arm-slots.msgpack", "refused", "Outcome", 1, "nil-slots",
+                Surface(outcomes: WithOutcome((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(1); w.WriteNil(); }))),
+            new Case("depth-at-limit.msgpack", "accepted", "UnionSurface", null, "depth-at-limit.msgpack",
+                Surface(root: WrapChain(AtLimitWraps, AtLimitLeaf))),
+            new Case("depth-past-limit.msgpack", "refused", "UnionSurface", null, "depth",
+                Surface(root: WrapChain(PastLimitWraps, PastLimitLeaf))),
+            new Case("depth-skipped-at-limit.msgpack", "read-only", "UnionSurface", null, "depth",
+                Surface(trailing: Nested(Limit - 1))),
+            new Case("depth-skipped-past-limit.msgpack", "refused", "UnionSurface", null, "depth",
+                Surface(trailing: Nested(Limit))),
+        };
+
+        private static byte[] BoundsOutcomesFile() => Raw((ref MessagePackWriter w) =>
+        {
+            var cases = BoundsCases();
+            w.WriteArrayHeader(cases.Count + 1);
+            w.WriteArrayHeader(2); w.Write("limit"); w.Write(Limit);
+            foreach (var c in cases)
+            {
+                w.WriteArrayHeader(5);
+                w.Write(c.File); w.Write(c.Outcome); w.Write(c.Union);
+                if (c.Key is { } key) w.Write(key); else w.WriteNil();
+                w.Write(c.Detail);
+            }
+        });
+
+        // The container depth of a payload, counted with the reader's typed reads and an explicit stack: not the rule's code.
+        private static int DepthOf(byte[] payload)
+        {
+            var reader = new MessagePackReader(payload);
+            var open = new Stack<long>();
+            var deepest = 0;
+            while (true)
+            {
+                switch (reader.NextMessagePackType)
+                {
+                    case MessagePackType.Array:
+                    case MessagePackType.Map:
+                        var isArray = reader.NextMessagePackType == MessagePackType.Array;
+                        long children = isArray ? reader.ReadArrayHeader() : 2L * reader.ReadMapHeader();
+                        deepest = Math.Max(deepest, open.Count + 1);
+                        if (children > 0) { open.Push(children); continue; }
+                        break;
+                    case MessagePackType.Nil: reader.ReadNil(); break;
+                    case MessagePackType.Boolean: reader.ReadBoolean(); break;
+                    case MessagePackType.Integer: if (reader.NextCode == MessagePackCode.UInt64) reader.ReadUInt64(); else reader.ReadInt64(); break;
+                    case MessagePackType.Float: reader.ReadDouble(); break;
+                    case MessagePackType.String: reader.ReadString(); break;
+                    case MessagePackType.Binary: reader.ReadBytes(); break;
+                    case MessagePackType.Extension: reader.ReadExtensionFormat(); break;
+                    default: throw new InvalidOperationException(reader.NextMessagePackType.ToString());
+                }
+
+                while (open.Count > 0)
+                {
+                    var left = open.Pop() - 1;
+                    if (left > 0) { open.Push(left); break; }
+                }
+
+                if (open.Count == 0) return deepest;
+            }
+        }
+
+        private static Exception Refusal(Action action)
+        {
+            try { action(); } catch (Exception exception) { return exception; }
+            throw new AssertionException("the payload was accepted");
+        }
+
+        [Test]
+        public void BoundsOutcomesFromCommittedFiles()
+        {
+            foreach (var c in BoundsCases()) Check(c.File, c.Payload);
+            Check("bounds-outcomes.msgpack", BoundsOutcomesFile());
+
+            // From here only the committed files speak.
+            var golden = Describe(Constructed());
+            var reader = new MessagePackReader(Committed("bounds-outcomes.msgpack"));
+            var count = reader.ReadArrayHeader();
+            Assert.That(count, Is.EqualTo(BoundsCases().Count + 1));
+            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
+            Assert.That(reader.ReadString(), Is.EqualTo("limit"));
+            Assert.That(reader.ReadInt32(), Is.EqualTo(CultMessagePackSecurity.MaximumPayloadDepth), "the limit entry states the reference's limit");
+            for (var i = 1; i < count; i++)
+            {
+                Assert.That(reader.ReadArrayHeader(), Is.EqualTo(5));
+                var file = reader.ReadString()!;
+                var outcome = reader.ReadString()!;
+                var union = reader.ReadString()!;
+                int? key = reader.TryReadNil() ? null : reader.ReadInt32();
+                var detail = reader.ReadString()!;
+                var payload = Committed(file);
+
+                switch (outcome)
+                {
+                    case "accepted":
+                        Assert.That(Convert.ToHexString(SerializeValue(Decode(payload))), Is.EqualTo(Convert.ToHexString(Committed(detail))), $"{file} re-encodes to {detail}");
+                        break;
+                    case "read-only":
+                        Assert.That(Describe(Decode(payload)), Is.EqualTo(golden), $"{file}: the extra slot is read past");
+                        break;
+                    case "refused":
+                        var message = Chain(Refusal(() => Decode(payload)));
+                        Assert.That(message, Does.Not.Contain(Canary), $"{file}: a refusal never echoes the payload");
+                        Assert.That(message, Does.Contain(UnionName(union)), file);
+                        switch (detail)
+                        {
+                            case "key-out-of-range": Assert.That(message, Does.Contain("outside Int32").And.Not.Contain("has no arm for key"), file); break;
+                            case "key-not-integer": Assert.That(message, Does.Contain("non-integer"), file); break;
+                            case "nil-slots": Assert.That(message, Does.Contain("nil slots").And.Contain($"arm {key} "), file); break;
+                            case "depth": Assert.That(message, Does.Contain($"nests {Limit + 1} MessagePack containers deep").And.Contain($"the limit is {Limit}").And.Contain("refused on read"), file); break;
+                            default: Assert.Fail($"{file}: unknown detail {detail}"); break;
+                        }
+
+                        break;
+                    default:
+                        Assert.Fail($"{file}: unknown outcome {outcome}");
+                        break;
+                }
+            }
+        }
+
+        [Test]
+        public void ArmKeyDomainVectors()
+        {
+            var min = Committed("arm-key-int32-min.msgpack");
+            var max = Committed("arm-key-int32-max.msgpack");
+            var wide = Committed("arm-key-wide-coding.msgpack");
+            Assert.That(Convert.ToHexString(min), Does.Contain("D280000000"), "Floor is written as an int32 key");
+            Assert.That(Convert.ToHexString(max), Does.Contain("CE7FFFFFFF"), "Ceiling is written as a uint32 key");
+            Assert.That(Convert.ToHexString(wide), Does.Contain("CF000000007FFFFFFF"), "the wide coding is a uint64 key");
+            Assert.That(Decode(min).Outcomes, Has.Count.EqualTo(4));
+            Assert.That(Decode(min).Outcomes[3], Is.TypeOf<Floor>());
+            Assert.That(Decode(max).Outcomes[3], Is.TypeOf<Ceiling>());
+            Assert.That(Decode(wide).Outcomes[3], Is.TypeOf<Ceiling>(), "an unsigned 64-bit coding of an in-range key is the same key");
+            Assert.That(Convert.ToHexString(SerializeValue(Decode(wide))), Is.EqualTo(Convert.ToHexString(max)), "and re-encodes as the canonical coding");
+            Assert.That(Convert.ToHexString(SerializeValue(Decode(min))), Is.EqualTo(Convert.ToHexString(min)));
+
+            Assert.That(Chain(Refusal(() => Decode(Committed("arm-key-above-int32.msgpack")))), Does.Contain("outside Int32").And.Contain(UnionName("Outcome")));
+            Assert.That(Chain(Refusal(() => Decode(Committed("arm-key-below-int32.msgpack")))), Does.Contain("outside Int32").And.Contain(UnionName("Outcome")));
+            Assert.That(Chain(Refusal(() => Decode(Committed("arm-key-float32.msgpack")))), Does.Contain("non-integer").And.Contain(UnionName("Outcome")));
+            Assert.That(Chain(Refusal(() => Decode(Committed("arm-key-float64-negzero.msgpack")))), Does.Contain("non-integer").And.Contain(UnionName("Outcome")));
+        }
+
+        [Test]
+        public void NilArmSlotsRefused()
+        {
+            var message = Chain(Refusal(() => Decode(Committed("nil-arm-slots.msgpack"))));
+            Assert.That(message, Does.Contain(UnionName("Outcome")).And.Contain("arm 1 has nil slots"));
+        }
+
+        [Test]
+        public void DepthAtLimitAcceptedBothWays()
+        {
+            var payload = Committed("depth-at-limit.msgpack");
+            Assert.That(DepthOf(payload), Is.EqualTo(Limit), "the vector nests exactly the limit, counted independently");
+            Assert.That(Convert.ToHexString(SerializeValue(Decode(payload))), Is.EqualTo(Convert.ToHexString(payload)), "read, then written again");
+            var built = Constructed(WrapChainValue(AtLimitWraps, new Box { Id = "leaf" }));
+            Assert.That(Convert.ToHexString(SerializeValue(built)), Is.EqualTo(Convert.ToHexString(payload)), "the constructed value writes the vector");
+        }
+
+        [Test]
+        public void DepthPastLimitRefusedBothWays()
+        {
+            var payload = Committed("depth-past-limit.msgpack");
+            Assert.That(DepthOf(payload), Is.EqualTo(Limit + 1), "one container past the limit, counted independently");
+            var read = Chain(Refusal(() => Decode(payload)));
+            Assert.That(read, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on read").And.Not.Contain(Canary));
+
+            byte[]? written = null;
+            var write = Chain(Refusal(() => written = SerializeValue(Constructed(WrapChainValue(PastLimitWraps, new Text { Id = "leaf", Content = Canary })))));
+            Assert.That(written, Is.Null, "nothing is returned");
+            Assert.That(write, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on write").And.Not.Contain(Canary));
+
+            // A single-file store holding the payload fails to load through the same entry point.
+            var work = Path.Combine(Path.GetTempPath(), $"cultlib-unionparity-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(work);
+            try
+            {
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(Committed("union-surface.cc"));
+                snapshot.Records[0].Payload = payload;
+                var scratch = Path.Combine(work, "deep.cc");
+                File.WriteAllBytes(scratch, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+                var load = Chain(Refusal(() => CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = Registry }).Dispose()));
+                Assert.That(load, Does.Contain("surface").And.Contain($"the limit is {Limit}").And.Not.Contain(Canary));
+            }
+            finally
+            {
+                Directory.Delete(work, recursive: true);
+            }
+        }
+
+        [Test]
+        public void SkippedContainersCount()
+        {
+            var past = Committed("depth-skipped-past-limit.msgpack");
+            var atLimit = Committed("depth-skipped-at-limit.msgpack");
+            Assert.That(DepthOf(Committed("union-surface.msgpack")), Is.LessThan(20), "what the formatters read is shallow");
+            Assert.That(DepthOf(atLimit), Is.EqualTo(Limit));
+            Assert.That(DepthOf(past), Is.EqualTo(Limit + 1));
+
+            Assert.That(Describe(Decode(atLimit)), Is.EqualTo(Describe(Constructed())), "skipped content at the limit is read past");
+            var message = Chain(Refusal(() => Decode(past)));
+            Assert.That(message, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Not.Contain(Canary));
+
+            // MessagePack alone counts only what its formatters read: it accepts the payload the walk refuses.
+            Assert.That(() => MessagePackSerializer.Deserialize(typeof(UnionSurface), past, CultDocumentMessagePackSerialization.OptionsFor(typeof(UnionSurface).Assembly)),
+                Throws.Nothing, "MessagePack's own counter never sees skipped containers");
+        }
+
+        [Test]
+        public void WalkIsIterative()
+        {
+            // 100000 nested arrays in an extra trailing slot, on a thread with a 256 KiB stack.
+            var deep = Surface(trailing: (ref MessagePackWriter w) =>
+            {
+                w.WriteRaw(Enumerable.Repeat((byte)0x91, 100_000).ToArray());
+                w.WriteArrayHeader(0);
+            });
+            Exception? thrown = null;
+            var thread = new Thread(() => { thrown = Refusal(() => Decode(deep)); }, 256 * 1024);
+            thread.Start();
+            thread.Join();
+            Assert.That(thrown, Is.Not.Null);
+            Assert.That(Chain(thrown!), Does.Contain($"the limit is {Limit}"));
+        }
+
+        // Runs whatever the switch reads when the test starts: it sets the switch itself, runs every test body that calls Check
+        // under each off value, and writes only a probe file. The fingerprint is each file's bytes and write time, so a rewrite
+        // with identical bytes shows.
         [Test, NonParallelizable]
         public void VectorsNotRewrittenByDefault()
         {
             string Fingerprint() => string.Join("|", Directory.EnumerateFiles(VectorDirectory()).OrderBy(f => f, StringComparer.Ordinal)
-                .Select(f => Path.GetFileName(f) + "=" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))));
+                .Select(f => Path.GetFileName(f) + "=" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f))) + "@" + File.GetLastWriteTimeUtc(f).Ticks));
 
             const string probe = "gate-probe.msgpack";
             var path = VectorPath(probe);
@@ -452,6 +744,9 @@ namespace GameCult.Caching.Tests
                     Assert.Throws<AssertionException>(() => Check(probe, new byte[] { 0x90 }), $"bytes that differ from the vector fail the run, switch {off ?? "unset"}");
                     Assert.That(File.ReadAllBytes(path), Is.EqualTo(new byte[] { 0x91 }), $"switch {off ?? "unset"} rewrites nothing");
                     File.Delete(path);
+
+                    foreach (var body in new Action[] { UnionSurfaceVectorMatches, UnionRefusalVectorsRefused, BoundsOutcomesFromCommittedFiles })
+                        body();
                 }
 
                 Environment.SetEnvironmentVariable(WriteVariable, "1");

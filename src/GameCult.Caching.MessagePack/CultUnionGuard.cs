@@ -46,6 +46,8 @@ internal sealed class CultUnionGuard(IFormatterResolver inner) : IFormatterResol
                     throw new MessagePackSerializationException($"Union {typeof(T).FullName} has an arm key outside Int32 (slot 0 of the arm); declared keys: {declared}.");
                 if (!keys.Contains(key))
                     throw new MessagePackSerializationException($"Union {typeof(T).FullName} has no arm for key {key} (slot 0 of the arm); declared keys: {declared}.");
+                if (peek.TryReadNil())
+                    throw new MessagePackSerializationException($"Union {typeof(T).FullName} arm {key} has nil slots (slot 1 of the arm); declared keys: {declared}.");
             }
 
             return inner.Deserialize(ref reader, options);

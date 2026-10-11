@@ -83,7 +83,9 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null) registry.GetRequired(type);
-        return MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        var payload = MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        CultPayloadDepth.Check(payload, type, PayloadDirection.Write);
+        return payload;
     }
 
     public static object DeserializeUntyped(Type type, byte[] payload)
@@ -95,6 +97,7 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         registry.GetRequired(type);
+        CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
         return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }

@@ -217,6 +217,13 @@ Under `cultcache.store.v1` a record has exactly these four slots. A reader refus
 header allows, naming the version or the record's key and schema id. It never skips a
 slot it does not understand.
 
+A record's payload nests at most 256 MessagePack containers. Every array and map
+counts, whether a reader decodes it or skips past it, and the outermost array is
+depth 1: a payload of depth 256 is accepted and one of depth 257 is refused. Every
+runtime enforces the same bound on read and on write, and the refusal names the type,
+the depth and the limit, never payload bytes. The vectors are in
+`tests/vectors/union-parity` (`bounds-outcomes.msgpack`).
+
 ## Variant Records
 
 A variant record is a record whose document is a base record's document with some
