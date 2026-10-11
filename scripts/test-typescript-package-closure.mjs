@@ -84,10 +84,19 @@ const mesh = require("cultmesh-ts");
 assert.equal(typeof cache.defineDocumentType, "function");
 // The document owner is also an entry of its own, which the browser client imports without the Node-only cache.
 assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
-assert.equal("resolveDocumentFormatter" in cache, false);
-assert.equal("resolveDocumentFormatter" in documentEntry, false);
-assert.equal("codecFormatter" in cache.codecs, false);
-assert.equal("codecFormatter" in documentEntry, false);
+// No entry exports a decoder or formatter that reads a payload around its schema: by shape, every packed export whose name
+// says it decodes, reads a wire or formats is enumerated, and the only one allowed is the schema-checked owner.
+const inspection = require("@gamecult/cultcache-ts/inspection");
+const decoderShaped = (entry) => Object.keys(entry).filter((name) => /decode|formatter|readwire/i.test(name)).sort();
+for (const [entryName, entry] of Object.entries({ root: cache, codecs: cache.codecs, document: documentEntry, inspection })) {
+  const found = decoderShaped(entry);
+  const allowed = entryName === "root" || entryName === "document" ? ["decodeDocumentPayload"] : [];
+  assert.deepEqual(found, allowed, "decoder-shaped exports of the " + entryName + " entry");
+}
+assert.equal(typeof documentEntry.checkPayloadDepth, "undefined");
+assert.equal(documentEntry.MAX_PAYLOAD_DEPTH, 256);
+assert.equal(cache.MAX_PAYLOAD_DEPTH, 256);
+assert.equal(documentEntry.CultCachePayloadDepthError, cache.CultCachePayloadDepthError);
 assert.equal(typeof net.CultNetPeer, "function");
 assert.equal(typeof mesh.CultMesh, "function");
 assert.equal(typeof mesh.CultMeshProviderSession, "function");

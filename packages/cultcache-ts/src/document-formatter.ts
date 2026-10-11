@@ -1,5 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 
+import { MAX_PAYLOAD_DEPTH } from "./payload-depth";
 import type { SlotsCodec } from "./codec";
 import type { AnyCultCacheDocumentDefinition, CultCacheDocumentFormatter } from "./types";
 import { readWire, writeWire } from "./wire";
@@ -16,7 +17,8 @@ export function resolveDocumentFormatter(definition: AnyCultCacheDocumentDefinit
 }
 
 const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
-  encode: (value: unknown) => encode(value),
+  // The encoder's own depth refusal (100 by default) is set above the limit, so the payload walk decides.
+  encode: (value: unknown) => encode(value, { maxDepth: MAX_PAYLOAD_DEPTH * 2 }),
   decode: (payload: Uint8Array) => decode(payload),
 };
 

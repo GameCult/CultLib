@@ -12,7 +12,15 @@ import { codecs } from "../src";
 import { MAX_SLOT_KEY, type Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { readWire, WireFloat, writeWire } from "../src/wire";
-import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
+import {
+  CultCachePayloadDepthError,
+  MAX_PAYLOAD_DEPTH,
+  decodeDocumentPayload,
+  defineDocumentType,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  encodeDocumentPayload,
+} from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope } from "../src/types";
 
@@ -39,9 +47,10 @@ type Node =
   | { kind: "Box"; id: string; children: (Node | null)[] }
   | { kind: "Text"; id: string; content: string }
   | { kind: "Use"; id: string; composition: Composition; slots: (Node | null)[] }
-  | { kind: "Image"; id: string; uri: string; alt: string };
+  | { kind: "Image"; id: string; uri: string; alt: string }
+  | { kind: "Wrap"; inner: Node | null };
 interface Composition { name: string; body: Node | null }
-type Outcome = { kind: "Pending"; message: string } | { kind: "Completed"; sourceVersion: number } | { kind: "Denied" };
+type Outcome = { kind: "Pending"; message: string } | { kind: "Completed"; sourceVersion: number } | { kind: "Denied" } | { kind: "Floor" } | { kind: "Ceiling" };
 type Item = { kind: "Gem"; name: string } | { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
 type CraftedItem = { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
 interface Surface {
@@ -62,11 +71,14 @@ const node: Codec<Node | null> = union<Node>("Node", {
     0: ["id", string], 1: ["composition", composition], 2: ["slots", list(lazy(() => node))],
   })],
   5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })],
+  6: ["Wrap", slots<{ inner: Node | null }>({ 0: ["inner", lazy(() => node)] })],
 }, `${CS}Node`);
 const outcome = union<Outcome>("Outcome", {
   0: ["Pending", slots<{ message: string }>({ 0: ["message", string] })],
   1: ["Completed", slots<{ sourceVersion: number }>({ 0: ["sourceVersion", int32] })],
   2: ["Denied", unit],
+  [-2147483648]: ["Floor", unit],
+  2147483647: ["Ceiling", unit],
 }, `${CS}Outcome`);
 const toolArm = slots<{ name: string; uses: number }>({ 0: ["name", string], 1: ["uses", int32] });
 const partArm = slots<{ name: string; count: number }>({ 0: ["name", string], 1: ["count", int32] });
@@ -99,6 +111,7 @@ const nodeSchema: z.ZodType<Node | null> = z.lazy(() =>
         slots: z.array(nodeSchema),
       }),
       z.object({ kind: z.literal("Image"), id: z.string(), uri: z.string(), alt: z.string() }),
+      z.object({ kind: z.literal("Wrap"), inner: nodeSchema }),
     ]),
   ]));
 const surfaceSchema = z.object({
@@ -111,6 +124,8 @@ const surfaceSchema = z.object({
       z.object({ kind: z.literal("Pending"), message: z.string() }),
       z.object({ kind: z.literal("Completed"), sourceVersion: z.number() }),
       z.object({ kind: z.literal("Denied") }),
+      z.object({ kind: z.literal("Floor") }),
+      z.object({ kind: z.literal("Ceiling") }),
     ]),
   ])),
   part: z.union([z.null(), z.discriminatedUnion("kind", [
@@ -273,7 +288,7 @@ test("an arm that is not [key, slots] is refused naming the union, and a non-int
 });
 
 test("an arm key that is not a declared key is refused, with no fallback", () => {
-  assert.throws(() => node.decode([4, []]), /Union Node: unknown arm key 4 \(declared keys: 0, 1, 2, 5\)/u);
+  assert.throws(() => node.decode([4, []]), /Union Node: unknown arm key 4 \(declared keys: 0, 1, 2, 5, 6\)/u);
   assert.throws(() => outcome.decode([3, []]), /Union Outcome: unknown arm key 3/u);
 });
 
@@ -448,14 +463,14 @@ test("an arm key is an integer in any MessagePack integer encoding, and a float-
     assert.deepEqual(outcome.decode(readWire(fromHex(`92${key}9107`))), completed, key);
   }
   for (const key of ["ca3f800000", "cb3ff0000000000000"]) {
-    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is not an integer (declared keys: 0, 1, 2)." }, key);
+    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is not an integer (declared keys: -2147483648, 0, 1, 2, 2147483647)." }, key);
   }
   assert.throws(() => outcome.decode(readWire(fromHex("92cb800000000000000091a477616974"))), /^Error: Union Outcome: the arm key is not an integer/u, "-0.0 is a float, not key 0");
   for (const key of ["ce80000000", "cf8000000000000000", "d30000000080000000"]) {
-    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is outside Int32 (declared keys: 0, 1, 2)." }, key);
+    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is outside Int32 (declared keys: -2147483648, 0, 1, 2, 2147483647)." }, key);
   }
-  assert.throws(() => outcome.decode(readWire(fromHex("92d2800000009107"))), { message: "Union Outcome: unknown arm key -2147483648 (declared keys: 0, 1, 2)." });
-  assert.throws(() => outcome.decode(readWire(fromHex("92ff9107"))), { message: "Union Outcome: unknown arm key -1 (declared keys: 0, 1, 2)." });
+  assert.throws(() => outcome.decode(readWire(fromHex("92d2800000019107"))), { message: "Union Outcome: unknown arm key -2147483647 (declared keys: -2147483648, 0, 1, 2, 2147483647)." });
+  assert.throws(() => outcome.decode(readWire(fromHex("92ff9107"))), { message: "Union Outcome: unknown arm key -1 (declared keys: -2147483648, 0, 1, 2, 2147483647)." });
 });
 
 test("a union refuses a declared arm key outside Int32", () => {
@@ -786,4 +801,86 @@ test("a bytes slot reads a MessagePack str as its bytes and writes bin, and refu
   assert.equal(hex(writeWire(record.encode(read))), "91c403616263");
   assert.throws(() => record.decode(readWire(fromHex("91a2c328"))), { message: "b (slot 0): expected bytes, found a string that is not valid UTF-8" });
   assert.throws(() => record.decode([5]), { message: "b (slot 0): expected bytes, found number" });
+});
+
+// ---- the bounds vectors: arm keys at the ends of the Int32 domain, nil arm slots, payload nesting ----
+
+const wrapChain = (wraps: number, leaf: Node): Node => {
+  let node: Node = leaf;
+  for (let index = 0; index < wraps; index += 1) node = { kind: "Wrap", inner: node };
+  return node;
+};
+// A Wrap adds 2 containers, a Box with no children 3, a Text leaf 2, and the outermost array is 1 (the C# test's arithmetic).
+const AT_LIMIT_WRAPS = (MAX_PAYLOAD_DEPTH - 1 - 3) / 2;
+const PAST_LIMIT_WRAPS = (MAX_PAYLOAD_DEPTH + 1 - 1 - 2) / 2;
+const atLimitValue: Surface = { ...golden, root: wrapChain(AT_LIMIT_WRAPS, { kind: "Box", id: "leaf", children: [] }) };
+const pastLimitValue: Surface = { ...golden, root: wrapChain(PAST_LIMIT_WRAPS, { kind: "Text", id: "leaf", content: CANARY }) };
+
+async function boundsEntries() {
+  const raw = decode(await read("bounds-outcomes.msgpack")) as unknown[][];
+  const [limit, ...rest] = raw;
+  return { limit, entries: rest.map(([file, outcome, unionName, key, detail]) => ({ file: file as string, outcome: outcome as string, unionName: unionName as string, key: key as number | null, detail: detail as string })) };
+}
+
+test("every bounds vector is listed and holds: accepted files decode and re-encode, refused files are refused naming the union or the depth", async () => {
+  const { limit, entries } = await boundsEntries();
+  assert.deepEqual(limit, ["limit", MAX_PAYLOAD_DEPTH]);
+  assert.equal(entries.length, 12);
+  const document = surfaceDocument();
+  const counts = { accepted: 0, refused: 0, readOnly: 0 };
+
+  for (const { file, outcome: expected, unionName, key, detail } of entries) {
+    const payload = documentPayloadFromBytes(await read(file));
+    if (expected === "accepted") {
+      counts.accepted += 1;
+      const value = decodeDocumentPayload(document, payload);
+      assert.equal(hex(documentPayloadBytes(encodeDocumentPayload(document, value))), hex(await read(detail)), `${file}: re-encodes to ${detail}`);
+    } else if (expected === "read-only") {
+      counts.readOnly += 1;
+      assert.deepEqual(decodeDocumentPayload(document, payload), golden, `${file}: the extra slots are read past`);
+    } else {
+      counts.refused += 1;
+      assert.throws(
+        () => decodeDocumentPayload(document, payload),
+        (error: Error) => {
+          assert.ok(!error.message.includes(CANARY), `${file}: the refusal echoed the payload`);
+          if (detail === "depth") {
+            return error instanceof CultCachePayloadDepthError && error.depth === MAX_PAYLOAD_DEPTH + 1 && error.limit === MAX_PAYLOAD_DEPTH
+              && error.message.includes(`"${document.type}"`) && error.message.includes("257") && error.message.includes("256");
+          }
+          assert.ok(!(error instanceof CultCachePayloadDepthError), file);
+          const said = detail === "key-out-of-range" ? "outside Int32" : detail === "key-not-integer" ? "not an integer" : "expected [key, slots]";
+          return error.message.includes(`Union ${unionName}:`) && error.message.includes(said);
+        },
+        file,
+      );
+    }
+  }
+  assert.deepEqual(counts, { accepted: 3 + 1, refused: 4 + 1 + 2, readOnly: 1 });
+});
+
+test("the constructed values write the committed at-limit payload byte for byte, and the past-limit value is refused and stored nowhere", async () => {
+  const document = surfaceDocument();
+  assert.equal(hex(documentPayloadBytes(encodeDocumentPayload(document, atLimitValue))), hex(await read("depth-at-limit.msgpack")));
+  assert.deepEqual(decodeDocumentPayload(document, documentPayloadFromBytes(await read("depth-at-limit.msgpack"))), atLimitValue);
+
+  assert.throws(
+    () => encodeDocumentPayload(document, pastLimitValue),
+    (error: Error) => error instanceof CultCachePayloadDepthError && error.depth === 257 && !error.message.includes(CANARY),
+  );
+
+  const entries: CultCacheEnvelope[] = [];
+  const cache = CultCache.builder().withDocumentType(document).withGenericStore(memoryStore(entries)).build();
+  await assert.rejects(() => cache.put(document, "past", pastLimitValue), CultCachePayloadDepthError);
+  assert.deepEqual(entries, [], "nothing reached the store");
+  assert.equal(cache.get(document, "past"), undefined, "nothing is held in memory");
+  await cache.put(document, "at", atLimitValue);
+  assert.equal(entries.length, 1);
+  assert.equal(hex(documentPayloadBytes(entries[0]!.payload)), hex(await read("depth-at-limit.msgpack")));
+});
+
+test("a cache load refuses a store whose record is past the limit, naming the type and not the payload", async () => {
+  const document = surfaceDocument();
+  const refusing = CultCache.builder().withDocumentType(document).withGenericStore(memoryStore([envelopeOf(await read("depth-past-limit.msgpack"))])).build();
+  await assert.rejects(() => refusing.pullAllBackingStores(), (error: Error) => error instanceof CultCachePayloadDepthError && !error.message.includes(CANARY));
 });

@@ -1,5 +1,6 @@
 import { decode } from "@msgpack/msgpack";
 
+import { checkPayloadDepth } from "./payload-depth";
 import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
@@ -288,6 +289,7 @@ function decodeLegacyEnvelope(value: unknown): InspectedRecord {
 
 function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPreview" | "payloadDecodeError"> {
   try {
+    checkPayloadDepth(payload);
     return { payloadPreview: toJsonSafe(decode(payload)) };
   } catch (error) {
     return {

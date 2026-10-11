@@ -5,6 +5,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
+import { checkPayloadDepth } from "./payload-depth";
 import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -355,6 +356,7 @@ function resolveCatalogEntryForRecord(
 
 function inferSchemaVersionFromPayload(payload: Uint8Array): string | undefined {
   try {
+    checkPayloadDepth(payload);
     const decoded = decode(payload);
     if (Array.isArray(decoded) && typeof decoded[0] === "string") {
       return decoded[0];
