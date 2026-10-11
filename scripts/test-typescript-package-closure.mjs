@@ -124,10 +124,11 @@ for (const [entryName, entry] of Object.entries(entries)) {
       assert.notEqual(value, reader, entryName + " entry exports " + name + " as " + where);
     }
     if (typeof value !== "function" || value === cache.decodeDocumentPayload) continue;
-    let returned;
-    try { returned = value(probePayload); } catch { continue; }
-    assert.ok(!JSON.stringify(returned, (_key, member) => (member instanceof Map ? Object.fromEntries(member) : member))?.includes('"probe":7'),
-      entryName + " entry exports " + where + ", which reads a payload without its schema");
+    let shown;
+    try {
+      shown = JSON.stringify(value(probePayload), (_key, member) => (member instanceof Map ? Object.fromEntries(member) : member));
+    } catch { continue; }
+    assert.ok(!shown?.includes('"probe":7'), entryName + " entry exports " + where + ", which reads a payload without its schema");
   }
 }
 assert.equal(typeof documentEntry.checkPayloadDepth, "undefined");
