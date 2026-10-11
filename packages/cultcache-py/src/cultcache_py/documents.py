@@ -7,6 +7,8 @@ from itertools import chain
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
+from .leaves import Float32, SlotCodec
+from .leaves import any as _any_leaf
 
 T = TypeVar("T")
 
@@ -83,7 +85,7 @@ def _json_payload_decoder(payload: bytes) -> Any:
     return json.loads(payload.decode("utf-8"))
 
 
-def _messagepack_payload_encoder(value: Any) -> bytes:
+def _msgpack() -> Any:
     try:
         import msgpack  # type: ignore
     except ModuleNotFoundError as exc:
@@ -91,7 +93,35 @@ def _messagepack_payload_encoder(value: Any) -> bytes:
             "MessagePack payload encoding requires the optional 'msgpack' dependency. "
             "Install with: python -m pip install cultcache-py[msgpack]"
         ) from exc
-    return msgpack.packb(value, use_bin_type=True)
+    return msgpack
+
+
+def _pack_tree(tree: Any) -> bytes:
+    """The bytes of the tree the leaves produced. `packb` writes everything but a `Float32`, which it refuses with a
+    TypeError; only then does an iterative walk pack each array and map header and each value, a `Float32` through a
+    single-float packer."""
+    msgpack = _msgpack()
+    try:
+        return msgpack.packb(tree, use_bin_type=True)  # type: ignore[no-any-return]
+    except TypeError:
+        pass
+    plain = msgpack.Packer(use_bin_type=True)
+    single = msgpack.Packer(use_bin_type=True, use_single_float=True)
+    out: list[bytes] = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Float32):
+            out.append(single.pack(node.value))
+        elif isinstance(node, (list, tuple)):
+            out.append(plain.pack_array_header(len(node)))
+            stack.extend(reversed(node))
+        elif isinstance(node, dict):
+            out.append(plain.pack_map_header(len(node)))
+            stack.extend(reversed([part for pair in node.items() for part in pair]))
+        else:
+            out.append(plain.pack(node))
+    return b"".join(out)
 
 
 def _messagepack_payload_decoder(payload: bytes) -> Any:
@@ -106,24 +136,17 @@ def _messagepack_payload_decoder(payload: bytes) -> Any:
 
 
 @dataclass(frozen=True)
-class SlotCodec:
-    """Encodes and decodes the value of one slot: a nested record or a union."""
-
-    encode: Callable[[Any], Any]
-    decode: Callable[[Any], Any]
-
-
-@dataclass(frozen=True)
 class DatabaseEntryField:
     name: str
     key: int
     default: Any = MISSING
-    codec: SlotCodec | Callable[[], SlotCodec] | None = None
-    many: bool = False
+    codec: SlotCodec = _any_leaf
 
     def __post_init__(self) -> None:
         if not _is_key(self.key) or not 0 <= self.key <= MAX_SLOT_KEY:
             raise ValueError(f"DatabaseEntry field keys must be integers within 0..{MAX_SLOT_KEY}")
+        if not isinstance(self.codec, SlotCodec):
+            raise ValueError("DatabaseEntry field codec must be a SlotCodec: a leaf from cultcache_py.leaves, or leaves.lazy")
 
 
 def database_entry_field(
@@ -131,14 +154,11 @@ def database_entry_field(
     key: int,
     *,
     default: Any = MISSING,
-    codec: SlotCodec | Callable[[], SlotCodec] | None = None,
-    many: bool = False,
+    codec: SlotCodec = _any_leaf,
 ) -> DatabaseEntryField:
-    """A slot. `codec` makes the slot a nested record or union (a zero-argument callable
-    returning the codec lets a union refer to itself); `many` makes it a list of them."""
-    if many and codec is None:
-        raise ValueError("A many DatabaseEntry field requires a codec")
-    return DatabaseEntryField(name=name, key=key, default=default, codec=codec, many=many)
+    """A slot. `codec` is the slot's leaf (cultcache_py.leaves, a record or a union); with none the slot is untyped,
+    an `object` in C#. A `default` fills a slot the payload is too short to have, never a nil."""
+    return DatabaseEntryField(name=name, key=key, default=default, codec=codec)
 
 
 @dataclass(frozen=True)
@@ -166,7 +186,11 @@ class DocumentDefinition(Generic[T]):
     content_hash: str | None = None
     canonical_schema_json: str | None = None
     compatible_schema_ids: tuple[str, ...] = field(default_factory=tuple)
-    members: tuple[CultCacheSchemaCatalogMember, ...] = field(default_factory=tuple)
+    members: tuple[CultCacheSchemaCatalogMember, ...] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] = field(
+        default_factory=tuple
+    )
+    """The catalog rows, or a function returning them: a document made of leaves derives them when the catalog is first
+    built, so a `lazy` leaf can name a definition made later."""
     _catalog_entry: CultCacheSchemaCatalogEntry | None = field(default=None, init=False, repr=False, compare=False)
 
     def encode_payload(self, value: T) -> bytes:
@@ -190,6 +214,7 @@ class DocumentDefinition(Generic[T]):
     def catalog_entry(self) -> CultCacheSchemaCatalogEntry:
         if self._catalog_entry is not None:
             return self._catalog_entry
+        members = tuple(self.members() if callable(self.members) else self.members)
         schema_id = self.schema_id or self.type
         schema_name = self.schema_name or self.type
         schema_version = self.schema_version or f"{schema_name}.v1"
@@ -208,7 +233,7 @@ class DocumentDefinition(Generic[T]):
                         "indexAlias": member.index_alias,
                         "isName": member.is_name,
                     }
-                    for member in self.members
+                    for member in members
                 ],
             },
             ensure_ascii=False,
@@ -222,7 +247,7 @@ class DocumentDefinition(Generic[T]):
             content_hash=self.content_hash or schema_id,
             canonical_schema_json=canonical_schema_json,
             compatible_schema_ids=tuple(compatible_schema_ids),
-            members=tuple(self.members),
+            members=members,
         )
         object.__setattr__(self, "_catalog_entry", catalog_entry)
         return catalog_entry
@@ -245,7 +270,7 @@ def define_document_type(
     content_hash: str | None = None,
     canonical_schema_json: str | None = None,
     compatible_schema_ids: Iterable[str] | None = None,
-    members: Iterable[CultCacheSchemaCatalogMember] | None = None,
+    members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
     return DocumentDefinition(
         type=type,
@@ -263,7 +288,7 @@ def define_document_type(
         content_hash=content_hash,
         canonical_schema_json=canonical_schema_json,
         compatible_schema_ids=tuple(compatible_schema_ids or ()),
-        members=tuple(members or ()),
+        members=members if callable(members) else tuple(members or ()),
     )
 
 
@@ -293,19 +318,21 @@ def define_database_entry_type(
     normalized = _normalize_fields(type, fields)
     member_name_lookup = name if isinstance(name, str) else None
     index_lookup = indexes or {}
-    members = tuple(
-        CultCacheSchemaCatalogMember(
-            slot=field.key,
-            member_name=_pascal_case(field.name),
-            type_name="System.Object",
-            is_name=field.name == member_name_lookup,
-            index_alias=next(
-                (alias for alias, extractor in index_lookup.items() if extractor == field.name),
-                None,
-            ),
+
+    def members() -> tuple[CultCacheSchemaCatalogMember, ...]:
+        return tuple(
+            CultCacheSchemaCatalogMember(
+                slot=field.key,
+                member_name=_pascal_case(field.name),
+                type_name=field.codec.type_name or _any_leaf.type_name,
+                is_name=field.name == member_name_lookup,
+                index_alias=next(
+                    (alias for alias, extractor in index_lookup.items() if extractor == field.name),
+                    None,
+                ),
+            )
+            for field in normalized
         )
-        for field in normalized
-    )
 
     record = _record_codec(type, normalized, cls)
 
@@ -317,7 +344,7 @@ def define_database_entry_type(
         global_document=global_document,
         name=name,
         indexes=indexes,
-        payload_encoder=_messagepack_payload_encoder,
+        payload_encoder=_pack_tree,
         payload_decoder=_messagepack_payload_decoder,
         schema_id=schema_id,
         schema_name=schema_name,
@@ -334,17 +361,22 @@ def define_record_codec(
     fields: Iterable[DatabaseEntryField | tuple[str, int] | tuple[str, int, Any]],
     *,
     cls: type[Any] | None = None,
+    type_name: str | None = None,
 ) -> SlotCodec:
-    """A nested record: the same slot array as a document payload, usable as a field's codec or a union arm."""
-    return _record_codec(name, _normalize_fields(name, fields), cls)
+    """A nested record: the same slot array as a document payload, usable as a field's codec or a union arm.
+    `type_name` is the C# FullName of the class it mirrors, for the catalog; without it the catalog names the slot as an untyped one."""
+    return _record_codec(name, _normalize_fields(name, fields), cls, type_name)
 
 
 def define_union(
     name: str,
-    arms: Mapping[int, tuple[str, SlotCodec | Callable[[], SlotCodec] | None]],
+    arms: Mapping[int, tuple[str, SlotCodec | None]],
+    *,
+    type_name: str | None = None,
 ) -> SlotCodec:
-    """A union: nil, or `[armKey, [armSlots...]]`. Each arm is `(arm name, record codec)`; a unit arm has
-    no codec and is written `[armKey, []]`. A key the union does not declare is refused, never carried."""
+    """A union: `[armKey, [armSlots...]]`. Each arm is `(arm name, record codec)`; a unit arm has no codec and is
+    written `[armKey, []]`. A key the union does not declare is refused, never carried, and so is nil: wrap the union
+    in `leaves.nullable` for a slot that may be null. `type_name` is the C# FullName of the interface, for the catalog."""
     by_key = dict(arms)
     by_name = {arm_name: (key, codec) for key, (arm_name, codec) in by_key.items()}
     if not by_key:
@@ -353,10 +385,12 @@ def define_union(
         raise ValueError(f"Union {name!r} has duplicate arm names")
     if any(not _is_key(key) or not _INT32_MIN <= key <= _INT32_MAX for key in by_key):
         raise ValueError(f"Union {name!r} arm keys must be integers within Int32")
+    if any(codec is not None and not isinstance(codec, SlotCodec) for _, codec in by_key.values()):
+        raise ValueError(f"Union {name!r} arm codecs must be SlotCodecs or None")
 
     def encode(value: Any) -> Any:
         if value is None:
-            return None
+            raise ValueError(f"Union {name!r}: expected an arm, found nil")
         if not isinstance(value, UnionArm) or value.name not in by_name:
             raise ValueError(f"Union {name!r} was given a value that is not one of its arms")
         key, codec = by_name[value.name]
@@ -364,11 +398,14 @@ def define_union(
             if value.value is not None:
                 raise ValueError(f"Union {name!r} arm {key} is a unit arm and carries no value")
             return [key, []]
-        return [key, _resolve(codec).encode(value.value)]
+        try:
+            return [key, codec.encode(value.value)]
+        except ValueError as error:
+            raise ValueError(f"Union {name!r} arm {key}: {error}") from None
 
     def decode(raw: Any) -> Any:
         if raw is None:
-            return None
+            raise ValueError(f"Union {name!r}: expected an arm, found nil")
         if not isinstance(raw, list) or len(raw) != 2:
             raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
         key = raw[0]
@@ -384,9 +421,14 @@ def define_union(
         if not isinstance(raw[1], list):
             raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
         arm_name, codec = by_key[key]
-        return UnionArm(arm_name, None if codec is None else _resolve(codec).decode(raw[1]))
+        if codec is None:
+            return UnionArm(arm_name, None)
+        try:
+            return UnionArm(arm_name, codec.decode(raw[1]))
+        except ValueError as error:
+            raise ValueError(f"Union {name!r} arm {key}: {error}") from None
 
-    return SlotCodec(encode=encode, decode=decode)
+    return SlotCodec(encode=encode, decode=decode, type_name=type_name)
 
 
 def define_document_registry(*documents: DocumentDefinition[Any]) -> tuple[DocumentDefinition[Any], ...]:
@@ -409,10 +451,6 @@ def _is_key(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _resolve(codec: SlotCodec | Callable[[], SlotCodec]) -> SlotCodec:
-    return codec if isinstance(codec, SlotCodec) else codec()
-
-
 def _normalize_fields(
     type: str,
     fields: Iterable[DatabaseEntryField | tuple[str, int] | tuple[str, int, Any]],
@@ -426,31 +464,20 @@ def _normalize_fields(
     return sorted(normalized, key=lambda field: field.key)
 
 
-def _record_codec(type: str, normalized: list[DatabaseEntryField], cls: type[Any] | None) -> SlotCodec:
+def _record_codec(
+    type: str, normalized: list[DatabaseEntryField], cls: type[Any] | None, type_name: str | None = None
+) -> SlotCodec:
     max_key = normalized[-1].key
 
-    def encode_slot(field: DatabaseEntryField, value: Any) -> Any:
-        if field.codec is None or value is None:
-            return value
-        codec = _resolve(field.codec)
-        if field.many:
-            return [None if item is None else codec.encode(item) for item in value]
-        return codec.encode(value)
-
-    def decode_slot(field: DatabaseEntryField, value: Any) -> Any:
-        if field.codec is None or value is None:
-            return value
-        codec = _resolve(field.codec)
-        if field.many:
-            if not isinstance(value, list):
-                raise ValueError(f"DatabaseEntry document type {type!r} slot {field.key} expected a MessagePack array")
-            return [None if item is None else codec.decode(item) for item in value]
-        return codec.decode(value)
-
     def encode(value: Any) -> list[Any]:
+        if value is None:
+            raise ValueError(f"DatabaseEntry document type {type!r}: expected a record, found nil")
         slots = [None] * (max_key + 1)
         for field in normalized:
-            slots[field.key] = encode_slot(field, extract_value(value, field.name))
+            try:
+                slots[field.key] = field.codec.encode(extract_value(value, field.name))
+            except ValueError as error:
+                raise ValueError(f"{type} slot {field.key} ({field.name}): {error}") from None
         return slots
 
     def decode(raw: Any) -> Any:
@@ -458,15 +485,20 @@ def _record_codec(type: str, normalized: list[DatabaseEntryField], cls: type[Any
             raise ValueError(f"DatabaseEntry document type {type!r} expected a MessagePack array")
         values: dict[str, Any] = {}
         for field in normalized:
-            value = decode_slot(field, raw[field.key]) if field.key < len(raw) else None
-            if value is None and field.default is not MISSING:
-                value = field.default() if callable(field.default) else field.default
-            values[field.name] = value
+            if field.key < len(raw):
+                try:
+                    values[field.name] = field.codec.decode(raw[field.key])
+                except ValueError as error:
+                    raise ValueError(f"{type} slot {field.key} ({field.name}): {error}") from None
+            elif field.default is MISSING:
+                values[field.name] = None
+            else:
+                values[field.name] = field.default() if callable(field.default) else field.default
         if cls is None:
             return values
         return cls(**values)
 
-    return SlotCodec(encode=encode, decode=decode)
+    return SlotCodec(encode=encode, decode=decode, type_name=type_name)
 
 
 def _normalize_database_entry_field(
