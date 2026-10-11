@@ -12,7 +12,6 @@ import { codecs } from "../src";
 import type { Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { readWire, WireFloat, writeWire } from "../src/wire";
-import { referenceReads, referenceWrites } from "./reference-numeric-table";
 import { defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope } from "../src/types";
@@ -378,7 +377,7 @@ test("slot names become catalog member names in Pascal case", () => {
 test("definitions are refused at definition time", () => {
   assert.throws(() => union<{ kind: "A" }>("U", { 0: ["A", slots<{ kind: string }>({ 0: ["kind", string] })] }), /Union U arm "A" declares a slot named kind/u);
   assert.throws(() => union<{ kind: "A" | "B" }>("U", { 0: ["A", unit], 1: ["A" as "B", unit] }), /declares the arm "A" twice/u);
-  assert.throws(() => union<{ kind: "A" }>("U", { x: ["A", unit] } as never), /^Error: Union U declares the key "x", which is not a non-negative integer\.$/u);
+  assert.throws(() => union<{ kind: "A" }>("U", { x: ["A", unit] } as never), /^Error: Union U declares the key "x", which is not an integer\.$/u);
   assert.throws(() => union<{ kind: "A" }>("U", { "01": ["A", unit] } as never), /key "01"/u);
   assert.throws(() => union<{ kind: "A" }>("U", { "1.5": ["A", unit] } as never), /key "1\.5"/u);
   assert.throws(() => union<{ kind: "A" }>("U", {} as never), /^Error: Union U declares no arms\.$/u);
@@ -532,39 +531,55 @@ test("every leaf and wrapper carries the reference's type name, and a catalog is
   assert.equal(given.members!.length, 1);
 });
 
-// referenceReads and referenceWrites are the C# reference's own answers (see the table's header): a numeric leaf reads
-// and refuses exactly what the reference does, and writes exactly the bytes the reference reads back unchanged.
+// tests/vectors/numeric-leaves is written by the C# reference (NumericLeafVectorTests): what it reads and refuses for each
+// numeric leaf, and the bytes it writes.
+const numericVectors = join(vectors, "..", "numeric-leaves");
 const numericLeaves: Record<string, Codec<unknown>> = { int32, int64, float32, float64 };
-const bitsOf = (value: number) => (Number.isNaN(value) ? "NaN" : Buffer.from(new Float64Array([value]).buffer).reverse().toString("hex"));
+const doubleBitsHex = (value: number) => {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  return Buffer.from(view.buffer).toString("hex");
+};
+const int64BitsHex = (value: number | bigint) => BigInt.asUintN(64, BigInt(value)).toString(16).padStart(16, "0");
+const isNaNBits = (bitsHex: string) => {
+  const bits = BigInt(`0x${bitsHex}`);
+  return ((bits >> 52n) & 0x7ffn) === 0x7ffn && (bits & ((1n << 52n) - 1n)) !== 0n;
+};
 
-test("numeric leaves read and refuse exactly what the C# reference does", () => {
-  assert.equal(referenceReads.length, 120);
+test("numeric leaves read and refuse exactly what the C# reference does", async () => {
+  const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
+  assert.equal(rows.length, 148);
   let accepted = 0;
   let refused = 0;
-  for (const [leaf, value, outcome] of referenceReads) {
+  for (const [leaf, payload, wasAccepted, bits] of rows) {
+    const label = `${leaf} ${hex(payload)}`;
     const record = slots<{ v: unknown }>({ 0: ["v", numericLeaves[leaf]] });
-    let got: string;
-    try {
-      const read = record.decode(readWire(fromHex(`91${value}`))).v;
-      got = `ACCEPT ${leaf.startsWith("float") ? bitsOf(read as number) : String(read)}`;
+    if (wasAccepted) {
+      const read = record.decode(readWire(payload)).v as number | bigint;
+      const wanted = hex(bits);
+      if (leaf.startsWith("float")) {
+        if (isNaNBits(wanted)) assert.ok(Number.isNaN(read), label);
+        else assert.equal(doubleBitsHex(read as number), wanted, label);
+      } else {
+        assert.equal(int64BitsHex(read), wanted, label);
+      }
       accepted += 1;
-    } catch (error) {
-      assert.ok(!(error as Error).message.includes(value), "a refusal never echoes the value");
-      got = "REFUSE";
+    } else {
+      assert.throws(() => record.decode(readWire(payload)), (error: Error) => !error.message.includes(hex(payload).slice(2)), label);
       refused += 1;
     }
-    assert.equal(got, outcome, `${leaf} ${value}`);
   }
-  assert.deepEqual([accepted, refused], [referenceReads.filter((row) => row[2].startsWith("ACCEPT")).length, referenceReads.filter((row) => row[2] === "REFUSE").length]);
-  assert.ok(accepted > 40 && refused > 40);
+  assert.ok(accepted > 40 && refused > 40, `accepted ${accepted}, refused ${refused}`);
+  assert.equal(accepted + refused, rows.length);
 });
 
-test("numeric leaves write the bytes the C# reference reads back unchanged, and 64-bit values lose nothing", () => {
-  assert.equal(referenceWrites.length, 46);
-  for (const [leaf, text, expected] of referenceWrites) {
-    const value = leaf.startsWith("float") ? (text === "-0" ? -0 : Number(text)) : text.endsWith("n") || Math.abs(Number(text)) > Number.MAX_SAFE_INTEGER ? BigInt(text.replace("n", "")) : Number(text);
+test("numeric leaves write the bytes the C# reference writes, and 64-bit values lose nothing", async () => {
+  const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "writes.msgpack")))) as [string, string, Uint8Array][];
+  assert.equal(rows.length, 46);
+  for (const [leaf, text, expected] of rows) {
+    const value = leaf.startsWith("float") ? new DataView(Uint8Array.from(Buffer.from(text, "hex")).buffer).getFloat64(0) : leaf === "int32" ? Number(text) : BigInt(text);
     const record = slots<{ v: unknown }>({ 0: ["v", numericLeaves[leaf]] });
-    assert.equal(hex(writeWire(record.encode({ v: value }))), expected, `${leaf} ${text}`);
+    assert.equal(hex(writeWire(record.encode({ v: value }))), hex(expected), `${leaf} ${text}`);
   }
   const wide = slots<{ v: number | bigint }>({ 0: ["v", int64] });
   for (const value of [2n ** 53n + 1n, 2n ** 63n - 1n, -(2n ** 63n), -(2n ** 53n) - 1n]) {
@@ -642,3 +657,32 @@ function memoryStore(entries: CultCacheEnvelope[]): CacheBackingStore & { entrie
     async delete() {},
   };
 }
+
+test("arm keys span Int32 and are listed ascending; slot keys are non-negative Int32", () => {
+  const keys = union<{ kind: "High" | "Zero" | "Neg" | "Low" }>("U", {
+    2147483647: ["High", unit],
+    0: ["Zero", unit],
+    [-1]: ["Neg", unit],
+    [-2147483648]: ["Low", unit],
+  });
+  for (const [kind, key] of [["High", 2147483647], ["Zero", 0], ["Neg", -1], ["Low", -2147483648]] as const) {
+    const written = keys.encode({ kind });
+    assert.deepEqual(written, [key, []]);
+    assert.deepEqual(keys.decode(readWire(writeWire(written))), { kind });
+  }
+  assert.throws(() => keys.decode(readWire(fromHex("92059090"))), { message: "Union U: unknown arm key 5 (declared keys: -2147483648, -1, 0, 2147483647)." });
+  assert.throws(() => union<{ kind: "A" }>("U", { [-2147483649]: ["A", unit] }), { message: "Union U declares the key -2147483649, which is outside Int32." });
+  assert.throws(() => union<{ kind: "A" }>("U", { 99999999999999999999: ["A", unit] } as never), { message: "Union U declares the key 100000000000000000000, which is outside Int32." });
+  assert.doesNotThrow(() => slots<{ a: string }>({ 2147483647: ["a", string] }));
+  assert.throws(() => slots<{ a: string }>({ 2147483648: ["a", string] }), { message: "A slot record declares the key 2147483648, which is outside Int32." });
+  assert.throws(() => slots<{ a: string }>({ [-1]: ["a", string] }), { message: 'A slot record declares the key "-1", which is not a non-negative integer.' });
+});
+
+test("the mixed-record vector is the bytes the reference writes for a record of every leaf kind", async () => {
+  const mixed = slots<{ id: string; i: number; l: number | bigint; f: number; d: number }>({
+    0: ["id", string], 1: ["i", int32], 2: ["l", int64], 3: ["f", float32], 4: ["d", float64],
+  });
+  const committed = new Uint8Array(await readFile(join(vectors, "..", "numeric-leaves", "mixed-record.msgpack")));
+  assert.equal(hex(writeWire(mixed.encode({ id: "n1", i: 7, l: 8, f: 1.5, d: 2.5 }))), hex(committed));
+  assert.deepEqual(mixed.decode(readWire(committed)), { id: "n1", i: 7, l: 8, f: 1.5, d: 2.5 });
+});

@@ -87,6 +87,19 @@ export const int32 = integerCodec("System.Int32", "an int32", -(2n ** 31n), 2n *
 // C# long. A number when the value is a safe integer, a bigint beyond 2^53 (so 64-bit values never lose precision).
 export const int64 = integerCodec("System.Int64", "an int64", -(2n ** 63n), 2n ** 63n - 1n);
 
+// A 64-bit integer to the nearest float32 in one rounding, ties to even, as the reference's cast does. Number(value)
+// first would round to a double and then again, and the two roundings can disagree.
+function bigintToFloat32(value: bigint): number {
+  const magnitude = value < 0n ? -value : value;
+  const excess = magnitude.toString(2).length - 24;
+  if (excess <= 0) return Number(value);
+  const kept = magnitude >> BigInt(excess);
+  const rest = magnitude - (kept << BigInt(excess));
+  const half = 1n << BigInt(excess - 1);
+  const rounded = Number(rest > half || (rest === half && (kept & 1n) === 1n) ? kept + 1n : kept) * 2 ** excess;
+  return value < 0n ? -rounded : rounded;
+}
+
 function floatCodec(typeName: string, wide: boolean): Codec<number> {
   const what = wide ? "a float64" : "a float32";
   return {
@@ -98,7 +111,8 @@ function floatCodec(typeName: string, wide: boolean): Codec<number> {
     },
     decode(raw) {
       if (raw instanceof WireFloat) return wide ? raw.value : Math.fround(raw.value);
-      if (typeof raw === "number" || typeof raw === "bigint") return wide ? Number(raw) : Math.fround(Number(raw));
+      if (typeof raw === "number") return wide ? raw : Math.fround(raw);
+      if (typeof raw === "bigint") return wide ? Number(raw) : bigintToFloat32(raw);
       return refuse(what, kindOf(raw));
     },
   };
@@ -170,21 +184,25 @@ type SlotSpec<TValue, TName extends string = string> =
 
 type SlotsSpec<TValue> = Readonly<Record<number, { [K in keyof TValue & string]: SlotSpec<TValue[K], K> }[keyof TValue & string]>>;
 
+const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
 
-// The declared keys, ascending. An arm key is an Int32 in the reference, so a union refuses a wider key at definition.
-function slotKeys(spec: Readonly<Record<string, unknown>>, owner: string, max = Number.MAX_SAFE_INTEGER): number[] {
-  // Object.keys lists integer keys in ascending order, so the declared keys come back sorted.
-  return Object.keys(spec).map((text) => {
-    const key = Number(text);
-    if (!Number.isInteger(key) || key < 0 || String(key) !== text) {
-      throw new Error(`${owner} declares the key "${text}", which is not a non-negative integer.`);
-    }
-    if (key > max) {
-      throw new Error(`${owner} declares the key ${key}, which is outside Int32.`);
-    }
-    return key;
-  });
+// The declared keys, ascending. The reference's keys are Int32: a union arm may be any (a negative one too), a slot is
+// non-negative, and a key outside the range is refused at definition rather than allocated for.
+function slotKeys(spec: Readonly<Record<string, unknown>>, owner: string, low: number): number[] {
+  return Object.keys(spec)
+    .map((text) => {
+      if (!/^-?(0|[1-9][0-9]*)$/u.test(text) || (low >= 0 && text.startsWith("-"))) {
+        throw new Error(`${owner} declares the key "${text}", which is not ${low < 0 ? "an" : "a non-negative"} integer.`);
+      }
+      const key = BigInt(text);
+      if (key < BigInt(low) || key > BigInt(INT32_MAX)) {
+        throw new Error(`${owner} declares the key ${text}, which is outside Int32.`);
+      }
+      return Number(key);
+    })
+    // Object.keys lists negative keys after the others, in the order they were written: sort them numerically.
+    .sort((left, right) => left - right);
 }
 
 function pascalCase(name: string): string {
@@ -199,7 +217,7 @@ function pascalCase(name: string): string {
 // are skipped, and a slot missing from the payload takes its declared default or is refused. A nil in a slot that
 // declares a default also takes the default (cultcache-py's rule).
 export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?: string): SlotsCodec<TValue> {
-  const keys = slotKeys(spec, "A slot record");
+  const keys = slotKeys(spec, "A slot record", 0);
   if (keys.length === 0) {
     throw new Error("A slot record declares no slots.");
   }
@@ -271,7 +289,7 @@ export function union<TValue extends { kind: string }>(
   arms: Readonly<Record<number, ArmSpec<TValue["kind"]>>>,
   typeName?: string,
 ): Codec<TValue | null> {
-  const keys = slotKeys(arms, `Union ${name}`, INT32_MAX);
+  const keys = slotKeys(arms, `Union ${name}`, INT32_MIN);
   if (keys.length === 0) {
     throw new Error(`Union ${name} declares no arms.`);
   }
@@ -314,7 +332,7 @@ export function union<TValue extends { kind: string }>(
       if (typeof key !== "number" && typeof key !== "bigint") {
         throw new Error(`Union ${name}: the arm key is not an integer (declared keys: ${declared}).`);
       }
-      if (key < -(2 ** 31) || key > INT32_MAX) {
+      if (key < INT32_MIN || key > INT32_MAX) {
         throw new Error(`Union ${name}: the arm key is outside Int32 (declared keys: ${declared}).`);
       }
       const arm = byKey.get(Number(key));

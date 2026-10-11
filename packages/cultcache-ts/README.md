@@ -272,13 +272,13 @@ const sceneDocument = defineDocumentType({
 - The leaves are `string`, `boolean`, `bytes`, `int32`, `int64`, `float32` and `float64`, each writing the MessagePack the
   C# type writes and refusing what C# refuses (a float in an int slot, an `int` outside Int32). `int64` reads a number
   when the value is a safe integer and a bigint beyond 2^53, and refuses a number beyond 2^53 on write. `list`, `array`
-  and `nullable` wrap a leaf, a union or a record.
+  and `nullable` wrap a leaf, a union or a record. A `float32` slot rounds an integer once, as the reference's cast does.
 - Every codec carries the reference's type name, and a store's schema catalog is derived from those names, because the
   reference refuses a store whose slot names another type. The leaves know theirs; give a union or a record its C# name
   as the last argument of `union(name, arms, typeName)` or `slots(spec, typeName)`. A codec with a slot it cannot name
   refuses to derive members: pass `members` instead.
-- An arm key is an integer within Int32, in any MessagePack integer encoding. A float key (even `1.0`) is refused on
-  read, and a union refuses a key outside Int32 when it is defined.
+- An arm key is an integer within Int32 (negative too), in any MessagePack integer encoding. A float key (even `1.0`) is
+  refused on read, and a union refuses a key outside Int32 when it is defined. A slot key is within 0 to Int32 max.
 - `codec` supplies the document's formatter and, unless `members` is given, its catalog members. A definition may not
   carry both `codec` and `formatter`. `schema.parse` still runs on every decoded value.
 

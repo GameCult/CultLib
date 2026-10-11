@@ -1,12 +1,11 @@
-import { decode, encode } from "@msgpack/msgpack";
 import type {
   AnyCultCacheDocumentDefinition,
   CultCache,
   CultCacheDocumentDefinition,
-  CultCacheDocumentFormatter,
   CultCacheDocumentValue,
   CultCacheEnvelope,
 } from "@gamecult/cultcache-ts";
+import { resolveDocumentFormatter } from "@gamecult/cultcache-ts";
 
 import {
   type CultNetDocumentDeleteMessage,
@@ -136,7 +135,7 @@ export class CultNetDocumentRegistry {
     } = {},
   ): CultNetDocumentPutRawMessage {
     const parsed = binding.definition.schema.parse(value);
-    const formatter = formatterFor(binding.definition);
+    const formatter = resolveDocumentFormatter(binding.definition);
     return {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId,
@@ -435,18 +434,7 @@ function decodeDocumentValue<TDefinition extends CultCacheDocumentDefinition>(
   definition: TDefinition,
   payload: Uint8Array,
 ): CultCacheDocumentValue<TDefinition> {
-  const formatter = formatterFor(definition);
+  const formatter = resolveDocumentFormatter(definition);
   const decoded = formatter.decode(payload);
   return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
-}
-
-function formatterFor<TDefinition extends CultCacheDocumentDefinition>(
-  definition: TDefinition,
-): CultCacheDocumentFormatter<CultCacheDocumentValue<TDefinition>> {
-  return (definition.formatter as CultCacheDocumentFormatter<
-    CultCacheDocumentValue<TDefinition>
-  > | undefined) ?? {
-    encode: (value: CultCacheDocumentValue<TDefinition>) => encode(value),
-    decode: (bytes: Uint8Array) => decode(bytes) as CultCacheDocumentValue<TDefinition>,
-  };
 }
