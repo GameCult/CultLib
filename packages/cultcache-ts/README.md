@@ -243,6 +243,8 @@ union as `[armKey, [armSlots...]]`. A union value is `{ kind: armName, ...armFie
 import { codecs, defineDocumentType } from "@gamecult/cultcache-ts";
 const { slots, union, list, lazy, string } = codecs;
 
+const NS = "MyApp.Scene+"; // the C# names of the types, as the reference writes them into a store's schema catalog
+
 type Node =
   | { kind: "Box"; id: string; children: (Node | null)[] }
   | { kind: "Text"; id: string; content: string }
@@ -252,7 +254,7 @@ const node: codecs.Codec<Node | null> = union<Node>("Node", {
   0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
   1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
   5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })], // slot 2 retired
-});
+}, `${NS}Node`);
 
 const sceneDocument = defineDocumentType({
   type: "scene",
@@ -267,6 +269,16 @@ const sceneDocument = defineDocumentType({
 - A union refuses an undeclared arm key on read, naming the union, the key and the declared keys. Nothing falls back
   to a default arm. An arm with no slots is `codecs.unit` and is written `[key, []]`.
 - A refusal names the union, the field and the slot; it never echoes the value it refused.
+- The leaves are `string`, `boolean`, `bytes`, `int32`, `int64`, `float32` and `float64`, each writing the MessagePack the
+  C# type writes and refusing what C# refuses (a float in an int slot, an `int` outside Int32). `int64` reads a number
+  when the value is a safe integer and a bigint beyond 2^53, and refuses a number beyond 2^53 on write. `list`, `array`
+  and `nullable` wrap a leaf, a union or a record.
+- Every codec carries the reference's type name, and a store's schema catalog is derived from those names, because the
+  reference refuses a store whose slot names another type. The leaves know theirs; give a union or a record its C# name
+  as the last argument of `union(name, arms, typeName)` or `slots(spec, typeName)`. A codec with a slot it cannot name
+  refuses to derive members: pass `members` instead.
+- An arm key is an integer within Int32, in any MessagePack integer encoding. A float key (even `1.0`) is refused on
+  read, and a union refuses a key outside Int32 when it is defined.
 - `codec` supplies the document's formatter and, unless `members` is given, its catalog members. A definition may not
   carry both `codec` and `formatter`. `schema.parse` still runs on every decoded value.
 
