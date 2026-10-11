@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use cultcache_rs::CultCache;
+use cultcache_rs::CacheBackingStore;
 use cultcache_rs::CultCacheEnvelope;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
 use cultcache_rs::PayloadTooDeep;
@@ -568,18 +569,26 @@ mod generated_names {
 // cache because the nesting rule lives in its one decode.
 const CANARY: &str = "CANARY-union-golden-4c2a";
 
+fn envelope(key: &str, payload: &[u8]) -> CultCacheEnvelope {
+    CultCacheEnvelope {
+        key: key.into(),
+        r#type: UnionSurface::TYPE.into(),
+        payload: payload.to_vec(),
+        stored_at: "2026-01-01T00:00:00Z".into(),
+        schema_id: None,
+    }
+}
+
+// A payload past the bound cannot be admitted through the cache, so a store file written behind its
+// back stands in for one a peer or an older runtime left.
 fn through_cache(payload: &[u8]) -> Result<UnionSurface, String> {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("foreign.cc");
+    SingleFileMessagePackBackingStore::new(&path).push(&envelope("k", payload)).unwrap();
     let mut cache = CultCache::new();
     cache.register_entry_type::<UnionSurface>().unwrap();
-    cache
-        .put_raw_envelope(CultCacheEnvelope {
-            key: "k".into(),
-            r#type: UnionSurface::TYPE.into(),
-            payload: payload.to_vec(),
-            stored_at: "2026-01-01T00:00:00Z".into(),
-            schema_id: None,
-        })
-        .unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
     match cache.get::<UnionSurface>("k") {
         Ok(value) => Ok(value.expect("the envelope was stored")),
         Err(error) => Err(format!("{error:#}")),
@@ -681,6 +690,98 @@ fn write_refused_past_limit() {
     assert_eq!(cache.get::<UnionSurface>("past").unwrap(), None);
     assert_eq!(cache.snapshot_envelopes(), stored);
     assert_eq!(std::fs::read(&path).unwrap(), file_before);
+}
+
+// Every door an envelope enters the store by holds the one bound: the typed put above, and the raw
+// doors a peer's bytes arrive through. Three nestings: union arms and maps
+// written by the production encoder, and the arrays of the committed vector.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct MapNest {
+    inner: Option<std::boxed::Box<MapNest>>,
+}
+
+#[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+#[cultcache(type = "tests.map_doc", schema = "tests.map_doc.v1")]
+struct MapDoc {
+    #[cultcache(key = 0)]
+    root: Option<MapNest>,
+}
+
+// The document array is depth 1 and each MapNest is one map.
+fn map_doc(maps: usize) -> MapDoc {
+    let mut nest = MapNest { inner: None };
+    for _ in 1..maps {
+        nest = MapNest { inner: Some(std::boxed::Box::new(nest)) };
+    }
+    MapDoc { root: Some(nest) }
+}
+
+#[test]
+fn maps_count_one_level_each_on_every_write_door() {
+    let at_limit = map_doc(MAX_PAYLOAD_DEPTH - 1);
+    let past_limit = map_doc(MAX_PAYLOAD_DEPTH);
+    let at_bytes = rmp_serde::to_vec_named(&at_limit).unwrap();
+    let past_bytes = rmp_serde::to_vec_named(&past_limit).unwrap();
+    assert_eq!(check_payload_depth(&at_bytes), Ok(()));
+    assert_eq!(check_payload_depth(&past_bytes), Err(TOO_DEEP));
+
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<MapDoc>().unwrap();
+    let (prepared, parsed) = cache.prepare_entry_named("at", &at_limit).unwrap();
+    assert_eq!((prepared.payload.as_slice(), &parsed), (at_bytes.as_slice(), &at_limit));
+    cache.put_prepared_batch(vec![prepared]).unwrap();
+    assert_eq!(cache.get::<MapDoc>("at").unwrap(), Some(at_limit));
+    let error = cache.prepare_entry_named("past", &past_limit).unwrap_err();
+    assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP));
+}
+
+fn raw(type_name: &str, key: &str, payload: Vec<u8>) -> CultCacheEnvelope {
+    CultCacheEnvelope { r#type: type_name.into(), ..envelope(key, &payload) }
+}
+
+#[test]
+fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
+    let arms_at = rmp_serde::to_vec(&wrap_chain(126, boxed("leaf", vec![]))).unwrap();
+    let arms_past = rmp_serde::to_vec(&wrap_chain(127, text("leaf", CANARY))).unwrap();
+    let maps_at = rmp_serde::to_vec_named(&map_doc(MAX_PAYLOAD_DEPTH - 1)).unwrap();
+    let maps_past = rmp_serde::to_vec_named(&map_doc(MAX_PAYLOAD_DEPTH)).unwrap();
+    let arrays_at = vector("depth-at-limit.msgpack");
+    let arrays_past = vector("depth-past-limit.msgpack");
+    let cases = [
+        (UnionSurface::TYPE, "arms", arms_at, arms_past),
+        (MapDoc::TYPE, "maps", maps_at, maps_past),
+        (UnionSurface::TYPE, "arrays", arrays_at, arrays_past),
+        (UnionSurface::TYPE, "mixed", Vec::new(), mixed_past),
+    ];
+    for (type_name, name, at, past) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("doors.cc");
+        let mut cache = CultCache::new();
+        cache.register_entry_type::<UnionSurface>().unwrap();
+        cache.register_entry_type::<MapDoc>().unwrap();
+        cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+        if !at.is_empty() {
+            cache.put_raw_envelope(raw(type_name, "at-raw", at.clone())).unwrap();
+            cache.put_prepared_batch(vec![raw(type_name, "at-batch", at.clone())]).unwrap();
+        }
+        let stored = cache.snapshot_envelopes();
+        let file_before = std::fs::read(&path).unwrap();
+
+        let refusals = [
+            cache.put_raw_envelope(raw(type_name, "past-raw", past.clone())).unwrap_err(),
+            // The valid entry staged beside it must not land either.
+            cache
+                .put_prepared_batch(vec![raw(type_name, "ok-staged", at.clone()), raw(type_name, "past-batch", past.clone())])
+                .unwrap_err(),
+        ];
+        for error in refusals {
+            assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&TOO_DEEP), "{name}");
+            let message = format!("{error:#}");
+            assert!(message.contains(type_name) && !message.contains(CANARY), "{name}: {message}");
+        }
+        assert_eq!(cache.snapshot_envelopes(), stored, "{name}");
+        assert_eq!(std::fs::read(&path).unwrap(), file_before, "{name}");
+    }
 }
 
 // A debug build on a 2 MiB thread carries 405 containers of this document; the bound keeps every

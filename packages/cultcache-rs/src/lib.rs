@@ -597,9 +597,21 @@ fn element_header(bytes: &[u8], position: usize) -> Option<(usize, Option<usize>
 
 /// The one decode of a document payload: the nesting bound first, then the deserializer, whose own
 /// depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the bytes.
-fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
+/// Readers of stored envelope payloads outside this crate decode through it too.
+pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;
     rmp_serde::from_slice(payload).map_err(opaque_decode_error)
+}
+
+/// The nesting bound for an envelope admitted without a typed decode, from the same walk that
+/// [`decode_payload`] runs first. Names the entry's type and key, never the payload.
+fn require_payload_depth(entry: &CultCacheEnvelope) -> Result<()> {
+    check_payload_depth(&entry.payload).with_context(|| {
+        format!(
+            "refused CultCache envelope {:?} at key {:?}",
+            entry.r#type, entry.key
+        )
+    })
 }
 
 /// A decoder failure as an error that keeps only its kind. Every decode of stored bytes
@@ -2717,6 +2729,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
+            require_payload_depth(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
             };
@@ -2761,7 +2774,7 @@ impl CultCache {
     /// claiming compile-time knowledge of its payload schema. This is the
     /// CultMesh/schema-registry boundary: callers own payload validation before
     /// admission; CultCache still enforces registered type, identity, timestamp,
-    /// routing, and persistence.
+    /// the payload nesting bound ([`MAX_PAYLOAD_DEPTH`]), routing, and persistence.
     pub fn put_raw_envelope(&mut self, entry: CultCacheEnvelope) -> Result<()> {
         if !self.definitions.contains_key(&entry.r#type) {
             return Err(anyhow!(
@@ -2781,6 +2794,7 @@ impl CultCache {
                 entry.r#type
             ));
         }
+        require_payload_depth(&entry)?;
         if let Some(home) = self.home_index(&entry.r#type)? {
             self.stores[home].store.push(&entry)?;
         }
