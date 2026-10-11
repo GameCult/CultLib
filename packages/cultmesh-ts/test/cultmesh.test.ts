@@ -3018,7 +3018,12 @@ test("CultMesh TS reads remote RUDP snapshots through document handles", async (
 
     const alias = CultMesh.documentFromPeerSnapshot(
       peer,
-      "cultmesh.note.alias.v1",
+      defineDocumentType({
+        type: "cultmesh.note.alias",
+        schemaId: "cultmesh.note.alias.v1",
+        schema: noteDocument.schema,
+        name: "noteId",
+      }),
       "note:remote",
       {
         documentId: "note:remote.alias",

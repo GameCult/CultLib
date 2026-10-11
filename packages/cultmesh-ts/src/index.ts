@@ -127,7 +127,7 @@ export type CultMeshDocumentPublicationSource =
     };
 
 export interface CultMeshPublicationDocumentBinding {
-  readonly schema: string | AnyCultCacheDocumentDefinition;
+  readonly schema: AnyCultCacheDocumentDefinition;
   readonly recordKey: string;
   readonly documentId?: string;
   readonly sourceId?: string;
@@ -2591,54 +2591,29 @@ export function cultMeshDocumentFromCache<TDefinition extends AnyCultCacheDocume
   );
 }
 
-export function cultMeshDocumentFromStore(
-  store: CacheBackingStore,
-  schemaId: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
   store: CacheBackingStore,
   definition: TDefinition,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromStore(
-  store: CacheBackingStore,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
     sourceId?: string;
     pollMs?: number;
   } = {},
-): CultMeshDocumentHandle<unknown> {
-  const schema = typeof schemaOrDefinition === "string"
-    ? { schemaId: schemaOrDefinition }
-    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  const schema = cultMeshSchemaFromDefinition(definition);
   const resolvedSchemaId = schema.schemaId ?? schema.type;
   if (!resolvedSchemaId) {
     throw new Error("CultMesh store document requires a schema id or document type.");
   }
-  if (typeof schemaOrDefinition === "string") {
-    requireNonEmpty(schemaOrDefinition, "schemaId");
-  }
   const documentId = options.documentId ?? resolvedSchemaId;
-  const read = async () => {
+  const read = async (): Promise<CultCacheDocumentValue<TDefinition>> => {
     const records = await store.pullAll();
-    const record = resolveCultMeshStoreDocumentRecord(records, schema, schemaOrDefinition);
+    const record = resolveCultMeshStoreDocumentRecord(records, schema, definition);
     if (!record) {
       throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
-    return parseCultMeshDocumentValue(schemaOrDefinition, decodeCultMeshPayload(schemaOrDefinition, record.payload));
+    return decodeDocumentPayload(definition, record.payload);
   };
 
   return cultMeshDocument(
@@ -2655,77 +2630,28 @@ export function cultMeshDocumentFromStore(
   );
 }
 
-export function cultMeshDocumentFromSingleFile(
-  path: string,
-  schemaId: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
   path: string,
   definition: TDefinition,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromSingleFile(
-  path: string,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
     sourceId?: string;
     pollMs?: number;
   } = {},
-): CultMeshDocumentHandle<unknown> {
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
   requireNonEmpty(path, "path");
   const store = new SingleFileMessagePackBackingStore(path);
-  const resolvedOptions = {
+  return cultMeshDocumentFromStore(store, definition, {
     ...options,
     routeHint: options.routeHint ?? cultMeshRouteHint("shared-memory", path),
-  };
-  return typeof schemaOrDefinition === "string"
-    ? cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions)
-    : cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions);
+  });
 }
 
-export function cultMeshDocumentFromPeerSnapshot(
-  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaId: string,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
   peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
   definition: TDefinition,
   recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromPeerSnapshot(
-  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-  recordKey: string,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
@@ -2734,45 +2660,34 @@ export function cultMeshDocumentFromPeerSnapshot(
     pollMs?: number;
     messageIdPrefix?: string;
   } = {},
-): CultMeshDocumentHandle<unknown> {
-  const schema = typeof schemaOrDefinition === "string"
-    ? { schemaId: schemaOrDefinition }
-    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  const schema = cultMeshSchemaFromDefinition(definition);
   const resolvedSchemaId = schema.schemaId ?? schema.type;
   if (!resolvedSchemaId) {
     throw new Error("CultMesh peer snapshot document requires a schema id or document type.");
   }
-  if (typeof schemaOrDefinition === "string") {
-    requireNonEmpty(schemaOrDefinition, "schemaId");
-  }
   requireNonEmpty(recordKey, "recordKey");
   const documentId = options.documentId ?? recordKey;
-  const read = async () =>
-    parseCultMeshDocumentValue(
-      schemaOrDefinition,
-      decodeCultNetRawDocumentPayload(
-        schemaOrDefinition,
-        await requestCultNetRawSnapshotDocument(
-          peer,
-          resolvedSchemaId,
-          recordKey,
-          {
-            timeoutMs: options.timeoutMs,
-            messageIdPrefix: options.messageIdPrefix ?? documentId,
-            accepts: typeof schemaOrDefinition === "string"
-              ? undefined
-              : record => {
-                  try {
-                    schemaOrDefinition.schema.parse(decodeCultNetRawDocumentPayload(schemaOrDefinition, record));
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                },
-          },
-        ),
-      ),
+  const read = async (): Promise<CultCacheDocumentValue<TDefinition>> => {
+    const record = await requestCultNetRawSnapshotDocument(
+      peer,
+      resolvedSchemaId,
+      recordKey,
+      {
+        timeoutMs: options.timeoutMs,
+        messageIdPrefix: options.messageIdPrefix ?? documentId,
+        accepts: candidate => {
+          try {
+            decodeDocumentPayload(definition, candidate.payload);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      },
     );
+    return decodeDocumentPayload(definition, record.payload);
+  };
 
   return cultMeshDocument(
     documentId,
@@ -2788,35 +2703,9 @@ export function cultMeshDocumentFromPeerSnapshot(
   );
 }
 
-export function cultMeshDocumentFromPublication(
-  source: CultMeshDocumentPublicationSource,
-  schemaId: string,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
   source: CultMeshDocumentPublicationSource,
   definition: TDefinition,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromPublication(
-  source: CultMeshDocumentPublicationSource,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   recordKey: string,
   options: {
     documentId?: string;
@@ -2826,7 +2715,7 @@ export function cultMeshDocumentFromPublication(
     pollMs?: number;
     messageIdPrefix?: string;
   } = {},
-): CultMeshDocumentHandle<unknown> {
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
   if (!source) {
     throw new Error("CultMesh publication source is required.");
   }
@@ -2834,14 +2723,12 @@ export function cultMeshDocumentFromPublication(
 
   switch (source.kind) {
     case "live-publication": {
-      const schema = typeof schemaOrDefinition === "string"
-        ? { schemaId: schemaOrDefinition }
-        : cultMeshSchemaFromDefinition(schemaOrDefinition);
+      const schema = cultMeshSchemaFromDefinition(definition);
       const schemaId = schema.schemaId ?? schema.type;
       if (!schemaId) {
         throw new Error("CultMesh live publication document requires a schema id or document type.");
       }
-      const parse = (value: unknown) => parseCultMeshDocumentValue(schemaOrDefinition, value);
+      const parse = (value: unknown) => definition.schema.parse(value) as CultCacheDocumentValue<TDefinition>;
       return cultMeshDocument(
         options.documentId ?? recordKey,
         schema,
@@ -2861,51 +2748,28 @@ export function cultMeshDocumentFromPublication(
       );
     }
     case "single-file":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          })
-        : cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          });
+      return cultMeshDocumentFromSingleFile(source.path, definition, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint,
+        sourceId: options.sourceId ?? recordKey,
+        pollMs: options.pollMs,
+      });
     case "store":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          })
-        : cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          });
+      return cultMeshDocumentFromStore(source.store, definition, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint,
+        sourceId: options.sourceId ?? recordKey,
+        pollMs: options.pollMs,
+      });
     case "peer-snapshot":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
-            sourceId: options.sourceId ?? recordKey,
-            timeoutMs: options.timeoutMs,
-            pollMs: options.pollMs,
-            messageIdPrefix: options.messageIdPrefix,
-          })
-        : cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
-            sourceId: options.sourceId ?? recordKey,
-            timeoutMs: options.timeoutMs,
-            pollMs: options.pollMs,
-            messageIdPrefix: options.messageIdPrefix,
-          });
+      return cultMeshDocumentFromPeerSnapshot(source.peer, definition, recordKey, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
+        sourceId: options.sourceId ?? recordKey,
+        timeoutMs: options.timeoutMs,
+        pollMs: options.pollMs,
+        messageIdPrefix: options.messageIdPrefix,
+      });
     default:
       throw new Error(`Unsupported CultMesh publication source kind '${(source as { kind?: string }).kind}'.`);
   }
@@ -2967,11 +2831,6 @@ export async function cultMeshSyncDocumentsFromPublication(
     if (!binding) {
       throw new Error("CultMesh publication binding is required.");
     }
-    if (typeof binding.schema === "string") {
-      throw new Error(
-        `CultMesh synced publication binding '${binding.recordKey}' requires a document definition, not only a schema id.`,
-      );
-    }
     const resolvedSource = binding.source ??
       (typeof source === "function" ? source(binding) : source);
     await node.syncDocumentFromPublication(
@@ -3029,7 +2888,7 @@ export function cultMeshDocuments(
 }
 
 export function cultMeshPublicationDocument(
-  schema: string | AnyCultCacheDocumentDefinition,
+  schema: AnyCultCacheDocumentDefinition,
   recordKey: string,
   options: {
     documentId?: string;
@@ -3071,33 +2930,19 @@ export function cultMeshDocumentsFromPublication(
       }
       const resolvedSource = binding.source ??
         (typeof source === "function" ? source(binding) : source);
-      return typeof binding.schema === "string"
-        ? cultMeshDocumentFromPublication(
-            resolvedSource,
-            binding.schema,
-            binding.recordKey,
-            {
-              documentId: binding.documentId ?? binding.recordKey,
-              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
-              routeHint: options.routeHint,
-              timeoutMs: options.timeoutMs,
-              pollMs: options.pollMs,
-              messageIdPrefix: options.messageIdPrefix,
-            },
-          )
-        : cultMeshDocumentFromPublication(
-            resolvedSource,
-            binding.schema,
-            binding.recordKey,
-            {
-              documentId: binding.documentId ?? binding.recordKey,
-              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
-              routeHint: options.routeHint,
-              timeoutMs: options.timeoutMs,
-              pollMs: options.pollMs,
-              messageIdPrefix: options.messageIdPrefix,
-            },
-          );
+      return cultMeshDocumentFromPublication(
+        resolvedSource,
+        binding.schema,
+        binding.recordKey,
+        {
+          documentId: binding.documentId ?? binding.recordKey,
+          sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
+          routeHint: options.routeHint,
+          timeoutMs: options.timeoutMs,
+          pollMs: options.pollMs,
+          messageIdPrefix: options.messageIdPrefix,
+        },
+      );
     }),
   );
 }
@@ -4108,7 +3953,7 @@ export class CultMeshNode {
         messageIdPrefix: options.messageIdPrefix ?? key,
         accepts: record => {
           try {
-            definition.schema.parse(decodeCultNetRawDocumentPayload(definition, record));
+            decodeDocumentPayload(definition, record.payload);
             return true;
           } catch {
             return false;
@@ -5037,106 +4882,36 @@ export class CultMesh {
     return cultMeshDocumentFromCache(cache, definition, key, options);
   }
 
-  public static documentFromStore(
-    store: CacheBackingStore,
-    schemaId: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
     store: CacheBackingStore,
     definition: TDefinition,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromStore(
-    store: CacheBackingStore,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
       sourceId?: string;
       pollMs?: number;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromStore(store, schemaOrDefinition, options)
-      : cultMeshDocumentFromStore(store, schemaOrDefinition, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromStore(store, definition, options);
   }
 
-  public static documentFromSingleFile(
-    path: string,
-    schemaId: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
     path: string,
     definition: TDefinition,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromSingleFile(
-    path: string,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
       sourceId?: string;
       pollMs?: number;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options)
-      : cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromSingleFile(path, definition, options);
   }
 
-  public static documentFromPeerSnapshot(
-    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-    schemaId: string,
-    recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
     peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
     definition: TDefinition,
     recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromPeerSnapshot(
-    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-    recordKey: string,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -5145,42 +4920,14 @@ export class CultMesh {
       pollMs?: number;
       messageIdPrefix?: string;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options)
-      : cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromPeerSnapshot(peer, definition, recordKey, options);
   }
 
-  public static documentFromPublication(
-    source: CultMeshDocumentPublicationSource,
-    schemaId: string,
-    recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
     source: CultMeshDocumentPublicationSource,
     definition: TDefinition,
     recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromPublication(
-    source: CultMeshDocumentPublicationSource,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-    recordKey: string,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -5189,10 +4936,8 @@ export class CultMesh {
       pollMs?: number;
       messageIdPrefix?: string;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options)
-      : cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromPublication(source, definition, recordKey, options);
   }
 
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -5254,7 +4999,7 @@ export class CultMesh {
   }
 
   public static publicationDocument(
-    schema: string | AnyCultCacheDocumentDefinition,
+    schema: AnyCultCacheDocumentDefinition,
     recordKey: string,
     options: {
       documentId?: string;
@@ -6331,7 +6076,7 @@ export class CultMesh {
         const onMessage = (message: CultNetMessage): void => {
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
-            const decoded = decodeCultMeshPayload(receiptBinding.definition, new Uint8Array(message.document.payload));
+            const decoded = decodeDocumentPayload(receiptBinding.definition, new Uint8Array(message.document.payload));
             cleanup();
             resolve(receiptBinding.definition.schema.parse(decoded) as CultCacheDocumentValue<TReceiptDefinition>);
           } catch (error) { cleanup(); reject(error); }
@@ -6597,18 +6342,14 @@ function inferCultMeshSchemaName(schemaId: string | undefined): string | undefin
 function resolveCultMeshStoreDocumentRecord(
   records: readonly CultCacheEnvelope[],
   schema: CultMeshDocumentSchemaDescriptor,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+  definition: AnyCultCacheDocumentDefinition,
 ): CultCacheEnvelope | undefined {
   const schemaId = schema.schemaId ?? schema.type;
   return (
     records.find(candidate => schemaId !== undefined && candidate.schemaId === schemaId) ??
     records.find(candidate =>
-      cultMeshEnvelopeMatchesSchema(candidate, schema) &&
-      (typeof schemaOrDefinition === "string" ||
-        cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition))) ??
-    (typeof schemaOrDefinition === "string"
-      ? undefined
-      : records.find(candidate => cultMeshEnvelopeParsesAsDefinition(candidate, schemaOrDefinition)))
+      cultMeshEnvelopeMatchesSchema(candidate, schema) && cultMeshEnvelopeParsesAsDefinition(candidate, definition)) ??
+    records.find(candidate => cultMeshEnvelopeParsesAsDefinition(candidate, definition))
   );
 }
 
@@ -6640,7 +6381,7 @@ function cultMeshEnvelopeParsesAsDefinition(
   definition: AnyCultCacheDocumentDefinition,
 ): boolean {
   try {
-    definition.schema.parse(decodeCultMeshPayload(definition, envelope.payload));
+    decodeDocumentPayload(definition, envelope.payload);
     return true;
   } catch {
     return false;
@@ -6675,11 +6416,15 @@ function normalizeRudpDocumentPut(
   if (document.payloadEncoding !== "messagepack") {
     throw new Error(`Unsupported raw payload encoding ${document.payloadEncoding}.`);
   }
+  const definition = documents.getBySchemaId(document.schemaId)?.definition;
+  if (!definition) {
+    throw new Error("Raw document put names a schema with no registered definition.");
+  }
   return {
     schemaId: document.schemaId,
     recordKey: document.recordKey,
     storedAt: document.storedAt ?? new Date().toISOString(),
-    payload: decodeDocumentPayload(documents.getBySchemaId(document.schemaId)?.definition, document.payload),
+    payload: decodeDocumentPayload(definition, document.payload),
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,
@@ -6777,43 +6522,8 @@ async function resolveCultNetPeer(
     : peerOrProvider;
 }
 
-// A document payload is read the way its definition's cache reads it (a codec or formatter document is not a plain
-// msgpack map); a payload with no definition is plain msgpack. Both are cultcache-ts's decision.
-function decodeCultMeshPayload(schemaOrDefinition: string | AnyCultCacheDocumentDefinition, payload: Uint8Array): unknown {
-  return decodeDocumentPayload(typeof schemaOrDefinition === "string" ? undefined : schemaOrDefinition, payload);
-}
-
-function decodeCultNetRawDocumentPayload(
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-  document: CultNetRawDocumentRecord,
-): unknown {
-  if (document.payloadEncoding !== "messagepack") {
-    throw new Error(`Unsupported CultNet raw document payload encoding ${document.payloadEncoding}.`);
-  }
-  return decodeCultMeshPayload(schemaOrDefinition, toUint8Array(document.payload));
-}
-
-function parseCultMeshDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(
-  schemaOrDefinition: string | TDefinition,
-  value: unknown,
-): unknown | CultCacheDocumentValue<TDefinition> {
-  return typeof schemaOrDefinition === "string"
-    ? value
-    : schemaOrDefinition.schema.parse(value);
-}
-
 function isCultNetErrorMessage(message: CultNetMessage): message is CultNetErrorMessage {
   return message.schemaVersion === "cultnet.error.v0";
-}
-
-function toUint8Array(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return Uint8Array.from(value);
-  }
-  throw new Error("CultNet raw document payload was not binary.");
 }
 
 async function bindRudpSocket(host: string, options: CultMeshRudpSocketOptions): Promise<Socket> {

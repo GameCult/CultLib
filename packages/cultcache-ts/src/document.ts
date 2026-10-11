@@ -7,6 +7,7 @@ import type {
   CultCacheSchemaCatalogMember,
   CultCacheDocumentDefinition,
   CultCacheDocumentRegistry,
+  CultCacheDocumentValue,
   CultCacheSchema,
 } from "./types";
 
@@ -90,10 +91,13 @@ const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
   decode: (payload: Uint8Array) => decode(payload),
 };
 
-// The one reader of a document payload outside the cache: through the definition's formatter, or as a plain msgpack
-// value when the caller holds no definition for the schema. Every package above the cache reads a payload through here.
-export function decodeDocumentPayload(definition: AnyCultCacheDocumentDefinition | undefined, payload: Uint8Array): unknown {
-  return (definition ? resolveDocumentFormatter(definition) : plainDocumentFormatter).decode(payload);
+// The one reader of a document payload: through the definition's formatter, codec or plain map, then its schema. A
+// reader holds the definition or it has no business reading the bytes, so there is no definition-less form.
+export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDefinition>(
+  definition: TDefinition,
+  payload: Uint8Array,
+): CultCacheDocumentValue<TDefinition> {
+  return definition.schema.parse(resolveDocumentFormatter(definition).decode(payload)) as CultCacheDocumentValue<TDefinition>;
 }
 
 // The schema members of a document: the ones it declares, else those its codec derives, else none.

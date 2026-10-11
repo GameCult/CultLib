@@ -5,7 +5,7 @@ import type {
   CultCacheDocumentValue,
   CultCacheEnvelope,
 } from "@gamecult/cultcache-ts";
-import { resolveDocumentFormatter } from "@gamecult/cultcache-ts";
+import { decodeDocumentPayload, resolveDocumentFormatter } from "@gamecult/cultcache-ts";
 
 import {
   type CultNetDocumentDeleteMessage,
@@ -174,7 +174,7 @@ export class CultNetDocumentRegistry {
         continue;
       }
 
-      const payload = decodeDocumentValue(binding.definition, envelope.payload);
+      const payload = decodeDocumentPayload(binding.definition, envelope.payload);
       documents.push({
         schemaId,
         recordKey: envelope.key,
@@ -343,7 +343,7 @@ export class CultNetDocumentRegistry {
     const payload = new Uint8Array(document.payload);
     for (const binding of this.#uniqueBindings()) {
       try {
-        decodeDocumentValue(binding.definition, payload);
+        decodeDocumentPayload(binding.definition, payload);
         return { binding, preserveIncomingSchemaId: false };
       } catch {
         // Keep looking; a foreign schema id is acceptable only when the payload validates locally.
@@ -428,13 +428,4 @@ function resolvePayloadSchemaVersion<TDefinition extends AnyCultCacheDocumentDef
   }
 
   return binding.payloadSchemaVersion;
-}
-
-function decodeDocumentValue<TDefinition extends CultCacheDocumentDefinition>(
-  definition: TDefinition,
-  payload: Uint8Array,
-): CultCacheDocumentValue<TDefinition> {
-  const formatter = resolveDocumentFormatter(definition);
-  const decoded = formatter.decode(payload);
-  return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
 }
