@@ -3,6 +3,7 @@ from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMe
 from .cache import CultCache, CultCacheBuilder
 from .documents import (
     MAX_PAYLOAD_DEPTH,
+    MAX_SLOT_KEY,
     CultCachePayloadDepthError,
     DatabaseEntryField,
     DocumentDefinition,
@@ -29,6 +30,7 @@ __all__ = [
     "DocumentDefinition",
     "JsonLinesBackingStore",
     "MAX_PAYLOAD_DEPTH",
+    "MAX_SLOT_KEY",
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
     "UnionArm",

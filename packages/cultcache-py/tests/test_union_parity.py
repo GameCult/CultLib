@@ -10,6 +10,7 @@ import msgpack
 
 from cultcache_py import (
     MAX_PAYLOAD_DEPTH,
+    MAX_SLOT_KEY,
     CultCache,
     CultCachePayloadDepthError,
     DatabaseEntryField,
@@ -278,10 +279,9 @@ class UnionCodecRuleTests(unittest.TestCase):
             arm.name = "Pending"  # type: ignore[misc]
         self.assertEqual(len({UnionArm("Denied"), UnionArm("Denied"), UnionArm("Pending", "wait")}), 2)
 
-    def test_a_nested_record_with_a_missing_required_slot_is_refused(self) -> None:
-        with self.assertRaises(ValueError) as caught:
-            node.decode([1, ["only-id"]])
-        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Text' is missing required slot 1")
+    def test_a_short_record_is_read_with_nil_for_the_slots_it_lacks_as_the_reference_reads_it(self) -> None:
+        self.assertEqual(node.decode([1, ["only-id"]]), UnionArm("Text", {"id": "only-id", "content": None}))
+        self.assertEqual(node.decode([0, ["sapphire"]]), UnionArm("Box", {"id": "sapphire", "children": None}))
 
     def test_definition_rules(self) -> None:
         cases = [
@@ -296,6 +296,10 @@ class UnionCodecRuleTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as caught:
                     define_union(union_name, arms)
                 self.assertEqual(str(caught.exception), expected)
+        for union_name, key in (("TrueKey", True), ("FalseKey", False)):
+            with self.assertRaises(ValueError) as caught:
+                define_union(union_name, {key: ("A", None)})
+            self.assertEqual(str(caught.exception), f"Union {union_name!r} arm keys must be integers within Int32")
         edge = define_union("Edge", {-(2**31): ("Low", None), -1: ("Negative", None), 2**31 - 1: ("High", None)})
         for arm_name, key in (("Low", -(2**31)), ("Negative", -1), ("High", 2**31 - 1)):
             self.assertEqual(edge.encode(UnionArm(arm_name)), [key, []])
@@ -362,12 +366,10 @@ class RecordCodecTests(unittest.TestCase):
             define_record_codec("Nothing", [])
         self.assertEqual(str(empty.exception), "DatabaseEntry document types require at least one field")
 
-    def test_a_plain_field_helper_makes_a_required_slot_with_no_codec(self) -> None:
+    def test_a_plain_field_helper_makes_a_slot_with_no_codec(self) -> None:
         plain = define_record_codec("Plain", [database_entry_field("id", 0), database_entry_field("label", 1)])
         self.assertEqual(plain.decode(plain.encode({"id": "a", "label": "b"})), {"id": "a", "label": "b"})
-        with self.assertRaises(ValueError) as caught:
-            plain.decode(["a"])
-        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Plain' is missing required slot 1")
+        self.assertEqual(plain.decode(["a"]), {"id": "a", "label": None})
         field = database_entry_field("id", 0)
         self.assertIsNone(field.codec)
         self.assertFalse(field.many)
@@ -385,11 +387,24 @@ class RecordCodecTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             database_entry_field("id", 0).key = 1  # type: ignore[misc]
 
-    def test_a_negative_slot_key_is_refused_but_zero_is_not(self) -> None:
+    def test_slot_keys_are_integers_within_zero_and_the_cap_however_the_field_is_made(self) -> None:
+        message = "DatabaseEntry field keys must be integers within 0..65535"
+        self.assertEqual(MAX_SLOT_KEY, 65535)
         database_entry_field("zero", 0)
-        with self.assertRaises(ValueError) as caught:
-            database_entry_field("negative", -1)
-        self.assertEqual(str(caught.exception), "DatabaseEntry field keys must be non-negative integers")
+        top = define_record_codec("Top", [("last", MAX_SLOT_KEY)])
+        self.assertEqual(len(top.encode({"last": "x"})), MAX_SLOT_KEY + 1)
+        self.assertEqual(top.decode(top.encode({"last": "x"})), {"last": "x"})
+        for make in (
+            lambda key: database_entry_field("bad", key),
+            lambda key: DatabaseEntryField(name="bad", key=key, default=dataclasses.MISSING),
+            lambda key: define_record_codec("Bad", [("bad", key)]),
+            lambda key: define_record_codec("Bad", [("bad", key, "d")]),
+        ):
+            for key in (-1, MAX_SLOT_KEY + 1, 2**31, True, 1.0, "1"):
+                with self.subTest(key=key):
+                    with self.assertRaises(ValueError) as caught:
+                        make(key)
+                    self.assertEqual(str(caught.exception), message)
 
     def test_slot_order_follows_keys_not_declaration_order(self) -> None:
         record = define_record_codec("Ordered", [("b", 2), ("a", 0)])

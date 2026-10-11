@@ -18,6 +18,9 @@ MAX_PAYLOAD_DEPTH = 256
 """The payload nesting limit, equal to the C# reference's `MaximumPayloadDepth`: every array and map counts, read
 or skipped, the outermost one is depth 1; depth 256 is accepted and 257 refused, on read and on write."""
 
+MAX_SLOT_KEY = 65535
+"""The largest slot key a record may define: the largest MessagePack array16 length."""
+
 try:
     from msgpack.exceptions import StackError as _MsgpackStackError
 
@@ -111,6 +114,10 @@ class DatabaseEntryField:
     codec: SlotCodec | Callable[[], SlotCodec] | None = None
     many: bool = False
 
+    def __post_init__(self) -> None:
+        if not _is_key(self.key) or not 0 <= self.key <= MAX_SLOT_KEY:
+            raise ValueError(f"DatabaseEntry field keys must be integers within 0..{MAX_SLOT_KEY}")
+
 
 def database_entry_field(
     name: str,
@@ -122,8 +129,6 @@ def database_entry_field(
 ) -> DatabaseEntryField:
     """A slot. `codec` makes the slot a nested record or union (a zero-argument callable
     returning the codec lets a union refer to itself); `many` makes it a list of them."""
-    if key < 0:
-        raise ValueError("DatabaseEntry field keys must be non-negative integers")
     if many and codec is None:
         raise ValueError("A many DatabaseEntry field requires a codec")
     return DatabaseEntryField(name=name, key=key, default=default, codec=codec, many=many)
@@ -452,14 +457,7 @@ def _record_codec(type: str, normalized: list[DatabaseEntryField], cls: type[Any
             raise ValueError(f"DatabaseEntry document type {type!r} expected a MessagePack array")
         values: dict[str, Any] = {}
         for field in normalized:
-            if field.key < len(raw):
-                value = decode_slot(field, raw[field.key])
-            elif field.default is MISSING:
-                raise ValueError(
-                    f"DatabaseEntry document type {type!r} is missing required slot {field.key}"
-                )
-            else:
-                value = None
+            value = decode_slot(field, raw[field.key]) if field.key < len(raw) else None
             if value is None and field.default is not MISSING:
                 value = field.default() if callable(field.default) else field.default
             values[field.name] = value
