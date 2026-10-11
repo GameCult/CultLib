@@ -4,6 +4,10 @@
 use std::path::PathBuf;
 
 use cultcache_rs::CultCache;
+use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::MAX_PAYLOAD_DEPTH;
+use cultcache_rs::PayloadTooDeep;
+use cultcache_rs::check_payload_depth;
 use cultcache_rs::CultSlots;
 use cultcache_rs::CultUnion;
 use cultcache_rs::DatabaseEntry;
@@ -19,6 +23,14 @@ enum Node {
     Use(UseArm),
     #[cultcache(key = 5)]
     Image(ImageArm),
+    #[cultcache(key = 6)]
+    Wrap(WrapArm),
+}
+
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct WrapArm {
+    #[cultcache(key = 0)]
+    inner: Option<std::boxed::Box<Node>>,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
@@ -74,6 +86,10 @@ enum Outcome {
     Completed(CompletedArm),
     #[cultcache(key = 2)]
     Denied,
+    #[cultcache(key = -2147483648)]
+    Floor,
+    #[cultcache(key = 2147483647)]
+    Ceiling,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
@@ -466,4 +482,321 @@ mod serde_enum_bytes {
         assert_eq!(bytes, AT_BASE);
         assert_eq!(rmp_serde::from_slice::<PlainEnums>(AT_BASE).unwrap(), value);
     }
+}
+
+// Names a derive's generated code must not capture: the generic parameters and the local items of the
+// expansion, used as user type names.
+mod generated_names {
+    use cultcache_rs::CultSlots;
+    use cultcache_rs::CultUnion;
+    use cultcache_rs::DatabaseEntry;
+
+    #[derive(Clone, Debug, PartialEq, CultSlots)]
+    struct D {
+        #[cultcache(key = 0)]
+        name: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, CultSlots)]
+    struct S {
+        #[cultcache(key = 0)]
+        count: i32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, CultSlots)]
+    struct ArmKey {
+        #[cultcache(key = 0)]
+        id: i32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, CultUnion)]
+    enum A {
+        #[cultcache(key = 1)]
+        D(D),
+        #[cultcache(key = 2)]
+        S(S),
+        #[cultcache(key = 3)]
+        ArmKey(ArmKey),
+        #[cultcache(key = 4)]
+        E,
+    }
+
+    #[derive(Clone, Debug, PartialEq, CultUnion)]
+    enum CultUnionVisitor {
+        #[cultcache(key = 1)]
+        A(ArmKey),
+    }
+
+    #[derive(Clone, Debug, PartialEq, DatabaseEntry)]
+    #[cultcache(type = "tests.names")]
+    struct E {
+        #[cultcache(key = 0)]
+        union: A,
+        #[cultcache(key = 1)]
+        other: CultUnionVisitor,
+    }
+
+    #[test]
+    fn types_named_like_generated_generics_and_locals_round_trip() {
+        let value = E {
+            union: A::D(D { name: "n".into() }),
+            other: CultUnionVisitor::A(ArmKey { id: 9 }),
+        };
+        let bytes = rmp_serde::to_vec(&value).unwrap();
+        assert_eq!(rmp_serde::from_slice::<E>(&bytes).unwrap(), value);
+        for union in [A::S(S { count: 2 }), A::ArmKey(ArmKey { id: 3 }), A::E] {
+            let bytes = rmp_serde::to_vec(&union).unwrap();
+            assert_eq!(rmp_serde::from_slice::<A>(&bytes).unwrap(), union);
+        }
+    }
+}
+
+// The reference's CultUnionGuard classes, from bounds-outcomes.msgpack; depth entries go through the
+// cache because the nesting rule lives in its one decode.
+const CANARY: &str = "CANARY-union-golden-4c2a";
+
+fn through_cache(payload: &[u8]) -> Result<UnionSurface, String> {
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache
+        .put_raw_envelope(CultCacheEnvelope {
+            key: "k".into(),
+            r#type: UnionSurface::TYPE.into(),
+            payload: payload.to_vec(),
+            stored_at: "2026-01-01T00:00:00Z".into(),
+            schema_id: None,
+        })
+        .unwrap();
+    cache.get::<UnionSurface>("k").map_err(|error| format!("{error:#}"))
+}
+
+#[test]
+fn bounds_vectors() {
+    let entries: Vec<serde_json::Value> = rmp_serde::from_slice(&vector("bounds-outcomes.msgpack")).unwrap();
+    assert_eq!(entries[0], serde_json::json!(["limit", 256]));
+    assert_eq!(MAX_PAYLOAD_DEPTH, 256);
+    let (mut accepted, mut refused, mut read_only) = (0, 0, 0);
+    for entry in &entries[1..] {
+        let fields: Vec<&str> = entry.as_array().unwrap().iter().filter_map(|field| field.as_str()).collect();
+        let (file, outcome, union, detail) = (fields[0], fields[1], fields[2], fields[3]);
+        let bytes = vector(file);
+        let result = if union == "UnionSurface" { through_cache(&bytes) } else { decode(&bytes) };
+        match outcome {
+            "accepted" => {
+                accepted += 1;
+                let value = result.unwrap_or_else(|message| panic!("{file}: {message}"));
+                assert_eq!(rmp_serde::to_vec(&value).unwrap(), vector(detail), "{file}");
+                match file {
+                    "arm-key-int32-min.msgpack" => assert_eq!(value.outcomes.last(), Some(&Outcome::Floor)),
+                    "arm-key-int32-max.msgpack" | "arm-key-wide-coding.msgpack" => {
+                        assert_eq!(value.outcomes.last(), Some(&Outcome::Ceiling))
+                    }
+                    _ => {}
+                }
+            }
+            "read-only" => {
+                read_only += 1;
+                assert_eq!(result.unwrap_or_else(|message| panic!("{file}: {message}")), constructed(), "{file}");
+            }
+            "refused" => {
+                refused += 1;
+                let message = result.expect_err(file);
+                assert!(message.contains(union), "{file}: {message}");
+                let class = match detail {
+                    "key-out-of-range" => "outside Int32",
+                    "key-not-integer" => "non-integer",
+                    "nil-slots" => "arm 1 has nil slots",
+                    "depth" => "the limit is 256",
+                    other => panic!("{file}: unknown class {other}"),
+                };
+                assert!(message.contains(class), "{file}: {message}");
+                assert!(!message.contains(CANARY), "{file} echoed a value: {message}");
+            }
+            other => panic!("{file}: unknown outcome {other}"),
+        }
+    }
+    assert_eq!((accepted, refused, read_only), (4, 7, 1));
+}
+
+fn wrap_chain(wraps: usize, leaf: Node) -> UnionSurface {
+    let mut node = leaf;
+    for _ in 0..wraps {
+        node = Node::Wrap(WrapArm { inner: Some(std::boxed::Box::new(node)) });
+    }
+    UnionSurface { root: Some(node), ..constructed() }
+}
+
+// Each Wrap adds a pair and a slots array; the surface array is depth 1, so a Box leaf (pair, slots,
+// children) ends at 2 * (wraps + 1) + 2 and a Text leaf at 2 * (wraps + 1) + 1.
+#[test]
+fn the_constructed_chains_write_the_vector_bytes() {
+    let at_limit = wrap_chain(126, boxed("leaf", vec![]));
+    assert_eq!(rmp_serde::to_vec(&at_limit).unwrap(), vector("depth-at-limit.msgpack"));
+    let past_limit = wrap_chain(127, text("leaf", CANARY));
+    assert_eq!(rmp_serde::to_vec(&past_limit).unwrap(), vector("depth-past-limit.msgpack"));
+}
+
+#[test]
+fn the_canary_is_in_the_committed_bytes() {
+    let bytes = vector("depth-past-limit.msgpack");
+    assert!(bytes.windows(CANARY.len()).any(|window| window == CANARY.as_bytes()));
+}
+
+#[test]
+fn write_refused_past_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("depth.cc");
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<UnionSurface>().unwrap();
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+
+    let at_limit = wrap_chain(126, boxed("leaf", vec![]));
+    assert_eq!(cache.put("at", &at_limit).unwrap(), at_limit);
+    let stored = cache.snapshot_envelopes();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].payload, vector("depth-at-limit.msgpack"));
+    let file_before = std::fs::read(&path).unwrap();
+
+    let error = cache.put("past", &wrap_chain(127, text("leaf", CANARY))).unwrap_err();
+    assert_eq!(error.downcast_ref::<PayloadTooDeep>(), Some(&PayloadTooDeep { depth: 257, limit: 256 }));
+    assert!(!format!("{error:#}").contains(CANARY), "{error:#}");
+    assert_eq!(cache.get::<UnionSurface>("past").unwrap(), None);
+    assert_eq!(cache.snapshot_envelopes(), stored);
+    assert_eq!(std::fs::read(&path).unwrap(), file_before);
+}
+
+// A debug build on a 2 MiB thread carries 405 containers of this document; the bound keeps every
+// accepted payload below that, and every refusal is an error, not an abort.
+#[test]
+fn stack_budget_debug_2mib() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            assert_eq!(
+                through_cache(&vector("depth-at-limit.msgpack")).unwrap(),
+                wrap_chain(126, boxed("leaf", vec![]))
+            );
+            let refused = through_cache(&vector("depth-past-limit.msgpack")).unwrap_err();
+            assert!(refused.contains("the limit is 256"), "{refused}");
+            let mut cache = CultCache::new();
+            cache.register_entry_type::<UnionSurface>().unwrap();
+            let value = wrap_chain(126, boxed("leaf", vec![]));
+            assert_eq!(cache.put("at", &value).unwrap(), value);
+            assert_eq!(cache.get::<UnionSurface>("at").unwrap(), Some(value));
+            let mut deep = vec![0x91u8; 100_000];
+            deep.push(0xc0);
+            let refused = through_cache(&deep).unwrap_err();
+            assert!(refused.contains("the limit is 256"), "{refused}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// The walk is iterative: 100000 nested arrays are refused on a 256 KiB stack.
+#[test]
+fn the_walk_does_not_recurse() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut deep = vec![0x91u8; 100_000];
+            deep.push(0xc0);
+            assert_eq!(check_payload_depth(&deep), Err(PayloadTooDeep { depth: 257, limit: 256 }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn nested(open: &[u8], levels: usize, leaf: &[u8]) -> Vec<u8> {
+    let mut bytes = open.repeat(levels);
+    bytes.extend_from_slice(leaf);
+    bytes
+}
+
+const TOO_DEEP: PayloadTooDeep = PayloadTooDeep { depth: 257, limit: 256 };
+
+// Every container header width counts one level, and the bound sits between 256 and 257 for each.
+#[test]
+fn every_container_header_counts_one_level() {
+    let openers: [(&str, &[u8]); 6] = [
+        ("fixarray", &[0x91]),
+        ("array16", &[0xdc, 0x00, 0x01]),
+        ("array32", &[0xdd, 0x00, 0x00, 0x00, 0x01]),
+        ("fixmap", &[0x81, 0x01]),
+        ("map16", &[0xde, 0x00, 0x01, 0x01]),
+        ("map32", &[0xdf, 0x00, 0x00, 0x00, 0x01, 0x01]),
+    ];
+    for (name, open) in openers {
+        assert_eq!(check_payload_depth(&nested(open, 256, &[0xc0])), Ok(()), "{name} at the limit");
+        assert_eq!(check_payload_depth(&nested(open, 257, &[0xc0])), Err(TOO_DEEP), "{name} past the limit");
+    }
+    // An empty container still counts the level it sits on.
+    assert_eq!(check_payload_depth(&nested(&[0x91], 255, &[0x90])), Ok(()));
+    assert_eq!(check_payload_depth(&nested(&[0x91], 256, &[0x90])), Err(TOO_DEEP));
+    assert_eq!(check_payload_depth(&nested(&[0x91], 255, &[0x80])), Ok(()));
+    assert_eq!(check_payload_depth(&nested(&[0x91], 256, &[0x80])), Err(TOO_DEEP));
+}
+
+// A scalar skipped by the wrong length would misplace the chain after it, so the chain's depth
+// reads the same only when every scalar width is skipped exactly.
+#[test]
+fn every_scalar_width_is_skipped_by_its_length() {
+    let scalars: Vec<Vec<u8>> = vec![
+        vec![0x00],
+        vec![0xff],
+        vec![0xc0],
+        vec![0xc2],
+        vec![0xc3],
+        vec![0xcc, 1],
+        vec![0xcd, 0, 1],
+        vec![0xce, 0, 0, 0, 1],
+        vec![0xcf, 0, 0, 0, 0, 0, 0, 0, 1],
+        vec![0xd0, 1],
+        vec![0xd1, 0, 1],
+        vec![0xd2, 0, 0, 0, 1],
+        vec![0xd3, 0, 0, 0, 0, 0, 0, 0, 1],
+        vec![0xca, 0, 0, 0, 0],
+        vec![0xcb, 0, 0, 0, 0, 0, 0, 0, 0],
+        vec![0xa2, b'a', b'b'],
+        vec![0xd9, 3, b'a', b'b', b'c'],
+        vec![0xda, 0, 3, b'a', b'b', b'c'],
+        vec![0xdb, 0, 0, 0, 3, b'a', b'b', b'c'],
+        vec![0xc4, 3, b'a', b'b', b'c'],
+        vec![0xc5, 0, 3, b'a', b'b', b'c'],
+        vec![0xc6, 0, 0, 0, 3, b'a', b'b', b'c'],
+        vec![0xd4, 1, 0],
+        vec![0xd5, 1, 0, 0],
+        vec![0xd6, 1, 0, 0, 0, 0],
+        vec![0xd7, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [vec![0xd8, 1], vec![0; 16]].concat(),
+        vec![0xc7, 3, 1, b'a', b'b', b'c'],
+        vec![0xc8, 0, 3, 1, b'a', b'b', b'c'],
+        vec![0xc9, 0, 0, 0, 3, 1, b'a', b'b', b'c'],
+    ];
+    let with_chain = |levels: usize| {
+        let mut bytes = vec![0xdd];
+        bytes.extend_from_slice(&u32::try_from(scalars.len() + 1).unwrap().to_be_bytes());
+        for scalar in &scalars {
+            bytes.extend_from_slice(scalar);
+        }
+        bytes.extend(nested(&[0x91], levels, &[0xc0]));
+        bytes
+    };
+    assert_eq!(check_payload_depth(&with_chain(255)), Ok(()));
+    assert_eq!(check_payload_depth(&with_chain(256)), Err(TOO_DEEP));
+}
+
+// An ending cut short is the decoder's to refuse, never a panic or a depth error.
+#[test]
+fn a_payload_cut_short_is_not_a_depth_error() {
+    for bytes in [&[0xdc, 0x00][..], &[0xdd, 0, 0], &[0xd9], &[0xc5, 0x00], &[0xde], &[0xdf, 0, 0, 0], &[0x91], &[]] {
+        assert_eq!(check_payload_depth(bytes), Ok(()), "{bytes:02x?}");
+    }
+    assert_eq!(check_payload_depth(&[0xdb, 0xff, 0xff, 0xff, 0xff, b'a']), Ok(()));
+}
+
+#[test]
+fn the_refusal_names_depth_and_limit_only() {
+    assert_eq!(TOO_DEEP.to_string(), "payload nests 257 MessagePack containers deep; the limit is 256");
 }
