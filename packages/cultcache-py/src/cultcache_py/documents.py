@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import MISSING, dataclass, field
+from itertools import chain
 from typing import Any, Callable, Generic, Iterable, Mapping, TypeVar
 
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
@@ -12,6 +13,42 @@ Encoder = Callable[[T], Any]
 Decoder = Callable[[Any], T]
 Validator = Callable[[T], None]
 Extractor = Callable[[T], str | int | float | bool | None]
+
+MAX_PAYLOAD_DEPTH = 256
+"""The payload nesting limit, equal to the C# reference's `MaximumPayloadDepth`: every array and map counts, read
+or skipped, the outermost one is depth 1; depth 256 is accepted and 257 refused, on read and on write."""
+
+try:
+    from msgpack.exceptions import StackError as _MsgpackStackError
+
+    _NESTING_FAULTS: tuple[type[BaseException], ...] = (RecursionError, _MsgpackStackError)
+except ModuleNotFoundError:
+    _NESTING_FAULTS = (RecursionError,)
+
+
+class CultCachePayloadDepthError(ValueError):
+    """A payload nests deeper than `MAX_PAYLOAD_DEPTH`. Names the type, the depth reached and the limit; never the payload."""
+
+    def __init__(self, type_name: str, direction: str) -> None:
+        self.depth = MAX_PAYLOAD_DEPTH + 1
+        self.limit = MAX_PAYLOAD_DEPTH
+        super().__init__(
+            f"{type_name} payload nests {self.depth} containers deep; the limit is {self.limit} (refused on {direction})."
+        )
+
+
+def _refuse_past_depth_limit(tree: Any, type_name: str, direction: str) -> None:
+    """The one nesting count. Walks a payload tree iteratively (lists, tuples and dicts are the containers), refusing
+    the first container past `MAX_PAYLOAD_DEPTH`."""
+    stack = [(tree, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if not isinstance(node, (list, tuple, dict)):
+            continue
+        if depth > MAX_PAYLOAD_DEPTH:
+            raise CultCachePayloadDepthError(type_name, direction)
+        children = chain(node.keys(), node.values()) if isinstance(node, dict) else node
+        stack.extend((child, depth + 1) for child in children if isinstance(child, (list, tuple, dict)))
 
 
 def _default_encode(value: Any) -> Any:
@@ -123,10 +160,23 @@ class DocumentDefinition(Generic[T]):
     def encode_payload(self, value: T) -> bytes:
         if self.validate:
             self.validate(value)
-        return self.payload_encoder(self.encode(value))
+        try:
+            tree = self.encode(value)
+        except RecursionError:
+            raise CultCachePayloadDepthError(self.type, "write") from None
+        _refuse_past_depth_limit(tree, self.type, "write")
+        return self.payload_encoder(tree)
 
     def decode_payload(self, payload: bytes) -> T:
-        value = self.decode(self.payload_decoder(payload))
+        try:
+            tree = self.payload_decoder(payload)
+        except _NESTING_FAULTS:
+            raise CultCachePayloadDepthError(self.type, "read") from None
+        _refuse_past_depth_limit(tree, self.type, "read")
+        try:
+            value = self.decode(tree)
+        except RecursionError:
+            raise CultCachePayloadDepthError(self.type, "read") from None
         if self.validate:
             self.validate(value)
         return value
@@ -313,14 +363,20 @@ def define_union(
     def decode(raw: Any) -> Any:
         if raw is None:
             return None
-        if not isinstance(raw, list) or len(raw) != 2 or not isinstance(raw[1], list):
+        if not isinstance(raw, list) or len(raw) != 2:
             raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
         key = raw[0]
         if not _is_key(key):
-            raise ValueError(f"Union {name!r} value is malformed: the arm key is not an integer")
+            raise ValueError(f"Union {name!r} value is malformed: the arm key is non-integer")
+        if not _INT32_MIN <= key <= _INT32_MAX:
+            raise ValueError(f"Union {name!r} value is malformed: the arm key is outside Int32")
         if key not in by_key:
             declared = ", ".join(str(declared_key) for declared_key in sorted(by_key))
             raise ValueError(f"Union {name!r} does not declare arm key {key} (declared: {declared})")
+        if raw[1] is None:
+            raise ValueError(f"Union {name!r} arm {key} has nil slots")
+        if not isinstance(raw[1], list):
+            raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
         arm_name, codec = by_key[key]
         return UnionArm(arm_name, None if codec is None else _resolve(codec).decode(raw[1]))
 

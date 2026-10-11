@@ -9,12 +9,15 @@ from pathlib import Path
 import msgpack
 
 from cultcache_py import (
+    MAX_PAYLOAD_DEPTH,
     CultCache,
+    CultCachePayloadDepthError,
     DatabaseEntryField,
     SingleFileMessagePackBackingStore,
     UnionArm,
     database_entry_field,
     define_database_entry_type,
+    define_document_type,
     define_record_codec,
     define_union,
 )
@@ -35,13 +38,18 @@ use = define_record_codec(
     ],
 )
 image = define_record_codec("Image", [("id", 0), ("uri", 1), ("alt", 3)])
-node = define_union("Node", {0: ("Box", box), 1: ("Text", text), 2: ("Use", use), 5: ("Image", image)})
+wrap = define_record_codec("Wrap", [database_entry_field("inner", 0, codec=lambda: node)])
+node = define_union(
+    "Node", {0: ("Box", box), 1: ("Text", text), 2: ("Use", use), 5: ("Image", image), 6: ("Wrap", wrap)}
+)
 outcome = define_union(
     "Outcome",
     {
         0: ("Pending", define_record_codec("Pending", [("message", 0)])),
         1: ("Completed", define_record_codec("Completed", [("source_version", 0)])),
         2: ("Denied", None),
+        -2147483648: ("Floor", None),
+        2147483647: ("Ceiling", None),
     },
 )
 tool = define_record_codec("Tool", [("name", 0), ("uses", 1)])
@@ -219,7 +227,7 @@ class UnionCodecRuleTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             node.decode([4, [self.CANARY]])
         message = str(caught.exception)
-        self.assertEqual(message, "Union 'Node' does not declare arm key 4 (declared: 0, 1, 2, 5)")
+        self.assertEqual(message, "Union 'Node' does not declare arm key 4 (declared: 0, 1, 2, 5, 6)")
 
     def test_a_malformed_union_value_is_refused_without_echoing_it(self) -> None:
         for raw in (
@@ -386,6 +394,181 @@ class RecordCodecTests(unittest.TestCase):
     def test_slot_order_follows_keys_not_declaration_order(self) -> None:
         record = define_record_codec("Ordered", [("b", 2), ("a", 0)])
         self.assertEqual(record.encode({"a": "x", "b": "y"}), ["x", None, "y"])
+
+
+CANARY = "CANARY-union-golden-4c2a"
+
+
+def _wrap_chain(wraps: int, leaf: UnionArm) -> UnionArm:
+    value = leaf
+    for _ in range(wraps):
+        value = UnionArm("Wrap", {"inner": value})
+    return value
+
+
+class BoundsVectorTests(unittest.TestCase):
+    def test_every_bounds_outcome_is_held(self) -> None:
+        entries = msgpack.unpackb(_vector("bounds-outcomes.msgpack"), raw=False)
+        self.assertEqual(entries[0], ["limit", MAX_PAYLOAD_DEPTH])
+        counts = {"accepted": 0, "refused": 0, "read-only": 0}
+        for file, outcome_kind, union, key, detail in entries[1:]:
+            counts[outcome_kind] += 1
+            payload = _vector(file)
+            if outcome_kind == "accepted":
+                self.assertEqual(
+                    surface_document.encode_payload(surface_document.decode_payload(payload)), _vector(detail), file
+                )
+            elif outcome_kind == "read-only":
+                self.assertEqual(surface_document.decode_payload(payload), _surface_value(), file)
+            else:
+                with self.assertRaises(ValueError, msg=file) as caught:
+                    surface_document.decode_payload(payload)
+                message = str(caught.exception)
+                self.assertNotIn(CANARY, message, file)
+                if detail == "depth":
+                    self.assertIsInstance(caught.exception, CultCachePayloadDepthError, file)
+                    self.assertIn(surface_document.type, message, file)
+                    self.assertIn("nests 257 containers deep", message, file)
+                    self.assertIn("the limit is 256", message, file)
+                    self.assertIn("refused on read", message, file)
+                    continue
+                self.assertNotIsInstance(caught.exception, CultCachePayloadDepthError, file)
+                self.assertIn(f"Union '{union}' ", message, file)
+                if detail == "key-out-of-range":
+                    self.assertIn("outside Int32", message, file)
+                    self.assertNotIn("does not declare", message, file)
+                elif detail == "key-not-integer":
+                    self.assertIn("non-integer", message, file)
+                else:
+                    self.assertEqual(detail, "nil-slots")
+                    self.assertIn(f"arm {key} has nil slots", message, file)
+        self.assertEqual(counts, {"accepted": 4, "refused": 7, "read-only": 1})
+
+    def test_the_value_at_the_limit_writes_the_vector_and_the_value_past_it_is_refused_on_write(self) -> None:
+        at_limit = {**_surface_value(), "root": _wrap_chain(126, UnionArm("Box", {"id": "leaf", "children": []}))}
+        self.assertEqual(surface_document.encode_payload(at_limit), _vector("depth-at-limit.msgpack"))
+        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Text", {"id": "leaf", "content": CANARY}))}
+        with self.assertRaises(CultCachePayloadDepthError) as caught:
+            surface_document.encode_payload(past)
+        message = str(caught.exception)
+        self.assertEqual((caught.exception.depth, caught.exception.limit), (257, 256))
+        self.assertIn("the limit is 256", message)
+        self.assertIn("refused on write", message)
+        self.assertNotIn(CANARY, message)
+
+    def test_a_cache_put_of_the_value_past_the_limit_refuses_and_stores_nothing(self) -> None:
+        past = {**_surface_value(), "root": _wrap_chain(127, UnionArm("Box", {"id": "leaf", "children": []}))}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.cc"
+            cache = (
+                CultCache.builder()
+                .register_document_type(surface_document)
+                .add_generic_store(SingleFileMessagePackBackingStore(path))
+                .build()
+            )
+            with self.assertRaises(CultCachePayloadDepthError):
+                cache.put(surface_document, "surface", past)
+            self.assertIsNone(cache.get(surface_document, "surface"))
+
+    def test_a_payload_beyond_the_c_unpackers_own_stack_is_the_depth_refusal(self) -> None:
+        deep = b"\x91" * 2000 + b"\xc0"
+        with self.assertRaises(CultCachePayloadDepthError) as caught:
+            surface_document.decode_payload(deep)
+        self.assertEqual(str(caught.exception).count("refused on read"), 1)
+        huge = b"\x98" + b"\xc0" * 7 + b"\x91" * 100000 + b"\xc0"
+        with self.assertRaises(CultCachePayloadDepthError):
+            surface_document.decode_payload(huge)
+
+    def test_a_deep_value_is_refused_by_the_depth_error_not_a_recursion_error(self) -> None:
+        deep = {**_surface_value(), "root": _wrap_chain(5000, UnionArm("Box", {"id": "leaf", "children": []}))}
+        with self.assertRaises(CultCachePayloadDepthError) as caught:
+            surface_document.encode_payload(deep)
+        self.assertIn("refused on write", str(caught.exception))
+        document = define_document_type("tests.json_tree")
+        with self.assertRaises(CultCachePayloadDepthError) as read:
+            document.decode_payload(b"[" * 100000)
+        self.assertIn("refused on read", str(read.exception))
+
+    def test_a_cycle_is_refused_as_depth(self) -> None:
+        loop: list = []
+        loop.append(loop)
+        document = define_document_type("tests.cycle", encode=lambda value: value)
+        with self.assertRaises(CultCachePayloadDepthError):
+            document.encode_payload(loop)
+
+
+def _nest(depth: int, mixed: bool = False) -> object:
+    value: object = "leaf"
+    for level in range(depth):
+        value = {"k": value} if mixed and level % 2 == 0 else [value]
+    return value
+
+
+def _as_tuple(tree: object) -> object:
+    return tuple(_as_tuple(child) for child in tree) if isinstance(tree, list) else tree
+
+
+class PayloadDepthRuleTests(unittest.TestCase):
+    """The nesting rule at its seam, on definitions that are not unions: the same routine serves any payload codec."""
+
+    def test_the_limit_is_256_and_depth_256_is_accepted_on_read_and_write_while_257_is_refused(self) -> None:
+        self.assertEqual(MAX_PAYLOAD_DEPTH, 256)
+        document = define_document_type("tests.json_tree", encode=lambda value: value)
+        for mixed in (False, True):
+            at_limit = _nest(256, mixed)
+            self.assertEqual(document.decode_payload(document.encode_payload(at_limit)), at_limit)
+            past = _nest(257, mixed)
+            with self.assertRaises(CultCachePayloadDepthError):
+                document.encode_payload(past)
+            with self.assertRaises(CultCachePayloadDepthError):
+                document.decode_payload(document.payload_encoder(past))
+
+    def test_a_tuple_and_a_container_dict_key_count_as_containers(self) -> None:
+        document = define_document_type("tests.tuple_tree", encode=lambda value: value, payload_encoder=lambda tree: b"ok")
+        self.assertEqual(document.encode_payload(_as_tuple(_nest(256))), b"ok")
+        with self.assertRaises(CultCachePayloadDepthError):
+            document.encode_payload(_as_tuple(_nest(257)))
+        self.assertEqual(document.encode_payload({_as_tuple(_nest(255)): 1}), b"ok")
+        with self.assertRaises(CultCachePayloadDepthError):
+            document.encode_payload({_as_tuple(_nest(256)): 1})
+
+    def test_a_scalar_payload_has_no_depth(self) -> None:
+        document = define_document_type("tests.scalar", encode=lambda value: value)
+        self.assertEqual(document.decode_payload(document.encode_payload("x")), "x")
+
+    def test_the_refusal_names_the_type_the_depth_and_the_limit_and_never_the_payload(self) -> None:
+        document = define_document_type("tests.json_tree", encode=lambda value: value)
+        value: object = CANARY
+        for _ in range(257):
+            value = [value]
+        with self.assertRaises(CultCachePayloadDepthError) as caught:
+            document.encode_payload(value)
+        self.assertEqual(
+            str(caught.exception),
+            "tests.json_tree payload nests 257 containers deep; the limit is 256 (refused on write).",
+        )
+        self.assertIsInstance(caught.exception, ValueError)
+
+
+class UnionDecodeBoundsTests(unittest.TestCase):
+    def test_the_arm_key_refusals_name_the_union_and_say_what_is_wrong(self) -> None:
+        cases = [
+            ([2**31, []], "Union 'Node' value is malformed: the arm key is outside Int32"),
+            ([-(2**31) - 1, []], "Union 'Node' value is malformed: the arm key is outside Int32"),
+            ([1.0, []], "Union 'Node' value is malformed: the arm key is non-integer"),
+            ([True, []], "Union 'Node' value is malformed: the arm key is non-integer"),
+            ([1, None], "Union 'Node' arm 1 has nil slots"),
+            ([1, CANARY], "Union 'Node' value is malformed: expected [armKey, [armSlots]]"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(key=raw[0], slots=type(raw[1]).__name__):
+                with self.assertRaises(ValueError) as caught:
+                    node.decode(raw)
+                self.assertEqual(str(caught.exception), expected)
+
+    def test_the_ends_of_the_int32_key_domain_are_unit_arms_that_read_and_write(self) -> None:
+        self.assertEqual(outcome.decode([-(2**31), []]), UnionArm("Floor"))
+        self.assertEqual(outcome.encode(UnionArm("Ceiling")), [2**31 - 1, []])
 
 
 if __name__ == "__main__":
