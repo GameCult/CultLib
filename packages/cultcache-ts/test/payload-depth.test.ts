@@ -248,16 +248,20 @@ test("a user formatter's bytes are its own: a 0x91 grey image round-trips, while
   assert.throws(() => encodeDocumentPayload(anything, nest(L + 1)), CultCachePayloadDepthError);
   assert.throws(() => decodeDocumentPayload(anything, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
 
-  type Tree = unknown[];
-  const tree: codecs.Codec<Tree> = codecs.lazy(() => codecs.list(tree));
+  // A slot that writes `depth` nested arrays, so a codec document can be made as deep as the test needs.
+  const nested: codecs.Codec<number> = {
+    typeName: "System.Object",
+    encode: (depth) => nest(depth),
+    decode: (raw) => (raw as unknown[]).length,
+  };
   const coded = defineDocumentType({
     type: "t.coded",
     schemaId: "t.coded.v0",
     schema: z.any(),
     name: "id",
-    codec: codecs.slots<{ id: string; inner: Tree }>({ 0: ["id", codecs.string], 1: ["inner", tree] }, "T.Coded"),
+    codec: codecs.slots<{ id: string; depth: number }>({ 0: ["id", codecs.string], 1: ["depth", nested] }, "T.Coded"),
   });
-  assert.doesNotThrow(() => encodeDocumentPayload(coded, { id: "a", inner: nest(L - 1) as Tree }));
-  assert.throws(() => encodeDocumentPayload(coded, { id: "a", inner: nest(L) as Tree }), CultCachePayloadDepthError);
+  assert.doesNotThrow(() => encodeDocumentPayload(coded, { id: "a", depth: L - 1 }));
+  assert.throws(() => encodeDocumentPayload(coded, { id: "a", depth: L }), CultCachePayloadDepthError);
   assert.throws(() => decodeDocumentPayload(coded, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
 });
