@@ -169,41 +169,38 @@ def _int_to_float32(value: _int) -> _float:
     return -rounded if value < 0 else rounded
 
 
-def _number(what: str, value: Any, *, writing: _bool) -> _float:
-    """A number as a double, or the float32-rounded double for `float32`; refuses what C# refuses."""
+def _checked_int(what: str, value: _int) -> _int:
+    if not _WRITABLE_INT[0] <= value <= _WRITABLE_INT[1]:
+        _refuse(what, "an integer out of range")
+    return value
+
+
+def _number(what: str, value: Any) -> _float:
+    """A number as a double: a float as it is, an integer (within the 64-bit range) rounded once."""
     if isinstance(value, _float):
         return value
     if not _is_int(value):
         _refuse(what, _kind(value))
-    if writing and not _WRITABLE_INT[0] <= value <= _WRITABLE_INT[1]:
-        _refuse(what, "an integer out of range")
-    return _float(value)
+    return _float(_checked_int(what, value))
+
+
+def _float32_value(value: Any) -> _float:
+    """The float32 a number rounds to, in one rounding, as the reference's cast does."""
+    if _is_int(value):
+        return _int_to_float32(_checked_int("a float32", value))
+    return _round_to_float32(_number("a float32", value))
 
 
 def _float32_encode(value: Any) -> Any:
-    if _is_int(value):
-        if not _WRITABLE_INT[0] <= value <= _WRITABLE_INT[1]:
-            _refuse("a float32", "an integer out of range")
-        return Float32(_int_to_float32(value))
-    return Float32(_round_to_float32(_number("a float32", value, writing=True)))
+    return Float32(_float32_value(value))
 
 
-def _float32_decode(raw: Any) -> Any:
-    if _is_int(raw):
-        return _int_to_float32(raw)
-    return _round_to_float32(_number("a float32", raw, writing=False))
+def _float64_check(value: Any) -> Any:
+    return _number("a float64", value)
 
 
-def _float64_encode(value: Any) -> Any:
-    return _number("a float64", value, writing=True)
-
-
-def _float64_decode(raw: Any) -> Any:
-    return _number("a float64", raw, writing=False)
-
-
-float32 = SlotCodec(_float32_encode, _float32_decode, "System.Single", True)
-float64 = SlotCodec(_float64_encode, _float64_decode, "System.Double", True)
+float32 = SlotCodec(_float32_encode, _float32_value, "System.Single", True)
+float64 = SlotCodec(_float64_check, _float64_check, "System.Double", True)
 
 
 def _refuse_ext(tree: Any) -> None:

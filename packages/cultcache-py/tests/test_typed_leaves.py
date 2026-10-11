@@ -206,6 +206,9 @@ class LeavesReadsVectorTests(unittest.TestCase):
                 document.decode_payload(payload)
         with self.assertRaises(ValueError):
             t.any.encode({"k": [msgpack.ExtType(1, b"\x00")]})
+        with self.assertRaises(ValueError) as caught:
+            t.any.decode(msgpack.ExtType(1, b"\x00"))
+        self.assertEqual(str(caught.exception), "expected an object, found ext")
         self.assertIsNone(t.any.decode(None))
         self.assertIsNone(t.any.encode(None))
 
@@ -452,13 +455,13 @@ class LeafRuleTests(unittest.TestCase):
         self.assertEqual(t.float32.decode(1e300), math.inf)
         self.assertEqual(t.float32.decode(-1e300), -math.inf)
         self.assertEqual(t.float64.decode(2**53 + 1), float(2**53))
-        # past 2**53 a double then a float32 rounding differs from one rounding: 2**63 + 2**39 + 1 is above the tie.
-        value = 2**63 + 2**39 + 1
-        self.assertEqual(t.float32.decode(value), float(2**63 + 2**40))
-        self.assertEqual(t.float32.decode(-value), -float(2**63 + 2**40))
-        tie_even, tie_odd = 2**63 + 2**39, 2**63 + 2**40 + 2**39
-        self.assertEqual(t.float32.decode(tie_even), float(2**63))
-        self.assertEqual(t.float32.decode(tie_odd), float(2**63 + 2**41))
+        # past 2**53 a double then a float32 rounding can differ from one rounding: 2**62 + 2**38 + 1 is above the tie.
+        value = 2**62 + 2**38 + 1
+        self.assertEqual(t.float32.decode(value), float(2**62 + 2**39))
+        self.assertEqual(t.float32.decode(-value), -float(2**62 + 2**39))
+        tie_even, tie_odd = 2**62 + 2**38, 2**62 + 2**39 + 2**38
+        self.assertEqual(t.float32.decode(tie_even), float(2**62))
+        self.assertEqual(t.float32.decode(tie_odd), float(2**62 + 2**40))
         self.assertEqual(t.float32.encode(2**64 - 1), t.Float32(float(2**64)))
         self.assertEqual(t.float32.encode(1.5), t.Float32(1.5))
         self.assertEqual(t.float64.encode(3), 3.0)
@@ -501,7 +504,10 @@ class LeafBoundaryTests(unittest.TestCase):
             for ok in (3, 0, -(2**63), 2**64 - 1):
                 leaf.encode(ok)
             for bad in (-(2**63) - 1, 2**64):
-                self.assertEqual(self._refusal(lambda: leaf.encode(bad)).rsplit(", found ", 1)[1], "an integer out of range")
+                what = "a float32" if leaf is t.float32 else "a float64"
+                expected = f"expected {what}, found an integer out of range"
+                self.assertEqual(self._refusal(lambda: leaf.encode(bad)), expected)
+                self.assertEqual(self._refusal(lambda: leaf.decode(bad)), expected)
         self.assertEqual(t.float32.encode(3), t.Float32(3.0))
         self.assertEqual(t.float32.encode(-(2**63)), t.Float32(-float(2**63)))
         self.assertEqual(t.float64.encode(-(2**63)), -float(2**63))
