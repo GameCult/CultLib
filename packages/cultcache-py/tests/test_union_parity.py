@@ -504,6 +504,34 @@ class BoundsVectorTests(unittest.TestCase):
             document.decode_payload(b"[" * 100000)
         self.assertIn("refused on read", str(read.exception))
 
+    def test_a_codec_that_exhausts_the_interpreter_stack_is_the_depth_refusal_on_each_side(self) -> None:
+        def boom(value: object) -> object:
+            return boom(value)
+
+        document = define_document_type("tests.boom", encode=boom, decode=boom)
+        with self.assertRaises(CultCachePayloadDepthError) as write:
+            document.encode_payload("x")
+        self.assertEqual(
+            str(write.exception), "tests.boom payload nests 257 containers deep; the limit is 256 (refused on write)."
+        )
+        with self.assertRaises(CultCachePayloadDepthError) as read:
+            document.decode_payload(b'"x"')
+        self.assertEqual(
+            str(read.exception), "tests.boom payload nests 257 containers deep; the limit is 256 (refused on read)."
+        )
+        with self.assertRaises(CultCachePayloadDepthError) as stack:
+            surface_document.decode_payload(bytes([0x91]) * 2000 + bytes([0xC0]))
+        self.assertEqual(
+            str(stack.exception),
+            "tests.union_surface payload nests 257 containers deep; the limit is 256 (refused on read).",
+        )
+
+    def test_the_validator_sees_the_value_on_write_and_the_decoded_value_on_read(self) -> None:
+        seen: list[object] = []
+        document = define_document_type("tests.validated", validate=seen.append)
+        document.decode_payload(document.encode_payload({"a": 1}))
+        self.assertEqual(seen, [{"a": 1}, {"a": 1}])
+
     def test_a_cycle_is_refused_as_depth(self) -> None:
         loop: list = []
         loop.append(loop)

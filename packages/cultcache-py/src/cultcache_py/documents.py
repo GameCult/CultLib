@@ -29,6 +29,9 @@ except ModuleNotFoundError:
     _NESTING_FAULTS = (RecursionError,)
 
 
+_CONTAINERS = (list, tuple, dict)
+
+
 class CultCachePayloadDepthError(ValueError):
     """A payload nests deeper than `MAX_PAYLOAD_DEPTH`. Names the type, the depth reached and the limit; never the payload."""
 
@@ -43,15 +46,13 @@ class CultCachePayloadDepthError(ValueError):
 def _refuse_past_depth_limit(tree: Any, type_name: str, direction: str) -> None:
     """The one nesting count. Walks a payload tree iteratively (lists, tuples and dicts are the containers), refusing
     the first container past `MAX_PAYLOAD_DEPTH`."""
-    stack = [(tree, 1)]
+    stack = [(tree, 1)] if isinstance(tree, _CONTAINERS) else []
     while stack:
         node, depth = stack.pop()
-        if not isinstance(node, (list, tuple, dict)):
-            continue
         if depth > MAX_PAYLOAD_DEPTH:
             raise CultCachePayloadDepthError(type_name, direction)
         children = chain(node.keys(), node.values()) if isinstance(node, dict) else node
-        stack.extend((child, depth + 1) for child in children if isinstance(child, (list, tuple, dict)))
+        stack.extend((child, depth + 1) for child in children if isinstance(child, _CONTAINERS))
 
 
 def _default_encode(value: Any) -> Any:
