@@ -526,53 +526,12 @@ impl std::error::Error for PayloadTooDeep {}
 /// refusing the first container past [`MAX_PAYLOAD_DEPTH`]. Scalars are skipped by length and nothing
 /// is allocated per element. A payload that ends early is the decoder's to refuse.
 pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDeep> {
-    // The big-endian length after the code byte, when the payload is long enough to hold it.
-    fn length(bytes: &[u8], position: usize, width: usize) -> Option<usize> {
-        let field = bytes.get(position + 1..position + 1 + width)?;
-        Some(field.iter().fold(0usize, |length, byte| (length << 8) | usize::from(*byte)))
-    }
-
     let mut remaining = [0usize; MAX_PAYLOAD_DEPTH];
     let mut depth = 0usize;
     let mut position = 0usize;
     while position < bytes.len() {
-        let code = bytes[position];
-        // (bytes to advance, children to read when the element is a container)
-        let (advance, children) = match code {
-            0x00..=0x7f | 0xe0..=0xff | 0xc0..=0xc3 => (1, None),
-            0x80..=0x8f => (1, Some(2 * usize::from(code & 0x0f))),
-            0x90..=0x9f => (1, Some(usize::from(code & 0x0f))),
-            0xa0..=0xbf => (1 + usize::from(code & 0x1f), None),
-            0xc4 | 0xd9 => (2 + length(bytes, position, 1).unwrap_or(usize::MAX - 2), None),
-            0xc5 | 0xda => (3 + length(bytes, position, 2).unwrap_or(usize::MAX - 3), None),
-            0xc6 | 0xdb => (5 + length(bytes, position, 4).unwrap_or(usize::MAX - 5), None),
-            0xc7 => (3 + length(bytes, position, 1).unwrap_or(usize::MAX - 3), None),
-            0xc8 => (4 + length(bytes, position, 2).unwrap_or(usize::MAX - 4), None),
-            0xc9 => (6 + length(bytes, position, 4).unwrap_or(usize::MAX - 6), None),
-            0xca | 0xce | 0xd2 => (5, None),
-            0xcb | 0xcf | 0xd3 => (9, None),
-            0xcc | 0xd0 => (2, None),
-            0xcd | 0xd1 | 0xd4 => (3, None),
-            0xd5 => (4, None),
-            0xd6 => (6, None),
-            0xd7 => (10, None),
-            0xd8 => (18, None),
-            0xdc => match length(bytes, position, 2) {
-                Some(count) => (3, Some(count)),
-                None => return Ok(()),
-            },
-            0xdd => match length(bytes, position, 4) {
-                Some(count) => (5, Some(count)),
-                None => return Ok(()),
-            },
-            0xde => match length(bytes, position, 2) {
-                Some(count) => (3, Some(2 * count)),
-                None => return Ok(()),
-            },
-            0xdf => match length(bytes, position, 4) {
-                Some(count) => (5, Some(count.saturating_mul(2))),
-                None => return Ok(()),
-            },
+        let Some((advance, children)) = element_header(bytes, position) else {
+            return Ok(());
         };
         position = position.saturating_add(advance);
         if let Some(children) = children {
@@ -598,6 +557,42 @@ pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDe
         }
     }
     Ok(())
+}
+
+/// The element at `position`: how many bytes to advance past it (its whole length for a scalar, its
+/// header for a container) and, for a container, how many child elements follow. `None` when the
+/// payload ends inside the header.
+fn element_header(bytes: &[u8], position: usize) -> Option<(usize, Option<usize>)> {
+    // The big-endian length after the code byte.
+    let length = |width: usize| -> Option<usize> {
+        let field = bytes.get(position + 1..position + 1 + width)?;
+        Some(field.iter().fold(0usize, |length, byte| (length << 8) | usize::from(*byte)))
+    };
+    let code = bytes[position];
+    Some(match code {
+        0x00..=0x7f | 0xe0..=0xff | 0xc0..=0xc3 => (1, None),
+        0x80..=0x8f => (1, Some(2 * usize::from(code & 0x0f))),
+        0x90..=0x9f => (1, Some(usize::from(code & 0x0f))),
+        0xa0..=0xbf => (1 + usize::from(code & 0x1f), None),
+        0xc4 | 0xd9 => (2usize.saturating_add(length(1)?), None),
+        0xc5 | 0xda => (3usize.saturating_add(length(2)?), None),
+        0xc6 | 0xdb => (5usize.saturating_add(length(4)?), None),
+        0xc7 => (3usize.saturating_add(length(1)?), None),
+        0xc8 => (4usize.saturating_add(length(2)?), None),
+        0xc9 => (6usize.saturating_add(length(4)?), None),
+        0xca | 0xce | 0xd2 => (5, None),
+        0xcb | 0xcf | 0xd3 => (9, None),
+        0xcc | 0xd0 => (2, None),
+        0xcd | 0xd1 | 0xd4 => (3, None),
+        0xd5 => (4, None),
+        0xd6 => (6, None),
+        0xd7 => (10, None),
+        0xd8 => (18, None),
+        0xdc => (3, Some(length(2)?)),
+        0xdd => (5, Some(length(4)?)),
+        0xde => (3, Some(length(2)?.saturating_mul(2))),
+        0xdf => (5, Some(length(4)?.saturating_mul(2))),
+    })
 }
 
 /// The one decode of a document payload: the nesting bound first, then the deserializer, whose own

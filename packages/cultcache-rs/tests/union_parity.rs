@@ -743,47 +743,74 @@ fn every_container_header_counts_one_level() {
     assert_eq!(check_payload_depth(&nested(&[0x91], 256, &[0x80])), Err(TOO_DEEP));
 }
 
-// A scalar skipped by the wrong length would misplace the chain after it, so the chain's depth
-// reads the same only when every scalar width is skipped exactly.
+// Every scalar and container header is followed by the chain that tests the bound. The skipped bytes
+// are filled with the array marker, so a skip that stops short reads them as containers and a skip
+// that runs long eats the chain: either way the chain's depth stops reading as 256 and 257.
 #[test]
-fn every_scalar_width_is_skipped_by_its_length() {
-    let scalars: Vec<Vec<u8>> = vec![
+fn every_element_is_skipped_by_its_length_and_counted_by_its_children() {
+    const FILL: u8 = 0x91;
+    let filled = |head: &[u8], bytes: usize| -> Vec<u8> { [head.to_vec(), vec![FILL; bytes]].concat() };
+    let long = |code: u8, width: usize, length: usize, extra: usize| -> Vec<u8> {
+        let size = length.to_be_bytes();
+        filled(&[&[code][..], &size[size.len() - width..]].concat(), length + extra)
+    };
+    let mut elements: Vec<Vec<u8>> = vec![
         vec![0x00],
         vec![0xff],
         vec![0xc0],
         vec![0xc2],
         vec![0xc3],
-        vec![0xcc, 1],
-        vec![0xcd, 0, 1],
-        vec![0xce, 0, 0, 0, 1],
-        vec![0xcf, 0, 0, 0, 0, 0, 0, 0, 1],
-        vec![0xd0, 1],
-        vec![0xd1, 0, 1],
-        vec![0xd2, 0, 0, 0, 1],
-        vec![0xd3, 0, 0, 0, 0, 0, 0, 0, 1],
-        vec![0xca, 0, 0, 0, 0],
-        vec![0xcb, 0, 0, 0, 0, 0, 0, 0, 0],
-        vec![0xa2, b'a', b'b'],
-        vec![0xd9, 3, b'a', b'b', b'c'],
-        vec![0xda, 0, 3, b'a', b'b', b'c'],
-        vec![0xdb, 0, 0, 0, 3, b'a', b'b', b'c'],
-        vec![0xc4, 3, b'a', b'b', b'c'],
-        vec![0xc5, 0, 3, b'a', b'b', b'c'],
-        vec![0xc6, 0, 0, 0, 3, b'a', b'b', b'c'],
-        vec![0xd4, 1, 0],
-        vec![0xd5, 1, 0, 0],
-        vec![0xd6, 1, 0, 0, 0, 0],
-        vec![0xd7, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        [vec![0xd8, 1], vec![0; 16]].concat(),
-        vec![0xc7, 3, 1, b'a', b'b', b'c'],
-        vec![0xc8, 0, 3, 1, b'a', b'b', b'c'],
-        vec![0xc9, 0, 0, 0, 3, 1, b'a', b'b', b'c'],
+        filled(&[0xcc], 1),
+        filled(&[0xcd], 2),
+        filled(&[0xce], 4),
+        filled(&[0xcf], 8),
+        filled(&[0xd0], 1),
+        filled(&[0xd1], 2),
+        filled(&[0xd2], 4),
+        filled(&[0xd3], 8),
+        filled(&[0xca], 4),
+        filled(&[0xcb], 8),
+        filled(&[0xa3], 3),
+        filled(&[0xbf], 31),
+        filled(&[0xd4], 2),
+        filled(&[0xd5], 3),
+        filled(&[0xd6], 5),
+        filled(&[0xd7], 9),
+        filled(&[0xd8], 17),
     ];
+    for (code, width) in [(0xd9, 1), (0xc4, 1), (0xda, 2), (0xc5, 2), (0xdb, 4), (0xc6, 4)] {
+        for length in [3, 200, 256, 65536] {
+            if length < (1usize << (8 * width)) {
+                elements.push(long(code, width, length, 0));
+            }
+        }
+    }
+    // An ext carries a type byte after its length.
+    for (code, width) in [(0xc7, 1), (0xc8, 2), (0xc9, 4)] {
+        for length in [3, 200, 256, 65536] {
+            if length < (1usize << (8 * width)) {
+                elements.push(long(code, width, length, 1));
+            }
+        }
+    }
+    // Containers whose children are scalars, so a wrong child count shifts everything after them.
+    elements.push(vec![0x92, 0x00, 0x00]);
+    elements.push(vec![0x93, 0x00, 0x00, 0x00]);
+    elements.push(vec![0x82, 0x00, 0x00, 0x00, 0x00]);
+    elements.push(vec![0x83, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    elements.push([vec![0xdc, 0x01, 0x00], vec![0x00; 256]].concat());
+    elements.push([vec![0xdd, 0x00, 0x00, 0x00, 0x03], vec![0x00; 3]].concat());
+    elements.push([vec![0xde, 0x00, 0x03], vec![0x00; 6]].concat());
+    elements.push([vec![0xde, 0x01, 0x00], vec![0x00; 512]].concat());
+    elements.push([vec![0xdf, 0x00, 0x00, 0x00, 0x03], vec![0x00; 6]].concat());
+    elements.push(vec![0xdc, 0x00, 0x00]);
+    elements.push(vec![0xdf, 0x00, 0x00, 0x00, 0x00]);
+
     let with_chain = |levels: usize| {
         let mut bytes = vec![0xdd];
-        bytes.extend_from_slice(&u32::try_from(scalars.len() + 1).unwrap().to_be_bytes());
-        for scalar in &scalars {
-            bytes.extend_from_slice(scalar);
+        bytes.extend_from_slice(&u32::try_from(elements.len() + 1).unwrap().to_be_bytes());
+        for element in &elements {
+            bytes.extend_from_slice(element);
         }
         bytes.extend(nested(&[0x91], levels, &[0xc0]));
         bytes
