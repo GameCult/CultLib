@@ -210,31 +210,36 @@ class LeavesReadsVectorTests(unittest.TestCase):
         self.assertIsNone(t.any.encode(None))
 
 
+def _leaf_record_document():
+    inner, shape = _inner_record(), _shape()
+    document = define_database_entry_type(
+        "cultcache.leaf-record",
+        [
+            database_entry_field("id", 0, codec=t.string),
+            database_entry_field("flag", 1, codec=t.boolean),
+            database_entry_field("blob", 2, codec=t.bytes),
+            database_entry_field("i", 3, codec=t.int32),
+            database_entry_field("l", 4, codec=t.int64),
+            database_entry_field("f", 5, codec=t.float32),
+            database_entry_field("d", 6, codec=t.float64),
+            database_entry_field("maybe_i", 7, codec=t.nullable(t.int32)),
+            database_entry_field("tags", 8, codec=t.list(t.string)),
+            database_entry_field("names", 9, codec=t.array(t.string)),
+            database_entry_field("any", 10, codec=t.any),
+            database_entry_field("nested", 11, codec=t.nullable(inner)),
+            database_entry_field("items", 12, codec=t.list(inner)),
+            database_entry_field("shape", 13, codec=t.nullable(shape)),
+            database_entry_field("floats", 14, codec=t.array(t.float32)),
+            database_entry_field("maybe_f", 15, codec=t.nullable(t.float32)),
+        ],
+        name="id",
+    )
+    return document
+
+
 class LeafRecordCatalogTests(unittest.TestCase):
     def test_a_python_mirror_derives_the_catalog_the_csharp_store_writes_and_the_payload_round_trips(self) -> None:
-        inner, shape = _inner_record(), _shape()
-        document = define_database_entry_type(
-            "cultcache.leaf-record",
-            [
-                database_entry_field("id", 0, codec=t.string),
-                database_entry_field("flag", 1, codec=t.boolean),
-                database_entry_field("blob", 2, codec=t.bytes),
-                database_entry_field("i", 3, codec=t.int32),
-                database_entry_field("l", 4, codec=t.int64),
-                database_entry_field("f", 5, codec=t.float32),
-                database_entry_field("d", 6, codec=t.float64),
-                database_entry_field("maybe_i", 7, codec=t.nullable(t.int32)),
-                database_entry_field("tags", 8, codec=t.list(t.string)),
-                database_entry_field("names", 9, codec=t.array(t.string)),
-                database_entry_field("any", 10, codec=t.any),
-                database_entry_field("nested", 11, codec=t.nullable(inner)),
-                database_entry_field("items", 12, codec=t.list(inner)),
-                database_entry_field("shape", 13, codec=t.nullable(shape)),
-                database_entry_field("floats", 14, codec=t.array(t.float32)),
-                database_entry_field("maybe_f", 15, codec=t.nullable(t.float32)),
-            ],
-            name="id",
-        )
+        document = _leaf_record_document()
         members, payload = _vector("leaf-record.msgpack")
         derived = [
             [m.slot, m.member_name, m.type_name, m.is_reference, m.is_many, m.target_schema_name, m.is_name, m.index_alias]
