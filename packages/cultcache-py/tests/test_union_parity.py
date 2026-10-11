@@ -10,6 +10,7 @@ import msgpack
 
 from cultcache_py import (
     CultCache,
+    DatabaseEntryField,
     SingleFileMessagePackBackingStore,
     UnionArm,
     database_entry_field,
@@ -362,6 +363,12 @@ class RecordCodecTests(unittest.TestCase):
         field = database_entry_field("id", 0)
         self.assertIsNone(field.codec)
         self.assertFalse(field.many)
+
+    def test_a_directly_constructed_field_is_required_plain_and_single(self) -> None:
+        field = DatabaseEntryField(name="id", key=0)
+        self.assertIs(field.default, dataclasses.MISSING)
+        self.assertIsNone(field.codec)
+        self.assertIs(field.many, False)
 
     def test_slot_codecs_and_fields_are_immutable(self) -> None:
         with self.assertRaises(dataclasses.FrozenInstanceError):
