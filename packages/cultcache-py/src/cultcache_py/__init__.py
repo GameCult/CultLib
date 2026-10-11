@@ -2,6 +2,9 @@
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from .cache import CultCache, CultCacheBuilder
 from .documents import (
+    MAX_PAYLOAD_DEPTH,
+    MAX_SLOT_KEY,
+    CultCachePayloadDepthError,
     DatabaseEntryField,
     DocumentDefinition,
     SlotCodec,
@@ -19,12 +22,15 @@ __all__ = [
     "BackingStore",
     "CultCache",
     "CultCacheBuilder",
+    "CultCachePayloadDepthError",
     "CultCacheEnvelope",
     "CultCacheSchemaCatalogEntry",
     "CultCacheSchemaCatalogMember",
     "DatabaseEntryField",
     "DocumentDefinition",
     "JsonLinesBackingStore",
+    "MAX_PAYLOAD_DEPTH",
+    "MAX_SLOT_KEY",
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
     "UnionArm",
