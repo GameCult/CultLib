@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decode, encode } from "@msgpack/msgpack";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import { z } from "zod";
 import { defineDocumentType } from "@gamecult/cultcache-ts";
 import {
@@ -268,7 +268,7 @@ test("CultMesh TS store document handles choose compatible foreign schema payloa
           type: "runtime.generated.incompatible-note",
           schemaId: "runtime.generated.incompatible-note.v1",
           storedAt: "2026-06-27T00:00:00Z",
-          payload: encode({ nope: "not the requested shape" }),
+          payload: encodeWireValue({ nope: "not the requested shape" }),
           catalogEntry: {
             schemaId: "runtime.generated.incompatible-note.v1",
             schemaName: "runtime.generated.incompatible-note",
@@ -283,7 +283,7 @@ test("CultMesh TS store document handles choose compatible foreign schema payloa
           type: "runtime.generated.cultmesh.note",
           schemaId: "runtime.generated.cultmesh.note.ui.42",
           storedAt: "2026-06-27T00:00:01Z",
-          payload: encode({
+          payload: encodeWireValue({
             noteId: "note:foreign",
             body: "foreign schema id, local store shape",
           }),
@@ -2820,7 +2820,7 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
         recordKey: "note:a",
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encode("first"),
+        payload: encodeWireValue("first"),
         sourceRuntimeId: "client-a",
       },
     });
@@ -2832,7 +2832,7 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
         recordKey: "note:b",
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encode("second"),
+        payload: encodeWireValue("second"),
         sourceRuntimeId: "client-b",
       },
     });
@@ -3311,7 +3311,7 @@ function notePut(
       recordKey,
       storedAt,
       payloadEncoding: "messagepack",
-      payload: encode({ noteId: recordKey, body: "x".repeat(bodyLength) }),
+      payload: encodeWireValue({ noteId: recordKey, body: "x".repeat(bodyLength) }),
       ...(sourceRuntimeId ? { sourceRuntimeId } : {}),
     },
   };
@@ -3324,7 +3324,7 @@ function notePut(
  */
 function servedAloneBytes(put: CultNetDocumentPutRawMessage): number {
   const { schemaId, recordKey, storedAt, payloadEncoding, payload } = put.document;
-  return encode({
+  return encodeWireValue({
     schemaVersion: "cultnet.snapshot_response_raw.v0",
     messageId: "0",
     documents: [{ schemaId, recordKey, storedAt, payloadEncoding, payload }],
@@ -3337,7 +3337,7 @@ function servedAloneBytes(put: CultNetDocumentPutRawMessage): number {
  * asked of the server, so a server that sized another receipt is caught.
  */
 function echoReceiptBytes(put: CultNetDocumentPutRawMessage): number {
-  return encode({
+  return encodeWireValue({
     schemaVersion: "cultnet.document_put_raw.v0",
     messageId: put.messageId,
     document: {
@@ -3345,7 +3345,7 @@ function echoReceiptBytes(put: CultNetDocumentPutRawMessage): number {
       recordKey: put.document.recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack",
-      payload: encode(decode(put.document.payload)),
+      payload: encodeWireValue(decodeWireValue(put.document.payload)),
       sourceRuntimeId: SERVED_BOUND_SERVER,
       sourceAgentId: undefined,
       sourceRole: "provider",
@@ -3397,7 +3397,7 @@ async function withServedBoundRig(
           recordKey: document.recordKey,
           storedAt: document.storedAt,
           payloadEncoding: "messagepack",
-          payload: encode(document.payload),
+          payload: encodeWireValue(document.payload),
         },
       });
       if (!handler.receipt) return undefined;
@@ -3448,7 +3448,7 @@ function servedBodies(reply: CultNetMessage): Array<[string, number]> {
   assert.equal(reply.schemaVersion, "cultnet.snapshot_response_raw.v0");
   return (reply as CultNetSnapshotResponseRawMessage).documents.map((document) => [
     document.recordKey,
-    (decode(document.payload) as { body: string }).body.length,
+    (decodeWireValue(document.payload) as { body: string }).body.length,
   ]);
 }
 
@@ -3567,7 +3567,7 @@ async function withRawPeerRig(
     const request = (messageId: string, recordKeys: string[]): number[] => {
       const packets = session.sendMany(
         "schema",
-        encode({ schemaVersion: "cultnet.snapshot_request.v0", messageId, recordKeys }),
+        encodeWireValue({ schemaVersion: "cultnet.snapshot_request.v0", messageId, recordKeys }),
         { reliable: true, ordered: true, nowMs: 2, maxFragmentBytes: 1200 },
       );
       packets.forEach(send);
@@ -3586,7 +3586,7 @@ function refusalIn(packets: CultNetRudpPacket[]): { message: Record<string, unkn
     .filter((packet) => packet.packetType === "data" && packet.channelId === "schema" && !packet.reliable)
     .sort((a, b) => (a.fragmentIndex ?? 0) - (b.fragmentIndex ?? 0));
   if (parts.length === 0) return undefined;
-  const message = decode(Buffer.concat(parts.map((part) => Buffer.from(part.payload ?? new Uint8Array())))) as Record<string, unknown>;
+  const message = decodeWireValue(Buffer.concat(parts.map((part) => Buffer.from(part.payload ?? new Uint8Array())))) as Record<string, unknown>;
   return { message, parts };
 }
 
@@ -3655,7 +3655,7 @@ test("CultMesh TS RUDP document server honours maxPayloadBytes for replies and j
     // A put whose own frame is over the limit only by the provenance it carries is served at the
     // bound, so it is admitted and served.
     const carried = notePut("put-at", "note:at", atBound, `runtime-${"r".repeat(200)}`);
-    assert.ok(encode(carried).byteLength > limit, "fixture: the put's frame is over the limit");
+    assert.ok(encodeWireValue(carried).byteLength > limit, "fixture: the put's frame is over the limit");
     rig.peer.send(carried);
     await waitForAdmission(rig, "note:at");
     assert.deepEqual(servedBodies(await snapshotUnderShortestId(rig, "note:at")), [["note:at", atBound]]);

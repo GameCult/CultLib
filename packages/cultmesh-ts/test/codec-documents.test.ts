@@ -63,12 +63,16 @@ test("the mesh reads a stored codec document as the cache does, and a plain docu
 
   assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNote).latest(), { noteId: "n1", body: "positional" });
   assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNoteAlias).latest(), { noteId: "n1", body: "positional" });
-  // A store holding a plain record first and a codec record second: the alias, found by parsing, takes the codec one.
-  const bothPath = join(dir, "both.ccmp");
-  const bothNode = await CultMesh.startNode(bothPath, { documents: [plainNote, codecNote] });
-  await bothNode.put(plainNote, "n2", { noteId: "n2", body: "map" });
-  await bothNode.put(codecNote, "n1", { noteId: "n1", body: "positional" });
-  assert.deepEqual(await cultMeshDocumentFromSingleFile(bothPath, codecNoteAlias).latest(), { noteId: "n1", body: "positional" });
+  // A store holding a plain record and a codec record, the alias found by parsing takes the codec one whichever the
+  // single-file store (which sorts records by key) puts first: the probe has to refuse the plain record, not meet it
+  // second.
+  for (const [plainKey, codecKey] of [["a-plain", "z-codec"], ["z-plain", "a-codec"]] as const) {
+    const bothPath = join(dir, `both-${plainKey}.ccmp`);
+    const bothNode = await CultMesh.startNode(bothPath, { documents: [plainNote, codecNote] });
+    await bothNode.put(plainNote, plainKey, { noteId: plainKey, body: "map" });
+    await bothNode.put(codecNote, codecKey, { noteId: codecKey, body: "positional" });
+    assert.deepEqual(await cultMeshDocumentFromSingleFile(bothPath, codecNoteAlias).latest(), { noteId: codecKey, body: "positional" });
+  }
   assert.deepEqual(await cultMeshDocumentFromSingleFile(plainPath, plainNote).latest(), { noteId: "n2", body: "map" });
 });
 
@@ -85,11 +89,12 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
   const commandBinding = defineCultNetDocumentBinding({ definition: codecNote });
   const plainBinding = defineCultNetDocumentBinding({ definition: plainNote });
   const receiptBinding = defineCultNetDocumentBinding({ definition: codecReceipt });
+  const puts: unknown[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-codec-server", connectionId, {
     documents: new CultNetDocumentRegistry([commandBinding, plainBinding, receiptBinding]),
     getCache: () => source.cache,
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
-    onDocumentPutRaw: async (document) => ({
+    onDocumentPutRaw: async (document) => (puts.push(document.payload), {
       binding: receiptBinding,
       recordKey: document.recordKey,
       value: { commandId: document.recordKey, body: "applied" },
@@ -119,6 +124,13 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
       { messageId: "n2", receiptTimeoutMs: 1_000, resendPollMs: 5 },
     );
     assert.deepEqual(receipt, { commandId: "n2", body: "applied" });
+    // The handler is handed the document, not its wire shape: the server reads a put through the registered definition.
+    await CultMesh.publishRudpDocumentAndWaitForReceipt(
+      "cultmesh-ts-plain-receipt", connectionId, `rudp://127.0.0.1:${server.bind.port}`,
+      plainBinding, "n4", { noteId: "n4", body: "plain command" }, receiptBinding,
+      { messageId: "n4", receiptTimeoutMs: 1_000, resendPollMs: 5 },
+    );
+    assert.deepEqual(puts, [{ noteId: "n2", body: "command" }, { noteId: "n4", body: "plain command" }]);
   } finally {
     peer?.close();
     server.close();

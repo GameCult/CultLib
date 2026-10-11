@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
 import test from "node:test";
-import { encode } from "@msgpack/msgpack";
+import { encodeWireValue } from "cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
@@ -43,7 +43,7 @@ function put(recordKey: string) {
       recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack" as const,
-      payload: encode(recordKey),
+      payload: encodeWireValue(recordKey),
     },
   };
 }

@@ -1,4 +1,4 @@
-import { decode, encode } from "@msgpack/msgpack";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import {
   encodeCultNetMessageForWire,
   parseCultNetMessage,
@@ -387,7 +387,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
       operation: options.operation,
       payloadSchema: options.payloadSchema,
       payloadEncoding: "messagepack-base64",
-      payload: bytesToBase64(encode(options.payload)),
+      payload: bytesToBase64(encodeWireValue(options.payload)),
       sourceRuntimeId: this.runtimeId,
       targetRuntimeId: this.identity.authorityRuntimeId,
     };
@@ -733,7 +733,7 @@ export class CultMeshBrowserClient implements AsyncDisposable {
   private send(message: CultNetMessage): void {
     const socket = this.#socket;
     if (!socket || socket.readyState !== 1) throw new Error("CultMesh browser route is not connected.");
-    const payload = encode(encodeCultNetMessageForWire(message));
+    const payload = encodeWireValue(encodeCultNetMessageForWire(message));
     if (payload.byteLength > this.#options.maxFrameBytes) {
       throw new Error(`CultMesh message exceeds the ${this.#options.maxFrameBytes}-byte limit.`);
     }
@@ -760,11 +760,19 @@ export class CultMeshBrowserClient implements AsyncDisposable {
   }
 }
 
-export function decodeCultNetPayload<T>(record: CultNetRawDocumentRecord): T {
+/**
+ * Reads a document record's payload. A document defined with a codec or a formatter is not a plain msgpack map: pass the
+ * formatter that reads it (a cultcache-ts `resolveDocumentFormatter(definition)`); without one the payload is read as a
+ * plain value, and a codec document comes back as its positional array.
+ */
+export function decodeCultNetPayload<T>(
+  record: CultNetRawDocumentRecord,
+  formatter?: { decode(payload: Uint8Array): unknown },
+): T {
   if (record.payloadEncoding !== "messagepack") {
     throw new Error(`Unsupported CultNet document payload '${record.payloadEncoding}'.`);
   }
-  return decode(record.payload) as T;
+  return (formatter ? formatter.decode(record.payload) : decodeWireValue(record.payload)) as T;
 }
 
 function recordMatchesSchema(record: CultNetRawDocumentRecord, requestedSchema: string): boolean {
@@ -777,7 +785,7 @@ export function decodeCultNetOperationPayload<T>(response: CultNetOperationRespo
   if (response.payloadEncoding !== "messagepack-base64") {
     throw new Error(`Unsupported CultNet operation payload '${response.payloadEncoding ?? "unspecified"}'.`);
   }
-  return decode(base64ToBytes(response.payload)) as T;
+  return decodeWireValue(base64ToBytes(response.payload)) as T;
 }
 
 function requireWebSocketEndpoint(value: string, field: string): URL {
@@ -794,7 +802,7 @@ function requireWebSocketEndpoint(value: string, field: string): URL {
 }
 
 function sendSocketMessage(socket: CultMeshBrowserSocket, message: CultNetMessage, maxFrameBytes: number): void {
-  const payload = encode(encodeCultNetMessageForWire(message));
+  const payload = encodeWireValue(encodeCultNetMessageForWire(message));
   if (payload.byteLength > maxFrameBytes) {
     throw new Error(`CultNet message exceeds the ${maxFrameBytes}-byte limit.`);
   }
@@ -815,7 +823,7 @@ async function decodeSocketMessage(event: MessageEvent, maxFrameBytes: number): 
   if (payload.byteLength > maxFrameBytes) {
     throw new Error(`CultNet frame exceeds the ${maxFrameBytes}-byte limit.`);
   }
-  return parseCultNetMessage(decode(payload));
+  return parseCultNetMessage(decodeWireValue(payload));
 }
 
 async function selectOdinRoute(

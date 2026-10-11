@@ -82,10 +82,18 @@ export function resolveDocumentFormatter(definition: AnyCultCacheDocumentDefinit
   if (definition.codec && definition.formatter) {
     throw new Error(`CultCache document type "${definition.type}" declares both a codec and a formatter.`);
   }
-  return definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : {
-    encode: (value: unknown) => encode(value),
-    decode: (payload: Uint8Array) => decode(payload),
-  });
+  return definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : plainDocumentFormatter);
+}
+
+const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
+  encode: (value: unknown) => encode(value),
+  decode: (payload: Uint8Array) => decode(payload),
+};
+
+// The one reader of a document payload outside the cache: through the definition's formatter, or as a plain msgpack
+// value when the caller holds no definition for the schema. Every package above the cache reads a payload through here.
+export function decodeDocumentPayload(definition: AnyCultCacheDocumentDefinition | undefined, payload: Uint8Array): unknown {
+  return (definition ? resolveDocumentFormatter(definition) : plainDocumentFormatter).decode(payload);
 }
 
 // The schema members of a document: the ones it declares, else those its codec derives, else none.

@@ -1,5 +1,5 @@
 import { createSocket, type Socket } from "node:dgram";
-import { decode, encode } from "@msgpack/msgpack";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 
 import {
   CultCache,
@@ -8,7 +8,7 @@ import {
   type CacheBackingStore,
   type CultCacheEnvelope,
   type CultCacheDocumentValue,
-  resolveDocumentFormatter,
+  decodeDocumentPayload,
 } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
@@ -5957,7 +5957,7 @@ export class CultMesh {
       payload: Uint8Array,
     ): Promise<void> {
       if (record.closed) return;
-      const message = parseCultNetMessage(decode(payload), wireContract);
+      const message = parseCultNetMessage(decodeWireValue(payload), wireContract);
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
@@ -6000,7 +6000,7 @@ export class CultMesh {
               sendSchemaMessage(record, { schemaVersion: "cultnet.error.v0", error: unservable.message });
               return;
             }
-            const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
+            const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote, options.documents));
             if (receipt) {
               try {
                 sendSchemaMessage(record, receiptMessage(receipt, message.messageId));
@@ -6138,7 +6138,7 @@ export class CultMesh {
 
     /** The one reply encoder, shared by sends and by put admission. */
     function encodeSchemaMessage(message: CultNetMessage): Uint8Array {
-      return encode(encodeCultNetMessageForWire(message, wireContract));
+      return encodeWireValue(encodeCultNetMessageForWire(message, wireContract));
     }
 
     /** Builds the receipt `onDocumentPutRaw` returned, under the put's message id by default. */
@@ -6663,6 +6663,7 @@ function requireNonEmpty(value: string, name: string): void {
 function normalizeRudpDocumentPut(
   message: CultNetMessage,
   remote: { address: string; family: string; port: number },
+  documents: CultNetDocumentRegistry,
 ): CultMeshRudpDocumentPut {
   if (message.schemaVersion !== "cultnet.document_put_raw.v0") {
     throw new Error(`Expected cultnet.document_put_raw.v0, received ${message.schemaVersion}.`);
@@ -6678,7 +6679,7 @@ function normalizeRudpDocumentPut(
     schemaId: document.schemaId,
     recordKey: document.recordKey,
     storedAt: document.storedAt ?? new Date().toISOString(),
-    payload: decode(document.payload),
+    payload: decodeDocumentPayload(documents.getBySchemaId(document.schemaId)?.definition, document.payload),
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,
@@ -6777,11 +6778,9 @@ async function resolveCultNetPeer(
 }
 
 // A document payload is read the way its definition's cache reads it (a codec or formatter document is not a plain
-// msgpack map); a payload with no definition is plain msgpack.
+// msgpack map); a payload with no definition is plain msgpack. Both are cultcache-ts's decision.
 function decodeCultMeshPayload(schemaOrDefinition: string | AnyCultCacheDocumentDefinition, payload: Uint8Array): unknown {
-  return typeof schemaOrDefinition === "string"
-    ? decode(payload)
-    : resolveDocumentFormatter(schemaOrDefinition).decode(payload);
+  return decodeDocumentPayload(typeof schemaOrDefinition === "string" ? undefined : schemaOrDefinition, payload);
 }
 
 function decodeCultNetRawDocumentPayload(

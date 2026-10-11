@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createSocket, type Socket } from "node:dgram";
-import { encode } from "@msgpack/msgpack";
+import { encodeWireValue } from "cultnet-ts/wire";
 import {
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
@@ -171,7 +171,7 @@ class RudpProviderConnection implements CultMeshProviderConnection {
       recordKey: publication.recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack",
-      payload: encode(publication.value),
+      payload: encodeWireValue(publication.value),
       sourceRuntimeId: this.#identity.serviceInstanceId,
       sourceAgentId: this.#identity.providerId,
       sourceRole: "provider",
