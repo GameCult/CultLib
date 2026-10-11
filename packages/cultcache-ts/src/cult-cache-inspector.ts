@@ -219,7 +219,7 @@ function decodeV1Record(value: unknown, catalogBySchemaId: Map<string, Inspected
 function recoverCatalogEntry(schemaId: string, payload: Uint8Array): InspectedCatalogEntry | undefined {
   let payloadPreview: unknown;
   try {
-    payloadPreview = decode(payload);
+    payloadPreview = decodeBoundedPayload(payload);
   } catch {
     return undefined;
   }
@@ -285,6 +285,12 @@ function decodeLegacyEnvelope(value: unknown): InspectedRecord {
     payloadBytes: payloadBytes.length,
     ...previewPayload(payloadBytes),
   };
+}
+
+// The inspector's one payload read: the depth walk first, so a payload past the limit is refused before any decoder sees it.
+function decodeBoundedPayload(payload: Uint8Array): unknown {
+  checkPayloadDepth(payload);
+  return decode(payload);
 }
 
 function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPreview" | "payloadDecodeError"> {
