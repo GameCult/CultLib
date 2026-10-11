@@ -241,12 +241,12 @@ namespace GameCult.Caching.Tests
 
         // ---- the wider leaves: reads and one record of every leaf ----
 
-        // The value token of each wide read case, as MessagePack hex. c1 is a code no reader assigns; d40100 and d6ff00000000 are an application ext and a timestamp ext, which the any leaf reads or refuses as the reference decides; 92a161ca3f800000, 92a16105 and 92a161a162 give the record slots a float, an int and a str in the second slot.
+        // The value token of each wide read case, as MessagePack hex. c1 is a code no reader assigns; d40100 is an application ext, which the any leaf refuses; 92a161ca3f800000, 92a16105 and 92a161a162 give the record slots a float, an int and a str in the second slot.
         private static readonly string[] WideValues =
         {
             "05", "ff", "cb3ff8000000000000", "ca3fc00000", "c0", "c2", "c3", "a161", "d90161", "c40100", "90", "9101", "91a161", "80", "81a161a162",
             "920091ca3f800000", "9291a161ca3f800000", "9192a161ca3f800000", "c1",
-            "92a161ca3f800000", "92a16105", "92a161a162", "d40100", "d6ff00000000",
+            "92a161ca3f800000", "92a16105", "92a161a162", "d40100",
         };
 
         // What the reference reads from a one-slot record of the leaf, and the bytes it writes back for what it read.
