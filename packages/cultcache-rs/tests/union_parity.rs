@@ -259,6 +259,15 @@ fn union_refusal_vectors() {
     assert_eq!((refused, read_only), (5, 4));
 }
 
+// A nil where the arm's slots belong is not an empty record, for an arm with slots and a unit arm.
+#[test]
+fn nil_slots_are_refused_naming_the_union_and_the_key() {
+    for (bytes, key) in [(vec![0x92, 0x01, 0xc0], "1"), (vec![0x92, 0x02, 0xc0], "2")] {
+        let message = rmp_serde::from_slice::<Outcome>(&bytes).unwrap_err().to_string();
+        assert!(message.contains("Outcome") && message.contains(&format!("arm {key} has nil slots")), "{message}");
+    }
+}
+
 #[test]
 fn an_unknown_arm_lists_the_declared_keys_and_never_echoes_the_payload() {
     // Shaped like a real arm, an array of strings, under an undeclared key.
@@ -409,7 +418,11 @@ mod arm_keys {
 
     #[test]
     fn a_key_that_is_not_an_integer_is_its_own_class_and_never_echoed() {
-        let keys: [&[u8]; 7] = [
+        let keys: [&[u8]; 10] = [
+            // A MessagePack ext: fixext 1, the timestamp extension and ext 8.
+            &[0xd4, 0x01, 0x00],
+            &[0xd6, 0xff, 0x00, 0x00, 0x00, 0x00],
+            &[0xc7, 0x02, 0x05, b'C', b'A'],
             &[0xc0],
             &[0xc3],
             &[0xcb, 0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
