@@ -116,6 +116,7 @@ fn add_unknown_entry(mut map: Vec<u8>, nested: &[u8]) -> Vec<u8> {
 fn add_trailing_slot(mut array: Vec<u8>, nested: &[u8]) -> Vec<u8> {
     match array[0] {
         header @ 0x90..=0x9e => array[0] = header + 1,
+        0x9f => array.splice(0..1, [0xdc, 0x00, 0x10]).for_each(drop),
         0xdc => {
             let count = u16::from_be_bytes([array[1], array[2]]) + 1;
             array[1..3].copy_from_slice(&count.to_be_bytes());
