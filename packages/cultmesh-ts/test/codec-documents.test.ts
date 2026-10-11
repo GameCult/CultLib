@@ -36,6 +36,15 @@ const codecReceipt = defineDocumentType({
   }, "Tests.CodecReceipt"),
 });
 
+// The same record under another schema id: the store holds it as codec_note, so it is found by parsing, not by id.
+const codecNoteAlias = defineDocumentType({
+  type: "cultmesh.codec_note_alias",
+  schemaId: "cultmesh.codec_note_alias.v0",
+  schema: z.object({ noteId: z.string(), body: z.string() }),
+  name: "noteId",
+  codec: codecNote.codec,
+});
+
 const plainNote = defineDocumentType({
   type: "cultmesh.plain_note",
   schemaId: "cultmesh.plain_note.v0",
@@ -53,6 +62,7 @@ test("the mesh reads a stored codec document as the cache does, and a plain docu
   await plainNode.put(plainNote, "n2", { noteId: "n2", body: "map" });
 
   assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNote).latest(), { noteId: "n1", body: "positional" });
+  assert.deepEqual(await cultMeshDocumentFromSingleFile(codecPath, codecNoteAlias).latest(), { noteId: "n1", body: "positional" });
   assert.deepEqual(await cultMeshDocumentFromSingleFile(plainPath, plainNote).latest(), { noteId: "n2", body: "map" });
 });
 
@@ -84,6 +94,8 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
     const synced = await target.syncDocumentFromPeerSnapshot(peer, codecNote, "n1", { timeoutMs: 1_000 });
     assert.deepEqual(synced, { noteId: "n1", body: "synced positional" });
     assert.deepEqual(target.getRequired(codecNote, "n1"), { noteId: "n1", body: "synced positional" });
+    // A peer snapshot handle reads the same way, and accepts the snapshot by parsing it as the codec.
+    assert.deepEqual(await CultMesh.documentFromPeerSnapshot(peer, codecNote, "n1", { timeoutMs: 1_000 }).latest(), { noteId: "n1", body: "synced positional" });
 
     const receipt = await CultMesh.publishRudpDocumentAndWaitForReceipt(
       "cultmesh-ts-codec-receipt", connectionId, `rudp://127.0.0.1:${server.bind.port}`,
