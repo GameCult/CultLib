@@ -328,6 +328,26 @@ test("CultCache can ingest raw envelopes without re-encoding the payload", async
   assert.deepEqual(target.getRequiredEnvelope(noteDocument, "note:hello").payload, envelope.payload);
 });
 
+test("the cache keeps its own copy of an envelope's bytes: a caller mutating them afterwards changes nothing", async () => {
+  const noteDocument = defineDocumentType({ type: "note", schema: z.object({ title: z.string(), body: z.string() }) });
+  const origin = CultCache.builder().withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "origin.msgpack"))).build();
+  const target = CultCache.builder().withDocumentType(noteDocument)
+    .withGenericStore(new SingleFileMessagePackBackingStore(join(await mkdtemp(join(tmpdir(), "cultcache-ts-")), "target.msgpack"))).build();
+  await origin.put(noteDocument, "note:hello", { title: "Hello", body: "world" });
+
+  const envelope = origin.getRequiredEnvelope(noteDocument, "note:hello");
+  const before = Buffer.from(documentPayloadBytes(envelope.payload));
+  await target.putEnvelope(noteDocument, envelope);
+  documentPayloadBytes(envelope.payload).fill(0);
+
+  assert.deepEqual(Buffer.from(documentPayloadBytes(target.getRequiredEnvelope(noteDocument, "note:hello").payload)), before);
+  const read = target.getRequiredEnvelope(noteDocument, "note:hello");
+  documentPayloadBytes(read.payload).fill(0);
+  assert.deepEqual(Buffer.from(documentPayloadBytes(target.getRequiredEnvelope(noteDocument, "note:hello").payload)), before);
+  assert.deepEqual(target.getRequired(noteDocument, "note:hello"), { title: "Hello", body: "world" });
+});
+
 test("SingleFileMessagePackBackingStore writes the CultCache v1 snapshot shape", async () => {
   const namedDocument = defineDocumentType({
     type: "tests.named_entry",
