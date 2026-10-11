@@ -24,7 +24,8 @@ Composition is a record, not an arm: `[Name, Body: Node]`.
   CraftedItem field) is Part `gear`; Missing is nil. A union inside a record inside a union, a unit arm, a list of
   unions with a nil element, an inner union keyed apart from its outer. Written by C#.
 - `union-surface.cc`: a single-file store written by the C# store holding that one record under key `surface`. Its
-  payload equals `union-surface.msgpack`; rewriting the loaded store is byte-identical.
+  payload equals `union-surface.msgpack`; rewriting the loaded store is byte-identical. The writer pins the store's
+  clock, so the record's stored-at is `2026-01-01T00:00:00.0000000+00:00` and the whole file reproduces byte for byte.
 - `outcomes.msgpack`: the expected outcome of every file below, as data. An array of entries
   `[file, outcome, union, key, detail]`: `outcome` is `refused` or `read-only`; `union` is the union (or record)
   named; `key` is the arm key or nil; `detail` is as in the tables below.

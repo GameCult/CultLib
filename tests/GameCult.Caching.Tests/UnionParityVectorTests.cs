@@ -20,6 +20,9 @@ namespace GameCult.Caching.Tests
         private const string WriteVariable = "CULTCACHE_WRITE_VECTORS";
         private const string Canary = "CANARY-union-golden-4c2a";
 
+        // The stored-at of the one record in union-surface.cc: the store's clock is pinned to it, so the store reproduces.
+        private static readonly DateTimeOffset StoredAt = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
         private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(UnionSurface) });
 
         private static bool Writing => Environment.GetEnvironmentVariable(WriteVariable) == "1";
@@ -329,16 +332,14 @@ namespace GameCult.Caching.Tests
             try
             {
                 var scratch = Path.Combine(work, "union-surface.cc");
-                if (Writing)
+                using (var cache = CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = Registry, StoreFlushOnDispose = true }))
                 {
-                    using (var cache = CultCacheMessagePack.Create(scratch, new CultCacheOpenOptions { Registry = Registry, StoreFlushOnDispose = true }))
-                    {
-                        cache.UpsertAsync(typeof(UnionSurface), value, new CultRecordKey("surface")).GetAwaiter().GetResult();
-                        cache.FlushAsync().GetAwaiter().GetResult();
-                    }
-
-                    Check("union-surface.cc", File.ReadAllBytes(scratch));
+                    cache.Clock = () => StoredAt;
+                    cache.UpsertAsync(typeof(UnionSurface), value, new CultRecordKey("surface")).GetAwaiter().GetResult();
+                    cache.FlushAsync().GetAwaiter().GetResult();
                 }
+
+                Check("union-surface.cc", File.ReadAllBytes(scratch));
 
                 // The committed store: one record whose payload is the committed payload, holding the constructed value, and rewritten unchanged.
                 var store = Committed("union-surface.cc");
@@ -428,19 +429,42 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        [Test]
+        // Runs whatever the switch reads when the test starts: it sets the switch itself, and writes only a probe file.
+        [Test, NonParallelizable]
         public void VectorsNotRewrittenByDefault()
         {
-            if (Writing) Assert.Ignore($"{WriteVariable}=1 is the one way to write the vectors.");
-
             string Fingerprint() => string.Join("|", Directory.EnumerateFiles(VectorDirectory()).OrderBy(f => f, StringComparer.Ordinal)
                 .Select(f => Path.GetFileName(f) + "=" + Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))));
 
+            const string probe = "gate-probe.msgpack";
+            var path = VectorPath(probe);
             var before = Fingerprint();
-            Assert.Throws<AssertionException>(() => Check("union-surface.msgpack", new byte[] { 0x90 }), "bytes that differ from the vector fail the run");
-            Assert.Throws<AssertionException>(() => Check("not-a-vector.msgpack", new byte[] { 0x90 }), "a missing vector fails the run");
-            Assert.That(Fingerprint(), Is.EqualTo(before), "an ordinary run writes nothing");
-            Assert.That(File.Exists(VectorPath("not-a-vector.msgpack")), Is.False);
+            var inherited = Environment.GetEnvironmentVariable(WriteVariable);
+            try
+            {
+                foreach (var off in new string?[] { null, string.Empty, "0", "true", "11" })
+                {
+                    Environment.SetEnvironmentVariable(WriteVariable, off);
+                    Assert.Throws<AssertionException>(() => Check(probe, new byte[] { 0x90 }), $"a missing vector fails the run, switch {off ?? "unset"}");
+                    Assert.That(File.Exists(path), Is.False, $"switch {off ?? "unset"} writes nothing");
+
+                    File.WriteAllBytes(path, new byte[] { 0x91 });
+                    Assert.Throws<AssertionException>(() => Check(probe, new byte[] { 0x90 }), $"bytes that differ from the vector fail the run, switch {off ?? "unset"}");
+                    Assert.That(File.ReadAllBytes(path), Is.EqualTo(new byte[] { 0x91 }), $"switch {off ?? "unset"} rewrites nothing");
+                    File.Delete(path);
+                }
+
+                Environment.SetEnvironmentVariable(WriteVariable, "1");
+                Check(probe, new byte[] { 0x90 });
+                Assert.That(File.ReadAllBytes(path), Is.EqualTo(new byte[] { 0x90 }), "1 is the one way to write a vector");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable(WriteVariable, inherited);
+                if (File.Exists(path)) File.Delete(path);
+            }
+
+            Assert.That(Fingerprint(), Is.EqualTo(before), "no committed vector changed");
         }
     }
 }
