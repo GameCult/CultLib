@@ -87,7 +87,7 @@ assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
 // No entry exports a function that reads a payload around its schema, whatever it is called, wherever it is mounted: the
 // package-internal readers are loaded from the packed dist files by path and looked for by identity in every packed
 // entry (own names, 'default', and the members of any namespace or function export), and every exported function is
-// shown a MessagePack map and must not hand it back decoded. The only reader allowed is the schema-checked owner.
+// shown a MessagePack map and a slot record and must not hand either back decoded. The only reader allowed is the schema-checked owner.
 const path = require("node:path");
 const msgpack = require("@msgpack/msgpack");
 const dist = path.dirname(require.resolve("@gamecult/cultcache-ts"));
@@ -100,7 +100,8 @@ const internalReaders = new Map([
 for (const [name, reader] of internalReaders) assert.equal(typeof reader, "function", name + " was found in the packed package");
 const inspection = require("@gamecult/cultcache-ts/inspection");
 const entries = { root: cache, codecs: cache.codecs, document: documentEntry, inspection };
-const probePayload = msgpack.encode({ probe: 7 });
+// A map and a slot record (an array), each with the text its decoded form prints as: a reader of either shape gives itself away.
+const probes = [{ probe: 7 }, ["probe", 7]].map((value) => [msgpack.encode(value), JSON.stringify(value)]);
 const exportsOf = (entry) => {
   const found = [];
   const seen = new Set();
@@ -124,11 +125,13 @@ for (const [entryName, entry] of Object.entries(entries)) {
       assert.notEqual(value, reader, entryName + " entry exports " + name + " as " + where);
     }
     if (typeof value !== "function" || value === cache.decodeDocumentPayload) continue;
-    let shown;
-    try {
-      shown = JSON.stringify(value(probePayload), (_key, member) => (member instanceof Map ? Object.fromEntries(member) : member));
-    } catch { continue; }
-    assert.ok(!shown?.includes('"probe":7'), entryName + " entry exports " + where + ", which reads a payload without its schema");
+    for (const [probePayload, decodedText] of probes) {
+      let shown;
+      try {
+        shown = JSON.stringify(value(probePayload), (_key, member) => (member instanceof Map ? Object.fromEntries(member) : member));
+      } catch { continue; }
+      assert.ok(!shown?.includes(decodedText), entryName + " entry exports " + where + ", which reads a payload without its schema");
+    }
   }
 }
 assert.equal(typeof documentEntry.checkPayloadDepth, "undefined");
