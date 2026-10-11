@@ -72,8 +72,8 @@ namespace GameCult.Caching.Tests
         {
             "05", "ff", "ccc8", "cd0100", "ceb2d05e00", "d0ce", "d18000", "d280000000", "d38000000000000000",
             "cf0020000000000001", "cfffffffffffffffff", "cf8000000000000000", "d30020000000000001", "d3fffffffffffffff0",
-            // integers beyond 2^53 that a float32 slot must round once: past a tie, on a tie to even, on a tie to odd, negative
-            "d31000001000000001", "cf8000008000000001", "cf8000008000000000", "cf8000018000000000", "d3efffffe800000001", "d3effffff000000001",
+            // integers beyond 2^53 that a float32 slot must round once: past a tie, on a tie to even, on a tie to odd, an odd value just past exact, negative
+            "d31000001000000001", "cf8000008000000001", "cf8000008000000000", "cf8000018000000000", "cf8000010000000001", "cf8000010000000000", "d3efffffe800000001", "d3effffff000000001",
             "ca3fc00000", "cb3ff8000000000000", "cb401c000000000000", "cb7ff8000000000000", "ca7f800000", "ca7f800001", "cb7e37e43c8800759c",
             "cb47efffffe0000000", "cb3fb999999999999a", "ca3dcccccd", "cb8000000000000000",
             "c0", "c3", "a161", "c40100", "90", "80",
@@ -209,6 +209,8 @@ namespace GameCult.Caching.Tests
         [TestCase("float32", "cf8000008000000001", "43e0000020000000")]
         [TestCase("float32", "cf8000008000000000", "43e0000000000000")]
         [TestCase("float32", "cf8000018000000000", "43e0000040000000")]
+        [TestCase("float32", "cf8000010000000001", "43e0000020000000")]
+        [TestCase("float32", "cf8000010000000000", "43e0000020000000")]
         [TestCase("float64", "cf0020000000000001", "4340000000000000")]
         [TestCase("int64", "cf0020000000000001", "0020000000000001")]
         public void ReadsRoundExactlyAsTheReferenceDoes(string leaf, string value, string bitsHex)
