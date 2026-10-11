@@ -81,19 +81,19 @@ ruled and slots are not, so the slot rule is its own cut rather than a blocked s
   writer's slot is gone. (The schema id was left unchanged, so the migration report said `Kind=Exact`; with a
   changed id the documented drift path reports `IgnoredExtraSlots`, `CultCache.cs:840-924`, but writes back the
   same way.)
-- **U7. Rust today.** Probe `rs` (`cultcache-rs` at `aaf0d7f6`, payloads built with `rmpv`, decoded with
+- **U7. Rust at `aaf0d7f6`, before the union cuts.** Probe `rs` (`cultcache-rs` at `aaf0d7f6`, payloads built with `rmpv`, decoded with
   `rmp_serde::from_slice`): a serde enum's unknown variant is refused (`unknown variant 'Exploded'`); the C# arm
   shape `[0, [...]]` is refused (`expected variant identifier`); a non-nil value in a gap slot is skipped; a missing
   trailing slot is refused (`missing field 'added'`) unless the field is `#[cultcache(default)]`; an extra trailing
   slot is skipped (`cultcache-rs-derive/src/lib.rs`, the `IgnoredAny` loop after the slot loop). The derive
   accepts named structs only (`lib.rs:51-67`) and writes an empty member list into the catalog
   (`src/lib.rs:2706`).
-- **U8. TypeScript today.** No typed codec: with no `formatter` a document encodes as a MessagePack **map** of the
+- **U8. TypeScript at `aaf0d7f6`, before the union cuts.** No typed codec: with no `formatter` a document encodes as a MessagePack **map** of the
   zod-parsed object and decodes raw (`cult-cache.ts:679-692`; `@msgpack/msgpack` `encode({id:'d',version:7})` is
   `82 a2 69 64 ...`, a fixmap, where the reference writes an array); positional slots exist only in hand-written
   formatters (`test/cult-cache.test.ts:1263-1310`). P13 measured that a hand codec matches whichever encoding its
   author chose.
-- **U9. Python today.** `define_database_entry_type` (`packages/cultcache-py/src/cultcache_py/documents.py:185-276`)
+- **U9. Python at `aaf0d7f6`, before the union cuts.** `define_database_entry_type` (`packages/cultcache-py/src/cultcache_py/documents.py:185-276`)
   is a slot codec: gaps written `nil`, extra slots ignored, a missing slot defaulted or refused. No union codec.
 - **U10. The written contracts.** `cultcache-schema-compatibility.md:75-91` classifies "persisted slot is missing
   locally and can be ignored" as soft-migratable drift, reported as `IgnoredExtraSlots`;
@@ -248,6 +248,37 @@ by a lexical script (it can over-count; it does not under-count named fields). A
 So the stores the arm refusal can affect today are Aetheria's (A2-A4, none carrying an unknown arm) and
 StreamPixels' overlay catalog (C3, carrying no arm). Every other runtime's persisted enums are serde shapes that
 the opt-in derive leaves alone.
+
+## D. Payload depth bound (body at `c028c511`)
+
+One bound, 256 nested MessagePack arrays and maps, on read and on write (ruling
+`cultlib-gaps:ruling:payload-depth-limit-256`; prior art `docs/research/payload-depth-limit.md`). The C# reference
+landed in `ead5260c`, Python in `5618d8dd`, Rust in `c028c511`. TypeScript is not landed (spec
+`cultlib-gaps:cut_spec:cut-union-bounds-ts.r2`, blocked on question `cultlib-gaps:question:ts-payload-opaque-type`).
+
+| Runtime | Owner of the decision (constant and walker) | Doors routed through it |
+|---|---|---|
+| C# | `CultPayloadDepth.Check` (`src/GameCult.Caching.MessagePack/CultPayloadDepth.cs`), limit `CultMessagePackSecurity.MaximumPayloadDepth`. MessagePack's own graph counter is set to the same value as a backstop only. | Write: `CultDocumentMessagePackSerialization.SerializeUntyped`. Read: `DeserializeUntyped`. The cache store (`SerializePayload`/`DeserializePayload`), the directory store, `CultMesh` and single-file documents all call those two; C# has no separate raw-envelope or prepared-batch door. |
+| Rust | `cultcache_rs::check_payload_depth` and `MAX_PAYLOAD_DEPTH` (`packages/cultcache-rs/src/lib.rs`). | Read: `decode_payload` (get, list, `validate_envelope`/`put_envelope`, `finish_prepared_entry`). Write: `put`/`prepare_entry`/`prepare_entry_named` reach it through `finish_prepared_entry`, which decodes what it just encoded. Raw envelope: `put_raw_envelope`, the door CultMesh network puts use (`cultmesh-rs` `lib.rs`, two call sites). Prepared batch: `put_prepared_batch` via `require_payload_depth`. cultnet-rs: every free-form or skippable wire payload decodes through `cultcache_rs::decode_payload` (message decode in `contracts.rs`, `provider_session`, `media_stream_wire`, `replication`, `service_identity`). |
+| Python | `_refuse_past_depth_limit` and `MAX_PAYLOAD_DEPTH` (`packages/cultcache-py/src/cultcache_py/documents.py`); a msgpack `StackError` on read maps to the same error. | `DocumentDefinition.encode_payload` (write) and `decode_payload` (read). `CultCache.put`, `put_envelope`, `put_envelopes` and load-time hydration go through them; there is no raw-envelope door. cultmesh-py round trips call the same pair. |
+
+- **Doors deliberately not routed.** cultnet-rs `idunn_lifecycle_brake`, `provider_health_contracts` and
+  `runtime_authority_contracts` decode records whose positional array length is checked exactly before decoding. A
+  fixed shape has no undeclared slot to skip and no free-form content, so the derive's depth is its shape (commit
+  `84bb1e28`). The five media records have no length check and are held by the test instead. C# `CultCacheMessagePack.CreateCodec`
+  serialises member values and deserialises member types without the document guard, by design (codec comment); only
+  the document type goes through the guard.
+- **Forbidden writers.** No second walker and no second constant: a runtime's decoders, stores and wire layers call
+  the owner above, never re-count depth or restate 256. An added payload door routes through the owner or names
+  itself in the exact-length list.
+- **Shared path.** `tests/vectors/union-parity/` (`bounds-outcomes.msgpack`, `depth-*.msgpack`; table in its
+  `README.md`), written by the C# reference and held by `tests/GameCult.Caching.Tests/UnionParityVectorTests.cs` and
+  `PayloadDepthTests.cs`, `packages/cultcache-rs/tests/union_parity.rs`, `packages/cultcache-py/tests/test_union_parity.py`.
+- **Cut line.** `packages/cultnet-rs/tests/payload_depth.rs` and the `service_identity`/`cultmesh-rs` tests pin the
+  Rust wire doors. cultnet-py and cultmesh-py message and replication decoders call `msgpack.unpackb` directly and
+  are outside the Python cut; they hold only msgpack's own stack limit.
+- **Verification layer.** Vector held by each runtime's own suite (limit 256 accepted, 257 refused, skipped content
+  counted, non-recursive walk); Rust wire doors by the cultnet-rs test above.
 
 ## Rationale
 
