@@ -384,7 +384,7 @@ test("a union names itself, its arm and the field when an arm's slots are refuse
   assert.equal(node.encode(undefined as unknown as null), null);
   assert.throws(
     () => node.encode({ kind: "Nope" } as unknown as Node),
-    /^Error: Union Node: the value's kind is not one of its arms \(Box, Text, Use, Image\)\.$/u,
+    /^Error: Union Node: the value's kind is not one of its arms \(Box, Text, Use, Image, Wrap\)\.$/u,
   );
 });
 
@@ -872,7 +872,7 @@ test("the constructed values write the committed at-limit payload byte for byte,
   const entries: CultCacheEnvelope[] = [];
   const cache = CultCache.builder().withDocumentType(document).withGenericStore(memoryStore(entries)).build();
   await assert.rejects(() => cache.put(document, "past", pastLimitValue), CultCachePayloadDepthError);
-  assert.deepEqual(entries, [], "nothing reached the store");
+  assert.equal(entries.length, 0, "nothing reached the store");
   assert.equal(cache.get(document, "past"), undefined, "nothing is held in memory");
   await cache.put(document, "at", atLimitValue);
   assert.equal(entries.length, 1);
