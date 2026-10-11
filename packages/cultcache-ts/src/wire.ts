@@ -48,7 +48,7 @@ function putLength(length: number, parts: number[], fix: number, fixMax: number,
 }
 
 function put(node: unknown, parts: number[]): void {
-  if (node === null || node === undefined) parts.push(0xc0);
+  if (node === null) parts.push(0xc0);
   else if (typeof node === "boolean") parts.push(node ? 0xc3 : 0xc2);
   else if (typeof node === "bigint") putInt(node, parts);
   else if (typeof node === "number") {
@@ -78,7 +78,7 @@ export function readWire(payload: Uint8Array): unknown {
   let offset = 0;
 
   const take = (count: number): number => {
-    if (count < 0 || offset + count > payload.length) throw new Error("the MessagePack payload is truncated.");
+    if (offset + count > payload.length) throw new Error("the MessagePack payload is truncated.");
     offset += count;
     return offset - count;
   };
@@ -86,7 +86,6 @@ export function readWire(payload: Uint8Array): unknown {
   const string = (length: number): string => utf8Decoder.decode(payload.subarray(take(length), offset));
   const binary = (length: number): Uint8Array => payload.slice(take(length), offset);
   const array = (length: number): unknown[] => {
-    if (length > payload.length - offset) throw new Error("the MessagePack payload is truncated.");
     const out: unknown[] = [];
     for (let index = 0; index < length; index += 1) out.push(next());
     return out;

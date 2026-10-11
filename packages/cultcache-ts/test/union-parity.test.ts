@@ -573,6 +573,63 @@ test("numeric leaves write the bytes the C# reference reads back unchanged, and 
   assert.equal(wide.decode(readWire(writeWire(wide.encode({ v: 2n })))).v, 2, "a bigint that fits comes back a number");
 });
 
+test("the wire writer's width boundaries: where a length or an integer changes its header", () => {
+  assert.equal(hex(writeWire(0)), "00");
+  assert.equal(hex(writeWire("a".repeat(31))).slice(0, 2), "bf");
+  assert.equal(hex(writeWire("a".repeat(32))).slice(0, 4), "d920");
+  assert.equal(hex(writeWire("a".repeat(255))).slice(0, 4), "d9ff");
+  assert.equal(hex(writeWire("a".repeat(256))).slice(0, 6), "da0100");
+  assert.equal(hex(writeWire("a".repeat(65535))).slice(0, 6), "daffff");
+  assert.equal(hex(writeWire("a".repeat(65536))).slice(0, 10), "db00010000");
+  assert.equal(hex(writeWire(new Uint8Array(1))), "c40100");
+  assert.equal(hex(writeWire(new Uint8Array(256))).slice(0, 6), "c50100");
+  assert.equal(hex(writeWire(new Uint8Array(65536))).slice(0, 10), "c600010000");
+  assert.equal(hex(writeWire(new Array(15).fill(null))), `9f${"c0".repeat(15)}`);
+  assert.equal(hex(writeWire(new Array(65535).fill(null))).slice(0, 6), "dcffff");
+  assert.equal(hex(writeWire(new Array(65536).fill(null))).slice(0, 10), "dd00010000");
+  assert.throws(() => writeWire(-(2n ** 63n) - 1n), { message: "cannot write an integer wider than 64 bits." });
+  assert.throws(() => writeWire(undefined), /this kind of value/u);
+  assert.equal(hex(writeWire(-(2n ** 63n))), "d38000000000000000");
+});
+
+test("the wire reader's boundaries: the largest fixarray, the 32-bit binary and string, the safe integer edge", () => {
+  assert.deepEqual(readWire(fromHex(`9f${"c0".repeat(15)}`)), new Array(15).fill(null));
+  assert.deepEqual(readWire(fromHex("c600000001aa")), new Uint8Array([0xaa]));
+  assert.equal(readWire(fromHex("db0000000161")), "a");
+  assert.equal(readWire(fromHex("d3ffe0000000000001")), -(2 ** 53 - 1));
+  assert.equal(readWire(fromHex("d3ffe0000000000000")), -(2n ** 53n));
+  assert.equal(readWire(fromHex("cf0020000000000000")), 2n ** 53n);
+});
+
+test("a refusal says what was found: nil, a float, an integer that is not the slot's, a plain kind", () => {
+  assert.throws(() => int32.encode(undefined as unknown as number), { message: "expected an int32, found nil" });
+  assert.throws(() => string.decode(new WireFloat(1, true)), { message: "expected a string, found float" });
+  assert.throws(() => string.decode(5n), { message: "expected a string, found integer" });
+  assert.throws(() => int32.decode(new WireFloat(7, true)), { message: "expected an int32, found float" });
+  assert.throws(() => float64.decode("1"), { message: "expected a float64, found string" });
+  assert.throws(() => int64.encode(1.5), { message: "expected an int64, found a non-integer number" });
+});
+
+test("nullable names a value type Nullable<T> and anything else as itself", () => {
+  assert.equal(nullable(boolean).typeName, "System.Nullable<System.Boolean>");
+  assert.equal(nullable(int64).typeName, "System.Nullable<System.Int64>");
+  assert.equal(nullable(float32).typeName, "System.Nullable<System.Single>");
+  assert.equal(nullable(float64).typeName, "System.Nullable<System.Double>");
+  assert.equal(nullable(bytes).typeName, "System.Byte[]");
+  const unnamedValueType: Codec<number> = { valueType: true, encode: (value) => value, decode: (raw) => raw as number };
+  assert.equal(nullable(unnamedValueType).typeName, undefined);
+  assert.equal(lazy(() => int32).valueType, true);
+});
+
+test("the Int32 edges of an arm key: the largest is an arm, one past either end is outside", () => {
+  const edge = union<{ kind: "A" }>("U", { 2147483647: ["A", unit] });
+  assert.deepEqual(edge.decode(readWire(fromHex("92ce7fffffff90"))), { kind: "A" });
+  assert.deepEqual(edge.encode({ kind: "A" }), [2147483647, []]);
+  assert.throws(() => edge.decode(readWire(fromHex("92ce8000000090"))), { message: "Union U: the arm key is outside Int32 (declared keys: 2147483647)." });
+  assert.throws(() => edge.decode(readWire(fromHex("92d3ffffffff7fffffff90"))), { message: "Union U: the arm key is outside Int32 (declared keys: 2147483647)." });
+  assert.throws(() => edge.decode(readWire(fromHex("92d3ffffffff8000000090"))), { message: "Union U: unknown arm key -2147483648 (declared keys: 2147483647)." });
+});
+
 function envelopeOf(payload: Uint8Array): CultCacheEnvelope {
   return { key: "surface", type: "tests.union_surface", payload, storedAt: new Date().toISOString() };
 }
