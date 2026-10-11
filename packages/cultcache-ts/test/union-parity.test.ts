@@ -8,6 +8,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { codecs } from "../src";
+import type { Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
@@ -43,7 +44,7 @@ interface Surface {
 }
 
 const composition = slots<Composition>({ 0: ["name", string], 1: ["body", lazy(() => node)] });
-const node = union<Node>("Node", {
+const node: Codec<Node | null> = union<Node>("Node", {
   0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
   1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
   2: ["Use", slots<{ id: string; composition: Composition; slots: (Node | null)[] }>({

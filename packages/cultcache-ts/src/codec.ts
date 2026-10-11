@@ -158,9 +158,12 @@ export function slots<TValue extends object>(spec: SlotsSpec<TValue>): SlotsCode
 }
 
 // An arm with no slots. It is written [key, []], never [key, nil].
-export const unit = Symbol("cultcache.unit-arm");
+export interface UnitArm {
+  readonly unit: true;
+}
+export const unit: UnitArm = Object.freeze({ unit: true });
 
-type ArmSpec<TKind extends string> = readonly [armName: TKind, body: SlotsCodec<any> | typeof unit];
+type ArmSpec<TKind extends string> = readonly [armName: TKind, body: SlotsCodec<any> | UnitArm];
 
 // A tagged union written [armKey, [armSlots...]]. The reader refuses an undeclared key, naming the union, the key and
 // the declared keys; there is no fallback arm.
@@ -172,14 +175,14 @@ export function union<TValue extends { kind: string }>(
   if (keys.length === 0) {
     throw new Error(`Union ${name} declares no arms.`);
   }
-  const byKey = new Map<number, { armName: string; body: SlotsCodec<any> | typeof unit }>();
+  const byKey = new Map<number, { armName: string; body: SlotsCodec<any> | UnitArm }>();
   const byName = new Map<string, number>();
   for (const key of keys) {
     const [armName, body] = arms[key];
     if (byName.has(armName)) {
       throw new Error(`Union ${name} declares the arm "${armName}" twice.`);
     }
-    if (body !== unit && body.names.includes("kind")) {
+    if (body !== unit && (body as SlotsCodec<any>).names.includes("kind")) {
       throw new Error(`Union ${name} arm "${armName}" declares a slot named kind, which is the union's own tag.`);
     }
     byKey.set(key, { armName, body });
@@ -197,7 +200,7 @@ export function union<TValue extends { kind: string }>(
         throw new Error(`Union ${name}: the value's kind is not one of its arms (${[...byName.keys()].join(", ")}).`);
       }
       const { armName, body } = byKey.get(key)!;
-      return [key, body === unit ? [] : at(`arm ${armName}`, () => body.encode(value))];
+      return [key, body === unit ? [] : at(`arm ${armName}`, () => (body as SlotsCodec<any>).encode(value))];
     },
     decode(raw) {
       if (raw === null) {
