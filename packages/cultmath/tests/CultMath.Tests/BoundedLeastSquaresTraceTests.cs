@@ -23,7 +23,10 @@ public sealed class BoundedLeastSquaresTraceTests
         foreach (var c in BlsTrace.Cases())
         {
             Assert.True(BlsBaseTraces.Expected.TryGetValue(c.Name, out var expected), $"{c.Name}: no base trace");
-            Assert.Equal(Normal(expected!), WithoutFreeViolated(BlsTrace.Trace(c)));
+            var trace = BlsTrace.Trace(c);
+            Assert.Equal(Normal(expected!), WithoutFreeViolated(trace));
+            var free = string.Join("\n", trace.Split('\n').Where(l => l.StartsWith("FreeViolated ", StringComparison.Ordinal)));
+            Assert.Equal(Normal(BlsBaseTraces.FreeViolatedLines.GetValueOrDefault(c.Name, "")), free);
         }
         Assert.Equal(BlsTrace.Cases().Count(), BlsBaseTraces.Expected.Count);
     }
