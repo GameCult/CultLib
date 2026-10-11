@@ -14,6 +14,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
+import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+
 import {
   canonicalRoute,
   type CultMeshAuthorityRouteView,
@@ -154,7 +156,7 @@ function testFrame(overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshReal
     producerEpoch: 7n,
     sequence: 1n,
     delivery: "latest-only",
-    payload: new Uint8Array([3, 4, 5]),
+    payload: documentPayloadFromBytes(new Uint8Array([3, 4, 5])),
     ...overrides,
   };
 }

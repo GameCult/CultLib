@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createSocket } from "node:dgram";
-import { decode } from "@msgpack/msgpack";
+import { documentPayloadBytes } from "@gamecult/cultcache-ts";
+import { decodeWireValue } from "cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
   CultNetRudpSession,
@@ -46,7 +47,7 @@ test("RUDP provider transport requires broker acceptance for the full lifecycle"
       session.connectPayload !== undefined
       && decodeProviderConnectEvidence(session.connectPayload).sessionToken === "signed-provider-token",
     acceptPublication: (_identity, publicationId, document) => {
-      accepted.set(publicationId, decode(document.payload));
+      accepted.set(publicationId, decodeWireValue(documentPayloadBytes(document.payload)));
       acceptedProvenance.set(publicationId, {
         runtime: document.sourceRuntimeId,
         agent: document.sourceAgentId,

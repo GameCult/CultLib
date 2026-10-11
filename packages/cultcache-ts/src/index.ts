@@ -1,6 +1,16 @@
+export * as codecs from "./codec";
+export type { Codec, SlotsCodec } from "./codec";
 export { CultCache, CultCacheBuilder } from "./cult-cache";
 export { inspectCultCacheBytes } from "./cult-cache-inspector";
-export { defineDocumentRegistry, defineDocumentType } from "./document";
+export {
+  decodeDocumentPayload,
+  defineDocumentRegistry,
+  defineDocumentType,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  encodeDocumentPayload,
+} from "./document";
+export type { DocumentPayload } from "./document";
 export { SingleFileMessagePackBackingStore } from "./single-file-messagepack-backing-store";
 export type {
   AnyCultCacheDocumentDefinition,

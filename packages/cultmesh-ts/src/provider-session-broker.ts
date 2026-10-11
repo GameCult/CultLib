@@ -1,4 +1,5 @@
-import { encode } from "@msgpack/msgpack";
+import { encodeDocumentPayload } from "@gamecult/cultcache-ts";
+import { encodeWireValue } from "cultnet-ts/wire";
 import type {
   CultNetDocumentPutRawMessage,
   CultNetOperationRequestMessage,
@@ -13,6 +14,7 @@ import {
   cultMeshProviderSessionSchemas,
   decodeProviderSessionPayload,
   encodeProviderSessionPayload,
+  providerCommandDocument,
   type CultMeshProviderCommandReceiptWire,
   type CultMeshProviderCommandWire,
   type CultMeshProviderLeaseRenewalWire,
@@ -420,7 +422,7 @@ export class CultMeshProviderSessionBroker {
         recordKey: `${command.providerId}/${command.serviceInstanceId}/${command.commandId}`,
         storedAt: this.#clock.now().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encode(command),
+        payload: encodeDocumentPayload(providerCommandDocument, command),
         sourceRuntimeId: this.#options.runtimeId,
         sourceRole: "provider-session-broker",
       },
@@ -513,7 +515,7 @@ function documentTuple(document: Pick<CultNetRawDocumentRecord, "schemaId" | "re
 }
 
 function wireEquivalent(left: unknown, right: unknown): boolean {
-  return Buffer.from(encode(left)).equals(Buffer.from(encode(right)));
+  return Buffer.from(encodeWireValue(left)).equals(Buffer.from(encodeWireValue(right)));
 }
 
 function publicationEntries(record: LeaseRecord): readonly {

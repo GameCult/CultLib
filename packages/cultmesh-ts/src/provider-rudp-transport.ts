@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createSocket, type Socket } from "node:dgram";
-import { encode } from "@msgpack/msgpack";
+import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+import { encodeWireValue } from "cultnet-ts/wire";
 import {
   CultNetPeer,
   CultNetRudpSocketTransportConnection,
@@ -171,7 +172,9 @@ class RudpProviderConnection implements CultMeshProviderConnection {
       recordKey: publication.recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack",
-      payload: encode(publication.value),
+      // The one plain writer of a document payload: a publication carries no definition. The typed owner of this write is
+      // cultlib-gaps:follow_up:document-payload-encode-owner.
+      payload: documentPayloadFromBytes(encodeWireValue(publication.value)),
       sourceRuntimeId: this.#identity.serviceInstanceId,
       sourceAgentId: this.#identity.providerId,
       sourceRole: "provider",

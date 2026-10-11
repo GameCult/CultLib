@@ -78,9 +78,16 @@ try {
   writeFileSync(join(consumerRoot, "runtime-smoke.cjs"), `
 const assert = require("node:assert/strict");
 const cache = require("@gamecult/cultcache-ts");
+const documentEntry = require("@gamecult/cultcache-ts/document");
 const net = require("cultnet-ts");
 const mesh = require("cultmesh-ts");
 assert.equal(typeof cache.defineDocumentType, "function");
+// The document owner is also an entry of its own, which the browser client imports without the Node-only cache.
+assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
+assert.equal("resolveDocumentFormatter" in cache, false);
+assert.equal("resolveDocumentFormatter" in documentEntry, false);
+assert.equal("codecFormatter" in cache.codecs, false);
+assert.equal("codecFormatter" in documentEntry, false);
 assert.equal(typeof net.CultNetPeer, "function");
 assert.equal(typeof mesh.CultMesh, "function");
 assert.equal(typeof mesh.CultMeshProviderSession, "function");
@@ -101,6 +108,7 @@ assert.equal("putDocument" in CultMeshBrowserClient.prototype, false);
 
   writeFileSync(join(consumerRoot, "types-smoke.ts"), `
 import { defineDocumentType } from "@gamecult/cultcache-ts";
+import { decodeDocumentPayload, type DocumentPayload } from "@gamecult/cultcache-ts/document";
 import { CultNetPeer } from "cultnet-ts";
 import {
   CultMesh,
@@ -112,6 +120,8 @@ import {
 
 const point: CultMeshVec2 = CultMesh.vec2(3, 4);
 const defineDocument: typeof defineDocumentType = defineDocumentType;
+const decodeOwner: typeof decodeDocumentPayload = decodeDocumentPayload;
+let opaque: DocumentPayload | undefined;
 const peerType: typeof CultNetPeer = CultNetPeer;
 const providerSessionType: typeof CultMeshProviderSession = CultMeshProviderSession;
 const providerIdentity: CultMeshProviderIdentity = {
@@ -123,6 +133,8 @@ const providerIdentity: CultMeshProviderIdentity = {
 let providerTransport: CultMeshProviderTransport | undefined;
 void point;
 void defineDocument;
+void decodeOwner;
+void opaque;
 void peerType;
 void providerSessionType;
 void providerIdentity;
@@ -142,6 +154,7 @@ void providerTransport;
   ], { cwd: consumerRoot, stdio: "inherit" });
 
   writeFileSync(join(consumerRoot, "browser-types-smoke.mts"), `
+import { decodeDocumentPayload } from "@gamecult/cultcache-ts/document";
 import {
   CultMeshBrowserClient,
   type CultMeshBrowserIdentity,
@@ -157,9 +170,11 @@ const lease: CultMeshRawDocumentLeaseOptions = {
   recordKey: "smoke:main",
 };
 const clientType: typeof CultMeshBrowserClient = CultMeshBrowserClient;
+const decodeOwner: typeof decodeDocumentPayload = decodeDocumentPayload;
 void identity;
 void lease;
 void clientType;
+void decodeOwner;
 `);
   execFileSync(process.execPath, [
     tsc,
@@ -170,6 +185,29 @@ void clientType;
     "--moduleResolution", "NodeNext",
     "--skipLibCheck",
     "browser-types-smoke.mts",
+  ], { cwd: consumerRoot, stdio: "inherit" });
+
+  // The formatter that reads a payload around its schema is in no entry: importing it from the document entry does not compile.
+  writeFileSync(join(consumerRoot, "formatter-refused.mts"), `
+// @ts-expect-error resolveDocumentFormatter is not exported from the document entry
+import { resolveDocumentFormatter } from "@gamecult/cultcache-ts/document";
+void resolveDocumentFormatter;
+import { codecs } from "@gamecult/cultcache-ts";
+// @ts-expect-error codecFormatter is not exported from the document entry
+import { codecFormatter } from "@gamecult/cultcache-ts/document";
+void codecFormatter;
+// @ts-expect-error codecFormatter is not a member of the root's codecs namespace
+void codecs.codecFormatter;
+`);
+  execFileSync(process.execPath, [
+    tsc,
+    "--noEmit",
+    "--strict",
+    "--target", "ES2022",
+    "--module", "NodeNext",
+    "--moduleResolution", "NodeNext",
+    "--skipLibCheck",
+    "formatter-refused.mts",
   ], { cwd: consumerRoot, stdio: "inherit" });
 
   console.log("TypeScript package closure smoke: passed");

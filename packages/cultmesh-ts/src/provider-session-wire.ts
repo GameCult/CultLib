@@ -1,4 +1,5 @@
-import { decode, encode } from "@msgpack/msgpack";
+import { decodeDocumentPayload, defineDocumentType } from "@gamecult/cultcache-ts";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import type { CultNetRawDocumentRecord } from "cultnet-ts";
 
 export const CULTMESH_PROVIDER_SESSION_SERVICE_ID = "gamecult.mesh.provider_session";
@@ -120,27 +121,27 @@ export interface CultMeshProviderMutationAcceptanceWire {
 }
 
 export function encodeProviderSessionPayload(value: unknown): string {
-  return Buffer.from(encode(value)).toString("base64");
+  return Buffer.from(encodeWireValue(value)).toString("base64");
 }
 
 export function decodeProviderSessionPayload<T>(payload: string): T {
   if (typeof payload !== "string" || payload.length === 0) {
     throw new Error("CultMesh provider-session payload must be non-empty MessagePack base64.");
   }
-  return decode(Buffer.from(payload, "base64")) as T;
+  return decodeWireValue(Buffer.from(payload, "base64")) as T;
 }
 
 export function encodeProviderConnectEvidence(
   evidence: CultMeshProviderConnectEvidenceWire,
 ): Uint8Array {
   assertProviderConnectEvidence(evidence);
-  return encode(evidence);
+  return encodeWireValue(evidence);
 }
 
 export function decodeProviderConnectEvidence(
   payload: Uint8Array,
 ): CultMeshProviderConnectEvidenceWire {
-  const evidence = decode(payload) as unknown;
+  const evidence = decodeWireValue(payload) as unknown;
   assertProviderConnectEvidence(evidence);
   return evidence;
 }
@@ -155,6 +156,23 @@ export function assertProviderConnectEvidence(
   }
 }
 
+// The provider command is a CultCache document like any other: written with encodeDocumentPayload and read with
+// decodeDocumentPayload, so its bytes never pass through a plain decoder.
+export const providerCommandDocument = defineDocumentType({
+  type: cultMeshProviderSessionSchemas.command,
+  schemaId: cultMeshProviderSessionSchemas.command,
+  schema: {
+    parse(value: unknown): CultMeshProviderCommandWire {
+      const command = requireObject(value, "provider command");
+      requireText(command.commandId, "commandId");
+      requireText(command.commandKind, "commandKind");
+      requireText(command.providerId, "providerId");
+      requireText(command.serviceInstanceId, "serviceInstanceId");
+      return command as unknown as CultMeshProviderCommandWire;
+    },
+  },
+});
+
 export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord): CultMeshProviderCommandWire {
   if (document.schemaId !== cultMeshProviderSessionSchemas.command) {
     throw new Error(`Expected ${cultMeshProviderSessionSchemas.command}, received ${document.schemaId}.`);
@@ -162,12 +180,7 @@ export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord
   if (document.payloadEncoding !== "messagepack") {
     throw new Error(`Provider command ${document.recordKey} must use MessagePack.`);
   }
-  const command = decode(document.payload) as Partial<CultMeshProviderCommandWire>;
-  requireText(command.commandId, "commandId");
-  requireText(command.commandKind, "commandKind");
-  requireText(command.providerId, "providerId");
-  requireText(command.serviceInstanceId, "serviceInstanceId");
-  return command as CultMeshProviderCommandWire;
+  return decodeDocumentPayload(providerCommandDocument, document.payload);
 }
 
 export function assertProviderLease(value: unknown): asserts value is CultMeshProviderLeaseWire {

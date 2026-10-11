@@ -15,6 +15,7 @@
 // the same C# test decodes. A fixture authored on one side alone would only
 // agree with itself.
 
+import { documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
 import { isNullOrWhiteSpaceCSharp } from "cultnet-ts";
 
 /** `CultMeshRealtimeWireProtocol.ApplicationProtocolName`: the QUIC ALPN. */
@@ -55,7 +56,7 @@ export interface CultMeshRealtimeFrame {
   producerEpoch: bigint;
   sequence: bigint;
   delivery: CultMeshRealtimeDelivery;
-  payload: Uint8Array;
+  payload: DocumentPayload;
 }
 
 const MAGIC = 0x31545343;
@@ -123,7 +124,7 @@ export function encodeRealtimeFrame(frame: CultMeshRealtimeFrame): Uint8Array {
   result.set(channel, offset); offset += channel.byteLength;
   result.set(schema, offset); offset += schema.byteLength;
   result.set(body, offset); offset += body.byteLength;
-  result.set(frame.payload, offset);
+  result.set(documentPayloadBytes(frame.payload), offset);
   return result;
 }
 
@@ -186,6 +187,6 @@ export function decodeRealtimeFrame(bytes: Uint8Array): CultMeshRealtimeFrame {
     // would compare equal or not depending on how it reached the decoder.
     //
     // The constructor copies and is the one type on both inputs.
-    payload: new Uint8Array(bytes.subarray(offset, offset + payloadLength)),
+    payload: documentPayloadFromBytes(new Uint8Array(bytes.subarray(offset, offset + payloadLength))),
   };
 }

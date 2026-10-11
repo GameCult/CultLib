@@ -15,6 +15,11 @@
       "require": "./dist/contracts.js",
       "default": "./dist/contracts.js"
     },
+    "./wire": {
+      "types": "./dist/wire-value.d.ts",
+      "require": "./dist/wire-value.js",
+      "default": "./dist/wire-value.js"
+    },
     "./idunn-runtime": {
       "types": "./dist/idunn-runtime-authority.d.ts",
       "require": "./dist/idunn-runtime-authority.js",

@@ -103,6 +103,15 @@ jobs:
       # Linux at all, and the browser client's never ran in CI on any OS.
       # packages/cultnet-ts verifies both vector files; cultmesh-browser proves
       # the browser client reads the shared rules rather than its own.
+      # No workflow ran cultcache-ts's tests, and its test script listed two files by hand while a third sat compiled
+      # and unrun. The wiring check fails when any TypeScript test file is run by no script, and the cache's own suite
+      # runs here beside the packages built on it.
+      - name: Check that every TypeScript test file is run by its package
+        run: node scripts/check-typescript-tests-wired.mjs
+
+      - name: Verify the CultCache document owner with the TypeScript cache
+        run: npm run test --workspace packages/cultcache-ts
+
       - name: Verify the CultMesh authority rules with the TypeScript verifier
         run: npm run test --workspace packages/cultnet-ts
 

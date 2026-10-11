@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
+import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { STORE_FORMAT_VERSION, isV1Snapshot, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -62,7 +63,7 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
           type: catalogEntry.schemaName,
           schemaId: record.schemaId,
           catalogEntry,
-          payload: record.payload,
+          payload: documentPayloadFromBytes(record.payload),
           storedAt: record.storedAt,
         };
       });
@@ -82,7 +83,10 @@ export class SingleFileMessagePackBackingStore implements CacheBackingStore {
           payload,
         };
       });
-      const parsed = envelopeArraySchema.parse(normalized) as CultCacheEnvelope[];
+      const parsed: CultCacheEnvelope[] = envelopeArraySchema.parse(normalized).map((entry) => ({
+        ...entry,
+        payload: documentPayloadFromBytes(entry.payload),
+      }));
 
       if (repairedLegacyPayload) {
         await this.#writeAll(parsed);
@@ -232,7 +236,7 @@ function encodeSnapshot(entries: CultCacheEnvelope[]): unknown[] {
       entry.key,
       schemaIdForEnvelope(entry),
       entry.storedAt,
-      entry.payload,
+      documentPayloadBytes(entry.payload),
     ]);
 
   return [

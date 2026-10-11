@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { documentPayloadFromBytes } from "@gamecult/cultcache-ts/document";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
@@ -278,7 +279,7 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
         recordKey: expected.target,
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: new Uint8Array(signed.payload),
+        payload: documentPayloadFromBytes(new Uint8Array(signed.payload)),
         sourceRuntimeId: expected.runtimeId,
         sourceRole: "runtime-presence-health-publisher",
         tags: ["cultnet.transport.rudp.v0", "runtime-presence"],

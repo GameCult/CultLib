@@ -16,6 +16,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+
 import {
   CULTMESH_REALTIME_ALPN,
   CULTMESH_REALTIME_CONNECTION_CLOSE_CODE,
@@ -89,7 +91,7 @@ function frameOf(fields: VectorFields): CultMeshRealtimeFrame {
     producerEpoch: 0n,
     sequence: 0n,
     delivery: fields.delivery,
-    payload: payload(fields.payload),
+    payload: documentPayloadFromBytes(payload(fields.payload)),
   };
 }
 
@@ -175,7 +177,7 @@ const sample = (overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshRealtim
   producerEpoch: 1n,
   sequence: 2n,
   delivery: "reliable-ordered",
-  payload: Uint8Array.from([1, 2, 3]),
+  payload: documentPayloadFromBytes(Uint8Array.from([1, 2, 3])),
   ...overrides,
 });
 
@@ -199,7 +201,7 @@ test("the fixed header is 37 little-endian bytes in the reference's order", () =
   const encoded = encodeRealtimeFrame(sample({
     channelId: "ch", schemaId: "sch", bodyId: "bdy",
     producerEpoch: 0x0102030405060708n, sequence: 0x1112131415161718n,
-    delivery: "unreliable", payload: Uint8Array.from([0xaa]),
+    delivery: "unreliable", payload: documentPayloadFromBytes(Uint8Array.from([0xaa])),
   }));
   const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
   assert.equal(view.getUint32(0, true), 0x31545343, "magic, little-endian");
@@ -258,11 +260,11 @@ test("an identity of exactly 65535 UTF-8 bytes encodes and one byte more is refu
 });
 
 test("a payload at the 64 MiB ceiling encodes and one byte more is refused", () => {
-  const encoded = encodeRealtimeFrame(sample({ payload: ramp(CULTMESH_REALTIME_MAX_PAYLOAD_BYTES) }));
+  const encoded = encodeRealtimeFrame(sample({ payload: documentPayloadFromBytes(ramp(CULTMESH_REALTIME_MAX_PAYLOAD_BYTES)) }));
   assert.equal(encoded.byteLength, 37 + 15 + 20 + 6 + CULTMESH_REALTIME_MAX_PAYLOAD_BYTES);
   assert.equal(decodeRealtimeFrame(encoded).payload.byteLength, CULTMESH_REALTIME_MAX_PAYLOAD_BYTES);
   assert.throws(
-    () => encodeRealtimeFrame(sample({ payload: new Uint8Array(CULTMESH_REALTIME_MAX_PAYLOAD_BYTES + 1) })),
+    () => encodeRealtimeFrame(sample({ payload: documentPayloadFromBytes(new Uint8Array(CULTMESH_REALTIME_MAX_PAYLOAD_BYTES + 1)) })),
     /payload exceeds the QUIC wire limit/,
   );
 });
@@ -363,16 +365,16 @@ test("decode refuses a negative payload length that the length sum cancels out",
 });
 
 test("decode reads exactly the viewed bytes of an offset view, not the buffer behind it", () => {
-  const good = encodeRealtimeFrame(sample({ payload: Uint8Array.from([9, 8, 7]) }));
+  const good = encodeRealtimeFrame(sample({ payload: documentPayloadFromBytes(Uint8Array.from([9, 8, 7])) }));
   const pool = new Uint8Array(good.byteLength + 64).fill(0xa5);
   pool.set(good, 17);
   const view = pool.subarray(17, 17 + good.byteLength);
-  assert.deepEqual(decodeRealtimeFrame(view).payload, Uint8Array.from([9, 8, 7]));
+  assert.deepEqual(documentPayloadBytes(decodeRealtimeFrame(view).payload), Uint8Array.from([9, 8, 7]));
   assert.equal(decodeRealtimeFrame(view).channelId, "aetheria.zone-1");
   // And the decoded payload does not alias the frame it came from.
   const decoded = decodeRealtimeFrame(good);
   good[good.byteLength - 1] = 0;
-  assert.deepEqual(decoded.payload, Uint8Array.from([9, 8, 7]));
+  assert.deepEqual(documentPayloadBytes(decoded.payload), Uint8Array.from([9, 8, 7]));
 });
 
 // The `Uint8Array` case above passes with a plain `bytes.slice(...)`; this one
@@ -380,12 +382,12 @@ test("decode reads exactly the viewed bytes of an offset view, not the buffer be
 // `Buffer` is what a socket read hands a Node caller, so the aliasing bug this
 // pins is the one that would actually reach a consumer.
 test("the decoded payload copies out of a Node Buffer too, which overrides slice", () => {
-  const frame = Buffer.from(encodeRealtimeFrame(sample({ payload: Uint8Array.from([9, 8, 7]) })));
+  const frame = Buffer.from(encodeRealtimeFrame(sample({ payload: documentPayloadFromBytes(Uint8Array.from([9, 8, 7])) })));
   const decoded = decodeRealtimeFrame(frame);
   frame[frame.byteLength - 1] = 0;
-  assert.deepEqual(decoded.payload, Uint8Array.from([9, 8, 7]), "payload unchanged by a later write to the frame");
-  assert.equal(Buffer.isBuffer(decoded.payload), false, "the copy is a plain Uint8Array, not a Buffer");
-  assert.notEqual(decoded.payload.buffer, frame.buffer, "the copy has its own backing store");
+  assert.deepEqual(documentPayloadBytes(decoded.payload), Uint8Array.from([9, 8, 7]), "payload unchanged by a later write to the frame");
+  assert.equal(Buffer.isBuffer(documentPayloadBytes(decoded.payload)), false, "the copy is a plain Uint8Array, not a Buffer");
+  assert.notEqual(documentPayloadBytes(decoded.payload).buffer, frame.buffer, "the copy has its own backing store");
   // The three identities need no such check: `TextDecoder` returns strings, which
   // hold no reference to the bytes they were decoded from.
   assert.equal(decoded.channelId, "aetheria.zone-1");
