@@ -567,7 +567,10 @@ fn through_cache(payload: &[u8]) -> Result<UnionSurface, String> {
             schema_id: None,
         })
         .unwrap();
-    cache.get::<UnionSurface>("k").map_err(|error| format!("{error:#}"))
+    match cache.get::<UnionSurface>("k") {
+        Ok(value) => Ok(value.expect("the envelope was stored")),
+        Err(error) => Err(format!("{error:#}")),
+    }
 }
 
 #[test]
