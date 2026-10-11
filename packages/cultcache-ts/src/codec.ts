@@ -49,10 +49,20 @@ export const boolean: Codec<boolean> = {
   decode: (raw) => (expect(raw, "a boolean", typeof raw === "boolean"), raw as boolean),
 };
 
+// The reference's byte[] reads a MessagePack str as its bytes and writes bin (an old-spec writer's output), so a str is
+// accepted and re-encodes as bin. The wire reader has already decoded the str, so a str that held invalid UTF-8 (it
+// reads back U+FFFD) is refused rather than turned into other bytes.
 export const bytes: Codec<Uint8Array> = {
   typeName: "System.Byte[]",
   encode: (value) => (expect(value, "bytes", value instanceof Uint8Array), value),
-  decode: (raw) => (expect(raw, "bytes", raw instanceof Uint8Array), raw as Uint8Array),
+  decode(raw) {
+    if (typeof raw === "string") {
+      if (raw.includes("�")) refuse("bytes", "a string that is not valid UTF-8");
+      return new TextEncoder().encode(raw);
+    }
+    expect(raw, "bytes", raw instanceof Uint8Array);
+    return raw as Uint8Array;
+  },
 };
 
 // A C# integer slot: written as the smallest MessagePack integer and read from any integer encoding in range. A float is
@@ -222,8 +232,10 @@ function pascalCase(name: string): string {
 }
 
 // A positional record: slot `key` holds field `name`. Gaps are written nil and skipped on read, extra trailing slots
-// are skipped, and a slot missing from the payload takes its declared default or is refused. A nil in a slot that
-// declares a default also takes the default (cultcache-py's rule).
+// are skipped, and a slot missing from the payload takes its declared default or is refused. A default fills only a
+// missing trailing slot, never a nil: as in the reference, a nil in a reference slot (string, bytes, record, union,
+// list) reads as null and writes back as nil, so a record the reference wrote re-encodes byte-identical, and a nil in
+// a value slot (int, float, bool) is refused unless the slot is nullable.
 export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?: string): SlotsCodec<TValue> {
   const keys = slotKeys(spec, "A slot record", 0, MAX_SLOT_KEY);
   if (keys.length === 0) {
@@ -259,8 +271,10 @@ export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?:
       expect(value, "a record", typeof value === "object" && value !== null);
       const out: unknown[] = new Array(length).fill(null);
       for (const field of fields) {
-        out[field.key] = at(`${field.name} (slot ${field.key})`, () =>
-          field.codec.encode((value as Record<string, unknown>)[field.name]));
+        const member = (value as Record<string, unknown>)[field.name];
+        out[field.key] = member === null && !field.codec.valueType
+          ? null
+          : at(`${field.name} (slot ${field.key})`, () => field.codec.encode(member));
       }
       return out;
     },
@@ -269,13 +283,15 @@ export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?:
       const input = raw as unknown[];
       const out: Record<string, unknown> = {};
       for (const field of fields) {
-        const present = field.key < input.length && !(input[field.key] === null && field.hasDefault);
+        const present = field.key < input.length;
         if (!present && !field.hasDefault) {
           throw new Error(`${field.name} (slot ${field.key}): the slot is missing and declares no default.`);
         }
-        out[field.name] = present
-          ? at(`${field.name} (slot ${field.key})`, () => field.codec.decode(input[field.key]))
-          : defaultOf(field);
+        out[field.name] = !present
+          ? defaultOf(field)
+          : input[field.key] === null && !field.codec.valueType
+            ? null
+            : at(`${field.name} (slot ${field.key})`, () => field.codec.decode(input[field.key]));
       }
       return out as TValue;
     },

@@ -290,16 +290,20 @@ test("slots: a gap writes nil, a missing slot reads its default, one without a d
   const record = slots<{ a: string; c: string; d: number }>({ 0: ["a", string], 2: ["c", string], 4: ["d", int32, 9] });
   assert.deepEqual(record.encode({ a: "x", c: "y", d: 1 }), ["x", null, "y", null, 1]);
   assert.deepEqual(record.decode(["x", null, "y"]), { a: "x", c: "y", d: 9 });
-  assert.deepEqual(record.decode(["x", 5, "y", null, null]), { a: "x", c: "y", d: 9 });
+  assert.deepEqual(record.decode(["x", 5, "y", null]), { a: "x", c: "y", d: 9 });
+  assert.throws(() => record.decode(["x", 5, "y", null, null]), { message: "d (slot 4): expected an int32, found nil" });
   assert.throws(() => record.decode(["x"]), /c \(slot 2\): the slot is missing and declares no default/u);
   assert.deepEqual(record.decode(["x", null, "y", null, 1, "extra", "slots"]), { a: "x", c: "y", d: 1 });
   assert.throws(() => record.decode({ a: "x" }), /expected an array of slots/u);
 });
 
-test("slots: a default may be a function, and nil in a defaulted slot takes it", () => {
+test("slots: a default may be a function and fills only a missing slot, never a nil", () => {
   const record = slots<{ tags: string[] }>({ 0: ["tags", list(string), () => ["fresh"]] });
   assert.deepEqual(record.decode([]), { tags: ["fresh"] });
-  assert.deepEqual(record.decode([null]), { tags: ["fresh"] });
+  assert.deepEqual(record.decode([null]), { tags: null });
+  const counted = slots<{ n: number }>({ 0: ["n", int32, 4] });
+  assert.deepEqual(counted.decode([]), { n: 4 });
+  assert.throws(() => counted.decode([null]), { message: "n (slot 0): expected an int32, found nil" });
 });
 
 test("a slot refusal names the field and slot and never the value", () => {
@@ -739,4 +743,47 @@ test("the mixed-record vector is the bytes the reference writes for a record of 
   const committed = new Uint8Array(await readFile(join(vectors, "..", "numeric-leaves", "mixed-record.msgpack")));
   assert.equal(hex(writeWire(mixed.encode({ id: "n1", i: 7, l: 8, f: 1.5, d: 2.5 }))), hex(committed));
   assert.deepEqual(mixed.decode(readWire(committed)), { id: "n1", i: 7, l: 8, f: 1.5, d: 2.5 });
+});
+
+// tests/vectors/slot-nil is written by the C# reference (SlotNilVectorTests): what it reads and rewrites for a nil, a str in a
+// byte[] slot, and a record short of its last slots. A runtime accepts what it accepts and rewrites the same bytes.
+test("slots read and rewrite exactly what the C# reference does for nil, a str in bytes, and short records", async () => {
+  const inner = slots<{ x: string }>({ 0: ["x", string, ""] });
+  const probe = slots<{ s: string; i: number; b: Uint8Array; r: { x: string }; l: string[] }>({
+    0: ["s", string, ""],
+    1: ["i", int32, 0],
+    2: ["b", bytes, () => new Uint8Array()],
+    3: ["r", inner, null as unknown as { x: string }],
+    4: ["l", list(string), () => []],
+  });
+  const rows = readWire(new Uint8Array(await readFile(join(vectors, "..", "slot-nil", "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
+  assert.equal(rows.length, 14);
+  let accepted = 0;
+  for (const [name, payload, wasAccepted, rewritten] of rows) {
+    if (wasAccepted) {
+      assert.equal(hex(writeWire(probe.encode(probe.decode(readWire(payload))))), hex(rewritten), name);
+      accepted += 1;
+    } else {
+      assert.throws(() => probe.decode(readWire(payload)), (error: Error) => !error.message.includes(hex(payload).slice(2)), name);
+    }
+  }
+  assert.equal(accepted, 12);
+});
+
+test("a nil reads as null and writes as nil in every reference slot, and a value slot refuses it", () => {
+  const record = slots<{ s: string; b: Uint8Array; i: number }>({ 0: ["s", string], 1: ["b", bytes], 2: ["i", int32, 5] });
+  const read = record.decode([null, null, 3]);
+  assert.deepEqual(read, { s: null, b: null, i: 3 });
+  assert.deepEqual(record.encode(read), [null, null, 3]);
+  assert.throws(() => record.encode({ s: "a", b: new Uint8Array(), i: null as unknown as number }), { message: "i (slot 2): expected an int32, found nil" });
+  assert.throws(() => record.decode(["a", new Uint8Array(), null]), { message: "i (slot 2): expected an int32, found nil" });
+});
+
+test("a bytes slot reads a MessagePack str as its bytes and writes bin, and refuses a str that was not valid UTF-8", () => {
+  const record = slots<{ b: Uint8Array }>({ 0: ["b", bytes] });
+  const read = record.decode(readWire(fromHex("91a3616263")));
+  assert.equal(hex(read.b), "616263");
+  assert.equal(hex(writeWire(record.encode(read))), "91c403616263");
+  assert.throws(() => record.decode(readWire(fromHex("91a2c328"))), { message: "b (slot 0): expected bytes, found a string that is not valid UTF-8" });
+  assert.throws(() => record.decode([5]), { message: "b (slot 0): expected bytes, found number" });
 });
