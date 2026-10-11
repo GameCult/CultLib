@@ -1,6 +1,4 @@
-import { decode, encode } from "@msgpack/msgpack";
-
-import { codecFormatter } from "./codec";
+import { resolveDocumentFormatter, resolveDocumentMembers } from "./document";
 import type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,
@@ -677,10 +675,7 @@ export class CultCache {
   }
 
   #createFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
-    const userFormatter = definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : {
-      encode: (value: unknown) => encode(value),
-      decode: (payload: Uint8Array) => decode(payload),
-    });
+    const userFormatter = resolveDocumentFormatter(definition);
 
     return {
       encode: (value: unknown) => {
@@ -700,7 +695,7 @@ export class CultCache {
     const canonicalSchemaJson = definition.canonicalSchemaJson ?? JSON.stringify({
       schemaName,
       schemaVersion,
-      members: [...(definition.members ?? [])]
+      members: [...resolveDocumentMembers(definition)]
         .sort((left, right) => left.slot - right.slot)
         .map((member) => ({
           slot: member.slot,
@@ -725,7 +720,7 @@ export class CultCache {
       contentHash: definition.contentHash ?? schemaId,
       canonicalSchemaJson,
       compatibleSchemaIds,
-      members: [...(definition.members ?? [])]
+      members: [...resolveDocumentMembers(definition)]
         .sort((left, right) => left.slot - right.slot)
         .map((member) => ({
           slot: member.slot,

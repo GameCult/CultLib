@@ -11,11 +11,15 @@ import { z } from "zod";
 import { codecs } from "../src";
 import type { Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
+import { readWire, WireFloat, writeWire } from "../src/wire";
 import { defineDocumentType } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { CacheBackingStore, CultCacheEnvelope } from "../src/types";
 
-const { boolean, bytes, lazy, list, nullable, number, slots, string, union, unit } = codecs;
+const { array, boolean, bytes, float32, float64, int32, int64, lazy, list, nullable, slots, string, union, unit } = codecs;
+
+// The names the C# reference gives the fixture's types (CultSchemaTypeNames.FromType), as union-surface.cc carries them.
+const CS = "GameCult.Caching.Tests.UnionParityVectorTests+";
 
 // The golden is tests/vectors/union-parity, written by the C# reference. Everything below that is bytes or an expected
 // outcome is read from those committed files; only the value the payload must decode to is spelled here.
@@ -50,7 +54,7 @@ interface Surface {
   missing: Node | null;
 }
 
-const composition = slots<Composition>({ 0: ["name", string], 1: ["body", lazy(() => node)] });
+const composition = slots<Composition>({ 0: ["name", string], 1: ["body", lazy(() => node)] }, `${CS}Composition`);
 const node: Codec<Node | null> = union<Node>("Node", {
   0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
   1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
@@ -58,29 +62,29 @@ const node: Codec<Node | null> = union<Node>("Node", {
     0: ["id", string], 1: ["composition", composition], 2: ["slots", list(lazy(() => node))],
   })],
   5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })],
-});
+}, `${CS}Node`);
 const outcome = union<Outcome>("Outcome", {
   0: ["Pending", slots<{ message: string }>({ 0: ["message", string] })],
-  1: ["Completed", slots<{ sourceVersion: number }>({ 0: ["sourceVersion", number] })],
+  1: ["Completed", slots<{ sourceVersion: number }>({ 0: ["sourceVersion", int32] })],
   2: ["Denied", unit],
-});
-const toolArm = slots<{ name: string; uses: number }>({ 0: ["name", string], 1: ["uses", number] });
-const partArm = slots<{ name: string; count: number }>({ 0: ["name", string], 1: ["count", number] });
+}, `${CS}Outcome`);
+const toolArm = slots<{ name: string; uses: number }>({ 0: ["name", string], 1: ["uses", int32] });
+const partArm = slots<{ name: string; count: number }>({ 0: ["name", string], 1: ["count", int32] });
 const item = union<Item>("Item", {
   0: ["Gem", slots<{ name: string }>({ 0: ["name", string] })],
   1: ["Tool", toolArm],
   2: ["Part", partArm],
-});
-const craftedItem = union<CraftedItem>("CraftedItem", { 0: ["Tool", toolArm], 1: ["Part", partArm] });
+}, `${CS}Item`);
+const craftedItem = union<CraftedItem>("CraftedItem", { 0: ["Tool", toolArm], 1: ["Part", partArm] }, `${CS}CraftedItem`);
 const surfaceCodec = slots<Surface>({
   0: ["id", string],
-  1: ["version", number],
+  1: ["version", int32],
   2: ["root", node],
   3: ["outcomes", list(outcome)],
   4: ["part", item],
   5: ["crafted", craftedItem],
   6: ["missing", node, null],
-});
+}, `${CS}UnionSurface`);
 
 const nodeSchema: z.ZodType<Node | null> = z.lazy(() =>
   z.union([
@@ -175,10 +179,10 @@ async function outcomeEntries() {
 
 test("the union surface vector decodes to the constructed value and re-encodes byte-identical", async () => {
   const committed = await read("union-surface.msgpack");
-  const decoded = surfaceCodec.decode(decode(committed));
+  const decoded = surfaceCodec.decode(readWire(committed));
   assert.deepEqual(decoded, golden);
-  assert.equal(hex(encode(surfaceCodec.encode(decoded))), hex(committed));
-  assert.equal(hex(encode(surfaceCodec.encode(golden))), hex(committed));
+  assert.equal(hex(writeWire(surfaceCodec.encode(decoded))), hex(committed));
+  assert.equal(hex(writeWire(surfaceCodec.encode(golden))), hex(committed));
 });
 
 test("a unit arm is written [key, []] and its payload must be an array", () => {
@@ -219,7 +223,7 @@ test("every outcome vector is listed and holds: refusals name the union and key,
       refused += 1;
       if (Buffer.from(payload).includes(CANARY)) carrying.push(file);
       assert.throws(
-        () => surfaceCodec.decode(decode(payload)),
+        () => surfaceCodec.decode(readWire(payload)),
         (error: Error) => {
           assert.ok(!error.message.includes(CANARY), `${file}: the refusal echoed the payload`);
           if (detail === "arity") {
@@ -234,7 +238,7 @@ test("every outcome vector is listed and holds: refusals name the union and key,
     } else {
       readOnly += 1;
       assert.equal(expected, "read-only");
-      assert.deepEqual(surfaceCodec.decode(decode(payload)), golden, `${file}: the extra slot is read past`);
+      assert.deepEqual(surfaceCodec.decode(readWire(payload)), golden, `${file}: the extra slot is read past`);
     }
   }
   assert.deepEqual([refused, readOnly], [5, 4]);
@@ -243,7 +247,7 @@ test("every outcome vector is listed and holds: refusals name the union and key,
 
 test("a refusal lists the declared keys, so a key only the outer union declares is unknown to the inner", async () => {
   const entry = (await outcomeEntries()).find((candidate) => candidate.file === "inner-union-outer-key.msgpack")!;
-  const payload = decode(await read(entry.file)) as unknown[];
+  const payload = readWire(await read(entry.file)) as unknown[];
   assert.throws(
     () => surfaceCodec.decode(payload),
     /Union CraftedItem: unknown arm key 2 \(declared keys: 0, 1\)\./u,
@@ -275,7 +279,7 @@ test("a union encodes by kind and refuses a kind it does not declare without ech
 });
 
 test("slots: a gap writes nil, a missing slot reads its default, one without a default is refused naming the slot", () => {
-  const record = slots<{ a: string; c: string; d: number }>({ 0: ["a", string], 2: ["c", string], 4: ["d", number, 9] });
+  const record = slots<{ a: string; c: string; d: number }>({ 0: ["a", string], 2: ["c", string], 4: ["d", int32, 9] });
   assert.deepEqual(record.encode({ a: "x", c: "y", d: 1 }), ["x", null, "y", null, 1]);
   assert.deepEqual(record.decode(["x", null, "y"]), { a: "x", c: "y", d: 9 });
   assert.deepEqual(record.decode(["x", 5, "y", null, null]), { a: "x", c: "y", d: 9 });
@@ -301,9 +305,15 @@ test("a slot refusal names the field and slot and never the value", () => {
 test("leaf codecs refuse the wrong shape on both sides, saying what was expected and what kind was found", () => {
   const table: [string, Codec<unknown>, string, unknown, string][] = [
     ["string", string, "a string", 5, "number"],
-    ["number", number, "a number", "5", "string"],
-    ["number", number, "a number", Number.POSITIVE_INFINITY, "number"],
-    ["number", number, "a number", Number.NaN, "number"],
+    ["int32", int32, "an int32", "5", "string"],
+    ["int32", int32, "an int32", Number.POSITIVE_INFINITY, "a non-integer number"],
+    ["int32", int32, "an int32", Number.NaN, "a non-integer number"],
+    ["int32", int32, "an int32", 1.5, "a non-integer number"],
+    ["int32", int32, "an int32", 2 ** 31, "an integer out of range"],
+    ["int64", int64, "an int64", 2 ** 53, "a number beyond 2^53, which needs a bigint"],
+    ["int64", int64, "an int64", 2n ** 63n, "an integer out of range"],
+    ["float64", float64, "a float64", "1.5", "string"],
+    ["float32", float32, "a float32", null, "nil"],
     ["boolean", boolean, "a boolean", "true", "string"],
     ["bytes", bytes, "bytes", [1, 2], "array"],
     ["string", string, "a string", null, "nil"],
@@ -311,25 +321,27 @@ test("leaf codecs refuse the wrong shape on both sides, saying what was expected
   ];
   for (const [label, codec, what, bad, found] of table) {
     for (const side of ["encode", "decode"] as const) {
+      // Decode sees the wire's shapes: a JS float or a number beyond 2^53 never arrives from a payload.
+      if (side === "decode" && (typeof bad === "number" && (!Number.isInteger(bad) || Math.abs(bad) >= 2 ** 53))) continue;
       assert.throws(() => codec[side](bad), new RegExp(`^Error: expected ${what}, found ${found}$`, "u"), `${label} ${side}`);
     }
   }
-  for (const [codec, good] of [[string, "s"], [number, 1.5], [boolean, false], [bytes, new Uint8Array([7])], [list(number), [1, 2]]] as [Codec<unknown>, unknown][]) {
+  for (const [codec, good] of [[string, "s"], [int32, 1], [int64, 5], [float64, 1.5], [float32, 1.5], [boolean, false], [bytes, new Uint8Array([7])], [list(int32), [1, 2]]] as [Codec<unknown>, unknown][]) {
     assert.deepEqual(codec.decode(codec.encode(good)), good);
   }
 });
 
 test("a list element refusal names the element, and nullable writes nil for null and undefined", () => {
-  const numbers = list(number);
-  assert.throws(() => numbers.encode([1, "x" as unknown as number]), /^Error: element 1: expected a number, found string$/u);
-  assert.throws(() => numbers.decode([1, 2, null]), /^Error: element 2: expected a number, found nil$/u);
-  const maybe = nullable(number);
+  const numbers = list(int32);
+  assert.throws(() => numbers.encode([1, "x" as unknown as number]), /^Error: element 1: expected an int32, found string$/u);
+  assert.throws(() => numbers.decode([1, 2, null]), /^Error: element 2: expected an int32, found nil$/u);
+  const maybe = nullable(int32);
   assert.equal(maybe.encode(null), null);
   assert.equal(maybe.encode(undefined as unknown as null), null);
   assert.equal(maybe.encode(0), 0);
   assert.equal(maybe.decode(null), null);
   assert.equal(maybe.decode(0), 0);
-  assert.throws(() => maybe.decode("x"), /expected a number/u);
+  assert.throws(() => maybe.decode("x"), /expected an int32/u);
 });
 
 test("a record refuses what is not a record and names the field and slot of a bad value", () => {
@@ -384,8 +396,8 @@ test("a codec supplies the document's catalog members unless it is given its own
     indexes: { byB: "the_b" },
   });
   assert.deepEqual(document.members, [
-    { slot: 0, memberName: "A", typeName: "System.Object", isName: true, indexAlias: null },
-    { slot: 3, memberName: "TheB", typeName: "System.Object", isName: false, indexAlias: "byB" },
+    { slot: 0, memberName: "A", typeName: "System.String", isName: true, indexAlias: null },
+    { slot: 3, memberName: "TheB", typeName: "System.String", isName: false, indexAlias: "byB" },
   ]);
   const given = [{ slot: 9, memberName: "Mine", typeName: "System.String" }];
   const own = defineDocumentType({ type: "t", schema: z.object({ a: z.string() }), codec: slots<{ a: string }>({ 0: ["a", string] }), members: given });
