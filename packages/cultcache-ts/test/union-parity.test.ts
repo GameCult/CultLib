@@ -604,6 +604,16 @@ test("a float32 NaN round-trips with its bits, and a signalling one is refused o
   assert.equal(refused, 3);
 });
 
+test("only a NaN with its quiet bit clear is signalling: a finite float32 with a clear bit 22 reads, and a float64 slot reads any float32 NaN", () => {
+  const f32 = slots<{ v: number }>({ 0: ["v", float32] });
+  const f64 = slots<{ v: number }>({ 0: ["v", float64] });
+  assert.equal(f32.decode(readWire(fromHex("91ca3f800001"))).v, Math.fround(1.0000001192092896));
+  assert.equal(f32.decode(readWire(fromHex("91ca00000001"))).v, Math.fround(1e-45));
+  assert.equal(f32.decode(readWire(fromHex("91ca7f800000"))).v, Infinity);
+  assert.ok(Number.isNaN(f32.decode(readWire(fromHex("91ca7fc00001"))).v));
+  assert.ok(Number.isNaN(f64.decode(readWire(fromHex("91ca7f800001"))).v));
+});
+
 test("numeric leaves write the bytes the C# reference writes, and 64-bit values lose nothing", async () => {
   const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "writes.msgpack")))) as [string, string, Uint8Array][];
   assert.equal(rows.length, 46);
