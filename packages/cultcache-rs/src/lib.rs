@@ -1,3 +1,62 @@
+//! The derives refuse a malformed union at compile time. Each block below is a valid
+//! union with one property changed.
+//!
+//! ```
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String }
+//! #[derive(CultUnion)]
+//! enum Ok_ { #[cultcache(key = 0)] A(Arm), #[cultcache(key = 1)] B }
+//! ```
+//!
+//! A variant without a key:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 0)] A(Arm), B }
+//! ```
+//!
+//! Two variants with one key:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 0)] A(Arm), #[cultcache(key = 0)] B }
+//! ```
+//!
+//! A struct variant:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultUnion;
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 0)] A { id: String }, #[cultcache(key = 1)] B }
+//! ```
+//!
+//! A multi-field tuple variant:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 0)] A(Arm, Arm), #[cultcache(key = 1)] B }
+//! ```
+//!
+//! A generic enum:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 0)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad<T> { #[cultcache(key = 0)] A(Arm), #[cultcache(key = 1)] B(std::marker::PhantomData<T>) }
+//! ```
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -20,6 +79,8 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 extern crate self as cultcache_rs;
 
+pub use cultcache_rs_derive::CultSlots;
+pub use cultcache_rs_derive::CultUnion;
 pub use cultcache_rs_derive::DatabaseEntry;
 
 pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
