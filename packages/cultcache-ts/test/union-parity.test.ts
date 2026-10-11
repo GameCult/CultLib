@@ -757,7 +757,7 @@ test("slots read and rewrite exactly what the C# reference does for nil, a str i
     4: ["l", list(string), () => []],
   });
   const rows = readWire(new Uint8Array(await readFile(join(vectors, "..", "slot-nil", "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
-  assert.equal(rows.length, 14);
+  assert.equal(rows.length, 15);
   let accepted = 0;
   for (const [name, payload, wasAccepted, rewritten] of rows) {
     if (wasAccepted) {
@@ -767,7 +767,7 @@ test("slots read and rewrite exactly what the C# reference does for nil, a str i
       assert.throws(() => probe.decode(readWire(payload)), (error: Error) => !error.message.includes(hex(payload).slice(2)), name);
     }
   }
-  assert.equal(accepted, 12);
+  assert.equal(accepted, 13);
 });
 
 test("a nil reads as null and writes as nil in every reference slot, and a value slot refuses it", () => {
