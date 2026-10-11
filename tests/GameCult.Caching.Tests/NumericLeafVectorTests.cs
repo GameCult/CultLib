@@ -20,7 +20,7 @@ namespace GameCult.Caching.Tests
     {
         private const string WriteVariable = "CULTCACHE_WRITE_VECTORS";
         private static readonly string[] Leaves = { "int32", "int64", "float32", "float64" };
-        private static readonly string[] WideLeaves = { "string", "boolean", "bytes", "any", "list-string", "array-string", "nullable-int32", "list-int32", "record", "union" };
+        private static readonly string[] WideLeaves = { "string", "boolean", "bytes", "any", "list-string", "array-string", "nullable-int32", "list-int32", "record", "list-record", "union" };
 
         [MessagePackObject] public sealed class Int32Slot { [Key(0)] public int V; }
         [MessagePackObject] public sealed class Int64Slot { [Key(0)] public long V; }
@@ -38,6 +38,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class ListInt32Slot { [Key(0)] public List<int>? V; }
         [MessagePackObject] public sealed class LeafInner { [Key(0)] public string N = string.Empty; [Key(1)] public float W; }
         [MessagePackObject] public sealed class RecordSlot { [Key(0)] public LeafInner? V; }
+        [MessagePackObject] public sealed class ListRecordSlot { [Key(0)] public List<LeafInner>? V; }
         [Union(0, typeof(LeafCircle))] public interface ILeafShape { }
         [MessagePackObject] public sealed class LeafCircle : ILeafShape { [Key(0)] public float R; }
         [MessagePackObject] public sealed class UnionSlot { [Key(0)] public ILeafShape? V; }
@@ -240,11 +241,12 @@ namespace GameCult.Caching.Tests
 
         // ---- the wider leaves: reads and one record of every leaf ----
 
-        // The value token of each wide read case, as MessagePack hex. c1 is a code no reader assigns, so even the any leaf refuses one row.
+        // The value token of each wide read case, as MessagePack hex. c1 is a code no reader assigns; d40100 and d6ff00000000 are an application ext and a timestamp ext, which the any leaf reads or refuses as the reference decides; 92a161ca3f800000, 92a16105 and 92a161a162 give the record slots a float, an int and a str in the second slot.
         private static readonly string[] WideValues =
         {
             "05", "ff", "cb3ff8000000000000", "ca3fc00000", "c0", "c2", "c3", "a161", "d90161", "c40100", "90", "9101", "91a161", "80", "81a161a162",
             "920091ca3f800000", "9291a161ca3f800000", "9192a161ca3f800000", "c1",
+            "92a161ca3f800000", "92a16105", "92a161a162", "d40100", "d6ff00000000",
         };
 
         // What the reference reads from a one-slot record of the leaf, and the bytes it writes back for what it read.
@@ -259,6 +261,7 @@ namespace GameCult.Caching.Tests
             "nullable-int32" => Reread<NullableInt32Slot>(payload),
             "list-int32" => Reread<ListInt32Slot>(payload),
             "record" => Reread<RecordSlot>(payload),
+            "list-record" => Reread<ListRecordSlot>(payload),
             _ => Reread<UnionSlot>(payload),
         };
 
