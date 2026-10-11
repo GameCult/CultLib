@@ -6,8 +6,9 @@ reviewed commit. Other runtimes decode them and are held to the same answers.
 
 These vectors hold every leaf kind, not only numbers. A document with one slot, `[value]`, whose slot is a C# `int`,
 `long`, `float` or `double` (leaf `int32`, `int64`, `float32`, `float64`), or a `string`, `bool`, `byte[]`, `object`,
-`List<string>`, `string[]`, `int?`, `List<int>`, a two-slot record class or a `[Union]` interface (leaf `string`,
-`boolean`, `bytes`, `any`, `list-string`, `array-string`, `nullable-int32`, `list-int32`, `record`, `union`).
+`List<string>`, `string[]`, `int?`, `List<int>`, a two-slot record class, a `List` of it or a `[Union]` interface (leaf
+`string`, `boolean`, `bytes`, `any`, `list-string`, `array-string`, `nullable-int32`, `list-int32`, `record`, `list-record`,
+`union`).
 
 - `reads.msgpack`: an array of `[leaf, payload, accepted, bits]`. `payload` (bin) is the one-slot record fed to the
   reference; `accepted` is whether it read; `bits` (bin, 8 bytes, big-endian) is the int64 it read, or the IEEE bits of
@@ -18,7 +19,9 @@ These vectors hold every leaf kind, not only numbers. A document with one slot, 
   or a NaN; `bytes` (bin) is what the reference writes after reading it. It keeps every bit, a signalling NaN's included.
 - `leaves-reads.msgpack`: an array of `[leaf, payload, accepted, rewrite]` for the wider leaves. `payload` (bin) is the
   one-slot record `[token]` fed to the reference; `accepted` is whether it read; `rewrite` (bin) is what the reference
-  writes after reading it, and empty when refused. Every token is fed to every leaf.
+  writes after reading it, and empty when refused. Every token is fed to every leaf: 11 leaves x 23 tokens, 253 rows.
+  The tokens include an application ext (`d40100`, which the `any` leaf refuses) and complete, int-in-float-slot and
+  str-in-float-slot two-slot records.
 - `leaf-record.msgpack`: `[members, payload]` for one `cultcache.leaf-record` document holding every leaf. `members` are
   the catalog rows the single-file store writes, each `[slot, memberName, typeName, isReference, isMany,
   targetSchemaName, isName, indexAlias]`; `payload` (bin) is the record's bytes in that store.
