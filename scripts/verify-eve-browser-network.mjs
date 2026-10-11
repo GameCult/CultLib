@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,8 +38,33 @@ let browser;
 
 try {
   const tsc = join(repoRoot, "node_modules", "typescript", "bin", "tsc");
+  await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultcache-ts", "tsconfig.json"), "--pretty", "false"]);
   await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultnet-ts", "tsconfig.json"), "--pretty", "false"]);
   await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultmesh-browser", "tsconfig.json"), "--pretty", "false"]);
+  // esbuild strips types, so a package signature change would otherwise surface as a browser error. The page is
+  // type-checked against the same module map the bundle uses.
+  const moduleMap = {
+    "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
+    "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
+    "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
+    "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
+  };
+  const sampleTsconfig = join(workRoot, "tsconfig.json");
+  await writeFile(sampleTsconfig, JSON.stringify({
+    compilerOptions: {
+      target: "ES2022",
+      module: "ES2022",
+      moduleResolution: "Bundler",
+      lib: ["ES2022", "ESNext.Disposable", "DOM", "DOM.Iterable"],
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+      types: [],
+      paths: Object.fromEntries(Object.entries(moduleMap).map(([name, target]) => [name, [target]])),
+    },
+    files: [join(sampleRoot, "browser", "main.ts")],
+  }));
+  await run(process.execPath, [tsc, "-p", sampleTsconfig, "--pretty", "false"]);
   await build({
     entryPoints: [join(sampleRoot, "browser", "main.ts")],
     outfile: bundlePath,
@@ -48,12 +73,7 @@ try {
     platform: "browser",
     target: "es2022",
     sourcemap: true,
-    alias: {
-      "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
-      "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
-      "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
-      "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
-    },
+    alias: moduleMap,
     logLevel: "warning",
   });
   const bundle = await readFile(bundlePath, "utf8");

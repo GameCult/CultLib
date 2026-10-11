@@ -6,10 +6,29 @@ import {
   decodeCultNetOperationPayload,
   decodeCultNetPayload,
 } from "cultmesh-browser";
+import { defineDocumentType } from "@gamecult/cultcache-ts/document";
 
-// CounterState is an integer-keyed MessagePack object: [counterId, count, receipts].
+// A payload is read through the definition that says how its bytes are laid out. These are plain-map definitions: the
+// provider's CultCache types are integer-keyed MessagePack, and the Eve documents are validated by their own parsers.
+// CounterState is [counterId, count, receipts].
+const counterDocument = defineDocumentType({
+  type: "sample.counter_state",
+  schemaId: "sample.counter_state.v1",
+  schema: {
+    parse: (value: unknown): [string, number, unknown] => {
+      if (!Array.isArray(value) || typeof value[0] !== "string" || typeof value[1] !== "number") {
+        throw new Error("The counter state document is not [counterId, count, receipts].");
+      }
+      return [value[0], value[1], value[2]];
+    },
+  },
+});
+const eveDocument = (type: string) => defineDocumentType({ type, schemaId: `${type}.v1`, schema: { parse: (value: unknown) => value } });
+const surfaceDocument = eveDocument("gamecult.eve.surface");
+const advertisementDocument = eveDocument("gamecult.eve.provider_advertisement");
+
 const counterCount = (record: Parameters<typeof decodeCultNetPayload>[0]) =>
-  decodeCultNetPayload<[string, number, unknown]>(record)[1];
+  decodeCultNetPayload(record, counterDocument)[1];
 
 declare global {
   interface Window {
@@ -63,8 +82,12 @@ try {
     recordKey: "sample.counter-ui",
     subscriptionId: "browser-provider",
   });
-  const provider = parseEveProviderAdvertisement(decodeCultNetPayload(advertisement.current!));
-  const currentSurface = parseEveSurfaceDocument(decodeCultNetPayload(surface.current!));
+  // Eve's generated contract type and the lowering's own interface disagree on optional plugin requirements; the
+  // value is the one parseEveProviderAdvertisement validated.
+  const provider = parseEveProviderAdvertisement(
+    decodeCultNetPayload(advertisement.current!, advertisementDocument),
+  ) as unknown as NonNullable<Parameters<typeof renderEveSurface>[2]>["provider"];
+  const currentSurface = parseEveSurfaceDocument(decodeCultNetPayload(surface.current!, surfaceDocument));
   renderEveSurface(currentSurface, host, {
     activeSurfaceId: "sample.counter",
     clientId: "sample.chromium",
@@ -77,10 +100,8 @@ try {
         payload: { amount: 1 },
         idempotencyKey: window.__sampleCommandId,
       });
-      const receipt = parseEveCommandReceipt(decodeCultNetOperationPayload(response)) as {
-        receiptId: string;
-        count: number;
-      };
+      const receipt = decodeCultNetOperationPayload<{ receiptId: string; count: number }>(response);
+      parseEveCommandReceipt(receipt);
       window.__sampleReceipt = receipt;
       receiptOutput.textContent = receipt.receiptId;
     },
