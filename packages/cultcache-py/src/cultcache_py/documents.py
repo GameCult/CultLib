@@ -2,8 +2,9 @@
 
 import json
 from dataclasses import MISSING, dataclass, field
+from collections.abc import Mapping, Sequence, Set
 from itertools import chain
-from typing import Any, Callable, Generic, Iterable, Mapping, TypeVar
+from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 
@@ -24,12 +25,13 @@ MAX_SLOT_KEY = 65535
 try:
     from msgpack.exceptions import StackError as _MsgpackStackError
 
-    _NESTING_FAULTS: tuple[type[BaseException], ...] = (RecursionError, _MsgpackStackError)
+    _STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
 except ModuleNotFoundError:
-    _NESTING_FAULTS = (RecursionError,)
+    _STACK_FAULTS = ()
 
 
-_CONTAINERS = (list, tuple, dict)
+_CONTAINERS = (Mapping, Sequence, Set)
+_SCALAR_SEQUENCES = (str, bytes, bytearray, memoryview)
 
 
 class CultCachePayloadDepthError(ValueError):
@@ -44,15 +46,19 @@ class CultCachePayloadDepthError(ValueError):
 
 
 def _refuse_past_depth_limit(tree: Any, type_name: str, direction: str) -> None:
-    """The one nesting count. Walks a payload tree iteratively (lists, tuples and dicts are the containers), refusing
-    the first container past `MAX_PAYLOAD_DEPTH`."""
-    stack = [(tree, 1)] if isinstance(tree, _CONTAINERS) else []
+    """The one nesting count. Walks a payload tree iteratively (every mapping, sequence and set that is not text or
+    bytes is a container), refusing the first container past `MAX_PAYLOAD_DEPTH`."""
+    stack = [(tree, 1)] if _is_container(tree) else []
     while stack:
         node, depth = stack.pop()
         if depth > MAX_PAYLOAD_DEPTH:
             raise CultCachePayloadDepthError(type_name, direction)
-        children = chain(node.keys(), node.values()) if isinstance(node, dict) else node
-        stack.extend((child, depth + 1) for child in children if isinstance(child, _CONTAINERS))
+        children = chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
+        stack.extend((child, depth + 1) for child in children if _is_container(child))
+
+
+def _is_container(node: Any) -> bool:
+    return isinstance(node, _CONTAINERS) and not isinstance(node, _SCALAR_SEQUENCES)
 
 
 def _default_encode(value: Any) -> Any:
@@ -166,23 +172,17 @@ class DocumentDefinition(Generic[T]):
     def encode_payload(self, value: T) -> bytes:
         if self.validate:
             self.validate(value)
-        try:
-            tree = self.encode(value)
-        except RecursionError:
-            raise CultCachePayloadDepthError(self.type, "write") from None
+        tree = self.encode(value)
         _refuse_past_depth_limit(tree, self.type, "write")
         return self.payload_encoder(tree)
 
     def decode_payload(self, payload: bytes) -> T:
         try:
             tree = self.payload_decoder(payload)
-        except _NESTING_FAULTS:
+        except _STACK_FAULTS:
             raise CultCachePayloadDepthError(self.type, "read") from None
         _refuse_past_depth_limit(tree, self.type, "read")
-        try:
-            value = self.decode(tree)
-        except RecursionError:
-            raise CultCachePayloadDepthError(self.type, "read") from None
+        value = self.decode(tree)
         if self.validate:
             self.validate(value)
         return value
