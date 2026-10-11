@@ -30,9 +30,7 @@ public sealed class BoundedLeastSquaresTraceTests
 
     // The base commit took the free-set test inline and recorded nothing for it; its record is the one thing the base traces lack.
     private static string WithoutFreeViolated(string trace)
-        => string.Join("
-", trace.Split('
-').Where(l => !l.StartsWith("FreeViolated ", StringComparison.Ordinal)));
+        => string.Join("\n", trace.Split('\n').Where(l => !l.StartsWith("FreeViolated ", StringComparison.Ordinal)));
 
     // In a real solve the free-set test is a decision of its own, taken before the pass's release and outcome: a miss or a
     // stall always follows the violating columns that caused it, KKT never does, and each recorded magnitude is above the
@@ -44,8 +42,7 @@ public sealed class BoundedLeastSquaresTraceTests
         foreach (var c in BlsTrace.Cases())
         {
             var violated = 0;
-            foreach (var line in BlsTrace.Trace(c).Split('
-'))
+            foreach (var line in BlsTrace.Trace(c).Split('\n'))
             {
                 var parts = line.Split(' ');
                 switch (parts[0])
@@ -209,8 +206,7 @@ public sealed class BoundedLeastSquaresTraceTests
     {
         var rec = new BlsTrace.Recorder();
         violated = BoundedLeastSquares.FreeSetViolated(g, freeIndex, freeCount, kktTol, rec);
-        return string.Join("
-", rec.Lines);
+        return string.Join("\n", rec.Lines);
     }
 
     // Every free column is judged, and each one that breaks stationarity is named with its gradient magnitude and the threshold
@@ -229,8 +225,7 @@ public sealed class BoundedLeastSquaresTraceTests
         // The free list is not the column order: the recorded column is the column, in list order, and column 2 (a bound) is not listed.
         trace = FreeViolated(g, new[] { 4, 3, 1, 0, 5 }, 4, 0.25, out violated);
         Assert.True(violated);
-        Assert.Equal("FreeViolated 4 0.5 0.25 0
-FreeViolated 1 0.3 0.25 0", trace);
+        Assert.Equal("FreeViolated 4 0.5 0.25 0\nFreeViolated 1 0.3 0.25 0", trace);
 
         // Only the last listed column violates; only the first does.
         trace = FreeViolated(g, new[] { 0, 3, 4 }, 3, 0.25, out violated);
