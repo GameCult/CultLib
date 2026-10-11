@@ -41,11 +41,12 @@ MessagePack decoder accepts it.
 
 What the type guarantees is that a payload cannot be read or assigned directly: a decoder call, an
 assignment to `Uint8Array` and `new Uint8Array(payload)` fail to compile. It does not stop what the
-runtime value allows. Because the value is a `Uint8Array`, a check such as `payload instanceof
-Uint8Array` narrows it back to bytes, and a cast does the same; a read made that way sees the raw
-bytes, which for a codec or formatter document are not the document. Read through
-`decodeDocumentPayload`, and when you need the bytes themselves (hashing, signing, a store write)
-take them with `documentPayloadBytes`.
+runtime value allows, because the value is a `Uint8Array`. These routes read it without the owner:
+`instanceof Uint8Array` or `ArrayBuffer.isView` narrowing, `Object.values`, `Object.assign` onto a
+`Uint8Array`, a JSON round trip, `Reflect.get`, and a cast. A read made that way sees the raw bytes,
+which for a codec or formatter document are not the document. No lint or guard closes them. Read
+through `decodeDocumentPayload`, and when you need the bytes themselves (hashing, signing, a store
+write) take them with `documentPayloadBytes`, the sanctioned escape.
 
 - `decodeDocumentPayload(definition, payload)` reads a payload through the definition's formatter,
   codec or plain map and then its schema. The definition is required.
