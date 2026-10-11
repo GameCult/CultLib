@@ -19,9 +19,14 @@ These vectors hold every leaf kind, not only numbers. A document with one slot, 
   or a NaN; `bytes` (bin) is what the reference writes after reading it. It keeps every bit, a signalling NaN's included.
 - `leaves-reads.msgpack`: an array of `[leaf, payload, accepted, rewrite]` for the wider leaves. `payload` (bin) is the
   one-slot record `[token]` fed to the reference; `accepted` is whether it read; `rewrite` (bin) is what the reference
-  writes after reading it, and empty when refused. Every token is fed to every leaf: 11 leaves x 23 tokens, 253 rows.
-  The tokens include an application ext (`d40100`, which the `any` leaf refuses) and complete, int-in-float-slot and
+  writes after reading it, and empty when refused. Every token is fed to every leaf: 11 leaves x 28 tokens, 308 rows.
+  The tokens include an application ext (`d40100`, which the `any` leaf refuses), the timestamp exts (`d6ff00000000`,
+  `d7ff0000000000000000`, `c70cff000000000000000000000000`, which the `any` leaf reads and rewrites as `91d6ff00000000`),
+  same-shaped non-timestamp exts (`d6fe00000000`, `c70100ff`, which it refuses), and complete, int-in-float-slot and
   str-in-float-slot two-slot records.
+  On the `any` leaf's rewrite rows a sibling is held to the rewrite's decoded value, not its MessagePack integer width
+  (the reference widens a boxed fixint, so the record `9105` rewrites as `91cc05`; ruling `cultlib-gaps:ruling:any-rewrite-binds-value`).
+  Every other leaf's rewrite binds bytes.
 - `leaf-record.msgpack`: `[members, payload]` for one `cultcache.leaf-record` document holding every leaf. `members` are
   the catalog rows the single-file store writes, each `[slot, memberName, typeName, isReference, isMany,
   targetSchemaName, isName, indexAlias]`; `payload` (bin) is the record's bytes in that store.
