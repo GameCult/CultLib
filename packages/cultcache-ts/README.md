@@ -234,6 +234,42 @@ The important boundary is this:
 
 So callers get typed values, and the persistence layer does not become an open polymorphic sewer.
 
+## Slot Records and Unions
+
+`codec` writes the reference runtimes' record shape: a MessagePack array indexed by slot key, nil in a gap, and a
+union as `[armKey, [armSlots...]]`. A union value is `{ kind: armName, ...armFields }`.
+
+```ts
+import { codecs, defineDocumentType } from "@gamecult/cultcache-ts";
+const { slots, union, list, lazy, string } = codecs;
+
+type Node =
+  | { kind: "Box"; id: string; children: (Node | null)[] }
+  | { kind: "Text"; id: string; content: string }
+  | { kind: "Image"; id: string; uri: string; alt: string };
+
+const node: codecs.Codec<Node | null> = union<Node>("Node", {
+  0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
+  1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
+  5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })], // slot 2 retired
+});
+
+const sceneDocument = defineDocumentType({
+  type: "scene",
+  schema: sceneSchema,
+  codec: slots<Scene>({ 0: ["id", string], 1: ["root", node], 2: ["title", string, ""] }),
+  name: "id",
+});
+```
+
+- A slot is `[name, codec, default?]`. A gap is written nil and skipped on read; an extra trailing slot is skipped; a
+  slot missing from the payload (or nil, when a default is declared) takes its default, and is refused without one.
+- A union refuses an undeclared arm key on read, naming the union, the key and the declared keys. Nothing falls back
+  to a default arm. An arm with no slots is `codecs.unit` and is written `[key, []]`.
+- A refusal names the union, the field and the slot; it never echoes the value it refused.
+- `codec` supplies the document's formatter and, unless `members` is given, its catalog members. A definition may not
+  carry both `codec` and `formatter`. `schema.parse` still runs on every decoded value.
+
 ## Raw Envelope Fast Path
 
 For bit-compatible neighbors such as CultNet peers that already share the same
