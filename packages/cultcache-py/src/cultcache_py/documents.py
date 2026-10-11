@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import MISSING, dataclass, field
-from typing import Any, Callable, Generic, Iterable, TypeVar
+from typing import Any, Callable, Generic, Iterable, Mapping, TypeVar
 
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 
@@ -59,16 +59,45 @@ def _messagepack_payload_decoder(payload: bytes) -> Any:
 
 
 @dataclass(frozen=True)
+class SlotCodec:
+    """Encodes and decodes the value of one slot: a nested record or a union."""
+
+    encode: Callable[[Any], Any]
+    decode: Callable[[Any], Any]
+
+
+@dataclass(frozen=True)
 class DatabaseEntryField:
     name: str
     key: int
     default: Any = MISSING
+    codec: SlotCodec | Callable[[], SlotCodec] | None = None
+    many: bool = False
 
 
-def database_entry_field(name: str, key: int, *, default: Any = MISSING) -> DatabaseEntryField:
+def database_entry_field(
+    name: str,
+    key: int,
+    *,
+    default: Any = MISSING,
+    codec: SlotCodec | Callable[[], SlotCodec] | None = None,
+    many: bool = False,
+) -> DatabaseEntryField:
+    """A slot. `codec` makes the slot a nested record or union (a zero-argument callable
+    returning the codec lets a union refer to itself); `many` makes it a list of them."""
     if key < 0:
         raise ValueError("DatabaseEntry field keys must be non-negative integers")
-    return DatabaseEntryField(name=name, key=key, default=default)
+    if many and codec is None:
+        raise ValueError("A many DatabaseEntry field requires a codec")
+    return DatabaseEntryField(name=name, key=key, default=default, codec=codec, many=many)
+
+
+@dataclass(frozen=True)
+class UnionArm:
+    """A decoded union value: the arm's declared name and its decoded record (None for a unit arm)."""
+
+    name: str
+    value: Any = None
 
 
 @dataclass(frozen=True)
@@ -205,14 +234,7 @@ def define_database_entry_type(
     and newly added fields can use higher keys without rewriting older payloads.
     """
 
-    normalized = [_normalize_database_entry_field(field) for field in fields]
-    if not normalized:
-        raise ValueError("DatabaseEntry document types require at least one field")
-    keys = [field.key for field in normalized]
-    if len(keys) != len(set(keys)):
-        raise ValueError(f"DatabaseEntry document type {type!r} has duplicate field keys")
-    normalized.sort(key=lambda field: field.key)
-    max_key = max(keys)
+    normalized = _normalize_fields(type, fields)
     member_name_lookup = name if isinstance(name, str) else None
     index_lookup = indexes or {}
     members = tuple(
@@ -229,36 +251,12 @@ def define_database_entry_type(
         for field in normalized
     )
 
-    def encode(value: Any) -> list[Any]:
-        slots = [None] * (max_key + 1)
-        for field in normalized:
-            slots[field.key] = extract_value(value, field.name)
-        return slots
-
-    def decode(raw: Any) -> Any:
-        if not isinstance(raw, list):
-            raise ValueError(f"DatabaseEntry document type {type!r} expected a MessagePack array")
-        values: dict[str, Any] = {}
-        for field in normalized:
-            if field.key < len(raw):
-                value = raw[field.key]
-            elif field.default is not MISSING:
-                value = field.default() if callable(field.default) else field.default
-            else:
-                raise ValueError(
-                    f"DatabaseEntry document type {type!r} is missing required slot {field.key}"
-                )
-            if value is None and field.default is not MISSING:
-                value = field.default() if callable(field.default) else field.default
-            values[field.name] = value
-        if cls is None:
-            return values
-        return cls(**values)
+    record = _record_codec(type, normalized, cls)
 
     return define_document_type(
         type,
-        encode=encode,
-        decode=decode,
+        encode=record.encode,
+        decode=record.decode,
         validate=validate,
         global_document=global_document,
         name=name,
@@ -275,6 +273,60 @@ def define_database_entry_type(
     )
 
 
+def define_record_codec(
+    name: str,
+    fields: Iterable[DatabaseEntryField | tuple[str, int] | tuple[str, int, Any]],
+    *,
+    cls: type[Any] | None = None,
+) -> SlotCodec:
+    """A nested record: the same slot array as a document payload, usable as a field's codec or a union arm."""
+    return _record_codec(name, _normalize_fields(name, fields), cls)
+
+
+def define_union(
+    name: str,
+    arms: Mapping[int, tuple[str, SlotCodec | Callable[[], SlotCodec] | None]],
+) -> SlotCodec:
+    """A union: nil, or `[armKey, [armSlots...]]`. Each arm is `(arm name, record codec)`; a unit arm has
+    no codec and is written `[armKey, []]`. A key the union does not declare is refused, never carried."""
+    by_key = dict(arms)
+    by_name = {arm_name: (key, codec) for key, (arm_name, codec) in by_key.items()}
+    if not by_key:
+        raise ValueError(f"Union {name!r} requires at least one arm")
+    if len(by_name) != len(by_key):
+        raise ValueError(f"Union {name!r} has duplicate arm names")
+    if any(not _is_key(key) or key < 0 for key in by_key):
+        raise ValueError(f"Union {name!r} arm keys must be non-negative integers")
+
+    def encode(value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, UnionArm) or value.name not in by_name:
+            raise ValueError(f"Union {name!r} was given a value that is not one of its arms")
+        key, codec = by_name[value.name]
+        if codec is None:
+            if value.value is not None:
+                raise ValueError(f"Union {name!r} arm {key} is a unit arm and carries no value")
+            return [key, []]
+        return [key, _resolve(codec).encode(value.value)]
+
+    def decode(raw: Any) -> Any:
+        if raw is None:
+            return None
+        if not isinstance(raw, list) or len(raw) != 2 or not isinstance(raw[1], list):
+            raise ValueError(f"Union {name!r} value is malformed: expected [armKey, [armSlots]]")
+        key = raw[0]
+        if not _is_key(key):
+            raise ValueError(f"Union {name!r} value is malformed: the arm key is not an integer")
+        if key not in by_key:
+            declared = ", ".join(str(declared_key) for declared_key in sorted(by_key))
+            raise ValueError(f"Union {name!r} does not declare arm key {key} (declared: {declared})")
+        arm_name, codec = by_key[key]
+        return UnionArm(arm_name, None if codec is None else _resolve(codec).decode(raw[1]))
+
+    return SlotCodec(encode=encode, decode=decode)
+
+
 def define_document_registry(*documents: DocumentDefinition[Any]) -> tuple[DocumentDefinition[Any], ...]:
     return tuple(documents)
 
@@ -285,6 +337,77 @@ def extract_value(value: Any, extractor: str | Extractor[Any]) -> str | int | fl
     if isinstance(value, dict):
         return value.get(extractor)
     return getattr(value, extractor, None)
+
+
+def _is_key(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _resolve(codec: SlotCodec | Callable[[], SlotCodec]) -> SlotCodec:
+    return codec if isinstance(codec, SlotCodec) else codec()
+
+
+def _normalize_fields(
+    type: str,
+    fields: Iterable[DatabaseEntryField | tuple[str, int] | tuple[str, int, Any]],
+) -> list[DatabaseEntryField]:
+    normalized = [_normalize_database_entry_field(field) for field in fields]
+    if not normalized:
+        raise ValueError("DatabaseEntry document types require at least one field")
+    keys = [field.key for field in normalized]
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"DatabaseEntry document type {type!r} has duplicate field keys")
+    return sorted(normalized, key=lambda field: field.key)
+
+
+def _record_codec(type: str, normalized: list[DatabaseEntryField], cls: type[Any] | None) -> SlotCodec:
+    max_key = normalized[-1].key
+
+    def encode_slot(field: DatabaseEntryField, value: Any) -> Any:
+        if field.codec is None or value is None:
+            return value
+        codec = _resolve(field.codec)
+        if field.many:
+            return [None if item is None else codec.encode(item) for item in value]
+        return codec.encode(value)
+
+    def decode_slot(field: DatabaseEntryField, value: Any) -> Any:
+        if field.codec is None or value is None:
+            return value
+        codec = _resolve(field.codec)
+        if field.many:
+            if not isinstance(value, list):
+                raise ValueError(f"DatabaseEntry document type {type!r} slot {field.key} expected a MessagePack array")
+            return [None if item is None else codec.decode(item) for item in value]
+        return codec.decode(value)
+
+    def encode(value: Any) -> list[Any]:
+        slots = [None] * (max_key + 1)
+        for field in normalized:
+            slots[field.key] = encode_slot(field, extract_value(value, field.name))
+        return slots
+
+    def decode(raw: Any) -> Any:
+        if not isinstance(raw, list):
+            raise ValueError(f"DatabaseEntry document type {type!r} expected a MessagePack array")
+        values: dict[str, Any] = {}
+        for field in normalized:
+            if field.key < len(raw):
+                value = decode_slot(field, raw[field.key])
+            elif field.default is not MISSING:
+                value = field.default() if callable(field.default) else field.default
+            else:
+                raise ValueError(
+                    f"DatabaseEntry document type {type!r} is missing required slot {field.key}"
+                )
+            if value is None and field.default is not MISSING:
+                value = field.default() if callable(field.default) else field.default
+            values[field.name] = value
+        if cls is None:
+            return values
+        return cls(**values)
+
+    return SlotCodec(encode=encode, decode=decode)
 
 
 def _normalize_database_entry_field(
