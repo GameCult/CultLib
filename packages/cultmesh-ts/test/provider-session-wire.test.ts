@@ -65,3 +65,21 @@ test("a provider command is a CultCache document: written and read by its defini
   );
   assert.throws(() => encodeDocumentPayload(providerCommandDocument, { ...command, commandId: " " }), /commandId/);
 });
+
+test("a provider command that is not a map, or lacks a required field, is refused naming the field and none of its values", () => {
+  const command = { commandId: "c1", commandKind: "k", providerId: "p", serviceInstanceId: "s", payload: 1 };
+  const record = (value: unknown) => ({
+    schemaId: cultMeshProviderSessionSchemas.command, recordKey: "p/s/c1", storedAt: "2026-10-11T00:00:00Z",
+    payloadEncoding: "messagepack" as const, payload: documentPayloadFromBytes(encodeWireValue(value)),
+  });
+  for (const field of ["commandId", "commandKind", "providerId", "serviceInstanceId"] as const) {
+    assert.throws(
+      () => decodeProviderCommandDocument(record({ ...command, [field]: "" })),
+      (error: Error) => error.message === `CultMesh provider-session ${field} must be non-empty.`,
+    );
+  }
+  assert.throws(
+    () => decodeProviderCommandDocument(record(["canary-not-a-map"])),
+    (error: Error) => error.message === "CultMesh provider command must be a MessagePack map.",
+  );
+});
