@@ -27,8 +27,8 @@ export const string: Codec<string> = {
 };
 
 export const number: Codec<number> = {
-  encode: (value) => (expect(value, "a number", typeof value === "number" && Number.isFinite(value)), value),
-  decode: (raw) => (expect(raw, "a number", typeof raw === "number" && Number.isFinite(raw)), raw as number),
+  encode: (value) => (expect(value, "a number", Number.isFinite(value)), value),
+  decode: (raw) => (expect(raw, "a number", Number.isFinite(raw)), raw as number),
 };
 
 export const boolean: Codec<boolean> = {
