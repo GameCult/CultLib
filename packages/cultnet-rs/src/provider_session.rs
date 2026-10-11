@@ -325,7 +325,7 @@ pub fn decode_provider_connect_evidence(
             "Provider Connect evidence must be a non-empty MessagePack map"
         ));
     }
-    let evidence: CultMeshProviderConnectEvidenceWire = rmp_serde::from_slice(payload)?;
+    let evidence: CultMeshProviderConnectEvidenceWire = cultcache_rs::decode_payload(payload)?;
     evidence.validate()?;
     Ok(evidence)
 }
@@ -338,7 +338,7 @@ where
     let bytes = STANDARD
         .decode(payload)
         .map_err(|error| anyhow!("Provider-session payload must be MessagePack base64: {error}"))?;
-    let value: T = rmp_serde::from_slice(&bytes)?;
+    let value: T = cultcache_rs::decode_payload(&bytes)?;
     value.validate()?;
     Ok(value)
 }
@@ -353,7 +353,7 @@ pub fn decode_provider_command_document(
             document.schema_id
         ));
     }
-    let command: CultMeshProviderCommandWire = rmp_serde::from_slice(&document.payload)?;
+    let command: CultMeshProviderCommandWire = cultcache_rs::decode_payload(&document.payload)?;
     command.validate()?;
     Ok(command)
 }

@@ -604,11 +604,7 @@ pub fn decode_cultnet_message_from_slice(
     bytes: &[u8],
     contract: CultNetWireContract,
 ) -> Result<CultNetMessage> {
-    if contract == CultNetWireContract::CultNetSchemaV0 {
-        let wire_value: rmpv::Value = rmp_serde::from_slice(bytes)?;
-        return parse_cultnet_message(&wire_value, contract);
-    }
-    let wire_value: rmpv::Value = rmp_serde::from_slice(bytes)?;
+    let wire_value: rmpv::Value = cultcache_rs::decode_payload(bytes)?;
     parse_cultnet_message(&wire_value, contract)
 }
 

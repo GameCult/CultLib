@@ -211,31 +211,31 @@ pub fn decode_media_wire_record(payload: &[u8]) -> Result<GameCultMediaWireRecor
     let record = match document.schema_id.as_str() {
         GAMECULT_MEDIA_VIDEO_ACCESS_UNIT_SCHEMA => {
             let record: GameCultMediaVideoAccessUnitRecord =
-                rmp_serde::from_slice(&document.payload)?;
+                cultcache_rs::decode_payload(&document.payload)?;
             validate_video_record(&record)?;
             GameCultMediaWireRecord::Video(record)
         }
         GAMECULT_MEDIA_VIDEO_PARITY_SHARD_SCHEMA => {
             let record: GameCultMediaVideoParityShardRecord =
-                rmp_serde::from_slice(&document.payload)?;
+                cultcache_rs::decode_payload(&document.payload)?;
             validate_video_parity_record(&record)?;
             GameCultMediaWireRecord::VideoParity(record)
         }
         GAMECULT_MEDIA_AUDIO_PACKET_SCHEMA => {
             let record: GameCultMediaAudioPacketRecord =
-                rmp_serde::from_slice(&document.payload)?;
+                cultcache_rs::decode_payload(&document.payload)?;
             validate_audio_record(&record)?;
             GameCultMediaWireRecord::Audio(record)
         }
         GAMECULT_MEDIA_AUDIO_PARITY_SHARD_SCHEMA => {
             let record: GameCultMediaAudioParityShardRecord =
-                rmp_serde::from_slice(&document.payload)?;
+                cultcache_rs::decode_payload(&document.payload)?;
             validate_audio_parity_record(&record)?;
             GameCultMediaWireRecord::AudioParity(record)
         }
         GAMECULT_MEDIA_RECEIVER_FEEDBACK_SCHEMA => {
             let record: GameCultMediaReceiverFeedbackRecord =
-                rmp_serde::from_slice(&document.payload)?;
+                cultcache_rs::decode_payload(&document.payload)?;
             validate_feedback_record(&record)?;
             GameCultMediaWireRecord::Feedback(record)
         }

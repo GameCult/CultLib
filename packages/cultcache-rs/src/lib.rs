@@ -99,6 +99,14 @@
 //! enum Bad { #[cultcache(key = 4)] A(Option<Arm>) }
 //! ```
 //!
+//! A hand-written `SlotRecord` impl, which only the derives provide:
+//!
+//! ```compile_fail,E0046
+//! use cultcache_rs::SlotRecord;
+//! struct Sneaky(String);
+//! impl SlotRecord for Sneaky {}
+//! ```
+//!
 //! A CultSlots field without a key, a repeated slot, a repeated key attribute, and a generic struct:
 //!
 //! ```compile_fail
@@ -163,7 +171,11 @@ pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
     label = "a CultUnion arm is a newtype over a #[derive(CultSlots)] struct",
     note = "a String, an Option or any other type is not written as an array of slots"
 )]
-pub trait SlotRecord {}
+pub trait SlotRecord {
+    /// Implemented only by the derives, which write the positional array the contract names.
+    #[doc(hidden)]
+    fn __slots_array();
+}
 
 pub trait CultCacheRegistry {
     fn register_entries(&self, cache: &mut CultCache) -> Result<()>;
@@ -482,6 +494,124 @@ fn describe_undecodable(error: &anyhow::Error) -> String {
         parts.push(cause.to_string());
     }
     parts.join(": ")
+}
+
+/// The deepest a document payload may nest, on read and on write, in every CultCache runtime: every
+/// MessagePack array and map counts, read by a deserializer or skipped past it, and the outermost
+/// array is depth 1. A payload of this depth is accepted and one container deeper is refused. It is
+/// the C# reference's `CultMessagePackSecurity.MaximumPayloadDepth`.
+pub const MAX_PAYLOAD_DEPTH: usize = 256;
+
+/// A payload nests more containers than [`MAX_PAYLOAD_DEPTH`]. It names the depth reached and the
+/// limit, never payload bytes, and can be recovered from the `anyhow::Error` a read or write returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayloadTooDeep {
+    pub depth: usize,
+    pub limit: usize,
+}
+
+impl std::fmt::Display for PayloadTooDeep {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "payload nests {} MessagePack containers deep; the limit is {}",
+            self.depth, self.limit
+        )
+    }
+}
+
+impl std::error::Error for PayloadTooDeep {}
+
+/// Walks the MessagePack headers of one payload without recursion, counting every array and map and
+/// refusing the first container past [`MAX_PAYLOAD_DEPTH`]. Scalars are skipped by length and nothing
+/// is allocated per element. A payload that ends early is the decoder's to refuse.
+pub fn check_payload_depth(bytes: &[u8]) -> std::result::Result<(), PayloadTooDeep> {
+    let mut remaining = [0usize; MAX_PAYLOAD_DEPTH];
+    let mut depth = 0usize;
+    let mut position = 0usize;
+    while position < bytes.len() {
+        let Some((advance, children)) = element_header(bytes, position) else {
+            return Ok(());
+        };
+        position = position.saturating_add(advance);
+        if let Some(children) = children {
+            if depth == MAX_PAYLOAD_DEPTH {
+                return Err(PayloadTooDeep { depth: MAX_PAYLOAD_DEPTH + 1, limit: MAX_PAYLOAD_DEPTH });
+            }
+            if children > 0 {
+                remaining[depth] = children;
+                depth += 1;
+                continue;
+            }
+        }
+        // One element is complete; close every container it was the last element of.
+        while depth > 0 {
+            remaining[depth - 1] -= 1;
+            if remaining[depth - 1] != 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        if depth == 0 {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The element at `position`: how many bytes to advance past it (its whole length for a scalar, its
+/// header for a container) and, for a container, how many child elements follow. `None` when the
+/// payload ends inside the header.
+fn element_header(bytes: &[u8], position: usize) -> Option<(usize, Option<usize>)> {
+    // The big-endian length after the code byte.
+    let length = |width: usize| -> Option<usize> {
+        let field = bytes.get(position + 1..position + 1 + width)?;
+        Some(field.iter().fold(0usize, |length, byte| (length << 8) | usize::from(*byte)))
+    };
+    let code = bytes[position];
+    Some(match code {
+        0x00..=0x7f | 0xe0..=0xff | 0xc0..=0xc3 => (1, None),
+        0x80..=0x8f => (1, Some(2 * usize::from(code & 0x0f))),
+        0x90..=0x9f => (1, Some(usize::from(code & 0x0f))),
+        0xa0..=0xbf => (1 + usize::from(code & 0x1f), None),
+        0xc4 | 0xd9 => (2usize.saturating_add(length(1)?), None),
+        0xc5 | 0xda => (3usize.saturating_add(length(2)?), None),
+        0xc6 | 0xdb => (5usize.saturating_add(length(4)?), None),
+        0xc7 => (3usize.saturating_add(length(1)?), None),
+        0xc8 => (4usize.saturating_add(length(2)?), None),
+        0xc9 => (6usize.saturating_add(length(4)?), None),
+        0xca | 0xce | 0xd2 => (5, None),
+        0xcb | 0xcf | 0xd3 => (9, None),
+        0xcc | 0xd0 => (2, None),
+        0xcd | 0xd1 | 0xd4 => (3, None),
+        0xd5 => (4, None),
+        0xd6 => (6, None),
+        0xd7 => (10, None),
+        0xd8 => (18, None),
+        0xdc => (3, Some(length(2)?)),
+        0xdd => (5, Some(length(4)?)),
+        0xde => (3, Some(length(2)?.saturating_mul(2))),
+        0xdf => (5, Some(length(4)?.saturating_mul(2))),
+    })
+}
+
+/// The one decode of a document payload: the nesting bound first, then the deserializer, whose own
+/// depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the bytes.
+/// Readers of stored envelope payloads outside this crate decode through it too.
+pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    check_payload_depth(payload)?;
+    rmp_serde::from_slice(payload).map_err(opaque_decode_error)
+}
+
+/// The nesting bound for an envelope admitted without a typed decode, from the same walk that
+/// [`decode_payload`] runs first. Names the entry's type and key, never the payload.
+fn require_payload_depth(entry: &CultCacheEnvelope) -> Result<()> {
+    check_payload_depth(&entry.payload).with_context(|| {
+        format!(
+            "refused CultCache envelope {:?} at key {:?}",
+            entry.r#type, entry.key
+        )
+    })
 }
 
 /// A decoder failure as an error that keeps only its kind. Every decode of stored bytes
@@ -2420,7 +2550,7 @@ impl CultCache {
         let Some(entry) = self.entries.get(&entry_id_parts(T::TYPE, key)) else {
             return Ok(None);
         };
-        let payload = rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
+        let payload = decode_payload(&entry.payload).with_context(|| {
             format!(
                 "failed to decode CultCache entry {:?} at key {:?} as {}",
                 T::TYPE,
@@ -2453,7 +2583,7 @@ impl CultCache {
             if entry.r#type != T::TYPE {
                 continue;
             }
-            values.push(rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
+            values.push(decode_payload(&entry.payload).with_context(|| {
                 format!(
                     "failed to decode CultCache entry {:?} at key {:?} as {}",
                     T::TYPE,
@@ -2474,7 +2604,7 @@ impl CultCache {
             }
             values.push((
                 entry.key.clone(),
-                rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
+                decode_payload(&entry.payload).with_context(|| {
                     format!(
                         "failed to decode CultCache entry {:?} at key {:?} as {}",
                         T::TYPE,
@@ -2556,7 +2686,7 @@ impl CultCache {
         key: String,
         payload: Vec<u8>,
     ) -> Result<(CultCacheEnvelope, T)> {
-        let parsed: T = rmp_serde::from_slice(&payload).map_err(opaque_decode_error).with_context(|| {
+        let parsed: T = decode_payload(&payload).with_context(|| {
             format!(
                 "failed to validate CultCache entry {:?} at key {:?} as {}",
                 T::TYPE,
@@ -2599,6 +2729,7 @@ impl CultCache {
                     entry.r#type
                 ));
             }
+            require_payload_depth(entry)?;
             let Some(home) = self.home_index(&entry.r#type)? else {
                 continue;
             };
@@ -2643,7 +2774,7 @@ impl CultCache {
     /// claiming compile-time knowledge of its payload schema. This is the
     /// CultMesh/schema-registry boundary: callers own payload validation before
     /// admission; CultCache still enforces registered type, identity, timestamp,
-    /// routing, and persistence.
+    /// the payload nesting bound ([`MAX_PAYLOAD_DEPTH`]), routing, and persistence.
     pub fn put_raw_envelope(&mut self, entry: CultCacheEnvelope) -> Result<()> {
         if !self.definitions.contains_key(&entry.r#type) {
             return Err(anyhow!(
@@ -2663,6 +2794,7 @@ impl CultCache {
                 entry.r#type
             ));
         }
+        require_payload_depth(&entry)?;
         if let Some(home) = self.home_index(&entry.r#type)? {
             self.stores[home].store.push(&entry)?;
         }
@@ -2692,7 +2824,7 @@ impl CultCache {
             ));
         }
 
-        rmp_serde::from_slice(&entry.payload).map_err(opaque_decode_error).with_context(|| {
+        decode_payload(&entry.payload).with_context(|| {
             format!(
                 "failed to validate CultCache envelope {:?} at key {:?} as {}",
                 T::TYPE,

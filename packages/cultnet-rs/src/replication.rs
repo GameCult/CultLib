@@ -522,7 +522,7 @@ impl CultNetDocumentRegistry {
         envelope: &CultCacheEnvelope,
     ) -> Result<CultNetDocumentRecord<Value>> {
         let binding = self.require_binding(&envelope.r#type)?;
-        let payload: Value = rmp_serde::from_slice(&envelope.payload).with_context(|| {
+        let payload: Value = cultcache_rs::decode_payload(&envelope.payload).with_context(|| {
             format!(
                 "failed to decode CultCache envelope {:?} at {:?} as generic CultNet payload",
                 envelope.r#type, envelope.key
