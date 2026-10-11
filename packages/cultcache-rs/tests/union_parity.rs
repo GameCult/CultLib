@@ -256,8 +256,8 @@ fn an_unknown_arm_lists_the_declared_keys_and_never_echoes_the_payload() {
 fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
     let cases: [(&str, Vec<u8>); 4] = [
         ("an empty array", vec![0x90]),
-        ("a trailing element", rmp_serde::to_vec(&(1u64, ("a",), 0u8)).unwrap()),
-        ("a string key", rmp_serde::to_vec(&("CANARY-key", ("a",))).unwrap()),
+        ("a trailing element", rmp_serde::to_vec(&(1u64, (7u8,), 0u8)).unwrap()),
+        ("a string key", rmp_serde::to_vec(&("CANARY-key", (7u8,))).unwrap()),
         ("a unit arm with slots", rmp_serde::to_vec(&(2u64, ("CANARY-slot",))).unwrap()),
     ];
     for (label, bytes) in cases {
@@ -289,6 +289,7 @@ fn union_store_reads() {
     let mut cache = CultCache::new();
     cache.register_entry_type::<UnionSurface>().unwrap();
     cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
+    cache.pull_all_backing_stores().unwrap();
     assert_eq!(cache.get::<UnionSurface>("surface").unwrap(), Some(constructed()));
 }
 
