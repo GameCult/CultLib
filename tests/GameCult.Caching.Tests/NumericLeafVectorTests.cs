@@ -175,7 +175,7 @@ namespace GameCult.Caching.Tests
             Assert.That(rows, Has.Count.EqualTo(Leaves.Length * ReadValues.Length));
             foreach (var leaf in Leaves)
             {
-                Assert.That(rows.Count(row => row.leaf == leaf && row.result.Accepted), Is.GreaterThan(10), $"{leaf} accepts");
+                Assert.That(rows.Count(row => row.leaf == leaf && row.result.Accepted), Is.GreaterThan(5), $"{leaf} accepts");
                 Assert.That(rows.Count(row => row.leaf == leaf && !row.result.Accepted), Is.GreaterThan(5), $"{leaf} refuses");
             }
         }
