@@ -66,6 +66,23 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
     }
   }
 
+  if (definition.codec) {
+    const codec = definition.codec;
+    if (definition.formatter) {
+      throw new Error(`CultCache document type "${definition.type}" declares both a codec and a formatter.`);
+    }
+    const indexAlias = (slotName: string) =>
+      !Array.isArray(definition.indexes) && definition.indexes
+        ? Object.entries(definition.indexes).find(([, accessor]) => accessor === slotName)?.[0] ?? null
+        : null;
+    const members = definition.members ?? codec.members.map((member, index) => ({
+      ...member,
+      isName: definition.name === codec.names[index],
+      indexAlias: indexAlias(codec.names[index]),
+    }));
+    return Object.freeze({ ...definition, members });
+  }
+
   return Object.freeze({ ...definition });
 }
 

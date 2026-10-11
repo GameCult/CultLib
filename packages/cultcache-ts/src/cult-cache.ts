@@ -1,5 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 
+import { codecFormatter } from "./codec";
 import type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,
@@ -676,10 +677,10 @@ export class CultCache {
   }
 
   #createFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
-    const userFormatter = definition.formatter ?? {
+    const userFormatter = definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : {
       encode: (value: unknown) => encode(value),
       decode: (payload: Uint8Array) => decode(payload),
-    };
+    });
 
     return {
       encode: (value: unknown) => {

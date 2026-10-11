@@ -1,3 +1,5 @@
+export * as codecs from "./codec";
+export type { Codec, SlotsCodec } from "./codec";
 export { CultCache, CultCacheBuilder } from "./cult-cache";
 export { inspectCultCacheBytes } from "./cult-cache-inspector";
 export { defineDocumentRegistry, defineDocumentType } from "./document";
