@@ -670,7 +670,7 @@ test("arm keys span Int32 and are listed ascending; slot keys are non-negative I
     assert.deepEqual(written, [key, []]);
     assert.deepEqual(keys.decode(readWire(writeWire(written))), { kind });
   }
-  assert.throws(() => keys.decode(readWire(fromHex("92059090"))), { message: "Union U: unknown arm key 5 (declared keys: -2147483648, -1, 0, 2147483647)." });
+  assert.throws(() => keys.decode(readWire(fromHex("920590"))), { message: "Union U: unknown arm key 5 (declared keys: -2147483648, -1, 0, 2147483647)." });
   assert.throws(() => union<{ kind: "A" }>("U", { [-2147483649]: ["A", unit] }), { message: "Union U declares the key -2147483649, which is outside Int32." });
   assert.throws(() => union<{ kind: "A" }>("U", { 99999999999999999999: ["A", unit] } as never), { message: "Union U declares the key 100000000000000000000, which is outside Int32." });
   assert.doesNotThrow(() => slots<{ a: string }>({ 2147483647: ["a", string] }));
