@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import tempfile
 import unittest
@@ -57,7 +58,7 @@ surface_document = define_database_entry_type(
         database_entry_field("outcomes", 3, codec=outcome, many=True),
         database_entry_field("part", 4, codec=item),
         database_entry_field("crafted", 5, codec=crafted),
-        database_entry_field("missing", 6, codec=item),
+        database_entry_field("missing", 6, codec=node),
     ],
 )
 
@@ -145,6 +146,16 @@ class UnionSurfaceVectorTests(unittest.TestCase):
             writer.put(surface_document, "surface", _surface_value())
             [envelope] = SingleFileMessagePackBackingStore(fresh).pull_all()
             self.assertEqual(envelope.payload, _vector("union-surface.msgpack"))
+
+    def test_the_missing_slot_is_a_node_and_agrees_with_the_csharp_written_root(self) -> None:
+        payload = _vector("union-surface.msgpack")
+        slots = msgpack.unpackb(payload, raw=False)
+        slots[6] = slots[2]
+        decoded = surface_document.decode_payload(msgpack.packb(slots, use_bin_type=True))
+        self.assertEqual(decoded["missing"], _surface_value()["root"])
+        self.assertEqual(surface_document.encode_payload(decoded), msgpack.packb(slots, use_bin_type=True))
+        with self.assertRaises(ValueError):
+            surface_document.encode_payload({**_surface_value(), "missing": UnionArm("Part", {"name": "gear", "count": 4})})
 
     def test_the_store_vector_payload_equals_the_surface_payload(self) -> None:
         [envelope] = SingleFileMessagePackBackingStore(VECTORS / "union-surface.cc").pull_all()
@@ -242,6 +253,22 @@ class UnionCodecRuleTests(unittest.TestCase):
             use.decode(["u", None, self.CANARY])
         self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Use' slot 2 expected a MessagePack array")
 
+    def test_a_list_of_nested_records_keeps_a_nil_element_as_csharp_writes_it(self) -> None:
+        row = define_record_codec("Row", [("id", 0), database_entry_field("cells", 1, codec=text, many=True)])
+        cells = [None, {"id": "c", "content": "x"}, None]
+        encoded = row.encode({"id": "r", "cells": cells})
+        self.assertEqual(encoded, ["r", [None, ["c", "x"], None]])
+        self.assertEqual(row.decode(encoded), {"id": "r", "cells": cells})
+
+    def test_a_unit_arm_with_extra_slots_is_read_past(self) -> None:
+        self.assertEqual(outcome.decode([2, ["extra"]]), UnionArm("Denied"))
+
+    def test_union_arms_are_immutable_hashable_values(self) -> None:
+        arm = UnionArm("Denied")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            arm.name = "Pending"  # type: ignore[misc]
+        self.assertEqual(len({UnionArm("Denied"), UnionArm("Denied"), UnionArm("Pending", "wait")}), 2)
+
     def test_a_nested_record_with_a_missing_required_slot_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
             node.decode([1, ["only-id"]])
@@ -251,14 +278,19 @@ class UnionCodecRuleTests(unittest.TestCase):
         cases = [
             ("Empty", {}, "Union 'Empty' requires at least one arm"),
             ("Dup", {0: ("A", None), 1: ("A", None)}, "Union 'Dup' has duplicate arm names"),
-            ("Neg", {-1: ("A", None)}, "Union 'Neg' arm keys must be non-negative integers"),
-            ("Flag", {True: ("A", None), "x": ("B", None)}, "Union 'Flag' arm keys must be non-negative integers"),
+            ("Wide", {2**31: ("A", None)}, "Union 'Wide' arm keys must be integers within Int32"),
+            ("Narrow", {-(2**31) - 1: ("A", None)}, "Union 'Narrow' arm keys must be integers within Int32"),
+            ("Flag", {True: ("A", None), "x": ("B", None)}, "Union 'Flag' arm keys must be integers within Int32"),
         ]
         for union_name, arms, expected in cases:
             with self.subTest(union=union_name):
                 with self.assertRaises(ValueError) as caught:
                     define_union(union_name, arms)
                 self.assertEqual(str(caught.exception), expected)
+        edge = define_union("Edge", {-(2**31): ("Low", None), -1: ("Negative", None), 2**31 - 1: ("High", None)})
+        for arm_name, key in (("Low", -(2**31)), ("Negative", -1), ("High", 2**31 - 1)):
+            self.assertEqual(edge.encode(UnionArm(arm_name)), [key, []])
+            self.assertEqual(edge.decode([key, []]), UnionArm(arm_name))
         with self.assertRaises(ValueError) as caught:
             database_entry_field("loose", 1, many=True)
         self.assertEqual(str(caught.exception), "A many DatabaseEntry field requires a codec")

@@ -295,8 +295,8 @@ def define_union(
         raise ValueError(f"Union {name!r} requires at least one arm")
     if len(by_name) != len(by_key):
         raise ValueError(f"Union {name!r} has duplicate arm names")
-    if any(not _is_key(key) or key < 0 for key in by_key):
-        raise ValueError(f"Union {name!r} arm keys must be non-negative integers")
+    if any(not _is_key(key) or not _INT32_MIN <= key <= _INT32_MAX for key in by_key):
+        raise ValueError(f"Union {name!r} arm keys must be integers within Int32")
 
     def encode(value: Any) -> Any:
         if value is None:
@@ -337,6 +337,10 @@ def extract_value(value: Any, extractor: str | Extractor[Any]) -> str | int | fl
     if isinstance(value, dict):
         return value.get(extractor)
     return getattr(value, extractor, None)
+
+
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
 
 
 def _is_key(value: Any) -> bool:
