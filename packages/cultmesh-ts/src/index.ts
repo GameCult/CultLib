@@ -4108,6 +4108,11 @@ export interface CultMeshRudpDocumentPut {
   schemaId: string;
   recordKey: string;
   storedAt: string;
+  /**
+   * The document, read through the definition `documents` holds for `schemaId`. A schema the registry has no definition
+   * for is not decoded at all: the payload arrives untouched as the opaque `DocumentPayload`, for a handler that holds
+   * the definition itself to read with `decodeDocumentPayload`.
+   */
   payload: unknown;
   sourceRuntimeId: string | null;
   sourceAgentId: string | null;
@@ -6417,14 +6422,11 @@ function normalizeRudpDocumentPut(
     throw new Error(`Unsupported raw payload encoding ${document.payloadEncoding}.`);
   }
   const definition = documents.getBySchemaId(document.schemaId)?.definition;
-  if (!definition) {
-    throw new Error("Raw document put names a schema with no registered definition.");
-  }
   return {
     schemaId: document.schemaId,
     recordKey: document.recordKey,
     storedAt: document.storedAt ?? new Date().toISOString(),
-    payload: decodeDocumentPayload(definition, document.payload),
+    payload: definition ? decodeDocumentPayload(definition, document.payload) : document.payload,
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,

@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import { z } from "zod";
-import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
@@ -2781,7 +2781,8 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
       maxFragmentBytes: 1024,
       maxPendingReliablePackets: 16,
       onDocumentPutRaw: (document) => {
-        received.push(`${document.sourceRuntimeId}:${document.recordKey}:${document.payload}`);
+        // The registry holds no definition, so the payload arrives untouched and is read here by name.
+        received.push(`${document.sourceRuntimeId}:${document.recordKey}:${decodeWireValue(documentPayloadBytes(document.payload as DocumentPayload))}`);
       },
     },
   );
@@ -2870,7 +2871,7 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
         received = {
           schemaId: document.schemaId,
           recordKey: document.recordKey,
-          payload: document.payload,
+          payload: decodeWireValue(documentPayloadBytes(document.payload as DocumentPayload)),
           sourceRuntimeId: document.sourceRuntimeId,
         };
       },

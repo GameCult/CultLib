@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { z } from "zod";
-import { codecs, defineDocumentType } from "@gamecult/cultcache-ts";
+import {
+  codecs,
+  decodeDocumentPayload,
+  defineDocumentType,
+  documentPayloadBytes,
+  encodeDocumentPayload,
+  type DocumentPayload,
+} from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   defineCultNetDocumentBinding,
@@ -137,23 +144,24 @@ test("the mesh syncs a codec document from a peer snapshot and returns a codec r
   }
 });
 
-test("a RUDP put naming a schema the server has no definition for is refused before the handler, and the refusal does not echo the schema id", async () => {
+test("a RUDP put naming a schema the server has no definition for reaches the handler as the untouched opaque payload", async () => {
   const connectionId = 0x10203070;
-  const canary = "cultmesh.canary_schema_8c1f.v0";
   const stray = defineDocumentType({
-    type: "cultmesh.canary_schema",
-    schemaId: canary,
+    type: "cultmesh.stray_note",
+    schemaId: "cultmesh.stray_note.v0",
     schema: z.object({ noteId: z.string() }),
     name: "noteId",
+    codec: codecs.slots<{ noteId: string }>({ 0: ["noteId", codecs.string] }, "Tests.StrayNote"),
   });
+  const strayBinding = defineCultNetDocumentBinding({ definition: stray });
   const known = defineCultNetDocumentBinding({ definition: plainNote });
   const errors: Error[] = [];
-  const puts: unknown[] = [];
+  const puts: Array<{ schemaId: string; payload: unknown }> = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-unregistered-server", connectionId, {
     documents: new CultNetDocumentRegistry([known]),
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
     onError: (error) => errors.push(error),
-    onDocumentPutRaw: async (document) => { puts.push(document.payload); },
+    onDocumentPutRaw: async (document) => { puts.push({ schemaId: document.schemaId, payload: document.payload }); },
   });
   let peer: CultNetPeer | undefined;
   try {
@@ -161,14 +169,17 @@ test("a RUDP put naming a schema the server has no definition for is refused bef
     peer = await CultMesh.createRudpPeer("cultmesh-ts-unregistered-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`, {
       resendDelayMs: 25, resendPollMs: 5, connectTimeoutMs: 1_000,
     });
-    peer.send(new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: stray })])
-      .createRawDocumentPutMessage(defineCultNetDocumentBinding({ definition: stray }), "unregistered-1", "k", { noteId: "k" }));
+    peer.send(new CultNetDocumentRegistry([strayBinding]).createRawDocumentPutMessage(strayBinding, "unregistered-1", "k", { noteId: "k" }));
     const startedAt = Date.now();
-    while (errors.length === 0 && Date.now() - startedAt < 2_000) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal(errors.length, 1);
-    assert.match(errors[0]!.message, /no registered definition/);
-    assert.ok(!errors[0]!.message.includes(canary), "the refusal names no schema id");
-    assert.deepEqual(puts, [], "the handler never saw the bytes");
+    while (puts.length === 0 && Date.now() - startedAt < 2_000) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(errors, []);
+    assert.equal(puts.length, 1);
+    // Not read as plain msgpack: the bytes are the codec's slot record, handed over opaque, and the definition that reads
+    // them is the handler's to hold.
+    const payload = puts[0]!.payload as DocumentPayload;
+    assert.equal(Buffer.from(documentPayloadBytes(payload)).toString("hex"), "91a16b", "a one-slot codec record, not a map");
+    assert.deepEqual(Buffer.from(documentPayloadBytes(payload)), Buffer.from(documentPayloadBytes(encodeDocumentPayload(stray, { noteId: "k" }))));
+    assert.deepEqual(decodeDocumentPayload(stray, payload), { noteId: "k" });
   } finally {
     peer?.close();
     server.close();
