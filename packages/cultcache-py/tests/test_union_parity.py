@@ -188,8 +188,7 @@ class UnionCodecRuleTests(unittest.TestCase):
     def test_unit_arm_refuses_a_value_to_carry(self) -> None:
         with self.assertRaises(ValueError) as caught:
             outcome.encode(UnionArm("Denied", {"message": self.CANARY}))
-        self.assertIn("Outcome", str(caught.exception))
-        self.assertNotIn(self.CANARY, str(caught.exception))
+        self.assertEqual(str(caught.exception), "Union 'Outcome' arm 2 is a unit arm and carries no value")
 
     def test_arm_keys_are_written_as_declared(self) -> None:
         self.assertEqual(node.encode(UnionArm("Image", {"id": "a", "uri": "b", "alt": "c"})), [5, ["a", "b", None, "c"]])
@@ -198,8 +197,9 @@ class UnionCodecRuleTests(unittest.TestCase):
     def test_encode_refuses_an_arm_the_union_does_not_declare_without_echoing_it(self) -> None:
         with self.assertRaises(ValueError) as caught:
             crafted.encode(UnionArm("Gem", {"name": self.CANARY}))
-        self.assertIn("CraftedItem", str(caught.exception))
-        self.assertNotIn(self.CANARY, str(caught.exception))
+        self.assertEqual(
+            str(caught.exception), "Union 'CraftedItem' was given a value that is not one of its arms"
+        )
         with self.assertRaises(ValueError):
             node.encode({"id": "a"})
 
@@ -207,10 +207,7 @@ class UnionCodecRuleTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             node.decode([4, [self.CANARY]])
         message = str(caught.exception)
-        self.assertIn("'Node'", message)
-        self.assertIn("arm key 4 ", message)
-        self.assertIn("declared: 0, 1, 2, 5", message)
-        self.assertNotIn(self.CANARY, message)
+        self.assertEqual(message, "Union 'Node' does not declare arm key 4 (declared: 0, 1, 2, 5)")
 
     def test_a_malformed_union_value_is_refused_without_echoing_it(self) -> None:
         for raw in (
@@ -226,8 +223,9 @@ class UnionCodecRuleTests(unittest.TestCase):
             with self.subTest(raw=type(raw).__name__):
                 with self.assertRaises(ValueError) as caught:
                     node.decode(raw)
-                self.assertIn("'Node'", str(caught.exception))
-                self.assertNotIn(self.CANARY, str(caught.exception))
+                message = str(caught.exception)
+                self.assertTrue(message.startswith("Union 'Node' value is malformed: "), message)
+                self.assertNotIn(self.CANARY, message)
 
     def test_extra_trailing_arm_slots_are_read(self) -> None:
         self.assertEqual(
@@ -242,25 +240,96 @@ class UnionCodecRuleTests(unittest.TestCase):
         self.assertEqual(use.decode(encoded)["slots"], slots)
         with self.assertRaises(ValueError) as caught:
             use.decode(["u", None, self.CANARY])
-        self.assertNotIn(self.CANARY, str(caught.exception))
+        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Use' slot 2 expected a MessagePack array")
 
     def test_a_nested_record_with_a_missing_required_slot_is_refused(self) -> None:
         with self.assertRaises(ValueError) as caught:
             node.decode([1, ["only-id"]])
-        self.assertIn("Text", str(caught.exception))
-        self.assertIn("slot 1", str(caught.exception))
+        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Text' is missing required slot 1")
 
     def test_definition_rules(self) -> None:
-        with self.assertRaises(ValueError):
-            define_union("Empty", {})
-        with self.assertRaises(ValueError):
-            define_union("Dup", {0: ("A", None), 1: ("A", None)})
-        with self.assertRaises(ValueError):
-            define_union("Neg", {-1: ("A", None)})
-        with self.assertRaises(ValueError):
-            define_union("Flag", {True: ("A", None), "x": ("B", None)})
-        with self.assertRaises(ValueError):
+        cases = [
+            ("Empty", {}, "Union 'Empty' requires at least one arm"),
+            ("Dup", {0: ("A", None), 1: ("A", None)}, "Union 'Dup' has duplicate arm names"),
+            ("Neg", {-1: ("A", None)}, "Union 'Neg' arm keys must be non-negative integers"),
+            ("Flag", {True: ("A", None), "x": ("B", None)}, "Union 'Flag' arm keys must be non-negative integers"),
+        ]
+        for union_name, arms, expected in cases:
+            with self.subTest(union=union_name):
+                with self.assertRaises(ValueError) as caught:
+                    define_union(union_name, arms)
+                self.assertEqual(str(caught.exception), expected)
+        with self.assertRaises(ValueError) as caught:
             database_entry_field("loose", 1, many=True)
+        self.assertEqual(str(caught.exception), "A many DatabaseEntry field requires a codec")
+        database_entry_field("fine", 1, codec=node, many=True)
+
+
+class RecordCodecTests(unittest.TestCase):
+    def test_defaults_fill_a_missing_or_nil_slot_and_a_callable_default_is_called(self) -> None:
+        record = define_record_codec(
+            "Defaulted",
+            [("id", 0), ("label", 1, "none"), ("tags", 2, list), ("plain", 3, 0)],
+        )
+        self.assertEqual(record.decode(["a"]), {"id": "a", "label": "none", "tags": [], "plain": 0})
+        self.assertEqual(
+            record.decode(["a", None, None, None]), {"id": "a", "label": "none", "tags": [], "plain": 0}
+        )
+        self.assertEqual(record.decode(["a", "x", ["t"], 5]), {"id": "a", "label": "x", "tags": ["t"], "plain": 5})
+
+    def test_a_document_type_names_its_members_and_marks_the_name_and_index_slots(self) -> None:
+        document = define_database_entry_type(
+            "tests.members",
+            [("id", 0), ("source_version", 1), ("owner", 2)],
+            name="id",
+            indexes={"by_owner": "owner"},
+        )
+        members = {member.slot: member for member in document.members}
+        self.assertEqual(
+            [members[slot].member_name for slot in (0, 1, 2)], ["Id", "SourceVersion", "Owner"]
+        )
+        self.assertEqual([members[slot].is_name for slot in (0, 1, 2)], [True, False, False])
+        self.assertEqual([members[slot].index_alias for slot in (0, 1, 2)], [None, None, "by_owner"])
+
+    def test_a_document_without_a_string_name_marks_no_member_as_the_name(self) -> None:
+        document = define_database_entry_type("tests.named", [("id", 0)], name=lambda value: value["id"])
+        self.assertFalse(document.members[0].is_name)
+
+    def test_a_record_that_is_not_an_array_is_refused_naming_the_type_only(self) -> None:
+        for refuse in (lambda r: r.decode({"id": "canary-7f3a91"}), lambda r: r.decode("canary-7f3a91")):
+            record = define_record_codec("Plain", [("id", 0)])
+            with self.assertRaises(ValueError) as caught:
+                refuse(record)
+            self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Plain' expected a MessagePack array")
+            self.assertNotIn("canary-7f3a91", str(caught.exception))
+
+    def test_field_tuples_of_the_wrong_length_are_refused(self) -> None:
+        for fields in ([("id",)], [("id", 0, 1, 2)]):
+            with self.assertRaises(ValueError) as caught:
+                define_record_codec("Bad", fields)
+            self.assertEqual(
+                str(caught.exception), "DatabaseEntry field tuples must be (name, key) or (name, key, default)"
+            )
+        self.assertEqual(define_record_codec("Pair", [("id", 0)]).decode(["a"]), {"id": "a"})
+        self.assertEqual(define_record_codec("Triple", [("id", 1, "d")]).decode([None]), {"id": "d"})
+
+    def test_duplicate_and_empty_field_lists_are_refused_naming_the_type(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            define_record_codec("Twice", [("a", 0), ("b", 0)])
+        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Twice' has duplicate field keys")
+        with self.assertRaises(ValueError) as empty:
+            define_record_codec("Nothing", [])
+        self.assertEqual(str(empty.exception), "DatabaseEntry document types require at least one field")
+
+    def test_a_negative_slot_key_is_refused_but_zero_is_not(self) -> None:
+        database_entry_field("zero", 0)
+        with self.assertRaises(ValueError) as caught:
+            database_entry_field("negative", -1)
+        self.assertEqual(str(caught.exception), "DatabaseEntry field keys must be non-negative integers")
+
+    def test_slot_order_follows_keys_not_declaration_order(self) -> None:
+        record = define_record_codec("Ordered", [("b", 2), ("a", 0)])
+        self.assertEqual(record.encode({"a": "x", "b": "y"}), ["x", None, "y"])
 
 
 if __name__ == "__main__":
