@@ -232,7 +232,7 @@ test("a user formatter's bytes are its own: a 0x91 grey image round-trips, while
   const grey = defineDocumentType({
     type: "t.grey",
     schemaId: "t.grey.v0",
-    schema: z.object({ pixels: z.instanceof(Uint8Array) }),
+    schema: z.object({ pixels: z.custom<Uint8Array>() }),
     name: "pixels",
     formatter: { encode: (value) => (value as { pixels: Uint8Array }).pixels, decode: (payload) => ({ pixels: payload }) },
   });
