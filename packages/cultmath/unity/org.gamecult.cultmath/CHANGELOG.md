@@ -5,6 +5,38 @@ All notable changes to this package are documented in this file.
 Earlier releases (0.2.0-0.2.3) predate this package's changelog and are not
 backfilled here; see `docs/semver-policy.md` for why.
 
+## [0.4.1]
+
+### Fixed
+
+- `BoundedLeastSquares.Solve` no longer reports `Converged` right after releasing
+  a bound while another bound still violates the KKT conditions by more than the
+  tolerance. Before, the cost-progress rule judged the pass that followed a
+  release, and near a minimiser a cost difference resolves only about the square
+  root of what a gradient comparison resolves, so the solve could stop with a
+  bound's gradient ten thousand times the tolerance. Now a bound is released
+  only when its violation exceeds both the tolerance and the rounding bound of
+  its double gradient, and the cost-progress rule judges only passes that
+  release nothing; a release resets the progress mark. Measured case: an
+  allocator-shaped problem (15 rows, 12 columns) solved from `x = 0` at
+  tolerance 1e-12 returned `Converged` with one throttle at 1, and re-solving
+  from that answer moved it to 0.92221445, so the answer depended on the start by
+  0.078. It now stops at 0.92221445 and the re-solve takes 0 iterations
+  (`TheStopAfterAReleaseIsOnTheGradientNotTheCost` at 1e-12 and 1e-9, and for
+  every column position of the released bound,
+  `TheStopAfterAReleaseIsOnTheGradientWhicheverColumnWasReleased`). At the
+  default tolerance the results of the existing tests are unchanged. Results
+  move only where the old solver stopped early; a caller that compared such a
+  result against a stored value sees the corrected one.
+
+### Added
+
+- `BoundedLeastSquares.Validate(m, n, a, b, lo, hi, kktRelativeTolerance)` and
+  the enum `BoundedLeastSquaresInput` (`Valid`, `InvalidTolerance`,
+  `InvalidBounds`, `NonFiniteMatrix`, `NonFiniteTarget`): names the first input
+  that breaks the contract, in that order. `Solve` calls it, so it returns
+  `InvalidInput` exactly when `Validate` returns anything but `Valid`.
+
 ## [0.4.0]
 
 ### Breaking
