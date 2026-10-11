@@ -1,3 +1,130 @@
+//! The derives refuse a malformed union at compile time. Each block below is a valid
+//! union with one property changed; keys are never 0, so a refusal cannot be a default
+//! key colliding with a declared 0. The derive crate's unit tests assert the message of
+//! every refusal the derive itself makes; a `compile_fail` block shows only that it fails.
+//!
+//! ```
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Fine { #[cultcache(key = -1)] A(Arm), #[cultcache(key = 2147483647)] B, #[cultcache(key = 4)] C }
+//! ```
+//!
+//! A variant without a key, first and last:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A(Arm), B }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { B, #[cultcache(key = 4)] A(Arm) }
+//! ```
+//!
+//! Two variants with one key:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A(Arm), #[cultcache(key = 4)] B }
+//! ```
+//!
+//! A key attribute given twice:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultUnion;
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] #[cultcache(key = 5)] A }
+//! ```
+//!
+//! A key outside Int32:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultUnion;
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 2147483648)] A }
+//! ```
+//!
+//! A struct variant:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultUnion;
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A { id: String }, #[cultcache(key = 5)] B }
+//! ```
+//!
+//! A multi-field tuple variant:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A(Arm, Arm), #[cultcache(key = 5)] B }
+//! ```
+//!
+//! A generic enum:
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad<T> { #[cultcache(key = 4)] A(Arm), #[cultcache(key = 5)] B(std::marker::PhantomData<T>) }
+//! ```
+//!
+//! An arm that is not a slots record (rustc's `SlotRecord` bound, not the derive, refuses it):
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultUnion;
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A(String) }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::{CultSlots, CultUnion};
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String }
+//! #[derive(CultUnion)]
+//! enum Bad { #[cultcache(key = 4)] A(Option<Arm>) }
+//! ```
+//!
+//! A CultSlots field without a key, a repeated slot, a repeated key attribute, and a generic struct:
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String, name: String }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] id: String, #[cultcache(key = 3)] name: String }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm { #[cultcache(key = 3)] #[cultcache(key = 4)] id: String }
+//! ```
+//!
+//! ```compile_fail
+//! use cultcache_rs::CultSlots;
+//! #[derive(CultSlots)]
+//! struct Arm<T> { #[cultcache(key = 3)] id: T }
+//! ```
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -20,12 +147,23 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 extern crate self as cultcache_rs;
 
+pub use cultcache_rs_derive::CultSlots;
+pub use cultcache_rs_derive::CultUnion;
 pub use cultcache_rs_derive::DatabaseEntry;
 
 pub trait DatabaseEntry: Serialize + DeserializeOwned + Clone + Send + 'static {
     const TYPE: &'static str;
     const SCHEMA_NAME: &'static str = "DatabaseEntry";
 }
+
+/// A type written as a positional slots array: what the `CultSlots` and `DatabaseEntry`
+/// derives implement, and what a `CultUnion` arm must carry.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a slots record",
+    label = "a CultUnion arm is a newtype over a #[derive(CultSlots)] struct",
+    note = "a String, an Option or any other type is not written as an array of slots"
+)]
+pub trait SlotRecord {}
 
 pub trait CultCacheRegistry {
     fn register_entries(&self, cache: &mut CultCache) -> Result<()>;
