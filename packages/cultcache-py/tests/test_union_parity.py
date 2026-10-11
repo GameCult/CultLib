@@ -364,9 +364,10 @@ class RecordCodecTests(unittest.TestCase):
         self.assertIsNone(field.codec)
         self.assertFalse(field.many)
 
-    def test_a_directly_constructed_field_is_required_plain_and_single(self) -> None:
-        field = DatabaseEntryField(name="id", key=0)
-        self.assertIs(field.default, dataclasses.MISSING)
+    def test_a_directly_constructed_field_requires_a_default_and_is_plain_and_single(self) -> None:
+        with self.assertRaises(TypeError):
+            DatabaseEntryField(name="id", key=0)  # type: ignore[call-arg]
+        field = DatabaseEntryField(name="id", key=0, default=dataclasses.MISSING)
         self.assertIsNone(field.codec)
         self.assertIs(field.many, False)
 
