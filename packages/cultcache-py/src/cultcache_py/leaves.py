@@ -82,11 +82,11 @@ def _kind(raw: Any) -> str:
         return "string"
     if isinstance(raw, _BYTE_LIKE):
         return "bytes"
+    if isinstance(raw, _ExtType):  # a namedtuple, so before the arrays
+        return "ext"
     if isinstance(raw, (_list, tuple)):
         return "array"
-    if isinstance(raw, Mapping):
-        return "map"
-    return "ext" if isinstance(raw, _ExtType) else "other"
+    return "map" if isinstance(raw, Mapping) else "other"
 
 
 def _refuse(what: str, found: str) -> NoReturn:

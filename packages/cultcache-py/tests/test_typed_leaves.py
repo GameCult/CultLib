@@ -490,6 +490,70 @@ class LeafRuleTests(unittest.TestCase):
         self.assertIn("must be a SlotCodec", self._refusal(lambda: database_entry_field("a", 0, codec=lambda: t.int32)))  # type: ignore[arg-type]
 
 
+class LeafBoundaryTests(unittest.TestCase):
+    def _refusal(self, run) -> str:
+        with self.assertRaises(ValueError) as caught:
+            run()
+        return str(caught.exception)
+
+    def test_float_leaves_write_an_int_across_the_whole_64_bit_range_and_refuse_beyond_it(self) -> None:
+        for leaf in (t.float32, t.float64):
+            for ok in (3, 0, -(2**63), 2**64 - 1):
+                leaf.encode(ok)
+            for bad in (-(2**63) - 1, 2**64):
+                self.assertEqual(self._refusal(lambda: leaf.encode(bad)).rsplit(", found ", 1)[1], "an integer out of range")
+        self.assertEqual(t.float32.encode(3), t.Float32(3.0))
+        self.assertEqual(t.float32.encode(-(2**63)), t.Float32(-float(2**63)))
+        self.assertEqual(t.float64.encode(-(2**63)), -float(2**63))
+        self.assertEqual(t.float64.encode(2**64 - 1), float(2**64))
+
+    def test_an_integer_past_2_to_53_rounds_to_float32_once_not_through_a_double(self) -> None:
+        # 2**53 + 2**29 + 1 is above the float32 tie, but rounding to a double first lands on the tie and rounds down.
+        value = 2**53 + 2**29 + 1
+        self.assertEqual(t.float32.decode(value), float(2**53 + 2**30))
+        self.assertEqual(t.float32.decode(-value), -float(2**53 + 2**30))
+        self.assertEqual(t.float32.encode(value), t.Float32(float(2**53 + 2**30)))
+        self.assertEqual(t.float32.decode(2**53), float(2**53))
+        self.assertEqual(t.float32.decode(-(2**53)), -float(2**53))
+
+    def test_the_kind_a_refusal_reports(self) -> None:
+        for value, kind in ((msgpack.ExtType(1, b""), "ext"), (object(), "other"), (t.Float32(1.0), "float"),
+                            (bytearray(1), "bytes"), ((1,), "array"), ({}, "map"), (True, "boolean")):
+            self.assertEqual(self._refusal(lambda: t.int32.encode(value)), f"expected an int32, found {kind}")
+
+    def test_definition_time_refusals_say_what_is_wrong(self) -> None:
+        self.assertEqual(
+            self._refusal(lambda: database_entry_field("a", 0, codec=object)),  # type: ignore[arg-type]
+            "DatabaseEntry field codec must be a SlotCodec: a leaf from cultcache_py.leaves, or leaves.lazy",
+        )
+        self.assertEqual(
+            self._refusal(lambda: define_union("Loose", {0: ("A", object)})),  # type: ignore[dict-item]
+            "Union 'Loose' arm codecs must be SlotCodecs or None",
+        )
+        self.assertEqual(
+            self._refusal(lambda: define_record_codec("R", [("a", 0)]).encode(None)),
+            "DatabaseEntry document type 'R': expected a record, found nil",
+        )
+
+    def test_value_objects_are_immutable_and_unnamed_by_default(self) -> None:
+        import dataclasses
+
+        plain = t.SlotCodec(lambda v: v, lambda v: v)
+        self.assertIsNone(plain.type_name)
+        self.assertIs(plain.value_type, False)
+        self.assertIs(t.nullable(plain).value_type, False)
+        self.assertIs(t.list(plain).value_type, False)
+        self.assertIsNone(t.nullable(plain).type_name)
+        for frozen, field_name in ((plain, "encode"), (t.Float32(1.0), "value"), (t.nullable(t.int32), "encode")):
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                setattr(frozen, field_name, None)
+
+    def test_a_definition_made_without_members_has_an_empty_catalog(self) -> None:
+        from cultcache_py.documents import DocumentDefinition
+
+        self.assertEqual(DocumentDefinition(type="tests.bare").catalog_entry().members, ())
+
+
 class BytesAtTheDepthSeamTests(unittest.TestCase):
     def test_bytes_bytearray_and_memoryview_leaves_at_depth_256_are_accepted_on_write_and_read(self) -> None:
         blob = define_record_codec("Blob", [database_entry_field("data", 0, codec=t.list(t.bytes))])
