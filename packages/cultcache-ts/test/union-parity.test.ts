@@ -207,6 +207,14 @@ test("union-surface.cc reads through SingleFileMessagePackBackingStore and write
   await fresh.put(document, envelope.key, golden);
   const [rewritten] = await new SingleFileMessagePackBackingStore(written).pullAll();
   assert.equal(hex(rewritten.payload), hex(envelope.payload));
+
+  // The reference refuses a store whose schema catalog names another type for a slot, so the catalog TS writes must be
+  // the one C# wrote: same canonical schema text, same member names, slots and types.
+  assert.equal(rewritten.catalogEntry!.canonicalSchemaJson, envelope.catalogEntry!.canonicalSchemaJson);
+  const shape = (members: readonly { slot: number; memberName: string; typeName: string; isName?: boolean }[]) =>
+    members.map((member) => [member.slot, member.memberName, member.typeName, member.isName === true]);
+  assert.deepEqual(shape(rewritten.catalogEntry!.members!), shape(envelope.catalogEntry!.members!));
+  assert.equal(rewritten.catalogEntry!.members!.length, 7);
 });
 
 test("every outcome vector is listed and holds: refusals name the union and key, never the payload", async () => {
@@ -323,7 +331,7 @@ test("leaf codecs refuse the wrong shape on both sides, saying what was expected
     for (const side of ["encode", "decode"] as const) {
       // Decode sees the wire's shapes: a JS float or a number beyond 2^53 never arrives from a payload.
       if (side === "decode" && (typeof bad === "number" && (!Number.isInteger(bad) || Math.abs(bad) >= 2 ** 53))) continue;
-      assert.throws(() => codec[side](bad), new RegExp(`^Error: expected ${what}, found ${found}$`, "u"), `${label} ${side}`);
+      assert.throws(() => codec[side](bad), { message: `expected ${what}, found ${found}` }, `${label} ${side}`);
     }
   }
   for (const [codec, good] of [[string, "s"], [int32, 1], [int64, 5], [float64, 1.5], [float32, 1.5], [boolean, false], [bytes, new Uint8Array([7])], [list(int32), [1, 2]]] as [Codec<unknown>, unknown][]) {
@@ -424,6 +432,103 @@ test("bytes and nullable round-trip through a slot record", () => {
   const wire = encode(record.encode({ blob: new Uint8Array([1, 2]), maybe: null }));
   assert.deepEqual(record.decode(decode(wire)), { blob: new Uint8Array([1, 2]), maybe: null });
   assert.throws(() => record.decode([new Uint8Array(), 4]), /maybe \(slot 1\): expected a string/u);
+});
+
+const fromHex = (text: string) => new Uint8Array(Buffer.from(text, "hex"));
+
+// Arm keys are integers within Int32 in the reference: a float key is refused even when it holds a whole number, and a
+// key outside Int32 is refused whether it is declared or read. Every payload below is [key, [7]] or [key, ["wait"]].
+test("an arm key is an integer in any MessagePack integer encoding, and a float-typed key is refused", () => {
+  const completed = { kind: "Completed", sourceVersion: 7 };
+  for (const key of ["01", "cc01", "cd0001", "ce00000001", "cf0000000000000001", "d001", "d10001", "d200000001", "d30000000000000001"]) {
+    assert.deepEqual(outcome.decode(readWire(fromHex(`92${key}9107`))), completed, key);
+  }
+  for (const key of ["ca3f800000", "cb3ff0000000000000"]) {
+    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is not an integer (declared keys: 0, 1, 2)." }, key);
+  }
+  assert.throws(() => outcome.decode(readWire(fromHex("92cb800000000000000091a477616974"))), /^Error: Union Outcome: the arm key is not an integer/u, "-0.0 is a float, not key 0");
+  for (const key of ["ce80000000", "cf8000000000000000", "d30000000080000000"]) {
+    assert.throws(() => outcome.decode(readWire(fromHex(`92${key}9107`))), { message: "Union Outcome: the arm key is outside Int32 (declared keys: 0, 1, 2)." }, key);
+  }
+  assert.throws(() => outcome.decode(readWire(fromHex("92d2800000009107"))), { message: "Union Outcome: unknown arm key -2147483648 (declared keys: 0, 1, 2)." });
+  assert.throws(() => outcome.decode(readWire(fromHex("92ff9107"))), { message: "Union Outcome: unknown arm key -1 (declared keys: 0, 1, 2)." });
+});
+
+test("a union refuses a declared arm key outside Int32", () => {
+  assert.doesNotThrow(() => union<{ kind: "A" }>("U", { 2147483647: ["A", unit] }));
+  assert.throws(() => union<{ kind: "A" }>("U", { 2147483648: ["A", unit] }), { message: "Union U declares the key 2147483648, which is outside Int32." });
+  assert.throws(() => union<{ kind: "A" }>("U", { 3000000000: ["A", unit] }), /outside Int32/u);
+});
+
+test("the wire reader keeps 64-bit integers whole, tells a float from an integer, and refuses what is not a value", () => {
+  assert.equal(readWire(fromHex("cf0020000000000001")), 2n ** 53n + 1n);
+  assert.equal(readWire(fromHex("cf001fffffffffffff")), 2 ** 53 - 1);
+  assert.equal(readWire(fromHex("d38000000000000000")), -(2n ** 63n));
+  assert.equal(readWire(fromHex("cfffffffffffffffff")), 2n ** 64n - 1n);
+  assert.ok(readWire(fromHex("cb3ff0000000000000")) instanceof WireFloat);
+  assert.ok(readWire(fromHex("ca3f800000")) instanceof WireFloat);
+  assert.equal(readWire(fromHex("01")), 1);
+  assert.throws(() => readWire(fromHex("92a161")), /truncated/u, "an array that promises more than the payload holds");
+  assert.throws(() => readWire(fromHex("dd")), /truncated/u);
+  assert.throws(() => readWire(fromHex("ddffffffff")), /truncated/u, "a huge array header reserves nothing");
+  assert.throws(() => readWire(fromHex("a5616263")), /truncated/u);
+  assert.throws(() => readWire(fromHex("0102")), /bytes after its value/u);
+  assert.throws(() => readWire(fromHex("81a161a162")), /map, extension or reserved/u);
+  assert.throws(() => readWire(fromHex("c1")), /map, extension or reserved/u);
+  assert.throws(() => readWire(fromHex("d4010a")), /map, extension or reserved/u);
+});
+
+test("the wire writer writes the smallest integer, keeps a float's width, and round-trips what it reads", () => {
+  const tree = [0, 127, 128, 255, 256, 65535, 65536, 4294967295, 4294967296, -1, -32, -33, -128, -129, -32768, -32769, -2147483648, -2147483649,
+    2n ** 53n, 2n ** 64n - 1n, -(2n ** 63n), new WireFloat(1.5, false), new WireFloat(1.5, true), "", "a".repeat(31), "a".repeat(32), "a".repeat(256),
+    new Uint8Array(0), new Uint8Array(300), [], null, true, false, "héllo"];
+  assert.deepEqual(readWire(writeWire(tree)), tree);
+  assert.equal(hex(writeWire(5)), "05");
+  assert.equal(hex(writeWire(128)), "cc80");
+  assert.equal(hex(writeWire(-33)), "d0df");
+  assert.equal(hex(writeWire(2n ** 53n + 2n)), "cf0020000000000002");
+  assert.equal(hex(writeWire(new WireFloat(3, true))), "cb4008000000000000");
+  assert.equal(hex(writeWire(new WireFloat(1.5, false))), "ca3fc00000");
+  assert.equal(hex(writeWire(new Array(16).fill(null))), `dc0010${"c0".repeat(16)}`);
+  assert.throws(() => writeWire(1.5), /not a safe integer/u);
+  assert.throws(() => writeWire(2 ** 53), /not a safe integer/u);
+  assert.throws(() => writeWire(2n ** 64n), /wider than 64 bits/u);
+  assert.throws(() => writeWire({}), /this kind of value/u);
+});
+
+test("a codec and a formatter are refused together wherever the definition enters", () => {
+  const both = { type: "t", schema: surfaceSchema, codec: surfaceCodec, formatter: { encode: () => new Uint8Array(), decode: () => golden } };
+  assert.throws(() => defineDocumentType(both), /declares both a codec and a formatter/u);
+  assert.throws(() => CultCache.builder().withDocumentType(both), /declares both a codec and a formatter/u);
+  assert.throws(() => CultCache.builder().withRegistry([both]), /declares both a codec and a formatter/u);
+});
+
+test("a definition that skips defineDocumentType still writes its codec's bytes and its derived catalog", async () => {
+  const raw = { type: "tests.union_surface", schemaId: "tests.union_surface.v1", schema: surfaceSchema, codec: surfaceCodec, name: "id" as const };
+  const holder = memoryStore([]);
+  const cache = CultCache.builder().withDocumentType(raw).withGenericStore(holder).build();
+  await cache.put(raw, "surface", golden);
+  assert.equal(hex(holder.entries[0].payload), hex(await read("union-surface.msgpack")));
+  const [snapshot] = cache.snapshot();
+  assert.deepEqual(snapshot.catalogEntry!.members!.map((member) => member.typeName).slice(0, 2), ["System.String", "System.Int32"]);
+});
+
+test("every leaf and wrapper carries the reference's type name, and a catalog is not derived from a codec that cannot name a slot", () => {
+  assert.deepEqual(
+    [string, boolean, bytes, int32, int64, float32, float64].map((codec) => codec.typeName),
+    ["System.String", "System.Boolean", "System.Byte[]", "System.Int32", "System.Int64", "System.Single", "System.Double"],
+  );
+  assert.equal(list(int64).typeName, "System.Collections.Generic.List<System.Int64>");
+  assert.equal(array(string).typeName, "System.String[]");
+  assert.equal(nullable(int32).typeName, "System.Nullable<System.Int32>");
+  assert.equal(nullable(string).typeName, "System.String");
+  assert.equal(nullable(list(string)).typeName, "System.Collections.Generic.List<System.String>");
+  assert.equal(list(union<{ kind: "A" }>("U", { 0: ["A", unit] })).typeName, undefined);
+  const unnamed = slots<{ id: string; what: { kind: "A" } | null }>({ 0: ["id", string], 1: ["what", union<{ kind: "A" }>("U", { 0: ["A", unit] })] });
+  assert.throws(() => unnamed.members, /^Error: what \(slot 1\) has no C# type name for the schema catalog/u);
+  assert.throws(() => defineDocumentType({ type: "t", schema: z.any(), codec: unnamed as never }), /what \(slot 1\) has no C# type name/u);
+  const given = defineDocumentType({ type: "t", schema: z.any(), codec: unnamed as never, members: [{ slot: 0, memberName: "Id", typeName: "System.String" }] });
+  assert.equal(given.members!.length, 1);
 });
 
 function envelopeOf(payload: Uint8Array): CultCacheEnvelope {

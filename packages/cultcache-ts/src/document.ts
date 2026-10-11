@@ -100,7 +100,7 @@ export function resolveDocumentMembers(definition: AnyCultCacheDocumentDefinitio
       : null;
   return codec.members.map((member, index) => ({
     ...member,
-    isName: definition.name === codec.names[index],
+    isName: (definition.name as unknown) === codec.names[index],
     indexAlias: indexAlias(codec.names[index]),
   }));
 }
