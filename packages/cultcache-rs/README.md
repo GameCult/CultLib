@@ -189,7 +189,7 @@ without pretending Rust has runtime reflection hiding under the floorboards.
 A union that crosses runtimes is written `[armKey, [armSlots...]]`, the shape the C# reference writes for
 `[Union(key, type)]`. Derive `CultUnion` on an enum: every variant carries `#[cultcache(key = N)]` and is a unit
 (`[N, []]`) or a newtype over a `#[derive(CultSlots)]` struct, which is a `DatabaseEntry`'s slot array without the
-entry consts. A key the enum does not declare is a decode error naming the enum and the declared keys, and never
+entry consts (a `String` or an `Option` is not an arm, and is a compile error). An arm key is the reference's Int32, negatives included, and is given once. A key the enum does not declare is a decode error naming the enum and the declared keys, and never
 quoting the payload. A null union is `Option<Enum>`. Plain serde enums are untouched and keep their bytes.
 
 ```rust

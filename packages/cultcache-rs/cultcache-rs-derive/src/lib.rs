@@ -23,9 +23,11 @@ pub fn derive_database_entry(input: TokenStream) -> TokenStream {
     {
         let parse_result = attribute.parse_nested_meta(|meta| {
             if meta.path.is_ident("type") {
+                once(&entry_type, &meta, "type")?;
                 entry_type = Some(meta.value()?.parse()?);
                 Ok(())
             } else if meta.path.is_ident("schema") {
+                once(&schema_name, &meta, "schema")?;
                 schema_name = Some(meta.value()?.parse()?);
                 Ok(())
             } else {
@@ -131,6 +133,7 @@ fn named_slots(data: Data, ident: &syn::Ident, owner: &str) -> syn::Result<Vec<C
         {
             attribute.parse_nested_meta(|meta| {
                 if meta.path.is_ident("key") {
+                    once(&key, &meta, "key")?;
                     let value: LitInt = meta.value()?.parse()?;
                     key = Some(value.base10_parse()?);
                     Ok(())
@@ -258,6 +261,8 @@ fn slot_codec(ident: &syn::Ident, slots: &[CultCacheSlot]) -> proc_macro2::Token
     });
 
     quote! {
+        impl ::cultcache_rs::SlotRecord for #ident {}
+
         impl ::serde::Serialize for #ident {
             fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
             where
@@ -310,6 +315,31 @@ fn slot_codec(ident: &syn::Ident, slots: &[CultCacheSlot]) -> proc_macro2::Token
     }
 }
 
+/// An attribute names each thing once; a second `key = N` would silently win otherwise.
+fn once<T>(seen: &Option<T>, meta: &syn::meta::ParseNestedMeta, name: &str) -> syn::Result<()> {
+    if seen.is_some() {
+        return Err(meta.error(format!("repeated `{name}`: #[cultcache({name} = ...)] is given once")));
+    }
+    Ok(())
+}
+
+/// An arm key is the reference's Int32, negatives included: `key = 5` or `key = -1`.
+fn arm_key(meta: &syn::meta::ParseNestedMeta) -> syn::Result<i32> {
+    let expr: syn::Expr = meta.value()?.parse()?;
+    let (negative, literal) = match expr {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(literal), .. }) => (false, literal),
+        syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) => match *expr {
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(literal), .. }) => (true, literal),
+            other => return Err(syn::Error::new_spanned(other, "a CultUnion arm key is an integer literal")),
+        },
+        other => return Err(syn::Error::new_spanned(other, "a CultUnion arm key is an integer literal")),
+    };
+    let magnitude: i128 = literal.base10_parse()?;
+    let value = if negative { -magnitude } else { magnitude };
+    i32::try_from(value)
+        .map_err(|_| syn::Error::new_spanned(&literal, format!("CultUnion arm key {value} is outside Int32")))
+}
+
 struct CultCacheSlot {
     key: usize,
     ident: syn::Ident,
@@ -334,13 +364,13 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     struct Arm {
-        key: u64,
+        key: i32,
         ident: syn::Ident,
         payload: Option<Type>,
     }
     let mut arms: Vec<Arm> = Vec::new();
     for variant in data.variants {
-        let mut key: Option<u64> = None;
+        let mut key: Option<i32> = None;
         for attribute in variant
             .attrs
             .iter()
@@ -348,8 +378,8 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         {
             attribute.parse_nested_meta(|meta| {
                 if meta.path.is_ident("key") {
-                    let value: LitInt = meta.value()?.parse()?;
-                    key = Some(value.base10_parse()?);
+                    once(&key, &meta, "key")?;
+                    key = Some(arm_key(&meta)?);
                     Ok(())
                 } else {
                     Err(meta.error("unsupported variant cultcache attribute"))
@@ -388,13 +418,16 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let enum_name = ident.to_string();
-    let declared = arms
-        .iter()
-        .map(|arm| arm.key.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut declared_keys: Vec<i32> = arms.iter().map(|arm| arm.key).collect();
+    declared_keys.sort_unstable();
+    let declared = declared_keys.iter().map(i32::to_string).collect::<Vec<_>>().join(", ");
     let unknown_message = format!("unknown arm key {{}} for union {enum_name}; declared keys: {declared}");
     let arity_message = format!("union {enum_name} is not a [key, slots] pair");
+    let non_integer_message = format!("union {enum_name} has a non-integer arm key; declared keys: {declared}");
+    let out_of_range_message = format!("union {enum_name} has an arm key outside Int32; declared keys: {declared}");
+    let payload_checks = arms.iter().filter_map(|arm| arm.payload.as_ref()).map(|ty| {
+        quote! { assert_slot_record::<#ty>(); }
+    });
 
     let serialize_arms = arms.iter().map(|arm| {
         let variant = &arm.ident;
@@ -441,6 +474,14 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     });
 
     Ok(quote! {
+        // An arm is a slots array: a newtype over anything else is refused here, by the
+        // trait the CultSlots and DatabaseEntry derives implement.
+        const _: fn() = || {
+            #[allow(dead_code)]
+            fn assert_slot_record<T: ::cultcache_rs::SlotRecord>() {}
+            #(#payload_checks)*
+        };
+
         impl ::serde::Serialize for #ident {
             fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
             where
@@ -460,6 +501,92 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             where
                 D: ::serde::Deserializer<'de>,
             {
+                // The reference classifies the key before the arm: an integer in Int32, an
+                // integer outside it, or not an integer. No input value is kept or echoed.
+                enum ArmKey {
+                    Int(i64),
+                    OutOfRange,
+                    NonInteger,
+                }
+                struct ArmKeyProbe(ArmKey);
+                struct ArmKeyVisitor;
+
+                impl<'de> ::serde::de::Visitor<'de> for ArmKeyVisitor {
+                    type Value = ArmKeyProbe;
+
+                    fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+                        formatter.write_str("an integer arm key")
+                    }
+
+                    fn visit_i64<E>(self, value: i64) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::Int(value)))
+                    }
+
+                    fn visit_u64<E>(self, value: u64) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(match i64::try_from(value) {
+                            Ok(value) => ArmKey::Int(value),
+                            Err(_) => ArmKey::OutOfRange,
+                        }))
+                    }
+
+                    fn visit_bool<E>(self, _: bool) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_f64<E>(self, _: f64) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_str<E>(self, _: &str) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_bytes<E>(self, _: &[u8]) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_unit<E>(self) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_none<E>(self) -> ::std::result::Result<Self::Value, E> {
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_some<D>(self, deserializer: D) -> ::std::result::Result<Self::Value, D::Error>
+                    where
+                        D: ::serde::Deserializer<'de>,
+                    {
+                        <::serde::de::IgnoredAny as ::serde::Deserialize>::deserialize(deserializer)?;
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_seq<A>(self, mut seq: A) -> ::std::result::Result<Self::Value, A::Error>
+                    where
+                        A: ::serde::de::SeqAccess<'de>,
+                    {
+                        while seq.next_element::<::serde::de::IgnoredAny>()?.is_some() {}
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+
+                    fn visit_map<A>(self, mut map: A) -> ::std::result::Result<Self::Value, A::Error>
+                    where
+                        A: ::serde::de::MapAccess<'de>,
+                    {
+                        while map.next_entry::<::serde::de::IgnoredAny, ::serde::de::IgnoredAny>()?.is_some() {}
+                        Ok(ArmKeyProbe(ArmKey::NonInteger))
+                    }
+                }
+
+                impl<'de> ::serde::Deserialize<'de> for ArmKeyProbe {
+                    fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+                    where
+                        D: ::serde::Deserializer<'de>,
+                    {
+                        deserializer.deserialize_any(ArmKeyVisitor)
+                    }
+                }
+
                 struct CultUnionVisitor;
 
                 impl<'de> ::serde::de::Visitor<'de> for CultUnionVisitor {
@@ -473,10 +600,28 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     where
                         A: ::serde::de::SeqAccess<'de>,
                     {
-                        let key = seq
-                            .next_element::<u64>()
+                        if seq.size_hint().is_some_and(|len| len != 2) {
+                            return ::std::result::Result::Err(::serde::de::Error::custom(#arity_message));
+                        }
+                        let key = match seq
+                            .next_element::<ArmKeyProbe>()
                             .map_err(|_| ::serde::de::Error::custom(#arity_message))?
-                            .ok_or_else(|| ::serde::de::Error::custom(#arity_message))?;
+                            .ok_or_else(|| ::serde::de::Error::custom(#arity_message))?
+                            .0
+                        {
+                            ArmKey::Int(wide) => match i32::try_from(wide) {
+                                Ok(key) => key,
+                                Err(_) => {
+                                    return ::std::result::Result::Err(::serde::de::Error::custom(#out_of_range_message));
+                                }
+                            },
+                            ArmKey::OutOfRange => {
+                                return ::std::result::Result::Err(::serde::de::Error::custom(#out_of_range_message));
+                            }
+                            ArmKey::NonInteger => {
+                                return ::std::result::Result::Err(::serde::de::Error::custom(#non_integer_message));
+                            }
+                        };
                         let value = match key {
                             #(#deserialize_arms)*
                             other => {
@@ -496,4 +641,101 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn union_error(source: &str) -> String {
+        let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
+        union_codec(input).expect_err("the fixture is refused").to_string()
+    }
+
+    fn slots_error(source: &str) -> String {
+        let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
+        let Err(error) = named_slots(input.data, &input.ident, "CultSlots") else {
+            panic!("the fixture is refused");
+        };
+        error.to_string()
+    }
+
+    fn union_ok(source: &str) {
+        let input: DeriveInput = syn::parse_str(source).expect("the fixture parses");
+        union_codec(input).expect("the fixture is accepted");
+    }
+
+    // Keys other than 0 throughout, so a default of 0 cannot stand in for a missing key.
+    #[test]
+    fn a_variant_without_a_key_is_refused_for_that_reason() {
+        let message = union_error("enum E { #[cultcache(key = 4)] A(Arm), B }");
+        assert!(message.contains("require #[cultcache(key = N)]"), "{message}");
+        let message = union_error("enum E { B, #[cultcache(key = 4)] A(Arm) }");
+        assert!(message.contains("require #[cultcache(key = N)]"), "{message}");
+    }
+
+    #[test]
+    fn two_variants_with_one_key_are_refused_for_that_reason() {
+        let message = union_error("enum E { #[cultcache(key = 4)] A(Arm), #[cultcache(key = 4)] B }");
+        assert!(message.contains("duplicate CultUnion key 4"), "{message}");
+        let message = union_error("enum E { #[cultcache(key = 0x4)] A(Arm), #[cultcache(key = 4)] B }");
+        assert!(message.contains("duplicate CultUnion key 4"), "{message}");
+    }
+
+    #[test]
+    fn a_repeated_key_attribute_is_refused_on_a_variant_and_on_a_field() {
+        for source in [
+            "enum E { #[cultcache(key = 7)] #[cultcache(key = 0)] A(Arm) }",
+            "enum E { #[cultcache(key = 7, key = 0)] A(Arm) }",
+        ] {
+            let message = union_error(source);
+            assert!(message.contains("repeated `key`"), "{source}: {message}");
+        }
+        for source in [
+            "struct S { #[cultcache(key = 7)] #[cultcache(key = 0)] a: String }",
+            "struct S { #[cultcache(key = 7, key = 0)] a: String }",
+        ] {
+            let message = slots_error(source);
+            assert!(message.contains("repeated `key`"), "{source}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_slot_is_refused_for_that_reason() {
+        let message = slots_error("struct S { #[cultcache(key = 3)] a: String, #[cultcache(key = 3)] b: String }");
+        assert!(message.contains("duplicate CultSlots slot 3"), "{message}");
+    }
+
+    #[test]
+    fn a_field_without_a_key_is_refused_for_that_reason() {
+        let message = slots_error("struct S { #[cultcache(key = 3)] a: String, b: String }");
+        assert!(message.contains("fields require #[cultcache(key = N)]"), "{message}");
+    }
+
+    #[test]
+    fn struct_multi_field_and_generic_variants_are_refused_for_their_reasons() {
+        let message = union_error("enum E { #[cultcache(key = 4)] A { id: String } }");
+        assert!(message.contains("use a newtype over a #[derive(CultSlots)] struct"), "{message}");
+        let message = union_error("enum E { #[cultcache(key = 4)] A(Arm, Arm) }");
+        assert!(message.contains("use a newtype over a #[derive(CultSlots)] struct"), "{message}");
+        let message = union_error("enum E<T> { #[cultcache(key = 4)] A(Arm), #[cultcache(key = 5)] B(T) }");
+        assert!(message.contains("does not support generics"), "{message}");
+    }
+
+    // The arm key domain is the reference's Int32: negatives declare, Int32::MAX declares,
+    // one past it is a compile error.
+    #[test]
+    fn the_arm_key_domain_is_int32() {
+        union_ok("enum E { #[cultcache(key = -1)] A(Arm), #[cultcache(key = 2147483647)] B, #[cultcache(key = -2147483648)] C }");
+        for source in [
+            "enum E { #[cultcache(key = 2147483648)] A(Arm) }",
+            "enum E { #[cultcache(key = -2147483649)] A(Arm) }",
+            "enum E { #[cultcache(key = 4294967296)] A(Arm) }",
+        ] {
+            let message = union_error(source);
+            assert!(message.contains("outside Int32"), "{source}: {message}");
+        }
+        let message = union_error("enum E { #[cultcache(key = \"1\")] A(Arm) }");
+        assert!(message.contains("integer literal"), "{message}");
+    }
 }

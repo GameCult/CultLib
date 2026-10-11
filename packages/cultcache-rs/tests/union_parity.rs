@@ -293,6 +293,132 @@ fn union_store_reads() {
     assert_eq!(cache.get::<UnionSurface>("surface").unwrap(), Some(constructed()));
 }
 
+// The arm key domain is the reference's Int32. Expected bytes are what MessagePack-CSharp writes
+// for the same keys (WriteInt32: fixneg, uint32, int32); the refusal classes are CultUnionGuard's.
+mod arm_keys {
+    use cultcache_rs::CultSlots;
+    use cultcache_rs::CultUnion;
+
+    #[derive(Clone, Debug, PartialEq, CultSlots)]
+    struct Count {
+        #[cultcache(key = 0)]
+        name: String,
+        #[cultcache(key = 1)]
+        count: i32,
+    }
+
+    #[derive(Clone, Debug, PartialEq, CultUnion)]
+    enum Keyed {
+        #[cultcache(key = -1)]
+        Negative(Count),
+        #[cultcache(key = 2147483647)]
+        Max(Count),
+        #[cultcache(key = -2147483648)]
+        Min,
+        #[cultcache(key = 7)]
+        Plain(Count),
+    }
+
+    fn count() -> Count {
+        Count { name: "n".into(), count: 1 }
+    }
+
+    fn message(bytes: &[u8]) -> String {
+        rmp_serde::from_slice::<Keyed>(bytes).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn negative_and_int32_max_keys_are_declared_and_round_trip() {
+        let cases: [(Keyed, &[u8]); 4] = [
+            (Keyed::Negative(count()), &[0x92, 0xff, 0x92, 0xa1, b'n', 0x01]),
+            (Keyed::Max(count()), &[0x92, 0xce, 0x7f, 0xff, 0xff, 0xff, 0x92, 0xa1, b'n', 0x01]),
+            (Keyed::Min, &[0x92, 0xd2, 0x80, 0x00, 0x00, 0x00, 0x90]),
+            (Keyed::Plain(count()), &[0x92, 0x07, 0x92, 0xa1, b'n', 0x01]),
+        ];
+        for (value, bytes) in cases {
+            assert_eq!(rmp_serde::to_vec(&value).unwrap(), bytes, "{value:?}");
+            assert_eq!(rmp_serde::from_slice::<Keyed>(bytes).unwrap(), value);
+        }
+    }
+
+    // Every integer width of a negative key reads as the same arm.
+    #[test]
+    fn a_negative_key_reads_in_every_integer_width() {
+        for key in [&[0xff][..], &[0xd0, 0xff], &[0xd1, 0xff, 0xff], &[0xd2, 0xff, 0xff, 0xff, 0xff], &[0xd3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]] {
+            let mut bytes = vec![0x92];
+            bytes.extend_from_slice(key);
+            bytes.extend_from_slice(&[0x92, 0xa1, b'n', 0x01]);
+            assert_eq!(rmp_serde::from_slice::<Keyed>(&bytes).unwrap(), Keyed::Negative(count()), "{key:02x?}");
+        }
+    }
+
+    fn pair(key: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x92];
+        bytes.extend_from_slice(key);
+        bytes.extend_from_slice(&[0x92, 0xa1, b'C', 0xa1, b'A']);
+        bytes
+    }
+
+    // A negative key the union does not declare is an unknown arm naming the key, as in the reference.
+    #[test]
+    fn a_negative_undeclared_key_is_an_unknown_arm_naming_the_key() {
+        for (key, shown) in [(&[0xe0][..], "-32"), (&[0xd0, 0xdf], "-33"), (&[0xd1, 0x80, 0x00], "-32768"), (&[0xd2, 0x80, 0x00, 0x00, 0x01], "-2147483647")] {
+            let text = message(&pair(key));
+            assert!(text.contains(&format!("unknown arm key {shown};")), "{text}");
+            assert!(text.contains("declared keys: -2147483648, -1, 7, 2147483647"), "{text}");
+            assert!(!text.contains("CA"), "{text}");
+        }
+    }
+
+    // Outside Int32 is its own class, naming neither the value nor the payload.
+    #[test]
+    fn keys_outside_int32_are_their_own_class_and_never_echoed() {
+        let wide: [&[u8]; 6] = [
+            &[0xce, 0x80, 0x00, 0x00, 0x00],
+            &[0xcf, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+            &[0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            &[0xd3, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff],
+            &[0xd3, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0xcf, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ];
+        for key in wide {
+            let text = message(&pair(key));
+            assert!(text.contains("an arm key outside Int32"), "{key:02x?}: {text}");
+            assert!(text.contains("Keyed") && !text.contains("CA"), "{text}");
+            for value in ["4294967296", "9223372036854775807", "9223372036854775808", "18446744073709551615"] {
+                assert!(!text.contains(value), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_that_is_not_an_integer_is_its_own_class_and_never_echoed() {
+        let keys: [&[u8]; 7] = [
+            &[0xc0],
+            &[0xc3],
+            &[0xcb, 0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0xa6, b'C', b'A', b'N', b'A', b'R', b'Y'],
+            &[0xc4, 0x02, b'C', b'A'],
+            &[0x91, 0xa6, b'C', b'A', b'N', b'A', b'R', b'Y'],
+            &[0x81, 0xa6, b'C', b'A', b'N', b'A', b'R', b'Y', 0x01],
+        ];
+        for key in keys {
+            let text = message(&pair(key));
+            assert!(text.contains("a non-integer arm key") && text.contains("Keyed"), "{key:02x?}: {text}");
+            assert!(!text.contains("CANARY") && !text.contains("CA"), "{text}");
+        }
+    }
+
+    // Anything that is not a two-element array is the arity class, whatever its first element is.
+    #[test]
+    fn a_pair_of_the_wrong_length_is_refused_before_its_key_is_read() {
+        for bytes in [&[0x91, 0xa1, b'x'][..], &[0x93, 0x07, 0x90, 0x00], &[0x90]] {
+            let text = message(bytes);
+            assert!(text.contains("is not a [key, slots] pair"), "{bytes:02x?}: {text}");
+        }
+    }
+}
+
 mod serde_enum_bytes {
     use cultcache_rs::DatabaseEntry;
 
