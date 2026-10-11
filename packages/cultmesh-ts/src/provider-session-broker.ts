@@ -1,3 +1,4 @@
+import { encodeDocumentPayload } from "@gamecult/cultcache-ts";
 import { encodeWireValue } from "cultnet-ts/wire";
 import type {
   CultNetDocumentPutRawMessage,
@@ -13,6 +14,7 @@ import {
   cultMeshProviderSessionSchemas,
   decodeProviderSessionPayload,
   encodeProviderSessionPayload,
+  providerCommandDocument,
   type CultMeshProviderCommandReceiptWire,
   type CultMeshProviderCommandWire,
   type CultMeshProviderLeaseRenewalWire,
@@ -420,7 +422,7 @@ export class CultMeshProviderSessionBroker {
         recordKey: `${command.providerId}/${command.serviceInstanceId}/${command.commandId}`,
         storedAt: this.#clock.now().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encodeWireValue(command),
+        payload: encodeDocumentPayload(providerCommandDocument, command),
         sourceRuntimeId: this.#options.runtimeId,
         sourceRole: "provider-session-broker",
       },

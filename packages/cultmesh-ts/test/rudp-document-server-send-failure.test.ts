@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
 import test from "node:test";
+import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import { encodeWireValue } from "cultnet-ts/wire";
 import {
   CultNetDocumentRegistry,
@@ -43,7 +44,7 @@ function put(recordKey: string) {
       recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack" as const,
-      payload: encodeWireValue(recordKey),
+      payload: documentPayloadFromBytes(encodeWireValue(recordKey)),
     },
   };
 }

@@ -5,7 +5,12 @@ import type {
   CultCacheDocumentValue,
   CultCacheEnvelope,
 } from "@gamecult/cultcache-ts";
-import { decodeDocumentPayload, resolveDocumentFormatter } from "@gamecult/cultcache-ts";
+import {
+  decodeDocumentPayload,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  encodeDocumentPayload,
+} from "@gamecult/cultcache-ts";
 
 import {
   type CultNetDocumentDeleteMessage,
@@ -134,8 +139,6 @@ export class CultNetDocumentRegistry {
       tags?: string[];
     } = {},
   ): CultNetDocumentPutRawMessage {
-    const parsed = binding.definition.schema.parse(value);
-    const formatter = resolveDocumentFormatter(binding.definition);
     return {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId,
@@ -144,7 +147,7 @@ export class CultNetDocumentRegistry {
         recordKey: documentKey,
         storedAt: options.storedAt ?? new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: formatter.encode(parsed),
+        payload: encodeDocumentPayload(binding.definition, value),
         sourceRuntimeId: options.sourceRuntimeId,
         sourceAgentId: options.sourceAgentId,
         sourceRole: options.sourceRole,
@@ -281,7 +284,7 @@ export class CultNetDocumentRegistry {
         schemaId: resolution.preserveIncomingSchemaId
           ? message.document.schemaId
           : schemaIdForBinding(binding),
-        payload: new Uint8Array(message.document.payload),
+        payload: documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(message.document.payload))),
         storedAt: message.document.storedAt,
       },
     };
@@ -340,7 +343,7 @@ export class CultNetDocumentRegistry {
       return { binding: exact, preserveIncomingSchemaId: true };
     }
 
-    const payload = new Uint8Array(document.payload);
+    const payload = documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(document.payload)));
     for (const binding of this.#uniqueBindings()) {
       try {
         decodeDocumentPayload(binding.definition, payload);
@@ -367,7 +370,7 @@ export class CultNetDocumentRegistry {
       recordKey: envelope.key,
       storedAt: envelope.storedAt,
       payloadEncoding: "messagepack",
-      payload: new Uint8Array(envelope.payload),
+      payload: documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(envelope.payload))),
     };
   }
 }

@@ -78,7 +78,7 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
 
 // The one place that decides how a document is encoded: its own formatter, or its codec's, or a plain map. A codec and a
 // formatter are two answers to one question, so a definition that carries both is refused wherever it enters (the
-// builder resolves through here as well).
+// builder resolves through here as well). Package-internal: not exported from the package index.
 export function resolveDocumentFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
   if (definition.codec && definition.formatter) {
     throw new Error(`CultCache document type "${definition.type}" declares both a codec and a formatter.`);
@@ -91,13 +91,44 @@ const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
   decode: (payload: Uint8Array) => decode(payload),
 };
 
+/**
+ * The bytes of one document, as they travel in a store envelope, a CultNet record or a realtime frame.
+ *
+ * At run time this is the same `Uint8Array`, so frames encode as they always did. At compile time it is opaque: it is not
+ * assignable to or from `Uint8Array` or `ArrayLike<number>`, so no byte decoder accepts it. The only reader is
+ * `decodeDocumentPayload(definition, payload)`, which needs the definition that says how the bytes are laid out, and the
+ * only writer is `encodeDocumentPayload(definition, value)`. The two escapes are named: `documentPayloadFromBytes` where
+ * bytes enter (a validated record, a store read, tests, a writer of pre-encoded or signed bytes) and
+ * `documentPayloadBytes` where they leave (a store write, a frame encode, hashing or signing).
+ *
+ * The key is a plain string, not a unique symbol, so two installed copies of this package stay compatible.
+ */
+export interface DocumentPayload {
+  readonly "cultcache.documentPayload": true;
+  readonly byteLength: number;
+}
+
+export function documentPayloadFromBytes(bytes: Uint8Array): DocumentPayload {
+  return bytes as unknown as DocumentPayload;
+}
+
+export function documentPayloadBytes(payload: DocumentPayload): Uint8Array {
+  return payload as unknown as Uint8Array;
+}
+
 // The one reader of a document payload: through the definition's formatter, codec or plain map, then its schema. A
 // reader holds the definition or it has no business reading the bytes, so there is no definition-less form.
 export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDefinition>(
   definition: TDefinition,
-  payload: Uint8Array,
+  payload: DocumentPayload,
 ): CultCacheDocumentValue<TDefinition> {
-  return definition.schema.parse(resolveDocumentFormatter(definition).decode(payload)) as CultCacheDocumentValue<TDefinition>;
+  const decoded = resolveDocumentFormatter(definition).decode(documentPayloadBytes(payload));
+  return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
+}
+
+// The one writer: the definition's schema first, then its formatter, codec or plain map.
+export function encodeDocumentPayload(definition: AnyCultCacheDocumentDefinition, value: unknown): DocumentPayload {
+  return documentPayloadFromBytes(resolveDocumentFormatter(definition).encode(definition.schema.parse(value)));
 }
 
 // The schema members of a document: the ones it declares, else those its codec derives, else none.

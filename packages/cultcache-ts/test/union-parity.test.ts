@@ -12,7 +12,7 @@ import { codecs } from "../src";
 import { MAX_SLOT_KEY, type Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { readWire, WireFloat, writeWire } from "../src/wire";
-import { defineDocumentType } from "../src/document";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { AnyCultCacheDocumentDefinition, CacheBackingStore, CultCacheEnvelope } from "../src/types";
 
@@ -195,7 +195,7 @@ test("union-surface.cc reads through SingleFileMessagePackBackingStore and write
   const file = join(dir, "union-surface.cc");
   await writeFile(file, await read("union-surface.cc"));
   const [envelope] = await new SingleFileMessagePackBackingStore(file).pullAll();
-  assert.equal(hex(envelope.payload), hex(await read("union-surface.msgpack")));
+  assert.equal(hex(documentPayloadBytes(envelope.payload)), hex(await read("union-surface.msgpack")));
 
   const document = surfaceDocument(envelope.schemaId);
   const cache = CultCache.builder().withDocumentType(document).withGenericStore(new SingleFileMessagePackBackingStore(file)).build();
@@ -206,7 +206,7 @@ test("union-surface.cc reads through SingleFileMessagePackBackingStore and write
   const fresh = CultCache.builder().withDocumentType(document).withGenericStore(new SingleFileMessagePackBackingStore(written)).build();
   await fresh.put(document, envelope.key, golden);
   const [rewritten] = await new SingleFileMessagePackBackingStore(written).pullAll();
-  assert.equal(hex(rewritten.payload), hex(envelope.payload));
+  assert.equal(hex(documentPayloadBytes(rewritten.payload)), hex(documentPayloadBytes(envelope.payload)));
 
   // The reference refuses a store whose schema catalog names another type for a slot, so the catalog TS writes must be
   // the one C# wrote: same canonical schema text, same member names, slots and types.
@@ -418,13 +418,13 @@ test("schema.parse still runs on a decoded value, and a document without a codec
     schema: z.object({ a: z.string().min(3) }),
     codec: slots<{ a: string }>({ 0: ["a", string] }),
   });
-  const store = memoryStore([{ key: "k", type: "t", payload: encode(["xy"]), storedAt: new Date().toISOString() }]);
+  const store = memoryStore([{ key: "k", type: "t", payload: documentPayloadFromBytes(encode(["xy"])), storedAt: new Date().toISOString() }]);
   await assert.rejects(() => CultCache.builder().withDocumentType(strict).withGenericStore(store).build().pullAllBackingStores());
 
   const plain = defineDocumentType({ type: "p", schema: z.object({ id: z.string() }) });
   const holder = memoryStore([]);
   await CultCache.builder().withDocumentType(plain).withGenericStore(holder).build().put(plain, "k", { id: "d" });
-  assert.deepEqual(decode(holder.entries[0].payload), { id: "d" });
+  assert.deepEqual(decode(documentPayloadBytes(holder.entries[0].payload)), { id: "d" });
 });
 
 test("bytes and nullable round-trip through a slot record", () => {
@@ -508,7 +508,7 @@ test("a definition that skips defineDocumentType still writes its codec's bytes 
   const holder = memoryStore([]);
   const cache = CultCache.builder().withDocumentType(raw).withGenericStore(holder).build();
   await cache.put(raw as never, "surface", golden as never);
-  assert.equal(hex(holder.entries[0].payload), hex(await read("union-surface.msgpack")));
+  assert.equal(hex(documentPayloadBytes(holder.entries[0].payload)), hex(await read("union-surface.msgpack")));
   const [snapshot] = cache.snapshot();
   assert.deepEqual(snapshot.catalogEntry!.members!.map((member) => member.typeName).slice(0, 2), ["System.String", "System.Int32"]);
 });
@@ -687,7 +687,7 @@ test("the Int32 edges of an arm key: the largest is an arm, one past either end 
 });
 
 function envelopeOf(payload: Uint8Array): CultCacheEnvelope {
-  return { key: "surface", type: "tests.union_surface", payload, storedAt: new Date().toISOString() };
+  return { key: "surface", type: "tests.union_surface", payload: documentPayloadFromBytes(payload), storedAt: new Date().toISOString() };
 }
 
 function memoryStore(entries: CultCacheEnvelope[]): CacheBackingStore & { entries: CultCacheEnvelope[] } {

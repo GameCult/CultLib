@@ -27,8 +27,16 @@ const counter = await mesh.leaseRawDocument({
   recordKey: "counter:main",
 });
 
-counter.watch(record => renderCounter(decodeCultNetPayload(record)));
+counter.watch(record => renderCounter(decodeCultNetPayload(record, counterDocument)));
 ```
+
+A record's `payload` is a `DocumentPayload`, an opaque type over the same bytes, and
+`decodeCultNetPayload(record, definition)` is how it is read: through the CultCache document
+definition that says whether the bytes are a plain map, a codec's slot record or a
+formatter's, then through the definition's schema. A plain MessagePack decode of a payload
+does not compile, and `decodeCultNetPayload` takes no definition-less form. The definition
+comes from `@gamecult/cultcache-ts` (this package imports only its `./document` entry, which
+holds no Node built-ins).
 
 `invoke(...)` returns the correlated provider response. Routing, schema, and
 envelope failures reject immediately with `CultMeshBrowserOperationError`;

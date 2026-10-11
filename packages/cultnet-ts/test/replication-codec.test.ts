@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { z } from "zod";
-import { CultCache, codecs, defineDocumentType, SingleFileMessagePackBackingStore } from "@gamecult/cultcache-ts";
+import { CultCache, codecs, defineDocumentType, documentPayloadBytes, SingleFileMessagePackBackingStore } from "@gamecult/cultcache-ts";
 
 import { CultNetDocumentRegistry, defineCultNetDocumentBinding } from "../src";
 
@@ -55,23 +55,23 @@ test("a codec document replicates as the bytes the C# reference writes, and a sn
     const target = CultCache.builder().withDocumentType(mixedDefinition).withGenericStore(new SingleFileMessagePackBackingStore(join(dir, "target.cc"))).build();
 
     const put = documents.createRawDocumentPutMessage(documents.get("tests.mixed_record")!, "put-1", "n1", value);
-    assert.equal(hex(put.document.payload), hex(reference), "a raw put carries the reference's record, not a map");
+    assert.equal(hex(documentPayloadBytes(put.document.payload)), hex(reference), "a raw put carries the reference's record, not a map");
 
     await documents.applyRawDocumentPutMessage(origin, put);
-    assert.equal(hex(origin.getRequiredEnvelope(mixedDefinition, "n1").payload), hex(reference));
+    assert.equal(hex(documentPayloadBytes(origin.getRequiredEnvelope(mixedDefinition, "n1").payload)), hex(reference));
 
     const raw = documents.createRawSnapshotResponse(origin, "snapshot-raw");
-    assert.equal(hex(raw.documents[0].payload), hex(reference));
+    assert.equal(hex(documentPayloadBytes(raw.documents[0].payload)), hex(reference));
     await documents.applyRawSnapshotResponse(target, raw);
     assert.deepEqual(target.getRequired(mixedDefinition, "n1"), value);
-    assert.equal(hex(target.getRequiredEnvelope(mixedDefinition, "n1").payload), hex(reference));
+    assert.equal(hex(documentPayloadBytes(target.getRequiredEnvelope(mixedDefinition, "n1").payload)), hex(reference));
 
     // The value-level snapshot decodes the stored record through the codec, so a peer applying it parses a record.
     const values = documents.createSnapshotResponse(origin, "snapshot-values");
     assert.deepEqual(values.documents[0].payload, value);
     const other = CultCache.builder().withDocumentType(mixedDefinition).withGenericStore(new SingleFileMessagePackBackingStore(join(dir, "other.cc"))).build();
     await documents.applySnapshotResponse(other, values);
-    assert.equal(hex(other.getRequiredEnvelope(mixedDefinition, "n1").payload), hex(reference));
+    assert.equal(hex(documentPayloadBytes(other.getRequiredEnvelope(mixedDefinition, "n1").payload)), hex(reference));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -100,5 +100,5 @@ test("a document with neither a codec nor a formatter replicates as a map, as be
   });
   const documents = new CultNetDocumentRegistry([defineCultNetDocumentBinding({ definition: plain })]);
   const put = documents.createRawDocumentPutMessage(documents.get("tests.plain_record")!, "put-3", "n1", { id: "n1" });
-  assert.equal(hex(put.document.payload), "81a26964a26e31");
+  assert.equal(hex(documentPayloadBytes(put.document.payload)), "81a26964a26e31");
 });

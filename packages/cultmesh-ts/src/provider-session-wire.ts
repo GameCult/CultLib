@@ -1,3 +1,4 @@
+import { decodeDocumentPayload, defineDocumentType } from "@gamecult/cultcache-ts";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import type { CultNetRawDocumentRecord } from "cultnet-ts";
 
@@ -155,6 +156,23 @@ export function assertProviderConnectEvidence(
   }
 }
 
+// The provider command is a CultCache document like any other: written with encodeDocumentPayload and read with
+// decodeDocumentPayload, so its bytes never pass through a plain decoder.
+export const providerCommandDocument = defineDocumentType({
+  type: cultMeshProviderSessionSchemas.command,
+  schemaId: cultMeshProviderSessionSchemas.command,
+  schema: {
+    parse(value: unknown): CultMeshProviderCommandWire {
+      const command = requireObject(value, "provider command");
+      requireText(command.commandId, "commandId");
+      requireText(command.commandKind, "commandKind");
+      requireText(command.providerId, "providerId");
+      requireText(command.serviceInstanceId, "serviceInstanceId");
+      return command as unknown as CultMeshProviderCommandWire;
+    },
+  },
+});
+
 export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord): CultMeshProviderCommandWire {
   if (document.schemaId !== cultMeshProviderSessionSchemas.command) {
     throw new Error(`Expected ${cultMeshProviderSessionSchemas.command}, received ${document.schemaId}.`);
@@ -162,12 +180,7 @@ export function decodeProviderCommandDocument(document: CultNetRawDocumentRecord
   if (document.payloadEncoding !== "messagepack") {
     throw new Error(`Provider command ${document.recordKey} must use MessagePack.`);
   }
-  const command = decodeWireValue(document.payload) as Partial<CultMeshProviderCommandWire>;
-  requireText(command.commandId, "commandId");
-  requireText(command.commandKind, "commandKind");
-  requireText(command.providerId, "providerId");
-  requireText(command.serviceInstanceId, "serviceInstanceId");
-  return command as CultMeshProviderCommandWire;
+  return decodeDocumentPayload(providerCommandDocument, document.payload);
 }
 
 export function assertProviderLease(value: unknown): asserts value is CultMeshProviderLeaseWire {

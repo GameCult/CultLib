@@ -27,6 +27,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
+import { documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+
 import {
   CultMeshQuicRealtimeConnector,
   CultMeshQuicRealtimeProvider,
@@ -124,7 +126,7 @@ async function serveAsync(args: Map<string, string>): Promise<void> {
         producerEpoch: 1n,
         sequence: BigInt(sequence),
         delivery,
-        payload: Buffer.from(`frame-${sequence}`, "utf8"),
+        payload: documentPayloadFromBytes(Buffer.from(`frame-${sequence}`, "utf8")),
       };
       await provider.broadcast(frame);
       // Printed so the harness can compare this exact frame's TypeScript
@@ -215,7 +217,7 @@ async function main(): Promise<void> {
           producerEpoch: frame.producerEpoch.toString(),
           sequence: frame.sequence.toString(),
           delivery: frame.delivery,
-          payloadHex: Buffer.from(frame.payload).toString("hex"),
+          payloadHex: Buffer.from(documentPayloadBytes(frame.payload)).toString("hex"),
         });
       } finally {
         clearTimeout(timer);

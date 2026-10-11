@@ -13,7 +13,7 @@ import { z } from "zod";
 
 import { CultCache } from "../src/cult-cache";
 import { inspectCultCacheBytes } from "../src/cult-cache-inspector";
-import { defineDocumentRegistry, defineDocumentType } from "../src/document";
+import { defineDocumentRegistry, defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "../src/document";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 import type { CacheBackingStore, CultCacheEnvelope, CultCacheSchema } from "../src/types";
 
@@ -202,7 +202,7 @@ test("CultCache fails closed on unknown or illegal persisted polymorphic state",
       {
         key: "mystery",
         type: "forbidden",
-        payload: encode({ theme: "ash" }),
+        payload: documentPayloadFromBytes(encode({ theme: "ash" })),
         storedAt: new Date().toISOString(),
       },
     ]))
@@ -219,13 +219,13 @@ test("CultCache fails closed on unknown or illegal persisted polymorphic state",
       {
         key: "one",
         type: "settings",
-        payload: encode({ theme: "ash" }),
+        payload: documentPayloadFromBytes(encode({ theme: "ash" })),
         storedAt: new Date().toISOString(),
       },
       {
         key: "two",
         type: "settings",
-        payload: encode({ theme: "ember" }),
+        payload: documentPayloadFromBytes(encode({ theme: "ember" })),
         storedAt: new Date().toISOString(),
       },
     ]))
@@ -650,7 +650,7 @@ async function storeState(path: string): Promise<string[]> {
     return [];
   }
   return (await new SingleFileMessagePackBackingStore(path).pullAll())
-    .map((entry) => `${entry.type}:${entry.key}:${Buffer.from(entry.payload).toString("hex")}`)
+    .map((entry) => `${entry.type}:${entry.key}:${Buffer.from(documentPayloadBytes(entry.payload)).toString("hex")}`)
     .sort();
 }
 
@@ -821,8 +821,8 @@ test("concurrentGlobalPutsCannotBothReachDisk", async () => {
   const onDisk = await inner.pullAll();
   assert.deepEqual(onDisk.map((entry) => entry.key), [CultCache.GLOBAL_KEY]);
   assert.deepEqual(
-    Buffer.from(onDisk[0].payload),
-    Buffer.from(cache.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY).payload),
+    Buffer.from(documentPayloadBytes(onDisk[0].payload)),
+    Buffer.from(documentPayloadBytes(cache.getRequiredEnvelope(settingsDocument, CultCache.GLOBAL_KEY).payload)),
   );
   assert.deepEqual(cache.getRequiredGlobal(settingsDocument), { t: "second" });
   const reloaded = build(new SingleFileMessagePackBackingStore(storePath));
@@ -1042,7 +1042,7 @@ test("pullWithThrowingIndexAccessorLeavesCacheUnchanged", async () => {
   await new SingleFileMessagePackBackingStore(storePath).push({
     ...potion,
     key: "bomb",
-    payload: encode({ name: "Bomb", category: "explosive" }),
+    payload: documentPayloadFromBytes(encode({ name: "Bomb", category: "explosive" })),
   });
 
   await assert.rejects(cache.pullAllBackingStores(), /category accessor refuses Bomb/u);
@@ -1349,7 +1349,7 @@ async function writeTsInteropStore(
         members: interopNoteDocument.members,
       },
       storedAt: new Date().toISOString(),
-      payload,
+      payload: documentPayloadFromBytes(payload),
     });
     return note;
   }
@@ -1524,7 +1524,7 @@ test("SingleFileMessagePackBackingStore refuses a dangling symlink at its path a
   const file = join(dir, "store.cc");
   await symlink(join(volume, "store.cc"), file);
   const store = new SingleFileMessagePackBackingStore(file);
-  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
   await assert.rejects(() => store.pullAll(), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   await assert.rejects(() => store.push(envelope), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
   await assert.rejects(() => store.pushAll([envelope], { soft: true }), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -1552,7 +1552,7 @@ test("R3 decides resolve-or-refuse: a push through a live link replaces the link
   const volume = join(dir, "volume");
   await mkdir(volume);
   const target = join(volume, "store.cc");
-  const envelope = { key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  const envelope = { key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
   await new SingleFileMessagePackBackingStore(target).push(envelope);
   const before = await readFile(target);
   const link = join(dir, "store.cc");
@@ -1568,7 +1568,7 @@ test("R3 decides resolve-or-refuse: a pushAll through a dangling link replaces t
   await mkdir(volume);
   const link = join(dir, "store.cc");
   await symlink(join(volume, "store.cc"), link);
-  await new SingleFileMessagePackBackingStore(link).pushAll([{ key: "a", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" }]);
+  await new SingleFileMessagePackBackingStore(link).pushAll([{ key: "a", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" }]);
   assert.ok((await lstat(link)).isFile());
   assert.deepEqual(await readdir(volume), []);
 });
@@ -1585,6 +1585,6 @@ test("CultCache inspector refuses the same vectors by name", async () => {
 test("a v1 store written at the base commit still reads byte for byte", async () => {
   const envelopes = await pullVector("v1-base.msgpack");
   assert.deepEqual(envelopes.map((entry) => [entry.key, entry.type]), [["alpha", "vectors.item"], ["beta", "vectors.item"]]);
-  assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
-  assert.deepEqual([...envelopes[1]!.payload], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
+  assert.deepEqual([...documentPayloadBytes(envelopes[0]!.payload)], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
+  assert.deepEqual([...documentPayloadBytes(envelopes[1]!.payload)], [0x92, 0xa4, 0x62, 0x65, 0x74, 0x61, 0x02]);
 });

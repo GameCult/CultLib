@@ -32,6 +32,28 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
+## Reading And Writing Payloads
+
+A document's bytes travel as a `DocumentPayload`: in a store envelope, a CultNet record and a
+realtime frame. At run time it is the same `Uint8Array`, so nothing on the wire changes. At compile
+time it is opaque: it is assignable to and from neither `Uint8Array` nor `ArrayLike<number>`, so no
+MessagePack decoder accepts it.
+
+- `decodeDocumentPayload(definition, payload)` reads a payload through the definition's formatter,
+  codec or plain map and then its schema. The definition is required.
+- `encodeDocumentPayload(definition, value)` is the writer: the schema first, then the formatter,
+  codec or plain map.
+- `documentPayloadFromBytes(bytes)` is where bytes enter (a record you validated, a store read, a
+  writer of pre-encoded or signed bytes) and `documentPayloadBytes(payload)` is where they leave (a
+  store write, a frame encode, hashing or signing). Reach for them only at those edges.
+
+```ts
+const note = decodeDocumentPayload(noteDocument, envelope.payload); // parsed Note
+const payload = encodeDocumentPayload(noteDocument, note); // DocumentPayload
+```
+
+Browsers import the same names from `@gamecult/cultcache-ts/document`, which holds no Node built-ins.
+
 ## `.cc` Inspection
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical

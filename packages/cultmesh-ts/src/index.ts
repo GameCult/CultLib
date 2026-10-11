@@ -6076,9 +6076,9 @@ export class CultMesh {
         const onMessage = (message: CultNetMessage): void => {
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
-            const decoded = decodeDocumentPayload(receiptBinding.definition, new Uint8Array(message.document.payload));
+            const decoded = decodeDocumentPayload(receiptBinding.definition, message.document.payload);
             cleanup();
-            resolve(receiptBinding.definition.schema.parse(decoded) as CultCacheDocumentValue<TReceiptDefinition>);
+            resolve(decoded);
           } catch (error) { cleanup(); reject(error); }
         };
         const cleanup = (): void => { clearTimeout(timeout); peer.off("message", onMessage); };

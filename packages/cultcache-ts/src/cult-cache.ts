@@ -1,10 +1,17 @@
-import { resolveDocumentFormatter, resolveDocumentMembers } from "./document";
+import {
+  decodeDocumentPayload,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  encodeDocumentPayload,
+  resolveDocumentFormatter,
+  resolveDocumentMembers,
+} from "./document";
+import type { DocumentPayload } from "./document";
 import type {
   AnyCultCacheDocumentDefinition,
   CacheBackingStore,
   CultCacheDocumentAccessor,
   CultCacheDocumentDefinition,
-  CultCacheDocumentFormatter,
   CultCacheDocumentRegistry,
   CultCacheDocumentValue,
   CultCacheEnvelope,
@@ -14,10 +21,16 @@ import type {
 
 type Accessor = (value: unknown) => string | undefined;
 
+// A registered definition reads and writes its documents through the owner, on payloads the cache has cloned.
+type RegisteredFormatter = {
+  encode(value: unknown): DocumentPayload;
+  decode(payload: DocumentPayload): unknown;
+};
+
 type RegisteredDefinition = {
   readonly definition: AnyCultCacheDocumentDefinition;
   readonly global: boolean;
-  readonly formatter: CultCacheDocumentFormatter<unknown>;
+  readonly formatter: RegisteredFormatter;
   readonly catalogEntry: CultCacheSchemaCatalogEntry;
   nameAccessor?: Accessor;
   indexAccessors: ReadonlyMap<string, Accessor>;
@@ -674,18 +687,13 @@ export class CultCache {
     }
   }
 
-  #createFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
-    const userFormatter = resolveDocumentFormatter(definition);
+  #createFormatter(definition: AnyCultCacheDocumentDefinition): RegisteredFormatter {
+    // A definition that declares both a codec and a formatter is refused here, where it is registered.
+    resolveDocumentFormatter(definition);
 
     return {
-      encode: (value: unknown) => {
-        const parsed = definition.schema.parse(value);
-        return this.#cloneBytes(userFormatter.encode(parsed));
-      },
-      decode: (payload: Uint8Array) => {
-        const decoded = userFormatter.decode(this.#cloneBytes(payload));
-        return definition.schema.parse(decoded);
-      },
+      encode: (value: unknown) => this.#cloneBytes(encodeDocumentPayload(definition, value)),
+      decode: (payload: DocumentPayload) => decodeDocumentPayload(definition, this.#cloneBytes(payload)),
     };
   }
 
@@ -1026,7 +1034,7 @@ export class CultCache {
     return `${type}::${indexName}`;
   }
 
-  #cloneBytes(payload: Uint8Array): Uint8Array {
-    return new Uint8Array(payload);
+  #cloneBytes(payload: DocumentPayload): DocumentPayload {
+    return documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(payload)));
   }
 }

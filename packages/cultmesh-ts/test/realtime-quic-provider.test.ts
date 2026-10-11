@@ -13,6 +13,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
+import { documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+
 import {
   CultMeshQuicNativeRuntime,
 } from "../src/realtime-quic-native";
@@ -63,7 +65,7 @@ function testFrame(overrides: Partial<CultMeshRealtimeFrame> = {}): CultMeshReal
     producerEpoch: 7n,
     sequence: 1n,
     delivery: "latest-only",
-    payload: new Uint8Array([3, 4, 5]),
+    payload: documentPayloadFromBytes(new Uint8Array([3, 4, 5])),
     ...overrides,
   };
 }
@@ -613,8 +615,8 @@ test("a peer attaching after two latest-only broadcasts for one key receives exa
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
   try {
-    await provider.broadcast(testFrame({ sequence: 1n, payload: new Uint8Array([1]) }));
-    await provider.broadcast(testFrame({ sequence: 2n, payload: new Uint8Array([2]) }));
+    await provider.broadcast(testFrame({ sequence: 1n, payload: documentPayloadFromBytes(new Uint8Array([1])) }));
+    await provider.broadcast(testFrame({ sequence: 2n, payload: documentPayloadFromBytes(new Uint8Array([2])) }));
 
     // Attach after both broadcasts have already resolved: nothing in this
     // peer's outbox came from `broadcast()`'s own fan-out, only from the
@@ -636,11 +638,11 @@ test("retention keeps the newer generation when an older one broadcasts afterwar
   if (!nativeBridgeAvailable()) return void t.skip("no native bridge available");
   const provider = await startProvider();
   try {
-    await provider.broadcast(testFrame({ sequence: 5n, payload: new Uint8Array([5]) }));
+    await provider.broadcast(testFrame({ sequence: 5n, payload: documentPayloadFromBytes(new Uint8Array([5])) }));
     // An older generation broadcast after a newer one must not overwrite the
     // retained frame: mutating the retention comparison to a plain
     // last-write-wins assignment would regress this.
-    await provider.broadcast(testFrame({ sequence: 3n, payload: new Uint8Array([3]) }));
+    await provider.broadcast(testFrame({ sequence: 3n, payload: documentPayloadFromBytes(new Uint8Array([3])) }));
 
     const consumer = await dialProvider(provider);
     try {
@@ -672,7 +674,7 @@ test("a reliable-ordered frame is never retained and is not delivered to a late 
     // after a real latest-only frame, so the assertion below proves the
     // reliable-ordered frame specifically was never retained, rather than
     // merely proving the provider had nothing at all to seed.
-    await provider.broadcast(testFrame({ delivery: "latest-only", sequence: 1n, payload: new Uint8Array([1]) }));
+    await provider.broadcast(testFrame({ delivery: "latest-only", sequence: 1n, payload: documentPayloadFromBytes(new Uint8Array([1])) }));
     const secondConsumer = await dialProvider(provider);
     try {
       const seeded = await secondConsumer.receiveFrame();

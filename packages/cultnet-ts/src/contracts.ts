@@ -1,3 +1,4 @@
+import type { DocumentPayload } from "@gamecult/cultcache-ts/document";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 
 import documentRecordSchema from "../contracts/cultnet/cultnet.document-record.schema.json";
@@ -200,7 +201,7 @@ export interface CultNetRawDocumentRecord {
   recordKey: string;
   storedAt: string;
   payloadEncoding: CultNetRawPayloadEncoding;
-  payload: Uint8Array;
+  payload: DocumentPayload;
   sourceRuntimeId?: string;
   sourceAgentId?: string;
   sourceRole?: string;

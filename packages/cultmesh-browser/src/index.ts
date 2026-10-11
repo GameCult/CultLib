@@ -1,3 +1,5 @@
+import { decodeDocumentPayload } from "@gamecult/cultcache-ts/document";
+import type { AnyCultCacheDocumentDefinition, CultCacheDocumentValue } from "@gamecult/cultcache-ts";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import {
   encodeCultNetMessageForWire,
@@ -761,18 +763,18 @@ export class CultMeshBrowserClient implements AsyncDisposable {
 }
 
 /**
- * Reads a document record's payload. A document defined with a codec or a formatter is not a plain msgpack map: pass the
- * formatter that reads it (a cultcache-ts `resolveDocumentFormatter(definition)`); without one the payload is read as a
- * plain value, and a codec document comes back as its positional array.
+ * Reads a document record's payload through the definition that says how its bytes are laid out: a codec, a formatter or
+ * a plain map, then the definition's schema. The payload is opaque (`DocumentPayload`), so a plain msgpack decode of it
+ * does not compile; the definition is required.
  */
-export function decodeCultNetPayload<T>(
+export function decodeCultNetPayload<TDefinition extends AnyCultCacheDocumentDefinition>(
   record: CultNetRawDocumentRecord,
-  formatter?: { decode(payload: Uint8Array): unknown },
-): T {
+  definition: TDefinition,
+): CultCacheDocumentValue<TDefinition> {
   if (record.payloadEncoding !== "messagepack") {
     throw new Error(`Unsupported CultNet document payload '${record.payloadEncoding}'.`);
   }
-  return (formatter ? formatter.decode(record.payload) : decodeWireValue(record.payload)) as T;
+  return decodeDocumentPayload(definition, record.payload);
 }
 
 function recordMatchesSchema(record: CultNetRawDocumentRecord, requestedSchema: string): boolean {

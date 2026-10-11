@@ -1,4 +1,5 @@
 import type { SlotsCodec } from "./codec";
+import type { DocumentPayload } from "./document";
 
 export type CultCacheIndexScalar = string | number | boolean | bigint;
 
@@ -80,7 +81,7 @@ export interface CultCacheDocumentRegistry<
 export interface CultCacheEnvelope {
   key: string;
   type: string;
-  payload: Uint8Array;
+  payload: DocumentPayload;
   storedAt: string;
   schemaId?: string;
   catalogEntry?: CultCacheSchemaCatalogEntry;

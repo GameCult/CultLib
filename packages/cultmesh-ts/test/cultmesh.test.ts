@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import { z } from "zod";
-import { defineDocumentType } from "@gamecult/cultcache-ts";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
@@ -21,6 +21,9 @@ import {
   type CultNetSnapshotResponseRawMessage,
 } from "cultnet-ts";
 import { CultMesh, CultMeshRudpUnservableDocumentError } from "../src/index";
+
+// A record's payload as the bytes a peer would put on the wire.
+const payloadOf = (value: unknown) => documentPayloadFromBytes(encodeWireValue(value));
 
 const noteDocument = defineDocumentType({
   type: "cultmesh.note",
@@ -268,7 +271,7 @@ test("CultMesh TS store document handles choose compatible foreign schema payloa
           type: "runtime.generated.incompatible-note",
           schemaId: "runtime.generated.incompatible-note.v1",
           storedAt: "2026-06-27T00:00:00Z",
-          payload: encodeWireValue({ nope: "not the requested shape" }),
+          payload: payloadOf({ nope: "not the requested shape" }),
           catalogEntry: {
             schemaId: "runtime.generated.incompatible-note.v1",
             schemaName: "runtime.generated.incompatible-note",
@@ -283,7 +286,7 @@ test("CultMesh TS store document handles choose compatible foreign schema payloa
           type: "runtime.generated.cultmesh.note",
           schemaId: "runtime.generated.cultmesh.note.ui.42",
           storedAt: "2026-06-27T00:00:01Z",
-          payload: encodeWireValue({
+          payload: payloadOf({
             noteId: "note:foreign",
             body: "foreign schema id, local store shape",
           }),
@@ -2820,7 +2823,7 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
         recordKey: "note:a",
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encodeWireValue("first"),
+        payload: payloadOf("first"),
         sourceRuntimeId: "client-a",
       },
     });
@@ -2832,7 +2835,7 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
         recordKey: "note:b",
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: encodeWireValue("second"),
+        payload: payloadOf("second"),
         sourceRuntimeId: "client-b",
       },
     });
@@ -3316,7 +3319,7 @@ function notePut(
       recordKey,
       storedAt,
       payloadEncoding: "messagepack",
-      payload: encodeWireValue({ noteId: recordKey, body: "x".repeat(bodyLength) }),
+      payload: payloadOf({ noteId: recordKey, body: "x".repeat(bodyLength) }),
       ...(sourceRuntimeId ? { sourceRuntimeId } : {}),
     },
   };
@@ -3350,7 +3353,7 @@ function echoReceiptBytes(put: CultNetDocumentPutRawMessage): number {
       recordKey: put.document.recordKey,
       storedAt: new Date().toISOString(),
       payloadEncoding: "messagepack",
-      payload: encodeWireValue(decodeWireValue(put.document.payload)),
+      payload: payloadOf(decodeWireValue(documentPayloadBytes(put.document.payload))),
       sourceRuntimeId: SERVED_BOUND_SERVER,
       sourceAgentId: undefined,
       sourceRole: "provider",
@@ -3402,7 +3405,7 @@ async function withServedBoundRig(
           recordKey: document.recordKey,
           storedAt: document.storedAt,
           payloadEncoding: "messagepack",
-          payload: encodeWireValue(document.payload),
+          payload: payloadOf(document.payload),
         },
       });
       if (!handler.receipt) return undefined;
@@ -3453,7 +3456,7 @@ function servedBodies(reply: CultNetMessage): Array<[string, number]> {
   assert.equal(reply.schemaVersion, "cultnet.snapshot_response_raw.v0");
   return (reply as CultNetSnapshotResponseRawMessage).documents.map((document) => [
     document.recordKey,
-    (decodeWireValue(document.payload) as { body: string }).body.length,
+    (decodeWireValue(documentPayloadBytes(document.payload)) as { body: string }).body.length,
   ]);
 }
 

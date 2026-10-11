@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const command = process.argv[2];
 if (!command) throw new Error("Usage: node scripts/run-typescript-workspaces.mjs <script>");
@@ -25,6 +26,14 @@ const childEnv = process.platform === "win32"
       ].join(";"),
     }
   : process.env;
+
+// A test file no script runs is a suite that passes while proving nothing, so `test` starts by checking the wiring.
+if (command === "test") {
+  execFileSync(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), "check-typescript-tests-wired.mjs")], {
+    env: childEnv,
+    stdio: "inherit",
+  });
+}
 
 for (const workspace of workspaces) {
   execFileSync(process.execPath, [npmCli, "--workspace", workspace, "run", command], {
