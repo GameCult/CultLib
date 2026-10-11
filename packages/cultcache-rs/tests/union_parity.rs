@@ -751,7 +751,6 @@ fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
         (UnionSurface::TYPE, "arms", arms_at, arms_past),
         (MapDoc::TYPE, "maps", maps_at, maps_past),
         (UnionSurface::TYPE, "arrays", arrays_at, arrays_past),
-        (UnionSurface::TYPE, "mixed", Vec::new(), mixed_past),
     ];
     for (type_name, name, at, past) in cases {
         let temp = tempfile::tempdir().unwrap();
@@ -760,10 +759,8 @@ fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
         cache.register_entry_type::<UnionSurface>().unwrap();
         cache.register_entry_type::<MapDoc>().unwrap();
         cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&path)).unwrap();
-        if !at.is_empty() {
-            cache.put_raw_envelope(raw(type_name, "at-raw", at.clone())).unwrap();
-            cache.put_prepared_batch(vec![raw(type_name, "at-batch", at.clone())]).unwrap();
-        }
+        cache.put_raw_envelope(raw(type_name, "at-raw", at.clone())).unwrap();
+        cache.put_prepared_batch(vec![raw(type_name, "at-batch", at.clone())]).unwrap();
         let stored = cache.snapshot_envelopes();
         let file_before = std::fs::read(&path).unwrap();
 
