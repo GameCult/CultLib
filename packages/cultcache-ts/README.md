@@ -39,6 +39,14 @@ realtime frame. At run time it is the same `Uint8Array`, so nothing on the wire 
 time it is opaque: it is assignable to and from neither `Uint8Array` nor `ArrayLike<number>`, so no
 MessagePack decoder accepts it.
 
+What the type guarantees is that a payload cannot be read or assigned directly: a decoder call, an
+assignment to `Uint8Array` and `new Uint8Array(payload)` fail to compile. It does not stop what the
+runtime value allows. Because the value is a `Uint8Array`, a check such as `payload instanceof
+Uint8Array` narrows it back to bytes, and a cast does the same; a read made that way sees the raw
+bytes, which for a codec or formatter document are not the document. Read through
+`decodeDocumentPayload`, and when you need the bytes themselves (hashing, signing, a store write)
+take them with `documentPayloadBytes`.
+
 - `decodeDocumentPayload(definition, payload)` reads a payload through the definition's formatter,
   codec or plain map and then its schema. The definition is required.
 - `encodeDocumentPayload(definition, value)` is the writer: the schema first, then the formatter,

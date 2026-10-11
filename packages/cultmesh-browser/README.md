@@ -34,7 +34,9 @@ A record's `payload` is a `DocumentPayload`, an opaque type over the same bytes,
 `decodeCultNetPayload(record, definition)` is how it is read: through the CultCache document
 definition that says whether the bytes are a plain map, a codec's slot record or a
 formatter's, then through the definition's schema. A plain MessagePack decode of a payload
-does not compile, and `decodeCultNetPayload` takes no definition-less form. The definition
+does not compile, and `decodeCultNetPayload` takes no definition-less form. The type stops direct reads
+and assignment; it does not stop runtime narrowing (`payload instanceof Uint8Array`) or a cast, which
+would read the raw bytes. For the bytes themselves use `documentPayloadBytes`. The definition
 comes from `@gamecult/cultcache-ts` (this package imports only its `./document` entry, which
 holds no Node built-ins).
 

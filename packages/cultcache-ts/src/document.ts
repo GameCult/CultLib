@@ -102,6 +102,11 @@ const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
  * `documentPayloadBytes` where they leave (a store write, a frame encode, hashing or signing).
  *
  * The key is a plain string, not a unique symbol, so two installed copies of this package stay compatible.
+ *
+ * What the type guarantees: a payload cannot be read or assigned directly (a decoder call, `const b: Uint8Array = p`,
+ * `new Uint8Array(p)` fail to compile). What it does not: the runtime value is a `Uint8Array`, so runtime narrowing
+ * (`p instanceof Uint8Array`) or a cast gets the raw bytes back, and a codec or formatter document read that way is not
+ * the document. The escape for bytes is `documentPayloadBytes`; the reader is `decodeDocumentPayload`.
  */
 export interface DocumentPayload {
   readonly "cultcache.documentPayload": true;
