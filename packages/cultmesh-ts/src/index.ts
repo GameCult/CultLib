@@ -8,6 +8,7 @@ import {
   type CacheBackingStore,
   type CultCacheEnvelope,
   type CultCacheDocumentValue,
+  type DocumentPayload,
   decodeDocumentPayload,
 } from "@gamecult/cultcache-ts";
 import {
@@ -4104,16 +4105,16 @@ export interface CultMeshPeerCard {
   authorityLeaseId?: string;
 }
 
-export interface CultMeshRudpDocumentPut {
+/**
+ * A document put as `onDocumentPutRaw` receives it. `decoded` says which read the payload is ready for: `true` when the
+ * registry held a definition for `schemaId` and `payload` is the document read through it; `false` when it did not, and
+ * `payload` is the opaque `DocumentPayload`, untouched, for a handler that holds the definition itself to read with
+ * `decodeDocumentPayload`. Narrowing on `decoded` needs no cast in either branch.
+ */
+export type CultMeshRudpDocumentPut = {
   schemaId: string;
   recordKey: string;
   storedAt: string;
-  /**
-   * The document, read through the definition `documents` holds for `schemaId`. A schema the registry has no definition
-   * for is not decoded at all: the payload arrives untouched as the opaque `DocumentPayload`, for a handler that holds
-   * the definition itself to read with `decodeDocumentPayload`.
-   */
-  payload: unknown;
   sourceRuntimeId: string | null;
   sourceAgentId: string | null;
   sourceRole: string | null;
@@ -4123,7 +4124,10 @@ export interface CultMeshRudpDocumentPut {
     family: string;
     port: number;
   };
-}
+} & (
+  | { readonly decoded: true; readonly payload: unknown }
+  | { readonly decoded: false; readonly payload: DocumentPayload }
+);
 
 export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDocumentDefinition = AnyCultCacheDocumentDefinition> {
   binding: CultNetDocumentBinding<TDefinition>;
@@ -6426,12 +6430,14 @@ function normalizeRudpDocumentPut(
     schemaId: document.schemaId,
     recordKey: document.recordKey,
     storedAt: document.storedAt ?? new Date().toISOString(),
-    payload: definition ? decodeDocumentPayload(definition, document.payload) : document.payload,
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,
     tags: Array.isArray(document.tags) ? document.tags : [],
     remote,
+    ...(definition
+      ? { decoded: true, payload: decodeDocumentPayload(definition, document.payload) }
+      : { decoded: false, payload: document.payload }),
   };
 }
 

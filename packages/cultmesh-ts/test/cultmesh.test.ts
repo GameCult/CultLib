@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import { z } from "zod";
-import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
+import { defineDocumentType, documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   CultNetPeer,
@@ -2782,7 +2782,8 @@ test("CultMesh TS RUDP document server accepts raw document puts from multiple p
       maxPendingReliablePackets: 16,
       onDocumentPutRaw: (document) => {
         // The registry holds no definition, so the payload arrives untouched and is read here by name.
-        received.push(`${document.sourceRuntimeId}:${document.recordKey}:${decodeWireValue(documentPayloadBytes(document.payload as DocumentPayload))}`);
+        if (document.decoded) throw new Error("the registry holds no definition, so the put must arrive undecoded");
+        received.push(`${document.sourceRuntimeId}:${document.recordKey}:${decodeWireValue(documentPayloadBytes(document.payload))}`);
       },
     },
   );
@@ -2868,10 +2869,11 @@ test("CultMesh TS publishes one registered document to a RUDP catalog", async ()
       maxFragmentBytes: 1024,
       maxPendingReliablePackets: 16,
       onDocumentPutRaw: (document) => {
+        if (document.decoded) throw new Error("the registry holds no definition, so the put must arrive undecoded");
         received = {
           schemaId: document.schemaId,
           recordKey: document.recordKey,
-          payload: decodeWireValue(documentPayloadBytes(document.payload as DocumentPayload)),
+          payload: decodeWireValue(documentPayloadBytes(document.payload)),
           sourceRuntimeId: document.sourceRuntimeId,
         };
       },

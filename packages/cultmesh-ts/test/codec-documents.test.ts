@@ -10,14 +10,14 @@ import {
   defineDocumentType,
   documentPayloadBytes,
   encodeDocumentPayload,
-  type DocumentPayload,
 } from "@gamecult/cultcache-ts";
+import type { CacheBackingStore, CultCacheEnvelope } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
   defineCultNetDocumentBinding,
   type CultNetPeer,
 } from "cultnet-ts";
-import { CultMesh, cultMeshDocumentFromSingleFile } from "../src/index";
+import { CultMesh, cultMeshDocumentFromSingleFile, cultMeshDocumentFromStore, type CultMeshRudpDocumentPut } from "../src/index";
 
 // A document written in the reference's positional shape, and a plain map document beside it. Every mesh reader of a
 // payload reads it the way the cache does, so both read through the mesh.
@@ -156,12 +156,12 @@ test("a RUDP put naming a schema the server has no definition for reaches the ha
   const strayBinding = defineCultNetDocumentBinding({ definition: stray });
   const known = defineCultNetDocumentBinding({ definition: plainNote });
   const errors: Error[] = [];
-  const puts: Array<{ schemaId: string; payload: unknown }> = [];
+  const puts: CultMeshRudpDocumentPut[] = [];
   const server = CultMesh.createRudpDocumentServer("cultmesh-ts-unregistered-server", connectionId, {
     documents: new CultNetDocumentRegistry([known]),
     bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
     onError: (error) => errors.push(error),
-    onDocumentPutRaw: async (document) => { puts.push({ schemaId: document.schemaId, payload: document.payload }); },
+    onDocumentPutRaw: async (document) => { puts.push(document); },
   });
   let peer: CultNetPeer | undefined;
   try {
@@ -176,7 +176,9 @@ test("a RUDP put naming a schema the server has no definition for reaches the ha
     assert.equal(puts.length, 1);
     // Not read as plain msgpack: the bytes are the codec's slot record, handed over opaque, and the definition that reads
     // them is the handler's to hold.
-    const payload = puts[0]!.payload as DocumentPayload;
+    const put = puts[0]!;
+    assert.ok(!put.decoded, "the registry holds no definition for this schema");
+    const payload = put.payload;
     assert.equal(Buffer.from(documentPayloadBytes(payload)).toString("hex"), "91a16b", "a one-slot codec record, not a map");
     assert.deepEqual(Buffer.from(documentPayloadBytes(payload)), Buffer.from(documentPayloadBytes(encodeDocumentPayload(stray, { noteId: "k" }))));
     assert.deepEqual(decodeDocumentPayload(stray, payload), { noteId: "k" });
@@ -184,4 +186,25 @@ test("a RUDP put naming a schema the server has no definition for reaches the ha
     peer?.close();
     server.close();
   }
+});
+
+test("a store read takes the record the catalog matches to the schema and the definition parses, not the first that merely parses", async () => {
+  const target = defineDocumentType({ type: "cultmesh.pick", schemaId: "cultmesh.pick.v1", schema: z.object({ n: z.number() }) });
+  const lenient = defineDocumentType({ type: "cultmesh.pick", schemaId: "cultmesh.pick.v1", schema: { parse: (value: unknown) => value } });
+  const entry = (schemaId: string, compatibleSchemaIds?: readonly string[]) => ({
+    schemaId, schemaName: schemaId, schemaVersion: `${schemaId}.v1`, contentHash: "h", canonicalSchemaJson: "{}", compatibleSchemaIds,
+  });
+  const envelope = (key: string, schemaId: string, value: unknown, compatibleSchemaIds?: readonly string[]): CultCacheEnvelope => ({
+    key, type: "cultmesh.pick", schemaId, storedAt: "2026-10-11T00:00:00.000Z",
+    payload: encodeDocumentPayload(lenient, value), catalogEntry: entry(schemaId, compatibleSchemaIds),
+  });
+  // None carries the definition's own schema id, so the exact-id find misses. The first parses and is foreign; the
+  // second is matched by the catalog and does not parse; the third is matched and parses.
+  const records = [
+    envelope("a", "foreign.v1", { n: 1 }),
+    envelope("b", "alias-bad.v1", { n: "x" }, ["cultmesh.pick.v1"]),
+    envelope("c", "alias-good.v1", { n: 2 }, ["cultmesh.pick.v1"]),
+  ];
+  const store: CacheBackingStore = { pullAll: async () => records, push: async () => undefined, delete: async () => undefined };
+  assert.deepEqual(await cultMeshDocumentFromStore(store, target).latest(), { n: 2 });
 });

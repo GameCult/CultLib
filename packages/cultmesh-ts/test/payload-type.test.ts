@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
+import {
+  decodeDocumentPayload,
+  defineDocumentType,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  type DocumentPayload,
+} from "@gamecult/cultcache-ts";
 import { decodeWireValue } from "cultnet-ts/wire";
 import type { CultNetRawDocumentRecord } from "cultnet-ts";
 
+import type { CultMeshRudpDocumentPut } from "../src/index";
 import { decodeRealtimeFrame, encodeRealtimeFrame, type CultMeshRealtimeFrame } from "../src/realtime-wire";
 
 // The rule: a document payload is read only through its definition. Every payload this package touches (a CultNet
@@ -20,6 +27,16 @@ export function refusedReaders(record: CultNetRawDocumentRecord, frame: CultMesh
   // @ts-expect-error bytes are not a payload until they enter by name
   const forged: DocumentPayload = new Uint8Array();
   void [bytes, forged];
+}
+
+// The one seam where a DocumentPayload reaches a consumer: a put for a schema the registry holds no definition for. The
+// owner read of the undecoded branch needs no cast, and the decoded branch is not a DocumentPayload.
+const noteDefinition = defineDocumentType({ type: "t.note", schemaId: "t.note.v0", schema: { parse: (value: unknown) => value } });
+export function readPut(put: CultMeshRudpDocumentPut): unknown {
+  if (!put.decoded) return decodeDocumentPayload(noteDefinition, put.payload);
+  // @ts-expect-error a decoded put's payload is the document, not a DocumentPayload
+  decodeDocumentPayload(noteDefinition, put.payload);
+  return put.payload;
 }
 
 test("a realtime frame carries its payload as the same bytes it was given by name", () => {
