@@ -772,7 +772,7 @@ test("slots read and rewrite exactly what the C# reference does for nil, a str i
     4: ["l", list(string), () => []],
   });
   const rows = readWire(new Uint8Array(await readFile(join(vectors, "..", "slot-nil", "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
-  assert.equal(rows.length, 15);
+  assert.equal(rows.length, 17);
   let accepted = 0;
   for (const [name, payload, wasAccepted, rewritten] of rows) {
     if (wasAccepted) {
@@ -782,7 +782,14 @@ test("slots read and rewrite exactly what the C# reference does for nil, a str i
       assert.throws(() => probe.decode(readWire(payload)), (error: Error) => !error.message.includes(hex(payload).slice(2)), name);
     }
   }
-  assert.equal(accepted, 13);
+  assert.equal(accepted, 15);
+  // A character outside the BMP is four UTF-8 bytes (U+1F600 is f0 9f 98 80); a CESU-8 reader, or one with no four-byte
+  // branch, fails here against the bytes the C# reference wrote.
+  const astral = rows.find(([name]) => name === "string-astral")!;
+  assert.equal(probe.decode(readWire(astral[1])).s, "\u{1F600}");
+  assert.equal(hex(writeWire(probe.encode(probe.decode(readWire(astral[1]))))), hex(astral[3]));
+  const astralInBytes = rows.find(([name]) => name === "bytes-str-astral")!;
+  assert.equal(hex(probe.decode(readWire(astralInBytes[1])).b), "f09f9880");
 });
 
 test("a nil reads as null and writes as nil in every reference slot, and a value slot refuses it", () => {
