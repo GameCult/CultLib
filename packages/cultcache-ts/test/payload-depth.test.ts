@@ -18,6 +18,7 @@ import {
   documentPayloadFromBytes,
   encodeDocumentPayload,
 } from "../src/document";
+import * as codecs from "../src/codec";
 import { checkPayloadDepth } from "../src/payload-depth";
 import { SingleFileMessagePackBackingStore } from "../src/single-file-messagepack-backing-store";
 
@@ -137,25 +138,23 @@ test("a refusal names the subject, the depth and the limit and never a byte of t
 });
 
 const note = z.object({ id: z.string(), count: z.number() });
-const formatterCalls: string[] = [];
+const slotCalls: string[] = [];
+const watched = { ...codecs.string, decode: (raw: unknown) => (slotCalls.push("decode"), codecs.string.decode(raw)), encode: (value: string) => (slotCalls.push("encode"), codecs.string.encode(value)) };
 const guarded = defineDocumentType({
   type: "t.guarded",
   schemaId: "t.guarded.v0",
   schema: note,
   name: "id",
-  formatter: {
-    encode: () => (formatterCalls.push("encode"), arrays(L + 1)),
-    decode: () => (formatterCalls.push("decode"), { id: "a", count: 1 }),
-  },
+  codec: codecs.slots<{ id: string; count: number }>({ 0: ["id", watched], 1: ["count", codecs.int32] }, "T.Guarded"),
 });
 
-test("the owner refuses a payload past the limit before its formatter reads it, and a formatter's bytes before they are wrapped", () => {
+test("the owner refuses a payload past the limit before a codec reads it, and a codec's bytes before they are wrapped", () => {
   assert.throws(() => decodeDocumentPayload(guarded, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
-  assert.deepEqual(formatterCalls, [], "the formatter never saw the deep payload");
-  assert.deepEqual(decodeDocumentPayload(guarded, documentPayloadFromBytes(arrays(L))), { id: "a", count: 1 });
+  assert.deepEqual(slotCalls, [], "the codec never saw the deep payload");
+  assert.deepEqual(decodeDocumentPayload(guarded, documentPayloadFromBytes(encode(["a", 1]))), { id: "a", count: 1 });
 
-  assert.throws(() => encodeDocumentPayload(guarded, { id: "a", count: 1 }), (error: Error) =>
-    error instanceof CultCachePayloadDepthError && error.message === 'document type "t.guarded" value nests 257 MessagePack containers deep; the limit is 256.');
+  const formatterBytes = (value: unknown) => documentPayloadBytes(encodeDocumentPayload(guarded, value));
+  assert.deepEqual(formatterBytes({ id: "a", count: 1 }), encode(["a", 1]));
 });
 
 test("a document without a codec or formatter writes a value L deep and refuses L+1 by the walk", () => {
@@ -189,11 +188,13 @@ test("the inspector previews a payload at the limit and reports one past it, or 
   const atLimit = await storeWith(stamped(L - 1));
   const previewed = inspectCultCacheBytes(atLimit, await readFile(atLimit)).records[0]!;
   assert.equal(previewed.payloadDecodeError, undefined);
+  assert.equal(previewed.schemaName, "tests.schema_stamped_entry", "a payload the walk accepts yields its stamp");
 
   for (const inside of [L, 100_000]) {
     const file = await storeWith(stamped(inside));
     const record = inspectCultCacheBytes(file, await readFile(file)).records[0]!;
     assert.equal(record.payloadDecodeError, "document payload nests 257 MessagePack containers deep; the limit is 256.");
+    assert.equal(record.schemaName, "<missing catalog entry>", "the stamp of a payload the walk refuses is not recovered");
   }
 });
 
@@ -204,4 +205,59 @@ test("the single-file store infers a legacy record's schema from a payload at th
 
   const past = await storeWith(stamped(L));
   await assert.rejects(() => new SingleFileMessagePackBackingStore(past).pullAll(), /missing schema id/u);
+});
+
+// A header whose length or count needs all four bytes: the low sixteen bits of the length are small, the whole is not.
+const be32 = (n: number) => bytes((n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
+
+test("a 32-bit length or count is read whole: the walk skips a 65539-byte scalar and counts 65540 children", () => {
+  const blob = repeat(bytes(0x91), 65539);
+  const scalars: [string, Uint8Array][] = [
+    ["bin32", cat(bytes(0xc6), be32(65539), blob)],
+    ["str32", cat(bytes(0xdb), be32(65539), blob)],
+    ["ext32", cat(bytes(0xc9), be32(65539), bytes(0x7f), blob)],
+  ];
+  for (const [name, scalar] of scalars) {
+    assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), scalar, arrays(L - 1))), `${name} of 65539 bytes then a chain at the limit`);
+    refused(cat(bytes(0x92), scalar, arrays(L)), `${name} of 65539 bytes then a chain past it`);
+  }
+  const nils = repeat(bytes(0xc0), 65540);
+  for (const [name, header] of [["array32", cat(bytes(0xdd), be32(65540))], ["map32", cat(bytes(0xdf), be32(32770))]] as const) {
+    refused(cat(bytes(0x92), header, nils, arrays(L)), `${name} announcing more than 65535: the sibling chain past the limit`);
+    assert.doesNotThrow(() => checkPayloadDepth(cat(bytes(0x92), header, nils, arrays(L - 1))), `${name}: the sibling chain at the limit`);
+  }
+});
+
+test("a user formatter's bytes are its own: a 0x91 grey image round-trips, while plain and codec documents are still walked", () => {
+  const grey = defineDocumentType({
+    type: "t.grey",
+    schemaId: "t.grey.v0",
+    schema: z.object({ pixels: z.instanceof(Uint8Array) }),
+    name: "pixels",
+    formatter: { encode: (value) => (value as { pixels: Uint8Array }).pixels, decode: (payload) => ({ pixels: payload }) },
+  });
+  for (const size of [300, 4096]) {
+    const pixels = new Uint8Array(size).fill(0x91);
+    const written = encodeDocumentPayload(grey, { pixels });
+    assert.deepEqual(documentPayloadBytes(written), pixels, `${size} bytes written as the formatter made them`);
+    assert.deepEqual(decodeDocumentPayload(grey, written), { pixels }, `${size} bytes read back through the formatter`);
+  }
+
+  const anything = defineDocumentType({ type: "t.any2", schemaId: "t.any2.v0", schema: z.any(), name: "id" });
+  const nest = (n: number): unknown => (n === 1 ? [] : [nest(n - 1)]);
+  assert.throws(() => encodeDocumentPayload(anything, nest(L + 1)), CultCachePayloadDepthError);
+  assert.throws(() => decodeDocumentPayload(anything, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
+
+  type Tree = unknown[];
+  const tree: codecs.Codec<Tree> = codecs.lazy(() => codecs.list(tree));
+  const coded = defineDocumentType({
+    type: "t.coded",
+    schemaId: "t.coded.v0",
+    schema: z.any(),
+    name: "id",
+    codec: codecs.slots<{ id: string; inner: Tree }>({ 0: ["id", codecs.string], 1: ["inner", tree] }, "T.Coded"),
+  });
+  assert.doesNotThrow(() => encodeDocumentPayload(coded, { id: "a", inner: nest(L - 1) as Tree }));
+  assert.throws(() => encodeDocumentPayload(coded, { id: "a", inner: nest(L) as Tree }), CultCachePayloadDepthError);
+  assert.throws(() => decodeDocumentPayload(coded, documentPayloadFromBytes(arrays(L + 1))), CultCachePayloadDepthError);
 });

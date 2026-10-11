@@ -253,6 +253,10 @@ const combatLogDocument = defineDocumentType({
 
 If you do not supply one, `CultCacheTS` uses MessagePack plus Zod validation by default.
 
+The 256-container nesting bound (`MAX_PAYLOAD_DEPTH`, refused with `CultCachePayloadDepthError`) covers the MessagePack the
+library itself writes: the default format and a codec. A payload your formatter writes is opaque bytes in any format, so the
+library does not walk it as MessagePack; its format and its bounds are your formatter's.
+
 Zod is no longer mandatory. Any schema object with a `parse(...)` function will
 do, which means generated Ajv-backed JSON-schema contracts can feed the cache
 directly as long as they expose the same parse surface.
