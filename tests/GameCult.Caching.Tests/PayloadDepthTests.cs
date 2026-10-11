@@ -59,6 +59,7 @@ namespace GameCult.Caching.Tests
             ("array16", Cat(Bytes(0xdc), Len16(3), Bytes(1, 1, 1))),
             ("array32", Cat(Bytes(0xdd), Len32(2), Bytes(1, 1))),
             ("fixmap", Cat(Bytes(0x82), Bytes(1, 1, 1, 1))),
+            ("largest fixmap", Cat(Bytes(0x8f), Enumerable.Repeat((byte)1, 30).ToArray())),
             ("map16", Cat(Bytes(0xde), Len16(2), Bytes(1, 1, 1, 1))),
             ("map32", Cat(Bytes(0xdf), Len32(1), Bytes(1, 1))),
             ("empty fixarray", Bytes(0x90)), ("empty array16", Bytes(0xdc, 0, 0)), ("empty array32", Bytes(0xdd, 0, 0, 0, 0)),
@@ -140,6 +141,10 @@ namespace GameCult.Caching.Tests
             // A header that fits exactly is read, not treated as cut short.
             Refuses(Chain(Limit + 1, Bytes(0xdc, 0, 0)), "an array16 header ending the payload is read");
             Accepts(Cat(Bytes(0x91, 0xd9, 200), Filler(10)), "a string cut short is not walked past its end");
+
+            // A container header cut short at the limit is not yet a container: the deserializer refuses it, not the walk.
+            foreach (var cut in new[] { Bytes(0xdc, 0), Bytes(0xdd, 0, 0, 0), Bytes(0xde, 0), Bytes(0xdf, 0, 0, 0) })
+                Accepts(Chain(Limit + 1, cut), $"{Convert.ToHexString(cut)} cut short at depth {Limit + 1}");
         }
 
         [Test]
