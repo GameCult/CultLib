@@ -24,6 +24,17 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class Float32Slot { [Key(0)] public float V; }
         [MessagePackObject] public sealed class Float64Slot { [Key(0)] public double V; }
 
+        // A record of every leaf kind, the shape a replicated document has.
+        [MessagePackObject]
+        public sealed class Mixed
+        {
+            [Key(0)] public string Id = string.Empty;
+            [Key(1)] public int I;
+            [Key(2)] public long L;
+            [Key(3)] public float F;
+            [Key(4)] public double D;
+        }
+
         private static bool Writing => Environment.GetEnvironmentVariable(WriteVariable) == "1";
 
         private static readonly MessagePackSerializerOptions Options = CultDocumentMessagePackSerialization.OptionsFor(typeof(NumericLeafVectorTests).Assembly);
@@ -160,6 +171,9 @@ namespace GameCult.Caching.Tests
             return buffer.WrittenSpan.ToArray();
         }
 
+        // mixed-record.msgpack: the reference's bytes for Mixed { "n1", 7, 8, 1.5f, 2.5 }, which other runtimes must write identically.
+        private static byte[] MixedRecord() => MessagePackSerializer.Serialize(new Mixed { Id = "n1", I = 7, L = 8, F = 1.5f, D = 2.5 }, Options);
+
         // ---- tests ----
 
         [Test]
@@ -167,6 +181,16 @@ namespace GameCult.Caching.Tests
 
         [Test]
         public void WritesVectorMatches() => Check("writes.msgpack", WritesVector());
+
+        [Test]
+        public void MixedRecordVectorMatches()
+        {
+            var written = MixedRecord();
+            Assert.That(Convert.ToHexString(written), Is.EqualTo("95A26E310708CA3FC00000CB4004000000000000"));
+            Check("mixed-record.msgpack", written);
+            var read = MessagePackSerializer.Deserialize<Mixed>(written, Options);
+            Assert.That((read.Id, read.I, read.L, read.F, read.D), Is.EqualTo(("n1", 7, 8L, 1.5f, 2.5)));
+        }
 
         [Test]
         public void ReadsCoverEveryLeafAndBothOutcomes()
