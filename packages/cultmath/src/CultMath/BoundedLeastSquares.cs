@@ -46,6 +46,9 @@ internal enum SolveEvent
     /// <summary>A bound released: column, the stall mark after the release.</summary>
     Release,
 
+    /// <summary>A free column whose gradient is above the tolerance, so the free set is not stationary: column, the gradient's magnitude, the tolerance it was judged against. One per such column, before the pass's other decisions.</summary>
+    FreeViolated,
+
     /// <summary>KKT holds and the solve is over: the tolerance.</summary>
     Kkt,
 
@@ -348,11 +351,7 @@ public static class BoundedLeastSquares
             Gradient(ata, atb, xd, g, n);
 
             // Stationarity of the free set is part of KKT: a Newton step on a near-singular free set can leave a residual gradient.
-            var freeViolated = false;
-            for (var i = 0; i < freeCount; i++)
-                if (Math.Abs(g[freeIndex[i]]) > kktTol)
-                    freeViolated = true;
-
+            var freeViolated = FreeSetViolated(g, freeIndex, freeCount, kktTol, trace);
             var release = SelectRelease(ata, atb, xd, g, state, lo, hi, kktTol, n, trace);
             if (JudgePass(release, freeViolated, kktTol, ref fMark, xd, g, atb, n, trace)) { status = BoundedLeastSquaresStatus.Converged; break; }
             if (iterations >= maxIterations) { trace?.Record(SolveEvent.Cap, -1, 0.0, 0.0, 0.0); status = BoundedLeastSquaresStatus.IterationLimit; break; }
@@ -364,6 +363,22 @@ public static class BoundedLeastSquares
         for (var j = 0; j < n; j++)
             x[j] = (float)xd[j];
         return status;
+    }
+
+    // Whether any free column's gradient is above the tolerance; every such column is recorded with the magnitude and the threshold it was judged against.
+    internal static bool FreeSetViolated(ReadOnlySpan<double> g, ReadOnlySpan<int> freeIndex, int freeCount, double kktTol, ISolveTrace? trace)
+    {
+        var violated = false;
+        for (var i = 0; i < freeCount; i++)
+        {
+            var magnitude = Math.Abs(g[freeIndex[i]]);
+            if (magnitude > kktTol)
+            {
+                trace?.Record(SolveEvent.FreeViolated, freeIndex[i], magnitude, kktTol, 0.0);
+                violated = true;
+            }
+        }
+        return violated;
     }
 
     // The bound to release: the one with the most violated gradient sign, the first of equal violations, and only if

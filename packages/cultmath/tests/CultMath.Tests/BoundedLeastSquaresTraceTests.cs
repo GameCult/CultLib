@@ -11,7 +11,7 @@ namespace CultMath.Tests;
 // equality, never a status or a tolerance band. Two sources of truth:
 //  - BlsBaseTraces: the same decisions as the base commit dbcb2a8e took them on the same problems, so Solve's defaults are
 //    unchanged decision by decision, not only in the end;
-//  - hand-built inputs to the two judgement functions, for states a solve may never reach (a release after a stationarity
+//  - hand-built inputs to the three judgement functions, for states a solve may never reach (a release after a stationarity
 //    miss with a finite stall mark) where only the decision itself can be asked.
 public sealed class BoundedLeastSquaresTraceTests
 {
@@ -23,9 +23,56 @@ public sealed class BoundedLeastSquaresTraceTests
         foreach (var c in BlsTrace.Cases())
         {
             Assert.True(BlsBaseTraces.Expected.TryGetValue(c.Name, out var expected), $"{c.Name}: no base trace");
-            Assert.Equal(Normal(expected!), BlsTrace.Trace(c));
+            Assert.Equal(Normal(expected!), WithoutFreeViolated(BlsTrace.Trace(c)));
         }
         Assert.Equal(BlsTrace.Cases().Count(), BlsBaseTraces.Expected.Count);
+    }
+
+    // The base commit took the free-set test inline and recorded nothing for it; its record is the one thing the base traces lack.
+    private static string WithoutFreeViolated(string trace)
+        => string.Join("
+", trace.Split('
+').Where(l => !l.StartsWith("FreeViolated ", StringComparison.Ordinal)));
+
+    // In a real solve the free-set test is a decision of its own, taken before the pass's release and outcome: a miss or a
+    // stall always follows the violating columns that caused it, KKT never does, and each recorded magnitude is above the
+    // threshold recorded beside it.
+    [Fact]
+    public void EveryMissAndStallIsPrecededByTheFreeColumnsThatBrokeStationarityAndKktByNone()
+    {
+        var misses = 0;
+        foreach (var c in BlsTrace.Cases())
+        {
+            var violated = 0;
+            foreach (var line in BlsTrace.Trace(c).Split('
+'))
+            {
+                var parts = line.Split(' ');
+                switch (parts[0])
+                {
+                    case "FreeViolated":
+                        violated++;
+                        Assert.InRange(int.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture), 0, c.N - 1);
+                        Assert.True(double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture) > double.Parse(parts[3], System.Globalization.CultureInfo.InvariantCulture), c.Name);
+                        break;
+                    case "Miss":
+                    case "Stall":
+                        misses++;
+                        Assert.True(violated > 0, $"{c.Name}: {parts[0]} without a violating free column");
+                        violated = 0;
+                        break;
+                    case "Kkt":
+                        Assert.True(violated == 0, $"{c.Name}: KKT after a violating free column");
+                        break;
+                    case "Release":
+                    case "Step":
+                    case "Cap":
+                        violated = 0;
+                        break;
+                }
+            }
+        }
+        Assert.True(misses > 0);
     }
 
     // Each kind of decision, and the ones the stop rule's variants differ on, occurs in the recorded problems: a case table
@@ -128,6 +175,95 @@ public sealed class BoundedLeastSquaresTraceTests
         trace = Judge(-1, true, ref mark, X1, G1, Atb1, out over);
         Assert.True(over);
         Assert.Equal($"Stall -1 2 2 {BlsTrace.F(allowance)}", trace);
+    }
+
+    // The stall comparison is f >= mark - allowance, pinned at its boundary to one ulp each side like the release gate. The point has
+    // cost exactly 0 (so the mark is the allowance itself and the subtraction is exact) and scale 4, allowance 4e-15: a stall at mark ==
+    // allowance, progress one ulp above it, whatever factor, offset or clamp the comparison puts on the allowance.
+    [Fact]
+    public void TheStallComparisonIsExactAtTheAllowanceToTheUlp()
+    {
+        var x = new[] { 1.0, 1.0 };
+        var g = new[] { 3.0, 1.0 };
+        var atb = new[] { 1.0, 3.0 };
+        var allowance = 1e-15 * 4.0;
+
+        var mark = allowance; // 0 >= allowance - allowance
+        var trace = Judge(-1, true, ref mark, x, g, atb, out var over);
+        Assert.True(over);
+        Assert.Equal($"Stall -1 0 {BlsTrace.F(allowance)} {BlsTrace.F(allowance)}", trace);
+
+        mark = Math.BitIncrement(allowance); // 0 < the smallest positive difference
+        trace = Judge(-1, true, ref mark, x, g, atb, out over);
+        Assert.False(over);
+        Assert.Equal(0.0, mark);
+        Assert.Equal($"Miss -1 0 {BlsTrace.F(Math.BitIncrement(allowance))} {BlsTrace.F(allowance)}", trace);
+
+        mark = Math.BitDecrement(allowance); // 0 >= a negative difference
+        trace = Judge(-1, true, ref mark, x, g, atb, out over);
+        Assert.True(over);
+        Assert.Equal($"Stall -1 0 {BlsTrace.F(Math.BitDecrement(allowance))} {BlsTrace.F(allowance)}", trace);
+    }
+
+    private static string FreeViolated(double[] g, int[] freeIndex, int freeCount, double kktTol, out bool violated)
+    {
+        var rec = new BlsTrace.Recorder();
+        violated = BoundedLeastSquares.FreeSetViolated(g, freeIndex, freeCount, kktTol, rec);
+        return string.Join("
+", rec.Lines);
+    }
+
+    // Every free column is judged, and each one that breaks stationarity is named with its gradient magnitude and the threshold
+    // it was judged against: not the first or last free column only, a column that is not free never, and the columns past
+    // freeCount never.
+    [Fact]
+    public void EveryFreeColumnIsJudgedAndTheViolatingOnesAreNamedWithTheirThreshold()
+    {
+        var g = new[] { 0.1, -0.3, 9.0, 0.2, -0.5, 7.0 };
+
+        // Column 1 only, in the middle of the free list.
+        var trace = FreeViolated(g, new[] { 0, 1, 3, 4, 5 }, 3, 0.25, out var violated);
+        Assert.True(violated);
+        Assert.Equal("FreeViolated 1 0.3 0.25 0", trace);
+
+        // The free list is not the column order: the recorded column is the column, in list order, and column 2 (a bound) is not listed.
+        trace = FreeViolated(g, new[] { 4, 3, 1, 0, 5 }, 4, 0.25, out violated);
+        Assert.True(violated);
+        Assert.Equal("FreeViolated 4 0.5 0.25 0
+FreeViolated 1 0.3 0.25 0", trace);
+
+        // Only the last listed column violates; only the first does.
+        trace = FreeViolated(g, new[] { 0, 3, 4 }, 3, 0.25, out violated);
+        Assert.Equal("FreeViolated 4 0.5 0.25 0", trace);
+        trace = FreeViolated(g, new[] { 4, 0, 3 }, 3, 0.25, out violated);
+        Assert.Equal("FreeViolated 4 0.5 0.25 0", trace);
+
+        trace = FreeViolated(g, new[] { 0, 3 }, 2, 0.25, out violated);
+        Assert.False(violated);
+        Assert.Equal("", trace);
+        trace = FreeViolated(g, new int[0], 0, 0.0, out violated);
+        Assert.False(violated);
+    }
+
+    // The threshold is the tolerance itself, at any scale: equal is stationary, one ulp above it (either sign) is not, one ulp
+    // below it is, and the threshold recorded is the one compared against.
+    [Theory]
+    [InlineData(1e-6)]
+    [InlineData(0.25)]
+    [InlineData(3.0)]
+    [InlineData(1e6)]
+    public void TheFreeStationarityThresholdIsTheToleranceToTheUlp(double kktTol)
+    {
+        var freeIndex = new[] { 0, 1, 2 };
+        var above = Math.BitIncrement(kktTol);
+        var g = new[] { kktTol, -above, Math.BitDecrement(kktTol) };
+        var trace = FreeViolated(g, freeIndex, 3, kktTol, out var violated);
+        Assert.True(violated);
+        Assert.Equal($"FreeViolated 1 {BlsTrace.F(above)} {BlsTrace.F(kktTol)} 0", trace);
+
+        trace = FreeViolated(new[] { kktTol, -kktTol, Math.BitDecrement(kktTol) }, freeIndex, 3, kktTol, out violated);
+        Assert.False(violated);
+        Assert.Equal("", trace);
     }
 
     // The cost and its scale are 0.5 sum x_j (g_j - atb_j) and 0.5 sum |x_j| (|g_j| + |atb_j|) over every column.
