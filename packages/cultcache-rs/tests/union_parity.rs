@@ -604,7 +604,9 @@ fn bounds_vectors() {
             "refused" => {
                 refused += 1;
                 let message = result.expect_err(file);
-                assert!(message.contains(union), "{file}: {message}");
+                // The cache path names the entry type in its context; the union names itself.
+                let names = if union == "UnionSurface" { UnionSurface::TYPE } else { union };
+                assert!(message.contains(names), "{file}: {message}");
                 let class = match detail {
                     "key-out-of-range" => "outside Int32",
                     "key-not-integer" => "non-integer",
