@@ -203,13 +203,14 @@ test("every outcome vector is listed and holds: refusals name the union and key,
   assert.equal(entries.length, 9);
   const document = surfaceDocument();
   let refused = 0;
+  const carrying: string[] = [];
   let readOnly = 0;
 
   for (const { file, outcome: expected, unionName, key, detail } of entries) {
     const payload = await read(file);
     if (expected === "refused") {
       refused += 1;
-      assert.ok(Buffer.from(payload).includes(CANARY) || detail === "arity", `${file} carries the canary`);
+      if (Buffer.from(payload).includes(CANARY)) carrying.push(file);
       assert.throws(
         () => surfaceCodec.decode(decode(payload)),
         (error: Error) => {
@@ -230,6 +231,7 @@ test("every outcome vector is listed and holds: refusals name the union and key,
     }
   }
   assert.deepEqual([refused, readOnly], [5, 4]);
+  assert.deepEqual(carrying, ["unknown-arm-field.msgpack", "unknown-arm-list.msgpack", "unknown-arm-nested.msgpack"], "the canary is in the payloads whose arm is unknown");
 });
 
 test("a refusal lists the declared keys, so a key only the outer union declares is unknown to the inner", async () => {
