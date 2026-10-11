@@ -306,7 +306,7 @@ fn open_service_identity_envelopes<P: ServiceIdentityProfile>(
     {
         bail!("service identity store belongs to a different profile or schema");
     }
-    let entry: ServiceIdentityPrivateEntry = rmp_serde::from_slice(&envelope.payload)
+    let entry: ServiceIdentityPrivateEntry = cultcache_rs::decode_payload(&envelope.payload)
         .context("service identity private payload is malformed MessagePack")?;
     validate_private::<P>(&entry)?;
     if entry.protector_kind != platform_protector_kind() || entry.assurance != platform_assurance()
@@ -738,6 +738,34 @@ mod tests {
             open_service_identity_at::<IdunnServiceIdentity>(&path)?.entry(),
             signer.entry()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_credential_payload_nested_past_the_bound_is_refused_by_the_cache_walk() -> Result<()> {
+        let limit = cultcache_rs::MAX_PAYLOAD_DEPTH;
+        let credential = |levels: usize| -> Result<Vec<u8>> {
+            let envelope = CultCacheEnvelope {
+                key: IdunnServiceIdentity::PRIVATE_KEY.into(),
+                r#type: IdunnServiceIdentity::PRIVATE_TYPE.into(),
+                payload: [vec![0x91u8; levels], vec![0xc0]].concat(),
+                stored_at: "2026-10-11T00:00:00Z".into(),
+                schema_id: Some(IdunnServiceIdentity::PRIVATE_SCHEMA.into()),
+            };
+            Ok(rmp_serde::to_vec(&vec![envelope])?)
+        };
+        let past = open_service_identity_credential_bytes::<IdunnServiceIdentity>(&credential(limit + 1)?)
+            .err()
+            .expect("a payload past the bound is refused");
+        assert_eq!(
+            past.downcast_ref::<cultcache_rs::PayloadTooDeep>(),
+            Some(&cultcache_rs::PayloadTooDeep { depth: limit + 1, limit })
+        );
+        // At the bound the walk lets the payload through to the decoder, which refuses its shape.
+        let at = open_service_identity_credential_bytes::<IdunnServiceIdentity>(&credential(limit)?)
+            .err()
+            .expect("the payload is not a credential");
+        assert!(at.downcast_ref::<cultcache_rs::PayloadTooDeep>().is_none());
         Ok(())
     }
 
