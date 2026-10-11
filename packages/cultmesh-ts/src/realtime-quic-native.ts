@@ -1,7 +1,7 @@
 // The koffi binding for `native/GameCult.Mesh.Quic.Native`'s C ABI v2
 // (`include/cultmesh_quic_native.h`). This file is the only place `koffi` is
 // imported, and it is imported lazily, inside `loadBindings`, so a consumer
-// that never touches QUIC (AetheriaEve Electron, Odin, Stonks, weksa) loads no
+// that never touches QUIC (Odin, Stonks, weksa) loads no
 // native module at all.
 //
 // No koffi callbacks. `cultmesh_quic_next_event` is the single blocking
