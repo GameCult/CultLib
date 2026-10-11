@@ -12,3 +12,5 @@ A document with one slot, `[value]`, whose slot is a C# `int`, `long`, `float` o
   the double it read (a float32 widened), and empty when refused. Every value is fed to every leaf.
 - `writes.msgpack`: an array of `[leaf, text, bytes]`. `text` is a decimal for an integer leaf and the double's IEEE
   bits in hex for a float leaf; `bytes` (bin) is the one-slot record the reference writes for that value.
+- `float32-nan.msgpack`: an array of `[payload, bytes]`. `payload` (bin) is a one-slot `float` record holding an infinity
+  or a NaN; `bytes` (bin) is what the reference writes after reading it. It keeps every bit, a signalling NaN's included.
