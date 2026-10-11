@@ -2337,9 +2337,12 @@ namespace GameCult.Caching
             throw new ArgumentException($"Expect({key.Value}) was given an instance this cache does not hold at that key.", nameof(current));
         }
 
-        private static string MintStoredAt(string? previous)
+        // The wall clock behind every storedAt. Internal: a test that writes a golden store pins it, so the bytes reproduce.
+        internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
+
+        private string MintStoredAt(string? previous)
         {
-            var now = DateTimeOffset.UtcNow;
+            var now = Clock();
             if (previous != null &&
                 DateTimeOffset.TryParse(previous, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last) &&
                 now <= last)
