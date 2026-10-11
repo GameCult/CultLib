@@ -548,7 +548,7 @@ const isNaNBits = (bitsHex: string) => {
 
 test("numeric leaves read and refuse exactly what the C# reference does", async () => {
   const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
-  assert.equal(rows.length, 148);
+  assert.equal(rows.length, 156);
   let accepted = 0;
   let refused = 0;
   for (const [leaf, payload, wasAccepted, bits] of rows) {

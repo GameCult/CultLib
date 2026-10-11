@@ -88,11 +88,11 @@ export const int32 = integerCodec("System.Int32", "an int32", -(2n ** 31n), 2n *
 export const int64 = integerCodec("System.Int64", "an int64", -(2n ** 63n), 2n ** 63n - 1n);
 
 // A 64-bit integer to the nearest float32 in one rounding, ties to even, as the reference's cast does. Number(value)
-// first would round to a double and then again, and the two roundings can disagree.
+// first would round to a double and then again, and the two roundings can disagree. A bigint reaches here only beyond
+// 2^53 (the wire reader returns a number for any smaller integer), so at least 30 bits are rounded away.
 function bigintToFloat32(value: bigint): number {
   const magnitude = value < 0n ? -value : value;
   const excess = magnitude.toString(2).length - 24;
-  if (excess <= 0) return Number(value);
   const kept = magnitude >> BigInt(excess);
   const rest = magnitude - (kept << BigInt(excess));
   const half = 1n << BigInt(excess - 1);
