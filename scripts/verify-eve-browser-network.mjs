@@ -242,10 +242,15 @@ function startDotnet(arguments_) {
       waiter.reject(new Error(`dotnet sample exited ${code}\n${output}\n${error}`));
     }
   });
+  // A line is complete once its newline has arrived: a stdout chunk can end inside a line, and the 10,000-operation
+  // benchmark line was parsed as JSON half-written.
+  function completeLines() {
+    return output.split(/\r?\n/u).slice(0, -1);
+  }
   function settle() {
     for (let index = waiters.length - 1; index >= 0; index--) {
       const waiter = waiters[index];
-      const line = output.split(/\r?\n/u).find(value => value.startsWith(waiter.prefix));
+      const line = completeLines().find(value => value.startsWith(waiter.prefix));
       if (!line) continue;
       waiters.splice(index, 1);
       clearTimeout(waiter.timer);
@@ -258,7 +263,7 @@ function startDotnet(arguments_) {
       process.stdin.write(`${line}\n`);
     },
     waitFor(prefix, timeoutMs = 30_000) {
-      const existing = output.split(/\r?\n/u).find(value => value.startsWith(prefix));
+      const existing = completeLines().find(value => value.startsWith(prefix));
       if (existing) return Promise.resolve(existing.slice(prefix.length));
       return new Promise((resolve, reject) => {
         const waiter = {
