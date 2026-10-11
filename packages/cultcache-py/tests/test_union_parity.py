@@ -577,7 +577,8 @@ class PayloadDepthRuleTests(unittest.TestCase):
 
     def test_a_scalar_payload_has_no_depth(self) -> None:
         document = define_document_type("tests.scalar", encode=lambda value: value)
-        self.assertEqual(document.decode_payload(document.encode_payload("x")), "x")
+        for scalar in ("x", 5, None):
+            self.assertEqual(document.decode_payload(document.encode_payload(scalar)), scalar)
 
     def test_the_refusal_names_the_type_the_depth_and_the_limit_and_never_the_payload(self) -> None:
         document = define_document_type("tests.json_tree", encode=lambda value: value)
