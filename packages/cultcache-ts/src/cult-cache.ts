@@ -3,9 +3,9 @@ import {
   documentPayloadBytes,
   documentPayloadFromBytes,
   encodeDocumentPayload,
-  resolveDocumentFormatter,
   resolveDocumentMembers,
 } from "./document";
+import { resolveDocumentFormatter } from "./document-formatter";
 import type { DocumentPayload } from "./document";
 import type {
   AnyCultCacheDocumentDefinition,

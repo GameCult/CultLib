@@ -85,6 +85,7 @@ assert.equal(typeof cache.defineDocumentType, "function");
 // The document owner is also an entry of its own, which the browser client imports without the Node-only cache.
 assert.equal(documentEntry.decodeDocumentPayload, cache.decodeDocumentPayload);
 assert.equal("resolveDocumentFormatter" in cache, false);
+assert.equal("resolveDocumentFormatter" in documentEntry, false);
 assert.equal(typeof net.CultNetPeer, "function");
 assert.equal(typeof mesh.CultMesh, "function");
 assert.equal(typeof mesh.CultMeshProviderSession, "function");
@@ -182,6 +183,23 @@ void decodeOwner;
     "--moduleResolution", "NodeNext",
     "--skipLibCheck",
     "browser-types-smoke.mts",
+  ], { cwd: consumerRoot, stdio: "inherit" });
+
+  // The formatter that reads a payload around its schema is in no entry: importing it from the document entry does not compile.
+  writeFileSync(join(consumerRoot, "formatter-refused.mts"), `
+// @ts-expect-error resolveDocumentFormatter is not exported from the document entry
+import { resolveDocumentFormatter } from "@gamecult/cultcache-ts/document";
+void resolveDocumentFormatter;
+`);
+  execFileSync(process.execPath, [
+    tsc,
+    "--noEmit",
+    "--strict",
+    "--target", "ES2022",
+    "--module", "NodeNext",
+    "--moduleResolution", "NodeNext",
+    "--skipLibCheck",
+    "formatter-refused.mts",
   ], { cwd: consumerRoot, stdio: "inherit" });
 
   console.log("TypeScript package closure smoke: passed");

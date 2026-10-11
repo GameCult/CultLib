@@ -1,9 +1,6 @@
-import { decode, encode } from "@msgpack/msgpack";
-
-import { codecFormatter } from "./codec";
+import { resolveDocumentFormatter } from "./document-formatter";
 import type {
   AnyCultCacheDocumentDefinition,
-  CultCacheDocumentFormatter,
   CultCacheSchemaCatalogMember,
   CultCacheDocumentDefinition,
   CultCacheDocumentRegistry,
@@ -75,21 +72,6 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
   resolveDocumentFormatter(definition);
   return Object.freeze(definition.codec ? { ...definition, members: resolveDocumentMembers(definition) } : { ...definition });
 }
-
-// The one place that decides how a document is encoded: its own formatter, or its codec's, or a plain map. A codec and a
-// formatter are two answers to one question, so a definition that carries both is refused wherever it enters (the
-// builder resolves through here as well). Package-internal: not exported from the package index.
-export function resolveDocumentFormatter(definition: AnyCultCacheDocumentDefinition): CultCacheDocumentFormatter<unknown> {
-  if (definition.codec && definition.formatter) {
-    throw new Error(`CultCache document type "${definition.type}" declares both a codec and a formatter.`);
-  }
-  return definition.formatter ?? (definition.codec ? codecFormatter(definition.codec) : plainDocumentFormatter);
-}
-
-const plainDocumentFormatter: CultCacheDocumentFormatter<unknown> = {
-  encode: (value: unknown) => encode(value),
-  decode: (payload: Uint8Array) => decode(payload),
-};
 
 /**
  * The bytes of one document, as they travel in a store envelope, a CultNet record or a realtime frame.
