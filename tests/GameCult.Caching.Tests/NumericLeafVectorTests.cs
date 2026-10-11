@@ -74,6 +74,8 @@ namespace GameCult.Caching.Tests
             "cf0020000000000001", "cfffffffffffffffff", "cf8000000000000000", "d30020000000000001", "d3fffffffffffffff0",
             // integers beyond 2^53 that a float32 slot must round once: past a tie, on a tie to even, on a tie to odd, an odd value just past exact, negative
             "d31000001000000001", "cf8000008000000001", "cf8000008000000000", "cf8000018000000000", "cf8000010000000001", "cf8000010000000000", "d3efffffe800000001", "d3effffff000000001",
+            // an integer a float32 cannot hold that a reader holds as a plain number: 2^24 + 1 rounds to 2^24
+            "ce01000001",
             "ca3fc00000", "cb3ff8000000000000", "cb401c000000000000", "cb7ff8000000000000", "ca7f800000", "ca7f800001", "cb7e37e43c8800759c",
             "cb47efffffe0000000", "cb3fb999999999999a", "ca3dcccccd", "cb8000000000000000",
             "c0", "c3", "a161", "c40100", "90", "80",
@@ -174,10 +176,45 @@ namespace GameCult.Caching.Tests
         // mixed-record.msgpack: the reference's bytes for Mixed { "n1", 7, 8, 1.5f, 2.5 }, which other runtimes must write identically.
         private static byte[] MixedRecord() => MessagePackSerializer.Serialize(new Mixed { Id = "n1", I = 7, L = 8, F = 1.5f, D = 2.5 }, Options);
 
+        // float32-nan.msgpack: an array of [payload (bin), bytes (bin)]: a one-slot float32 record holding an infinity or a NaN,
+        // and the bytes the reference writes after reading it. A signalling NaN (quiet bit clear) comes back unchanged.
+        private static readonly string[] Float32NanValues = { "ca7f800000", "ca7f800001", "ca7fa00000", "ca7fc00001", "ca7fe00000", "caff800001" };
+
+        private static byte[] Float32NanVector()
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(buffer);
+            writer.WriteArrayHeader(Float32NanValues.Length);
+            foreach (var value in Float32NanValues)
+            {
+                var payload = Payload(value);
+                writer.WriteArrayHeader(2);
+                writer.Write(payload);
+                writer.Write(MessagePackSerializer.Serialize(MessagePackSerializer.Deserialize<Float32Slot>(payload, Options), Options));
+            }
+
+            writer.Flush();
+            return buffer.WrittenSpan.ToArray();
+        }
+
         // ---- tests ----
 
         [Test]
         public void ReadsVectorMatches() => Check("reads.msgpack", ReadsVector());
+
+        [Test]
+        public void Float32NanVectorMatches() => Check("float32-nan.msgpack", Float32NanVector());
+
+        [Test]
+        public void Float32SignallingNanIsReadAndWrittenBitForBit()
+        {
+            foreach (var value in new[] { "ca7f800001", "ca7fa00000", "caff800001" })
+            {
+                var payload = Payload(value);
+                var again = MessagePackSerializer.Serialize(MessagePackSerializer.Deserialize<Float32Slot>(payload, Options), Options);
+                Assert.That(Convert.ToHexString(again), Is.EqualTo(Convert.ToHexString(payload)), value);
+            }
+        }
 
         [Test]
         public void WritesVectorMatches() => Check("writes.msgpack", WritesVector());

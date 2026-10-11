@@ -9,7 +9,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
 import { codecs } from "../src";
-import type { Codec } from "../src/codec";
+import { MAX_SLOT_KEY, type Codec } from "../src/codec";
 import { CultCache } from "../src/cult-cache";
 import { readWire, WireFloat, writeWire } from "../src/wire";
 import { defineDocumentType } from "../src/document";
@@ -546,15 +546,27 @@ const isNaNBits = (bitsHex: string) => {
   return ((bits >> 52n) & 0x7ffn) === 0x7ffn && (bits & ((1n << 52n) - 1n)) !== 0n;
 };
 
+const isSignallingFloat32 = (payload: Uint8Array) => {
+  // payload is a one-slot record [float32]: 91 ca b0 b1 b2 b3
+  if (payload.length !== 6 || payload[1] !== 0xca) return false;
+  const bits = new DataView(payload.buffer, payload.byteOffset).getUint32(2);
+  return (bits & 0x7f800000) === 0x7f800000 && (bits & 0x007fffff) !== 0 && (bits & 0x00400000) === 0;
+};
+
 test("numeric leaves read and refuse exactly what the C# reference does", async () => {
   const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "reads.msgpack")))) as [string, Uint8Array, boolean, Uint8Array][];
-  assert.equal(rows.length, 156);
+  assert.equal(rows.length, 160);
   let accepted = 0;
   let refused = 0;
   for (const [leaf, payload, wasAccepted, bits] of rows) {
     const label = `${leaf} ${hex(payload)}`;
     const record = slots<{ v: unknown }>({ 0: ["v", numericLeaves[leaf]] });
-    if (wasAccepted) {
+    if (wasAccepted && leaf === "float32" && isSignallingFloat32(payload)) {
+      // The one reading that differs from the reference: it reads a float32 signalling NaN, this runtime refuses it
+      // (float32-nan.msgpack shows the reference keeps its bits, which a JS number cannot).
+      assert.throws(() => record.decode(readWire(payload)), (error: Error) => !error.message.includes(hex(payload).slice(2)), label);
+      refused += 1;
+    } else if (wasAccepted) {
       const read = record.decode(readWire(payload)).v as number | bigint;
       const wanted = hex(bits);
       if (leaf.startsWith("float")) {
@@ -571,6 +583,25 @@ test("numeric leaves read and refuse exactly what the C# reference does", async 
   }
   assert.ok(accepted > 40 && refused > 40, `accepted ${accepted}, refused ${refused}`);
   assert.equal(accepted + refused, rows.length);
+});
+
+// float32-nan.msgpack: [payload, bytes the reference writes after reading it] for a float32 slot holding an infinity or a NaN.
+// The reference keeps every payload bit; a JS number cannot keep a signalling NaN's, so that read is refused.
+test("a float32 NaN round-trips with its bits, and a signalling one is refused on read", async () => {
+  const rows = readWire(new Uint8Array(await readFile(join(numericVectors, "float32-nan.msgpack")))) as [Uint8Array, Uint8Array][];
+  assert.equal(rows.length, 6);
+  const record = slots<{ v: number }>({ 0: ["v", float32] });
+  let refused = 0;
+  for (const [payload, rewritten] of rows) {
+    if (isSignallingFloat32(payload)) {
+      assert.equal(hex(rewritten), hex(payload), "the reference keeps the signalling bits");
+      assert.throws(() => record.decode(readWire(payload)), { message: "v (slot 0): expected a float32, found a signalling NaN" }, hex(payload));
+      refused += 1;
+    } else {
+      assert.equal(hex(writeWire(record.encode(record.decode(readWire(payload))))), hex(rewritten), hex(payload));
+    }
+  }
+  assert.equal(refused, 3);
 });
 
 test("numeric leaves write the bytes the C# reference writes, and 64-bit values lose nothing", async () => {
@@ -673,9 +704,22 @@ test("arm keys span Int32 and are listed ascending; slot keys are non-negative I
   assert.throws(() => keys.decode(readWire(fromHex("920590"))), { message: "Union U: unknown arm key 5 (declared keys: -2147483648, -1, 0, 2147483647)." });
   assert.throws(() => union<{ kind: "A" }>("U", { [-2147483649]: ["A", unit] }), { message: "Union U declares the key -2147483649, which is outside Int32." });
   assert.throws(() => union<{ kind: "A" }>("U", { 99999999999999999999: ["A", unit] } as never), { message: "Union U declares the key 100000000000000000000, which is outside Int32." });
-  assert.doesNotThrow(() => slots<{ a: string }>({ 2147483647: ["a", string] }));
-  assert.throws(() => slots<{ a: string }>({ 2147483648: ["a", string] }), { message: "A slot record declares the key 2147483648, which is outside Int32." });
+  assert.throws(() => slots<{ a: string }>({ 2147483647: ["a", string] }), { message: "A slot record declares the key 2147483647, which is above the slot key limit 65535." });
+  assert.throws(() => slots<{ a: string }>({ 2147483648: ["a", string] }), { message: "A slot record declares the key 2147483648, which is above the slot key limit 65535." });
   assert.throws(() => slots<{ a: string }>({ [-1]: ["a", string] }), { message: 'A slot record declares the key "-1", which is not a non-negative integer.' });
+});
+
+// A slot record is a dense array of key+1 slots, as the reference writes it, so the key is capped: the largest accepted
+// key writes a 65536-slot payload, one more is refused at definition.
+test("a slot key is capped at 65535: the cap is the largest slot record, one past it is refused at definition", () => {
+  assert.equal(MAX_SLOT_KEY, 65535);
+  const edge = slots<{ a: string }>({ 65535: ["a", string] });
+  const written = edge.encode({ a: "x" }) as unknown[];
+  assert.equal(written.length, 65536);
+  assert.equal(written[65535], "x");
+  assert.equal(written.filter((slot) => slot === null).length, 65535);
+  assert.deepEqual(edge.decode(readWire(writeWire(written))), { a: "x" });
+  assert.throws(() => slots<{ a: string }>({ 65536: ["a", string] }), { message: "A slot record declares the key 65536, which is above the slot key limit 65535." });
 });
 
 test("the mixed-record vector is the bytes the reference writes for a record of every leaf kind", async () => {

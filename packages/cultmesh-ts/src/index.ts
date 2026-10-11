@@ -8,6 +8,7 @@ import {
   type CacheBackingStore,
   type CultCacheEnvelope,
   type CultCacheDocumentValue,
+  resolveDocumentFormatter,
 } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
@@ -2637,7 +2638,7 @@ export function cultMeshDocumentFromStore(
     if (!record) {
       throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
-    return parseCultMeshDocumentValue(schemaOrDefinition, decode(record.payload));
+    return parseCultMeshDocumentValue(schemaOrDefinition, decodeCultMeshPayload(schemaOrDefinition, record.payload));
   };
 
   return cultMeshDocument(
@@ -2750,6 +2751,7 @@ export function cultMeshDocumentFromPeerSnapshot(
     parseCultMeshDocumentValue(
       schemaOrDefinition,
       decodeCultNetRawDocumentPayload(
+        schemaOrDefinition,
         await requestCultNetRawSnapshotDocument(
           peer,
           resolvedSchemaId,
@@ -2761,7 +2763,7 @@ export function cultMeshDocumentFromPeerSnapshot(
               ? undefined
               : record => {
                   try {
-                    schemaOrDefinition.schema.parse(decodeCultNetRawDocumentPayload(record));
+                    schemaOrDefinition.schema.parse(decodeCultNetRawDocumentPayload(schemaOrDefinition, record));
                     return true;
                   } catch {
                     return false;
@@ -4106,7 +4108,7 @@ export class CultMeshNode {
         messageIdPrefix: options.messageIdPrefix ?? key,
         accepts: record => {
           try {
-            definition.schema.parse(decodeCultNetRawDocumentPayload(record));
+            definition.schema.parse(decodeCultNetRawDocumentPayload(definition, record));
             return true;
           } catch {
             return false;
@@ -6329,7 +6331,7 @@ export class CultMesh {
         const onMessage = (message: CultNetMessage): void => {
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
-            const decoded = decode(new Uint8Array(message.document.payload));
+            const decoded = decodeCultMeshPayload(receiptBinding.definition, new Uint8Array(message.document.payload));
             cleanup();
             resolve(receiptBinding.definition.schema.parse(decoded) as CultCacheDocumentValue<TReceiptDefinition>);
           } catch (error) { cleanup(); reject(error); }
@@ -6638,7 +6640,7 @@ function cultMeshEnvelopeParsesAsDefinition(
   definition: AnyCultCacheDocumentDefinition,
 ): boolean {
   try {
-    definition.schema.parse(decode(envelope.payload));
+    definition.schema.parse(decodeCultMeshPayload(definition, envelope.payload));
     return true;
   } catch {
     return false;
@@ -6774,11 +6776,22 @@ async function resolveCultNetPeer(
     : peerOrProvider;
 }
 
-function decodeCultNetRawDocumentPayload(document: CultNetRawDocumentRecord): unknown {
+// A document payload is read the way its definition's cache reads it (a codec or formatter document is not a plain
+// msgpack map); a payload with no definition is plain msgpack.
+function decodeCultMeshPayload(schemaOrDefinition: string | AnyCultCacheDocumentDefinition, payload: Uint8Array): unknown {
+  return typeof schemaOrDefinition === "string"
+    ? decode(payload)
+    : resolveDocumentFormatter(schemaOrDefinition).decode(payload);
+}
+
+function decodeCultNetRawDocumentPayload(
+  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+  document: CultNetRawDocumentRecord,
+): unknown {
   if (document.payloadEncoding !== "messagepack") {
     throw new Error(`Unsupported CultNet raw document payload encoding ${document.payloadEncoding}.`);
   }
-  return decode(toUint8Array(document.payload));
+  return decodeCultMeshPayload(schemaOrDefinition, toUint8Array(document.payload));
 }
 
 function parseCultMeshDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(

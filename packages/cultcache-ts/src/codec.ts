@@ -110,7 +110,11 @@ function floatCodec(typeName: string, wide: boolean): Codec<number> {
       return new WireFloat(value, wide);
     },
     decode(raw) {
-      if (raw instanceof WireFloat) return wide ? raw.value : Math.fround(raw.value);
+      if (raw instanceof WireFloat) {
+        // A JS number has no NaN payload, so a signalling float32 NaN cannot be kept; refusing beats changing its bytes.
+        if (raw.signalling && !wide) refuse(what, "a signalling NaN");
+        return wide ? raw.value : Math.fround(raw.value);
+      }
       if (typeof raw === "number") return wide ? raw : Math.fround(raw);
       if (typeof raw === "bigint") return wide ? Number(raw) : bigintToFloat32(raw);
       return refuse(what, kindOf(raw));
@@ -187,17 +191,21 @@ type SlotsSpec<TValue> = Readonly<Record<number, { [K in keyof TValue & string]:
 const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
 
+// The largest slot key. A slot record is written as a dense array of key+1 slots (the reference writes the same, nil
+// in every gap), so a key is a payload length: the cap keeps a definition's typo from allocating without bound.
+export const MAX_SLOT_KEY = 65535;
+
 // The declared keys, ascending. The reference's keys are Int32: a union arm may be any (a negative one too), a slot is
-// non-negative, and a key outside the range is refused at definition rather than allocated for.
-function slotKeys(spec: Readonly<Record<string, unknown>>, owner: string, low: number): number[] {
+// 0 to MAX_SLOT_KEY, and a key outside its range is refused at definition rather than allocated for.
+function slotKeys(spec: Readonly<Record<string, unknown>>, owner: string, low: number, high: number): number[] {
   return Object.keys(spec)
     .map((text) => {
       if (!/^-?(0|[1-9][0-9]*)$/u.test(text) || (low >= 0 && text.startsWith("-"))) {
         throw new Error(`${owner} declares the key "${text}", which is not ${low < 0 ? "an" : "a non-negative"} integer.`);
       }
       const key = BigInt(text);
-      if (key < BigInt(low) || key > BigInt(INT32_MAX)) {
-        throw new Error(`${owner} declares the key ${text}, which is outside Int32.`);
+      if (key < BigInt(low) || key > BigInt(high)) {
+        throw new Error(`${owner} declares the key ${text}, which is ${high === INT32_MAX ? "outside Int32" : `above the slot key limit ${high}`}.`);
       }
       return Number(key);
     })
@@ -217,7 +225,7 @@ function pascalCase(name: string): string {
 // are skipped, and a slot missing from the payload takes its declared default or is refused. A nil in a slot that
 // declares a default also takes the default (cultcache-py's rule).
 export function slots<TValue extends object>(spec: SlotsSpec<TValue>, typeName?: string): SlotsCodec<TValue> {
-  const keys = slotKeys(spec, "A slot record", 0);
+  const keys = slotKeys(spec, "A slot record", 0, MAX_SLOT_KEY);
   if (keys.length === 0) {
     throw new Error("A slot record declares no slots.");
   }
@@ -289,7 +297,7 @@ export function union<TValue extends { kind: string }>(
   arms: Readonly<Record<number, ArmSpec<TValue["kind"]>>>,
   typeName?: string,
 ): Codec<TValue | null> {
-  const keys = slotKeys(arms, `Union ${name}`, INT32_MIN);
+  const keys = slotKeys(arms, `Union ${name}`, INT32_MIN, INT32_MAX);
   if (keys.length === 0) {
     throw new Error(`Union ${name} declares no arms.`);
   }

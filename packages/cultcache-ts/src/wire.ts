@@ -4,7 +4,8 @@
 // outside the safe range. A float decodes to a WireFloat, whatever its value.
 
 export class WireFloat {
-  constructor(readonly value: number, readonly wide: boolean) {}
+  // signalling: a float32 NaN whose quiet bit is clear. The JS number it becomes has lost that payload.
+  constructor(readonly value: number, readonly wide: boolean, readonly signalling = false) {}
 }
 
 const SAFE_MIN = BigInt(Number.MIN_SAFE_INTEGER);
@@ -104,7 +105,11 @@ export function readWire(payload: Uint8Array): unknown {
       case 0xc4: return binary(view.getUint8(take(1)));
       case 0xc5: return binary(view.getUint16(take(2)));
       case 0xc6: return binary(view.getUint32(take(4)));
-      case 0xca: return new WireFloat(view.getFloat32(take(4)), false);
+      case 0xca: {
+        const at = take(4);
+        const bits = view.getUint32(at);
+        return new WireFloat(view.getFloat32(at), false, (bits & 0x7f800000) === 0x7f800000 && (bits & 0x007fffff) !== 0 && (bits & 0x00400000) === 0);
+      }
       case 0xcb: return new WireFloat(view.getFloat64(take(8)), true);
       case 0xcc: return view.getUint8(take(1));
       case 0xcd: return view.getUint16(take(2));
