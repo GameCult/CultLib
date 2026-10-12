@@ -433,7 +433,7 @@ public sealed class HlslSourceCompatibilityTests
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + source + "\n}\n";
     }
 
-    private static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
+    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
     {
         var hlsl = ReadShaderSource(FindCultMathRoot());
         var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl));
