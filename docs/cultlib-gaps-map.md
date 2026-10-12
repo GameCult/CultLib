@@ -18,8 +18,11 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
 4. `cultmath-rotation-algebra`: quaternion algebra, swing-twist and joint clamps (ruling
    `aetheria-release:ruling:solver-in-gamecult-animation`). Ships in the CultMath release that the first
    GameCult.Animation release pins; that release is mapped with GameCult.Animation.
-5. `py-msgpack-default` revision 2 (section P): the fix batch for Soul s1's eight findings on
-   `hands/py-msgpack-default`. Its merge to main waits on the Brokkr cut (P7).
+5. `py-msgpack-default` revision 3 (section P, "Revision 3"): the fix batch (h3) for Soul s2's open findings and
+   s1's `store-and-sniff-decide-format` on `hands/py-msgpack-default` at `57f85acd`. Its merge to main waits on the
+   Brokkr cut (follow-up `brokkr-msgpack-payloads-r3`).
+5a. Not mapped: the Python store takes the cross-process sidecar lock the C# and Rust stores take (follow-up
+   `py-ts-store-cross-process-lock`); `migrate_payloads` then holds it too.
 6. Not mapped: the C# leaf-vectors revision (`leaf-vectors-next`) gains the P2 map-key rows, so the Python
    key tests read C#-written bytes instead of literals.
 
@@ -215,7 +218,7 @@ Quaternions are Hamilton, stored xyzw, unit for rotation; angles are radians, ri
 - A CultMath release that carries cut 4, which `org.gamecult.animation`'s `package.json` pins. That release is
   mapped with GameCult.Animation, so one Soul-verified release pair ships both.
 
-## P. cultcache-py payload format (py-msgpack-default, revision 2)
+## P. cultcache-py payload format (py-msgpack-default, revisions 2 and 3)
 
 Imagination pass `imagination-py-msgpack-r2`, session `self-2026-10-12-eureka`, against `hands/py-msgpack-default`
 at `7f2c7477`. Probes ran from the session scratchpad and were removed afterwards; their results are recorded here (`jobK` ran
@@ -333,8 +336,9 @@ stranded a store with it. Revision 2 replaces the procedure with
    `JsonLinesBackingStore` each do that as a temp file and a rename.
 5. Records of other types keep their bytes and `stored_at`. The return value is the count rewritten.
 
-Two properties follow. It never sniffs: each record is read only by the codec its type was named with, so a
-second run is refused and changes nothing. It cannot leave a store half-migrated.
+It never sniffs, and it cannot leave a store half-migrated. Revision 2 also claimed that a second run is refused;
+Soul s2 falsified that (P10), and a concurrent writer strands the store (P11). Revision 3 replaces this shape
+(see "Revision 3").
 
 Rejected alternatives:
 - A sniffing reader that accepts both formats: P1's one-digit payloads are valid in both formats, and r1's map
@@ -349,9 +353,90 @@ The merge of `hands/py-msgpack-default` to main waits on three things:
    (`put_messagepack_document`) into both stores. The JSON-first read becomes a read of exactly one MessagePack
    value with a trailing-bytes check, and the bridge's 8 definitions are unchanged. The Blender store is migrated
    by `cultcache_py.migrate_payloads` over those 8 definitions, because those payloads came from cultcache-py's
-   old default. The daemon-written JSON receipts in the Unity store are the daemon's own, and it rewrites them.
+   old default. From revision 3 the call names a backup path that must not exist (P12), and the original JSON
+   store is kept there. The daemon-written JSON receipts in the Unity store are the daemon's own, and it rewrites
+   them.
 3. An operator window: close Blender and stop sync, Self merges CultLib and Brokkr together, build the daemon,
-   run both migrations, then restart.
+   run both migrations, then restart. The backup stays until the operator has opened the migrated store; deleting
+   it is the operator's step, after which a rerun is no longer guarded (P12).
+
+### Revision 3
+
+Imagination pass `imagination-py-msgpack-r3`, session `self-2026-10-12-eureka`, against `hands/py-msgpack-default`
+at `57f85acd`. Python probes ran on Starfire (Python 3.13, msgpack 1.2.2) over a `git archive` of the cultcache-py
+and cultnet-py sources at that head, and were removed afterwards. The C# facts are Soul s2's (`jobB`, Yggdrasil),
+not rerun here.
+
+P8. **What still decides map keys at 57f85acd.** One search found three MessagePack readers that see document
+payload maps. (a) The codec's `_unpack_tree` applies the reference rule through `_checked_map`. (b) The store's
+whole-file `msgpack.unpackb(data, raw=False)` (`stores.py:98`) applies msgpack's `strict_map_key=True`. A legacy
+envelope file whose inline payload is `{1: 'a'}` is refused with "int is not allowed for map key". Read through
+`_unpack_tree` instead, the same file yields the payload `8101a161`, and a v1 snapshot's framing decodes
+identically either way. (c) cultnet-py's stamp router (`replication.py:192`) applies `strict_map_key=True`. Read
+through the codec, `['x.v1', {1: 'a'}]` and `{'schemaVersion': 'x.v1', 'v': {1: 'a'}}` both route to `x.v1` (C#
+routes both, Soul s2 STAMPPROBE). A nil-keyed payload gives `None`, as it does today and in C#. Every other
+`unpackb` in cultnet-py and cultmesh-py reads wire messages, cursor files or fixed-slot protocol records, whose
+maps are frames rather than payload data. Their bound is follow-up `py-wire-decoders-unbounded`. Unmeasured: C#
+reads a map stamp as `IReadOnlyDictionary<string, object>`, so a top-level non-str key may stop C# routing where
+Python routes. The resolved definition decides the record either way.
+
+P9. **The two depth counters.** `_check_writable` (documents.py:184) counts every node, scalars included, to
+`_PACK_DEPTH_LIMIT = 511`. `_check_payload_tree` counts containers to 256. Commit `eef1cb15` moved the codec
+from 256 to 511 so that `test_union_parity.py:650` could build its 257-deep read fixture with
+`document.payload_codec.encode(past)`. The fixture needs bytes that are 257 deep, not a codec that writes them:
+`msgpack.packb(past, use_bin_type=True)` and `json.dumps(past).encode()` build them, and both writers nest to 511
+or further. One container walk, bounded at `MAX_PAYLOAD_DEPTH`, serves both the definition and the codec. It also
+ends a cycle, because a cycle reaches 257.
+
+P10. **Rerun.** No byte in a CultCache store records a payload format, and no wire change is wanted for one. A
+migration that rewrites the live store in place therefore cannot tell its own output from its input when a
+payload is valid in both formats. `b'5'` is the JSON 5 or the MessagePack 53, and Soul s2 saw 53 become 5. No
+check on the payload content can separate the two, so the rerun guard has to come from outside the payload.
+
+P11. **Concurrency in the store.** cultcache-py's file stores hold a per-object `threading.RLock` only, so every
+`push` is a read-modify-write that loses another process's write. The C# store opens a `.lock` sidecar with
+`FileShare.None` (`CultCache.cs:3489-3509`), and cultcache-rs takes an `fs2` lock on its sidecar (`lib.rs:853-859`).
+cultcache-ts has none (a search of `packages/cultcache-ts/src` finds no lock). The migration race is one case of a
+store that lacks the reference's lock.
+
+P12. **Prior art and the shape chosen** (primary docs fetched 2026-10-12). SQLite `VACUUM INTO`: "the original
+database file is unchanged", and the target "must not previously exist, or else it must be an empty file". LMDB
+`mdb_env_copy`: the target directory "must already exist and be writable but must otherwise be empty". Realm is
+the counter-example to Self's hypothesis. It migrates in place on open, and a rerun is safe because the file
+records its schema version, which CultCache's payload format does not (P10). The chosen shape follows `VACUUM
+INTO`, with the destination role taken by a mandatory backup:
+
+`migrate_payloads(store, definitions, *, backup, source_codec=JSON_PAYLOAD_CODEC) -> int`
+
+1. Copy the live store's bytes to `backup` with exclusive create (`open(backup, "xb")`). If the backup exists,
+   the call is refused before anything is read. Every rerun is refused this way, whatever the payloads hold.
+2. Read the records from the backup, the frozen copy, and rewrite the listed ones. Any refusal of any exception
+   class raises `CultCacheError` naming the type, the record key and the code or class.
+3. Compare the live bytes with the copied bytes. A difference means a writer ran during the migration, and the
+   call refuses and says to stop every writer.
+4. Replace the live file in one `_replace_all` (temp file and rename).
+5. On any failure after step 1, the backup is removed and the live store is unchanged. A count of zero also
+   removes it.
+
+Probe (`probe2`, this shape over the 57f85acd sources). The first run over `b'53'`, `b'5'` and an unlisted type
+gives 53 and 5, keeps the unlisted bytes, and keeps the JSON in the backup. A second identical call raises
+`FileExistsError` and leaves the live bytes unchanged. A push between the read and the swap (the s2 interleave)
+is refused, with the backup removed and the live store holding the writer's JSON record. A validate that raises
+`AssertionError` is named by class and the backup is removed.
+
+What remains and is stated: the window between the compare and the rename, closed by the lock in `5a`. The
+precondition is to stop every writer, as it is for SQLite's offline tools. If someone deletes the backup and then
+reruns the migration on its own output, P10 recurs. The README says to delete the backup only after the
+migrated store has been opened, and never to rerun after that.
+
+P13. **Float32 keys.** `Float32(0.1).value` is `0.1`, so a `Float32` key is not rounded until it is packed.
+Decoded, it is the float32-rounded value. Writing `{1, F32(1.0)}`, `{True, F32(1.0)}`, `{1.5, F32(1.5)}` or
+`{0, F32(-0.0)}` produces bytes that the codec's own decode refuses as `duplicate_map_key`. `{0.1, F32(0.1)}` and
+two NaN keys read back as two keys. The rule that matches decode exactly compares each key's decoded image (a
+`Float32` key's image is `struct.unpack('>f', struct.pack('>f', v))[0]`) and refuses a collision on write as
+`duplicate_map_key`. The reference reads all four collision maps as two keys (Soul s2 KEYPROBE). Python cannot,
+for the same reason it cannot read `{1, 1.0}`, which is the residual already recorded. Refusing on write keeps
+Python inside what it can read back, and it is the write half of that residual.
 
 ## Observed, not owned by these cuts
 
