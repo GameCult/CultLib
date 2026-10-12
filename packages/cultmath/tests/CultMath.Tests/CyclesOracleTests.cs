@@ -216,6 +216,39 @@ public sealed class CyclesOracleTests
         Assert.True(worst <= Math.ScaleB(1.0, -22), $"a lookup is {worst} from (index + weight) / (size - 1), more than 2^-22");
     }
 
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void ResultsTheFilmCannotShowFollowTheCyclesSource(string target)
+    {
+        // Cycles' film writes 0 for an infinite or NaN result, so the fixtures cannot tell the guards that return 0
+        // from the division that would return an infinity. These are the guards in svm_math (util/math_base.h):
+        // safe_logf, safe_divide and inversesqrtf return 0 where the plain operation is not finite.
+        float One(string function, params float[] arguments) => (float)Call(target, function, arguments.Cast<object>().ToArray());
+        Assert.Equal(0.0f, One("cycles_logarithm", 0.0f, 2.0f));
+        Assert.Equal(0.0f, One("cycles_logarithm", -1.0f, 2.0f));
+        Assert.Equal(0.0f, One("cycles_logarithm", 2.0f, 0.0f));
+        Assert.Equal(0.0f, One("cycles_logarithm", 2.0f, -1.0f));
+        Assert.Equal(0.0f, One("cycles_divide", 1.0f, 0.0f));
+        Assert.Equal(0.0f, One("cycles_inverse_sqrt", 0.0f));
+        Assert.Equal(0.0f, One("cycles_modulo", 1.0f, 0.0f));
+        Assert.Equal(0.0f, One("cycles_floored_modulo", 1.0f, 0.0f));
+    }
+
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void HueSaturationAndValueOfThePrimariesFollowCycles(string target)
+    {
+        // util/color.h rgb_to_hsv: hue 0 for red, 1/3 for green, 2/3 for blue, saturation 1, value 1; a grey has
+        // hue 0 and saturation 0. Red's hue is exactly 0 and not 1, which hsv_to_rgb would read the same.
+        float[] Hsv(float r, float g, float b) => Flatten(Call(target, "cycles_rgb_to_hsv", new float3(r, g, b)));
+        Assert.Equal(new[] { 0.0f, 1.0f, 1.0f }, Hsv(1.0f, 0.0f, 0.0f));
+        Assert.Equal(new[] { 0.0f, 0.0f, 0.5f }, Hsv(0.5f, 0.5f, 0.5f));
+        Assert.Equal(1.0f / 3.0f, Hsv(0.0f, 1.0f, 0.0f)[0], 6);
+        Assert.Equal(2.0f / 3.0f, Hsv(0.0f, 0.0f, 1.0f)[0], 6);
+        var back = Flatten(Call(target, "cycles_hsv_to_rgb", new float3(0.0f, 1.0f, 1.0f)));
+        Assert.Equal(new[] { 1.0f, 0.0f, 0.0f }, back);
+    }
+
     [Fact]
     public void RgbToBwCoefficientsAreTheOnesBlenderReads()
     {
