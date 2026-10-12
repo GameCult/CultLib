@@ -361,8 +361,9 @@ public static partial class math
     /// </summary>
     public static float2 cycles_ramp_index(float t, int size)
     {
-        var f = (t > 0.0f ? (t < 1.0f ? t : 1.0f) : 0.0f) * (size - 1);
+        var f = (t > 0.0f ? (t < 1.0f ? t : 1.0f) : 0.0f) * (float)(size - 1);
         var index = clamp((int)f, 0, size - 1);
-        return new float2(index, f - index);
+        var lower = (float)index;
+        return new float2(lower, f - lower);
     }
 }

@@ -86,6 +86,12 @@ public sealed class GlslMirrorTests
             Assert.DoesNotContain(token, library);
             Assert.Contains(token, phacelle);
         }
+
+        // The Apache-2.0 code is in its own file too, and the MPL-2.0 file holds none of it.
+        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text;
+        Assert.DoesNotContain("cultmath_cycles_divide(", library);
+        Assert.DoesNotContain("cultmath_cycles_divide(", phacelle);
+        Assert.Contains("float cultmath_cycles_divide(", cycles);
     }
 
     // The two-file contract a consumer relies on when it concatenates CultMath.Phacelle.glsl after
@@ -106,6 +112,13 @@ public sealed class GlslMirrorTests
         Assert.Contains("cultmath_phacelle is in CultMath.Phacelle.glsl", library);
         Assert.Contains(" MPL-2.0;", phacelle);
         Assert.DoesNotContain("MIT", phacelle);
+
+        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text.Split('
+')[0];
+        Assert.Contains("cultmath_cycles_ramp_index is in CultMath.Cycles.glsl", library);
+        Assert.Contains(" Apache-2.0;", cycles);
+        Assert.DoesNotContain("MIT", cycles);
+        Assert.DoesNotContain("MPL", cycles);
     }
 
     [Fact]

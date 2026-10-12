@@ -335,9 +335,10 @@ float cultmath_cycles_rgb_to_bw(float3 color)
 // otherwise. The ramp table itself is the caller's.
 float2 cultmath_cycles_ramp_index(float t, int size)
 {
-    float f = (t > 0.0 ? (t < 1.0 ? t : 1.0) : 0.0) * (size - 1);
+    float f = (t > 0.0 ? (t < 1.0 ? t : 1.0) : 0.0) * (float)(size - 1);
     int index = clamp((int)f, 0, size - 1);
-    return float2(index, f - index);
+    float lower = (float)index;
+    return float2(lower, f - lower);
 }
 
 #endif
