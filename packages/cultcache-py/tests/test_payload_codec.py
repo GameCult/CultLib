@@ -77,6 +77,24 @@ class PayloadCodecTests(unittest.TestCase):
         self.assertEqual(reread.get(modern, "k"), {"n": 1, "schema": "x"})
         self.assertEqual(reread.get_envelope(modern, "k").payload, MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1, "schema": "x"}))
 
+    def test_the_read_refusal_text_is_exact_under_each_codec(self) -> None:
+        with self.assertRaises(CultCachePayloadFormatError) as default:
+            define_document_type("tests.text").decode_payload(LEGACY_JSON)
+        self.assertEqual(
+            str(default.exception),
+            "tests.text payload is not one MessagePack value (ExtraData); refused on read. A record written by cultcache-py 0.3 "
+            "or earlier through define_document_type's JSON default is read by defining tests.text with payload_codec=JSON_PAYLOAD_CODEC.",
+        )
+        with self.assertRaises(CultCachePayloadFormatError) as json_side:
+            define_document_type("tests.text", payload_codec=JSON_PAYLOAD_CODEC).decode_payload(b"\x81\xa1a")
+        self.assertEqual(str(json_side.exception), "tests.text payload is not one JSON value (UnicodeDecodeError); refused on read.")
+        self.assertEqual((json_side.exception.type_name, json_side.exception.codec, json_side.exception.direction), ("tests.text", "JSON", "read"))
+
+    def test_the_write_refusal_carries_its_type_codec_and_direction(self) -> None:
+        with self.assertRaises(CultCachePayloadFormatError) as caught:
+            define_document_type("tests.attrs", encode=lambda value: value).encode_payload({1: "a"})
+        self.assertEqual((caught.exception.type_name, caught.exception.codec, caught.exception.direction), ("tests.attrs", "MessagePack", "write"))
+
     def test_wrong_format_payloads_are_typed_refusals_on_both_sides(self) -> None:
         document = define_document_type("tests.faults")
         for payload in (b"[1,2]", b'"hi"', b"true", b"null", b"1.5", b"-3", b"12", b"\x93\x01\x02", b"\xc1", b"\xa2\xff\xfe"):
