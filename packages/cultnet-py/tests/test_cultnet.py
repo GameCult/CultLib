@@ -2023,16 +2023,20 @@ class CultNetTests(unittest.TestCase):
             ("array", ["replica.stamped.v1", {1: "a"}]),
             ("map", {"schemaVersion": "replica.stamped.v1", "v": {1: "a"}}),
             ("nested", ["replica.stamped.v1", {"a": {2: [{3: 4}]}}]),
+            ("snake", {"schema_version": "replica.stamped.v1", "v": {1: "a"}}),
         ):
             with self.subTest(form=name):
                 self.assertEqual(routed(tree), (document, "replica.stamped.current"))
         for name, tree in (
             ("array", ["replica.stamped.v1", {None: "a"}]),
             ("map", {"schemaVersion": "replica.stamped.v1", "v": {None: "a"}}),
+            ("not-a-string", {"schemaVersion": 5, "v": {1: "a"}}),
+            ("unknown-name", ["replica.other.v1", {1: "a"}]),
         ):
             with self.subTest(form=name):
-                with self.assertRaises(KeyError):
+                with self.assertRaises(KeyError) as caught:
                     routed(tree)
+                self.assertEqual(caught.exception.args, ("sha256:unknown",))
 
     def test_cultnet_replication_helpers_recover_schema_stamped_raw_records(self) -> None:
         document = define_database_entry_type(
