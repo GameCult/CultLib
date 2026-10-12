@@ -1376,5 +1376,25 @@ namespace GameCult.Caching.Tests
 
             Assert.That(Stored(path, W), Is.EqualTo(theirs), "the declared record the checked key now holds is not removed");
         }
+
+        // A cache disposed with several stores flushes when any one of them has checks staged, not only when all do (a read-only store
+        // never has any).
+        [Test]
+        public void DisposingACacheFlushesWhenOnlyOneStoreHasChecksStaged([Values] bool directory)
+        {
+            var writable = Seeded("dispose-home.cc", directory);
+            var other = PathOf("dispose-other.cc");
+            using (var seed = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo }), directory))
+                seed.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g")));
+            var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo })) { FlushAttachedStoresOnDispose = true };
+            cache.AddBackingStore(StoreAt(writable, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: true), Gizmo);
+            Assert.That(cache.Remove(W), Is.False);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Dispose())!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            try { cache.Dispose(); } catch (CultSchemaConflictException) { }
+        }
     }
 }
