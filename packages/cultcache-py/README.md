@@ -123,16 +123,25 @@ another format is refused with `CultCachePayloadFormatError`, never guessed at.
   reference's object reader takes them; `None`, `bytes`, list and map keys are
   refused, on read and on write. Two keys Python holds as one are refused on read
   as `duplicate_map_key`, which includes `1` beside `1.0` or `True`: the reference
-  keeps those apart and a Python `dict` cannot.
+  keeps those apart and a Python `dict` cannot. The same keys are refused on
+  write as `duplicate_map_key`, which includes a `Float32` key beside an equal
+  int, bool or float key: the codec never writes bytes its own reader refuses.
+- Arrays and maps nest at most 256 deep (`MAX_PAYLOAD_DEPTH`), on read and on
+  write, in the codec and in the definition alike.
 - Integers beyond 64 bits (outside `-(2**63)..2**64-1`) are refused on write as
   `integer_out_of_range`; MessagePack has no wider integer.
 - A store written by cultcache-py 0.3 or earlier holds JSON payloads. Define each
-  type with `payload_codec=JSON_PAYLOAD_CODEC` to read it, or rewrite it once,
-  whole or not at all, with `migrate_payloads(store, definitions)`: it reads
-  every record of the listed definitions, writes them under the definitions'
-  own codec in one `push_all`, and raises `CultCacheError` naming the type,
-  record key and code, with the store untouched, if any record is refused. A
-  second run is refused and changes nothing.
+  type with `payload_codec=JSON_PAYLOAD_CODEC` to read it, or rewrite it once with
+  `migrate_payloads(store, definitions, backup=path)`. Stop every writer of the
+  store first. The store's bytes are copied to `backup`, which must not exist;
+  the copy is read, every record of the listed definitions is rewritten under the
+  definitions' own codec, and the live file is replaced, once, only if it is still
+  byte-identical to the copy. The source is never written. Any refusal (a record,
+  or a store that changed meanwhile) raises `CultCacheError` naming the type,
+  record key and code, or the path, removes the backup and leaves the store as it
+  was. The backup is also the guard against a second run, which is refused: payload
+  bytes cannot tell a migrated store from an unmigrated one. Delete the backup only
+  after the migrated store opens, and never rerun after deleting it.
 - A JSON payload that is a single digit (`0` to `9`) is also a valid one-byte
   MessagePack integer and reads as 48 to 57 under the default. Documents that
   are objects or lists never meet this.

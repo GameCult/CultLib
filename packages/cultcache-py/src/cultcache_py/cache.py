@@ -1,12 +1,15 @@
 ﻿from __future__ import annotations
 
 import functools
+import os
 import threading
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
 from .documents import JSON_PAYLOAD_CODEC, DocumentDefinition, PayloadCodec, extract_value
+from .stores import JsonLinesBackingStore, SingleFileMessagePackBackingStore
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -588,37 +591,71 @@ class CultCache:
 
 
 def migrate_payloads(
-    store: BackingStore,
+    store: SingleFileMessagePackBackingStore | JsonLinesBackingStore,
     definitions: Iterable[DocumentDefinition[Any]],
     *,
+    backup: str | os.PathLike[str],
     source_codec: PayloadCodec = JSON_PAYLOAD_CODEC,
 ) -> int:
     """Rewrite the records of `definitions` in `store` from `source_codec` to each definition's own codec, whole or not
-    at all: every record is read and rewritten first, any refusal raises `CultCacheError` naming the type, the record key
-    and the refusal's code before the store is touched, and the rewritten envelopes go back in one `push_all`. Records of
-    other types keep their bytes. Returns the count rewritten.
+    at all, and return the count rewritten. Stop every writer of the store first: a writer between the copy and the swap
+    makes the call refuse, but the swap itself takes no cross-process lock.
 
-    Run it once on a store written by cultcache-py 0.3 or earlier. A store already in the definitions' format is
-    refused, not rewritten twice: the second run raises and changes nothing.
+    The store's bytes are copied to `backup`, which must not exist. The copy is read, every listed record is rewritten
+    in memory, and only if the store is byte-identical to the copy is it replaced, once, with the result; any refusal
+    (a record, a changed store) removes the backup and leaves the store as it was. The source is never written. Records
+    of other types keep their bytes. The backup is also the rerun guard, since payload bytes cannot say whether a store
+    was migrated (the JSON `5` is the MessagePack `53`): a second call finds it and is refused. Delete the backup only
+    after the migrated store opens, and never rerun after deleting it. A count of 0 writes nothing and keeps no backup.
     """
+    if not isinstance(store, (SingleFileMessagePackBackingStore, JsonLinesBackingStore)):
+        raise TypeError(f"migrate_payloads takes a library file store, not {type(store).__name__}")
+    backup = Path(backup)
     by_type: dict[str, DocumentDefinition[Any]] = {}
     for definition in definitions:
         by_type[definition.type] = definition
         by_type.setdefault(definition.catalog_entry().schema_name, definition)
-    rewritten: list[CultCacheEnvelope] = []
-    for envelope in store.pull_all():
-        definition = by_type.get(envelope.type)
-        if definition is None:
-            continue
-        try:
-            value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
-            rewritten.append(replace(envelope, payload=definition.encode_payload(value)))
-        except ValueError as refusal:
-            code = getattr(refusal, "code", type(refusal).__name__)
-            failure = CultCacheError(f"Cannot migrate {envelope.type} record {envelope.key}: {code}; the store is unchanged.")
-        else:
-            continue
+    original = store.path.read_bytes()
+    try:
+        with open(backup, "xb") as copy:
+            copy.write(original)
+    except FileExistsError:
+        failure = CultCacheError(
+            f"{backup} already exists: a migration already ran or was stopped; the store is unchanged."
+        )
+    else:
+        failure = None
+    if failure is not None:
         raise failure
-    if rewritten:
-        store.push_all(rewritten)
-    return len(rewritten)
+    try:
+        migrated: list[CultCacheEnvelope] = []
+        count = 0
+        for envelope in type(store)(backup).pull_all():
+            definition = by_type.get(envelope.type)
+            if definition is not None:
+                try:
+                    value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
+                    envelope = replace(envelope, payload=definition.encode_payload(value))
+                except Exception as refusal:
+                    code = getattr(refusal, "code", type(refusal).__name__)
+                    failure = CultCacheError(
+                        f"Cannot migrate {envelope.type} record {envelope.key}: {code}; the store is unchanged."
+                    )
+                else:
+                    count += 1
+            if failure is not None:
+                raise failure
+            migrated.append(envelope)
+        if count:
+            with store._lock:
+                if store.path.read_bytes() != original:
+                    raise CultCacheError(
+                        f"{store.path} changed during migration; stop every writer and retry. The store is unchanged."
+                    )
+                store._replace_all(migrated)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    if not count:
+        backup.unlink()
+    return count
