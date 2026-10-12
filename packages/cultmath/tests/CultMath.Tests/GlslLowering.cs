@@ -21,6 +21,8 @@ internal static class GlslLowering
         {
             // Phacelle is a port of MPL-2.0 code, and MPL-2.0 covers the files that carry it.
             ["CultMath.Phacelle.hlsl"] = ("CultMath.Phacelle.glsl", "MPL-2.0"),
+            // The Cycles node semantics are a port of Apache-2.0 code, and the licence travels with the file.
+            ["CultMath.Cycles.hlsl"] = ("CultMath.Cycles.glsl", "Apache-2.0"),
         };
 
     private const string Regenerate =
