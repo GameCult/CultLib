@@ -76,8 +76,12 @@ namespace GameCult.Caching.Tests
             try
             {
                 var cache = new CultCache();
-                cache.AddBackingStore(new SingleFileMessagePackBackingStore(Store($"wrong-slot-{slot}.cc", scratch)));
-                var error = Assert.CatchAsync<Exception>(async () => await cache.PullAllBackingStoresAsync());
+                var path = Store($"wrong-slot-{slot}.cc", scratch);
+                var error = Assert.CatchAsync<Exception>(async () =>
+                {
+                    cache.AddBackingStore(new SingleFileMessagePackBackingStore(path));
+                    await cache.PullAllBackingStoresAsync();
+                });
                 Assert.That(error!.Message, Does.Contain($"slot {slot} changed type"));
             }
             finally
