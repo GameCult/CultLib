@@ -377,6 +377,34 @@ class PayloadCodecTests(unittest.TestCase):
             document.decode_payload(b"\x91" * 257 + b"\x01")
         self.assertEqual(document.decode_payload(b"\x91" * 256 + b"\x01"), lists(256))
 
+    def test_the_integer_range_is_closed_at_both_ends_at_the_root_too(self) -> None:
+        codec = MESSAGEPACK_PAYLOAD_CODEC
+        for value in (2**64 - 1, -(2**63), 0):
+            with self.subTest(accepted=value):
+                self.assertEqual(codec.decode(codec.encode(value)), value)
+        for value in (2**64, -(2**63) - 1):
+            with self.subTest(refused=value):
+                with self.assertRaises(PayloadCodecFault) as caught:
+                    codec.encode(value)
+                self.assertEqual(caught.exception.code, "integer_out_of_range")
+
+    def test_a_consumer_codec_that_refuses_a_nesting_gets_the_depth_refusal_naming_the_direction(self) -> None:
+        def encode(tree: object) -> bytes:
+            raise PayloadCodecFault("depth_limit")
+
+        def decode(payload: bytes) -> object:
+            raise PayloadCodecFault("depth_limit")
+
+        document = define_document_type("tests.own_depth", encode=lambda value: value, payload_codec=PayloadCodec("Own", encode, decode))
+        for direction, call, argument in (("write", document.encode_payload, {"a": 1}), ("read", document.decode_payload, b"x")):
+            with self.subTest(direction=direction):
+                with self.assertRaises(CultCachePayloadDepthError) as caught:
+                    call(argument)
+                self.assertEqual(
+                    str(caught.exception),
+                    f"tests.own_depth payload nests 257 containers deep; the limit is 256 (refused on {direction}).",
+                )
+
     def test_a_codec_fault_prints_its_code_only(self) -> None:
         self.assertEqual(str(PayloadCodecFault("some_code", "some_kind")), "some_code")
         self.assertEqual(str(PayloadCodecFault("some_code")), "some_code")
@@ -698,9 +726,32 @@ class MigratePayloadsTests(unittest.TestCase):
 
     def test_migration_takes_only_the_library_file_stores(self) -> None:
         backup = self._backup("foreign")
-        with self.assertRaises(TypeError):
+        with self.assertRaises(TypeError) as caught:
             migrate_payloads(object(), [define_document_type("tests.mig")], backup=backup)
+        self.assertEqual(str(caught.exception), "migrate_payloads takes a library file store, not object")
         self.assertFalse(backup.exists())
+
+    def test_a_backup_removed_by_someone_else_does_not_mask_the_refusal(self) -> None:
+        store = self._filled(
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "vanished", {"k1": b'{"n": 1}'}
+        )
+        backup = self._backup("vanished")
+        real = SingleFileMessagePackBackingStore.pull_all
+
+        def pull_all(self_store):
+            result = real(self_store)
+            if self_store.path == backup:
+                backup.unlink()
+            return result
+
+        def validate(value: object) -> None:
+            raise AssertionError(CANARY)
+
+        with mock.patch.object(SingleFileMessagePackBackingStore, "pull_all", pull_all):
+            with self.assertRaises(CultCacheError) as caught:
+                migrate_payloads(store, [define_document_type("tests.mig", validate=validate)], backup=backup)
+        self.assertIn("AssertionError", str(caught.exception))
+        self.assertIsNone(caught.exception.__context__)
 
 
 if __name__ == "__main__":
