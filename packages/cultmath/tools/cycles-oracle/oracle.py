@@ -45,7 +45,10 @@ PLANE = bpy.context.active_object
 
 def by_identifier(sockets, identifier):
     """A node's socket by identifier: several data types share one socket name."""
-    return next(socket for socket in sockets if socket.identifier == identifier)
+    for socket in sockets:
+        if socket.identifier == identifier:
+            return socket
+    raise KeyError("no socket %s among %s" % (identifier, [s.identifier for s in sockets]))
 
 
 def f32(values):
@@ -308,7 +311,7 @@ def family_map_range():
             node.interpolation_type = kind
             node.clamp = False
             sockets = operand_sockets(tree, imgs, 6)
-            for k, identifier in enumerate(["Value", "From_Min", "From_Max", "To_Min", "To_Max", "Steps"]):
+            for k, identifier in enumerate(["Value", "From_Min_FLOAT", "From_Max_FLOAT", "To_Min_FLOAT", "To_Max_FLOAT", "Steps_FLOAT"]):
                 socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
@@ -321,7 +324,7 @@ def family_map_range():
             node.interpolation_type = kind
             node.clamp = True
             sockets = operand_sockets(tree, imgs, 6)
-            for k, identifier in enumerate(["Value", "From_Min", "From_Max", "To_Min", "To_Max", "Steps"]):
+            for k, identifier in enumerate(["Value", "From_Min_FLOAT", "From_Max_FLOAT", "To_Min_FLOAT", "To_Max_FLOAT", "Steps_FLOAT"]):
                 socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
@@ -511,12 +514,39 @@ def identity_check():
         sys.exit(3)
 
 
+def kernel_check():
+    """The CPU kernel must not fuse multiply-adds.
+
+    Cycles' AVX2 CPU kernel is compiled with FMA, so a - floor(a / b) b is one fused operation there and
+    10000 mod 0.1 is -1.5e-4; the SSE4.2 kernel has none, and gives the unfused result 0 that CultMath's C#
+    computes. The fixtures pin the SSE4.2 kernel: run with CYCLES_CPU_NO_AVX2=1.
+    """
+    a = f32([10000.0] * CASES)
+    b = f32([0.1] * CASES)
+    unfused = a - np.floor(a / b) * b
+    images = pack_operands([a, b])
+
+    def build(tree, imgs):
+        node = tree.nodes.new("ShaderNodeMath")
+        node.operation = "FLOORED_MODULO"
+        sockets = operand_sockets(tree, imgs, 2)
+        tree.links.new(sockets[0], node.inputs[0])
+        tree.links.new(sockets[1], node.inputs[1])
+        return [node.outputs[0]]
+
+    got = bake("kernel", images, build, 1)[0]
+    if not np.array_equal(got.view(np.uint32), unfused.astype(np.float32).view(np.uint32)):
+        sys.stderr.write("cycles-oracle: this Cycles CPU kernel fuses multiply-adds; run with CYCLES_CPU_NO_AVX2=1\n")
+        sys.exit(4)
+
+
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:]
     out = argv[0]
     wanted = argv[1:] or list(FAMILIES)
     os.makedirs(out, exist_ok=True)
     identity_check()
+    kernel_check()
     header = {
         "oracle": "tools/cycles-oracle/oracle.py (Blender %s, build %s, Cycles CPU, 1 sample, Emit bake, float Non-Color images)" % (PINNED_VERSION, PINNED_HASH),
         "blender": PINNED_VERSION,

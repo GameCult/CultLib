@@ -19,9 +19,9 @@ static const float CULTMATH_CYCLES_FLT_EPSILON = 1.1920929e-07;
 
 // The scene-linear luminance coefficients Cycles reads from Blender 5.2.2's default OCIO config
 // (kernel/film linear_rgb_to_gray). The oracle fixture pins them with a case per primary.
-static const float CULTMATH_CYCLES_RGB_TO_Y_R = 0.2126729;
-static const float CULTMATH_CYCLES_RGB_TO_Y_G = 0.7151522;
-static const float CULTMATH_CYCLES_RGB_TO_Y_B = 0.0721750;
+static const float CULTMATH_CYCLES_RGB_TO_Y_R = 0.212639093;
+static const float CULTMATH_CYCLES_RGB_TO_Y_G = 0.715169132;
+static const float CULTMATH_CYCLES_RGB_TO_Y_B = 0.0721927434;
 
 // ---- Math node (kernel/svm/math_util.h svm_math; util/math_base.h) ----
 
@@ -63,13 +63,23 @@ float cultmath_cycles_sqrt(float a) { return sqrt(max(a, 0.0)); }
 // inversesqrtf
 float cultmath_cycles_inverse_sqrt(float a) { return a > 0.0 ? 1.0 / sqrt(a) : 0.0; }
 
-// safe_modulo is fmodf, the remainder with the dividend's sign. GLSL has no fmod and the HLSL one is this
-// quotient form on a GPU, so this is the form every CultMath target shares; it is not fmodf bit for bit,
-// and CyclesOracleTests states how far it is.
+// safe_modulo is fmodf, the remainder with the dividend's sign, exactly. GLSL has no fmod, and a - b trunc(a / b)
+// is wrong where the quotient rounds up to an integer or the product rounds (3 mod 0.3 is 0.29999995, not 0).
+// So this subtracts the largest power-of-two multiple of the divisor not above the remainder until the
+// remainder is below the divisor: every step is an exact subtraction, as in fmod. The loops are bounded by the
+// binades a float spans.
 float cultmath_cycles_modulo(float a, float b)
 {
-    float quotient = a / b;
-    return b != 0.0 ? a - b * (quotient >= 0.0 ? floor(quotient) : ceil(quotient)) : 0.0;
+    float remainder = abs(a);
+    float divisor = abs(b);
+    for (int steps = 0; steps < 300 && remainder >= divisor && divisor > 0.0; steps++)
+    {
+        float multiple = divisor;
+        for (int doublings = 0; doublings < 300 && multiple * 2.0 <= remainder; doublings++)
+            multiple = multiple * 2.0;
+        remainder = remainder - multiple;
+    }
+    return b != 0.0 ? (a < 0.0 ? -remainder : remainder) : 0.0;
 }
 
 // safe_floored_modulo

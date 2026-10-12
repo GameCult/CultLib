@@ -20,13 +20,13 @@ public static partial class math
     private const float CYCLES_FLT_EPSILON = 1.1920929e-07f;
 
     /// <summary>The scene-linear red luminance coefficient Cycles' RGB to BW node reads from Blender 5.2.2's default OCIO config.</summary>
-    public const float CYCLES_RGB_TO_Y_R = 0.2126729f;
+    public const float CYCLES_RGB_TO_Y_R = 0.212639093f;
 
     /// <summary>The scene-linear green luminance coefficient Cycles' RGB to BW node reads from Blender 5.2.2's default OCIO config.</summary>
-    public const float CYCLES_RGB_TO_Y_G = 0.7151522f;
+    public const float CYCLES_RGB_TO_Y_G = 0.715169132f;
 
     /// <summary>The scene-linear blue luminance coefficient Cycles' RGB to BW node reads from Blender 5.2.2's default OCIO config.</summary>
-    public const float CYCLES_RGB_TO_Y_B = 0.0721750f;
+    public const float CYCLES_RGB_TO_Y_B = 0.0721927434f;
 
     // ---- Math node (kernel/svm/math_util.h svm_math; util/math_base.h) ----
 
@@ -72,14 +72,25 @@ public static partial class math
     public static float cycles_inverse_sqrt(float a) => a > 0.0f ? 1.0f / sqrt(a) : 0.0f;
 
     /// <summary>
-    /// Math node Truncated Modulo (safe_modulo), the remainder with the dividend's sign, or 0 when b is 0.
-    /// Cycles computes fmodf. GLSL has no fmod and HLSL's is this quotient form on a GPU, so this is the form
-    /// every CultMath target shares: it is not fmodf bit for bit, and CyclesOracleTests states how far it is.
+    /// Math node Truncated Modulo (safe_modulo), the remainder with the dividend's sign, exactly as fmodf computes
+    /// it, or 0 when b is 0. GLSL has no fmod, and a - b trunc(a / b) is wrong where the quotient rounds up to an
+    /// integer or the product rounds (3 mod 0.3 is 0.29999995, not 0). So this subtracts the largest power-of-two
+    /// multiple of the divisor not above the remainder until the remainder is below the divisor: every step is an
+    /// exact subtraction, as in fmod. The loops are bounded by the binades a float spans.
     /// </summary>
     public static float cycles_modulo(float a, float b)
     {
-        var quotient = a / b;
-        return b != 0.0f ? a - b * (quotient >= 0.0f ? floor(quotient) : ceil(quotient)) : 0.0f;
+        var remainder = abs(a);
+        var divisor = abs(b);
+        for (var steps = 0; steps < 300 && remainder >= divisor && divisor > 0.0f; steps++)
+        {
+            var multiple = divisor;
+            for (var doublings = 0; doublings < 300 && multiple * 2.0f <= remainder; doublings++)
+                multiple = multiple * 2.0f;
+            remainder = remainder - multiple;
+        }
+
+        return b != 0.0f ? (a < 0.0f ? -remainder : remainder) : 0.0f;
     }
 
     /// <summary>Math node Floored Modulo (safe_floored_modulo): a - floor(a / b) b, or 0 when b is 0.</summary>
