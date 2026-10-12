@@ -52,6 +52,45 @@ Other Body facts that shape the map:
   AetheriaEve `AetheriaRuntimeCatalogStore` (directory-store pages).
 - **Kotlin reads no store files.** It sees CultNet raw snapshots only.
 
+### Body at 2026-10-12 (Imagination refresh, `imagination-variants-refresh`)
+
+Probes run 2026-10-12 from `F:\Projects\CultLib-c2afix` with git only (no builds), after
+`git fetch origin`. Scratch worktrees under the session scratchpad were removed afterwards.
+
+- **C2a head.** `hands/variants-c2a` = `origin/hands/variants-c2a` = `de401056`, worktree clean.
+  `main` = `origin/main` = `b3bd8dd5`. Merge base `f789c8d1` (2026-09-30). C2a is 207 commits
+  ahead, main 453. `15ccdbb9`, the base of the five 2026-10-02 specs, is a C2a commit, not a
+  main commit; C2a has never merged main.
+- **Overlap.** `git diff --name-only` from the merge base: C2a touches 141 files, main 285, 33 in
+  common. In C#, main changed `CultCache.cs` (+18 -4: union guard, internal `Clock` seam),
+  `CultDocumentMessagePackSerialization.cs` (+9 -3: nesting bound 256), and the persistence and
+  schema-compatibility contracts (+7, +21). Everything else in common is under `packages/`:
+  cultmesh-ts `src/index.ts` (main +372 -433, C2a +189 -356), cultcache-rs `lib.rs` (main +276,
+  C2a +761 -171), cultcache-ts store and cache, cultnet-ts replication.
+- **Merge probe.** `git merge --no-ff --no-commit b3bd8dd5` onto `de401056` in a throwaway
+  worktree: 16 files conflict, 32 hunks. `CultCache.cs` has one: C2a made `MintStoredAt` an
+  `internal static` (the store's `StoredAtOver` calls it), main made it an instance method over a
+  new `Clock` seam for its union golden. The cultmesh-ts conflicts carry a semantic one: main
+  added payload-parse acceptance to the store document (an `accepts` predicate that decodes the
+  payload, and the test "store document handles choose compatible foreign schema payloads"),
+  which C2a's retire-schema-alias rule forbids. Main still carries `preserveIncomingSchemaId`
+  and `resolve_document_and_schema_id_for_raw_record`, which C2a deleted.
+- **The stash.** `stash@{0}` in `CultLib-c2afix`, "h3 WIP 2026-10-03: commit-time check-only
+  keys, stopped for quota; unverified", based on `de401056`, 2 files, +186 -47
+  (`CultCache.cs`, `DirectoryMessagePackBackingStore.cs`). It is a draft of the operator's
+  at-commit ruling (`unheld-removal-refused-at-commit`): `CultCommitRequest.Checks`, staged
+  checks on each writable store judged under the lock by `RefuseUndeclaredOnDisk`, both stores'
+  unlocked removal reads deleted, and `ExpectUnchanged` comparing foreign records at their read
+  versions (`CultForeignRecord.StoredVersion`). No tests, no contract text. Read with
+  `git stash show -p`; not applied or dropped.
+- **The High finding is already fixed.** `rawbytes-in-place-edit-lost` (content-version s2) was
+  fixed by h3 (`2a3773a4`, range head `a935d15c`: `RawBytes` deleted, the store owns a file's
+  bytes) and Soul's verdict `cut-c2a-content-version.s3` holds it, with `rawbytes-key-drop-unpinned`
+  retired by deletion and the five s1 pins (`cache-wrote-version-unpinned`,
+  `expect-on-removed-unpinned`, `no-condition-hash-unpinned`, `staleness-own-upsert-unpinned`,
+  `unstored-same-tick-unpinned`) caught at head. `git grep RawBytes de401056 -- src tests`: no
+  match. Those findings were never closed in the mind.
+
 ## 2. Model page (step 0b)
 
 | Kind | Named by | Over time | Decided by |
@@ -180,6 +219,37 @@ must carry deltas (ruling 4), and no message can yet.
 Dictionary entries, scalar lists and arrays are replaced whole.
 - **Recommend yes.** Aetheria's cases (`Hardpoints` whole; `Behaviors[id]...Max`) fit. Keyed
   dictionary addressing can be added later without a format change. Affects C2.
+
+## Cut sequence (2026-10-12)
+
+Mapped now (specs in the mind): `c2a-declared-apply` r2, the C# commit-time fix batch on
+`hands/variants-c2a` (the stash, finished, with tests and contract text), and its sibling
+`main-into-c2a` r2, main merged into C2a on `hands/variants-c2a-main` in its own worktree. Later
+cuts, one line each, mapped only when Self is about to dispatch them:
+
+1. **reconcile**: merge `hands/variants-c2a` into `hands/variants-c2a-main` after both Soul passes
+   hold; Self moves `hands/variants-c2a` there. Waits on both mapped cuts.
+2. **parity-ts**: TypeScript write set, one record per key, undeclared records carried and refused,
+   unheld removals judged at commit. Waits on reconcile.
+3. **parity-rs**: Rust `push_all` and `put_prepared_batch` apply a write set, ownership by
+   declaration, the same commit-time checks. Waits on reconcile; can run beside parity-ts.
+4. **parity-py**: Python write-set apply. Waits on reconcile and on `cultlib-gaps` cut
+   `py-msgpack-default` landing on main (then a main merge into C2a first).
+5. **write-set-vectors**: one cross-runtime manifest, read and acted on by all four runtimes;
+   carries follow-ups `c0-bad-canonical-in-manifest`, `legacy-vectors-all-runtimes`,
+   `directory-at-path-ts-py-pinned`. Waits on the three parity cuts.
+6. **land-c2a**: final main merge, full verification, Soul, then `git merge --no-ff` onto main
+   with an empty diff against the verified head; no tag. Waits on write-set-vectors, Soul holding,
+   and `asura:cut_spec:cut-semver-measured` landed. Asura Cut 3 bases on its merge commit.
+
+Rationale. The 2026-10-02 order (parity, vectors, then merge main) was right when main was close.
+Main has since moved 453 commits and rebuilt exactly what the parity cuts change: cultcache-ts
+payload ownership, cultmesh-ts, cultcache-rs. Parity mapped before the merge would be mapped
+twice. Merging first means every later cut is mapped once, on the code it changes. The C# fix
+batch goes first because the operator's at-commit ruling is the contract the parity runtimes
+copy; and it touches C# files main barely changed, so it can run beside the merge with one
+small reconcile (the `MintStoredAt` region). The High finding is not on this path: h3 fixed it
+and Soul s3 held it (body facts above).
 
 ## 5. Cuts, in order
 
