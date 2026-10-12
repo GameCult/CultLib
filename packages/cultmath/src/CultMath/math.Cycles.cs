@@ -368,7 +368,8 @@ public static partial class math
     /// <summary>
     /// Where a Color Ramp of `size` table entries is read at t: (index, weight), the lower entry and the
     /// weight of the next one. The colour is table[index] when weight is 0 and
-    /// (1 - weight) table[index] + weight table[index + 1] otherwise. The ramp table itself is the caller's.
+    /// (1 - weight) table[index] + weight table[index + 1] otherwise. The ramp table itself is the caller's;
+    /// Blender's holds 257 entries, the ramp sampled at i / 256.
     /// </summary>
     public static float2 cycles_ramp_index(float t, int size)
     {

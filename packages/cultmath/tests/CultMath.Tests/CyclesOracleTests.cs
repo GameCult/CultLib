@@ -53,7 +53,8 @@ public sealed class CyclesOracleTests
                 throw new InvalidOperationException($"{method.Name}: parameter type {parameter.ParameterType.Name} is not a fixture operand");
         }
 
-        Assert.Equal(tokens.Length, next);
+        // The operands a function does not take (Map Range's Steps, for the three kinds that ignore it) are left unread.
+        Assert.True(next <= tokens.Length, $"{method.Name}: {next} operands wanted, {tokens.Length} in the case");
         return values.ToArray();
     }
 

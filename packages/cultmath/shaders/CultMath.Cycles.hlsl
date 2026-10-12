@@ -342,7 +342,7 @@ float cultmath_cycles_rgb_to_bw(float3 color)
 
 // Where a ramp of `size` table entries is read at t: (index, weight), the lower entry and the weight of the
 // next one. The colour is table[index] when weight is 0 and (1 - weight) table[index] + weight table[index + 1]
-// otherwise. The ramp table itself is the caller's.
+// otherwise. The ramp table itself is the caller's; Blender's holds 257 entries, the ramp sampled at i / 256.
 float2 cultmath_cycles_ramp_index(float t, int size)
 {
     float f = (t > 0.0 ? (t < 1.0 ? t : 1.0) : 0.0) * (float)(size - 1);

@@ -438,7 +438,9 @@ def family_rgb_to_bw():
     return [{"function": "cycles_rgb_to_bw", "node": "ShaderNodeRGBToBW", "cases": encode_cases(columns, bake("rgb_to_bw", images, build, 1))}]
 
 
-RAMP_SIZE = 256
+# A Blender ramp is sampled at 256 intervals into a table of 257 entries (colorramp_to_array: size + 1 entries
+# at i / size), and the kernel reads that table with table_size 257.
+RAMP_SIZE = 257
 # A constant ramp whose 32 stops sit half an entry past an entry boundary: its table is the stops' values, so
 # a lookup's result names the entry it read.
 CONSTANT_STOPS = [((8 * j + 3.5) / (RAMP_SIZE - 1), (j + 1) / 32.0) for j in range(32)]

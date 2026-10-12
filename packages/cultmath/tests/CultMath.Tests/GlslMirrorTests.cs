@@ -621,7 +621,7 @@ public sealed class GlslMirrorTests
         new("vec3 cultmath_cycles_rgb_to_hsv(vec3)", "ulp-bounded", r => new object[] { CyclesColor(r) }),
         new("vec3 cultmath_cycles_hsv_to_rgb(vec3)", "ulp-bounded", r => new object[] { new float3(r.NextSingle(), r.NextSingle(), Uniform(r, 0.0f, 2.0f)) }),
         new("float cultmath_cycles_rgb_to_bw(vec3)", "ulp-bounded", r => new object[] { CyclesColor(r) }),
-        new("vec2 cultmath_cycles_ramp_index(float, int)", "ulp-bounded", r => new object[] { Uniform(r, -0.25f, 1.25f), 256 }),
+        new("vec2 cultmath_cycles_ramp_index(float, int)", "ulp-bounded", r => new object[] { Uniform(r, -0.25f, 1.25f), 257 }),
     }.Concat(new[]
     {
         "blend", "add", "mul", "screen", "overlay", "sub", "div", "diff", "exclusion", "dark", "light", "dodge", "burn", "hue", "sat", "val", "color", "soft", "linear",
