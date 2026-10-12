@@ -81,7 +81,7 @@ namespace GameCult.Caching.Tests
 
         private static readonly MessagePackSerializerOptions Options = CultDocumentMessagePackSerialization.OptionsFor(typeof(NumericLeafVectorTests).Assembly);
 
-        private static string VectorPath(string name)
+        internal static string VectorPath(string name)
         {
             for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
             {

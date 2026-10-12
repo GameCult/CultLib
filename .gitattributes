@@ -38,3 +38,6 @@ packages/cultmesh-ts/native/MANIFEST.txt text eol=lf
 # LF-configured or Linux clone builds the same bytes as a Windows one. The index
 # stays LF; only the checkout changes.
 packages/cultmath/src/** text eol=crlf
+
+# Stores the Python typed-leaf tests write for the C# reference to open.
+tests/vectors/**/*.cc binary
