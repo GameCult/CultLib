@@ -129,38 +129,56 @@ public sealed class CyclesOracleTests
     }
 
     [Fact]
-    public void RampIndexAndWeightReproduceBlendersLookup()
+    public void RampIndexNamesTheEntryBlenderReads()
     {
-        var fixture = Load("ramp");
-        var entry = fixture["functions"]!.AsArray().Single()!;
+        var entry = Load("ramp")["functions"]!.AsArray().Single(e => (string)e!["node"]!.ToString() == "ShaderNodeValToRGB CONSTANT")!;
         var size = (int)entry["table_entries"]!;
+        var stops = entry["stops"]!.AsArray().Select(stop => (Position: Float((string)stop![0]!), Value: Float((string)stop[1]!))).ToArray();
+
+        // A constant ramp's table: the value of the last stop at or before the entry's position.
+        var table = Enumerable.Range(0, size).Select(i =>
+        {
+            var position = (double)i / (size - 1);
+            var stop = stops.LastOrDefault(s => s.Position <= position);
+            return stop == default ? stops[0].Value : stop.Value;
+        }).ToArray();
+
         var cases = entry["cases"]!.AsArray().Select(line => ((string)line!).Split(" -> ")).ToArray();
-
-        // The first `size` cases are the table: each t reads its own entry (weight 0), so the result is the entry.
-        var table = new float[size];
-        for (var k = 0; k < size; k++)
+        Assert.True(table.Distinct().Count() > 30, "the constant ramp's table should name 32 entries apart");
+        foreach (var line in cases)
         {
-            var t = Float(cases[k][0]);
-            var lookup = math.cycles_ramp_index(t, size);
-            Assert.Equal((float)k, lookup.x);
-            Assert.Equal(0.0f, lookup.y);
-            table[k] = Float(cases[k][1]);
-        }
-
-        var interpolated = 0;
-        for (var c = size; c < cases.Length; c++)
-        {
-            var t = Float(cases[c][0]);
+            var t = Float(line[0]);
             var lookup = math.cycles_ramp_index(t, size);
             var index = (int)lookup.x;
             Assert.InRange(index, 0, size - 1);
-            var have = lookup.y > 0.0f ? (1.0f - lookup.y) * table[index] + lookup.y * table[index + 1] : table[index];
-            interpolated += lookup.y > 0.0f ? 1 : 0;
-            var want = Float(cases[c][1]);
-            Assert.True(Distance(want, have) == 0, $"ramp t {cases[c][0]}: index {index}, weight {lookup.y}, got {have}, Blender {want}");
+            Assert.True(Distance(Float(line[1]), table[index]) == 0, $"ramp t {line[0]}: index {index} reads {table[index]}, Blender {Float(line[1])}");
         }
 
-        Assert.True(interpolated > 100, "the fixture holds too few interpolated lookups");
+        // Every stop's value appears in the results at its own boundary, so the cases do cross the entries.
+        Assert.True(cases.Select(line => line[1]).Distinct().Count() >= 32, "the cases never cross the stops");
+    }
+
+    [Fact]
+    public void RampWeightBlendsTheEntryWithTheNextOne()
+    {
+        // A linear ramp from 0 to 1: entry i holds i / 255 to within the float rounding of Blender's table, and a
+        // lookup at (index, weight) reads (index + weight) / 255. A weight that is off by a fraction of a
+        // percent, or an index that is off by one, moves the result by more than the bound.
+        var entry = Load("ramp")["functions"]!.AsArray().Single(e => (string)e!["node"]!.ToString() == "ShaderNodeValToRGB LINEAR")!;
+        var size = (int)entry["table_entries"]!;
+        var worst = 0.0;
+        var fractional = 0;
+        foreach (var line in entry["cases"]!.AsArray().Select(line => ((string)line!).Split(" -> ")))
+        {
+            var lookup = math.cycles_ramp_index(Float(line[0]), size);
+            Assert.InRange(lookup.y, 0.0f, 1.0f);
+            fractional += lookup.y > 0.0f ? 1 : 0;
+            var expected = (lookup.x + lookup.y) / (size - 1);
+            worst = Math.Max(worst, Math.Abs(expected - Float(line[1])));
+        }
+
+        Assert.True(fractional > 500, "the cases hold too few interpolated lookups");
+        Assert.True(worst <= Math.ScaleB(1.0, -22), $"a lookup is {worst} from (index + weight) / 255, more than 2^-22");
     }
 
     [Fact]

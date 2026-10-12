@@ -263,7 +263,7 @@ float3 cultmath_cycles_rgb_to_hsv(float3 rgb)
     float s = cmax != 0.0 ? cdelta / cmax : 0.0;
     float3 c = (float3(cmax, cmax, cmax) - rgb) / cdelta;
     float h = rgb.x == cmax ? c.z - c.y : (rgb.y == cmax ? 2.0 + c.x - c.z : 4.0 + c.y - c.x);
-    h = h / 6.0;
+    h = h * 0.16666667; // Cycles' kernel is built with reciprocal math: h /= 6.0f computes h * (1 / 6.0f).
     h = h < 0.0 ? h + 1.0 : h;
     return float3(s != 0.0 ? h : 0.0, s, cmax);
 }

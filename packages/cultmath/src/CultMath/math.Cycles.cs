@@ -285,7 +285,7 @@ public static partial class math
         var s = cmax != 0.0f ? cdelta / cmax : 0.0f;
         var c = (new float3(cmax, cmax, cmax) - rgb) / cdelta;
         var h = rgb.x == cmax ? c.z - c.y : (rgb.y == cmax ? 2.0f + c.x - c.z : 4.0f + c.y - c.x);
-        h = h / 6.0f;
+        h = h * 0.16666667f; // Cycles' kernel is built with reciprocal math: h /= 6.0f computes h * (1 / 6.0f).
         h = h < 0.0f ? h + 1.0f : h;
         return new float3(s != 0.0f ? h : 0.0f, s, cmax);
     }

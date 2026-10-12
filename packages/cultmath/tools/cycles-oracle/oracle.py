@@ -311,7 +311,7 @@ def family_map_range():
             node.interpolation_type = kind
             node.clamp = False
             sockets = operand_sockets(tree, imgs, 6)
-            for k, identifier in enumerate(["Value", "From_Min_FLOAT", "From_Max_FLOAT", "To_Min_FLOAT", "To_Max_FLOAT", "Steps_FLOAT"]):
+            for k, identifier in enumerate(["Value", "From Min", "From Max", "To Min", "To Max", "Steps"]):
                 socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
@@ -324,7 +324,7 @@ def family_map_range():
             node.interpolation_type = kind
             node.clamp = True
             sockets = operand_sockets(tree, imgs, 6)
-            for k, identifier in enumerate(["Value", "From_Min_FLOAT", "From_Max_FLOAT", "To_Min_FLOAT", "To_Max_FLOAT", "Steps_FLOAT"]):
+            for k, identifier in enumerate(["Value", "From Min", "From Max", "To Min", "To Max", "Steps"]):
                 socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
@@ -439,54 +439,57 @@ def family_rgb_to_bw():
 
 
 RAMP_SIZE = 256
-RAMP_STOPS = [(0.0, 0.0), (0.3, 1.0), (1.0, 0.25)]
+# A constant ramp whose 32 stops sit half an entry past an entry boundary: its table is the stops' values, so
+# a lookup's result names the entry it read.
+CONSTANT_STOPS = [((8 * j + 3.5) / (RAMP_SIZE - 1), (j + 1) / 32.0) for j in range(32)]
 
 
-def family_ramp():
-    rng = rng_for("ramp")
-    # The table: one case per entry, at a t whose float32 product with 255 is the entry's index, so the
-    # lookup returns the entry itself.
-    table_t = []
-    for k in range(RAMP_SIZE):
-        base = np.float32(k) / np.float32(RAMP_SIZE - 1)
-        found = None
-        candidate = base
-        for _ in range(8):
-            if np.float32(candidate * np.float32(RAMP_SIZE - 1)) == np.float32(k):
-                found = candidate
-                break
-            candidate = np.nextafter(candidate, np.float32(2.0))
-        if found is None:
-            candidate = base
-            for _ in range(8):
-                candidate = np.nextafter(candidate, np.float32(-1.0))
-                if np.float32(candidate * np.float32(RAMP_SIZE - 1)) == np.float32(k):
-                    found = candidate
-                    break
-        if found is None:
-            raise RuntimeError("no float32 t reads ramp entry %d exactly" % k)
-        table_t.append(found)
-    specials = [-0.5, -0.25, -1.0e-7, 0.0, 1.0e-7, 0.001, 0.002, 0.5, 0.25, 0.999, 1.0, 1.0000001, 1.25, 1.5, 0.3, 0.29999998, 0.30000004]
-    values = list(table_t) + specials
+def ramp_cases(rng, boundaries):
+    """CASES values of t: the floats around each boundary t = i / 255, the specials, then uniform draws."""
+    values = []
+    for i in boundaries:
+        t = np.float32(i / (RAMP_SIZE - 1))
+        down = [t]
+        up = [t]
+        for _ in range(7):
+            down.append(np.nextafter(down[-1], np.float32(-1.0)))
+            up.append(np.nextafter(up[-1], np.float32(2.0)))
+        values += sorted(set(down + up))
+    values += [-0.5, -1.0e-7, 0.0, 1.0e-7, 1.0, 1.0000001, 1.5]
     while len(values) < CASES:
         values.append(float(rng.uniform(-0.25, 1.25)))
-    column = f32(values[:CASES])
+    return f32(values[:CASES])
+
+
+def ramp_entry(label, interpolation, stops, boundaries):
+    rng = rng_for("ramp-" + label)
+    column = ramp_cases(rng, boundaries)
     images = pack_operands([column])
 
     def build(tree, imgs):
         node = tree.nodes.new("ShaderNodeValToRGB")
-        node.color_ramp.interpolation = "LINEAR"
-        elements = node.color_ramp.elements
-        while len(elements) < len(RAMP_STOPS):
-            elements.new(0.5)
-        for element, (position, red) in zip(elements, RAMP_STOPS):
-            element.position = position
+        ramp = node.color_ramp
+        ramp.interpolation = interpolation
+        ramp.elements[0].position = stops[0][0]
+        ramp.elements[1].position = stops[-1][0]
+        for position, _ in stops[1:-1]:
+            ramp.elements.new(position)
+        for element, (_, red) in zip(ramp.elements, stops):
             element.color = (red, 0.0, 0.0, 1.0)
         tree.links.new(operand_sockets(tree, imgs, 1)[0], node.inputs["Fac"])
         return [node.outputs["Color"]]
 
-    return [{"function": "cycles_ramp_index", "node": "ShaderNodeValToRGB LINEAR size %d stops %s" % (RAMP_SIZE, json.dumps(RAMP_STOPS)),
-             "table_entries": RAMP_SIZE, "cases": encode_cases([column], bake("ramp", images, build, 1))}]
+    return {"function": "cycles_ramp_index", "node": "ShaderNodeValToRGB " + interpolation, "table_entries": RAMP_SIZE,
+            "stops": [[bits(position), bits(red)] for position, red in stops],
+            "cases": encode_cases([column], bake("ramp-" + label, images, build, 1))}
+
+
+def family_ramp():
+    boundaries = [8 * j + 4 for j in range(32)]
+    return [
+        ramp_entry("constant", "CONSTANT", CONSTANT_STOPS, boundaries),
+        ramp_entry("linear", "LINEAR", [(0.0, 0.0), (1.0, 1.0)], list(range(1, RAMP_SIZE, 17))),
+    ]
 
 
 FAMILIES = {
