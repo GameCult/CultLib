@@ -18,6 +18,10 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
 4. `cultmath-rotation-algebra`: quaternion algebra, swing-twist and joint clamps (ruling
    `aetheria-release:ruling:solver-in-gamecult-animation`). Ships in the CultMath release that the first
    GameCult.Animation release pins; that release is mapped with GameCult.Animation.
+5. `py-msgpack-default` revision 2 (section P): the fix batch for Soul s1's eight findings on
+   `hands/py-msgpack-default`. Its merge to main waits on the Brokkr cut (P7).
+6. Not mapped: the C# leaf-vectors revision (`leaf-vectors-next`) gains the P2 map-key rows, so the Python
+   key tests read C#-written bytes instead of literals.
 
 ## B. BoundedLeastSquares stopping
 
@@ -210,6 +214,144 @@ Quaternions are Hamilton, stored xyzw, unit for rotation; angles are radians, ri
   from `current`; without cut 1 its answer would depend on the previous frame exactly as the allocator's did.
 - A CultMath release that carries cut 4, which `org.gamecult.animation`'s `package.json` pins. That release is
   mapped with GameCult.Animation, so one Soul-verified release pair ships both.
+
+## P. cultcache-py payload format (py-msgpack-default, revision 2)
+
+Imagination pass `imagination-py-msgpack-r2`, session `self-2026-10-12-eureka`, against `hands/py-msgpack-default`
+at `7f2c7477`. Probes ran from the session scratchpad and were removed afterwards; their results are recorded here (`jobK` ran
+the C# reference on Yggdrasil at `7f2c7477`; `p1`-`p3` ran Python 3.13.15 with msgpack 1.2.2 on Starfire). Revision 1's facts
+are in `docs/research/py-msgpack-default/README.md`, and Soul's are in verdict `cut-py-msgpack-default.s1`.
+
+### Body facts
+
+P1. **What decides a payload's format at 7f2c7477.** A search of every `packb`, `unpackb`, `json.loads` and
+`json.dumps` call in cultcache-py, cultnet-py and cultmesh-py found five places:
+- (a) `PayloadCodec.encode`/`decode`, through `DocumentDefinition.encode_payload`/`decode_payload`.
+- (b) `_check_payload_tree` (documents.py:75), which holds the map-key rule. `MESSAGEPACK_PAYLOAD_CODEC.encode`
+  does not apply that rule, so a direct call writes `{1: 'a'}` and its own `decode` refuses the bytes.
+- (c) `stores.py:217`, `_infer_schema_version_from_payload`. A v1 record whose schema id is missing from the
+  catalog is read by unpacking its payload as MessagePack to find a schema stamp.
+- (d) `replication.py:186`, the same stamp reader copied into cultnet-py behind a lazy `import msgpack`.
+- (e) `stores.py:257`. A legacy envelope whose payload is an inline map or array is repacked as MessagePack.
+
+The other JSON sites are wire messages, schema JSON, CLI output and the cultmesh ready file. None of them is a
+document payload.
+
+P2. **The C# reference's object slot, map keys** (`jobK`, `NumericLeafVectorTests.AnySlot` under
+`CultDocumentMessagePackSerialization.OptionsFor`, MessagePack `UntrustedData` security):
+- Accepted: str, int at every width (negative fixint, u64 max, i64 min), float32, float64, bool, and timestamp
+  ext. The reference rewrites each one at its own width, for example `9181ff01` becomes `9181d0ffcc01`.
+- Refused: nil (inner `ArgumentNullException`); bin, array and map keys (inner `TypeAccessException`, because
+  UntrustedData has no collision-resistant comparer for them).
+- Refused as duplicates (inner `ArgumentException`): `{1:1,1:2}`, `{"a":1,"a":2}`, and `{01:1, cc01:2}`, which
+  is the same value written at two widths.
+- Accepted as two keys: `{1:1, 1.0:2}` and `{1:1, true:2}`. The CLR types differ, so the keys are distinct.
+- An `object` value of u64 max or i64 min is accepted and rewritten byte-identical.
+
+P3. **msgpack-python with `strict_map_key=False`** (`p2`, `p3`). Every key kind decodes: nil becomes None, bin
+becomes bytes, and a timestamp ext becomes `msgpack.Timestamp`. An array or map key raises TypeError
+(unhashable) without a hook. Duplicates are silently last-wins: `{1:1,1:2}`, `{"a":1,"a":2}`, `{01, cc01}`,
+`{1, 1.0}` and `{1, true}` each decode to a single key. An `object_pairs_hook` sees every key kind, lists and
+dicts included. An exception it raises propagates with `__context__` None. On 100k small maps the hook costs
+2.2x the decode time (0.087 s becomes 0.200 s). `packb` raises an untyped `OverflowError` for 2**64 and
+-(2**63)-1.
+
+P4. **Hash flooding with non-str keys** (`p1`). This is msgpack-python's reason for `strict_map_key=True`.
+Within the 64-bit MessagePack integer range, at most 13 integers share one CPython hash. The full-hash collision
+attack on int keys therefore needs unbounded integers, and MessagePack cannot carry them. Keys crafted to share
+low hash bits (`k << 43`) took 0.44 s for 200k keys and 1.34 s for 400k. 200k str keys take 0.25 s. The cost is
+mildly superlinear, not quadratic. The reference defends itself with UntrustedData's collision-resistant
+comparers. Python's dict has no such comparer, and the measured bound makes one unnecessary.
+
+P5. **Schema-stamp recovery.** The C# store deleted its stamp recovery in `a3cc3942` (2026-09-13), so a persisted
+schema id that is absent from the embedded catalog is refused ("Persisted schema ... is not present in the
+embedded catalog", `CultCache.cs:504-507`). The C# CultNet registry keeps payload-stamp routing for raw wire
+records (`CultNetDocumentRegistry.ResolveDescriptorForRawDocument`, `TryResolveDescriptorByPayloadSchema`).
+cultcache-py's store copy (P1c) is therefore a divergence from the reference. cultnet-py's copy (P1d) mirrors
+the reference. The TS store (`single-file-messagepack-backing-store.ts:336`) also keeps the store copy.
+
+P6. **Legacy envelope arrays.** The C# reference does not read them. TS (`normalizePayload`, line 490) and Python
+both repack an inline payload with MessagePack `encode`. A legacy inline payload is a subtree of a MessagePack
+document, so it is MessagePack by construction. No JSON-payload writer ever produced one: the 0.3 JSON default
+wrote bytes, which land as bin.
+
+P7. **Brokkr** (read-only, `f97d4dc`). The bridge imports cultcache-py from `F:/Projects/CultLib/packages`
+(`blender_target.py:19`) and defines 8 types with `define_document_type` (630-637). Merging to that checkout's
+main is therefore the switch itself: Soul s1 measured that the next `_open_node` pull refuses the whole Blender
+store. The daemon writes JSON into the Blender store and the Unity store with `put_json_document`
+(`main.rs:1424`, called at 790-1392 and in tests from 2710). It also has `put_messagepack_document` (1435) and
+reads JSON first, then MessagePack (`decode_payload`, 1447). The daemon is Rust and cannot call cultcache-py.
+
+### Authority, and why
+
+- **Payload format.** The definition's `PayloadCodec` owns its bytes: the encoding, and which maps and integers
+  the format can carry. On read, `MESSAGEPACK_PAYLOAD_CODEC` refuses key kinds and duplicates through its
+  `object_pairs_hook`; that is the only place they are visible, because a dict cannot show a collapsed duplicate
+  afterwards. On write, its encode walks the tree first, so a direct `codec.encode` call cannot write bytes
+  its own `decode` refuses (Soul's single path).
+- **What the definition owns.** `DocumentDefinition.encode_payload`/`decode_payload` own the cross-codec rules
+  (depth 256) and the translation of codec faults into the typed refusals, naming the type. `PayloadCodec.map_keys`
+  is deleted, and `_check_payload_tree` goes back to checking depth only.
+- **The key rule is P2's.** It is not `strict_map_key`'s. Duplicates are refused as the reference refuses them.
+- **Residual.** Keys Python holds as one but the reference holds as two (`1` and `1.0`, `1` and `true`) are
+  refused, because a dict cannot hold both. The refusal is typed (`duplicate_map_key`) and pinned so a change is
+  seen. Matching the reference here would need a decoded map type that is not a dict. No consumer is known to
+  write such maps.
+- **Prior art for refusing duplicates** (from knowledge, not fetched this pass): CBOR's RFC 8949 section 5.6
+  expects decoders to reject duplicate keys; I-JSON (RFC 7493) requires the same of JSON; MessagePack-CSharp's
+  `UntrustedData` refuses duplicates and keys it cannot hash safely (P2). msgpack-python's `strict_map_key` exists
+  for hash flooding, which P4 bounds.
+- **Integer range.** Beyond 64 bits is a format limit, so the MessagePack codec's write walk refuses it with the
+  code `integer_out_of_range`. The value is never named, and neither is a map key on its path, because in a
+  free-form tree a key is payload data. Entry slots keep their leaf refusals, which name the slot and the field.
+  A bigint was never wire-parity data: MessagePack has no integer wider than 64 bits (P3), and the 0.3 JSON
+  payloads that could hold one were unreadable by the reference (`py-default-payload-json`).
+- **The stamp readers.** P1c is deleted and its record is refused as the reference refuses it (P5). P1d stays as
+  cultnet-py's raw-record router, mirroring C#. It reads a stamp and decides no format: the resolved definition's
+  codec decodes the payload or refuses it. It loses its lazy import.
+- **Legacy envelopes.** P1e is demoted and stays (P6). It extracts the MessagePack bytes the inline subtree
+  already is. A definition whose codec is not MessagePack refuses the record like any other foreign record.
+- **The default codec.** The `DocumentDefinition` field is its only author. `define_document_type`'s parameter
+  defaults to None and forwards only a codec it was given.
+- **Refusal text.** The JSON remedy sentence is dropped from the read refusal: it was false for every entry
+  definition. Each refusal carries a `code` (`not_one_value`, `map_key_kind`, `duplicate_map_key`,
+  `integer_out_of_range`) and names the kind or the fault class. It is raised after the `except` block, so
+  `__context__` holds no decoder exception and no payload.
+
+### Migration: what CultLib owns
+
+Revision 1's README procedure (read under JSON, then put each value) was per record and not atomic. Soul s1
+stranded a store with it. Revision 2 replaces the procedure with
+`migrate_payloads(store, definitions, *, source_codec=JSON_PAYLOAD_CODEC) -> int` in cultcache-py:
+
+1. It pulls every envelope from the store.
+2. For each record whose type is among `definitions`, it decodes under that definition with `source_codec` and
+   encodes under the definition itself. That is the whole definition path, validation and every refusal included.
+3. Any refusal stops the migration before the store is touched. The error names the type, the record key and
+   the refusal's code, never the value.
+4. Otherwise one `push_all` writes the store whole. `SingleFileMessagePackBackingStore` and
+   `JsonLinesBackingStore` each do that as a temp file and a rename.
+5. Records of other types keep their bytes and `stored_at`. The return value is the count rewritten.
+
+Two properties follow. It never sniffs: each record is read only by the codec its type was named with, so a
+second run is refused and changes nothing. It cannot leave a store half-migrated.
+
+Rejected alternatives:
+- A sniffing reader that accepts both formats: P1's one-digit payloads are valid in both formats, and r1's map
+  forbade readers that try one format and then another.
+- A consumer-run loop over `put`: that is the procedure that stranded the store.
+
+### Brokkr landing contract (follow-up `brokkr-msgpack-payloads-r2`)
+
+The merge of `hands/py-msgpack-default` to main waits on three things:
+1. Soul holds on the fix batch.
+2. A Brokkr branch, Soul-held, is ready in its own campaign. On it, the daemon writes MessagePack
+   (`put_messagepack_document`) into both stores. The JSON-first read becomes a read of exactly one MessagePack
+   value with a trailing-bytes check, and the bridge's 8 definitions are unchanged. The Blender store is migrated
+   by `cultcache_py.migrate_payloads` over those 8 definitions, because those payloads came from cultcache-py's
+   old default. The daemon-written JSON receipts in the Unity store are the daemon's own, and it rewrites them.
+3. An operator window: close Blender and stop sync, Self merges CultLib and Brokkr together, build the daemon,
+   run both migrations, then restart.
 
 ## Observed, not owned by these cuts
 
