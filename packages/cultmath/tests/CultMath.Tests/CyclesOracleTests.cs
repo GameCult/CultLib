@@ -8,15 +8,20 @@ namespace CultMath.Tests;
 /// math.cycles_* against the results of Blender 5.2.2's own Cycles on the CPU. The fixtures under
 /// fixtures/cycles-oracle are written by tools/cycles-oracle/oracle.py (never by hand): each case is the
 /// operands and the node's baked results as float32 bit patterns. Every function is compared at every case
-/// within the tolerance its family states below; a function not named in <see cref="Tolerances"/> is held to
-/// 0 ulp. Signed zeros are not distinguished (-0 equals 0), and NaN equals NaN. The fixtures come from Cycles'
+/// within the tolerance named in <see cref="Tolerances"/>; a function not named there is held to 0 ulp. Signed zeros are not distinguished (-0 equals 0), and NaN equals NaN. The fixtures come from Cycles'
 /// SSE4.2 CPU kernel, which does not fuse multiply-adds as C# does not (oracle.py checks this before it bakes).
 /// </summary>
 public sealed class CyclesOracleTests
 {
-    // The ulp distance each function is allowed from Cycles, with the measured worst case that earned it.
-    // Anything absent is 0 ulp.
-    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new();
+    // The ulp distance a function is allowed from Cycles. The two that call the platform's libm have the bound the
+    // golden fixture gives a platform libm family (GlslMirrorTests, Platform.Ulp): Blender's powf and logf are
+    // glibc's, measured here at 0 ulp from MathF.Pow and MathF.Log on Linux, and another OS's libm may differ by
+    // one. That allowance is the golden fixture's, not a measurement on another OS.
+    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new()
+    {
+        ["cycles_power"] = (1, "0 ulp on Linux"),
+        ["cycles_logarithm"] = (1, "0 ulp on Linux"),
+    };
 
     private static string FixturePath(string family) =>
         Path.Combine(HlslSourceCompatibilityTests.FindCultMathRoot(), "tests", "CultMath.Tests", "fixtures", "cycles-oracle", family + ".json");
