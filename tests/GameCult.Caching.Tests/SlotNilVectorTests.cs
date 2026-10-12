@@ -44,6 +44,8 @@ namespace GameCult.Caching.Tests
             ("nil-int", "95a161c0c4026162c090"),
             ("bytes-str", "95a16107a3616263c090"),
             ("bytes-str-euro", "95a16107a3e282acc090"),
+            ("string-astral", "95a4f09f988007c4026162c090"),
+            ("bytes-str-astral", "95a16107a4f09f9880c090"),
             ("bytes-bin", "95a16107c403616263c090"),
             ("short-0", "90"),
             ("short-1", "91a161"),

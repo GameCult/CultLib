@@ -10,6 +10,7 @@ export {
   documentPayloadFromBytes,
   encodeDocumentPayload,
 } from "./document";
+export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
 export type { DocumentPayload } from "./document";
 export { SingleFileMessagePackBackingStore } from "./single-file-messagepack-backing-store";
 export type {

@@ -5,10 +5,14 @@ import { join } from "node:path";
 import test from "node:test";
 import { z } from "zod";
 import {
+  CultCachePayloadDepthError,
+  MAX_PAYLOAD_DEPTH,
+  SingleFileMessagePackBackingStore,
   codecs,
   decodeDocumentPayload,
   defineDocumentType,
   documentPayloadBytes,
+  documentPayloadFromBytes,
   encodeDocumentPayload,
 } from "@gamecult/cultcache-ts";
 import type { CacheBackingStore, CultCacheEnvelope } from "@gamecult/cultcache-ts";
@@ -207,4 +211,51 @@ test("a store read takes the record the catalog matches to the schema and the de
   ];
   const store: CacheBackingStore = { pullAll: async () => records, push: async () => undefined, delete: async () => undefined };
   assert.deepEqual(await cultMeshDocumentFromStore(store, target).latest(), { n: 2 });
+});
+
+// A payload nested past the limit: MAX_PAYLOAD_DEPTH + 1 one-element arrays around a nil.
+const pastLimitPayload = () => documentPayloadFromBytes(Uint8Array.from([...new Array(MAX_PAYLOAD_DEPTH + 1).fill(0x91), 0xc0]));
+
+test("a payload past the nesting limit is refused at the network doors: a RUDP put and a single-file read", async () => {
+  const connectionId = 0x10203080;
+  const plainBinding = defineCultNetDocumentBinding({ definition: plainNote });
+  const registry = new CultNetDocumentRegistry([plainBinding]);
+  const errors: unknown[] = [];
+  const puts: CultMeshRudpDocumentPut[] = [];
+  const server = CultMesh.createRudpDocumentServer("cultmesh-ts-depth-server", connectionId, {
+    documents: registry,
+    bindHost: "127.0.0.1", bindPort: 0, resendDelayMs: 25, resendPollMs: 5,
+    onError: (error) => errors.push(error),
+    onDocumentPutRaw: async (document) => { puts.push(document); },
+  });
+  let peer: CultNetPeer | undefined;
+  try {
+    await server.start();
+    peer = await CultMesh.createRudpPeer("cultmesh-ts-depth-client", connectionId, `rudp://127.0.0.1:${server.bind.port}`, {
+      resendDelayMs: 25, resendPollMs: 5, connectTimeoutMs: 1_000,
+    });
+    peer.send(registry.createRawDocumentPutMessageFromEnvelope("deep-1", {
+      key: "k", type: plainNote.type, schemaId: plainNote.schemaId, payload: pastLimitPayload(), storedAt: new Date().toISOString(),
+    }));
+    const startedAt = Date.now();
+    while (errors.length === 0 && Date.now() - startedAt < 2_000) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof CultCachePayloadDepthError, "the put is refused by the payload owner");
+    assert.deepEqual(puts, [], "the handler never saw the put");
+
+    // The server is still serving: an ordinary put goes through.
+    peer.send(registry.createRawDocumentPutMessage(plainBinding, "ok-1", "k2", { noteId: "k2", body: "fine" }));
+    while (puts.length === 0 && Date.now() - startedAt < 4_000) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(puts.length, 1);
+  } finally {
+    peer?.close();
+    server.close();
+  }
+
+  const dir = await mkdtemp(join(tmpdir(), "cultmesh-ts-depth-store-"));
+  const path = join(dir, "deep.ccmp");
+  await new SingleFileMessagePackBackingStore(path).push({
+    key: "k", type: plainNote.type, schemaId: plainNote.schemaId, payload: pastLimitPayload(), storedAt: new Date().toISOString(),
+  });
+  await assert.rejects(() => cultMeshDocumentFromSingleFile(path, plainNote).latest(), CultCachePayloadDepthError);
 });

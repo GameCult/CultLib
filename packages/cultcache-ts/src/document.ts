@@ -1,4 +1,5 @@
 import { resolveDocumentFormatter } from "./document-formatter";
+import { checkPayloadDepth } from "./payload-depth";
 import type {
   AnyCultCacheDocumentDefinition,
   CultCacheSchemaCatalogMember,
@@ -104,19 +105,31 @@ export function documentPayloadBytes(payload: DocumentPayload): Uint8Array {
   return payload as unknown as Uint8Array;
 }
 
+export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
+
+// The payload nesting bound covers the MessagePack the library itself writes: the plain default formatter and a codec. A
+// user formatter's bytes are opaque and in any format; its format and bounds are its own.
+function writesLibraryMessagePack(definition: AnyCultCacheDocumentDefinition): boolean {
+  return !definition.formatter;
+}
+
 // The one reader of a document payload: through the definition's formatter, codec or plain map, then its schema. A
 // reader holds the definition or it has no business reading the bytes, so there is no definition-less form.
 export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDefinition>(
   definition: TDefinition,
   payload: DocumentPayload,
 ): CultCacheDocumentValue<TDefinition> {
-  const decoded = resolveDocumentFormatter(definition).decode(documentPayloadBytes(payload));
+  const bytes = documentPayloadBytes(payload);
+  if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" payload`);
+  const decoded = resolveDocumentFormatter(definition).decode(bytes);
   return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
 }
 
 // The one writer: the definition's schema first, then its formatter, codec or plain map.
 export function encodeDocumentPayload(definition: AnyCultCacheDocumentDefinition, value: unknown): DocumentPayload {
-  return documentPayloadFromBytes(resolveDocumentFormatter(definition).encode(definition.schema.parse(value)));
+  const bytes = resolveDocumentFormatter(definition).encode(definition.schema.parse(value));
+  if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" value`);
+  return documentPayloadFromBytes(bytes);
 }
 
 // The schema members of a document: the ones it declares, else those its codec derives, else none.

@@ -8,5 +8,5 @@ A record of five slots: `S` string, `I` int, `B` byte[], `R` a record of one str
 
 - `reads.msgpack`: an array of `[name, payload, accepted, rewritten]`. `payload` (bin) is the record fed to the
   reference; `accepted` is whether it read; `rewritten` (bin) is what the reference writes after reading it, and empty
-  when refused. It covers a nil in each kind of slot, a MessagePack str in the byte[] slot, and records short of their
-  last slots.
+  when refused. It covers a nil in each kind of slot, a MessagePack str in the byte[] slot, a four-byte UTF-8 character
+  (U+1F600) as the string slot and as a str in the byte[] slot, and records short of their last slots.
