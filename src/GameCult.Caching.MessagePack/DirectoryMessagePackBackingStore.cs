@@ -182,10 +182,17 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
                 return CultCommitOutcome.Contended;
             var (manifest, catalogBytes) = ReadManifest();
             if (request.HasConditions && !request.ConditionsHold(
-                    manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values))
+                    manifest.Records.ToDictionary(record => record.Key, record => VersionOf(record.Payload), StringComparer.Ordinal), Entries.Values, ForeignRecords))
                 return CultCommitOutcome.Mismatch;
 
-            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(StagedKeys));
+            RefuseUndeclaredOnDisk(manifest, request.Upserts.Concat(request.Deletes).Select(entry => entry.Key.Value).Concat(request.Checks).Concat(StagedKeys));
+            if (request.Upserts.Count == 0 && request.Deletes.Count == 0 && !IsDirty)
+            {
+                // Nothing to write: the batch only judged keys it does not hold.
+                MarkFlushSucceeded();
+                return CultCommitOutcome.Committed;
+            }
+
             var previousEntries = Entries.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var previousDirtyKeys = _dirtyKeys.Keys.ToArray();
             var previousDeletedKeys = _deletedKeys.Keys.ToArray();
@@ -230,23 +237,41 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         ThrowIfReadOnly();
         Held(() =>
         {
-            if (!IsDirty)
+            if (!IsDirty && StagedChecks.Count == 0)
                 return;
 
             Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait: true, create: true);
             var (manifest, catalogBytes) = ReadManifest();
             RefuseUndeclaredOnDisk(manifest, StagedKeys);
-            WriteGeneration(manifest, catalogBytes);
+            if (IsDirty)
+                WriteGeneration(manifest, catalogBytes);
+            else
+                MarkFlushSucceeded();
         });
     }
 
-    private IEnumerable<string> StagedKeys => _deletedKeys.Keys.Concat(_dirtyKeys.Keys);
+    // Every key the next flush or commit judges: the staged writes and removals, and the staged checks.
+    private IEnumerable<string> StagedKeys => _deletedKeys.Keys.Concat(_dirtyKeys.Keys).Concat(StagedChecks);
 
-    // The manifest as it is now, read without the commit lease: nothing is written after the read, the manifest is only ever
-    // replaced whole, and a read-only store must not create the lease.
-    protected internal override void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys) =>
-        Held(() => RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys));
+    // A writable store judges a removal of a key its cache does not hold at its next flush or commit, under the commit lease
+    // (StageChecks); a read-only store has neither, so it answers from its view and never creates the lease.
+    protected internal override void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys)
+    {
+        if (IsReadOnly)
+            base.RefuseRemovalOfUndeclared(keys);
+        else
+            StageChecks(keys);
+    }
+
+    // A manifest record no registered type claims, listed at the version its index record names.
+    private CultForeignRecord? ForeignAt(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+    {
+        if (Foreign(record, catalog) is not { } carried)
+            return null;
+        carried.StoredVersion = VersionOf(record.Payload);
+        return carried;
+    }
 
     // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
     // record the manifest holds under an id no registered type declares is refused before any page is written, by the one rule every
@@ -261,7 +286,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,
-            key => HeldAt(key) is { } held ? Foreign(held, currentManifest.SchemaCatalog) : null,
+            key => HeldAt(key) is { } held ? ForeignAt(held, currentManifest.SchemaCatalog) : null,
             key =>
             {
                 _dirtyKeys.TryRemove(key, out _);
@@ -365,7 +390,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         var claimed = new List<CultPersistedRecord>(records.Length);
         foreach (var metadata in records)
         {
-            if (Foreign(metadata, catalogEntries) is { } carried)
+            if (ForeignAt(metadata, catalogEntries) is { } carried)
                 foreign.Add(carried);
             else
                 claimed.Add(metadata);
