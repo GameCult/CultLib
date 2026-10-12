@@ -1063,6 +1063,7 @@ namespace GameCult.Caching.Tests
                 Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
                 Assert.That(cache.IsDirty, Is.False);
                 Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+                Assert.DoesNotThrow(() => cache.FlushAsync().GetAwaiter().GetResult(), "a refusal forgets the check it refused");
                 Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False, "a key nothing holds is still no removal");
                 Assert.That(Fingerprint(path), Is.EqualTo(before));
             }
@@ -1123,7 +1124,7 @@ namespace GameCult.Caching.Tests
             var path = PathOf("checked.cc");
             using (var seed = Open(path, Full, directory))
                 seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
-            using var a = Open(path, Full, directory);
+            using var a = Open(path, DeckOnly, directory);
             Assert.That(a.Remove(W), Is.False);
             using (var b = Open(path, Full, directory))
                 b.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
@@ -1132,7 +1133,9 @@ namespace GameCult.Caching.Tests
             Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult());
 
             Assert.That(Stored(path, W), Is.EqualTo(theirs), "the record at the checked key is still the other writer's bytes");
-            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult(), "a flush clears what it judged");
+            using (var c = Open(path, Full, directory))
+                c.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), W));
+            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult(), "a flush clears what it judged: the next one has nothing to judge");
         }
 
         // ExpectUnchanged compares the foreign records a store carries at the versions it read them: it holds right after the load,
