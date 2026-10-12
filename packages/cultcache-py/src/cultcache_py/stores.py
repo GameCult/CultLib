@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+import msgpack
+
 from .backing_store import (
     CultCacheEnvelope,
     CultCacheSchemaCatalogEntry,
@@ -88,7 +90,6 @@ class SingleFileMessagePackBackingStore:
         self._lock = threading.RLock()
 
     def pull_all(self) -> list[CultCacheEnvelope]:
-        msgpack = self._msgpack()
         with self._lock:
             # An empty file is not a store (no writer leaves one), so it is decoded and refused.
             data = _read_store(self.path, Path.read_bytes)
@@ -98,7 +99,7 @@ class SingleFileMessagePackBackingStore:
             snapshot = _decode_v1_snapshot(decoded)
             if snapshot is not None:
                 return snapshot
-            return _decode_legacy_envelopes(decoded, msgpack)
+            return _decode_legacy_envelopes(decoded)
 
     def push(self, envelope: CultCacheEnvelope) -> None:
         with self._lock:
@@ -119,22 +120,10 @@ class SingleFileMessagePackBackingStore:
             self._replace_all(existing)
 
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        msgpack = self._msgpack()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
         temp.write_bytes(msgpack.packb(_encode_v1_snapshot(envelopes), use_bin_type=True))
         temp.replace(self.path)
-
-    @staticmethod
-    def _msgpack() -> Any:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "SingleFileMessagePackBackingStore requires the optional 'msgpack' dependency. "
-                "Install with: python -m pip install cultcache-py[msgpack]"
-            ) from exc
-        return msgpack
 
 
 def _encode_v1_snapshot(envelopes: list[CultCacheEnvelope]) -> list[Any]:
@@ -252,7 +241,7 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
     return envelopes
 
 
-def _decode_legacy_envelopes(decoded: Any, msgpack: Any) -> list[CultCacheEnvelope]:
+def _decode_legacy_envelopes(decoded: Any) -> list[CultCacheEnvelope]:
     if not isinstance(decoded, list):
         raise ValueError("CultCache MessagePack store is not a recognized snapshot")
     envelopes: list[CultCacheEnvelope] = []
@@ -380,7 +369,6 @@ def _normalize_payload(payload: Any) -> bytes:
 
 def _infer_schema_version_from_payload(payload: bytes) -> str | None:
     try:
-        msgpack = SingleFileMessagePackBackingStore._msgpack()
         decoded = msgpack.unpackb(payload, raw=False)
     except Exception:
         return None

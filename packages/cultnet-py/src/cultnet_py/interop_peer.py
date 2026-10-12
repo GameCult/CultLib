@@ -969,8 +969,6 @@ def binding(
         document_type,
         encode=encode_slots,
         decode=decode_slots,
-        payload_encoder=lambda value: msgpack.packb(value, use_bin_type=True),
-        payload_decoder=lambda payload: msgpack.unpackb(payload, raw=False),
         schema_id=schema_id,
         schema_name=document_type,
         schema_version=schema_version,

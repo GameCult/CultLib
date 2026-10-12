@@ -26,7 +26,7 @@ discovery, sessions, local server) build on it, mirroring `cultcache-rs` /
   second store, or a second generic store, raises `CultCacheError`; a write
   touches exactly one store and nothing is mirrored; once any store is
   attached, a write whose type has no home raises
-- the JSONL store uses only the Python standard library for bootstrap consumers
+- `define_document_type(...)` payloads are MessagePack by default; `JSON_PAYLOAD_CODEC` reads stores written by 0.3 and earlier
 - `define_database_entry_type(...)` emits Rust/C#-style slot-indexed
   MessagePack array payloads for cross-runtime `DatabaseEntry` contracts
 
@@ -99,7 +99,7 @@ store.
 
 Backing stores persist envelopes, not caller domain objects. The cache decodes payloads through registered document definitions and rejects unknown type discriminators. This keeps Python's dynamic runtime from turning persistence into an open polymorphic sewer with a cheerful docstring.
 
-`JsonLinesBackingStore` is the dependency-free control-plane store. It rewrites an atomic JSONL snapshot and base64-encodes payload bytes. It is designed for compact state spines, settings, ledgers, and bootstrap surfaces.
+`JsonLinesBackingStore` is the control-plane store. It rewrites an atomic JSONL snapshot and base64-encodes the payload bytes its definition's codec wrote. It is designed for compact state spines, settings, ledgers, and bootstrap surfaces.
 
 `SingleFileMessagePackBackingStore` follows the shared CultCache v1 store shape
 used by the TypeScript, Rust, and C# runtimes:
@@ -112,10 +112,28 @@ used by the TypeScript, Rust, and C# runtimes:
 
 Large corpora should use a sharded store or a real database. A single snapshot file is a scalpel, not a forklift.
 
+## Payload format
+
+A definition's `payload_codec` owns its payload bytes. The default,
+`MESSAGEPACK_PAYLOAD_CODEC`, writes MessagePack; a store holds no format marker,
+so the registered definition decides how every record is read, and a record in
+another format is refused with `CultCachePayloadFormatError`, never guessed at.
+
+- Map keys are `str` or `bytes`; any other key type is refused on write, because
+  the reader refuses it. Integers beyond 64 bits are refused on write.
+- A store written by cultcache-py 0.3 or earlier holds JSON payloads. Read it by
+  defining the type with `payload_codec=JSON_PAYLOAD_CODEC`, then put each value
+  under the default definition to rewrite the store as MessagePack.
+- A JSON payload that is a single digit (`0` to `9`) is also a valid one-byte
+  MessagePack integer and reads as 48 to 57 under the default. Documents that
+  are objects or lists never meet this.
+- A `PayloadCodec` you build owns the nesting depth of nodes the library's walk
+  cannot see (anything that is not a mapping, sequence or set).
+
 ## DatabaseEntry Slot Contract
 
-For cross-runtime cache entries, use `define_database_entry_type(...)` instead
-of the generic JSON formatter:
+For cross-runtime cache entries, use `define_database_entry_type(...)`, which
+fixes the MessagePack slot-array payload:
 
 ```python
 from dataclasses import dataclass

@@ -24,6 +24,7 @@ from cultnet_py.compare_csharp import (
 )
 from cultnet_py.interop_peer import (
     append_shard_log_put,
+    binding,
     build_state,
     handle_server_message,
     raw_snapshot_response,
@@ -2507,6 +2508,12 @@ class CultNetTests(unittest.TestCase):
         self.assertEqual(response["shardId"], state.shard_id)
         self.assertEqual(response["shardLogSequence"], 1)
         self.assertEqual([record["recordKey"] for record in response["documents"]], ["note:logged"])
+
+    def test_python_interop_peer_binding_writes_plain_messagepack_slots(self) -> None:
+        # The bytes the binding wrote before it stopped passing its own codec lambdas: packb of the slot array.
+        note = binding("tests.note", "tests.note.v1", "tests.note.v1", "{}", lambda value: ["a", 1], lambda slots: slots)
+        self.assertEqual(note.document.encode_payload({}), bytes.fromhex("92a16101"))
+        self.assertEqual(note.document.decode_payload(bytes.fromhex("92a16101")), ["a", 1])
 
     def test_python_interop_peer_refuses_v1_selection_messages(self) -> None:
         # R-2, owed by Cut 1 (docs/cultnet-selection-cut.md, section 9): a v0-only peer refuses any

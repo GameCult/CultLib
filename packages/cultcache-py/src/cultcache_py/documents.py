@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence, Set
 from itertools import chain
 from typing import Any, Callable, Generic, Iterable, TypeVar
 
+import msgpack
+
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from .leaves import Float32, SlotCodec
 from .leaves import any as _any_leaf
@@ -24,13 +26,6 @@ or skipped, the outermost one is depth 1; depth 256 is accepted and 257 refused,
 MAX_SLOT_KEY = 65535
 """The largest slot key a record may define: the largest MessagePack array16 length."""
 
-try:
-    from msgpack.exceptions import StackError as _MsgpackStackError
-
-    _STACK_FAULTS: tuple[type[BaseException], ...] = (_MsgpackStackError,)
-except ModuleNotFoundError:
-    _STACK_FAULTS = ()
-
 
 _CONTAINERS = (Mapping, Sequence, Set)
 _SCALAR_SEQUENCES = (str, bytes, bytearray, memoryview)
@@ -47,15 +42,52 @@ class CultCachePayloadDepthError(ValueError):
         )
 
 
-def _refuse_past_depth_limit(tree: Any, type_name: str, direction: str) -> None:
-    """The one nesting count. Walks a payload tree iteratively (every mapping, sequence and set that is not text or
-    bytes is a container), refusing the first container past `MAX_PAYLOAD_DEPTH`."""
+class CultCachePayloadFormatError(ValueError):
+    """A payload is not one value of its definition's codec (read), or holds a map key the codec cannot write (write).
+    Names the type, the codec, the direction and the fault's class or the key's type; never a payload byte or value."""
+
+    def __init__(self, type_name: str, codec: str, direction: str, message: str) -> None:
+        self.type_name = type_name
+        self.codec = codec
+        self.direction = direction
+        super().__init__(message)
+
+    @classmethod
+    def unreadable(cls, type_name: str, codec: "PayloadCodec", fault: BaseException) -> "CultCachePayloadFormatError":
+        message = f"{type_name} payload is not one {codec.name} value ({type(fault).__name__}); refused on read."
+        if codec is MESSAGEPACK_PAYLOAD_CODEC:
+            message += (
+                " A record written by cultcache-py 0.3 or earlier through define_document_type's JSON default is read by"
+                f" defining {type_name} with payload_codec=JSON_PAYLOAD_CODEC."
+            )
+        return cls(type_name, codec.name, "read", message)
+
+    @classmethod
+    def unwritable_key(cls, type_name: str, codec: "PayloadCodec", key: Any) -> "CultCachePayloadFormatError":
+        allowed = " or ".join(kind.__name__ for kind in codec.map_keys or ())
+        message = (
+            f"{type_name} payload has a map key of type {type(key).__name__}; "
+            f"{codec.name} payloads take {allowed} keys (refused on write)."
+        )
+        return cls(type_name, codec.name, "write", message)
+
+
+def _check_payload_tree(tree: Any, type_name: str, direction: str, codec: "PayloadCodec") -> None:
+    """The one walk over a payload tree. Iterative (every mapping, sequence and set that is not text or bytes is a
+    container): refuses the first container past `MAX_PAYLOAD_DEPTH`, and, on write, a map key the codec cannot write."""
     stack = [(tree, 1)] if _is_container(tree) else []
     while stack:
         node, depth = stack.pop()
         if depth > MAX_PAYLOAD_DEPTH:
             raise CultCachePayloadDepthError(type_name, direction)
-        children = chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
+        if isinstance(node, Mapping):
+            if direction == "write" and codec.map_keys is not None:
+                for key in node:
+                    if not isinstance(key, codec.map_keys):
+                        raise CultCachePayloadFormatError.unwritable_key(type_name, codec, key)
+            children = chain(node.keys(), node.values())
+        else:
+            children = node
         stack.extend((child, depth + 1) for child in children if _is_container(child))
 
 
@@ -77,30 +109,10 @@ def _default_decode(value: Any) -> Any:
     return value
 
 
-def _json_payload_encoder(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
-
-
-def _json_payload_decoder(payload: bytes) -> Any:
-    return json.loads(payload.decode("utf-8"))
-
-
-def _msgpack() -> Any:
-    try:
-        import msgpack  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "MessagePack payload encoding requires the optional 'msgpack' dependency. "
-            "Install with: python -m pip install cultcache-py[msgpack]"
-        ) from exc
-    return msgpack
-
-
 def _pack_tree(tree: Any) -> bytes:
     """The bytes of the tree the leaves produced. `packb` writes everything but a `Float32`, which it refuses with a
     TypeError; only then does an iterative walk pack each array and map header and each value, a `Float32` through a
     single-float packer."""
-    msgpack = _msgpack()
     try:
         return msgpack.packb(tree, use_bin_type=True)  # type: ignore[no-any-return]
     except TypeError:
@@ -124,15 +136,39 @@ def _pack_tree(tree: Any) -> bytes:
     return b"".join(out)
 
 
-def _messagepack_payload_decoder(payload: bytes) -> Any:
-    try:
-        import msgpack  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "MessagePack payload decoding requires the optional 'msgpack' dependency. "
-            "Install with: python -m pip install cultcache-py[msgpack]"
-        ) from exc
+@dataclass(frozen=True)
+class PayloadCodec:
+    """A codec owns one payload format: how a tree becomes bytes and back, which of its decode faults mean the payload
+    nests past the interpreter's own stack, and which map keys it can write. A consumer-built codec owns the depth of
+    nodes the depth walk cannot see (anything that is not a Mapping, Sequence or Set)."""
+
+    name: str
+    encode: Callable[[Any], bytes]
+    decode: Callable[[bytes], Any]
+    depth_faults: tuple[type[BaseException], ...] = ()
+    map_keys: tuple[type, ...] | None = None
+
+
+def _unpack_tree(payload: bytes) -> Any:
     return msgpack.unpackb(payload, raw=False)
+
+
+def _dump_json(tree: Any) -> bytes:
+    return json.dumps(tree, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+
+def _load_json(payload: bytes) -> Any:
+    return json.loads(payload.decode("utf-8"))
+
+
+MESSAGEPACK_PAYLOAD_CODEC = PayloadCodec(
+    "MessagePack", _pack_tree, _unpack_tree, depth_faults=(msgpack.exceptions.StackError,), map_keys=(str, bytes)
+)
+"""The default payload format. `map_keys` is what `unpackb` (strict_map_key) reads back, so the default never writes a
+record it cannot read."""
+
+JSON_PAYLOAD_CODEC = PayloadCodec("JSON", _dump_json, _load_json, depth_faults=(RecursionError,))
+"""The 0.3 default, kept for stores written before MessagePack: it writes exactly the 0.3 bytes. Never a default."""
 
 
 @dataclass(frozen=True)
@@ -178,8 +214,7 @@ class DocumentDefinition(Generic[T]):
     global_document: bool = False
     name: str | Extractor[T] | None = None
     indexes: dict[str, str | Extractor[T]] = field(default_factory=dict)
-    payload_encoder: Callable[[Any], bytes] = _json_payload_encoder
-    payload_decoder: Callable[[bytes], Any] = _json_payload_decoder
+    payload_codec: PayloadCodec = MESSAGEPACK_PAYLOAD_CODEC
     schema_id: str | None = None
     schema_name: str | None = None
     schema_version: str | None = None
@@ -197,15 +232,18 @@ class DocumentDefinition(Generic[T]):
         if self.validate:
             self.validate(value)
         tree = self.encode(value)
-        _refuse_past_depth_limit(tree, self.type, "write")
-        return self.payload_encoder(tree)
+        _check_payload_tree(tree, self.type, "write", self.payload_codec)
+        return self.payload_codec.encode(tree)
 
     def decode_payload(self, payload: bytes) -> T:
+        codec = self.payload_codec
         try:
-            tree = self.payload_decoder(payload)
-        except _STACK_FAULTS:
+            tree = codec.decode(payload)
+        except codec.depth_faults:
             raise CultCachePayloadDepthError(self.type, "read") from None
-        _refuse_past_depth_limit(tree, self.type, "read")
+        except ValueError as fault:
+            raise CultCachePayloadFormatError.unreadable(self.type, codec, fault) from None
+        _check_payload_tree(tree, self.type, "read", codec)
         value = self.decode(tree)
         if self.validate:
             self.validate(value)
@@ -262,8 +300,7 @@ def define_document_type(
     global_document: bool = False,
     name: str | Extractor[T] | None = None,
     indexes: dict[str, str | Extractor[T]] | None = None,
-    payload_encoder: Callable[[Any], bytes] = _json_payload_encoder,
-    payload_decoder: Callable[[bytes], Any] = _json_payload_decoder,
+    payload_codec: PayloadCodec = MESSAGEPACK_PAYLOAD_CODEC,
     schema_id: str | None = None,
     schema_name: str | None = None,
     schema_version: str | None = None,
@@ -272,6 +309,8 @@ def define_document_type(
     compatible_schema_ids: Iterable[str] | None = None,
     members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
+    """Define a document type. Its payload is the MessagePack of what `encode` returns; pass
+    `payload_codec=JSON_PAYLOAD_CODEC` to read and rewrite a store written by cultcache-py 0.3 or earlier."""
     return DocumentDefinition(
         type=type,
         encode=encode,
@@ -280,8 +319,7 @@ def define_document_type(
         global_document=global_document,
         name=name,
         indexes=indexes or {},
-        payload_encoder=payload_encoder,
-        payload_decoder=payload_decoder,
+        payload_codec=payload_codec,
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version,
@@ -344,8 +382,6 @@ def define_database_entry_type(
         global_document=global_document,
         name=name,
         indexes=indexes,
-        payload_encoder=_pack_tree,
-        payload_decoder=_messagepack_payload_decoder,
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version,

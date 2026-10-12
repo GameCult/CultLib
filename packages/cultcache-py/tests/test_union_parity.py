@@ -15,8 +15,10 @@ from cultcache_py import (
     MAX_PAYLOAD_DEPTH,
     MAX_SLOT_KEY,
     CultCache,
+    JSON_PAYLOAD_CODEC,
     CultCachePayloadDepthError,
     DatabaseEntryField,
+    PayloadCodec,
     SlotCodec,
     SingleFileMessagePackBackingStore,
     UnionArm,
@@ -560,17 +562,18 @@ class BoundsVectorTests(unittest.TestCase):
         with self.assertRaises(CultCachePayloadDepthError) as caught:
             tree.encode_payload(_nest(5000))
         self.assertIn("refused on write", str(caught.exception))
-        document = define_document_type("tests.json_tree")
-        with self.assertRaises(CultCachePayloadDepthError) as read:
-            document.decode_payload(b"[" * 300 + b"]" * 300)
-        self.assertIn("refused on read", str(read.exception))
+        for codec, deep in ((None, b"\x91" * 300 + b"\xc0"), (JSON_PAYLOAD_CODEC, b"[" * 300 + b"]" * 300)):
+            document = define_document_type("tests.json_tree") if codec is None else define_document_type("tests.json_tree", payload_codec=codec)
+            with self.assertRaises(CultCachePayloadDepthError) as read:
+                document.decode_payload(deep)
+            self.assertIn("refused on read", str(read.exception))
 
     def test_a_codec_that_exhausts_the_interpreter_stack_keeps_its_own_recursion_error_on_each_side(self) -> None:
         def boom(value: object) -> object:
             return boom(value)
 
         document = define_document_type("tests.boom", encode=boom, decode=boom)
-        for run in (lambda: document.encode_payload("x"), lambda: document.decode_payload(b'"x"')):
+        for run in (lambda: document.encode_payload("x"), lambda: document.decode_payload(b"\xa1x")):
             try:
                 run()
             except RecursionError as caught:
@@ -585,11 +588,11 @@ class BoundsVectorTests(unittest.TestCase):
             "tests.union_surface payload nests 257 containers deep; the limit is 256 (refused on read).",
         )
 
-    def test_a_json_payload_past_the_interpreters_own_stack_keeps_the_decoders_recursion_error(self) -> None:
-        document = define_document_type("tests.json_tree")
-        with self.assertRaises(RecursionError) as caught:
+    def test_json_text_past_the_interpreters_own_stack_is_the_depth_refusal(self) -> None:
+        document = define_document_type("tests.json_tree", payload_codec=JSON_PAYLOAD_CODEC)
+        with self.assertRaises(CultCachePayloadDepthError) as caught:
             document.decode_payload(b"[" * 100000)
-        self.assertNotIsInstance(caught.exception, CultCachePayloadDepthError)
+        self.assertIn("refused on read", str(caught.exception))
 
     def test_a_refusal_reports_the_depth_where_the_walk_stopped_whatever_the_payloads_real_depth(self) -> None:
         document = define_document_type("tests.json_tree", encode=lambda value: value)
@@ -598,7 +601,7 @@ class BoundsVectorTests(unittest.TestCase):
                 document.encode_payload(_nest(depth))
             self.assertEqual((write.exception.depth, write.exception.limit), (257, 256), depth)
             with self.assertRaises(CultCachePayloadDepthError) as read:
-                document.decode_payload(b"[" * depth + b"]" * depth)
+                document.decode_payload(b"\x91" * depth + b"\xc0")
             self.assertEqual((read.exception.depth, read.exception.limit), (257, 256), depth)
 
     def test_the_validator_sees_the_value_on_write_and_the_decoded_value_on_read(self) -> None:
@@ -613,6 +616,9 @@ class BoundsVectorTests(unittest.TestCase):
         document = define_document_type("tests.cycle", encode=lambda value: value)
         with self.assertRaises(CultCachePayloadDepthError):
             document.encode_payload(loop)
+
+
+_STUB_CODEC = PayloadCodec("test", lambda tree: b"ok", lambda payload: payload)
 
 
 def _nest(depth: int, mixed: bool = False) -> object:
@@ -631,18 +637,19 @@ class PayloadDepthRuleTests(unittest.TestCase):
 
     def test_the_limit_is_256_and_depth_256_is_accepted_on_read_and_write_while_257_is_refused(self) -> None:
         self.assertEqual(MAX_PAYLOAD_DEPTH, 256)
-        document = define_document_type("tests.json_tree", encode=lambda value: value)
-        for mixed in (False, True):
-            at_limit = _nest(256, mixed)
-            self.assertEqual(document.decode_payload(document.encode_payload(at_limit)), at_limit)
-            past = _nest(257, mixed)
-            with self.assertRaises(CultCachePayloadDepthError):
-                document.encode_payload(past)
-            with self.assertRaises(CultCachePayloadDepthError):
-                document.decode_payload(document.payload_encoder(past))
+        for codec in (None, JSON_PAYLOAD_CODEC):
+            document = define_document_type("tests.json_tree", encode=lambda value: value, **({} if codec is None else {"payload_codec": codec}))
+            for mixed in (False, True):
+                at_limit = _nest(256, mixed)
+                self.assertEqual(document.decode_payload(document.encode_payload(at_limit)), at_limit)
+                past = _nest(257, mixed)
+                with self.assertRaises(CultCachePayloadDepthError):
+                    document.encode_payload(past)
+                with self.assertRaises(CultCachePayloadDepthError):
+                    document.decode_payload(document.payload_codec.encode(past))
 
     def test_a_tuple_and_a_container_dict_key_count_as_containers(self) -> None:
-        document = define_document_type("tests.tuple_tree", encode=lambda value: value, payload_encoder=lambda tree: b"ok")
+        document = define_document_type("tests.tuple_tree", encode=lambda value: value, payload_codec=_STUB_CODEC)
         self.assertEqual(document.encode_payload(_as_tuple(_nest(256))), b"ok")
         with self.assertRaises(CultCachePayloadDepthError):
             document.encode_payload(_as_tuple(_nest(257)))
@@ -658,19 +665,21 @@ class PayloadDepthRuleTests(unittest.TestCase):
             "userlist": lambda inner: collections.UserList([inner]),
         }
         for name, wrap in wrappers.items():
-            document = define_document_type(f"tests.{name}", encode=lambda value: value, payload_encoder=lambda tree: b"ok")
+            document = define_document_type(f"tests.{name}", encode=lambda value: value, payload_codec=_STUB_CODEC)
             at_limit: object = "leaf"
             for _ in range(256):
                 at_limit = wrap(at_limit)
             self.assertEqual(document.encode_payload(at_limit), b"ok", name)
             with self.assertRaises(CultCachePayloadDepthError, msg=name):
                 document.encode_payload(wrap(at_limit))
-            decoding = define_document_type(f"tests.{name}.read", payload_decoder=lambda payload, w=wrap: w(at_limit))
+            decoding = define_document_type(
+                f"tests.{name}.read", payload_codec=PayloadCodec("test", lambda tree: b"ok", lambda payload, w=wrap: w(at_limit))
+            )
             with self.assertRaises(CultCachePayloadDepthError, msg=name):
                 decoding.decode_payload(b"x")
 
     def test_text_and_bytes_are_leaves_however_long(self) -> None:
-        document = define_document_type("tests.leaves", encode=lambda value: value, payload_encoder=lambda tree: b"ok")
+        document = define_document_type("tests.leaves", encode=lambda value: value, payload_codec=_STUB_CODEC)
         self.assertEqual(document.encode_payload([["x" * 100000, b"y" * 100000, bytearray(5), memoryview(b"z")]]), b"ok")
 
     def test_a_scalar_payload_has_no_depth(self) -> None:
