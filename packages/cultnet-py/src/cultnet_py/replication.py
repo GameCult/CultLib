@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+import msgpack
 from cultcache_py import CultCache, CultCacheEnvelope
 from cultcache_py.documents import DocumentDefinition
 
@@ -184,8 +185,10 @@ def resolve_document_and_schema_id_for_raw_record(
 
 
 def _infer_schema_version_from_payload(payload: bytes) -> str | None:
+    """Routing only, as the C# `CultNetDocumentRegistry.TryResolveDescriptorByPayloadSchema` does: reads a schema stamp
+    off a raw record whose schema id is unknown, to pick a definition. It decides no format; the definition it picks
+    has a codec that decodes the payload or refuses it."""
     try:
-        import msgpack  # type: ignore
         decoded = msgpack.unpackb(payload, raw=False)
     except Exception:
         return None

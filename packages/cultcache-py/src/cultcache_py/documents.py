@@ -42,52 +42,52 @@ class CultCachePayloadDepthError(ValueError):
         )
 
 
-class CultCachePayloadFormatError(ValueError):
-    """A payload is not one value of its definition's codec (read), or holds a map key the codec cannot write (write).
-    Names the type, the codec, the direction and the fault's class or the key's type; never a payload byte or value."""
+class PayloadCodecFault(ValueError):
+    """A codec raises this for a payload its format cannot carry. `code` names the rule (the library's are
+    `map_key_kind`, `duplicate_map_key` and `integer_out_of_range`) and `kind` the kind of node at fault (a MessagePack
+    kind such as `nil` or `bin`); neither is ever a payload value. A consumer-built codec may raise it."""
 
-    def __init__(self, type_name: str, codec: str, direction: str, message: str) -> None:
+    def __init__(self, code: str, kind: str = "") -> None:
+        self.code = code
+        self.kind = kind
+        super().__init__(code)
+
+
+class CultCachePayloadFormatError(ValueError):
+    """A payload is not one value of its definition's codec (read), or holds a key or integer the codec cannot carry.
+    Names the type, the codec, the direction and a `code`; `detail` is the fault's class or the key's kind. Never a
+    payload byte or value."""
+
+    def __init__(self, type_name: str, codec: str, direction: str, code: str, detail: str) -> None:
         self.type_name = type_name
         self.codec = codec
         self.direction = direction
+        self.code = code
+        if code == "not_one_value":
+            message = f"{type_name} payload is not one {codec} value ({detail}); refused on read."
+        elif code == "map_key_kind":
+            message = (
+                f"{type_name} payload has a map key of kind {detail}; "
+                f"{codec} payloads take str, int, float, bool or timestamp keys (refused on {direction})."
+            )
+        elif code == "duplicate_map_key":
+            message = f"{type_name} payload has two map keys Python holds as one; refused on read."
+        elif code == "integer_out_of_range":
+            message = f"{type_name} payload has an integer beyond 64 bits; refused on write."
+        else:
+            message = f"{type_name} payload is refused by the {codec} codec ({code}); refused on {direction}."
         super().__init__(message)
 
-    @classmethod
-    def unreadable(cls, type_name: str, codec: "PayloadCodec", fault: BaseException) -> "CultCachePayloadFormatError":
-        message = f"{type_name} payload is not one {codec.name} value ({type(fault).__name__}); refused on read."
-        if codec is MESSAGEPACK_PAYLOAD_CODEC:
-            message += (
-                " A record written by cultcache-py 0.3 or earlier through define_document_type's JSON default is read by"
-                f" defining {type_name} with payload_codec=JSON_PAYLOAD_CODEC."
-            )
-        return cls(type_name, codec.name, "read", message)
 
-    @classmethod
-    def unwritable_key(cls, type_name: str, codec: "PayloadCodec", key: Any) -> "CultCachePayloadFormatError":
-        allowed = " or ".join(kind.__name__ for kind in codec.map_keys or ())
-        message = (
-            f"{type_name} payload has a map key of type {type(key).__name__}; "
-            f"{codec.name} payloads take {allowed} keys (refused on write)."
-        )
-        return cls(type_name, codec.name, "write", message)
-
-
-def _check_payload_tree(tree: Any, type_name: str, direction: str, codec: "PayloadCodec") -> None:
-    """The one walk over a payload tree. Iterative (every mapping, sequence and set that is not text or bytes is a
-    container): refuses the first container past `MAX_PAYLOAD_DEPTH`, and, on write, a map key the codec cannot write."""
+def _check_payload_tree(tree: Any, type_name: str, direction: str) -> None:
+    """The one depth walk over a payload tree, for every codec. Iterative (every mapping, sequence and set that is not
+    text or bytes is a container): refuses the first container past `MAX_PAYLOAD_DEPTH`."""
     stack = [(tree, 1)] if _is_container(tree) else []
     while stack:
         node, depth = stack.pop()
         if depth > MAX_PAYLOAD_DEPTH:
             raise CultCachePayloadDepthError(type_name, direction)
-        if isinstance(node, Mapping):
-            if direction == "write" and codec.map_keys is not None:
-                for key in node:
-                    if not isinstance(key, codec.map_keys):
-                        raise CultCachePayloadFormatError.unwritable_key(type_name, codec, key)
-            children = chain(node.keys(), node.values())
-        else:
-            children = node
+        children = chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
         stack.extend((child, depth + 1) for child in children if _is_container(child))
 
 
@@ -139,18 +139,73 @@ def _pack_tree(tree: Any) -> bytes:
 @dataclass(frozen=True)
 class PayloadCodec:
     """A codec owns one payload format: how a tree becomes bytes and back, which of its decode faults mean the payload
-    nests past the interpreter's own stack, and which map keys it can write. A consumer-built codec owns the depth of
-    nodes the depth walk cannot see (anything that is not a Mapping, Sequence or Set)."""
+    nests past the interpreter's own stack, and which trees it can carry: it raises `PayloadCodecFault` for a key or an
+    integer its format cannot hold, and nothing it writes is refused by its own `decode`. A consumer-built codec owns
+    the depth of nodes the depth walk cannot see (anything that is not a Mapping, Sequence or Set)."""
 
     name: str
     encode: Callable[[Any], bytes]
     decode: Callable[[bytes], Any]
     depth_faults: tuple[type[BaseException], ...] = ()
-    map_keys: tuple[type, ...] | None = None
+
+
+_INTEGER_RANGE = (-(2**63), 2**64 - 1)
+_KEY_TYPES = (str, int, float, Float32, msgpack.Timestamp)
+
+
+def _node_kind(node: Any) -> str:
+    """The MessagePack kind of a node, for a refusal: a kind, never a value."""
+    if node is None:
+        return "nil"
+    if isinstance(node, (bytes, bytearray, memoryview)):
+        return "bin"
+    if isinstance(node, Mapping):
+        return "map"
+    if isinstance(node, msgpack.ExtType):
+        return "ext"
+    if isinstance(node, _CONTAINERS):
+        return "array"
+    return "unsupported"
+
+
+def _checked_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    """The read hook of every MessagePack map: the keys the C# reference's object reader accepts (str, int, float,
+    bool, timestamp) and no duplicate."""
+    for key, _ in pairs:
+        if not isinstance(key, _KEY_TYPES):
+            raise PayloadCodecFault("map_key_kind", _node_kind(key))
+    held = dict(pairs)
+    if len(held) != len(pairs):
+        raise PayloadCodecFault("duplicate_map_key")
+    return held
+
+
+def _check_writable(tree: Any) -> None:
+    """The write side of the key and integer rule: what `_checked_map` refuses on read is refused here, so nothing
+    this codec writes is refused by its own decode. Iterative; it stops at the depth limit, which the definition rules."""
+    stack = [(tree, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_PAYLOAD_DEPTH + 1:
+            raise RecursionError("payload nests past the depth limit")
+        if isinstance(node, int) and not _INTEGER_RANGE[0] <= node <= _INTEGER_RANGE[1]:
+            raise PayloadCodecFault("integer_out_of_range")
+        if isinstance(node, Mapping):
+            for key in node:
+                if not isinstance(key, _KEY_TYPES):
+                    raise PayloadCodecFault("map_key_kind", _node_kind(key))
+            stack.extend((child, depth + 1) for child in chain(node.keys(), node.values()))
+        elif isinstance(node, (list, tuple)):
+            stack.extend((child, depth + 1) for child in node)
 
 
 def _unpack_tree(payload: bytes) -> Any:
-    return msgpack.unpackb(payload, raw=False)
+    return msgpack.unpackb(payload, raw=False, strict_map_key=False, object_pairs_hook=_checked_map)
+
+
+def _pack_checked_tree(tree: Any) -> bytes:
+    _check_writable(tree)
+    return _pack_tree(tree)
 
 
 def _dump_json(tree: Any) -> bytes:
@@ -162,10 +217,11 @@ def _load_json(payload: bytes) -> Any:
 
 
 MESSAGEPACK_PAYLOAD_CODEC = PayloadCodec(
-    "MessagePack", _pack_tree, _unpack_tree, depth_faults=(msgpack.exceptions.StackError,), map_keys=(str, bytes)
+    "MessagePack", _pack_checked_tree, _unpack_tree, depth_faults=(msgpack.exceptions.StackError,)
 )
-"""The default payload format. `map_keys` is what `unpackb` (strict_map_key) reads back, so the default never writes a
-record it cannot read."""
+"""The default payload format. It carries what the C# reference's object reader accepts: str, int, float, bool and
+timestamp keys, no duplicate key, and integers within -(2**63)..2**64-1. It refuses the rest on read through its map
+hook and on write through its encode, so it never writes a record it cannot read."""
 
 JSON_PAYLOAD_CODEC = PayloadCodec("JSON", _dump_json, _load_json, depth_faults=(RecursionError,))
 """The 0.3 default, kept for stores written before MessagePack: it writes exactly the 0.3 bytes. Never a default."""
@@ -205,6 +261,10 @@ class UnionArm:
     value: Any = None
 
 
+def _fault_refusal(type_name: str, codec: PayloadCodec, direction: str, fault: PayloadCodecFault) -> CultCachePayloadFormatError:
+    return CultCachePayloadFormatError(type_name, codec.name, direction, fault.code, fault.kind)
+
+
 @dataclass(frozen=True)
 class DocumentDefinition(Generic[T]):
     type: str
@@ -232,22 +292,31 @@ class DocumentDefinition(Generic[T]):
         if self.validate:
             self.validate(value)
         tree = self.encode(value)
-        _check_payload_tree(tree, self.type, "write", self.payload_codec)
-        return self.payload_codec.encode(tree)
+        _check_payload_tree(tree, self.type, "write")
+        codec = self.payload_codec
+        try:
+            return codec.encode(tree)
+        except PayloadCodecFault as fault:
+            refusal = _fault_refusal(self.type, codec, "write", fault)
+        raise refusal
 
     def decode_payload(self, payload: bytes) -> T:
         codec = self.payload_codec
         try:
             tree = codec.decode(payload)
         except codec.depth_faults:
-            raise CultCachePayloadDepthError(self.type, "read") from None
+            refusal: Exception = CultCachePayloadDepthError(self.type, "read")
+        except PayloadCodecFault as fault:
+            refusal = _fault_refusal(self.type, codec, "read", fault)
         except ValueError as fault:
-            raise CultCachePayloadFormatError.unreadable(self.type, codec, fault) from None
-        _check_payload_tree(tree, self.type, "read", codec)
-        value = self.decode(tree)
-        if self.validate:
-            self.validate(value)
-        return value
+            refusal = CultCachePayloadFormatError(self.type, codec.name, "read", "not_one_value", type(fault).__name__)
+        else:
+            _check_payload_tree(tree, self.type, "read")
+            value = self.decode(tree)
+            if self.validate:
+                self.validate(value)
+            return value
+        raise refusal
 
     def catalog_entry(self) -> CultCacheSchemaCatalogEntry:
         if self._catalog_entry is not None:
@@ -300,7 +369,7 @@ def define_document_type(
     global_document: bool = False,
     name: str | Extractor[T] | None = None,
     indexes: dict[str, str | Extractor[T]] | None = None,
-    payload_codec: PayloadCodec = MESSAGEPACK_PAYLOAD_CODEC,
+    payload_codec: PayloadCodec | None = None,
     schema_id: str | None = None,
     schema_name: str | None = None,
     schema_version: str | None = None,
@@ -310,7 +379,9 @@ def define_document_type(
     members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
     """Define a document type. Its payload is the MessagePack of what `encode` returns; pass
-    `payload_codec=JSON_PAYLOAD_CODEC` to read and rewrite a store written by cultcache-py 0.3 or earlier."""
+    `payload_codec=JSON_PAYLOAD_CODEC` to read a store written by cultcache-py 0.3 or earlier, and `migrate_payloads` to
+    rewrite it."""
+    codec = {} if payload_codec is None else {"payload_codec": payload_codec}
     return DocumentDefinition(
         type=type,
         encode=encode,
@@ -319,7 +390,7 @@ def define_document_type(
         global_document=global_document,
         name=name,
         indexes=indexes or {},
-        payload_codec=payload_codec,
+        **codec,
         schema_id=schema_id,
         schema_name=schema_name,
         schema_version=schema_version,

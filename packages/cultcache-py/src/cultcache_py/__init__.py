@@ -1,7 +1,7 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from . import leaves
-from .cache import CultCache, CultCacheBuilder
+from .cache import CultCache, CultCacheBuilder, migrate_payloads
 from .documents import (
     MAX_PAYLOAD_DEPTH,
     JSON_PAYLOAD_CODEC,
@@ -12,6 +12,7 @@ from .documents import (
     DatabaseEntryField,
     DocumentDefinition,
     PayloadCodec,
+    PayloadCodecFault,
     UnionArm,
     database_entry_field,
     define_database_entry_type,
@@ -40,6 +41,7 @@ __all__ = [
     "MAX_SLOT_KEY",
     "MESSAGEPACK_PAYLOAD_CODEC",
     "PayloadCodec",
+    "PayloadCodecFault",
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
     "UnionArm",
@@ -50,4 +52,5 @@ __all__ = [
     "define_document_type",
     "define_record_codec",
     "define_union",
+    "migrate_payloads",
 ]

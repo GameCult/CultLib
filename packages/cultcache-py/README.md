@@ -119,16 +119,26 @@ A definition's `payload_codec` owns its payload bytes. The default,
 so the registered definition decides how every record is read, and a record in
 another format is refused with `CultCachePayloadFormatError`, never guessed at.
 
-- Map keys are `str` or `bytes`; any other key type is refused on write, because
-  the reader refuses it. Integers beyond 64 bits are refused on write.
-- A store written by cultcache-py 0.3 or earlier holds JSON payloads. Read it by
-  defining the type with `payload_codec=JSON_PAYLOAD_CODEC`, then put each value
-  under the default definition to rewrite the store as MessagePack.
+- Map keys are `str`, integer, float, `bool` or `msgpack.Timestamp`, as the C#
+  reference's object reader takes them; `None`, `bytes`, list and map keys are
+  refused, on read and on write. Two keys Python holds as one are refused on read
+  as `duplicate_map_key`, which includes `1` beside `1.0` or `True`: the reference
+  keeps those apart and a Python `dict` cannot.
+- Integers beyond 64 bits (outside `-(2**63)..2**64-1`) are refused on write as
+  `integer_out_of_range`; MessagePack has no wider integer.
+- A store written by cultcache-py 0.3 or earlier holds JSON payloads. Define each
+  type with `payload_codec=JSON_PAYLOAD_CODEC` to read it, or rewrite it once,
+  whole or not at all, with `migrate_payloads(store, definitions)`: it reads
+  every record of the listed definitions, writes them under the definitions'
+  own codec in one `push_all`, and raises `CultCacheError` naming the type,
+  record key and code, with the store untouched, if any record is refused. A
+  second run is refused and changes nothing.
 - A JSON payload that is a single digit (`0` to `9`) is also a valid one-byte
   MessagePack integer and reads as 48 to 57 under the default. Documents that
   are objects or lists never meet this.
 - A `PayloadCodec` you build owns the nesting depth of nodes the library's walk
-  cannot see (anything that is not a mapping, sequence or set).
+  cannot see (anything that is not a mapping, sequence or set), and may raise
+  `PayloadCodecFault(code, kind)` for a key or integer its format cannot carry.
 
 ## DatabaseEntry Slot Contract
 

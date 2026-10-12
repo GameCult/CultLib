@@ -3,10 +3,10 @@
 import functools
 import threading
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, Iterable, TypeVar
 
 from .backing_store import BackingStore, CultCacheEnvelope
-from .documents import DocumentDefinition, extract_value
+from .documents import JSON_PAYLOAD_CODEC, DocumentDefinition, PayloadCodec, extract_value
 
 T = TypeVar("T")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -585,3 +585,40 @@ class CultCache:
         if document is not None:
             return document
         return self._state.documents_by_schema_name.get(envelope.type)
+
+
+def migrate_payloads(
+    store: BackingStore,
+    definitions: Iterable[DocumentDefinition[Any]],
+    *,
+    source_codec: PayloadCodec = JSON_PAYLOAD_CODEC,
+) -> int:
+    """Rewrite the records of `definitions` in `store` from `source_codec` to each definition's own codec, whole or not
+    at all: every record is read and rewritten first, any refusal raises `CultCacheError` naming the type, the record key
+    and the refusal's code before the store is touched, and the rewritten envelopes go back in one `push_all`. Records of
+    other types keep their bytes. Returns the count rewritten.
+
+    Run it once on a store written by cultcache-py 0.3 or earlier. A store already in the definitions' format is
+    refused, not rewritten twice: the second run raises and changes nothing.
+    """
+    by_type: dict[str, DocumentDefinition[Any]] = {}
+    for definition in definitions:
+        by_type[definition.type] = definition
+        by_type.setdefault(definition.catalog_entry().schema_name, definition)
+    rewritten: list[CultCacheEnvelope] = []
+    for envelope in store.pull_all():
+        definition = by_type.get(envelope.type)
+        if definition is None:
+            continue
+        try:
+            value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
+            rewritten.append(replace(envelope, payload=definition.encode_payload(value)))
+        except ValueError as refusal:
+            code = getattr(refusal, "code", type(refusal).__name__)
+            failure = CultCacheError(f"Cannot migrate {envelope.type} record {envelope.key}: {code}; the store is unchanged.")
+        else:
+            continue
+        raise failure
+    if rewritten:
+        store.push_all(rewritten)
+    return len(rewritten)

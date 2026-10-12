@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+import msgpack
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from cultcache_py.backing_store import CultCacheEnvelope
@@ -118,11 +119,6 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual(cache.get_key_by_index(document, "category", "Consumable"), "item:first")
 
     def test_database_entry_formatter_uses_slot_indexed_messagepack_array(self) -> None:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError:
-            self.skipTest("msgpack optional dependency is not installed")
-
         @dataclass
         class Settings:
             theme: str
@@ -157,11 +153,6 @@ class CultCacheTests(unittest.TestCase):
         self.assertEqual([member.slot for member in first.members], [0, 2])
 
     def test_messagepack_store_writes_v1_snapshot(self) -> None:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError:
-            self.skipTest("msgpack optional dependency is not installed")
-
         with tempfile.TemporaryDirectory() as tmp:
             document = define_database_entry_type(
                 "settings",
@@ -186,12 +177,7 @@ class CultCacheTests(unittest.TestCase):
             self.assertEqual(raw[2][0][0], "app")
             self.assertEqual(raw[2][0][1], "settings")
 
-    def test_messagepack_store_recovers_schema_stamped_record_missing_catalog_entry(self) -> None:
-        try:
-            import msgpack  # type: ignore
-        except ModuleNotFoundError:
-            self.skipTest("msgpack optional dependency is not installed")
-
+    def test_messagepack_store_refuses_a_schema_id_missing_from_the_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             document = define_database_entry_type(
                 "runtime-policy",
@@ -227,11 +213,9 @@ class CultCacheTests(unittest.TestCase):
                 .build()
             )
 
-            cache.pull_all_backing_stores()
-            self.assertEqual(cache.get_required(document, "record-1")["value"], "still readable")
-            envelope = cache.get_required_envelope(document, "record-1")
-            self.assertEqual(envelope.type, "runtime-policy")
-            self.assertEqual(envelope.schema_id, "sha256:stale-schema-id-from-cold-record")
+            with self.assertRaisesRegex(ValueError, "references missing schema id"):
+                cache.pull_all_backing_stores()
+            self.assertEqual(cache.get_all(document), [])
 
     def test_interop_cli_helpers_round_trip_v1_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

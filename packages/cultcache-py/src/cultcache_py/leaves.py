@@ -16,10 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
-try:
-    from msgpack import ExtType as _ExtType
-except ModuleNotFoundError:
-    _ExtType = ()  # type: ignore[assignment,misc]
+from msgpack import ExtType as _ExtType
 
 _bool, _bytes, _list, _int, _float, _str = bool, bytes, list, int, float, str
 _BYTE_LIKE = (_bytes, bytearray, memoryview)

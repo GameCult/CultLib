@@ -214,19 +214,7 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
             raise ValueError("CultCache persisted records must declare storedAt")
         catalog_entry = catalog_by_schema_id.get(schema_id)
         if catalog_entry is None:
-            schema_version = _infer_schema_version_from_payload(_normalize_payload(payload))
-            schema_name = _infer_schema_name(schema_version) if schema_version is not None else None
-            if schema_name is None:
-                raise ValueError(f'CultCache persisted record "{key}" references missing schema id "{schema_id}"')
-            catalog_entry = CultCacheSchemaCatalogEntry(
-                schema_id=schema_id,
-                schema_name=schema_name,
-                schema_version=schema_version,
-                content_hash=schema_id,
-                canonical_schema_json="",
-                compatible_schema_ids=(),
-                members=(),
-            )
+            raise ValueError(f'CultCache persisted record "{key}" references missing schema id "{schema_id}"')
         normalized_payload = _normalize_payload(payload)
         envelopes.append(
             CultCacheEnvelope(
@@ -242,6 +230,9 @@ def _decode_v1_snapshot(decoded: Any) -> list[CultCacheEnvelope] | None:
 
 
 def _decode_legacy_envelopes(decoded: Any) -> list[CultCacheEnvelope]:
+    """A legacy envelope holds its payload as an inline MessagePack subtree or as bytes. Extracting the subtree's bytes
+    decides no format: the inline value is MessagePack by construction, and the registered codec still reads it or
+    refuses it."""
     if not isinstance(decoded, list):
         raise ValueError("CultCache MessagePack store is not a recognized snapshot")
     envelopes: list[CultCacheEnvelope] = []
@@ -365,26 +356,3 @@ def _normalize_payload(payload: Any) -> bytes:
     if isinstance(payload, list) and all(isinstance(item, int) and 0 <= item <= 255 for item in payload):
         return bytes(payload)
     raise ValueError("CultCache record payload must be binary MessagePack bytes")
-
-
-def _infer_schema_version_from_payload(payload: bytes) -> str | None:
-    try:
-        decoded = msgpack.unpackb(payload, raw=False)
-    except Exception:
-        return None
-    if isinstance(decoded, list) and decoded and isinstance(decoded[0], str):
-        return decoded[0]
-    if isinstance(decoded, dict):
-        value = decoded.get("schemaVersion", decoded.get("schema_version"))
-        return value if isinstance(value, str) else None
-    return None
-
-
-def _infer_schema_name(schema_version: str) -> str | None:
-    marker = schema_version.rfind(".v")
-    if marker <= 0:
-        return None
-    version = schema_version[marker + 2:]
-    if not version or not version.isdigit():
-        return None
-    return schema_version[:marker]
