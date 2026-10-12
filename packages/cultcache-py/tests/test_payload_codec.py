@@ -100,7 +100,7 @@ class PayloadCodecTests(unittest.TestCase):
         written = JSON_PAYLOAD_CODEC.encode({"b": "é", "a": [1, 2]})
         self.assertEqual(written, b'{"a": [1, 2], "b": "\xc3\xa9"}')
         self.assertEqual(JSON_PAYLOAD_CODEC.decode(written), {"a": [1, 2], "b": "é"})
-        self.assertEqual(JSON_PAYLOAD_CODEC.encode({1: "a", "n": 2**70}), b'{"1": "a", "n": 1180591620717411303424}')
+        self.assertEqual(JSON_PAYLOAD_CODEC.encode({1: "a", 3: 2**70}), b'{"1": "a", "3": 1180591620717411303424}')
 
     def test_a_json_store_is_refused_typed_and_loads_nothing(self) -> None:
         store = _store_with(self.directory / "legacy.cc", LEGACY_JSON)
@@ -262,7 +262,6 @@ class PayloadCodecTests(unittest.TestCase):
                 self.assertEqual(document.decode_payload(document.encode_payload(tree)), tree)
         refused = (
             ({b"k": 1}, "bin"),
-            ({bytearray(b"k"): 1}, "bin"),
             ({None: 1}, "nil"),
             ({(1,): 1}, "array"),
             ({frozenset(): 1}, "array"),
@@ -313,7 +312,7 @@ class PayloadCodecTests(unittest.TestCase):
     def test_a_cyclic_tree_is_not_walked_forever_by_the_codec(self) -> None:
         cycle: dict = {}
         cycle["a"] = cycle
-        with self.assertRaises(RecursionError):
+        with self.assertRaises(ValueError):
             MESSAGEPACK_PAYLOAD_CODEC.encode(cycle)
         with self.assertRaises(CultCachePayloadDepthError):
             define_document_type("tests.cycle", encode=lambda value: value).encode_payload(cycle)

@@ -150,6 +150,7 @@ class PayloadCodec:
 
 
 _INTEGER_RANGE = (-(2**63), 2**64 - 1)
+_PACK_DEPTH_LIMIT = 511  # msgpack's own packb limit: a tree nested past it, or a cycle, is not walked on
 _KEY_TYPES = (str, int, float, Float32, msgpack.Timestamp)
 
 
@@ -182,12 +183,13 @@ def _checked_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
 
 def _check_writable(tree: Any) -> None:
     """The write side of the key and integer rule: what `_checked_map` refuses on read is refused here, so nothing
-    this codec writes is refused by its own decode. Iterative; it stops at the depth limit, which the definition rules."""
+    this codec writes is refused by its own decode. Iterative; the nesting limit is the definition's rule (a tree past it
+    is the definition's refusal), so the walk stops only where `packb` would, which also ends a cycle."""
     stack = [(tree, 1)]
     while stack:
         node, depth = stack.pop()
-        if depth > MAX_PAYLOAD_DEPTH + 1:
-            raise RecursionError("payload nests past the depth limit")
+        if depth > _PACK_DEPTH_LIMIT:
+            raise ValueError("recursion limit exceeded")
         if isinstance(node, int) and not _INTEGER_RANGE[0] <= node <= _INTEGER_RANGE[1]:
             raise PayloadCodecFault("integer_out_of_range")
         if isinstance(node, Mapping):
