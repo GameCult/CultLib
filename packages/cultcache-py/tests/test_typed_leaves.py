@@ -44,6 +44,21 @@ def _is_signalling_float32(payload: bytes) -> bool:
     return word & 0x7F800000 == 0x7F800000 and word & 0x007FFFFF != 0 and word & 0x00400000 == 0
 
 
+def _kinded(node):
+    """A decoded tree with its kinds kept: bool, int and float never compare equal; numeric width is not part of it."""
+    if isinstance(node, bool):
+        return ("bool", node)
+    if isinstance(node, int):
+        return ("int", node)
+    if isinstance(node, float):
+        return ("float", "nan" if math.isnan(node) else struct.pack(">d", node))
+    if isinstance(node, (list, tuple)):
+        return ("array", [_kinded(item) for item in node])
+    if isinstance(node, dict):
+        return ("map", [(_kinded(k), _kinded(v)) for k, v in node.items()])
+    return (type(node).__name__, node)
+
+
 NUMERIC = {"int32": t.int32, "int64": t.int64, "float32": t.float32, "float64": t.float64}
 
 
@@ -195,9 +210,21 @@ class LeavesReadsVectorTests(unittest.TestCase):
                     document.decode_payload(payload)
             else:
                 written = document.encode_payload(document.decode_payload(payload))
-                self.assertEqual(msgpack.unpackb(written, raw=False), msgpack.unpackb(rewrite, raw=False), label)
+                self.assertEqual(_kinded(msgpack.unpackb(written, raw=False)), _kinded(msgpack.unpackb(rewrite, raw=False)), label)
             count += 1
         self.assertEqual(count, 28)
+
+    def test_the_any_comparison_tells_bool_int_and_float_apart_and_ignores_only_numeric_width(self) -> None:
+        # ruling any-rewrite-binds-kind-and-value: Python's == makes True == 1 == 1.0; _kinded does not.
+        self.assertNotEqual(_kinded([True]), _kinded([1]))
+        self.assertNotEqual(_kinded([1]), _kinded([1.0]))
+        self.assertNotEqual(_kinded({"k": [5]}), _kinded({"k": [5.0]}))
+        self.assertNotEqual(_kinded([0.0]), _kinded([-0.0]))
+        self.assertNotEqual(_kinded(["a"]), _kinded([b"a"]))
+        self.assertEqual(_kinded(msgpack.unpackb(bytes.fromhex("9105"))), _kinded(msgpack.unpackb(bytes.fromhex("91cc05"))))
+        self.assertEqual(
+            _kinded(msgpack.unpackb(bytes.fromhex("91ca3fc00000"))), _kinded(msgpack.unpackb(bytes.fromhex("91cb3ff8000000000000")))
+        )
 
     def test_any_refuses_an_extension_that_is_not_a_timestamp_wherever_it_nests(self) -> None:
         document = _slot(t.any)
@@ -499,6 +526,17 @@ class LeafBoundaryTests(unittest.TestCase):
             run()
         return str(caught.exception)
 
+    def test_float32_writes_a_subnormal_as_a_float_32_with_its_exact_bits(self) -> None:
+        document = _slot(t.float32)
+        for value, expected in (
+            (1e-40, "91ca000116c2"),
+            (-1e-40, "91ca800116c2"),
+            (1.401298464324817e-45, "91ca00000001"),
+            (7e-46, "91ca00000000"),
+            (1.1754942106924411e-38, "91ca007fffff"),
+        ):
+            self.assertEqual(document.encode_payload({"v": value}).hex(), expected, repr(value))
+
     def test_float_leaves_write_an_int_across_the_whole_64_bit_range_and_refuse_beyond_it(self) -> None:
         for leaf in (t.float32, t.float64):
             for ok in (3, 0, -(2**63), 2**64 - 1):
@@ -613,6 +651,65 @@ class PackTreeTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "Union 'Node' arm 1: Text slot 1 (content): expected a string, found integer")
         self.assertNotIn("hammer", str(caught.exception))
         self.assertEqual(node.decode([1, ["hammer", "x"]]), UnionArm("Text", {"id": "hammer", "content": "x"}))
+
+
+PY_STORES = VECTORS / "py-store"
+# slot -> the C# type name a wrong catalog gives it; the reference refuses each ("slot N changed type").
+WRONG_NAMES = {3: "System.Int64", 5: "System.Double", 7: "System.Int32", 14: "System.Double[]"}
+
+
+def _python_authored_leaf_record() -> dict:
+    return {
+        "id": "py", "flag": False, "blob": bytearray([1, 255]), "i": -(2**31), "l": 2**63 - 1, "f": 0.1, "d": 1e-300,
+        "maybe_i": None, "tags": [], "names": ("\u00e9", "z"), "any": {"k": [1, True, None, 2.5, "s"], "n": -3},
+        "nested": None, "items": [{"n": "one", "w": 2**53 + 2**29 + 1}, {"n": "two", "w": 1e-40}],
+        "shape": UnionArm("LeafCircle", {"r": 0.1}), "floats": [0.1, 3, -0.0, 1e39], "maybe_f": None,
+    }
+
+
+def _write_store(path: Path, document, value: dict) -> None:
+    path.unlink(missing_ok=True)
+    cache = CultCache.builder().register_document_type(document).add_generic_store(SingleFileMessagePackBackingStore(path)).build()
+    cache.pull_all_backing_stores()
+    cache.put(document, value["id"], value)
+
+
+def _wrong_catalog(document, slot: int):
+    import dataclasses
+
+    good = tuple(document.catalog_entry().members)
+    return dataclasses.replace(
+        document, members=lambda: tuple(dataclasses.replace(m, type_name=WRONG_NAMES[slot]) if m.slot == slot else m for m in good)
+    )
+
+
+class PythonWrittenStoreVectorTests(unittest.TestCase):
+    """The stores under tests/vectors/numeric-leaves/py-store are written only by this class, with CULTCACHE_WRITE_VECTORS=1;
+    GameCult.Caching.Tests (PythonWrittenStoreTests) opens them with the C# reference and asserts every field."""
+
+    def test_the_committed_stores_are_what_the_definition_writes_and_read_back(self) -> None:
+        import os
+        import tempfile
+
+        document = _leaf_record_document()
+        value = _python_authored_leaf_record()
+        if os.environ.get("CULTCACHE_WRITE_VECTORS"):
+            PY_STORES.mkdir(exist_ok=True)
+            _write_store(PY_STORES / "leaf-record.cc", document, value)
+            for slot in WRONG_NAMES:
+                _write_store(PY_STORES / f"wrong-slot-{slot}.cc", _wrong_catalog(document, slot), value)
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh = Path(tmp) / "fresh.cc"
+            _write_store(fresh, document, value)
+            [committed] = SingleFileMessagePackBackingStore(PY_STORES / "leaf-record.cc").pull_all()
+            [again] = SingleFileMessagePackBackingStore(fresh).pull_all()
+            self.assertEqual(committed.payload, again.payload)
+            self.assertEqual(committed.catalog_entry.members, again.catalog_entry.members)
+        self.assertEqual(committed.payload, document.encode_payload(value))
+        for slot, name in WRONG_NAMES.items():
+            [wrong] = SingleFileMessagePackBackingStore(PY_STORES / f"wrong-slot-{slot}.cc").pull_all()
+            self.assertEqual(wrong.catalog_entry.members[slot].type_name, name)
+            self.assertEqual(wrong.payload, committed.payload)
 
 
 class StoreRoundTripTests(unittest.TestCase):

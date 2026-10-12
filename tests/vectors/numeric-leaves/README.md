@@ -1,6 +1,6 @@
 # numeric-leaves vectors
 
-Written only by the C# reference, `tests/GameCult.Caching.Tests/NumericLeafVectorTests.cs`, with
+Except `py-store/` (below), written only by the C# reference, `tests/GameCult.Caching.Tests/NumericLeafVectorTests.cs`, with
 `CULTCACHE_WRITE_VECTORS=1`. Every other run reads these files and compares them byte for byte; a changed vector is a
 reviewed commit. Other runtimes decode them and are held to the same answers.
 
@@ -24,9 +24,16 @@ These vectors hold every leaf kind, not only numbers. A document with one slot, 
   `d7ff0000000000000000`, `c70cff000000000000000000000000`, which the `any` leaf reads and rewrites as `91d6ff00000000`),
   same-shaped non-timestamp exts (`d6fe00000000`, `c70100ff`, which it refuses), and complete, int-in-float-slot and
   str-in-float-slot two-slot records.
-  On the `any` leaf's rewrite rows a sibling is held to the rewrite's decoded value, not its MessagePack integer width
-  (the reference widens a boxed fixint, so the record `9105` rewrites as `91cc05`; ruling `cultlib-gaps:ruling:any-rewrite-binds-value`).
+  On the `any` leaf's rewrite rows a sibling is held to the rewrite's value kind (nil, bool, int, float, str, bin, array, map; bool,
+  int and float are distinct, so `true`, `1` and `1.0` never match) and its exact value, recursively, not to its MessagePack numeric
+  width (the reference widens a boxed fixint, so the record `9105` rewrites as `91cc05`, and a float 32 as a float 64; ruling
+  `cultlib-gaps:ruling:any-rewrite-binds-kind-and-value`).
   Every other leaf's rewrite binds bytes.
 - `leaf-record.msgpack`: `[members, payload]` for one `cultcache.leaf-record` document holding every leaf. `members` are
   the catalog rows the single-file store writes, each `[slot, memberName, typeName, isReference, isMany,
   targetSchemaName, isName, indexAlias]`; `payload` (bin) is the record's bytes in that store.
+
+- `py-store/`: single-file stores written only by cultcache-py (`PythonWrittenStoreVectorTests` in `test_typed_leaves.py`, with
+  `CULTCACHE_WRITE_VECTORS=1`), never by C#. `leaf-record.cc` holds one `cultcache.leaf-record` document authored in Python; the
+  reference (`PythonWrittenStoreTests`) opens it and asserts every field. `wrong-slot-N.cc` is the same store whose catalog names
+  another C# type for slot N (3, 5, 7, 14); the reference refuses each with `slot N changed type`.
