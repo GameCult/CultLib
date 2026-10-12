@@ -29,12 +29,11 @@ const float CULTMATH_CYCLES_RGB_TO_Y_B = 0.0721927434;
 float cultmath_cycles_divide(float a, float b) { return b != 0.0 ? a / b : 0.0; }
 
 // safe_powf with compatible_powf. A negative base takes an integral exponent's parity; a base below zero
-// with a fractional exponent is 0, and so is one with an exponent past the int range, where Cycles' int
-// round trip cannot hold it.
+// with a fractional exponent is 0.
 float cultmath_cycles_power(float a, float b)
 {
     float whole = b >= 0.0 ? floor(b) : ceil(b);
-    if (a < 0.0 && (b != whole || b >= 2147483648.0 || b < -2147483648.0))
+    if (a < 0.0 && b != whole)
         return 0.0;
     if (b == 0.0)
         return 1.0;
