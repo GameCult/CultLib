@@ -1,5 +1,6 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
+from . import leaves
 from .cache import CultCache, CultCacheBuilder
 from .documents import (
     MAX_PAYLOAD_DEPTH,
@@ -7,7 +8,6 @@ from .documents import (
     CultCachePayloadDepthError,
     DatabaseEntryField,
     DocumentDefinition,
-    SlotCodec,
     UnionArm,
     database_entry_field,
     define_database_entry_type,
@@ -16,6 +16,7 @@ from .documents import (
     define_record_codec,
     define_union,
 )
+from .leaves import SlotCodec
 from .stores import JsonLinesBackingStore, SingleFileMessagePackBackingStore
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "SingleFileMessagePackBackingStore",
     "SlotCodec",
     "UnionArm",
+    "leaves",
     "database_entry_field",
     "define_database_entry_type",
     "define_document_registry",

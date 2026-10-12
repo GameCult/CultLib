@@ -1,50 +1,29 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
 from typing import Any
 
-import msgpack
-
-from . import CultCache, CultCacheSchemaCatalogMember, SingleFileMessagePackBackingStore, define_document_type
+from . import CultCache, SingleFileMessagePackBackingStore, database_entry_field, define_database_entry_type, leaves as t
 
 INTEROP_SCHEMA_VERSION = "cultcache.interop_note.v1"
 
-interop_note_document = define_document_type(
+interop_note_document = define_database_entry_type(
     "cultcache.interop-note",
-    encode=lambda note: [
-        note["schemaVersion"],
-        note["documentId"],
-        note["authorRuntimeId"],
-        note["title"],
-        note["body"],
-        note["tags"],
+    [
+        database_entry_field("schemaVersion", 0, codec=t.nullable(t.string)),
+        database_entry_field("documentId", 1, codec=t.nullable(t.string)),
+        database_entry_field("authorRuntimeId", 2, codec=t.nullable(t.string)),
+        database_entry_field("title", 3, codec=t.nullable(t.string)),
+        database_entry_field("body", 4, codec=t.nullable(t.string)),
+        database_entry_field("tags", 5, default=list, codec=t.nullable(t.array(t.string))),
     ],
-    decode=lambda slots: {
-        "schemaVersion": slots[0],
-        "documentId": slots[1],
-        "authorRuntimeId": slots[2],
-        "title": slots[3],
-        "body": slots[4],
-        "tags": slots[5] if len(slots) > 5 and slots[5] is not None else [],
-    },
     name="documentId",
-    payload_encoder=lambda value: msgpack.packb(value, use_bin_type=True),
-    payload_decoder=lambda payload: msgpack.unpackb(payload, raw=False),
     schema_id="cultcache.interop-note",
     schema_name="cultcache.interop-note",
     schema_version=INTEROP_SCHEMA_VERSION,
     content_hash="cultcache.interop-note",
-    canonical_schema_json='{"schemaName":"cultcache.interop-note","schemaVersion":"cultcache.interop_note.v1","members":[{"slot":0,"name":"SchemaVersion","type":"System.String","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":false},{"slot":1,"name":"DocumentId","type":"System.String","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":true},{"slot":2,"name":"AuthorRuntimeId","type":"System.String","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":false},{"slot":3,"name":"Title","type":"System.String","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":false},{"slot":4,"name":"Body","type":"System.String","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":false},{"slot":5,"name":"Tags","type":"System.String[]","isReference":false,"many":false,"targetSchemaName":null,"indexAlias":null,"isName":false}]}',
     compatible_schema_ids=("cultcache.interop-note",),
-    members=(
-        CultCacheSchemaCatalogMember(0, "SchemaVersion", "System.String"),
-        CultCacheSchemaCatalogMember(1, "DocumentId", "System.String", is_name=True),
-        CultCacheSchemaCatalogMember(2, "AuthorRuntimeId", "System.String"),
-        CultCacheSchemaCatalogMember(3, "Title", "System.String"),
-        CultCacheSchemaCatalogMember(4, "Body", "System.String"),
-        CultCacheSchemaCatalogMember(5, "Tags", "System.String[]"),
-    ),
 )
 
 

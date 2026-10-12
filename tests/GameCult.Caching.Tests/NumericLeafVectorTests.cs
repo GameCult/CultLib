@@ -2,9 +2,11 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using GameCult.Caching.MessagePack;
 using MessagePack;
 using NUnit.Framework;
@@ -18,11 +20,51 @@ namespace GameCult.Caching.Tests
     {
         private const string WriteVariable = "CULTCACHE_WRITE_VECTORS";
         private static readonly string[] Leaves = { "int32", "int64", "float32", "float64" };
+        private static readonly string[] WideLeaves = { "string", "boolean", "bytes", "any", "list-string", "array-string", "nullable-int32", "list-int32", "record", "list-record", "union" };
 
         [MessagePackObject] public sealed class Int32Slot { [Key(0)] public int V; }
         [MessagePackObject] public sealed class Int64Slot { [Key(0)] public long V; }
         [MessagePackObject] public sealed class Float32Slot { [Key(0)] public float V; }
         [MessagePackObject] public sealed class Float64Slot { [Key(0)] public double V; }
+
+        // The wider leaves: one-slot records [value] for each kind of slot a document can declare.
+        [MessagePackObject] public sealed class StringSlot { [Key(0)] public string? V; }
+        [MessagePackObject] public sealed class BoolSlot { [Key(0)] public bool V; }
+        [MessagePackObject] public sealed class BytesSlot { [Key(0)] public byte[]? V; }
+        [MessagePackObject] public sealed class AnySlot { [Key(0)] public object? V; }
+        [MessagePackObject] public sealed class ListStringSlot { [Key(0)] public List<string>? V; }
+        [MessagePackObject] public sealed class ArrayStringSlot { [Key(0)] public string[]? V; }
+        [MessagePackObject] public sealed class NullableInt32Slot { [Key(0)] public int? V; }
+        [MessagePackObject] public sealed class ListInt32Slot { [Key(0)] public List<int>? V; }
+        [MessagePackObject] public sealed class LeafInner { [Key(0)] public string N = string.Empty; [Key(1)] public float W; }
+        [MessagePackObject] public sealed class RecordSlot { [Key(0)] public LeafInner? V; }
+        [MessagePackObject] public sealed class ListRecordSlot { [Key(0)] public List<LeafInner>? V; }
+        [Union(0, typeof(LeafCircle))] public interface ILeafShape { }
+        [MessagePackObject] public sealed class LeafCircle : ILeafShape { [Key(0)] public float R; }
+        [MessagePackObject] public sealed class UnionSlot { [Key(0)] public ILeafShape? V; }
+
+        // One member of every leaf kind: the record whose catalog rows and payload leaf-record.msgpack pins.
+        [CultDocument("cultcache.leaf-record", "cultcache.leaf_record.v1")]
+        [MessagePackObject]
+        public sealed class LeafRecord
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public bool Flag;
+            [Key(2)] public byte[] Blob = Array.Empty<byte>();
+            [Key(3)] public int I;
+            [Key(4)] public long L;
+            [Key(5)] public float F;
+            [Key(6)] public double D;
+            [Key(7)] public int? MaybeI;
+            [Key(8)] public List<string> Tags = new();
+            [Key(9)] public string[] Names = Array.Empty<string>();
+            [Key(10)] public object? Any;
+            [Key(11)] public LeafInner? Nested;
+            [Key(12)] public List<LeafInner> Items = new();
+            [Key(13)] public ILeafShape? Shape;
+            [Key(14)] public float[] Floats = Array.Empty<float>();
+            [Key(15)] public float? MaybeF;
+        }
 
         // A record of every leaf kind, the shape a replicated document has.
         [MessagePackObject]
@@ -39,7 +81,7 @@ namespace GameCult.Caching.Tests
 
         private static readonly MessagePackSerializerOptions Options = CultDocumentMessagePackSerialization.OptionsFor(typeof(NumericLeafVectorTests).Assembly);
 
-        private static string VectorPath(string name)
+        internal static string VectorPath(string name)
         {
             for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
             {
@@ -197,6 +239,120 @@ namespace GameCult.Caching.Tests
             return buffer.WrittenSpan.ToArray();
         }
 
+        // ---- the wider leaves: reads and one record of every leaf ----
+
+        // The value token of each wide read case, as MessagePack hex. c1 is a code no reader assigns; d40100 is an application ext, which the any leaf refuses; d6ff00000000, d7ff0000000000000000 and c70cff... are the timestamp32, timestamp64 and timestamp96 exts, which the any leaf reads, while d6fe00000000 and c70100ff are same-shaped non-timestamp exts, which it refuses; 92a161ca3f800000, 92a16105 and 92a161a162 give the record slots a float, an int and a str in the second slot.
+        private static readonly string[] WideValues =
+        {
+            "05", "ff", "cb3ff8000000000000", "ca3fc00000", "c0", "c2", "c3", "a161", "d90161", "c40100", "90", "9101", "91a161", "80", "81a161a162",
+            "920091ca3f800000", "9291a161ca3f800000", "9192a161ca3f800000", "c1",
+            "92a161ca3f800000", "92a16105", "92a161a162", "d40100",
+            "d6ff00000000", "d7ff0000000000000000", "c70cff000000000000000000000000", "d6fe00000000", "c70100ff",
+        };
+
+        // What the reference reads from a one-slot record of the leaf, and the bytes it writes back for what it read.
+        private static (bool Accepted, byte[] Rewrite) ReadWide(string leaf, byte[] payload) => leaf switch
+        {
+            "string" => Reread<StringSlot>(payload),
+            "boolean" => Reread<BoolSlot>(payload),
+            "bytes" => Reread<BytesSlot>(payload),
+            "any" => Reread<AnySlot>(payload),
+            "list-string" => Reread<ListStringSlot>(payload),
+            "array-string" => Reread<ArrayStringSlot>(payload),
+            "nullable-int32" => Reread<NullableInt32Slot>(payload),
+            "list-int32" => Reread<ListInt32Slot>(payload),
+            "record" => Reread<RecordSlot>(payload),
+            "list-record" => Reread<ListRecordSlot>(payload),
+            _ => Reread<UnionSlot>(payload),
+        };
+
+        private static (bool Accepted, byte[] Rewrite) Reread<T>(byte[] payload)
+        {
+            T value;
+            try
+            {
+                value = MessagePackSerializer.Deserialize<T>(payload, Options);
+            }
+            catch (Exception)
+            {
+                return (false, Array.Empty<byte>());
+            }
+
+            return (true, MessagePackSerializer.Serialize(value, Options));
+        }
+
+        // leaves-reads.msgpack: an array of [leaf, payload (bin), accepted, rewrite (bin: the reference's bytes for what it read, empty when refused)].
+        private static byte[] LeavesReadsVector()
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(buffer);
+            writer.WriteArrayHeader(WideLeaves.Length * WideValues.Length);
+            foreach (var leaf in WideLeaves)
+                foreach (var value in WideValues)
+                {
+                    var payload = Payload(value);
+                    var (accepted, rewrite) = ReadWide(leaf, payload);
+                    writer.WriteArrayHeader(4);
+                    writer.Write(leaf);
+                    writer.Write(payload);
+                    writer.Write(accepted);
+                    writer.Write(rewrite);
+                }
+
+            writer.Flush();
+            return buffer.WrittenSpan.ToArray();
+        }
+
+        // Every float32 slot holds 0.1f, which float32 holds only as its own rounding, and the double slot 0.1, which float32 cannot hold; 1.5f is exact.
+        private static LeafRecord Everything() => new()
+        {
+            Id = "leaves", Flag = true, Blob = new byte[] { 1, 2, 3 }, I = -7, L = 5_000_000_000, F = 0.1f, D = 0.1, MaybeI = 9,
+            Tags = new List<string> { "a", "b" }, Names = new[] { "x", "y" }, Any = "text",
+            Nested = new LeafInner { N = "inner", W = 0.1f }, Items = new List<LeafInner> { new() { N = "one", W = 0.1f }, new() { N = "two", W = 1.5f } },
+            Shape = new LeafCircle { R = 0.1f }, Floats = new[] { 0.1f, 1.5f }, MaybeF = 0.1f,
+        };
+
+        // leaf-record.msgpack: [members, payload]. members are the catalog rows the store writes for LeafRecord, each
+        // [slot, memberName, typeName, isReference, isMany, targetSchemaName, isName, indexAlias]; payload (bin) is the record's bytes in that store.
+        private static async Task<byte[]> LeafRecordVector()
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"cultlib-leaf-record-{Guid.NewGuid():N}.cc");
+            try
+            {
+                var store = new SingleFileMessagePackBackingStore(path);
+                var cache = new CultCache();
+                cache.AddBackingStore(store);
+                await cache.AddAsync(Everything());
+                store.PushAll();
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+                var members = snapshot.SchemaCatalog.Single(entry => entry.SchemaName == "cultcache.leaf-record").Members;
+                var buffer = new ArrayBufferWriter<byte>();
+                var writer = new MessagePackWriter(buffer);
+                writer.WriteArrayHeader(2);
+                writer.WriteArrayHeader(members.Length);
+                foreach (var member in members)
+                {
+                    writer.WriteArrayHeader(8);
+                    writer.Write(member.Slot);
+                    writer.Write(member.MemberName);
+                    writer.Write(member.TypeName);
+                    writer.Write(member.IsReference);
+                    writer.Write(member.IsMany);
+                    writer.Write(member.TargetSchemaName);
+                    writer.Write(member.IsName);
+                    writer.Write(member.IndexAlias);
+                }
+
+                writer.Write(snapshot.Records.Single().Payload);
+                writer.Flush();
+                return buffer.WrittenSpan.ToArray();
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
         // ---- tests ----
 
         [Test]
@@ -227,6 +383,30 @@ namespace GameCult.Caching.Tests
             Check("mixed-record.msgpack", written);
             var read = MessagePackSerializer.Deserialize<Mixed>(written, Options);
             Assert.That((read.Id, read.I, read.L, read.F, read.D), Is.EqualTo(("n1", 7, 8L, 1.5f, 2.5)));
+        }
+
+        [Test]
+        public void LeavesReadsVectorMatches() => Check("leaves-reads.msgpack", LeavesReadsVector());
+
+        [Test]
+        public async Task LeafRecordVectorMatches()
+        {
+            var written = await LeafRecordVector();
+            Check("leaf-record.msgpack", written);
+            var reader = new MessagePackReader(written);
+            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(2));
+            Assert.That(reader.ReadArrayHeader(), Is.EqualTo(16), "one member per leaf");
+        }
+
+        [Test]
+        public void LeavesReadCoverEveryLeafAndBothOutcomes()
+        {
+            var rows = WideLeaves.SelectMany(leaf => WideValues.Select(value => (leaf, result: ReadWide(leaf, Payload(value))))).ToList();
+            foreach (var leaf in WideLeaves)
+            {
+                Assert.That(rows.Count(row => row.leaf == leaf && row.result.Accepted), Is.GreaterThan(0), $"{leaf} accepts");
+                Assert.That(rows.Count(row => row.leaf == leaf && !row.result.Accepted), Is.GreaterThan(0), $"{leaf} refuses");
+            }
         }
 
         [Test]

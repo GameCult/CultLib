@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import collections
 import dataclasses
@@ -17,6 +17,7 @@ from cultcache_py import (
     CultCache,
     CultCachePayloadDepthError,
     DatabaseEntryField,
+    SlotCodec,
     SingleFileMessagePackBackingStore,
     UnionArm,
     database_entry_field,
@@ -24,55 +25,92 @@ from cultcache_py import (
     define_document_type,
     define_record_codec,
     define_union,
+    leaves as t,
 )
 
 VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "union-parity"
 
+_GOLDEN = "GameCult.Caching.Tests.UnionParityVectorTests+"
+_node = t.nullable(t.lazy(lambda: node))
 composition = define_record_codec(
-    "Composition", [("name", 0), database_entry_field("body", 1, codec=lambda: node)]
+    "Composition",
+    [database_entry_field("name", 0, codec=t.string), database_entry_field("body", 1, codec=_node)],
+    type_name=_GOLDEN + "Composition",
 )
-box = define_record_codec("Box", [("id", 0), database_entry_field("children", 1, codec=lambda: node, many=True)])
-text = define_record_codec("Text", [("id", 0), ("content", 1)])
+box = define_record_codec(
+    "Box",
+    [
+        database_entry_field("id", 0, codec=t.string),
+        database_entry_field("children", 1, codec=t.list(t.lazy(lambda: node))),
+    ],
+    type_name=_GOLDEN + "Box",
+)
+text = define_record_codec(
+    "Text",
+    [database_entry_field("id", 0, codec=t.string), database_entry_field("content", 1, codec=t.string)],
+    type_name=_GOLDEN + "Text",
+)
 use = define_record_codec(
     "Use",
     [
-        ("id", 0),
+        database_entry_field("id", 0, codec=t.string),
         database_entry_field("composition", 1, codec=composition),
-        database_entry_field("slots", 2, codec=lambda: node, many=True),
+        database_entry_field("slots", 2, codec=t.list(t.nullable(t.lazy(lambda: node)))),
     ],
+    type_name=_GOLDEN + "Use",
 )
-image = define_record_codec("Image", [("id", 0), ("uri", 1), ("alt", 3)])
-wrap = define_record_codec("Wrap", [database_entry_field("inner", 0, codec=lambda: node)])
+image = define_record_codec(
+    "Image",
+    [
+        database_entry_field("id", 0, codec=t.string),
+        database_entry_field("uri", 1, codec=t.string),
+        database_entry_field("alt", 3, codec=t.string),
+    ],
+    type_name=_GOLDEN + "Image",
+)
+wrap = define_record_codec("Wrap", [database_entry_field("inner", 0, codec=_node)], type_name=_GOLDEN + "Wrap")
 node = define_union(
-    "Node", {0: ("Box", box), 1: ("Text", text), 2: ("Use", use), 5: ("Image", image), 6: ("Wrap", wrap)}
+    "Node",
+    {0: ("Box", box), 1: ("Text", text), 2: ("Use", use), 5: ("Image", image), 6: ("Wrap", wrap)},
+    type_name=_GOLDEN + "Node",
 )
 outcome = define_union(
     "Outcome",
     {
-        0: ("Pending", define_record_codec("Pending", [("message", 0)])),
-        1: ("Completed", define_record_codec("Completed", [("source_version", 0)])),
+        0: ("Pending", define_record_codec("Pending", [database_entry_field("message", 0, codec=t.string)])),
+        1: ("Completed", define_record_codec("Completed", [database_entry_field("source_version", 0, codec=t.int32)])),
         2: ("Denied", None),
         -2147483648: ("Floor", None),
         2147483647: ("Ceiling", None),
     },
+    type_name=_GOLDEN + "Outcome",
 )
-tool = define_record_codec("Tool", [("name", 0), ("uses", 1)])
-part = define_record_codec("Part", [("name", 0), ("count", 1)])
-gem = define_record_codec("Gem", [("name", 0)])
-item = define_union("Item", {0: ("Gem", gem), 1: ("Tool", tool), 2: ("Part", part)})
-crafted = define_union("CraftedItem", {0: ("Tool", tool), 1: ("Part", part)})
+tool = define_record_codec(
+    "Tool",
+    [database_entry_field("name", 0, codec=t.string), database_entry_field("uses", 1, codec=t.int32)],
+    type_name=_GOLDEN + "Tool",
+)
+part = define_record_codec(
+    "Part",
+    [database_entry_field("name", 0, codec=t.string), database_entry_field("count", 1, codec=t.int32)],
+    type_name=_GOLDEN + "Part",
+)
+gem = define_record_codec("Gem", [database_entry_field("name", 0, codec=t.string)], type_name=_GOLDEN + "Gem")
+item = define_union("Item", {0: ("Gem", gem), 1: ("Tool", tool), 2: ("Part", part)}, type_name=_GOLDEN + "Item")
+crafted = define_union("CraftedItem", {0: ("Tool", tool), 1: ("Part", part)}, type_name=_GOLDEN + "CraftedItem")
 
 surface_document = define_database_entry_type(
     "tests.union_surface",
     [
-        ("id", 0),
-        ("version", 1),
-        database_entry_field("root", 2, codec=node),
-        database_entry_field("outcomes", 3, codec=outcome, many=True),
-        database_entry_field("part", 4, codec=item),
-        database_entry_field("crafted", 5, codec=crafted),
-        database_entry_field("missing", 6, codec=node),
+        database_entry_field("id", 0, codec=t.string),
+        database_entry_field("version", 1, codec=t.int32),
+        database_entry_field("root", 2, codec=_node),
+        database_entry_field("outcomes", 3, codec=t.list(outcome)),
+        database_entry_field("part", 4, codec=t.nullable(item)),
+        database_entry_field("crafted", 5, codec=t.nullable(crafted)),
+        database_entry_field("missing", 6, codec=_node),
     ],
+    name="id",
 )
 
 
@@ -201,9 +239,21 @@ class UnionSurfaceVectorTests(unittest.TestCase):
 class UnionCodecRuleTests(unittest.TestCase):
     CANARY = "canary-7f3a91"
 
-    def test_nil_union_is_nil_both_ways(self) -> None:
-        self.assertIsNone(node.encode(None))
-        self.assertIsNone(node.decode(None))
+    def test_a_union_refuses_nil_both_ways_unless_it_is_wrapped_in_nullable(self) -> None:
+        for refuse in (lambda: node.encode(None), lambda: node.decode(None)):
+            with self.assertRaises(ValueError) as caught:
+                refuse()
+            self.assertEqual(str(caught.exception), "Union 'Node': expected an arm, found nil")
+        maybe = t.nullable(node)
+        self.assertIsNone(maybe.encode(None))
+        self.assertIsNone(maybe.decode(None))
+        self.assertEqual(maybe.decode(maybe.encode(UnionArm("Text", {"id": "a", "content": "b"}))), UnionArm("Text", {"id": "a", "content": "b"}))
+        with self.assertRaises(ValueError) as write:
+            surface_document.encode_payload({**_surface_value(), "outcomes": [None]})
+        self.assertEqual(
+            str(write.exception),
+            "tests.union_surface slot 3 (outcomes): element 0: Union 'Outcome': expected an arm, found nil",
+        )
 
     def test_unit_arm_is_written_with_empty_slots_and_reads_back(self) -> None:
         self.assertEqual(outcome.encode(UnionArm("Denied")), [2, []])
@@ -257,17 +307,26 @@ class UnionCodecRuleTests(unittest.TestCase):
             UnionArm("Text", {"id": "a", "content": "b"}),
         )
 
-    def test_many_slot_requires_a_list_and_keeps_nil_elements(self) -> None:
+    def test_a_list_slot_requires_an_array_and_keeps_nil_elements_of_a_nullable_item(self) -> None:
         slots = [UnionArm("Text", {"id": "a", "content": "b"}), None]
-        encoded = use.encode({"id": "u", "composition": None, "slots": slots})
-        self.assertEqual(encoded, ["u", None, [[1, ["a", "b"]], None]])
+        inner = {"name": "c", "body": None}
+        encoded = use.encode({"id": "u", "composition": inner, "slots": slots})
+        self.assertEqual(encoded, ["u", ["c", None], [[1, ["a", "b"]], None]])
         self.assertEqual(use.decode(encoded)["slots"], slots)
         with self.assertRaises(ValueError) as caught:
-            use.decode(["u", None, self.CANARY])
-        self.assertEqual(str(caught.exception), "DatabaseEntry document type 'Use' slot 2 expected a MessagePack array")
+            use.decode(["u", ["c", None], self.CANARY])
+        self.assertEqual(str(caught.exception), "Use slot 2 (slots): expected an array, found string")
+        with self.assertRaises(ValueError) as nil_element:
+            box.decode(["b", [None]])
+        self.assertEqual(
+            str(nil_element.exception),
+            "Box slot 1 (children): element 0: Union 'Node': expected an arm, found nil",
+        )
 
     def test_a_list_of_nested_records_keeps_a_nil_element_as_csharp_writes_it(self) -> None:
-        row = define_record_codec("Row", [("id", 0), database_entry_field("cells", 1, codec=text, many=True)])
+        row = define_record_codec(
+            "Row", [("id", 0), database_entry_field("cells", 1, codec=t.list(t.nullable(text)))]
+        )
         cells = [None, {"id": "c", "content": "x"}, None]
         encoded = row.encode({"id": "r", "cells": cells})
         self.assertEqual(encoded, ["r", [None, ["c", "x"], None]])
@@ -307,22 +366,23 @@ class UnionCodecRuleTests(unittest.TestCase):
         for arm_name, key in (("Low", -(2**31)), ("Negative", -1), ("High", 2**31 - 1)):
             self.assertEqual(edge.encode(UnionArm(arm_name)), [key, []])
             self.assertEqual(edge.decode([key, []]), UnionArm(arm_name))
-        with self.assertRaises(ValueError) as caught:
-            database_entry_field("loose", 1, many=True)
-        self.assertEqual(str(caught.exception), "A many DatabaseEntry field requires a codec")
-        database_entry_field("fine", 1, codec=node, many=True)
+        for loose in (lambda: node, node.encode, "node", object):
+            with self.assertRaises(ValueError) as caught:
+                database_entry_field("loose", 1, codec=loose)  # type: ignore[arg-type]
+            self.assertIn("must be a SlotCodec", str(caught.exception))
+        with self.assertRaises(ValueError):
+            define_union("Loose", {0: ("A", lambda: node)})  # type: ignore[dict-item]
 
 
 class RecordCodecTests(unittest.TestCase):
-    def test_defaults_fill_a_missing_or_nil_slot_and_a_callable_default_is_called(self) -> None:
+    def test_a_default_fills_a_slot_past_the_payloads_end_and_a_callable_default_is_called(self) -> None:
         record = define_record_codec(
             "Defaulted",
             [("id", 0), ("label", 1, "none"), ("tags", 2, list), ("plain", 3, 0)],
         )
         self.assertEqual(record.decode(["a"]), {"id": "a", "label": "none", "tags": [], "plain": 0})
-        self.assertEqual(
-            record.decode(["a", None, None, None]), {"id": "a", "label": "none", "tags": [], "plain": 0}
-        )
+        self.assertEqual(record.decode(["a", "x"]), {"id": "a", "label": "x", "tags": [], "plain": 0})
+        self.assertEqual(record.decode(["a", None, None, None]), {"id": "a", "label": None, "tags": None, "plain": None})
         self.assertEqual(record.decode(["a", "x", ["t"], 5]), {"id": "a", "label": "x", "tags": ["t"], "plain": 5})
 
     def test_a_document_type_names_its_members_and_marks_the_name_and_index_slots(self) -> None:
@@ -332,7 +392,7 @@ class RecordCodecTests(unittest.TestCase):
             name="id",
             indexes={"by_owner": "owner"},
         )
-        members = {member.slot: member for member in document.members}
+        members = {member.slot: member for member in document.catalog_entry().members}
         self.assertEqual(
             [members[slot].member_name for slot in (0, 1, 2)], ["Id", "SourceVersion", "Owner"]
         )
@@ -341,7 +401,7 @@ class RecordCodecTests(unittest.TestCase):
 
     def test_a_document_without_a_string_name_marks_no_member_as_the_name(self) -> None:
         document = define_database_entry_type("tests.named", [("id", 0)], name=lambda value: value["id"])
-        self.assertFalse(document.members[0].is_name)
+        self.assertFalse(document.catalog_entry().members[0].is_name)
 
     def test_a_record_that_is_not_an_array_is_refused_naming_the_type_only(self) -> None:
         for refuse in (lambda r: r.decode({"id": "canary-7f3a91"}), lambda r: r.decode("canary-7f3a91")):
@@ -369,20 +429,18 @@ class RecordCodecTests(unittest.TestCase):
             define_record_codec("Nothing", [])
         self.assertEqual(str(empty.exception), "DatabaseEntry document types require at least one field")
 
-    def test_a_plain_field_helper_makes_a_slot_with_no_codec(self) -> None:
+    def test_a_plain_field_helper_makes_an_untyped_slot(self) -> None:
         plain = define_record_codec("Plain", [database_entry_field("id", 0), database_entry_field("label", 1)])
         self.assertEqual(plain.decode(plain.encode({"id": "a", "label": "b"})), {"id": "a", "label": "b"})
         self.assertEqual(plain.decode(["a"]), {"id": "a", "label": None})
         field = database_entry_field("id", 0)
-        self.assertIsNone(field.codec)
-        self.assertFalse(field.many)
+        self.assertIs(field.codec, t.any)
 
-    def test_a_directly_constructed_field_requires_a_default_and_is_plain_and_single(self) -> None:
+    def test_a_directly_constructed_field_requires_a_default_and_is_untyped(self) -> None:
         with self.assertRaises(TypeError):
             DatabaseEntryField(name="id", key=0)  # type: ignore[call-arg]
         field = DatabaseEntryField(name="id", key=0, default=dataclasses.MISSING)
-        self.assertIsNone(field.codec)
-        self.assertIs(field.many, False)
+        self.assertIs(field.codec, t.any)
 
     def test_slot_codecs_and_fields_are_immutable(self) -> None:
         with self.assertRaises(dataclasses.FrozenInstanceError):
