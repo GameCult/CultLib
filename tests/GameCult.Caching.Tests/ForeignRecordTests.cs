@@ -1011,10 +1011,10 @@ namespace GameCult.Caching.Tests
                         store.PushAll();
                         break;
                     case DirectWrite.CommitUpsert:
-                        store.CommitBatch(new CultCommitRequest(new[] { mine }, Array.Empty<CultStoredDocument>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        store.CommitBatch(new CultCommitRequest(new[] { mine }, Array.Empty<CultStoredDocument>(), Array.Empty<string>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
                         break;
                     case DirectWrite.CommitDelete:
-                        store.CommitBatch(new CultCommitRequest(Array.Empty<CultStoredDocument>(), new[] { held }, Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        store.CommitBatch(new CultCommitRequest(Array.Empty<CultStoredDocument>(), new[] { held }, Array.Empty<string>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
                         break;
                 }
             })!;
@@ -1026,9 +1026,10 @@ namespace GameCult.Caching.Tests
             Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("theirs"));
         }
 
-        // A removal of a foreign record, which the cache does not hold, is refused typed: the caller is never told it removed what the
-        // store still carries. The store is read as it is at the removal, so a foreign record another writer added after the load
-        // is refused too, and listed foreign from then on.
+        // A removal of a foreign record, which the cache does not hold, is refused typed where the store judges it under its lock: at
+        // the commit that carries it, or the flush that follows a Remove, which itself costs nothing and returns false. The caller is
+        // never told a write removed what the store still carries. The store is read at that judgement, so a foreign record another
+        // writer added after the load is refused too, and listed foreign from then on.
         [Test]
         public void RemovingAForeignRecordIsRefusedNotReportedAsDone([Values] bool directory, [Values] bool batch, [Values] bool appearedAfterLoad)
         {
@@ -1054,7 +1055,10 @@ namespace GameCult.Caching.Tests
                     if (batch)
                         cache.Commit(stage => stage.Remove(W));
                     else
-                        cache.Remove(W);
+                    {
+                        Assert.That(cache.Remove(W), Is.False, "a key the cache does not hold costs nothing at the call");
+                        cache.FlushAsync().GetAwaiter().GetResult();
+                    }
                 })!;
                 Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
                 Assert.That(cache.IsDirty, Is.False);
@@ -1062,6 +1066,164 @@ namespace GameCult.Caching.Tests
                 Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False, "a key nothing holds is still no removal");
                 Assert.That(Fingerprint(path), Is.EqualTo(before));
             }
+        }
+
+        // A write that removes a key the cache does not hold is judged under the store's lock, after the load: a foreign record another
+        // writer committed in between refuses the whole commit, typed, and nothing the commit would have written lands.
+        [Test]
+        public void AForeignRecordThatLandsBetweenTheLoadAndTheCommitRefusesTheCommitThatRemovesIt([Values] bool directory)
+        {
+            var path = PathOf("window.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var a = Open(path, DeckOnly, directory);
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            var before = Fingerprint(path);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => a.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf(Canary), D);
+                batch.Remove(W);
+            }))!;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+                Assert.That(refusal.Message, Does.Not.Contain(Canary));
+                Assert.That(Fingerprint(path), Is.EqualTo(before), "nothing was written, d included");
+                Assert.That(a.IsDirty, Is.False);
+            });
+        }
+
+        // Removing a key nothing holds reads no store: the judgement is the flush's, so a store that cannot be read costs the removal
+        // nothing and the flush is where it is read.
+        [Test]
+        public void RemovingAnUnheldKeyReadsNothingUntilTheFlush([Values] bool directory)
+        {
+            var path = Seeded("unreadable.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            var original = File.ReadAllBytes(path);
+            File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            try
+            {
+                Assert.DoesNotThrow(() => Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False));
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            }
+            finally
+            {
+                File.WriteAllBytes(path, original);
+            }
+        }
+
+        // A checked key is judged and never removed: another writer's declared record at it stays where it is.
+        [Test]
+        public void ACheckedKeyIsNeverRemoved([Values] bool directory)
+        {
+            var path = PathOf("checked.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var a = Open(path, Full, directory);
+            Assert.That(a.Remove(W), Is.False);
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
+            var theirs = Stored(path, W);
+
+            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult());
+
+            Assert.That(Stored(path, W), Is.EqualTo(theirs), "the record at the checked key is still the other writer's bytes");
+            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult(), "a flush clears what it judged");
+        }
+
+        // ExpectUnchanged compares the foreign records a store carries at the versions it read them: it holds right after the load,
+        // and fails, writing nothing, once another writer changed one.
+        [Test]
+        public void ExpectUnchangedHoldsOverAStoreCarryingAForeignRecord([Values] bool directory)
+        {
+            var path = Seeded("expect-unchanged.cc", directory);
+            using var a = Open(path, DeckOnly, directory);
+            Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("e"), E);
+            }), Is.True, "nothing changed since the load");
+
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("changed"), W));
+            var before = Fingerprint(path);
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("f"), new CultRecordKey("f"));
+            }), Is.False, "another writer changed the foreign record");
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // A foreign key listed at the load that another writer then replaced with a record this cache reads but does not declare: the
+        // refused removal (judged at the flush) reloads it read-only and takes it off the foreign list.
+        [Test]
+        public void AListedForeignKeyBecomesReadOnlyWhenARemovalOfItIsRefused([Values] bool directory)
+        {
+            var path = Seeded("delist.cc", directory);
+            using var a = Open(path, DeckOnly, directory);
+            Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+            Move(path, W, "moved", directory);
+
+            Assert.That(a.Remove(W), Is.False);
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => a.FlushAsync().GetAwaiter().GetResult())!;
+            RefusedOnDisk(refusal, W);
+
+            Assert.That(StoreOf(a).ForeignRecords, Is.Empty, "no longer foreign");
+            Assert.That(a.Get(W), Is.Not.Null, "held, read-only");
+            Assert.Throws<CultSchemaConflictException>(() => a.Remove(W), "refused at the call now: the cache holds it");
+        }
+
+        // A single-file store holding a variant refuses a write after another writer changed it; a changed key whose record this cache
+        // does not read is listed as foreign by that refusal, as a load lists it.
+        [Test]
+        public void AVariantStoreRefusalListsTheRecordItRefusedAsForeign([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = PathOf("variant-refusal.cc");
+            var gears = CultDocumentRegistry.ForTypes(new[] { typeof(VariantTests.VariantGear) });
+            var withWidget = CultDocumentRegistry.ForTypes(new[] { typeof(VariantTests.VariantGear), Widget });
+            using var a = Open(path, gears, directory: false);
+            var baseKey = new CultRecordKey("laser");
+            a.Commit(batch =>
+            {
+                batch.Upsert(typeof(VariantTests.VariantGear), new VariantTests.VariantGear { Name = "laser", Power = 10, Code = "l1" }, baseKey);
+                batch.UpsertVariant(new CultRecordKey("laser-big"), baseKey, new[]
+                {
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Name), "laser big"),
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Power), 25),
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Code), "laser big")
+                });
+            });
+            using (var b = Open(path, withWidget, directory: false))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            Assert.That(StoreOf(a).ForeignRecords, Is.Empty);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+            {
+                var next = new VariantTests.VariantGear { Name = "next", Power = 1, Code = "n" };
+                var key = new CultRecordKey("n");
+                if (write == Write.Flush)
+                {
+                    a.UpsertAsync(typeof(VariantTests.VariantGear), next, key).GetAwaiter().GetResult();
+                    a.FlushAsync().GetAwaiter().GetResult();
+                }
+                else
+                {
+                    a.Commit(batch => batch.Upsert(typeof(VariantTests.VariantGear), next, key));
+                }
+            })!;
+
+            Assert.That(conflict.ChangedKeys, Does.Contain(W.Value));
+            var listed = StoreOf(a).ForeignRecords.Single();
+            Assert.That((listed.Key, listed.SchemaId), Is.EqualTo((W.Value, WidgetId)), "the refused record is listed as the store holds it");
+            Assert.That(a.Get(W), Is.Null);
         }
     }
 }
