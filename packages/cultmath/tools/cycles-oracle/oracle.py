@@ -243,7 +243,7 @@ EXTRA_ROWS = {
     "cycles_compare": [(0.0, 1.0e-7, 0.0), (1.0, 1.0000001, 0.0), (1.0, 1.0000002, 0.0), (0.0, 1.0e-7, 1.0e-8), (5.0, 5.0, 0.0), (0.0, 2.0e-7, 1.0e-7)],
     # Burn with a divisor of exactly 0 (tm + t col2 = 0) and a colour above 1: the result is 1 for the channel Cycles reads
     # as 0, and an infinity the film would hide for the others.
-    "cycles_mix_burn": [(2.0, 1.5, 0.5, 1.0, 0.5, 0.5, 0.5), (0.5, 1.5, 2.0, 1.0, -1.0, -1.0, -1.0)],
+    "cycles_mix_burn": [(2.0, 1.5, 0.5, 2.5, 0.5, 0.5, 0.5), (0.5, 1.5, 2.0, 3.0, -1.0, -1.0, -1.0)],
     "cycles_modulo": [(0.3, 0.1), (-0.3, 0.1), (5.5, -2.0), (-5.5, -2.0), (1.0, 0.0), (1.0e7, 3.0), (7.0, 7.0), (-7.0, 7.0)],
 }
 
