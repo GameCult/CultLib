@@ -43,6 +43,11 @@ bpy.ops.mesh.primitive_plane_add(size=2)
 PLANE = bpy.context.active_object
 
 
+def by_identifier(sockets, identifier):
+    """A node's socket by identifier: several data types share one socket name."""
+    return next(socket for socket in sockets if socket.identifier == identifier)
+
+
 def f32(values):
     return np.asarray(values, dtype=np.float32)
 
@@ -304,7 +309,7 @@ def family_map_range():
             node.clamp = False
             sockets = operand_sockets(tree, imgs, 6)
             for k, identifier in enumerate(["Value", "From_Min", "From_Max", "To_Min", "To_Max", "Steps"]):
-                socket = next(i for i in node.inputs if i.identifier == identifier and i.enabled)
+                socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
 
@@ -317,7 +322,7 @@ def family_map_range():
             node.clamp = True
             sockets = operand_sockets(tree, imgs, 6)
             for k, identifier in enumerate(["Value", "From_Min", "From_Max", "To_Min", "To_Max", "Steps"]):
-                socket = next(i for i in node.inputs if i.identifier == identifier and i.enabled)
+                socket = by_identifier(node.inputs, identifier)
                 tree.links.new(sockets[k], socket)
             return [node.outputs["Result"]]
 
@@ -372,8 +377,8 @@ def family_mix():
         node.clamp_result = False
         sockets = operand_sockets(tree, imgs, 3)
         for k, identifier in enumerate(["Factor_Float", "A_Float", "B_Float"]):
-            tree.links.new(sockets[k], next(i for i in node.inputs if i.identifier == identifier))
-        return [node.outputs["Result_Float"]]
+            tree.links.new(sockets[k], by_identifier(node.inputs, identifier))
+        return [by_identifier(node.outputs, "Result_Float")]
 
     functions.append({"function": "cycles_mix_float", "node": "ShaderNodeMix FLOAT", "cases": encode_cases(columns, bake("mix_float", images, build_float, 1))})
 
@@ -386,10 +391,10 @@ def family_mix():
         node.factor_mode = "UNIFORM"
         node.clamp_factor = False
         sockets = operand_sockets(tree, imgs, 1)
-        tree.links.new(sockets[0], next(i for i in node.inputs if i.identifier == "Factor_Float"))
-        tree.links.new(triple_socket(tree, imgs, 1), next(i for i in node.inputs if i.identifier == "A_Vector"))
-        tree.links.new(triple_socket(tree, imgs, 4), next(i for i in node.inputs if i.identifier == "B_Vector"))
-        return node.outputs["Result_Vector"]
+        tree.links.new(sockets[0], by_identifier(node.inputs, "Factor_Float"))
+        tree.links.new(triple_socket(tree, imgs, 1), by_identifier(node.inputs, "A_Vector"))
+        tree.links.new(triple_socket(tree, imgs, 4), by_identifier(node.inputs, "B_Vector"))
+        return by_identifier(node.outputs, "Result_Vector")
 
     functions.append({"function": "cycles_mix_vector", "node": "ShaderNodeMix VECTOR UNIFORM", "cases": encode_cases(columns, vector_bake("mix_vector", images, build_vector))})
 
@@ -404,10 +409,10 @@ def family_mix():
             node.clamp_factor = False
             node.clamp_result = False
             sockets = operand_sockets(tree, imgs, 1)
-            tree.links.new(sockets[0], next(i for i in node.inputs if i.identifier == "Factor_Float"))
-            tree.links.new(triple_socket(tree, imgs, 1), next(i for i in node.inputs if i.identifier == "A_Color"))
-            tree.links.new(triple_socket(tree, imgs, 4), next(i for i in node.inputs if i.identifier == "B_Color"))
-            return node.outputs["Result_Color"]
+            tree.links.new(sockets[0], by_identifier(node.inputs, "Factor_Float"))
+            tree.links.new(triple_socket(tree, imgs, 1), by_identifier(node.inputs, "A_Color"))
+            tree.links.new(triple_socket(tree, imgs, 4), by_identifier(node.inputs, "B_Color"))
+            return by_identifier(node.outputs, "Result_Color")
 
         functions.append({"function": function, "node": "ShaderNodeMix RGBA " + blend, "cases": encode_cases(columns, vector_bake(function, images, build))})
     return functions

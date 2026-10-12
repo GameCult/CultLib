@@ -5,6 +5,9 @@ param(
     # Also concatenate shaders\CultMath.Phacelle.glsl (MPL-2.0) after CultMath.glsl, as a consumer that
     # calls cultmath_phacelle does. Without it the wrapper is the MIT library alone.
     [switch]$Phacelle,
+    # Also concatenate shaders\CultMath.Cycles.glsl (Apache-2.0), as a consumer that calls a cultmath_cycles_
+    # function does.
+    [switch]$Cycles,
     [string]$GlslangPath = ""
 )
 
@@ -22,6 +25,9 @@ if (-not $GlslangPath) {
 $library = Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.glsl") -Raw
 if ($Phacelle) {
     $library += Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.Phacelle.glsl") -Raw
+}
+if ($Cycles) {
+    $library += Get-Content -LiteralPath (Join-Path $repoRoot "shaders\CultMath.Cycles.glsl") -Raw
 }
 $calls = foreach ($match in [regex]::Matches($library, '(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)')) {
     $arguments = foreach ($parameter in ($match.Groups[2].Value -split ',')) {

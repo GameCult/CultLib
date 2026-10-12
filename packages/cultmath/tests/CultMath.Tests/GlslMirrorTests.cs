@@ -113,8 +113,7 @@ public sealed class GlslMirrorTests
         Assert.Contains(" MPL-2.0;", phacelle);
         Assert.DoesNotContain("MIT", phacelle);
 
-        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text.Split('
-')[0];
+        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text.Split('\n')[0];
         Assert.Contains("cultmath_cycles_ramp_index is in CultMath.Cycles.glsl", library);
         Assert.Contains(" Apache-2.0;", cycles);
         Assert.DoesNotContain("MIT", cycles);
