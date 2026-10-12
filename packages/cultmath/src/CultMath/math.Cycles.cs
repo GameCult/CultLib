@@ -35,13 +35,12 @@ public static partial class math
 
     /// <summary>
     /// Math node Power (safe_powf with compatible_powf): 0 for a negative base with a fractional exponent,
-    /// 1 for exponent 0, 0 for base 0. A negative base takes an integral exponent's parity. An exponent past
-    /// the int range counts as fractional for a negative base, where Cycles' int round trip cannot hold it.
+    /// 1 for exponent 0, 0 for base 0. A negative base takes an integral exponent's parity.
     /// </summary>
     public static float cycles_power(float a, float b)
     {
         var whole = b >= 0.0f ? floor(b) : ceil(b);
-        if (a < 0.0f && (b != whole || b >= 2147483648.0f || b < -2147483648.0f))
+        if (a < 0.0f && b != whole)
             return 0.0f;
         if (b == 0.0f)
             return 1.0f;
