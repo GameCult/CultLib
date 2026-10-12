@@ -197,7 +197,7 @@ class LeavesReadsVectorTests(unittest.TestCase):
         self.assertEqual(self._check("boolean", t.boolean, _vector("leaves-reads.msgpack")), 28)
 
     def test_any_reads_what_the_reference_reads_and_rewrites_to_the_same_value(self) -> None:
-        # ruling any-rewrite-binds-value: the decoded value of the rewrite, not the integer width ("05" -> "cc05").
+        # ruling any-rewrite-binds-kind-and-value: the kind and exact value of the rewrite, recursively; numeric width is free ("05" -> "cc05").
         rows = _vector("leaves-reads.msgpack")
         document = _slot(t.any)
         count = 0
