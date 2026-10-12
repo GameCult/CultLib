@@ -528,13 +528,13 @@ class MigratePayloadsTests(unittest.TestCase):
 
     def test_migration_finds_a_record_by_its_catalog_schema_name_and_skips_unlisted_types_anywhere(self) -> None:
         store = SingleFileMessagePackBackingStore(self.directory / "names.cc")
-        store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b" opaque"))
+        store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b"\x00opaque"))
         store.push(CultCacheEnvelope.create(key="n", type="tests.by-name", payload=b'{"n": 1}'))
         document = define_document_type("tests.by-type", schema_name="tests.by-name")
         self.assertEqual(migrate_payloads(store, [document]), 1)
         rewritten = {item.key: item.payload for item in store.pull_all()}
         self.assertEqual(rewritten["n"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
-        self.assertEqual(rewritten["a"], b" opaque")
+        self.assertEqual(rewritten["a"], b"\x00opaque")
 
     def test_migration_names_the_class_of_a_refusal_that_has_no_code_and_never_its_text(self) -> None:
         def validate(value: object) -> None:
