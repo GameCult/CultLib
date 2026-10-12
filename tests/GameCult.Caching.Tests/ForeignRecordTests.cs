@@ -1125,6 +1125,7 @@ namespace GameCult.Caching.Tests
             using (var seed = Open(path, Full, directory))
                 seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
             using var a = Open(path, DeckOnly, directory);
+            a.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
             Assert.That(a.Remove(W), Is.False);
             using (var b = Open(path, Full, directory))
                 b.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
@@ -1132,6 +1133,7 @@ namespace GameCult.Caching.Tests
 
             Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult());
 
+            Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e", "w" }), "the staged write landed beside the checked key");
             Assert.That(Stored(path, W), Is.EqualTo(theirs), "the record at the checked key is still the other writer's bytes");
             using (var c = Open(path, Full, directory))
                 c.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), W));
@@ -1173,7 +1175,9 @@ namespace GameCult.Caching.Tests
             var path = Seeded("delist.cc", directory);
             using var a = Open(path, DeckOnly, directory);
             Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
-            Move(path, W, "moved", directory);
+            // The writer declares the widget's id, so it may replace the widget with a deck record under an id a reads but does not declare.
+            using (var other = Open(path, CultDocumentRegistry.ForTypes(new[] { MovingDeck, Widget }), directory))
+                Assert.That(other.Commit(batch => batch.Upsert(MovingDeck, New(MovingDeck, ("Name", "moved")), W)), Is.True);
 
             Assert.That(a.Remove(W), Is.False);
             var refusal = Assert.Throws<CultSchemaConflictException>(() => a.FlushAsync().GetAwaiter().GetResult())!;

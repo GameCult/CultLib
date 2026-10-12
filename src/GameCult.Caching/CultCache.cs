@@ -4164,7 +4164,7 @@ namespace GameCult.Caching
 
         // Flush, commit and Mesh's write all end here, with the durable store they read under the lock they hold. First, a key the write
         // names or checks whose durable record is under an id the writer does not declare refuses the write (RefuseUndeclaredOnDisk); a
-        // write that then has nothing to write (it only checked keys) writes no file. Then a store that holds
+        // write that then has nothing to write but keys it checked writes no file. Then a store that holds
         // a variant, or would after this write, is written only while its record versions are what this store last read: a variant
         // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Versions
         // only: a write hashes other records' bytes, never decodes them. Otherwise the whole write is refused and what it refused is
@@ -4175,7 +4175,7 @@ namespace GameCult.Caching
             Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals, IEnumerable<string> checks)
         {
             RefuseUndeclaredOnDisk(durable, upserts, removals, checks);
-            if (upserts.Count == 0 && removals.Count == 0)
+            if (upserts.Count == 0 && removals.Count == 0 && (checks.Any() || StagedChecks.Count > 0))
                 return Array.Empty<(CultStagedRecord, string)>();
             RefuseWriteIntoMovedVariantStore(durable, upserts, removals);
             var durableRecords = durable?.Snapshot.Records ?? Array.Empty<CultPersistedRecord>();
