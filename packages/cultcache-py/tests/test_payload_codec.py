@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import inspect
+import json
 import shutil
 import tempfile
 import traceback
@@ -466,11 +467,14 @@ class MigratePayloadsTests(unittest.TestCase):
                 self.assertEqual(push.call_count, 0)
                 kept = next(item for item in store.pull_all() if item.type == "tests.other")
                 self.assertEqual((kept.payload, kept.stored_at), (other.payload, other.stored_at))
-                default = self._pull_with(store, MESSAGEPACK_PAYLOAD_CODEC)
-                self.assertEqual(len(default), 6)
-                with self.assertRaises(CultCachePayloadFormatError):
-                    self._pull_with(store, JSON_PAYLOAD_CODEC)
                 migrated = {item.key: item.payload for item in store.pull_all() if item.type == "tests.mig"}
+                self.assertEqual(sorted(migrated), ["k1", "k2", "k3", "k4", "k5", "k6"])
+                modern = define_document_type("tests.mig")
+                legacy = define_document_type("tests.mig", payload_codec=JSON_PAYLOAD_CODEC)
+                for key, payload in migrated.items():
+                    self.assertEqual(modern.decode_payload(payload), json.loads(records[key]))
+                    with self.assertRaises(CultCachePayloadFormatError):
+                        legacy.decode_payload(payload)
                 self.assertEqual(migrated["k1"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
                 self.assertEqual(migrated["k2"], MESSAGEPACK_PAYLOAD_CODEC.encode(["a", 2]))
                 after = store.path.read_bytes()
