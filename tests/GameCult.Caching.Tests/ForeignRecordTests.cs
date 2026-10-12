@@ -18,6 +18,8 @@ namespace GameCult.Caching.Tests
         private static readonly Type ClaimingDeck = Emit("ForeignSuiteClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v1", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
         private static readonly Type LateClaimingDeck = Emit("ForeignSuiteLateClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v2", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
         private static readonly Type Widget = Emit("ForeignSuiteWidget", "tests.foreign_widget", "tests.foreign_widget.v1", new[] { new Field("Label", typeof(string), 0, IsName: true) });
+        // A second type a cache registers, so that a second backing store has a home of its own.
+        private static readonly Type Gizmo = Emit("ForeignSuiteGizmo", "tests.foreign_gizmo", "tests.foreign_gizmo.v1", new[] { new Field("Tag", typeof(string), 0, IsName: true) });
 
         // A build that has both types, and one that has only the deck: to it the widget is foreign.
         private static readonly CultDocumentRegistry Full = CultDocumentRegistry.ForTypes(new[] { Deck, Widget });
@@ -1340,15 +1342,15 @@ namespace GameCult.Caching.Tests
             using (var seed = Open(writable, Full, directory))
                 seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
             var readOnly = PathOf("other.cc");
-            using (var seed = Open(readOnly, Full, directory))
+            using (var seed = Open(readOnly, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
                 seed.Commit(batch =>
                 {
-                    batch.Upsert(Deck, DeckOf("e"), E);
+                    batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g"));
                     batch.Upsert(Widget, WidgetOf("w"), W);
                 });
-            using var cache = new CultCache(DeckOnly);
-            cache.AddBackingStore(StoreAt(writable, directory, readOnly: false));
-            cache.AddBackingStore(StoreAt(readOnly, directory, readOnly: true));
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(writable, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(readOnly, directory, readOnly: true), Gizmo);
             var before = Fingerprint(writable);
 
             var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(W)))!;
