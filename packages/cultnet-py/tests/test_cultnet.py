@@ -62,6 +62,7 @@ from cultnet_py import (
     TcpFramedTransportConnection,
     CultNetWitnessArtifactBundle,
     apply_raw_document_record,
+    resolve_document_and_schema_id_for_raw_record,
     apply_raw_snapshot,
     apply_shard_log_response,
     create_rudp_transport_profile,
@@ -2001,6 +2002,37 @@ class CultNetTests(unittest.TestCase):
         typed_applied_log = apply_shard_log_response(cache, [document], typed_shard_log)
         self.assertEqual([change.change_kind for change in typed_applied_log], ["updated", "removed"])
         self.assertIsNone(cache.get(document, "item:1"))
+
+    def test_the_stamp_router_judges_no_map_key_and_the_codec_alone_does(self) -> None:
+        import msgpack  # type: ignore
+
+        document = define_database_entry_type(
+            "replica.stamped",
+            [("schema_version", 0), ("value", 1)],
+            schema_id="replica.stamped.current",
+            schema_name="replica.stamped",
+            schema_version="replica.stamped.v1",
+        )
+        by_schema_id = {"replica.stamped.current": document, "replica.stamped": document}
+
+        def routed(tree: object) -> object:
+            record = {"payload": msgpack.packb(tree, use_bin_type=True)}
+            return resolve_document_and_schema_id_for_raw_record(by_schema_id, "sha256:unknown", record)
+
+        for name, tree in (
+            ("array", ["replica.stamped.v1", {1: "a"}]),
+            ("map", {"schemaVersion": "replica.stamped.v1", "v": {1: "a"}}),
+            ("nested", ["replica.stamped.v1", {"a": {2: [{3: 4}]}}]),
+        ):
+            with self.subTest(form=name):
+                self.assertEqual(routed(tree), (document, "replica.stamped.current"))
+        for name, tree in (
+            ("array", ["replica.stamped.v1", {None: "a"}]),
+            ("map", {"schemaVersion": "replica.stamped.v1", "v": {None: "a"}}),
+        ):
+            with self.subTest(form=name):
+                with self.assertRaises(KeyError):
+                    routed(tree)
 
     def test_cultnet_replication_helpers_recover_schema_stamped_raw_records(self) -> None:
         document = define_database_entry_type(

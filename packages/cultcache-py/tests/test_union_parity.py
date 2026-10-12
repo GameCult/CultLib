@@ -2,6 +2,7 @@
 
 import collections
 import dataclasses
+import json
 import shutil
 import tempfile
 import traceback
@@ -16,6 +17,8 @@ from cultcache_py import (
     MAX_SLOT_KEY,
     CultCache,
     JSON_PAYLOAD_CODEC,
+    MESSAGEPACK_PAYLOAD_CODEC,
+    PayloadCodecFault,
     CultCachePayloadDepthError,
     DatabaseEntryField,
     PayloadCodec,
@@ -645,8 +648,13 @@ class PayloadDepthRuleTests(unittest.TestCase):
                 past = _nest(257, mixed)
                 with self.assertRaises(CultCachePayloadDepthError):
                     document.encode_payload(past)
+                raw = json.dumps(past).encode() if codec is JSON_PAYLOAD_CODEC else msgpack.packb(past, use_bin_type=True)
                 with self.assertRaises(CultCachePayloadDepthError):
-                    document.decode_payload(document.payload_codec.encode(past))
+                    document.decode_payload(raw)
+                if codec is None:
+                    with self.assertRaises(PayloadCodecFault) as refused:
+                        MESSAGEPACK_PAYLOAD_CODEC.encode(past)
+                    self.assertEqual(refused.exception.code, "depth_limit")
 
     def test_a_tuple_and_a_container_dict_key_count_as_containers(self) -> None:
         document = define_document_type("tests.tuple_tree", encode=lambda value: value, payload_codec=_STUB_CODEC)

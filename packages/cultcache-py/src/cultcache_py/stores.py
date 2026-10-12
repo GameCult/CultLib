@@ -14,6 +14,7 @@ from .backing_store import (
     CultCacheSchemaCatalogEntry,
     CultCacheSchemaCatalogMember,
 )
+from .documents import _unpack_tree
 
 STORE_FORMAT_VERSION = "cultcache.store.v1"
 _STORE_FORMAT_PREFIX = "cultcache.store."
@@ -95,7 +96,7 @@ class SingleFileMessagePackBackingStore:
             data = _read_store(self.path, Path.read_bytes)
             if data is None:
                 return []
-            decoded = msgpack.unpackb(data, raw=False)
+            decoded = _unpack_tree(data)
             snapshot = _decode_v1_snapshot(decoded)
             if snapshot is not None:
                 return snapshot

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import struct
 from dataclasses import MISSING, dataclass, field
 from collections.abc import Mapping, Sequence, Set
 from itertools import chain
@@ -44,7 +45,7 @@ class CultCachePayloadDepthError(ValueError):
 
 class PayloadCodecFault(ValueError):
     """A codec raises this for a payload its format cannot carry. `code` names the rule (the library's are
-    `map_key_kind`, `duplicate_map_key` and `integer_out_of_range`) and `kind` the kind of node at fault (a MessagePack
+    `map_key_kind`, `duplicate_map_key`, `integer_out_of_range` and `depth_limit`) and `kind` the kind of node at fault (a MessagePack
     kind such as `nil` or `bin`); neither is ever a payload value. A consumer-built codec may raise it."""
 
     def __init__(self, code: str, kind: str = "") -> None:
@@ -71,7 +72,7 @@ class CultCachePayloadFormatError(ValueError):
                 f"{codec} payloads take str, int, float, bool or timestamp keys (refused on {direction})."
             )
         elif code == "duplicate_map_key":
-            message = f"{type_name} payload has two map keys Python holds as one; refused on read."
+            message = f"{type_name} payload has two map keys Python holds as one; refused on {direction}."
         elif code == "integer_out_of_range":
             message = f"{type_name} payload has an integer beyond 64 bits; refused on write."
         else:
@@ -79,20 +80,38 @@ class CultCachePayloadFormatError(ValueError):
         super().__init__(message)
 
 
-def _check_payload_tree(tree: Any, type_name: str, direction: str) -> None:
-    """The one depth walk over a payload tree, for every codec. Iterative (every mapping, sequence and set that is not
-    text or bytes is a container): refuses the first container past `MAX_PAYLOAD_DEPTH`."""
+def _is_container(node: Any) -> bool:
+    return isinstance(node, _CONTAINERS) and not isinstance(node, _SCALAR_SEQUENCES)
+
+
+def _children(node: Any) -> Iterable[Any]:
+    return chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
+
+
+def _containers(tree: Any) -> Iterable[Any]:
+    """The one depth walk over a payload tree, for every codec and every caller. Iterative, so a cycle ends at the limit:
+    yields every container (a mapping, sequence or set that is not text or bytes; a mapping's keys and values are both
+    children), the outermost at depth 1, and raises `PayloadCodecFault('depth_limit')` at the first one past
+    `MAX_PAYLOAD_DEPTH`."""
     stack = [(tree, 1)] if _is_container(tree) else []
     while stack:
         node, depth = stack.pop()
         if depth > MAX_PAYLOAD_DEPTH:
-            raise CultCachePayloadDepthError(type_name, direction)
-        children = chain(node.keys(), node.values()) if isinstance(node, Mapping) else node
-        stack.extend((child, depth + 1) for child in children if _is_container(child))
+            raise PayloadCodecFault("depth_limit")
+        yield node
+        stack.extend((child, depth + 1) for child in _children(node) if _is_container(child))
 
 
-def _is_container(node: Any) -> bool:
-    return isinstance(node, _CONTAINERS) and not isinstance(node, _SCALAR_SEQUENCES)
+def _check_payload_tree(tree: Any, type_name: str, direction: str) -> None:
+    """The definition's translation of the depth walk into its typed refusal."""
+    try:
+        for _ in _containers(tree):
+            pass
+    except PayloadCodecFault:
+        refusal = CultCachePayloadDepthError(type_name, direction)
+    else:
+        return
+    raise refusal
 
 
 def _default_encode(value: Any) -> Any:
@@ -139,8 +158,8 @@ def _pack_tree(tree: Any) -> bytes:
 @dataclass(frozen=True)
 class PayloadCodec:
     """A codec owns one payload format: how a tree becomes bytes and back, which of its decode faults mean the payload
-    nests past the interpreter's own stack, and which trees it can carry: it raises `PayloadCodecFault` for a key or an
-    integer its format cannot hold, and nothing it writes is refused by its own `decode`. A consumer-built codec owns
+    nests past the interpreter's own stack, and which trees it can carry: it raises `PayloadCodecFault` for a key, an
+    integer or a nesting its format cannot hold, and nothing it writes is refused by its own `decode`. A consumer-built codec owns
     the depth of nodes the depth walk cannot see (anything that is not a Mapping, Sequence or Set)."""
 
     name: str
@@ -150,7 +169,6 @@ class PayloadCodec:
 
 
 _INTEGER_RANGE = (-(2**63), 2**64 - 1)
-_PACK_DEPTH_LIMIT = 511  # msgpack's own packb limit: a tree nested past it, or a cycle, is not walked on
 _KEY_TYPES = (str, int, float, Float32, msgpack.Timestamp)
 
 
@@ -181,24 +199,27 @@ def _checked_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
     return held
 
 
+def _key_image(key: Any) -> Any:
+    """A map key as the reader holds it: a `Float32` is written as float32 and read back as that float."""
+    return struct.unpack(">f", struct.pack(">f", key.value))[0] if isinstance(key, Float32) else key
+
+
 def _check_writable(tree: Any) -> None:
-    """The write side of the key and integer rule: what `_checked_map` refuses on read is refused here, so nothing
-    this codec writes is refused by its own decode. Iterative; the nesting limit is the definition's rule (a tree past it
-    is the definition's refusal), so the walk stops only where `packb` would, which also ends a cycle."""
-    stack = [(tree, 1)]
-    while stack:
-        node, depth = stack.pop()
-        if depth > _PACK_DEPTH_LIMIT:
-            raise ValueError("recursion limit exceeded")
-        if isinstance(node, int) and not _INTEGER_RANGE[0] <= node <= _INTEGER_RANGE[1]:
-            raise PayloadCodecFault("integer_out_of_range")
+    """The write side of the key, integer and depth rule: what `_checked_map` refuses on read, and nesting past
+    `MAX_PAYLOAD_DEPTH`, is refused here, so nothing this codec writes is refused by its own decode. Keys that collide
+    once decoded (a `Float32` beside an equal int, bool or float) are the reader's duplicate."""
+    if isinstance(tree, int) and not _INTEGER_RANGE[0] <= tree <= _INTEGER_RANGE[1]:
+        raise PayloadCodecFault("integer_out_of_range")
+    for node in _containers(tree):
+        for child in _children(node):
+            if isinstance(child, int) and not _INTEGER_RANGE[0] <= child <= _INTEGER_RANGE[1]:
+                raise PayloadCodecFault("integer_out_of_range")
         if isinstance(node, Mapping):
             for key in node:
                 if not isinstance(key, _KEY_TYPES):
                     raise PayloadCodecFault("map_key_kind", _node_kind(key))
-            stack.extend((child, depth + 1) for child in chain(node.keys(), node.values()))
-        elif isinstance(node, (list, tuple)):
-            stack.extend((child, depth + 1) for child in node)
+            if len(dict.fromkeys(_key_image(key) for key in node)) != len(node):
+                raise PayloadCodecFault("duplicate_map_key")
 
 
 def _unpack_tree(payload: bytes) -> Any:
@@ -222,8 +243,8 @@ MESSAGEPACK_PAYLOAD_CODEC = PayloadCodec(
     "MessagePack", _pack_checked_tree, _unpack_tree, depth_faults=(msgpack.exceptions.StackError,)
 )
 """The default payload format. It carries what the C# reference's object reader accepts: str, int, float, bool and
-timestamp keys, no duplicate key, and integers within -(2**63)..2**64-1. It refuses the rest on read through its map
-hook and on write through its encode, so it never writes a record it cannot read."""
+timestamp keys, no duplicate key, and integers within -(2**63)..2**64-1, nested no deeper than `MAX_PAYLOAD_DEPTH`. It refuses the rest on read through its
+map hook and on write through its encode, so it never writes a record it cannot read."""
 
 JSON_PAYLOAD_CODEC = PayloadCodec("JSON", _dump_json, _load_json, depth_faults=(RecursionError,))
 """The 0.3 default, kept for stores written before MessagePack: it writes exactly the 0.3 bytes. Never a default."""
@@ -263,7 +284,9 @@ class UnionArm:
     value: Any = None
 
 
-def _fault_refusal(type_name: str, codec: PayloadCodec, direction: str, fault: PayloadCodecFault) -> CultCachePayloadFormatError:
+def _fault_refusal(type_name: str, codec: PayloadCodec, direction: str, fault: PayloadCodecFault) -> CultCachePayloadFormatError | CultCachePayloadDepthError:
+    if fault.code == "depth_limit":
+        return CultCachePayloadDepthError(type_name, direction)
     return CultCachePayloadFormatError(type_name, codec.name, direction, fault.code, fault.kind)
 
 
