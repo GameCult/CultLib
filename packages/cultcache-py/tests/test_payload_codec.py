@@ -230,7 +230,7 @@ class PayloadCodecTests(unittest.TestCase):
 
     # The key rule is the C# reference's (map P2), both ways.
 
-    def test_reference_map_keys_read_through_an_any_slot(self) -> None:
+    def test_reference_key_rule_reads_through_an_any_slot(self) -> None:
         entry = define_database_entry_type("tests.any", [("v", 0)])
         for name, row in ACCEPTED_KEY_ROWS.items():
             with self.subTest(row=name):
@@ -256,7 +256,7 @@ class PayloadCodecTests(unittest.TestCase):
                 refusal = self._refused(entry.decode_payload, b"\x91" + bytes.fromhex(row))
                 self.assertEqual(refusal.code, "duplicate_map_key")
 
-    def test_reference_map_keys_write_and_read_back_through_a_document_type(self) -> None:
+    def test_reference_key_rule_writes_and_reads_back_through_a_document_type(self) -> None:
         document = define_document_type("tests.keys", encode=lambda value: value)
         for tree in ({1: "a"}, {True: 1}, {1.5: 1}, {msgpack.Timestamp(0, 0): 1}, {"a": {2: 3}}, {"a": [{1.5: 1}]}, {-(2**63): 1}, {2**64 - 1: 1}):
             with self.subTest(tree=tree):
@@ -309,6 +309,50 @@ class PayloadCodecTests(unittest.TestCase):
         for tree in ({1: "a"}, {True: 1}, {1.5: [2**64 - 1, -(2**63)]}, {"a": {-1: None}}, [{2: 3}]):
             with self.subTest(tree=tree):
                 self.assertEqual(codec.decode(codec.encode(tree)), tree)
+
+    def test_the_codec_write_walk_ends_where_packb_does(self) -> None:
+        def nested_lists(depth: int) -> object:
+            tree: object = 1
+            for _ in range(depth):
+                tree = [tree]
+            return tree
+
+        def nested_maps(depth: int) -> object:
+            tree: object = 1
+            for _ in range(depth):
+                tree = {"a": tree}
+            return tree
+
+        for build in (nested_lists, nested_maps):
+            with self.subTest(build=build.__name__):
+                MESSAGEPACK_PAYLOAD_CODEC.encode(build(510))
+                with self.assertRaises(ValueError) as caught:
+                    MESSAGEPACK_PAYLOAD_CODEC.encode(build(511))
+                self.assertEqual(str(caught.exception), "recursion limit exceeded")
+                self.assertNotIsInstance(caught.exception, PayloadCodecFault)
+
+    def test_a_codec_fault_prints_its_code_only(self) -> None:
+        self.assertEqual(str(PayloadCodecFault("some_code", "some_kind")), "some_code")
+        self.assertEqual(str(PayloadCodecFault("some_code")), "some_code")
+        self.assertEqual(PayloadCodecFault("some_code").kind, "")
+
+    def test_define_document_type_forwards_every_schema_field(self) -> None:
+        document = define_document_type(
+            "tests.schema",
+            schema_id="sid",
+            schema_name="sname",
+            schema_version="sname.v9",
+            content_hash="hash",
+            canonical_schema_json='{"canonical":true}',
+            compatible_schema_ids=["sid", "older"],
+        )
+        self.assertEqual(
+            (document.schema_id, document.schema_name, document.schema_version, document.content_hash),
+            ("sid", "sname", "sname.v9", "hash"),
+        )
+        self.assertEqual((document.canonical_schema_json, document.compatible_schema_ids), ('{"canonical":true}', ("sid", "older")))
+        bare = define_document_type("tests.schema")
+        self.assertEqual((bare.schema_id, bare.compatible_schema_ids), (None, ()))
 
     def test_a_cyclic_tree_is_not_walked_forever_by_the_codec(self) -> None:
         cycle: dict = {}
@@ -481,6 +525,31 @@ class MigratePayloadsTests(unittest.TestCase):
                 with self.assertRaises(CultCacheError):
                     migrate_payloads(store, [define_document_type("tests.mig")])
                 self.assertEqual(store.path.read_bytes(), after)
+
+    def test_migration_finds_a_record_by_its_catalog_schema_name_and_skips_unlisted_types_anywhere(self) -> None:
+        store = SingleFileMessagePackBackingStore(self.directory / "names.cc")
+        store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b" opaque"))
+        store.push(CultCacheEnvelope.create(key="n", type="tests.by-name", payload=b'{"n": 1}'))
+        document = define_document_type("tests.by-type", schema_name="tests.by-name")
+        self.assertEqual(migrate_payloads(store, [document]), 1)
+        rewritten = {item.key: item.payload for item in store.pull_all()}
+        self.assertEqual(rewritten["n"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
+        self.assertEqual(rewritten["a"], b" opaque")
+
+    def test_migration_names_the_class_of_a_refusal_that_has_no_code_and_never_its_text(self) -> None:
+        def validate(value: object) -> None:
+            raise ValueError(CANARY)
+
+        store = self._filled(
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "validated", {"k1": b'{"n": 1}'}
+        )
+        before = store.path.read_bytes()
+        with self.assertRaises(CultCacheError) as caught:
+            migrate_payloads(store, [define_document_type("tests.mig", validate=validate)])
+        self.assertIn("ValueError", str(caught.exception))
+        self.assertNotIn(CANARY, _chain_text(caught.exception))
+        self.assertIsNone(caught.exception.__context__)
+        self.assertEqual(store.path.read_bytes(), before)
 
     def test_migration_names_a_source_codec_and_skips_unlisted_types(self) -> None:
         store = self._filled(lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "src", {"k1": b'{"n": 1}'})
