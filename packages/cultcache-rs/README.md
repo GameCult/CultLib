@@ -459,7 +459,7 @@ manual registration ceremony, not to loosen the closed-world boundary.
 Payload nesting is bounded at 256 MessagePack containers, checked before any
 recursion; past the bound the refusal is a typed `PayloadTooDeep`. Typed decode
 of stored bytes then grows its stack: the decoder checks the remaining stack
-before its first frame and `serde_stacker` checks it at every container, moving
+at entry and `serde_stacker` checks it at every container, moving
 onto a fresh segment whenever less than 512 KiB remains, so a payload inside the
 bound decodes on a small thread instead of aborting the process. Envelope and
 store reads (single-file, redb, v1 snapshots) use the same grown decoder and
@@ -471,9 +471,11 @@ record may have, and the derives refuse a larger one at compile time: put its
 large data behind a `Vec` or a `Box`. A field of a type the derives did not
 produce that is larger than that, behind a `Box` or `Vec`, is outside the
 guarantee. The decoder's own frames have a fixed floor that no payload changes: at the bound a thread decodes a record of
-this size from about 56 KiB in a release build and 104 KiB in a debug build, against 16 and 88 KiB for a function
-of the same signature that decodes nothing, plus the caller's own frames. Stack growth was verified on
-x86_64-pc-windows-msvc once, by hand, on Starfire (`decode_stack`, debug and release); later `stacker` bumps repeat it.
+this size from about 56 KiB in a release build and 72 KiB in a debug build for a caller that only tests the result
+(`is_ok`), plus the caller's own frames. The figure depends on how the caller holds the result: one that moves the
+record out holds a second copy and needs more (about 104 KiB in debug). Stack growth was verified on
+x86_64-pc-windows-msvc by hand (`decode_stack`, WINREV, 13 tests, debug and release); a `stacker` bump or a change
+to the stack-size tests repeats it.
 The crate does not
 build for wasm32 (`fs2`), and no wasm behaviour is claimed.
 

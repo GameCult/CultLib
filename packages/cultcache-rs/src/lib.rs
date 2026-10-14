@@ -687,9 +687,8 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// ```
 pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
 
-/// The one grown decoder of stored bytes: the stack check comes first, before any frame that holds
-/// a `T`, then `serde_stacker` re-checks at every container serde's impls descend through, skipped
-/// values included. No nesting bound is applied here; [`decode_payload`] walks first.
+/// The one grown decoder of stored bytes: the outer stack check, then `serde_stacker` re-checks at
+/// every container serde's impls descend through, skipped values included. No nesting bound is applied here; [`decode_payload`] walks first.
 fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
     stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
         let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
@@ -705,10 +704,12 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
 /// bytes. Readers of stored envelope payloads outside this crate decode through it too.
 ///
 /// A payload inside the bound decodes on any thread that has the decoder's fixed floor, which no payload
-/// changes: at the bound, about 56 KiB in release and 104 KiB in debug, against 16 and 88 KiB for a
-/// same-signature function that decodes nothing, plus the caller's own frames. That holds for every
-/// record the derives produce, which [`MAX_RECORD_INLINE_BYTES`] bounds. Stack growth was verified on
-/// Windows once, by hand; a `stacker` bump repeats it.
+/// changes: at the bound, about 56 KiB in release and 72 KiB in debug for a caller that only tests the
+/// result (`is_ok`), plus the caller's own frames. The figure depends on how the caller holds the result:
+/// one that moves the record out holds a second copy and needs more (about 104 KiB in debug). That holds
+/// for every record the derives produce, which [`MAX_RECORD_INLINE_BYTES`] bounds. Stack growth was
+/// verified on x86_64-pc-windows-msvc by hand (`decode_stack`, WINREV, 13 tests, debug and release); a
+/// `stacker` bump or a change to the stack-size tests repeats it.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;
     decode_grown(payload).map_err(opaque_decode_error)
