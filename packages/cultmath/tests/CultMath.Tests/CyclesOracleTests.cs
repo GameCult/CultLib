@@ -233,6 +233,63 @@ public sealed class CyclesOracleTests
         Assert.Equal(0.0f, One("cycles_floored_modulo", 1.0f, 0.0f));
     }
 
+    private static float OperandOrInfinity(string token) => token == "inf" ? float.PositiveInfinity : token == "-inf" ? float.NegativeInfinity : Float(token);
+
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void InfiniteOperandsFollowBlender(string target)
+    {
+        // infinite.json: operands that are infinite, made inside Blender's kernel (the film writes 0 for an infinity), and
+        // results read back through comparisons with 0 as "inf", "-inf" or "nan" where the film showed 0.
+        var functions = Load("infinite")["functions"]!.AsArray();
+        Assert.Equal(new[] { "cycles_power", "cycles_modulo", "cycles_map_range_smoothstep" }, functions.Select(f => (string)f!["function"]!).ToArray());
+        var cases = 0;
+        foreach (var entry in functions)
+        {
+            var name = (string)entry!["function"]!;
+            foreach (var line in entry["cases"]!.AsArray())
+            {
+                var sides = ((string)line!).Split(" -> ");
+                var operands = sides[0].Split(' ').Select(OperandOrInfinity).Cast<object>().ToArray();
+                var have = (float)Call(target, name, operands);
+                var ok = sides[1] switch
+                {
+                    "nan" => float.IsNaN(have),
+                    "inf" => float.IsPositiveInfinity(have),
+                    "-inf" => float.IsNegativeInfinity(have),
+                    var token => Distance(Float(token), have) == 0,
+                };
+                Assert.True(ok, $"{target} {name} {sides[0]}: Blender {sides[1]}, here {have}");
+                cases++;
+            }
+        }
+
+        Assert.True(cases >= 45, $"{cases} infinite-operand cases");
+    }
+
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void InfiniteOperandsFollowTheCyclesSource(string target)
+    {
+        // Blender 5.2.2 (infinite.json rows named beside each pin). powf(a, +-inf) is never negative, so an infinite
+        // exponent is even; modulo and smoothstep of an infinity are NaN where inf - inf or inf / inf forms.
+        float One(string function, params float[] arguments) => (float)Call(target, function, arguments.Cast<object>().ToArray());
+        const float inf = float.PositiveInfinity;
+        Assert.Equal(0x3f800000, BitConverter.SingleToInt32Bits(One("cycles_power", -1.0f, inf)));
+        Assert.Equal(0x3f800000, BitConverter.SingleToInt32Bits(One("cycles_power", -1.0f, -inf)));
+        Assert.Equal(inf, One("cycles_power", -2.0f, inf));
+        Assert.Equal(inf, One("cycles_power", -0.5f, -inf));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(One("cycles_power", -2.0f, -inf)));
+        Assert.Equal(-8.0f, One("cycles_power", -2.0f, 3.0f));
+        Assert.Equal(0x3f800000, BitConverter.SingleToInt32Bits(One("cycles_power", -1.0f, 2.0f)));
+        Assert.True(float.IsNaN(One("cycles_modulo", inf, 1.0f)));
+        Assert.True(float.IsNaN(One("cycles_modulo", -inf, 3.0f)));
+        Assert.True(float.IsNaN(One("cycles_modulo", inf, 0.1f)));
+        Assert.True(float.IsNaN(One("cycles_map_range_smoothstep", -inf, -inf, 1.0f, 2.0f, 3.0f)));
+        Assert.True(float.IsNaN(One("cycles_map_range_smoothstep", -inf, 1.0f, -inf, 2.0f, 3.0f)));
+        Assert.Equal(2.0f, One("cycles_map_range_smoothstep", -inf, 1.0f, 5.0f, 2.0f, 3.0f));
+    }
+
     [Theory]
     [MemberData(nameof(Targets))]
     public void InverseTrigonometryFollowsTheCyclesGuards(string target)

@@ -49,7 +49,8 @@ public static partial class math
         if (a < 0.0f)
         {
             var magnitude = pow(-a, b);
-            return b - 2.0f * floor(0.5f * b) != 0.0f ? -magnitude : magnitude;
+            // Odd exactly when the remainder is 1: an infinite exponent leaves NaN here and is even, as powf(a, +-inf) is never negative.
+            return b - 2.0f * floor(0.5f * b) == 1.0f ? -magnitude : magnitude;
         }
 
         return pow(a, b);

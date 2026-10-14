@@ -516,6 +516,109 @@ def family_ramp():
     ]
 
 
+# ---- infinite operands ----
+
+INF = float("inf")
+
+# Rows of (function, node, operands) whose operands may be an infinity. The film writes 0 for an infinite operand and
+# for an infinite or NaN result, so neither can travel through an image: the operand is made in-kernel (+-1 times
+# exp(100), which overflows to +-inf) and the result is read back through three comparisons with 0.
+INFINITE = [
+    ("cycles_power", "POWER", [
+        (-1.0, INF), (-1.0, -INF), (-2.0, INF), (-2.0, -INF), (-0.5, INF), (-0.5, -INF), (-0.0, INF), (-0.0, -INF),
+        (0.5, INF), (0.5, -INF), (2.0, INF), (2.0, -INF), (1.0, INF), (0.0, INF), (0.0, -INF), (INF, 3.0), (-INF, 3.0),
+        (-INF, 2.0), (INF, -1.0), (-INF, -1.0), (-INF, INF), (INF, INF)]),
+    ("cycles_modulo", "MODULO", [
+        (INF, 1.0), (-INF, 1.0), (INF, 3.0), (-INF, 3.0), (INF, 0.1), (-INF, 0.1), (INF, -2.0), (5.0, INF), (-5.0, INF),
+        (5.0, -INF), (INF, INF), (-INF, INF), (0.0, INF), (INF, 0.0)]),
+]
+
+# Map Range, Smooth Step: (value, from_min, from_max, to_min, to_max).
+INFINITE_SMOOTHSTEP = [
+    (-INF, -INF, 1.0, 2.0, 3.0), (-INF, 1.0, -INF, 2.0, 3.0), (-INF, 1.0, 5.0, 2.0, 3.0), (-INF, -5.0, 1.0, 2.0, 3.0),
+    (INF, -5.0, 1.0, 2.0, 3.0), (INF, 1.0, -5.0, 2.0, 3.0), (INF, INF, 1.0, 2.0, 3.0), (INF, 1.0, INF, 2.0, 3.0),
+    (-INF, INF, 1.0, 2.0, 3.0), (-INF, 1.0, INF, 2.0, 3.0), (1.0, -INF, INF, 2.0, 3.0),
+]
+
+
+def result_token(value, greater, less, equal):
+    """A result as the fixture writes it: float32 bits, or inf / -inf / nan where the film showed 0 and the comparisons say why."""
+    if bits(value) != "00000000" and bits(value) != "80000000":
+        return bits(value)
+    if equal:
+        return bits(value)
+    return "inf" if greater else ("-inf" if less else "nan")
+
+
+def infinite_entry(function, node_label, build_node, rows):
+    count = len(rows[0])
+    value_columns = []
+    flag_columns = []
+    for k in range(count):
+        value_columns.append(f32([(0.0 if r >= len(rows) else (float(np.sign(rows[r][k])) if np.isinf(rows[r][k]) else rows[r][k])) for r in range(CASES)]))
+        flag_columns.append(f32([(0.0 if r >= len(rows) else (1.0 if np.isinf(rows[r][k]) else 0.0)) for r in range(CASES)]))
+    images = pack_operands(value_columns + flag_columns)
+
+    def build(tree, imgs):
+        sockets = operand_sockets(tree, imgs, 2 * count)
+        operands = []
+        for k in range(count):
+            hundred = tree.nodes.new("ShaderNodeMath")
+            hundred.operation = "MULTIPLY"
+            tree.links.new(sockets[count + k], hundred.inputs[0])
+            hundred.inputs[1].default_value = 100.0
+            overflow = tree.nodes.new("ShaderNodeMath")
+            overflow.operation = "EXPONENT"
+            tree.links.new(hundred.outputs[0], overflow.inputs[0])
+            made = tree.nodes.new("ShaderNodeMath")
+            made.operation = "MULTIPLY"
+            tree.links.new(sockets[k], made.inputs[0])
+            tree.links.new(overflow.outputs[0], made.inputs[1])
+            operands.append(made.outputs[0])
+        result = build_node(tree, operands)
+        probes = []
+        for operation in ("GREATER_THAN", "LESS_THAN", "COMPARE"):
+            probe = tree.nodes.new("ShaderNodeMath")
+            probe.operation = operation
+            tree.links.new(result, probe.inputs[0])
+            probe.inputs[1].default_value = 0.0
+            if operation == "COMPARE":
+                probe.inputs[2].default_value = 0.0
+            probes.append(probe.outputs[0])
+        return [result] + probes
+
+    value, greater, less, equal = bake(function + ".infinite", images, build, 4)
+    cases = []
+    for r, row in enumerate(rows):
+        operands = " ".join(("inf" if x == INF else "-inf" if x == -INF else bits(x)) for x in row)
+        cases.append("%s -> %s" % (operands, result_token(value[r], greater[r] > 0.5, less[r] > 0.5, equal[r] > 0.5)))
+    return {"function": function, "node": node_label, "cases": cases}
+
+
+def family_infinite():
+    def math_node(operation):
+        def build(tree, operands):
+            node = tree.nodes.new("ShaderNodeMath")
+            node.operation = operation
+            for k, socket in enumerate(operands):
+                tree.links.new(socket, node.inputs[k])
+            return node.outputs[0]
+        return build
+
+    def smoothstep(tree, operands):
+        node = tree.nodes.new("ShaderNodeMapRange")
+        node.data_type = "FLOAT"
+        node.interpolation_type = "SMOOTHSTEP"
+        node.clamp = False
+        for identifier, socket in zip(["Value", "From Min", "From Max", "To Min", "To Max"], operands):
+            tree.links.new(socket, by_identifier(node.inputs, identifier))
+        return node.outputs["Result"]
+
+    functions = [infinite_entry(function, "ShaderNodeMath " + operation, math_node(operation), rows) for function, operation, rows in INFINITE]
+    functions.append(infinite_entry("cycles_map_range_smoothstep", "ShaderNodeMapRange SMOOTHSTEP", smoothstep, INFINITE_SMOOTHSTEP))
+    return functions
+
+
 FAMILIES = {
     "math": family_math,
     "map-range": family_map_range,
@@ -523,6 +626,7 @@ FAMILIES = {
     "mix": family_mix,
     "rgb-to-bw": family_rgb_to_bw,
     "ramp": family_ramp,
+    "infinite": family_infinite,
 }
 
 
