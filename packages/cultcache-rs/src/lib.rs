@@ -655,7 +655,7 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 ///     #[cultcache(key = 0)]
 ///     bytes: Vec<u8>,
 ///     #[cultcache(key = 1)]
-///     header: [u8; 16 * 1024 - 64],
+///     header: [[u64; 32]; 63],
 /// }
 /// ```
 pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
