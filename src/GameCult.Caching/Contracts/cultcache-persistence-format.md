@@ -434,7 +434,7 @@ elements retargets nothing.
   keyed member of the element. A list whose element type is not keyed
   (`[MessagePackObject]` or `[Union]`) is a value list and is replaced whole. For an
   object list, C# refuses at registration a concrete element type that is not keyed and
-  `[MessagePackFormatter]` on any type or member on the way to the list or on the id
+  `[MessagePackFormatter]` on any type, collection type or member on the way to the list or on the id
   member, and refuses at the first encode or decode of the document a formatter
   resolver that claims one of those types.
 

@@ -100,14 +100,17 @@ namespace GameCult.Caching
             // element types and every concrete type under them. A serialization codec must write all of these by their [Key]
             // layout, so it checks them against the formatters it composed.
             public List<Type> IdPath { get; } = new();
+
+            // The concrete element types already judged in this document, so each is refused at most once however many lists hold it.
+            internal HashSet<Type> Judged { get; } = new();
         }
 
         // What the walk saw, settled once it is complete: a type reaches a list only through types reached later, and a type
         // can sit in a cycle, so the path is a fixed point over these edges and not a stack.
         private sealed class Graph
         {
-            public List<(Type Owner, MemberInfo? Member, Type Child)> Edges { get; } = new();
-            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete)> Lists { get; } = new();
+            public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through)> Edges { get; } = new();
+            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through)> Lists { get; } = new();
         }
 
         private static readonly ConcurrentDictionary<Type, bool> IdCapable = new();
@@ -130,22 +133,22 @@ namespace GameCult.Caching
             if (!seen.Add(type))
                 return;
             foreach (var (member, memberType) in KeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, seen, survey, graph);
+                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), seen, survey, graph);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
             {
-                graph.Edges.Add((type, null, union.SubType));
+                graph.Edges.Add((type, null, union.SubType, Array.Empty<Type>()));
                 VisitObject(documentType, union.SubType, seen, survey, graph);
             }
         }
 
-        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, HashSet<Type> seen, Survey survey, Graph graph)
+        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
             if (IsLeaf(memberType))
                 return;
             if (DictionaryValueType(memberType) is { } valueType)
             {
-                VisitMemberType(documentType, owner, member, valueType, seen, survey, graph);
+                VisitMemberType(documentType, owner, member, valueType, through.Append(memberType).ToArray(), seen, survey, graph);
                 return;
             }
 
@@ -154,9 +157,11 @@ namespace GameCult.Caching
                 if (IsObjectType(element))
                 {
                     var concretes = ConcreteTypes(element).ToList();
-                    graph.Lists.Add((owner, member, element, concretes));
+                    graph.Lists.Add((owner, member, element, concretes, through.Append(memberType).ToArray()));
                     foreach (var concrete in concretes)
                     {
+                        if (!survey.Judged.Add(concrete))
+                            continue;
                         var problem = IsObjectType(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
                         if (problem != null)
                             survey.Problems.Add($"Cult document {documentType.Name}: list element type {concrete.Name} (in {owner.Name}.{member.Name}) {problem}");
@@ -165,13 +170,13 @@ namespace GameCult.Caching
                     VisitObject(documentType, element, seen, survey, graph);
                 }
                 else
-                    VisitMemberType(documentType, owner, member, element, seen, survey, graph);
+                    VisitMemberType(documentType, owner, member, element, through.Append(memberType).ToArray(), seen, survey, graph);
                 return;
             }
 
             if (IsObjectType(memberType))
             {
-                graph.Edges.Add((owner, member, memberType));
+                graph.Edges.Add((owner, member, memberType, through));
                 VisitObject(documentType, memberType, seen, survey, graph);
             }
         }
@@ -186,15 +191,17 @@ namespace GameCult.Caching
         {
             var reaching = new HashSet<Type>(graph.Lists.Select(list => list.Owner));
             var members = new List<MemberInfo>(graph.Lists.Select(list => list.Member));
+            var through = new List<Type>(graph.Lists.SelectMany(list => list.Through));
             for (var grew = true; grew;)
             {
                 grew = false;
-                foreach (var (owner, member, child) in graph.Edges)
+                foreach (var (owner, member, child, via) in graph.Edges)
                 {
                     if (!reaching.Contains(child))
                         continue;
                     if (member != null && !members.Contains(member))
                         members.Add(member);
+                    through.AddRange(via);
                     grew |= reaching.Add(owner);
                 }
             }
@@ -207,6 +214,8 @@ namespace GameCult.Caching
             }
 
             foreach (var type in reaching)
+                Add(type);
+            foreach (var type in through)
                 Add(type);
             foreach (var list in graph.Lists)
             {
@@ -224,7 +233,7 @@ namespace GameCult.Caching
 
             foreach (var member in members)
             {
-                if (member.IsDefined(typeof(MessagePackFormatterAttribute), true))
+                if (Declares(member, typeof(MessagePackFormatterAttribute)))
                     survey.Problems.Add($"Cult document {documentType.Name}: {member.DeclaringType!.Name}.{member.Name} leads to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute.");
             }
         }
@@ -252,13 +261,13 @@ namespace GameCult.Caching
 
         private static string? IdProblem(Type element)
         {
-            var ids = MembersOf(element).Where(member => member.IsDefined(typeof(CultElementIdAttribute), true)).ToArray();
+            var ids = MembersOf(element).Where(member => Declares(member, typeof(CultElementIdAttribute))).ToArray();
             if (ids.Length == 0)
                 return "has no [CultElementId] member; add a public string member with [Key] and [CultElementId] so each element has an identity.";
             if (ids.Length > 1)
                 return $"has two [CultElementId] members ({ids[0].Name}, {ids[1].Name}); an element has one identity.";
             var id = ids[0];
-            if (id.IsDefined(typeof(MessagePackFormatterAttribute), true))
+            if (Declares(id, typeof(MessagePackFormatterAttribute)))
                 return $"declares [MessagePackFormatter] on its [CultElementId] member {id.Name}, so the id would not be written by its [Key].";
             if (TypeOf(id) != typeof(string))
                 return $"declares [CultElementId] on {id.Name}, which is not a string.";
@@ -475,7 +484,7 @@ namespace GameCult.Caching
         private static Shape Build(Type type)
         {
             var shape = new Shape();
-            var idMember = MembersOf(type).FirstOrDefault(member => member.IsDefined(typeof(CultElementIdAttribute), true));
+            var idMember = MembersOf(type).FirstOrDefault(member => Declares(member, typeof(CultElementIdAttribute)));
             if (idMember != null)
             {
                 shape.GetId = idMember is FieldInfo field ? o => (string?)field.GetValue(o) : o => (string?)((PropertyInfo)idMember).GetValue(o);
@@ -503,6 +512,10 @@ namespace GameCult.Caching
 
         private static IEnumerable<(MemberInfo Member, Type Type)> KeyedMembers(Type type) =>
             MembersOf(type).Where(member => KeyOf(member) != null).Select(member => (member, TypeOf(member)));
+
+        // An attribute a member declares, or inherits through an override: MemberInfo.IsDefined ignores inherit for properties, so an
+        // override of a base virtual member would not see its base's attribute.
+        private static bool Declares(MemberInfo member, Type attribute) => Attribute.IsDefined(member, attribute, inherit: true);
 
         private static int? KeyOf(MemberInfo member) => member.GetCustomAttribute<KeyAttribute>(true)?.IntKey;
 

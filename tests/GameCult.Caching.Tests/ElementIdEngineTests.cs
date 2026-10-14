@@ -313,6 +313,52 @@ namespace GameCult.Caching.Tests
             Assert.That(Problems(typeof(HFormattedDerived)).Single(), Does.Contain("FormattedDerived").And.Contain("[MessagePackFormatter]"), "the attribute is inherited");
         }
 
+        // The collection types between a member and its object list are written by some formatter too, so they sit on the id path.
+        // A value list (of a struct, a primitive or a non-keyed class) never reaches an object, so it does not.
+        [Test]
+        public void ACollectionTypeOnTheWayToAnObjectListIsOnTheIdPath()
+        {
+            var path = CultElementIds.Inspect(typeof(HCollections)).IdPath;
+            Assert.That(path, Is.EquivalentTo(new[]
+            {
+                typeof(HCollections), typeof(EIded), typeof(HHasIds),
+                typeof(List<EIded>), typeof(EIded[]), typeof(Dictionary<string, HHasIds>), typeof(List<List<EIded>>)
+            }));
+
+            var valueLists = CultElementIds.Inspect(typeof(HValueListsBesideObjects)).IdPath;
+            Assert.That(valueLists, Is.EquivalentTo(new[] { typeof(HValueListsBesideObjects), typeof(List<EIded>), typeof(EIded) }));
+        }
+
+        [Test]
+        public void AFormatterOnACollectionClassOfAnObjectListIsRefused()
+        {
+            Assert.That(Problems(typeof(HRoles)).Single(), Does.Contain("Roles").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedValueCollection)), Is.Empty, "a collection class of a non-keyed element is a value list");
+        }
+
+        // MemberInfo.IsDefined ignores inherit for properties: an override sees its base's attribute only through Declares.
+        [Test]
+        public void AnInheritedFormatterOnAnOverriddenMemberIsRefused()
+        {
+            Assert.That(Problems(typeof(HOverFormattedId)).Single(), Does.Contain("Id").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(OwnerOverFormatted)).Single(), Does.Contain("Items").And.Contain("[MessagePackFormatter]"));
+
+            Assert.That(Problems(typeof(HIdOverride)), Is.Empty, "a base [CultElementId] is the override's id");
+            var root = new HIdOverride { Items = { new IdOverride() } };
+            Assert.That(Assign(root, "r", deterministic: false), Is.EqualTo(1));
+            Assert.That(root.Items[0].Id, Has.Length.EqualTo(12));
+        }
+
+        // The union arm has a valid id, so IdProblem passes it and only the rule that an element is written by its [Key] layout
+        // can refuse it; it is refused once per document however many lists hold it.
+        [Test]
+        public void ANonKeyedArmWithAValidIdIsRefusedOncePerType()
+        {
+            Assert.That(Problems(typeof(HUnkeyedArmList)).Single(), Does.Contain("UnkeyedArm").And.Contain("formatter the cache does not own"));
+            Assert.That(Problems(typeof(HUnkeyedTwoLists)).Single(), Does.Contain("UnkeyedArm"));
+            Assert.That(Problems(typeof(HUnkeyedArmField)), Is.Empty);
+        }
+
         // The id path is a fixed point, not the stack at the moment a list is found: a type in a cycle with the list's owner, and
         // a type reached twice, are both on the way to it.
         [Test]
@@ -336,11 +382,71 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public class EBareNest { [Key(0)] [CultElementId] public string Id { get; set; } = ""; [Key(1)] public List<EBare> Sub { get; set; } = new(); }
 
         public sealed class NoFormatter { }
-        public class UnkeyedArm : ArmBase { [Key(0)] public string Id { get; set; } = ""; }
+        public class UnkeyedArm : ArmBase { [Key(0)] [CultElementId] public string Id { get; set; } = ""; }
         [Union(0, typeof(KeyedArm)), Union(1, typeof(UnkeyedArm))] public abstract class ArmBase { }
         [MessagePackObject] public class KeyedArm : ArmBase { [Key(0)] [CultElementId] public string Id { get; set; } = ""; }
         [MessagePackObject] public class HUnkeyedArmList { [Key(0)] public List<ArmBase> Items { get; set; } = new(); }
         [MessagePackObject] public class HUnkeyedArmField { [Key(0)] public ArmBase? Root { get; set; } }
+        [MessagePackObject]
+        public class HCollections
+        {
+            [Key(0)] public List<EIded> A { get; set; } = new();
+            [Key(1)] public EIded[] B { get; set; } = Array.Empty<EIded>();
+            [Key(2)] public Dictionary<string, HHasIds> C { get; set; } = new();
+            [Key(3)] public List<List<EIded>> D { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public class HValueListsBesideObjects
+        {
+            [Key(0)] public List<EIded> Objects { get; set; } = new();
+            [Key(1)] public List<int> Numbers { get; set; } = new();
+            [Key(2)] public List<PlainValue> Plain { get; set; } = new();
+            [Key(3)] public List<Pair> Points { get; set; } = new();
+        }
+
+        [MessagePackFormatter(typeof(NoFormatter))] public class Roles : List<EIded> { }
+        [MessagePackObject] public class HRoles { [Key(0)] public Roles Items { get; set; } = new(); }
+        [MessagePackFormatter(typeof(NoFormatter))] public class PlainValues : List<PlainValue> { }
+        [MessagePackObject] public class HFormattedValueCollection { [Key(0)] public List<EIded> Objects { get; set; } = new(); [Key(1)] public PlainValues Plain { get; set; } = new(); }
+
+        [MessagePackObject]
+        public abstract class FormattedIdBase
+        {
+            [Key(0)] [MessagePackFormatter(typeof(NoFormatter))] public virtual string Id { get; set; } = "";
+        }
+
+        [MessagePackObject]
+        public class FormattedIdOverride : FormattedIdBase
+        {
+            [Key(0)] [CultElementId] public override string Id { get; set; } = "";
+        }
+
+        [MessagePackObject] public class HOverFormattedId { [Key(0)] public List<FormattedIdOverride> Items { get; set; } = new(); }
+
+        [MessagePackObject]
+        public class OwnerBaseFormatted
+        {
+            [Key(0)] [MessagePackFormatter(typeof(NoFormatter))] public virtual List<EIded> Items { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public class OwnerOverFormatted : OwnerBaseFormatted
+        {
+            [Key(0)] public override List<EIded> Items { get; set; } = new();
+        }
+
+        [MessagePackObject]
+        public class IdVirtual
+        {
+            [Key(0)] public string X { get; set; } = "";
+            [Key(1)] [CultElementId] public virtual string Id { get; set; } = "";
+        }
+
+        [MessagePackObject] public class IdOverride : IdVirtual { [Key(1)] public override string Id { get; set; } = ""; }
+        [MessagePackObject] public class HIdOverride { [Key(0)] public List<IdOverride> Items { get; set; } = new(); }
+
+        [MessagePackObject] public class HUnkeyedTwoLists { [Key(0)] public List<ArmBase> A { get; set; } = new(); [Key(1)] public List<ArmBase> B { get; set; } = new(); }
         public class PlainValue { public string X { get; set; } = ""; }
         [MessagePackObject] public class HValueList { [Key(0)] public List<PlainValue> Items { get; set; } = new(); }
 
