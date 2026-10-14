@@ -18,6 +18,8 @@ namespace GameCult.Caching.Tests
         private static readonly Type ClaimingDeck = Emit("ForeignSuiteClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v1", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
         private static readonly Type LateClaimingDeck = Emit("ForeignSuiteLateClaimingDeck", "tests.foreign_deck", "tests.foreign_deck.v2", new[] { new Field("Name", typeof(string), 0, IsName: true) }, new[] { "other.runtime.deck" });
         private static readonly Type Widget = Emit("ForeignSuiteWidget", "tests.foreign_widget", "tests.foreign_widget.v1", new[] { new Field("Label", typeof(string), 0, IsName: true) });
+        // A second type a cache registers, so that a second backing store has a home of its own.
+        private static readonly Type Gizmo = Emit("ForeignSuiteGizmo", "tests.foreign_gizmo", "tests.foreign_gizmo.v1", new[] { new Field("Tag", typeof(string), 0, IsName: true) });
 
         // A build that has both types, and one that has only the deck: to it the widget is foreign.
         private static readonly CultDocumentRegistry Full = CultDocumentRegistry.ForTypes(new[] { Deck, Widget });
@@ -1011,10 +1013,10 @@ namespace GameCult.Caching.Tests
                         store.PushAll();
                         break;
                     case DirectWrite.CommitUpsert:
-                        store.CommitBatch(new CultCommitRequest(new[] { mine }, Array.Empty<CultStoredDocument>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        store.CommitBatch(new CultCommitRequest(new[] { mine }, Array.Empty<CultStoredDocument>(), Array.Empty<string>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
                         break;
                     case DirectWrite.CommitDelete:
-                        store.CommitBatch(new CultCommitRequest(Array.Empty<CultStoredDocument>(), new[] { held }, Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
+                        store.CommitBatch(new CultCommitRequest(Array.Empty<CultStoredDocument>(), new[] { held }, Array.Empty<string>(), Array.Empty<(CultRecordKey, string?)>(), false), wait: true);
                         break;
                 }
             })!;
@@ -1026,9 +1028,10 @@ namespace GameCult.Caching.Tests
             Assert.That(EmittedDocumentTypes.Read(cache.Get(D)!, "Name"), Is.EqualTo("theirs"));
         }
 
-        // A removal of a foreign record, which the cache does not hold, is refused typed: the caller is never told it removed what the
-        // store still carries. The store is read as it is at the removal, so a foreign record another writer added after the load
-        // is refused too, and listed foreign from then on.
+        // A removal of a foreign record, which the cache does not hold, is refused typed where the store judges it under its lock: at
+        // the commit that carries it, or the flush that follows a Remove, which itself costs nothing and returns false. The caller is
+        // never told a write removed what the store still carries. The store is read at that judgement, so a foreign record another
+        // writer added after the load is refused too, and listed foreign from then on.
         [Test]
         public void RemovingAForeignRecordIsRefusedNotReportedAsDone([Values] bool directory, [Values] bool batch, [Values] bool appearedAfterLoad)
         {
@@ -1054,14 +1057,573 @@ namespace GameCult.Caching.Tests
                     if (batch)
                         cache.Commit(stage => stage.Remove(W));
                     else
-                        cache.Remove(W);
+                    {
+                        Assert.That(cache.Remove(W), Is.False, "a key the cache does not hold costs nothing at the call");
+                        cache.FlushAsync().GetAwaiter().GetResult();
+                    }
                 })!;
                 Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
                 Assert.That(cache.IsDirty, Is.False);
                 Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+                Assert.DoesNotThrow(() => cache.FlushAsync().GetAwaiter().GetResult(), "a refusal forgets the check it refused");
                 Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False, "a key nothing holds is still no removal");
                 Assert.That(Fingerprint(path), Is.EqualTo(before));
             }
+        }
+
+        // A write that removes a key the cache does not hold is judged under the store's lock, after the load: a foreign record another
+        // writer committed in between refuses the whole commit, typed, and nothing the commit would have written lands.
+        [Test]
+        public void AForeignRecordThatLandsBetweenTheLoadAndTheCommitRefusesTheCommitThatRemovesIt([Values] bool directory)
+        {
+            var path = PathOf("window.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var a = Open(path, DeckOnly, directory);
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            var before = Fingerprint(path);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => a.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf(Canary), D);
+                batch.Remove(W);
+            }))!;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+                Assert.That(refusal.Message, Does.Not.Contain(Canary));
+                Assert.That(Fingerprint(path), Is.EqualTo(before), "nothing was written, d included");
+                Assert.That(a.IsDirty, Is.False);
+            });
+        }
+
+        // Removing a key nothing holds reads no store: the judgement is the flush's, so a store that cannot be read costs the removal
+        // nothing and the flush is where it is read.
+        [Test]
+        public void RemovingAnUnheldKeyReadsNothingUntilTheFlush([Values] bool directory)
+        {
+            var path = Seeded("unreadable.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            var original = File.ReadAllBytes(path);
+            File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+            try
+            {
+                Assert.DoesNotThrow(() => Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False));
+                Assert.Throws<CultStoreUnreadableException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            }
+            finally
+            {
+                File.WriteAllBytes(path, original);
+            }
+        }
+
+        // A checked key is judged and never removed: another writer's declared record at it stays where it is.
+        [Test]
+        public void ACheckedKeyIsNeverRemoved([Values] bool directory)
+        {
+            var path = PathOf("checked.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var a = Open(path, DeckOnly, directory);
+            a.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
+            Assert.That(a.Remove(W), Is.False);
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
+            var theirs = Stored(path, W);
+
+            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult());
+
+            Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e", "w" }), "the staged write landed beside the checked key");
+            Assert.That(Stored(path, W), Is.EqualTo(theirs), "the record at the checked key is still the other writer's bytes");
+            using (var c = Open(path, Full, directory))
+                c.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), W));
+            Assert.DoesNotThrow(() => a.FlushAsync().GetAwaiter().GetResult(), "a flush clears what it judged: the next one has nothing to judge");
+        }
+
+        // ExpectUnchanged compares the foreign records a store carries at the versions it read them: it holds right after the load,
+        // and fails, writing nothing, once another writer changed one.
+        [Test]
+        public void ExpectUnchangedHoldsOverAStoreCarryingAForeignRecord([Values] bool directory)
+        {
+            var path = Seeded("expect-unchanged.cc", directory);
+            using var a = Open(path, DeckOnly, directory);
+            Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("e"), E);
+            }), Is.True, "nothing changed since the load");
+
+            using (var b = Open(path, Full, directory))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("changed"), W));
+            var before = Fingerprint(path);
+
+            Assert.That(a.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("f"), new CultRecordKey("f"));
+            }), Is.False, "another writer changed the foreign record");
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+        }
+
+        // A foreign key listed at the load that another writer then replaced with a record this cache reads but does not declare: the
+        // refused removal (judged at the flush) reloads it read-only and takes it off the foreign list.
+        [Test]
+        public void AListedForeignKeyBecomesReadOnlyWhenARemovalOfItIsRefused([Values] bool directory)
+        {
+            var path = Seeded("delist.cc", directory);
+            using var a = Open(path, DeckOnly, directory);
+            Assert.That(StoreOf(a).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+            // The writer declares the widget's id, so it may replace the widget with a deck record under an id a reads but does not declare.
+            using (var other = Open(path, CultDocumentRegistry.ForTypes(new[] { MovingDeck, Widget }), directory))
+                Assert.That(other.Commit(batch => batch.Upsert(MovingDeck, New(MovingDeck, ("Name", "moved")), W)), Is.True);
+
+            Assert.That(a.Remove(W), Is.False);
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => a.FlushAsync().GetAwaiter().GetResult())!;
+            RefusedOnDisk(refusal, W);
+
+            Assert.That(StoreOf(a).ForeignRecords, Is.Empty, "no longer foreign");
+            Assert.That(a.Get(W), Is.Not.Null, "held, read-only");
+            Assert.Throws<CultSchemaConflictException>(() => a.Remove(W), "refused at the call now: the cache holds it");
+        }
+
+        // A single-file store holding a variant refuses a write after another writer changed it; a changed key whose record this cache
+        // does not read is listed as foreign by that refusal, as a load lists it.
+        [Test]
+        public void AVariantStoreRefusalListsTheRecordItRefusedAsForeign([Values(Write.Flush, Write.Commit)] Write write)
+        {
+            var path = PathOf("variant-refusal.cc");
+            var gears = CultDocumentRegistry.ForTypes(new[] { typeof(VariantTests.VariantGear) });
+            var withWidget = CultDocumentRegistry.ForTypes(new[] { typeof(VariantTests.VariantGear), Widget });
+            using var a = Open(path, gears, directory: false);
+            var baseKey = new CultRecordKey("laser");
+            a.Commit(batch =>
+            {
+                batch.Upsert(typeof(VariantTests.VariantGear), new VariantTests.VariantGear { Name = "laser", Power = 10, Code = "l1" }, baseKey);
+                batch.UpsertVariant(new CultRecordKey("laser-big"), baseKey, new[]
+                {
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Name), "laser big"),
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Power), 25),
+                    a.Override<VariantTests.VariantGear>(nameof(VariantTests.VariantGear.Code), "laser big")
+                });
+            });
+            using (var b = Open(path, withWidget, directory: false))
+                b.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            Assert.That(StoreOf(a).ForeignRecords, Is.Empty);
+
+            var conflict = Assert.Throws<CultWriteConflictException>(() =>
+            {
+                var next = new VariantTests.VariantGear { Name = "next", Power = 1, Code = "n" };
+                var key = new CultRecordKey("n");
+                if (write == Write.Flush)
+                {
+                    a.UpsertAsync(typeof(VariantTests.VariantGear), next, key).GetAwaiter().GetResult();
+                    a.FlushAsync().GetAwaiter().GetResult();
+                }
+                else
+                {
+                    a.Commit(batch => batch.Upsert(typeof(VariantTests.VariantGear), next, key));
+                }
+            })!;
+
+            Assert.That(conflict.ChangedKeys, Does.Contain(W.Value));
+            var listed = StoreOf(a).ForeignRecords.Single();
+            Assert.That((listed.Key, listed.SchemaId), Is.EqualTo((W.Value, WidgetId)), "the refused record is listed as the store holds it");
+            Assert.That(a.Get(W), Is.Null);
+        }
+
+        private static CacheBackingStore StoreAt(string path, bool directory, bool readOnly) => directory
+            ? new DirectoryMessagePackBackingStore(path, readOnly: readOnly)
+            : new SingleFileMessagePackBackingStore(path, readOnly);
+
+        // A batch with nothing to write and no key to check commits through no store: a staged write waits for its own flush.
+        [Test]
+        public void ABatchWithNothingToWriteOrCheckCommitsNothingToTheStore([Values] bool directory)
+        {
+            var path = Seeded("empty-batch.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            cache.UpsertAsync(Deck, DeckOf("e"), E).GetAwaiter().GetResult();
+
+            Assert.That(cache.Commit(batch => { }), Is.True);
+
+            Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "w" }), "e is still only staged");
+            cache.FlushAsync().GetAwaiter().GetResult();
+            Assert.That(Read(path).Records.Select(record => record.Key), Is.EquivalentTo(new[] { "d", "e", "w" }));
+        }
+
+        // A write that only checked keys has nothing to write: no file is replaced and no generation is written, by a commit or a flush.
+        [Test]
+        public void AWriteThatOnlyCheckedKeysWritesNoFile([Values] bool directory, [Values] bool viaCommit)
+        {
+            var path = Seeded("check-only.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            var past = new DateTime(2001, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(path, past);
+            var before = Fingerprint(path);
+
+            if (viaCommit)
+                Assert.That(cache.Commit(batch => batch.Remove(new CultRecordKey("absent"))), Is.True);
+            else
+            {
+                Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False);
+                cache.FlushAsync().GetAwaiter().GetResult();
+            }
+
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            Assert.That(File.GetLastWriteTimeUtc(path), Is.EqualTo(past), "the store was not replaced");
+            Assert.That(cache.IsDirty, Is.False);
+        }
+
+        // A flush or commit that only checked keys clears every check it judged: the next one has nothing to judge, so it does not
+        // refuse a record another writer put at a checked key afterwards.
+        [Test]
+        public void AWriteThatOnlyCheckedKeysClearsTheChecksItJudged([Values] bool directory, [Values] bool viaCommit)
+        {
+            var path = Seeded("check-cleared.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            var staged = new CultRecordKey("staged");
+            Assert.That(cache.Remove(staged), Is.False);
+            if (viaCommit)
+                Assert.That(cache.Commit(batch => batch.Remove(new CultRecordKey("requested"))), Is.True);
+            else
+                cache.FlushAsync().GetAwaiter().GetResult();
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Widget, WidgetOf("now a widget"), staged));
+
+            Assert.DoesNotThrow(() => cache.FlushAsync().GetAwaiter().GetResult());
+        }
+
+        // A disposed cache and a disposed store judge the checks a removal staged, as their flush does.
+        [Test]
+        public void DisposingAStoreJudgesTheChecksARemovalStaged([Values] bool directory, [Values] bool viaCache)
+        {
+            var path = Seeded("dispose.cc", directory);
+            var cache = Open(path, DeckOnly, directory);
+            cache.FlushAttachedStoresOnDispose = true;
+            StoreOf(cache).FlushOnDispose = true;
+            Assert.That(cache.Remove(W), Is.False);
+            var before = Fingerprint(path);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() =>
+            {
+                if (viaCache)
+                    cache.Dispose();
+                else
+                    StoreOf(cache).Dispose();
+            })!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            Assert.That(Fingerprint(path), Is.EqualTo(before));
+            try { cache.Dispose(); } catch (CultSchemaConflictException) { }
+        }
+
+        // A read-only store has no lock to judge under, so it answers a removal of a key the cache does not hold at the call, from
+        // what it last loaded.
+        [Test]
+        public void AReadOnlyStoreRefusesTheRemovalOfAForeignRecordAtTheCall([Values] bool directory)
+        {
+            var path = Seeded("read-only.cc", directory);
+            using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = DeckOnly, UseDirectoryStore = directory, ReadOnly = true });
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Remove(W))!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False);
+        }
+
+        // A batch that only checks keys commits through the one writable store; a read-only store answers the checks from its last load.
+        [Test]
+        public void AReadOnlyStoreAnswersTheChecksFromItsView([Values] bool directory)
+        {
+            var writable = PathOf("home.cc");
+            using (var seed = Open(writable, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var readOnly = PathOf("other.cc");
+            using (var seed = Open(readOnly, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                seed.Commit(batch =>
+                {
+                    batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g"));
+                    batch.Upsert(Widget, WidgetOf("w"), W);
+                });
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(writable, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(readOnly, directory, readOnly: true), Gizmo);
+            var before = Fingerprint(writable);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch => batch.Remove(W)))!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            Assert.That(Fingerprint(writable), Is.EqualTo(before));
+            Assert.That(cache.Commit(batch => batch.Remove(new CultRecordKey("absent"))), Is.True, "a key no store holds is free");
+        }
+
+        // The home store judges a check under its lock, from the record it holds then: a foreign record it listed at the load that
+        // another writer since replaced with a declared one no longer refuses the commit, and is not removed.
+        [Test]
+        public void TheHomeStoreJudgesACheckUnderItsLockNotFromItsLoad([Values] bool directory)
+        {
+            var path = Seeded("home-judges.cc", directory);
+            using var cache = Open(path, DeckOnly, directory);
+            Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+            using (var other = Open(path, Full, directory))
+                other.Commit(batch => batch.Upsert(Deck, DeckOf("theirs"), W));
+            var theirs = Stored(path, W);
+
+            Assert.That(cache.Commit(batch => batch.Remove(W)), Is.True);
+
+            Assert.That(Stored(path, W), Is.EqualTo(theirs), "the declared record the checked key now holds is not removed");
+        }
+
+        // A cache disposed with several stores flushes when any one of them has checks staged, not only when all do (a read-only store
+        // never has any).
+        [Test]
+        public void DisposingACacheFlushesWhenOnlyOneStoreHasChecksStaged([Values] bool directory)
+        {
+            var writable = Seeded("dispose-home.cc", directory);
+            var other = PathOf("dispose-other.cc");
+            using (var seed = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo }), directory))
+                seed.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g")));
+            var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo })) { FlushAttachedStoresOnDispose = true };
+            cache.AddBackingStore(StoreAt(writable, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: true), Gizmo);
+            Assert.That(cache.Remove(W), Is.False);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Dispose())!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            try { cache.Dispose(); } catch (CultSchemaConflictException) { }
+        }
+
+        // Two writable stores: home.cc holds a deck and takes Deck, other.cc holds a gizmo and takes Gizmo, and, when asked, a widget at
+        // w that no registered type declares, so the cache lists it foreign at the load.
+        private (CultCache Cache, string Home, string Other) TwoWritableStores(bool directory, bool otherListsWidget)
+        {
+            var home = PathOf("home.cc");
+            using (var seed = Open(home, DeckOnly, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var other = PathOf("other.cc");
+            using (var seed = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+            {
+                seed.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g")));
+                if (otherListsWidget)
+                    seed.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            }
+
+            var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(home, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: false), Gizmo);
+            return (cache, home, other);
+        }
+
+        // Every writable store judges a batch's checks under its own lock, whichever store the batch commits through: a record another
+        // writer put at a checked key in a store the batch does not write, after the load, refuses the whole commit and writes nothing.
+        [Test]
+        public void EveryWritableStoreRefusesACommitThatRemovesItsLateForeignRecord([Values] bool directory, [Values] bool withWrite)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: false);
+            using var _ = cache;
+            using (var late = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            var homeBefore = Fingerprint(home);
+            var otherBefore = Fingerprint(other);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
+            {
+                if (withWrite)
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }))!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+            Assert.That(Fingerprint(other), Is.EqualTo(otherBefore));
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Not.Contain("d2"));
+            Assert.That(cache.BackingStores[1].ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+        }
+
+        // The non-home judgement reads the store under its lock, not its listing: a foreign record that store listed at the load,
+        // since replaced by a declared one, no longer refuses the commit and is not removed.
+        [Test]
+        public void ANonHomeStoreJudgesACheckUnderItsLockNotFromItsLoad([Values] bool directory)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: true);
+            using var _ = cache;
+            Assert.That(cache.BackingStores[1].ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+            using (var late = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "theirs")), W));
+            var theirs = Stored(other, W);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }), Is.True);
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+            Assert.That(Stored(other, W), Is.EqualTo(theirs), "the declared record the checked key now holds is not removed");
+        }
+
+        // A store that is not the batch's home and cannot take its lock makes the commit contended before the home writes.
+        [Test]
+        public void ANonHomeStoreHeldByAnotherWriterMakesTryCommitContended()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: false, otherListsWidget: false);
+            using var _ = cache;
+            var homeBefore = Fingerprint(home);
+
+            using (new FileStream(other + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                var outcome = cache.TryCommit(batch =>
+                {
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                    batch.Remove(W);
+                });
+
+                Assert.That(outcome, Is.EqualTo(CultCommitOutcome.Contended));
+            }
+
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+        }
+
+        private static void CopyStoreOver(string from, string to, bool directory)
+        {
+            if (directory)
+            {
+                var source = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(from);
+                var target = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(to);
+                Directory.CreateDirectory(target);
+                foreach (var file in Directory.GetFiles(source, "*.msgpack"))
+                    File.Copy(file, Path.Combine(target, Path.GetFileName(file)), true);
+            }
+            File.Copy(from, to, true);
+        }
+
+        private static FileStream HoldStoreLock(string path, bool directory) => directory
+            ? new FileStream(Path.Combine(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path), ".commit.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+            : new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        // A non-home store is judged only after the commit holds that store's own lock: a foreign record another writer lands at the
+        // checked key while the commit waits for the lock is refused, whichever kind the store is and whether or not the batch writes.
+        [Test]
+        public void ANonHomeStoreIsReadOnlyAfterItsLockIsTaken([Values] bool directory, [Values] bool withWrite)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: false);
+            using var _ = cache;
+            var copy = PathOf("copy.cc");
+            CopyStoreOver(other, copy, directory);
+            using (var late = Open(copy, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            var homeBefore = Fingerprint(home);
+
+            Exception? thrown = null;
+            var held = HoldStoreLock(other, directory);
+            var worker = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    cache.Commit(batch =>
+                    {
+                        if (withWrite)
+                            batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                        batch.Remove(W);
+                    });
+                }
+                catch (Exception ex) { thrown = ex; }
+            });
+            worker.Start();
+            // The lock wait is a Thread.Sleep retry loop, so the worker sleeping is the worker waiting for the held lock.
+            Assert.That(System.Threading.SpinWait.SpinUntil(
+                () => (worker.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(10)), Is.True, "the commit waits on the held lock");
+            CopyStoreOver(copy, other, directory);
+            var otherAfterSwap = Fingerprint(other);
+            held.Dispose();
+
+            Assert.That(worker.Join(TimeSpan.FromSeconds(40)), Is.True, "the commit finished");
+            Assert.That(thrown, Is.TypeOf<CultSchemaConflictException>());
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore), "the home is unwritten");
+            Assert.That(Fingerprint(other), Is.EqualTo(otherAfterSwap), "the non-home store is unwritten");
+        }
+
+        // A directory store judging a check honours wait=false: its lease held by another writer makes TryCommit contended at once.
+        [Test]
+        public void ADirectoryNonHomeStoreWhoseLeaseIsHeldMakesTryCommitContended()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: true, otherListsWidget: false);
+            using var _ = cache;
+            var homeBefore = Fingerprint(home);
+
+            CultCommitOutcome outcome;
+            using (HoldStoreLock(other, directory: true))
+                outcome = cache.TryCommit(batch =>
+                {
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                    batch.Remove(W);
+                });
+
+            Assert.That(outcome, Is.EqualTo(CultCommitOutcome.Contended));
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+        }
+
+        // A non-home store the cache attached before anything was written to it has no directory and no lease yet: judging a check
+        // there creates what it locks, finds nothing, and writes no store.
+        [Test]
+        public void ANonHomeStoreNothingWasEverWrittenToJudgesAChecksOnlyCommit([Values] bool directory)
+        {
+            var home = PathOf("home.cc");
+            using (var seed = Open(home, DeckOnly, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var other = PathOf("fresh" + Path.DirectorySeparatorChar + "other.cc");
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(home, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: false), Gizmo);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }), Is.True);
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+            Assert.That(File.Exists(other), Is.False, "judging a check writes no store");
+        }
+
+        // A batch with no check asks no other store anything: a lock another writer holds on a store the batch does not write does
+        // not stand in its way.
+        [Test]
+        public void ABatchWithoutChecksIsNotHeldUpByAnotherStoreLock()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: false, otherListsWidget: false);
+            using var _ = cache;
+
+            using (new FileStream(other + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                Assert.That(cache.TryCommit(batch => batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"))), Is.EqualTo(CultCommitOutcome.Committed));
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+        }
+
+        // A foreign record a refusal lists carries the version the refusal read, so a conditional commit over the stores that
+        // list it holds when nothing has changed since.
+        [Test]
+        public void ExpectUnchangedHoldsAfterARefusalListedTheForeignRecord([Values] bool directory)
+        {
+            var path = PathOf("refusal-listed.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var cache = Open(path, DeckOnly, directory);
+            using (var late = Open(path, Full, directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            Assert.That(cache.Remove(W), Is.False);
+            Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+            }), Is.True);
         }
     }
 }

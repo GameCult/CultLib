@@ -263,6 +263,14 @@ refuses to replace a file whose header it cannot read, and leaves it as it was.
   before anything is written, and that record is reloaded as the store holds
   it: dropped when foreign, held read-only when a type reads it
   (cultcache-persistence-format.md, ownership by declaration).
+- A removal of a key the cache does not hold travels as a check-only key: a
+  commit carries it in the request, a flush stages it, and either store kind
+  judges it under its lock with the keys it writes, never removing it. Every
+  writable store judges a batch's checks under its own lock: the stores the
+  batch does not commit through first (`JudgeChecks`), the home last. A batch
+  that only checks keys writes no file. `ExpectUnchanged` compares the foreign
+  records a store carries at the versions it read them; a store kind lists a
+  foreign record through `Foreign` with the version it read.
 - A single-file store holding a variant (the directory store refuses variants)
   is written only from what its writer last read. A record that moved refuses
   the whole write with the typed write conflict, and the refused and moved keys
