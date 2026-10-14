@@ -231,7 +231,7 @@ fn a_skipped_slot_at_the_limit_decodes_on_a_64kib_thread() {
     in_child("a_skipped_slot_at_the_limit_decodes_on_a_64kib_thread", || {
         // [1, [[...]]]: slot 1 is unknown to One and is skipped; the whole payload is 256 deep.
         let mut bytes = vec![0x92u8, 0x01];
-        bytes.extend(std::iter::repeat(0x91u8).take(MAX_PAYLOAD_DEPTH - 2));
+        bytes.extend(std::iter::repeat_n(0x91u8, MAX_PAYLOAD_DEPTH - 2));
         bytes.push(0x90);
         let decoded = decode_on::<One>(64 * KIB, bytes).unwrap();
         assert_eq!(decoded, One { a: 1 });
