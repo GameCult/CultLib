@@ -42,7 +42,8 @@ float cultmath_cycles_power(float a, float b)
     if (a < 0.0)
     {
         float magnitude = pow(-a, b);
-        return b - 2.0 * floor(0.5 * b) != 0.0 ? -magnitude : magnitude;
+        // Odd exactly when the remainder is 1: an infinite exponent leaves NaN here and is even, as powf(a, +-inf) is never negative.
+        return b - 2.0 * floor(0.5 * b) == 1.0 ? -magnitude : magnitude;
     }
     return pow(a, b);
 }
