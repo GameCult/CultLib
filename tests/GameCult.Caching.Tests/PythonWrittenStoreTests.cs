@@ -115,11 +115,12 @@ namespace GameCult.Caching.Tests
                 var path = Store("leaf-record.cc", scratch);
                 var (reader, readerStore) = await PulledAsync(path);
 
-                var (writer, writerStore) = await PulledAsync(path);
-                var py = writer.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single(record => record.Id == "py");
-                py.Items.Clear();
-                await writer.AddAsync(py);
-                writerStore.PushAll();
+                // Another writer replaces the record with one that holds no id.
+                var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+                var replaced = snapshot.Records.Single(record => record.Key == "py");
+                replaced.Payload = CultDocumentMessagePackSerialization.SerializeUntyped(
+                    new NumericLeafVectorTests.LeafRecord { Id = "py" }, typeof(NumericLeafVectorTests.LeafRecord));
+                File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
                 Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the replacement holds no id");
 
                 await reader.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
