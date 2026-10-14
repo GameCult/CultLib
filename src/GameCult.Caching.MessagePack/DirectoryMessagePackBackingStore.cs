@@ -272,7 +272,6 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             return base.JudgeChecks(keys, wait);
         return Held(() =>
         {
-            Directory.CreateDirectory(_manifestFile.DirectoryName!);
             using var commitLease = AcquireCommitLease(wait, create: true);
             if (commitLease == null)
                 return CultCommitOutcome.Contended;

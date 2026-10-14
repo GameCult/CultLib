@@ -1488,6 +1488,43 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
         }
 
+        // A non-home store the cache attached before anything was written to it has no directory and no lease yet: judging a check
+        // there creates what it locks, finds nothing, and writes no store.
+        [Test]
+        public void ANonHomeStoreNothingWasEverWrittenToJudgesAChecksOnlyCommit([Values] bool directory)
+        {
+            var home = PathOf("home.cc");
+            using (var seed = Open(home, DeckOnly, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var other = PathOf("fresh" + Path.DirectorySeparatorChar + "other.cc");
+            using var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(home, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: false), Gizmo);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }), Is.True);
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+            Assert.That(File.Exists(other), Is.False, "judging a check writes no store");
+        }
+
+        // A batch with no check asks no other store anything: a lock another writer holds on a store the batch does not write does
+        // not stand in its way.
+        [Test]
+        public void ABatchWithoutChecksIsNotHeldUpByAnotherStoreLock()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: false, otherListsWidget: false);
+            using var _ = cache;
+
+            using (new FileStream(other + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+                Assert.That(cache.TryCommit(batch => batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"))), Is.EqualTo(CultCommitOutcome.Committed));
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+        }
+
         // A foreign record a refusal lists carries the version the refusal read, so a conditional commit over the stores that
         // list it holds when nothing has changed since.
         [Test]
