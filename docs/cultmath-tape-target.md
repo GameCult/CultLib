@@ -1,7 +1,10 @@
 # CultMath tapes: interval-pruned field evaluation on CPU and GPU
 
-Status: steps 2-5 (tape, pruning, HLSL interpreter, meshing) are **parked**
-(2026-10-02; ruling tape-target-unparks-when-asura-stable). The affine-forms
+Status: steps 2 and 4 (graph, C# evaluator, HLSL interpreter) unparked on
+2026-10-14 (ruling tape-unparked-for-trophic-graphs, which supersedes
+tape-target-unparks-when-asura-stable); their model page and cut sequence are
+`docs/cultmath-interval-ground-cut.md`, "Pass 7". Steps 3 and 5 (pruning,
+meshing) stay parked. The affine-forms
 piece was unparked on 2026-10-03 (ruling affine-forms-unparked) and is on main
 (156782da), alongside step 1's intervals; its map and as-built record are in
 `docs/cultmath-interval-ground-cut.md`. This note records the direction for the
