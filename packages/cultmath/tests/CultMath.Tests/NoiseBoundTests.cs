@@ -489,25 +489,13 @@ public sealed class NoiseBoundTests
     // the quotient is not skewed by the rounding of p + h far from the origin.
     private static double Step(float x, float h, out double back) { back = x - (double)(x - h); return (x + h) - (double)x; }
 
-    // The spectral norm (largest absolute eigenvalue) of the symmetrised Hessian of snoise(float3) at p,
-    // from central differences of snoise_grad at h = 1e-3.
+    // The spectral norm (largest absolute eigenvalue) of snoise's Hessian at p: the library's own
+    // snoise_hessian, symmetric bit for bit, then the closed-form eigenvalues of a symmetric 3x3.
     private static double HessianNorm(float3 p)
     {
-        const float h = 1.0e-3f;
-        var m = new double[3, 3];
-        for (var a = 0; a < 3; a++)
-        {
-            var e = new float3(a == 0 ? h : 0.0f, a == 1 ? h : 0.0f, a == 2 ? h : 0.0f);
-            var forward = Step(a == 0 ? p.x : a == 1 ? p.y : p.z, h, out var back);
-            var gp = snoise_grad(p + e);
-            var gm = snoise_grad(p - e);
-            m[0, a] = (gp.x - (double)gm.x) / (forward + back);
-            m[1, a] = (gp.y - (double)gm.y) / (forward + back);
-            m[2, a] = (gp.z - (double)gm.z) / (forward + back);
-        }
-
-        var (a00, a11, a22) = (m[0, 0], m[1, 1], m[2, 2]);
-        var (a01, a02, a12) = ((m[0, 1] + m[1, 0]) / 2, (m[0, 2] + m[2, 0]) / 2, (m[1, 2] + m[2, 1]) / 2);
+        var m = snoise_hessian(p);
+        var (a00, a11, a22) = ((double)m._m00, (double)m._m11, (double)m._m22);
+        var (a01, a02, a12) = ((double)m._m01, (double)m._m02, (double)m._m12);
         var p1 = a01 * a01 + a02 * a02 + a12 * a12;
         if (p1 == 0.0)
             return Math.Max(Math.Abs(a00), Math.Max(Math.Abs(a11), Math.Abs(a22)));
@@ -617,7 +605,7 @@ public sealed class NoiseBoundTests
     }
 
     // The start MeasureHessian printed as its witness.
-    private static readonly float3 HessianWitness = new(-245.19885f, -53.01323f, -91.47363f);
+    private static readonly float3 HessianWitness = new(-13.7920685f, -9.672134f, 61.563934f);
 
     /// <summary>
     /// Pins SNOISE_HESSIAN: no Hessian norm over 1e5 seeded points exceeds it, and the ascent from
@@ -633,6 +621,181 @@ public sealed class NoiseBoundTests
         Assert.True(refined <= SNOISE_HESSIAN, $"the Hessian norm reaches {refined:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
         var ratio = SNOISE_HESSIAN / (1.10 * refined);
         Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_HESSIAN is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureHessian and re-pin");
+    }
+
+    // ---- The third-derivative constant (math.Span.cs) ----
+
+    // The symmetric third-derivative tensor of snoise at p, entry (i * 3 + j) * 3 + k: central differences
+    // of snoise_hessian along each axis at h = 1e-3 over the exact float32 steps, symmetrised over the six
+    // index orders (the Hessian is symmetric, so only the derivative index can differ).
+    private static double[] ThirdTensor(float3 p)
+    {
+        const float h = 1.0e-3f;
+        var d = new double[27];
+        for (var k = 0; k < 3; k++)
+        {
+            var e = new float3(k == 0 ? h : 0.0f, k == 1 ? h : 0.0f, k == 2 ? h : 0.0f);
+            var forward = Step(k == 0 ? p.x : k == 1 ? p.y : p.z, h, out var back);
+            var plus = snoise_hessian(p + e);
+            var minus = snoise_hessian(p - e);
+            for (var i = 0; i < 3; i++)
+            for (var j = 0; j < 3; j++)
+                d[(i * 3 + j) * 3 + k] = (plus[i][j] - (double)minus[i][j]) / (forward + back);
+        }
+
+        var t = new double[27];
+        for (var i = 0; i < 3; i++)
+        for (var j = 0; j < 3; j++)
+        for (var k = 0; k < 3; k++)
+            t[(i * 3 + j) * 3 + k] = (d[(i * 3 + j) * 3 + k] + d[(i * 3 + k) * 3 + j] + d[(j * 3 + i) * 3 + k]
+                + d[(j * 3 + k) * 3 + i] + d[(k * 3 + i) * 3 + j] + d[(k * 3 + j) * 3 + i]) / 6.0;
+        return t;
+    }
+
+    // T(u, u, u) for a symmetric 3-tensor.
+    private static double Cubic(double[] t, double[] u)
+    {
+        var sum = 0.0;
+        for (var i = 0; i < 3; i++)
+        for (var j = 0; j < 3; j++)
+        for (var k = 0; k < 3; k++)
+            sum += t[(i * 3 + j) * 3 + k] * u[i] * u[j] * u[k];
+        return sum;
+    }
+
+    // The 26 unit directions of the axes, the edge midpoints and the cube corners.
+    private static readonly double[][] TensorStarts = Enumerable.Range(0, 27).Select(c => new[] { c % 3 - 1.0, c / 3 % 3 - 1.0, c / 9 - 1.0 })
+        .Where(v => v[0] != 0.0 || v[1] != 0.0 || v[2] != 0.0)
+        .Select(v => { var length = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return new[] { v[0] / length, v[1] / length, v[2] / length }; }).ToArray();
+
+    // The operator norm of a symmetric 3-tensor, max over unit u of |T(u, u, u)| (for a symmetric tensor
+    // that is the injective norm). From the six of 26 starts (axes, edge midpoints, cube corners) with
+    // the largest |T(u, u, u)|, the shifted power ascent u <- normalise(T(u, u, .) +- alpha u), with alpha
+    // twice the largest absolute row sum, which makes the iteration monotone in the cubic form (Kolda and
+    // Mayo's SS-HOPM), the sign chosen as the start's. A local maximum, so a lower bound; MeasureThird
+    // checks it against a dense direction sweep at its witness.
+    private static double TensorNorm(double[] t)
+    {
+        var alpha = 0.0;
+        for (var i = 0; i < 3; i++)
+        {
+            var row = 0.0;
+            for (var jk = 0; jk < 9; jk++)
+                row += Math.Abs(t[i * 9 + jk]);
+            alpha = Math.Max(alpha, 2.0 * row);
+        }
+
+        var best = 0.0;
+        var g = new double[3];
+        foreach (var start in TensorStarts.OrderByDescending(v => Math.Abs(Cubic(t, v))).Take(6))
+        {
+            var u = (double[])start.Clone();
+            var sign = Cubic(t, u) < 0.0 ? -1.0 : 1.0;
+            for (var iteration = 0; iteration < 40; iteration++)
+            {
+                for (var i = 0; i < 3; i++)
+                {
+                    var sum = 0.0;
+                    for (var j = 0; j < 3; j++)
+                    for (var k = 0; k < 3; k++)
+                        sum += t[(i * 3 + j) * 3 + k] * u[j] * u[k];
+                    g[i] = sign * sum + alpha * u[i];
+                }
+
+                var length = Math.Sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+                if (length == 0.0)
+                    break;
+                var moved = 0.0;
+                for (var i = 0; i < 3; i++)
+                {
+                    var next = g[i] / length;
+                    moved += (next - u[i]) * (next - u[i]);
+                    u[i] = next;
+                }
+
+                if (moved < 1.0e-20)
+                    break;
+            }
+
+            best = Math.Max(best, Math.Abs(Cubic(t, u)));
+        }
+
+        return best;
+    }
+
+    // The operator norm of snoise's third-derivative tensor at p.
+    private static double ThirdNorm(float3 p) => TensorNorm(ThirdTensor(p));
+
+    [Fact]
+    public void TensorNormFindsKnownMaxima()
+    {
+        // T = e_x (x) e_x (x) e_x: the cubic form is u_x^3, norm 1.
+        var single = new double[27];
+        single[0] = 1.0;
+        Assert.InRange(TensorNorm(single), 1.0 - 1.0e-9, 1.0 + 1.0e-9);
+
+        // The six permutations of (0, 1, 2) at 1: the cubic form is 6 u_x u_y u_z, largest on the cube
+        // diagonal at 6 / (3 sqrt 3) = 2 / sqrt 3.
+        var permutations = new double[27];
+        foreach (var (i, j, k) in new[] { (0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0) })
+            permutations[(i * 3 + j) * 3 + k] = 1.0;
+        Assert.InRange(TensorNorm(permutations), 2.0 / Math.Sqrt(3.0) - 1.0e-9, 2.0 / Math.Sqrt(3.0) + 1.0e-9);
+
+        // A negative extremum counts by its absolute value.
+        var negative = new double[27];
+        negative[13] = -3.0;
+        Assert.InRange(TensorNorm(negative), 3.0 - 1.0e-9, 3.0 + 1.0e-9);
+    }
+
+    /// <summary>
+    /// The provenance of SNOISE_THIRD: the largest operator norm of snoise's third-derivative tensor
+    /// (ThirdNorm) over 1e6 seeded points of [-256, 256]^3, the 1e4 largest refined by ascent over the point,
+    /// times 1.10, on the tied kernel. Prints the start whose ascent reached the maximum, which
+    /// ThirdConstantPinsSampled climbs from again, and a sweep of 20,000 directions at the point the
+    /// ascent ends on (the tensor norm there against the largest cubic form the sweep finds, so the
+    /// tightness of the inner maximisation is on the record). Slow; run explicitly after any change to the
+    /// snoise kernel and re-pin the constant and the witness.
+    /// </summary>
+    [Fact(Explicit = true)]
+    [Trait("Category", "Slow")]
+    public void MeasureThird()
+    {
+        var (sampled, refined, witness) = MeasureMax(ThirdNorm, false, 0x4E57, 1_000_000, 10_000);
+        output.WriteLine($"IV-REPORT third: max |D3| sampled {sampled:R}, refined {refined:R}, x 1.10 = {(float)(refined * 1.10):R}, witness ({witness.x:R}, {witness.y:R}, {witness.z:R})");
+        var (best, at) = AscendPoint(ThirdNorm, witness);
+        var tensor = ThirdTensor(at);
+        var sweep = 0.0;
+        const int directions = 20_000;
+        for (var k = 0; k < directions; k++)
+        {
+            var z = 1.0 - 2.0 * (k + 0.5) / directions;
+            var r = Math.Sqrt(1.0 - z * z);
+            var phi = k * Math.PI * (3.0 - Math.Sqrt(5.0));
+            sweep = Math.Max(sweep, Math.Abs(Cubic(tensor, new[] { r * Math.Cos(phi), r * Math.Sin(phi), z })));
+        }
+
+        output.WriteLine($"IV-REPORT third witness ascent ends at ({at.x:R}, {at.y:R}, {at.z:R}): tensor norm {best:R}, dense sweep of {directions} directions {sweep:R} ({sweep / best:R} of it)");
+        Assert.True(sweep <= best * (1.0 + 1.0e-6), $"a direction sweep finds {sweep:R} over the ascent's {best:R}: the inner maximisation misses a maximum");
+        Assert.True(refined <= SNOISE_THIRD, $"measured {refined:R} exceeds SNOISE_THIRD {SNOISE_THIRD:R}");
+    }
+
+    // The start MeasureThird printed as its witness.
+    private static readonly float3 ThirdWitness = new(-168.3755f, -3.8205261f, -109.16948f);
+
+    /// <summary>
+    /// Pins SNOISE_THIRD: no third-derivative norm over 1e5 seeded points exceeds it, and the ascent from
+    /// MeasureThird's witness reaches a maximum that, times 1.10, is the constant to within half a
+    /// percent, so a constant moved by 1% fails here.
+    /// </summary>
+    [Fact]
+    public void ThirdConstantPinsSampled()
+    {
+        var (sampled, _, _) = MeasureMax(ThirdNorm, false, 0x4E58, 100_000, 0);
+        Assert.True(sampled <= SNOISE_THIRD, $"the third-derivative norm reaches {sampled:R}, above SNOISE_THIRD {SNOISE_THIRD:R}");
+        var refined = Ascend(ThirdNorm, ThirdWitness);
+        Assert.True(refined <= SNOISE_THIRD, $"the third-derivative norm reaches {refined:R}, above SNOISE_THIRD {SNOISE_THIRD:R}");
+        var ratio = SNOISE_THIRD / (1.10 * refined);
+        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_THIRD is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureThird and re-pin");
     }
 
     /// <summary>
