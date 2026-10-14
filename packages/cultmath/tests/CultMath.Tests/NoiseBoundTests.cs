@@ -625,31 +625,177 @@ public sealed class NoiseBoundTests
 
     // ---- The third-derivative constant (math.Span.cs) ----
 
-    // The symmetric third-derivative tensor of snoise at p, entry (i * 3 + j) * 3 + k: central differences
-    // of snoise_hessian along each axis at h = 1e-3 over the exact float32 steps, symmetrised over the six
-    // index orders (the Hessian is symmetric, so only the derivative index can differ).
-    private static double[] ThirdTensor(float3 p)
+    private static float3 CultMod289(float3 v) => v - floor(v * (1.0f / 289.0f)) * 289.0f;
+    private static float4 CultMod289(float4 v) => v - floor(v * (1.0f / 289.0f)) * 289.0f;
+    private static float4 CultPermute(float4 v) => CultMod289(((v * 34.0f) + 10.0f) * v);
+
+    // The four simplex corners of snoise at (vx, vy, vz): each corner's offset x_c from the point, and its
+    // gradient direction p_c, in double, with snoise_hessian's lattice, step() tie order and (float) hash,
+    // so one corner table serves the Hessian and its derivative. Key names the lattice cell and traversal
+    // order: two points with the same key are differentiated through the same corners.
+    private static (double[][] X, double[][] P, double[] Key) Corners(double vx, double vy, double vz)
     {
-        const float h = 1.0e-3f;
-        var d = new double[27];
-        for (var k = 0; k < 3; k++)
+        const double cx = 1.0 / 6.0;
+        const double cy = 1.0 / 3.0;
+        var skew = (vx + vy + vz) * cy;
+        double ix = Math.Floor(vx + skew), iy = Math.Floor(vy + skew), iz = Math.Floor(vz + skew);
+        var unskew = (ix + iy + iz) * cx;
+        double x0 = vx - ix + unskew, y0 = vy - iy + unskew, z0 = vz - iz + unskew;
+        double gx = x0 >= y0 ? 1.0 : 0.0, gy = y0 >= z0 ? 1.0 : 0.0, gz = 1.0 - (x0 >= z0 ? 1.0 : 0.0);
+        double lx = 1.0 - gx, ly = 1.0 - gy, lz = 1.0 - gz;
+        double i1x = Math.Min(gx, lz), i1y = Math.Min(gy, lx), i1z = Math.Min(gz, ly);
+        double i2x = Math.Max(gx, lz), i2y = Math.Max(gy, lx), i2z = Math.Max(gz, ly);
+        var x = new[]
         {
-            var e = new float3(k == 0 ? h : 0.0f, k == 1 ? h : 0.0f, k == 2 ? h : 0.0f);
-            var forward = Step(k == 0 ? p.x : k == 1 ? p.y : p.z, h, out var back);
-            var plus = snoise_hessian(p + e);
-            var minus = snoise_hessian(p - e);
+            new[] { x0, y0, z0 },
+            new[] { x0 - i1x + cx, y0 - i1y + cx, z0 - i1z + cx },
+            new[] { x0 - i2x + cy, y0 - i2y + cy, z0 - i2z + cy },
+            new[] { x0 - 0.5, y0 - 0.5, z0 - 0.5 },
+        };
+
+        var i = CultMod289(new float3((float)ix, (float)iy, (float)iz));
+        var hash = CultPermute(CultPermute(CultPermute(
+            i.z + new float4(0.0f, (float)i1z, (float)i2z, 1.0f)) + i.y + new float4(0.0f, (float)i1y, (float)i2y, 1.0f)) + i.x + new float4(0.0f, (float)i1x, (float)i2x, 1.0f));
+        const float n = 0.142857142857f;
+        var ns = new float3(2.0f * n, 0.5f * n - 1.0f, n);
+        var j = hash - 49.0f * floor(hash * ns.z * ns.z);
+        var xs = floor(j * ns.z);
+        var ys = floor(j - 7.0f * xs);
+        var gxs = xs * ns.x + ns.y;
+        var gys = ys * ns.x + ns.y;
+        var h = 1.0f - abs(gxs) - abs(gys);
+        var b0 = new float4(gxs.x, gxs.y, gys.x, gys.y);
+        var b1 = new float4(gxs.z, gxs.w, gys.z, gys.w);
+        var s0 = floor(b0) * 2.0f + 1.0f;
+        var s1 = floor(b1) * 2.0f + 1.0f;
+        var sh = -step(h, 0.0f);
+        var a0 = new float4(b0.x, b0.z, b0.y, b0.w) + new float4(s0.x, s0.z, s0.y, s0.w) * new float4(sh.x, sh.x, sh.y, sh.y);
+        var a1 = new float4(b1.x, b1.z, b1.y, b1.w) + new float4(s1.x, s1.z, s1.y, s1.w) * new float4(sh.z, sh.z, sh.w, sh.w);
+        var p0 = new float3(a0.x, a0.y, h.x);
+        var p1 = new float3(a0.z, a0.w, h.y);
+        var p2 = new float3(a1.x, a1.y, h.z);
+        var p3 = new float3(a1.z, a1.w, h.w);
+        var norm = 1.79284291400159f - 0.85373472095314f * new float4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+        p0 *= norm.x;
+        p1 *= norm.y;
+        p2 *= norm.z;
+        p3 *= norm.w;
+        double[] Of(float3 v) => new double[] { v.x, v.y, v.z };
+        return (x, new[] { Of(p0), Of(p1), Of(p2), Of(p3) }, new[] { ix, iy, iz, i1x, i1y, i1z, i2x, i2y, i2z });
+    }
+
+    // The Hessian of snoise at v in double, entry i * 3 + j: snoise_hessian's per-corner derivation, summed
+    // over Corners. A corner with m = 0.5 - |x|^2 <= 0 contributes nothing.
+    private static double[] HessianDouble(double vx, double vy, double vz)
+    {
+        var (x, p, _) = Corners(vx, vy, vz);
+        var hessian = new double[9];
+        for (var c = 0; c < 4; c++)
+        {
+            var m = 0.5 - (x[c][0] * x[c][0] + x[c][1] * x[c][1] + x[c][2] * x[c][2]);
+            if (m <= 0.0)
+                continue;
+            var s = p[c][0] * x[c][0] + p[c][1] * x[c][1] + p[c][2] * x[c][2];
             for (var i = 0; i < 3; i++)
-            for (var j = 0; j < 3; j++)
-                d[(i * 3 + j) * 3 + k] = (plus[i][j] - (double)minus[i][j]) / (forward + back);
+            for (var k = 0; k < 3; k++)
+                hessian[i * 3 + k] += 105.0 * (48.0 * m * m * s * x[c][i] * x[c][k]
+                    - 8.0 * m * m * m * (p[c][k] * x[c][i] + p[c][i] * x[c][k] + (i == k ? s : 0.0)));
         }
 
+        return hessian;
+    }
+
+    private static double Delta(int a, int b) => a == b ? 1.0 : 0.0;
+
+    // The symmetric third-derivative tensor of snoise at p, entry (i * 3 + j) * 3 + k, in closed form:
+    // snoise_hessian's per-corner entry 105 (48 m^2 s x_i x_j - 8 m^3 (p_j x_i + p_i x_j + s delta_ij))
+    // differentiated by x_k (dm = -2 x_k, ds = p_k, every corner's x moves one for one with p), which sums
+    // to 105 (-192 m s x_i x_j x_k + 48 m^2 (p_k x_i x_j + p_j x_i x_k + p_i x_j x_k)
+    // + 48 m^2 s (delta_ik x_j + delta_jk x_i + delta_ij x_k) - 8 m^3 (p_j delta_ik + p_i delta_jk + p_k delta_ij)).
+    // Symmetric in i, j and k by construction, so there is no symmetrising pass.
+    private static double[] ThirdTensor(float3 p)
+    {
+        var (x, g, _) = Corners(p.x, p.y, p.z);
         var t = new double[27];
-        for (var i = 0; i < 3; i++)
-        for (var j = 0; j < 3; j++)
-        for (var k = 0; k < 3; k++)
-            t[(i * 3 + j) * 3 + k] = (d[(i * 3 + j) * 3 + k] + d[(i * 3 + k) * 3 + j] + d[(j * 3 + i) * 3 + k]
-                + d[(j * 3 + k) * 3 + i] + d[(k * 3 + i) * 3 + j] + d[(k * 3 + j) * 3 + i]) / 6.0;
+        for (var c = 0; c < 4; c++)
+        {
+            var m = 0.5 - (x[c][0] * x[c][0] + x[c][1] * x[c][1] + x[c][2] * x[c][2]);
+            if (m <= 0.0)
+                continue;
+            var s = g[c][0] * x[c][0] + g[c][1] * x[c][1] + g[c][2] * x[c][2];
+            for (var i = 0; i < 3; i++)
+            for (var j = 0; j < 3; j++)
+            for (var k = 0; k < 3; k++)
+                t[(i * 3 + j) * 3 + k] += 105.0 * (-192.0 * m * s * x[c][i] * x[c][j] * x[c][k]
+                    + 48.0 * m * m * (g[c][k] * x[c][i] * x[c][j] + g[c][j] * x[c][i] * x[c][k] + g[c][i] * x[c][j] * x[c][k])
+                    + 48.0 * m * m * s * (Delta(i, k) * x[c][j] + Delta(j, k) * x[c][i] + Delta(i, j) * x[c][k])
+                    - 8.0 * m * m * m * (g[c][j] * Delta(i, k) + g[c][i] * Delta(j, k) + g[c][k] * Delta(i, j)));
+        }
+
         return t;
+    }
+
+    /// <summary>
+    /// ThirdTensor is the third derivative of snoise: HessianDouble is the kernel's Hessian (within float
+    /// rounding of snoise_hessian over 200 seeded points, which proves Corners is the kernel's lattice),
+    /// and the closed form equals central differences of HessianDouble, Richardson-extrapolated from steps
+    /// h = 1e-3 and 2e-3 (error O(h^4)), at every one of 27 entries of every point whose neighbours share
+    /// its lattice cell and clear every corner's support edge. Dropping or mis-signing any term of the closed form moves some entry by far more
+    /// than the tolerance.
+    /// </summary>
+    [Fact]
+    public void ThirdTensorMatchesDifferencesOfTheHessian()
+    {
+        var random = new System.Random(0x7D1);
+        var compared = 0;
+        var largest = 0.0;
+        var worst = 0.0;
+        for (var n = 0; n < 400; n++)
+        {
+            var p = new float3(Uniform(random, -256.0f, 256.0f), Uniform(random, -256.0f, 256.0f), Uniform(random, -256.0f, 256.0f));
+            var hd = HessianDouble(p.x, p.y, p.z);
+            var kernel = snoise_hessian(p);
+            if (n < 200)
+                for (var i = 0; i < 3; i++)
+                for (var j = 0; j < 3; j++)
+                    Assert.True(Math.Abs(hd[i * 3 + j] - kernel[i][j]) <= 0.1, $"HessianDouble({p}) entry {i},{j} is {hd[i * 3 + j]:R}, snoise_hessian {kernel[i][j]:R}");
+
+            double[] At(int axis, double delta) =>
+                HessianDouble(p.x + (axis == 0 ? delta : 0.0), p.y + (axis == 1 ? delta : 0.0), p.z + (axis == 2 ? delta : 0.0));
+            var (corner, _, key) = Corners(p.x, p.y, p.z);
+            // A corner whose support edge (m = 0) lies within the differencing window has a kink in the
+            // Hessian's second derivative there, which the O(h^4) extrapolation does not cover.
+            if (corner.Any(c => Math.Abs(0.5 - (c[0] * c[0] + c[1] * c[1] + c[2] * c[2])) < 0.01))
+                continue;
+            var sameCell = true;
+            for (var axis = 0; axis < 3; axis++)
+                foreach (var delta in new[] { -2.0e-3, 2.0e-3 })
+                    sameCell &= Corners(p.x + (axis == 0 ? delta : 0.0), p.y + (axis == 1 ? delta : 0.0), p.z + (axis == 2 ? delta : 0.0)).Key.SequenceEqual(key);
+            if (!sameCell)
+                continue;
+
+            var closed = ThirdTensor(p);
+            compared++;
+            for (var k = 0; k < 3; k++)
+            {
+                var (plus1, minus1, plus2, minus2) = (At(k, 1.0e-3), At(k, -1.0e-3), At(k, 2.0e-3), At(k, -2.0e-3));
+                for (var i = 0; i < 3; i++)
+                for (var j = 0; j < 3; j++)
+                {
+                    var d1 = (plus1[i * 3 + j] - minus1[i * 3 + j]) / 2.0e-3;
+                    var d2 = (plus2[i * 3 + j] - minus2[i * 3 + j]) / 4.0e-3;
+                    var richardson = (4.0 * d1 - d2) / 3.0;
+                    var entry = closed[(i * 3 + j) * 3 + k];
+                    largest = Math.Max(largest, Math.Abs(entry));
+                    worst = Math.Max(worst, Math.Abs(entry - richardson) / (1.0 + Math.Abs(entry)));
+                }
+            }
+        }
+
+        output.WriteLine($"IV-REPORT third oracle: {compared} points, largest entry {largest:R}, worst relative difference from the Richardson differences {worst:R}");
+        Assert.True(compared >= 250, $"only {compared} of 400 points kept their lattice cell and cleared the support edges");
+        Assert.True(largest >= 200.0, $"the largest third-derivative entry compared is {largest:R}: the check has no teeth");
+        Assert.True(worst <= 1.0e-6, $"the closed-form third tensor differs from the differenced Hessian by {worst:R} (relative)");
     }
 
     // T(u, u, u) for a symmetric 3-tensor.
@@ -748,8 +894,8 @@ public sealed class NoiseBoundTests
     }
 
     /// <summary>
-    /// The provenance of SNOISE_THIRD: the largest operator norm of snoise's third-derivative tensor
-    /// (ThirdNorm) over 1e6 seeded points of [-256, 256]^3, the 1e4 largest refined by ascent over the point,
+    /// The provenance of SNOISE_THIRD: the largest operator norm of snoise's closed-form third-derivative
+    /// tensor (ThirdNorm, ThirdTensor) over 1e6 seeded points of [-256, 256]^3, the 1e4 largest refined by ascent over the point,
     /// times 1.10, on the tied kernel. Prints the start whose ascent reached the maximum, which
     /// ThirdConstantPinsSampled climbs from again, and a sweep of 20,000 directions at the point the
     /// ascent ends on (the tensor norm there against the largest cubic form the sweep finds, so the
@@ -780,7 +926,7 @@ public sealed class NoiseBoundTests
     }
 
     // The start MeasureThird printed as its witness.
-    private static readonly float3 ThirdWitness = new(-168.3755f, -3.8205261f, -109.16948f);
+    private static readonly float3 ThirdWitness = new(-184.81363f, -34.250977f, 68.26865f);
 
     /// <summary>
     /// Pins SNOISE_THIRD: no third-derivative norm over 1e5 seeded points exceeds it, and the ascent from

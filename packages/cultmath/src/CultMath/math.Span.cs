@@ -5,15 +5,18 @@ public static partial class math
     // An upper bound on the operator norm of the third-derivative tensor of snoise(float3):
     // max over unit u of |D^3 snoise(p)[u, u, u]|, the next order after SNOISE_LIPSCHITZ (gradient)
     // and SNOISE_HESSIAN (curvature). Provenance: NoiseBoundTests.MeasureThird (slow, explicit) takes
-    // the largest such norm over 1e6 seeded points of [-256, 256]^3 (central differences of
-    // snoise_hessian at h = 1e-3, then an ascent over unit vectors for the tensor's operator norm),
-    // refines the 1e4 largest by ascent over the point, and multiplies the maximum by 1.10; it prints
-    // the witness start. NoiseBoundTests.ThirdConstantPinsSampled pins the value against a fast
-    // re-measure and the ascent from that witness. Measured on the tied kernel (snoise_grad's order),
-    // not on any pre-tie splice. Measured 488.1047 (a dense sweep of 20,000 directions at the witness
-    // found 99.9998% of the tensor norm there). Empirical with a margin, not a proof. A change to the snoise kernel
-    // must re-run MeasureThird and re-pin it.
-    public const float SNOISE_THIRD = 536.9152f;
+    // the largest such norm over 1e6 seeded points of [-256, 256]^3 of the closed-form tensor (snoise_hessian's
+    // per-corner derivation differentiated once more, in double, with the kernel's lattice, tie order and
+    // hash; NoiseBoundTests.ThirdTensorMatchesDifferencesOfTheHessian pins it against differences of the
+    // double Hessian), then an ascent over unit vectors for the tensor's operator norm, refines the 1e4
+    // largest by ascent over the point, and multiplies the maximum by 1.10; it prints the witness start.
+    // NoiseBoundTests.ThirdConstantPinsSampled pins the value against a fast re-measure and the ascent
+    // from that witness. Measured on the tied kernel (snoise_grad's order), not on any pre-tie splice:
+    // refined maximum 487.0917, a dense sweep of 20,000 directions at the witness's ascent end found
+    // 99.9987% of the tensor norm there. The inner maximisation is a local ascent and the outer a sampled
+    // search refined by ascent: empirical with a margin, not a proof. A change to the snoise kernel must
+    // re-run MeasureThird and re-pin it.
+    public const float SNOISE_THIRD = 535.8009f;
 
     // Analytic Hessian of snoise(float3): the symmetric matrix of second partial derivatives, same
     // lattice, hash and tie order as snoise_grad, whose kernel it differentiates once more. Every local

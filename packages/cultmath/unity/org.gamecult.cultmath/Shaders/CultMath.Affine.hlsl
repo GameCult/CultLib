@@ -14,7 +14,7 @@ static const float CULTMATH_SNOISE_HESSIAN = 55.642143;
 
 // An upper bound on the operator norm of the third-derivative tensor of cultmath_snoise(float3), the
 // next order after CULTMATH_SNOISE_HESSIAN; provenance in math.Span.cs (SNOISE_THIRD).
-static const float CULTMATH_SNOISE_THIRD = 536.9152;
+static const float CULTMATH_SNOISE_THIRD = 535.8009;
 
 float3 cultmath_af_point(float value) { return float3(value, 0.0, 0.0); }
 float3 cultmath_af_symbol(float x0, float a) { return float3(x0, a, 0.0); }

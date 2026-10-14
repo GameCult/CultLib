@@ -777,11 +777,18 @@ differentiating each corner's gradient `-8 m^3 s x + m^4 p` once more. Each
 off-diagonal entry is computed once and placed twice, so the matrix equals its
 transpose bit for bit, and a clamped corner (`m = 0`) contributes nothing. Built
 from nine scalars, the matrix reads as columns in GLSL (`mat3`) and rows in HLSL,
-which is the same matrix because it is symmetric. `SNOISE_THIRD = 536.9152`
+which is the same matrix because it is symmetric. `SNOISE_THIRD = 535.8009`
 (`math.Span.cs`) is the next order: 1.10 times the maximum, over 1e6 seeded points,
-of the operator norm of the third-derivative tensor of `snoise` (central
-differences of `snoise_hessian` at h = 1e-3, then an ascent over unit vectors),
-refined from the 1e4 largest; measured 488.1047 on the tied kernel.
+of the operator norm of the third-derivative tensor of `snoise`, refined from the
+1e4 largest; measured 487.0917 on the tied kernel. The tensor is closed form, in
+double: `snoise_hessian`'s per-corner entry differentiated once more, on the
+kernel's lattice, tie order and hash, and the test
+`ThirdTensorMatchesDifferencesOfTheHessian` holds it against Richardson-extrapolated
+differences of the double Hessian. The operator norm is a local ascent over unit
+vectors (a dense sweep of 20,000 directions at the witness finds 99.9987% of it) and
+the outer maximum a sampled search refined by ascent, so the constant is empirical
+with a 10% margin, not a proof; an earlier pin from central differences of the
+float Hessian read 488.1047, its roundoff.
 `MeasureThird` takes the measurement and `ThirdConstantPinsSampled` pins it.
 `integral_clamp_linear(a, b, lo, hi, t0, t1)` is the closed-form integral over
 `[t0, t1]` of `clamp(a + b t, lo, hi)`. All three have HLSL and GLSL lowerings and
