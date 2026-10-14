@@ -290,7 +290,7 @@ namespace GameCult.Caching
                         continue;
                     if (shape.Derive == null && !IsRandomId(id!))
                         throw new CultElementIdException(
-                            $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters.",
+                            $"Record {rootPath}: element id '{id}' in the list at {path} is not 12 lowercase hex characters. An id you write by hand must be 12 lowercase hex; for readable ids, derive them from a member with [CultElementId(nameof(Member))].",
                             rootPath, path, id);
                     if (!taken.Add(id!))
                         throw Duplicate(id!, path);

@@ -136,6 +136,13 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
+        public void TheHexRefusalNamesTheDerivedFormForReadableIds()
+        {
+            var refusal = Assert.Throws<CultElementIdException>(() => Assign(new HHasIds { Items = { new EIded { Id = "root" } } }, "r", deterministic: false))!;
+            Assert.That(refusal.Message, Does.Contain("12 lowercase hex").And.Contain("[CultElementId(nameof(Member))]"));
+        }
+
+        [Test]
         public void ARandomIdMustBeTwelveLowercaseHexCharactersAndADerivedIdNeedOnlyBeText()
         {
             foreach (var bad in new[] { "x", "ABCDEF012345", "0123456789a", "0123456789abc", "0123456789ag", "0123456789 a" })
