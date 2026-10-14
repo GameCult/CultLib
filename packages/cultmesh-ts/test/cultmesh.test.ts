@@ -3293,12 +3293,6 @@ test("CultMesh TS peer snapshots never take another type's record at the key", a
     }
     // The failed sync of a note at "note:b" left the local record of the other type there untouched.
     assert.deepEqual(target.getRequired(incompatibleNoteDocument, "note:b"), { nope: "local b" });
-    // HELD for the schema-naming fork: a handle named by a bare id string still takes the first record at the key, which
-    // is how Eve Electron reads the C# daemon's hash-stamped records.
-    assert.deepEqual(
-      await CultMesh.documentFromPeerSnapshot(peer, "cultmesh.note.v0", "note:c", { timeoutMs: 1_000 }).latest(),
-      { noteId: "note:c", body: "remote c, note-shaped" },
-    );
     // Its own type's record under its own id still syncs.
     assert.deepEqual(
       await target.syncDocumentFromPeerSnapshot(peer, incompatibleNoteDocument, "note:b", { timeoutMs: 1_000 }),
