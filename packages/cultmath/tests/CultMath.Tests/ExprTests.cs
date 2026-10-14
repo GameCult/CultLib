@@ -266,6 +266,15 @@ public sealed class ExprTests
         Assert.Equal("foreign-operand", foreign.Rule);
         var cell = d.Call("cellular3", d.Const(0f), d.Const(0f), d.Const(0f));
         Assert.Equal("bare-multi-result", Assert.Throws<ExprGraphException>(() => d.Substitute(field, new Dictionary<string, ExprValue> { ["x"] = cell })).Rule);
+
+        // The checks are the call's own: a graph that is only its input still refuses a foreign or multi-result replacement.
+        var identity = new ExprBuilder();
+        identity.Output("o", identity.Input("x"));
+        var passThrough = identity.Build();
+        var e = new ExprBuilder();
+        Assert.Equal("foreign-operand", Refusal(() => e.Substitute(passThrough, new Dictionary<string, ExprValue> { ["x"] = c.Const(1f) })).Rule);
+        Assert.Equal("bare-multi-result", Refusal(() => e.Substitute(passThrough, new Dictionary<string, ExprValue> { ["x"] = e.Call("cellular3", e.Const(0f), e.Const(0f), e.Const(0f)) })).Rule);
+        Assert.Same(c.Const(1f), c.Substitute(passThrough, new Dictionary<string, ExprValue> { ["x"] = c.Const(1f) })["o"]);
     }
 
     [Fact]
@@ -403,10 +412,12 @@ public sealed class ExprTests
         b.Output("p", b.Call("neg", b.Input("x")));
         var graph = b.Build();
         var bindings = ExprBindings.Bind(graph);
-        Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[4], new float[5])).Rule);
+        Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[2], new float[5])).Rule);
         Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[3], new float[4])).Rule);
         var outputs = new float[6];
         ExprEvaluator.Evaluate(graph, bindings, new[] { 1f, 2f, 3f }, outputs);
+        var none = new ExprBuilder().Build();
+        ExprEvaluator.Evaluate(none, ExprBindings.Bind(none), ReadOnlySpan<float>.Empty, Span<float>.Empty);
         Assert.Equal(new[] { 1f, 2f, 3f, -1f, -2f, -3f }, outputs);
     }
 
@@ -502,6 +513,32 @@ public sealed class ExprTests
         Rule("pick-range", () => Make(outputNodes: new[] { 1 }, nodes: N(x, ExprNode.Pick(0, 0))), 1);
         Rule("operand-order", () => Make(nodes: N(x, ExprNode.Pick(5, 0))), 1);
         Rule("operand-order", () => Make(nodes: N(x, ExprNode.Call("neg", new[] { -1 }))), 1);
+        Rule("operand-order", () => Make(nodes: N(x, ExprNode.Call("neg", new[] { 1 }))), 1);
+    }
+
+    [Fact]
+    public void PortNamesAcceptTheirWholeAlphabetAndNothingBeside()
+    {
+        foreach (var name in new[] { "a", "z", "A", "Z", "_", "_9", "a0", "Z9", "x_Y_z_0" })
+            Assert.Equal(new[] { name }, Make(nodes: N(ExprNode.Input(0)), inputs: new[] { name }).InputNames);
+        foreach (var name in new[] { "", "9", "@", "[", "`", "{", "/", ":", "a b", "a-b", "é" })
+            Assert.Equal("port-name", Refusal(() => Make(nodes: N(ExprNode.Input(0)), inputs: new[] { name })).Rule);
+        foreach (var name in new[] { "a@", "a[", "a`", "a{", "a/", "a:" })
+            Assert.Equal("port-name", Refusal(() => Make(nodes: N(ExprNode.Input(0)), inputs: new[] { name })).Rule);
+    }
+
+    [Fact]
+    public void RefusalsNameTheirRuleAndNodeAndNothingElse()
+    {
+        var b = new ExprBuilder();
+        var x = b.Input("x");
+        Assert.Equal("unknown-op at node 1", Refusal(() => b.Call("nope", x)).Message);
+        Assert.Equal("port-name", Refusal(() => b.Input("1")).Message);
+        Assert.Equal("version", Refusal(() => Make(nodes: N(ExprNode.Input(0)), version: 3)).Message);
+        Assert.Equal(-1, Refusal(() => b.Input("1")).NodeIndex);
+        Assert.Equal(1, Refusal(() => b.Call("nope", x)).NodeIndex);
+        Assert.Equal(0, new ExprGraphException("r", 0).NodeIndex);
+        Assert.Equal("r at node 0", new ExprGraphException("r", 0).Message);
     }
 
     [Fact]
