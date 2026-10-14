@@ -334,6 +334,19 @@ class PayloadCodecTests(unittest.TestCase):
         refusal = self._refused(document.decode_payload, bytes.fromhex("91d40100"))
         self.assertEqual((refusal.code, str(refusal)), ("value_kind", text.format("read")))
 
+    def test_mixed_width_nan_keys_are_a_documented_refusal(self) -> None:
+        # The bytes the C# reference writes for a map holding float.NaN and double.NaN keys: it reads them as two keys.
+        row = "82 ca ffc00000 01 cb fff8000000000000 02"
+        with self.assertRaises(PayloadCodecFault) as caught:
+            MESSAGEPACK_PAYLOAD_CODEC.decode(bytes.fromhex(row))
+        self.assertEqual((caught.exception.code, caught.exception.kind), ("duplicate_map_key", ""))
+        document = define_document_type("tests.nan", encode=lambda value: value)
+        self.assertEqual(self._refused(document.decode_payload, bytes.fromhex(row)).code, "duplicate_map_key")
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        section = readme.split("## Wire Parity", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("duplicate_map_key", section)
+        self.assertIn(row, section)
+
     def test_every_nan_key_is_one_key_both_ways(self) -> None:
         from cultcache_py.leaves import Float32
 
@@ -634,6 +647,11 @@ MIGRATION_RECORDS = {
     "k7": b'{"big": 1180591620717411303424}',
 }
 BIG_DIGITS = "1180591620717411303424"
+SOURCE_MISSING = "convert: argument source does not exist (source_missing); there is nothing to convert."
+DESTINATION_EXISTS = (
+    "convert: argument destination already exists (destination_exists); convert writes only a new store, "
+    "and the source is unchanged."
+)
 
 
 class ConvertTests(unittest.TestCase):
@@ -754,10 +772,7 @@ class ConvertTests(unittest.TestCase):
                             convert(store, destination, definitions)
                         with self.assertRaises(CultCacheError) as again:
                             convert(store, destination, definitions)
-                    self.assertEqual(
-                        str(caught.exception),
-                        f"{destination} already exists; convert writes only a new store. {store.path} is unchanged.",
-                    )
+                    self.assertEqual(str(caught.exception), DESTINATION_EXISTS)
                     self.assertEqual(str(again.exception), str(caught.exception))
                     self.assertIsNone(caught.exception.__context__)
                     self.assertEqual(pull_all.call_count, 0)
@@ -889,8 +904,110 @@ class ConvertTests(unittest.TestCase):
         missing = SingleFileMessagePackBackingStore(self.directory / "missing.cc")
         with self.assertRaises(CultCacheError) as caught:
             convert(missing, destination, [define_document_type("tests.mig")])
-        self.assertEqual(str(caught.exception), f"{missing.path} does not exist; there is nothing to convert.")
+        self.assertEqual(str(caught.exception), SOURCE_MISSING)
         self.assertFalse(destination.exists())
+
+    def test_convert_refusals_name_no_path(self) -> None:
+        for label, make in self._stores():
+            with self.subTest(store=label):
+                folder = self.directory / f"{CANARY}-dir"
+                folder.mkdir()
+                definitions = [define_document_type("tests.mig")]
+                store = type(make("x"))(folder / f"{CANARY}-src")
+                taken = type(store)(folder / f"{CANARY}-taken")
+                taken.push(CultCacheEnvelope.create(key="k", type="tests.mig", payload=b'{"n": 1}'))
+                store.push(CultCacheEnvelope.create(key="k", type="tests.mig", payload=b'{"n": 1}'))
+                missing = type(store)(folder / f"{CANARY}-missing")
+                for expected, call in (
+                    (SOURCE_MISSING, lambda: convert(missing, folder / f"{CANARY}-out", definitions)),
+                    (DESTINATION_EXISTS, lambda: convert(store, taken.path, definitions)),
+                ):
+                    with self.assertRaises(CultCacheError) as caught:
+                        call()
+                    refusal = caught.exception
+                    self.assertEqual(str(refusal), expected)
+                    for text in (str(refusal), repr(refusal), repr(refusal.args), repr(vars(refusal)), _chain_text(refusal)):
+                        self.assertNotIn(CANARY, text)
+                        self.assertNotIn(str(folder), text)
+                    self.assertIsNone(refusal.__context__)
+                    self.assertIsNone(refusal.__cause__)
+
+    def _one_record(self, label, name):
+        store = self._filled(dict(self._stores())[label], name, {"k1": b'{"n": 1}'})
+        return store, self.directory / f"{name}.out", [define_document_type("tests.mig")]
+
+    def test_convert_interrupt_leaves_no_destination(self) -> None:
+        import cultcache_py.cache as cache_module
+
+        real_open = open
+
+        class FirstWriteInterrupts:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def __enter__(self):
+                self.handle.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self.handle.__exit__(*exc)
+
+            def write(self, data):
+                raise KeyboardInterrupt
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+        def created_then_interrupted(path, mode):
+            real_open(path, mode).close()
+            raise KeyboardInterrupt
+
+        def created_then_first_write_interrupted(path, mode):
+            return FirstWriteInterrupts(real_open(path, mode))
+
+        for label, _ in self._stores():
+            for case, seam in (
+                ("raises-after-create", created_then_interrupted),
+                ("first-write-raises", created_then_first_write_interrupted),
+            ):
+                with self.subTest(store=label, case=case):
+                    store, destination, definitions = self._one_record(label, f"int-{label}-{case}")
+                    before = store.path.read_bytes()
+                    with mock.patch.object(cache_module, "open", seam, create=True):
+                        with self.assertRaises(KeyboardInterrupt):
+                            convert(store, destination, definitions)
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(store.path.read_bytes(), before)
+                    self.assertEqual(convert(store, destination, definitions), 1)
+                    self.assertTrue(destination.exists())
+
+    def test_convert_never_removes_a_destination_it_did_not_create(self) -> None:
+        import cultcache_py.cache as cache_module
+
+        for label, _ in self._stores():
+            with self.subTest(store=label):
+                store, destination, definitions = self._one_record(label, f"theirs-{label}")
+                destination.write_bytes(b"theirs")
+                with mock.patch.object(cache_module, "open", side_effect=KeyboardInterrupt, create=True):
+                    with self.assertRaises(CultCacheError) as caught:
+                        convert(store, destination, definitions)
+                self.assertEqual(str(caught.exception), DESTINATION_EXISTS)
+                self.assertEqual(destination.read_bytes(), b"theirs")
+                # Another process creates the destination between the existence check and the create.
+                other = self.directory / f"raced-{label}.out"
+                real_exists = Path.exists
+
+                def exists(path):
+                    if path == other:
+                        other.write_bytes(b"raced")
+                        return False
+                    return real_exists(path)
+
+                with mock.patch.object(Path, "exists", exists):
+                    with self.assertRaises(CultCacheError) as caught:
+                        convert(store, other, definitions)
+                self.assertEqual(str(caught.exception), DESTINATION_EXISTS)
+                self.assertEqual(other.read_bytes(), b"raced")
 
     def test_a_destination_under_a_missing_directory_is_created(self) -> None:
         store = self._filled(

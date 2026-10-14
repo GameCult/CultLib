@@ -600,56 +600,63 @@ def convert(
     """Write the records of `source` to a new store of the same kind at `destination`, the records of `definitions`
     rewritten from `source_codec` to each definition's own codec, and return the count rewritten. Records of other types
     keep their bytes. Stop every writer of the source before calling. `destination` must not exist: the call creates it
-    exclusively, and it is complete only once the call returns. A refusal (a record, a failed write) removes it and
-    leaves the source as it was. A killed run leaves the source intact and a partial destination: delete the destination
-    and run again. The source is only read, never written; swap the new store in yourself once it opens. A count of 0
-    still writes the destination.
+    exclusively, and it is complete only once the call returns. A refusal (a record, a failed write) or an interrupt
+    after the create removes it and leaves the source as it was. A killed run leaves the source intact and a partial
+    destination: delete the destination and run again. A file another process creates at the destination between the
+    existence check and the create is refused and left alone. The source is only read, never written; swap the new
+    store in yourself once it opens. A count of 0 still writes the destination.
     """
     if not isinstance(source, (SingleFileMessagePackBackingStore, JsonLinesBackingStore)):
         raise TypeError(f"convert takes a library file store, not {type(source).__name__}")
     if not source.path.exists():
-        raise CultCacheError(f"{source.path} does not exist; there is nothing to convert.")
+        raise CultCacheError("convert: argument source does not exist (source_missing); there is nothing to convert.")
     by_type: dict[str, DocumentDefinition[Any]] = {}
     for definition in definitions:
         by_type[definition.type] = definition
         by_type.setdefault(definition.catalog_entry().schema_name, definition)
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    exists = CultCacheError(
+        "convert: argument destination already exists (destination_exists); convert writes only a new store, "
+        "and the source is unchanged."
+    )
+    if destination.exists():
+        raise exists
+    refused = False
+    failure: CultCacheError | None = None
     try:
-        target = open(destination, "xb")
-    except FileExistsError:
-        failure: CultCacheError | None = CultCacheError(
-            f"{destination} already exists; convert writes only a new store. {source.path} is unchanged."
-        )
-    else:
-        failure = None
-    if failure is not None:
-        raise failure
-    try:
-        with target:
-            converted: list[CultCacheEnvelope] = []
-            count = 0
-            for envelope in source.pull_all():
-                definition = by_type.get(envelope.type)
-                if definition is not None:
-                    try:
-                        value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
-                        envelope = replace(envelope, payload=definition.encode_payload(value))
-                    except Exception as refusal:
-                        code = getattr(refusal, "code", type(refusal).__name__)
-                        failure = CultCacheError(
-                            f"Cannot convert {envelope.type} record {envelope.key}: {code}; "
-                            "no store was written and the source is unchanged."
-                        )
-                    else:
-                        count += 1
-                if failure is not None:
-                    raise failure
-                converted.append(envelope)
-            target.write(type(source)._file_bytes(converted))
-            target.flush()
-            os.fsync(target.fileno())
+        try:
+            target = open(destination, "xb")
+        except FileExistsError:
+            refused = True
+        else:
+            with target:
+                converted: list[CultCacheEnvelope] = []
+                count = 0
+                for envelope in source.pull_all():
+                    definition = by_type.get(envelope.type)
+                    if definition is not None:
+                        try:
+                            value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
+                            envelope = replace(envelope, payload=definition.encode_payload(value))
+                        except Exception as refusal:
+                            code = getattr(refusal, "code", type(refusal).__name__)
+                            failure = CultCacheError(
+                                f"Cannot convert {envelope.type} record {envelope.key}: {code}; "
+                                "no store was written and the source is unchanged."
+                            )
+                        else:
+                            count += 1
+                    if failure is not None:
+                        raise failure
+                    converted.append(envelope)
+                target.write(type(source)._file_bytes(converted))
+                target.flush()
+                os.fsync(target.fileno())
     except BaseException:
-        destination.unlink(missing_ok=True)
+        if not refused:
+            destination.unlink(missing_ok=True)
         raise
+    if refused:
+        raise exists
     return count
