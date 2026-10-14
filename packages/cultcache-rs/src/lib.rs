@@ -595,30 +595,94 @@ fn element_header(bytes: &[u8], position: usize) -> Option<(usize, Option<usize>
     })
 }
 
-/// The stack left below which a decode moves to a fresh segment. Measured (map D4): the worst
-/// distance between two stack checks is 128-144 KiB in a debug build and under 32 KiB in release,
-/// so 256 KiB leaves a margin in both. A frame larger than this between two checks still overruns.
-const DECODE_RED_ZONE: usize = 256 * 1024;
+/// The stack left below which a decode moves to a fresh segment. Measured (map D10, D12): the
+/// distance between two stack checks is 14 times the inline size of the record entered plus 3 KiB in
+/// a debug build and 6 times in release, so at [`MAX_RECORD_INLINE_BYTES`] it is 220 KiB and 93 KiB;
+/// 512 KiB is 2.3 times the larger. A record the derives produced can never exceed that bound.
+const DECODE_RED_ZONE: usize = 512 * 1024;
 
-/// The size of each segment a decode grows onto. It does not change the cost of a decode (map D6).
+/// The size of each segment a decode grows onto, four red zones. It does not change the cost of a
+/// decode (map D6); it only has to exceed the red zone plus one gap.
 const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
-/// The one decode of a document payload: the nesting bound first, then the deserializer, whose own
-/// depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the bytes.
-/// Readers of stored envelope payloads outside this crate decode through it too.
+/// The largest `size_of` a record the derives produce may have. `DatabaseEntry`, `CultSlots` and
+/// `CultUnion` refuse a larger one at compile time: put its large data behind a `Vec` or a `Box`.
 ///
-/// The deserializer runs under `serde_stacker`, which moves onto a fresh stack segment whenever less
-/// than the red zone remains, at every container level serde's impls descend through, skipped values
-/// included. The calling thread's stack size therefore never decides whether a payload inside the
-/// bound decodes. The one residual is a single frame larger than the red zone. On wasm32 the shadow
-/// stack grows the same way, while the engine's own call stack stays the host's limit.
+/// Decoding builds a record in stack frames that hold it, and the distance between two stack checks
+/// grows with its size, so the decode's red zone is set against a record of exactly this size. A
+/// field of a type the derives did not produce (a plain serde struct, a large tuple) that exceeds
+/// this size behind a `Box` or `Vec` is outside the guarantee.
+///
+/// ```compile_fail,E0080
+/// use cultcache_rs::CultSlots;
+///
+/// #[derive(CultSlots)]
+/// struct TooLarge {
+///     #[cultcache(key = 0)]
+///     bytes: [u8; 16 * 1024 + 1],
+/// }
+/// ```
+///
+/// A union is refused by its own size, though every arm is within the limit:
+///
+/// ```compile_fail,E0080
+/// use cultcache_rs::{CultSlots, CultUnion};
+///
+/// #[derive(CultSlots)]
+/// struct Arm {
+///     #[cultcache(key = 0)]
+///     a: [[u64; 32]; 32],
+///     #[cultcache(key = 1)]
+///     b: [[u64; 32]; 32],
+/// }
+///
+/// #[derive(CultUnion)]
+/// enum TooLarge {
+///     #[cultcache(key = 0)]
+///     Arm(Arm),
+///     #[cultcache(key = 1)]
+///     Leaf,
+/// }
+/// ```
+///
+/// Just under the limit compiles:
+///
+/// ```
+/// use cultcache_rs::CultSlots;
+///
+/// #[derive(CultSlots)]
+/// struct JustUnder {
+///     #[cultcache(key = 0)]
+///     bytes: Vec<u8>,
+///     #[cultcache(key = 1)]
+///     header: [u8; 16 * 1024 - 64],
+/// }
+/// ```
+pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
+
+/// The one grown decoder of stored bytes: the stack check comes first, before any frame that holds
+/// a `T`, then `serde_stacker` re-checks at every container serde's impls descend through, skipped
+/// values included. No nesting bound is applied here; [`decode_payload`] walks first.
+fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Result<T, rmp_serde::decode::Error> {
+    stacker::maybe_grow(DECODE_RED_ZONE, DECODE_STACK_SEGMENT, || {
+        let mut reader = rmp_serde::Deserializer::from_read_ref(bytes);
+        let mut grown = serde_stacker::Deserializer::new(&mut reader);
+        grown.red_zone = DECODE_RED_ZONE;
+        grown.stack_size = DECODE_STACK_SEGMENT;
+        T::deserialize(grown)
+    })
+}
+
+/// The one decode of a document payload: the nesting bound first, then [`decode_grown`], whose
+/// rmp-serde depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the
+/// bytes. Readers of stored envelope payloads outside this crate decode through it too.
+///
+/// A payload inside the bound decodes whatever the calling thread's stack: the thread needs only its
+/// own frames that hold the returned value. That holds for every record the derives produce, which
+/// [`MAX_RECORD_INLINE_BYTES`] bounds; Windows stack growth is not yet verified.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;
-    let mut reader = rmp_serde::Deserializer::from_read_ref(payload);
-    let mut grown = serde_stacker::Deserializer::new(&mut reader);
-    grown.red_zone = DECODE_RED_ZONE;
-    grown.stack_size = DECODE_STACK_SEGMENT;
-    <T as serde::Deserialize>::deserialize(grown).map_err(opaque_decode_error)
+    decode_grown(payload).map_err(opaque_decode_error)
 }
 
 /// The nesting bound for an envelope admitted without a typed decode, from the same walk that
@@ -1158,7 +1222,7 @@ impl SingleFileMessagePackBackingStore {
                 CultCacheStoreUnreadableKind::UnsupportedFormat,
                 anyhow!("its header is {}; this runtime reads {STORE_FORMAT_V1:?} only", describe_header(&header)),
             )),
-            _ => rmp_serde::from_slice(&bytes)
+            _ => decode_grown(&bytes)
                 .context("failed to decode legacy CultCache envelope array")
                 .map_err(|error| unreadable(CultCacheStoreUnreadableKind::Undecodable, error)),
         }
@@ -2311,7 +2375,7 @@ fn read_redb_entry(
     table
         .get(key.as_slice())?
         .map(|value| {
-            rmp_serde::from_slice(value.value())
+            decode_grown(value.value())
                 .map_err(opaque_decode_error)
                 .context("failed to decode redb CultCache envelope")
         })
@@ -2335,7 +2399,7 @@ fn read_all_redb(
         .iter()?
         .map(|row| {
             let (_, value) = row?;
-            rmp_serde::from_slice(value.value())
+            decode_grown(value.value())
                 .map_err(opaque_decode_error)
                 .context("failed to decode redb CultCache envelope")
         })
@@ -3025,7 +3089,7 @@ fn encode_store_snapshot(entries: &[CultCacheEnvelope]) -> Result<PersistedStore
 /// Decodes a store whose header the caller has already read as [`STORE_FORMAT_V1`].
 fn decode_store_snapshot(bytes: &[u8]) -> Result<Vec<CultCacheEnvelope>> {
     let snapshot: PersistedStoreSnapshot =
-        rmp_serde::from_slice(bytes).context("failed to decode CultCache v1 snapshot")?;
+        decode_grown(bytes).context("failed to decode CultCache v1 snapshot")?;
 
     let catalog = snapshot
         .1
