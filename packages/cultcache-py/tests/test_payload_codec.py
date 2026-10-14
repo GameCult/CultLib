@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import inspect
 import json
+import os
 import shutil
 import tempfile
 import traceback
@@ -26,7 +28,7 @@ from cultcache_py import (
     SingleFileMessagePackBackingStore,
     define_database_entry_type,
     define_document_type,
-    migrate_payloads,
+    convert,
 )
 from cultcache_py.cache import CultCacheError
 
@@ -157,7 +159,7 @@ class PayloadCodecTests(unittest.TestCase):
         self.assertEqual((fault.code, fault.kind), ("no_sets", "set"))
         self.assertIsInstance(fault, ValueError)
 
-    def test_a_json_store_opted_in_reads_and_migrate_payloads_rewrites_it(self) -> None:
+    def test_a_json_store_opted_in_reads_and_convert_writes_it_anew(self) -> None:
         path = self.directory / "legacy.cc"
         store = _store_with(path, LEGACY_JSON)
         legacy = define_document_type("tests.legacy", payload_codec=JSON_PAYLOAD_CODEC)
@@ -165,11 +167,11 @@ class PayloadCodecTests(unittest.TestCase):
         old.pull_all_backing_stores()
         self.assertEqual(old.get(legacy, "k"), {"n": 1, "schema": "x"})
         modern = define_document_type("tests.legacy")
-        backup = path.with_suffix(".json-0.3")
+        destination = self.directory / "converted.cc"
         original = path.read_bytes()
-        self.assertEqual(migrate_payloads(SingleFileMessagePackBackingStore(path), [modern], backup=backup), 1)
-        self.assertEqual(backup.read_bytes(), original)
-        reread = self._cache(modern, SingleFileMessagePackBackingStore(path))
+        self.assertEqual(convert(store, destination, [modern]), 1)
+        self.assertEqual(path.read_bytes(), original)
+        reread = self._cache(modern, SingleFileMessagePackBackingStore(destination))
         reread.pull_all_backing_stores()
         self.assertEqual(reread.get(modern, "k"), {"n": 1, "schema": "x"})
         self.assertEqual(reread.get_envelope(modern, "k").payload, MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1, "schema": "x"}))
@@ -313,6 +315,54 @@ class PayloadCodecTests(unittest.TestCase):
             with self.subTest(tree=tree):
                 self.assertEqual(codec.decode(codec.encode(tree)), tree)
 
+    def test_the_codec_carries_no_extension_type_but_the_timestamp(self) -> None:
+        codec = MESSAGEPACK_PAYLOAD_CODEC
+        ext = msgpack.ExtType(1, b"x")
+        for name, tree in (("root", ext), ("map-value", {"a": ext}), ("nested-item", [[ext]])):
+            with self.subTest(encode=name):
+                with self.assertRaises(PayloadCodecFault) as caught:
+                    codec.encode(tree)
+                self.assertEqual((caught.exception.code, caught.exception.kind), ("value_kind", "ext"))
+        for name, row in (("root", "d40100"), ("map-value", "81a161d40100"), ("nested-item", "91d40100")):
+            with self.subTest(decode=name):
+                with self.assertRaises(PayloadCodecFault) as caught:
+                    codec.decode(bytes.fromhex(row))
+                self.assertEqual((caught.exception.code, caught.exception.kind), ("value_kind", "ext"))
+        document = define_document_type("tests.ext", encode=lambda value: value)
+        text = "tests.ext payload holds a value of kind ext; MessagePack payloads carry no extension type but the timestamp (refused on {})."
+        self.assertEqual(str(self._refused(document.encode_payload, ext)), text.format("write"))
+        refusal = self._refused(document.decode_payload, bytes.fromhex("91d40100"))
+        self.assertEqual((refusal.code, str(refusal)), ("value_kind", text.format("read")))
+
+    def test_every_nan_key_is_one_key_both_ways(self) -> None:
+        from cultcache_py.leaves import Float32
+
+        codec = MESSAGEPACK_PAYLOAD_CODEC
+        collisions = (
+            {float("nan"): 1, float("nan"): 2},
+            {Float32(float("nan")): 1, Float32(float("nan")): 2},
+            {float("nan"): 1, Float32(float("nan")): 2},
+        )
+        for tree in collisions:
+            for wrapped in (tree, {"n": [tree]}):
+                with self.subTest(tree=wrapped):
+                    with self.assertRaises(PayloadCodecFault) as caught:
+                        codec.encode(wrapped)
+                    self.assertEqual((caught.exception.code, caught.exception.kind), ("duplicate_map_key", ""))
+        for name, row in (
+            ("f64-pair", "82cb7ff800000000000001cb7ff800000000000002"),
+            ("f32-pair", "82ca7fc0000001ca7fc0000002"),
+            ("mixed-pair", "82cb7ff800000000000001ca7fc0000002"),
+        ):
+            with self.subTest(row=name):
+                with self.assertRaises(PayloadCodecFault) as caught:
+                    codec.decode(bytes.fromhex(row))
+                self.assertEqual((caught.exception.code, caught.exception.kind), ("duplicate_map_key", ""))
+        for single in (float("nan"), Float32(float("nan"))):
+            with self.subTest(single=type(single).__name__):
+                (key,) = codec.decode(codec.encode({single: 1}))
+                self.assertNotEqual(key, key)
+
     def test_a_float32_key_beside_a_key_the_reader_holds_equal_is_refused_on_write(self) -> None:
         from cultcache_py.leaves import Float32
 
@@ -340,7 +390,6 @@ class PayloadCodecTests(unittest.TestCase):
         self.assertFalse(store.path.exists())
         for tree in (
             {0.1: "a", Float32(0.1): "b"},
-            {float("nan"): 1, Float32(float("nan")): 2},
             {1: "a", Float32(1.5): "b"},
             {"a": 1, Float32(1.0): 2},
         ):
@@ -376,6 +425,40 @@ class PayloadCodecTests(unittest.TestCase):
         with self.assertRaises(CultCachePayloadDepthError):
             document.decode_payload(b"\x91" * 257 + b"\x01")
         self.assertEqual(document.decode_payload(b"\x91" * 256 + b"\x01"), lists(256))
+
+    def test_the_codec_read_bound_is_the_payload_bound(self) -> None:
+        codec = MESSAGEPACK_PAYLOAD_CODEC
+        document = define_document_type("tests.depth", encode=lambda value: value)
+        for name, unit, leaf in (("lists", b"\x91", b"\x01"), ("maps", b"\x81\xa1a", b"\x01")):
+            with self.subTest(shape=name):
+                self.assertIsNotNone(codec.decode(unit * 256 + leaf))
+                with self.assertRaises(PayloadCodecFault) as caught:
+                    codec.decode(unit * 257 + leaf)
+                self.assertEqual((caught.exception.code, caught.exception.kind), ("depth_limit", ""))
+                with self.assertRaises(CultCachePayloadDepthError):
+                    document.decode_payload(unit * 257 + leaf)
+
+    def test_timestamps_lie_within_datetime_both_ways(self) -> None:
+        codec = MESSAGEPACK_PAYLOAD_CODEC
+        stamp = msgpack.Timestamp
+        for ts in (stamp(-62135596800, 0), stamp(253402300799, 999999999)):
+            for tree in (ts, {"a": ts}, {ts: 1}):
+                with self.subTest(inside=tree):
+                    self.assertEqual(codec.decode(codec.encode(tree)), tree)
+        document = define_document_type("tests.ts", encode=lambda value: value)
+        text = "tests.ts payload holds a timestamp outside years 1 to 9999; refused on {}."
+        for ts in (stamp(-62135596801, 999999999), stamp(253402300800, 0)):
+            for tree in (ts, {"a": ts}, {ts: 1}):
+                with self.subTest(outside=tree):
+                    with self.assertRaises(PayloadCodecFault) as caught:
+                        codec.encode(tree)
+                    self.assertEqual((caught.exception.code, caught.exception.kind), ("timestamp_out_of_range", ""))
+                    packed = msgpack.packb(tree, use_bin_type=True)
+                    with self.assertRaises(PayloadCodecFault) as caught:
+                        codec.decode(packed)
+                    self.assertEqual((caught.exception.code, caught.exception.kind), ("timestamp_out_of_range", ""))
+                    self.assertEqual(str(self._refused(document.encode_payload, tree)), text.format("write"))
+                    self.assertEqual(str(self._refused(document.decode_payload, packed)), text.format("read"))
 
     def test_the_integer_range_is_closed_at_both_ends_at_the_root_too(self) -> None:
         codec = MESSAGEPACK_PAYLOAD_CODEC
@@ -553,7 +636,7 @@ MIGRATION_RECORDS = {
 BIG_DIGITS = "1180591620717411303424"
 
 
-class MigratePayloadsTests(unittest.TestCase):
+class ConvertTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.directory, True)
@@ -568,128 +651,115 @@ class MigratePayloadsTests(unittest.TestCase):
             store.push(CultCacheEnvelope.create(key=key, type="tests.mig", payload=payload))
         return store
 
-    def _backup(self, name: str) -> Path:
-        return self.directory / f"{name}.bak"
-
     def _pull_with(self, store, codec):
-        document = define_document_type("tests.mig", payload_codec=codec)
+        document = define_document_type("tests.mig", payload_codec=codec, encode=lambda value: value)
         cache = CultCache.builder().register_document_type(document).add_generic_store(store).build()
         cache.pull_all_backing_stores()
         return cache.get_all(document)
 
-    def test_migration_is_refused_whole_and_leaves_the_store_untouched(self) -> None:
-        for label, make in self._stores():
-            with self.subTest(store=label):
-                store = self._filled(make, f"refused-{label}", MIGRATION_RECORDS)
-                before = store.path.read_bytes()
-                backup = self._backup(f"refused-{label}")
-                with self.assertRaises(CultCacheError) as caught:
-                    migrate_payloads(store, [define_document_type("tests.mig")], backup=backup)
-                message = str(caught.exception)
-                for part in ("tests.mig", "k7", "integer_out_of_range"):
-                    self.assertIn(part, message)
-                self.assertNotIn(BIG_DIGITS[:8], _chain_text(caught.exception))
-                self.assertIsNone(caught.exception.__context__)
-                self.assertEqual(store.path.read_bytes(), before)
-                self.assertFalse(backup.exists())
-                self.assertEqual(len(self._pull_with(store, JSON_PAYLOAD_CODEC)), 7)
-
-    def test_migration_rewrites_every_listed_record_in_one_swap_and_keeps_the_original_as_the_backup(self) -> None:
-        records = {key: payload for key, payload in MIGRATION_RECORDS.items() if key != "k7"}
-        for label, make in self._stores():
-            with self.subTest(store=label):
-                store = self._filled(make, f"ok-{label}", records)
-                other = CultCacheEnvelope.create(key="o", type="tests.other", payload=b"opaque\x00bytes")
-                store.push(other)
-                original = store.path.read_bytes()
-                backup = self._backup(f"ok-{label}")
-                with mock.patch.object(store, "_replace_all", wraps=store._replace_all) as replace_all, mock.patch.object(
-                    store, "push_all"
-                ) as push_all, mock.patch.object(store, "push") as push:
-                    count = migrate_payloads(store, [define_document_type("tests.mig")], backup=backup)
-                self.assertEqual(count, 6)
-                self.assertEqual((replace_all.call_count, push_all.call_count, push.call_count), (1, 0, 0))
-                self.assertEqual(backup.read_bytes(), original)
-                kept = next(item for item in store.pull_all() if item.type == "tests.other")
-                self.assertEqual((kept.payload, kept.stored_at), (other.payload, other.stored_at))
-                migrated = {item.key: item.payload for item in store.pull_all() if item.type == "tests.mig"}
-                self.assertEqual(sorted(migrated), ["k1", "k2", "k3", "k4", "k5", "k6"])
-                modern = define_document_type("tests.mig")
-                legacy = define_document_type("tests.mig", payload_codec=JSON_PAYLOAD_CODEC)
-                for key, payload in migrated.items():
-                    self.assertEqual(modern.decode_payload(payload), json.loads(records[key]))
-                    with self.assertRaises(CultCachePayloadFormatError):
-                        legacy.decode_payload(payload)
-                self.assertEqual(migrated["k1"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
-                self.assertEqual(migrated["k2"], MESSAGEPACK_PAYLOAD_CODEC.encode(["a", 2]))
-
-    def test_the_backup_is_the_rerun_guard_that_payload_bytes_cannot_be(self) -> None:
+    def test_convert_writes_a_new_store_of_the_same_kind(self) -> None:
+        records = {"k1": b"5", "k2": b"53", "k3": b'{"n": 1}'}
         definition = define_document_type("tests.mig", encode=lambda value: value)
         for label, make in self._stores():
             with self.subTest(store=label):
-                store = self._filled(make, f"digits-{label}", {"a": b"53", "b": b"5"})
-                original = store.path.read_bytes()
-                backup = self._backup(f"digits-{label}")
-                self.assertEqual(migrate_payloads(store, [definition], backup=backup), 2)
-                self.assertEqual({item.key: definition.decode_payload(item.payload) for item in store.pull_all()}, {"a": 53, "b": 5})
-                self.assertEqual(backup.read_bytes(), original)
-                migrated = store.path.read_bytes()
-                with self.assertRaises(CultCacheError) as caught:
-                    migrate_payloads(store, [definition], backup=backup)
-                self.assertIn(str(backup), str(caught.exception))
-                self.assertEqual((store.path.read_bytes(), backup.read_bytes()), (migrated, original))
+                store = self._filled(make, f"src-{label}", records)
+                other = CultCacheEnvelope.create(key="o", type="tests.other", payload=b"opaque\x00bytes")
+                store.push(other)
+                destination = self.directory / f"dst-{label}.out"
+                self.assertEqual(convert(store, destination, [definition]), 3)
+                opened = type(store)(destination)
+                kept = next(item for item in opened.pull_all() if item.type == "tests.other")
+                self.assertEqual((kept.payload, kept.stored_at), (other.payload, other.stored_at))
+                self.assertEqual(
+                    {item.key: definition.decode_payload(item.payload) for item in opened.pull_all() if item.type == "tests.mig"},
+                    {"k1": 5, "k2": 53, "k3": {"n": 1}},
+                )
+                self.assertEqual(sorted(self._pull_with(opened, MESSAGEPACK_PAYLOAD_CODEC), key=str), [5, 53, {"n": 1}])
+                raw = destination.read_bytes()
+                if label == "jsonl":
+                    self.assertEqual(raw[:1], b"{")
+                else:
+                    self.assertIsInstance(msgpack.unpackb(raw, raw=False, strict_map_key=False), list)
 
-    def test_a_backup_path_that_exists_is_refused_before_the_store_is_read(self) -> None:
+    def test_a_source_with_no_listed_record_still_writes_the_destination_with_count_zero(self) -> None:
         for label, make in self._stores():
             with self.subTest(store=label):
-                store = self._filled(make, f"taken-{label}", {"k1": b'{"n": 1}'})
-                before = store.path.read_bytes()
-                backup = self._backup(f"taken-{label}")
-                backup.write_bytes(b"mine")
-                with mock.patch.object(type(store), "pull_all") as pull_all:
-                    with self.assertRaises(CultCacheError) as caught:
-                        migrate_payloads(store, [define_document_type("tests.mig")], backup=backup)
-                self.assertEqual(pull_all.call_count, 0)
-                self.assertIn(str(backup), str(caught.exception))
-                self.assertEqual((store.path.read_bytes(), backup.read_bytes()), (before, b"mine"))
+                store = self._filled(make, f"zero-{label}", {"k1": b'{"n": 1}'})
+                destination = self.directory / f"zero-{label}.out"
+                self.assertEqual(convert(store, destination, [define_document_type("tests.nothing")]), 0)
+                self.assertTrue(destination.exists())
+                self.assertEqual(
+                    [(item.key, item.payload) for item in type(store)(destination).pull_all()], [("k1", b'{"n": 1}')]
+                )
 
-    def test_a_writer_between_the_copy_and_the_swap_makes_the_migration_refuse_and_keeps_its_record(self) -> None:
+    def test_convert_never_writes_its_source(self) -> None:
+        for label, make in self._stores():
+            for case, records in (("ok", {"k1": b'{"n": 1}'}), ("refused", {"k1": b'{"n": 1}', "k7": MIGRATION_RECORDS["k7"]})):
+                with self.subTest(store=label, case=case):
+                    store = self._filled(make, f"ro-{label}-{case}", records)
+                    before = (store.path.read_bytes(), store.path.stat().st_mtime_ns)
+                    destination = self.directory / f"ro-{label}-{case}.out"
+                    with contextlib.ExitStack() as stack:
+                        for name in ("push", "push_all", "delete", "_replace_all"):
+                            stack.enter_context(mock.patch.object(type(store), name, side_effect=AssertionError(name)))
+                        try:
+                            convert(store, destination, [define_document_type("tests.mig")])
+                        except CultCacheError:
+                            self.assertEqual(case, "refused")
+                        else:
+                            self.assertEqual(case, "ok")
+                    self.assertEqual((store.path.read_bytes(), store.path.stat().st_mtime_ns), before)
+
+    def test_a_writer_after_the_read_keeps_its_record_and_convert_returns_normally(self) -> None:
         for label, make in self._stores():
             with self.subTest(store=label):
-                store = self._filled(make, f"race-{label}", {"k1": b'{"n": 1}'})
-                backup = self._backup(f"race-{label}")
+                store = self._filled(make, f"late-{label}", {"k1": b'{"n": 1}'})
                 writer = type(store)(store.path)
                 real = type(store).pull_all
                 interleaved: list[bool] = []
 
                 def pull_all(self_store):
                     result = real(self_store)
-                    if self_store.path == backup and not interleaved:
+                    if not interleaved:
                         interleaved.append(True)
                         writer.push(CultCacheEnvelope.create(key="w", type="tests.mig", payload=b'{"late": true}'))
                     return result
 
+                destination = self.directory / f"late-{label}.out"
                 with mock.patch.object(type(store), "pull_all", pull_all):
-                    with self.assertRaises(CultCacheError) as caught:
-                        migrate_payloads(store, [define_document_type("tests.mig")], backup=backup)
-                self.assertIn("changed during migration", str(caught.exception))
-                self.assertFalse(backup.exists())
-                self.assertEqual(
-                    {item.key: item.payload for item in store.pull_all()}, {"k1": b'{"n": 1}', "w": b'{"late": true}'}
-                )
+                    count = convert(store, destination, [define_document_type("tests.mig")])
+                self.assertEqual(count, 1)
+                self.assertEqual({item.key for item in store.pull_all()}, {"k1", "w"})
+                self.assertEqual({item.key for item in type(store)(destination).pull_all()}, {"k1"})
 
-    def test_migration_finds_a_record_by_its_catalog_schema_name_and_skips_unlisted_types_anywhere(self) -> None:
-        store = SingleFileMessagePackBackingStore(self.directory / "names.cc")
-        store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b"\x00opaque"))
-        store.push(CultCacheEnvelope.create(key="n", type="tests.by-name", payload=b'{"n": 1}'))
-        document = define_document_type("tests.by-type", schema_name="tests.by-name")
-        self.assertEqual(migrate_payloads(store, [document], backup=self._backup("names")), 1)
-        rewritten = {item.key: item.payload for item in store.pull_all()}
-        self.assertEqual(rewritten["n"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
-        self.assertEqual(rewritten["a"], b"\x00opaque")
+    def test_an_existing_destination_is_refused_before_the_source_is_read(self) -> None:
+        for label, make in self._stores():
+            with self.subTest(store=label):
+                store = self._filled(make, f"taken-{label}", {"k1": b'{"n": 1}'})
+                definitions = [define_document_type("tests.mig")]
+                earlier = self.directory / f"earlier-{label}.out"
+                convert(store, earlier, definitions)
+                empty = self.directory / f"empty-{label}.out"
+                empty.write_bytes(b"")
+                for destination in (store.path, earlier, empty):
+                    before = destination.read_bytes()
+                    source_before = store.path.read_bytes()
+                    with mock.patch.object(type(store), "pull_all") as pull_all:
+                        with self.assertRaises(CultCacheError) as caught:
+                            convert(store, destination, definitions)
+                        with self.assertRaises(CultCacheError) as again:
+                            convert(store, destination, definitions)
+                    self.assertEqual(
+                        str(caught.exception),
+                        f"{destination} already exists; convert writes only a new store. {store.path} is unchanged.",
+                    )
+                    self.assertEqual(str(again.exception), str(caught.exception))
+                    self.assertIsNone(caught.exception.__context__)
+                    self.assertEqual(pull_all.call_count, 0)
+                    self.assertEqual((destination.read_bytes(), store.path.read_bytes()), (before, source_before))
 
-    def test_migration_names_the_class_of_any_refusal_and_never_its_text(self) -> None:
-        for refusal_class in (ValueError, AssertionError, TypeError, KeyError):
+    def test_a_refusal_leaves_no_destination_and_names_only_the_class(self) -> None:
+        for refusal_class in (AssertionError, TypeError, KeyError):
             with self.subTest(refusal=refusal_class.__name__):
 
                 def validate(value: object) -> None:
@@ -700,58 +770,98 @@ class MigratePayloadsTests(unittest.TestCase):
                     f"validated-{refusal_class.__name__}",
                     {"k1": b'{"n": 1}'},
                 )
-                before = store.path.read_bytes()
-                backup = self._backup(f"validated-{refusal_class.__name__}")
+                destination = self.directory / f"validated-{refusal_class.__name__}.out"
                 with self.assertRaises(CultCacheError) as caught:
-                    migrate_payloads(store, [define_document_type("tests.mig", validate=validate)], backup=backup)
-                for part in ("tests.mig", "k1", refusal_class.__name__):
-                    self.assertIn(part, str(caught.exception))
+                    convert(store, destination, [define_document_type("tests.mig", validate=validate)])
+                self.assertEqual(
+                    str(caught.exception),
+                    f"Cannot convert tests.mig record k1: {refusal_class.__name__}; no store was written and the source is unchanged.",
+                )
                 self.assertNotIn(CANARY, _chain_text(caught.exception))
                 self.assertIsNone(caught.exception.__context__)
                 self.assertIsNone(caught.exception.__cause__)
-                self.assertEqual(store.path.read_bytes(), before)
-                self.assertFalse(backup.exists())
+                self.assertFalse(destination.exists())
 
-    def test_migration_names_a_source_codec_and_a_count_of_zero_keeps_no_backup(self) -> None:
-        store = self._filled(lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "src", {"k1": b'{"n": 1}'})
-        backup = self._backup("src")
-        self.assertEqual(migrate_payloads(store, [define_document_type("tests.nothing")], backup=backup), 0)
-        self.assertEqual(store.pull_all()[0].payload, b'{"n": 1}')
-        self.assertFalse(backup.exists())
-        self.assertEqual(
-            migrate_payloads(store, [define_document_type("tests.mig")], backup=backup, source_codec=JSON_PAYLOAD_CODEC), 1
-        )
-        self.assertEqual(store.pull_all()[0].payload, MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
-        self.assertTrue(backup.exists())
+    def test_an_integer_beyond_64_bits_is_refused_by_code_and_the_fixed_record_converts(self) -> None:
+        for label, make in self._stores():
+            with self.subTest(store=label):
+                store = self._filled(make, f"big-{label}", MIGRATION_RECORDS)
+                destination = self.directory / f"big-{label}.out"
+                definition = define_document_type("tests.mig")
+                with self.assertRaises(CultCacheError) as caught:
+                    convert(store, destination, [definition])
+                for part in ("tests.mig", "k7", "integer_out_of_range"):
+                    self.assertIn(part, str(caught.exception))
+                self.assertNotIn(BIG_DIGITS[:8], _chain_text(caught.exception))
+                self.assertIsNone(caught.exception.__context__)
+                self.assertFalse(destination.exists())
+                store.push(CultCacheEnvelope.create(key="k7", type="tests.mig", payload=b'{"big": 1}'))
+                self.assertEqual(convert(store, destination, [definition]), 7)
+                self.assertEqual(len(self._pull_with(type(store)(destination), MESSAGEPACK_PAYLOAD_CODEC)), 7)
 
-    def test_migration_takes_only_the_library_file_stores(self) -> None:
-        backup = self._backup("foreign")
-        with self.assertRaises(TypeError) as caught:
-            migrate_payloads(object(), [define_document_type("tests.mig")], backup=backup)
-        self.assertEqual(str(caught.exception), "migrate_payloads takes a library file store, not object")
-        self.assertFalse(backup.exists())
-
-    def test_a_backup_removed_by_someone_else_does_not_mask_the_refusal(self) -> None:
+    def test_the_destination_is_fsynced_once_and_a_failed_sync_leaves_none(self) -> None:
         store = self._filled(
-            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "vanished", {"k1": b'{"n": 1}'}
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "sync", {"k1": b'{"n": 1}'}
         )
-        backup = self._backup("vanished")
-        real = SingleFileMessagePackBackingStore.pull_all
+        definitions = [define_document_type("tests.mig")]
+        destination = self.directory / "sync.out"
+        seen: list[int] = []
+        real = os.fsync
 
-        def pull_all(self_store):
-            result = real(self_store)
-            if self_store.path == backup:
-                backup.unlink()
-            return result
+        def fsync(descriptor: int) -> None:
+            seen.append(os.fstat(descriptor).st_size)
+            real(descriptor)
 
-        def validate(value: object) -> None:
-            raise AssertionError(CANARY)
+        with mock.patch("os.fsync", fsync):
+            convert(store, destination, definitions)
+        self.assertEqual(seen, [destination.stat().st_size])
+        self.assertGreater(seen[0], 0)
+        failing = self.directory / "sync-failed.out"
+        with mock.patch("os.fsync", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                convert(store, failing, definitions)
+        self.assertFalse(failing.exists())
 
-        with mock.patch.object(SingleFileMessagePackBackingStore, "pull_all", pull_all):
-            with self.assertRaises(CultCacheError) as caught:
-                migrate_payloads(store, [define_document_type("tests.mig", validate=validate)], backup=backup)
-        self.assertIn("AssertionError", str(caught.exception))
-        self.assertIsNone(caught.exception.__context__)
+    def test_convert_finds_a_record_by_its_catalog_schema_name_and_skips_unlisted_types_anywhere(self) -> None:
+        store = SingleFileMessagePackBackingStore(self.directory / "names.cc")
+        store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b"\x00opaque"))
+        store.push(CultCacheEnvelope.create(key="n", type="tests.by-name", payload=b'{"n": 1}'))
+        document = define_document_type("tests.by-type", schema_name="tests.by-name")
+        self.assertEqual(convert(store, self.directory / "names.out", [document]), 1)
+        converted = {item.key: item.payload for item in SingleFileMessagePackBackingStore(self.directory / "names.out").pull_all()}
+        self.assertEqual(converted["n"], MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1}))
+        self.assertEqual(converted["a"], b"\x00opaque")
+
+    def test_convert_reads_under_the_source_codec_and_writes_under_the_definitions(self) -> None:
+        store = self._filled(
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"),
+            "codec",
+            {"k1": MESSAGEPACK_PAYLOAD_CODEC.encode({"n": 1})},
+        )
+        definition = define_document_type("tests.mig", payload_codec=JSON_PAYLOAD_CODEC)
+        destination = self.directory / "codec.out"
+        self.assertEqual(convert(store, destination, [definition], source_codec=MESSAGEPACK_PAYLOAD_CODEC), 1)
+        self.assertEqual(SingleFileMessagePackBackingStore(destination).pull_all()[0].payload, b'{"n": 1}')
+
+    def test_convert_takes_only_existing_library_file_stores(self) -> None:
+        destination = self.directory / "foreign.out"
+        with self.assertRaises(TypeError) as caught:
+            convert(object(), destination, [define_document_type("tests.mig")])
+        self.assertEqual(str(caught.exception), "convert takes a library file store, not object")
+        self.assertFalse(destination.exists())
+        missing = SingleFileMessagePackBackingStore(self.directory / "missing.cc")
+        with self.assertRaises(CultCacheError) as caught:
+            convert(missing, destination, [define_document_type("tests.mig")])
+        self.assertEqual(str(caught.exception), f"{missing.path} does not exist; there is nothing to convert.")
+        self.assertFalse(destination.exists())
+
+    def test_a_destination_under_a_missing_directory_is_created(self) -> None:
+        store = self._filled(
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "nested", {"k1": b'{"n": 1}'}
+        )
+        destination = self.directory / "a" / "b" / "nested.out"
+        self.assertEqual(convert(store, destination, [define_document_type("tests.mig")]), 1)
+        self.assertTrue(destination.exists())
 
 
 if __name__ == "__main__":
