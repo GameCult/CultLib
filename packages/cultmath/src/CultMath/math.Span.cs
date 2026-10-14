@@ -103,16 +103,17 @@ public static partial class math
     // at the bound the line starts beyond, the stretch on the ramp (a trapezoid: its length times the
     // line's value at the stretch's midpoint), and the stretch held at the far bound. b = 0 is the
     // constant clamp(a, lo, hi); t1 < t0 is the negative of the integral over [t1, t0]; lo above hi
-    // clamps to hi everywhere, as clamp does. A crossing that overflows (b tiny) lies past the span and
+    // clamps to hi everywhere, as clamp does, and is normalised (lo = min(lo, hi)) before anything reads it,
+    // so no clamp ever sees lo above hi (GLSL leaves that undefined). A crossing that overflows (b tiny) lies past the span and
     // cuts nothing. A held stretch contributes only when its length is positive, so an infinite bound
     // (relu has hi = +inf) times a zero length never forms: the integral of a ramp clamped on one side
     // only is finite.
     public static float integral_clamp_linear(float a, float b, float lo, float hi, float t0, float t1)
     {
+        lo = min(lo, hi);
         if (b == 0.0f)
             return clamp(a, lo, hi) * (t1 - t0);
 
-        lo = min(lo, hi);
         var direction = t1 < t0 ? -1.0f : 1.0f;
         var start = min(t0, t1);
         var stop = max(t0, t1);

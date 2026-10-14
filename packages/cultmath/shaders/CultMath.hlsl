@@ -302,10 +302,10 @@ float3x3 cultmath_snoise_hessian(float3 value)
 // The integral over [t0, t1] of clamp(a + b t, lo, hi); see the C# math.integral_clamp_linear comment.
 float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float t0, float t1)
 {
+    lo = min(lo, hi);
     if (b == 0.0)
         return clamp(a, lo, hi) * (t1 - t0);
 
-    lo = min(lo, hi);
     float direction = t1 < t0 ? -1.0 : 1.0;
     float start = min(t0, t1);
     float stop = max(t0, t1);

@@ -45,6 +45,26 @@ public sealed class GlslMirrorTests
         }
     }
 
+    /// <summary>
+    /// The lowering keeps HLSL's statement order, and GLSL leaves clamp(x, minVal, maxVal) undefined for
+    /// minVal above maxVal, so integral_clamp_linear must normalise lo = min(lo, hi) before any clamp in
+    /// its body can see it: in the committed HLSL and the committed GLSL alike, the normalisation precedes
+    /// the first clamp.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearNormalisesLoBeforeAnyClamp()
+    {
+        foreach (var (file, text) in Lowered.Where(l => l.File == "CultMath.glsl").Concat(new[] { ("CultMath.hlsl", Hlsl) }))
+        {
+            var start = text.IndexOf("cultmath_integral_clamp_linear(float a", StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{file} has no cultmath_integral_clamp_linear");
+            var body = text[start..text.IndexOf("}", start, StringComparison.Ordinal)];
+            var normalise = body.IndexOf("lo = min(lo, hi);", StringComparison.Ordinal);
+            var firstClamp = body.IndexOf("clamp(", StringComparison.Ordinal);
+            Assert.True(normalise >= 0 && normalise < firstClamp, $"{file}: lo = min(lo, hi) must come before the first clamp in cultmath_integral_clamp_linear");
+        }
+    }
+
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
     private static readonly Regex HlslOnly = new(
         @"\b(float|u?int|bool)[234]\b|\bfloat3x3\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
@@ -637,6 +657,23 @@ public sealed class GlslMirrorTests
             {
                 var lo = Uniform(r, -2.0f, 0.5f);
                 return new object[] { Uniform(r, -4.0f, 4.0f), r.Next(8) == 0 ? 0.0f : Uniform(r, -4.0f, 4.0f), lo, lo + Uniform(r, 0.0f, 3.0f), Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f) };
+            }),
+        // The edge cases the family above never draws: lo above hi (b = 0 and b != 0; the lowering must
+        // normalise before any clamp sees it) and infinite bounds (hi = +inf, lo = -inf, both).
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, lo above hi and infinite bounds",
+            r =>
+            {
+                var a = Uniform(r, -4.0f, 4.0f);
+                var slope = Uniform(r, -4.0f, 4.0f);
+                var (t0, t1) = (Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f));
+                return r.Next(5) switch
+                {
+                    0 => new object[] { a, 0.0f, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    1 => new object[] { a, slope, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    2 => new object[] { a, slope, Uniform(r, -2.0f, 1.0f), float.PositiveInfinity, t0, t1 },
+                    3 => new object[] { a, slope, float.NegativeInfinity, Uniform(r, -1.0f, 2.0f), t0, t1 },
+                    _ => new object[] { a, slope, float.NegativeInfinity, float.PositiveInfinity, t0, t1 },
+                };
             }),
     }).ToArray();
 

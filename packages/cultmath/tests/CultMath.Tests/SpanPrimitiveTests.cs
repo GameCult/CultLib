@@ -345,6 +345,22 @@ public sealed class SpanPrimitiveTests
         Assert.Equal(6.0f, integral_clamp_linear(0.0f, 1.0f, 2.0f, inf, 2.0f, 4.0f));
     }
 
+    /// <summary>
+    /// lo above hi is normalised before the flat branch reads it: with b = 0 the answer is hi times the
+    /// span (what clamp(a, lo, hi) gives with lo = min(lo, hi)), and with b != 0 the same. The GLSL
+    /// lowering would otherwise call clamp with minVal above maxVal, which is undefined there.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearNormalisesBeforeTheFlatBranch()
+    {
+        // b = 0: a above both, below both and between them all give hi.
+        foreach (var a in new[] { 9.0f, -9.0f, 3.5f })
+            Assert.Equal(2.0f * 3.0f, integral_clamp_linear(a, 0.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+        // b != 0: hi everywhere, whichever way the line runs.
+        Assert.Equal(2.0f * 3.0f, integral_clamp_linear(0.0f, 1.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+        Assert.Equal(2.0f * 3.0f, integral_clamp_linear(9.0f, -1.0f, 5.0f, 2.0f, 0.0f, 3.0f));
+    }
+
     [Fact]
     public void IntegralClampLinearHasExactValuesOnTheBinaryFloats()
     {
