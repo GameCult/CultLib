@@ -163,12 +163,13 @@ namespace GameCult.Caching
     /// </summary>
     public sealed class CultForeignRecord
     {
-        internal CultForeignRecord(string key, string schemaId, string schemaName, string storedAt)
+        internal CultForeignRecord(string key, string schemaId, string schemaName, string storedAt, string storedVersion)
         {
             Key = key;
             SchemaId = schemaId;
             SchemaName = schemaName;
             StoredAt = storedAt;
+            StoredVersion = storedVersion;
         }
 
         public string Key { get; }
@@ -180,9 +181,9 @@ namespace GameCult.Caching
 
         public string StoredAt { get; }
 
-        // The version of the record's stored bytes when its store read it, in that store's spelling; null when the store kind
-        // did not give one. ExpectUnchanged compares it with the version on disk at the commit.
-        internal string? StoredVersion { get; set; }
+        // The version of the record's stored bytes when its store read it, in that store's spelling, given by the store through
+        // CacheBackingStore.Foreign. ExpectUnchanged compares it with the version on disk at the commit.
+        internal string StoredVersion { get; }
     }
 
     public sealed class CultPersistedStoreSnapshot
@@ -1881,8 +1882,10 @@ namespace GameCult.Caching
         /// <summary>
         /// Keys the batch removes that its cache does not hold. Such a removal removes nothing, so it is never in
         /// <see cref="Deletes"/>; but a store that holds a record at one of these keys under an id no registered type declares
-        /// refuses the commit, as it refuses a write of that record. A <see cref="CacheBackingStore.CommitBatch"/> judges these keys
-        /// under its lock, with the keys it writes, and never removes them: a record a declared type reads stays where it is.
+        /// refuses the commit, as it refuses a write of that record. The home's <see cref="CacheBackingStore.CommitBatch"/> judges
+        /// these keys under its lock, with the keys it writes; every other attached store judges them first through
+        /// <see cref="CacheBackingStore.JudgeChecks"/>, each under its own lock, and a refusal anywhere writes nothing. A judged
+        /// key is never removed: a record a declared type reads stays where it is.
         /// </summary>
         public IReadOnlyList<string> Checks { get; }
         public IReadOnlyList<(CultRecordKey Key, string? Version)> Expected { get; }
@@ -2659,7 +2662,7 @@ namespace GameCult.Caching
                         : op.Variant != null ? StampVariant(op.Key, DescriptorOfBase(op.Key, op.Variant.BaseKey, batch), op.Variant)
                         : StampFlatten(op.Key))
                     .ToArray();
-                // A removal of a key the cache does not hold removes nothing: it is a check the commit's store judges under its lock.
+                // A removal of a key the cache does not hold removes nothing: it is a check every store the commit reaches judges under its lock.
                 var checks = batch.Operations.Values
                     .Where(op => op.IsRemoval && !_entries.ContainsKey(op.Key.Value))
                     .Select(op => op.Key.Value)
@@ -2673,13 +2676,15 @@ namespace GameCult.Caching
                     // A batch that only checks keys names no home; it commits through the cache's one writable store, if it has one.
                     if (home == null && checks.Length > 0 && _stores.Where(entry => !entry.Store.IsReadOnly).Take(2).ToArray() is { Length: 1 } only)
                         home = only[0].Store;
-                    // Every other store answers the checks now, from what it last loaded: the batch commits through one store.
+                    // Every store the batch does not commit through judges its checks first, each under its own lock, so a refusal or
+                    // contention writes nothing; the home judges its own in CommitBatch.
                     foreach (var (store, _) in _stores)
                     {
-                        if (store == home)
+                        if (store == home || checks.Length == 0)
                             continue;
-                        foreach (var key in checks)
-                            store.RefuseUndeclared(key);
+                        var judged = store.JudgeChecks(checks, wait);
+                        if (judged != CultCommitOutcome.Committed)
+                            return judged;
                     }
 
                     // What the store holds is what the hold resolved: a variant's delta beside its resolved view.
@@ -3577,7 +3582,8 @@ namespace GameCult.Caching
         /// <remarks>
         /// An implementation judges <see cref="CultCommitRequest.Checks"/>, and its own <see cref="StagedChecks"/>, under that
         /// lock with the keys it writes: a key whose record is under an id no registered type declares refuses the commit, and a
-        /// checked key is never removed. Pass <see cref="ForeignRecords"/> to
+        /// checked key is never removed. The cache calls <see cref="JudgeChecks"/> on every other store before this commit. Each
+        /// foreign record a store lists comes from <see cref="Foreign"/> with the version it read, so pass <see cref="ForeignRecords"/> to
         /// <see cref="CultCommitRequest.ConditionsHold(IReadOnlyDictionary{string, string}, IEnumerable{CultStoredDocument}, IEnumerable{CultForeignRecord})"/>.
         /// </remarks>
         public abstract CultCommitOutcome CommitBatch(CultCommitRequest request, bool wait);
@@ -3680,9 +3686,11 @@ namespace GameCult.Caching
 
         // The one test of whether a stored record is foreign: no registered type claims its schema id through the catalog it was
         // stored with. It reads the record's header only, never its payload. Null for a record the registry resolves.
-        protected CultForeignRecord? Foreign(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+        // The one constructor path for a foreign record, so every store kind, one outside this library included, lists it at the
+        // version it read.
+        protected CultForeignRecord? Foreign(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog, string storedVersion) =>
             Registry.Claimant(record.SchemaId, catalog, out var persisted) == null
-                ? new CultForeignRecord(record.Key, record.SchemaId, persisted!.SchemaName, record.StoredAt)
+                ? new CultForeignRecord(record.Key, record.SchemaId, persisted!.SchemaName, record.StoredAt, storedVersion)
                 : null;
 
         protected void SetForeignRecords(IEnumerable<CultForeignRecord> foreign)
@@ -3718,13 +3726,32 @@ namespace GameCult.Caching
         /// judges <see cref="StagedChecks"/> at its next <see cref="PushAll"/> or <see cref="CommitBatch"/> as it judges
         /// <see cref="CultCommitRequest.Checks"/>: under the lock, with the keys it writes, refused through the same refusal, never
         /// removed. It calls <see cref="MarkFlushSucceeded"/> when that step succeeds, which clears them. A read-only store has no
-        /// such step and keeps the default. Both shipped store kinds do this.
+        /// such step and keeps the default. Both shipped store kinds do this. A batch's own checks are judged through
+        /// <see cref="JudgeChecks"/>.
         /// </para>
         /// </remarks>
         protected internal virtual void RefuseRemovalOfUndeclared(IReadOnlyCollection<string> keys)
         {
             foreach (var key in keys)
                 RefuseUndeclared(key);
+        }
+
+        /// <summary>
+        /// Called for a batch's checks on every attached store that is not the batch's home, before the home commits. It judges
+        /// only the keys it is given: it never writes, stages, clears <see cref="StagedChecks"/> or calls
+        /// <see cref="MarkFlushSucceeded"/>.
+        /// </summary>
+        /// <remarks>
+        /// The default answers from this store's view (<see cref="RefuseUndeclared"/>) and reads nothing, which is right for a
+        /// read-only store. A writable store kind that reads its durable state under a lock overrides this to read under that
+        /// lock and refuse through <see cref="Refuse"/>, returning <see cref="CultCommitOutcome.Contended"/> when it may not wait
+        /// and the lock is held. A refusal or contention here writes nothing anywhere, because the home has not yet committed.
+        /// </remarks>
+        protected internal virtual CultCommitOutcome JudgeChecks(IReadOnlyCollection<string> keys, bool wait)
+        {
+            foreach (var key in keys)
+                RefuseUndeclared(key);
+            return CultCommitOutcome.Committed;
         }
 
         // Keys a removal named that this store's cache does not hold, waiting for this store's next flush or commit to judge them.
@@ -4005,9 +4032,8 @@ namespace GameCult.Caching
             foreach (var record in snapshot.Records)
             {
                 var version = versions[record.Key] = durable.Version(record.Key);
-                if (Foreign(record, snapshot.SchemaCatalog) is { } carried)
+                if (Foreign(record, snapshot.SchemaCatalog, version) is { } carried)
                 {
-                    carried.StoredVersion = version;
                     foreign.Add(carried);
                     continue;
                 }
@@ -4286,6 +4312,22 @@ namespace GameCult.Caching
                 StageChecks(keys);
         }
 
+        // A read-only store answers a batch's checks from its view and never creates the lock file; a writable one reads the file
+        // under its lock.
+        protected internal override CultCommitOutcome JudgeChecks(IReadOnlyCollection<string> keys, bool wait)
+        {
+            if (IsReadOnly)
+                return base.JudgeChecks(keys, wait);
+            return Held(() =>
+            {
+                using var fileLock = AcquireLock(wait);
+                if (fileLock == null)
+                    return CultCommitOutcome.Contended;
+                RefuseUndeclaredOnDisk(ReadSnapshot(), keys, Registry.Declares);
+                return CultCommitOutcome.Committed;
+            });
+        }
+
         // A cache declares through its registry. A cacheless CultMesh write declares the ids of the catalog entry it writes: its own id
         // and the ids it lists compatible. The keys judged are every key staged, written, removed or checked.
         private void RefuseUndeclaredOnDisk(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals, IEnumerable<string> checks) =>
@@ -4335,9 +4377,8 @@ namespace GameCult.Caching
         private CultForeignRecord? ForeignAt(Durable? durable, string key)
         {
             if (durable?.Snapshot.Records.FirstOrDefault(candidate => string.Equals(candidate.Key, key, StringComparison.Ordinal)) is not { } record ||
-                Foreign(record, durable.Snapshot.SchemaCatalog) is not { } carried)
+                Foreign(record, durable.Snapshot.SchemaCatalog, durable.Version(key)) is not { } carried)
                 return null;
-            carried.StoredVersion = durable.Version(key);
             return carried;
         }
 
@@ -4346,7 +4387,7 @@ namespace GameCult.Caching
         private CultStoredDocument? DurableAt(Durable? durable, string key)
         {
             var record = durable?.Snapshot.Records.FirstOrDefault(candidate => string.Equals(candidate.Key, key, StringComparison.Ordinal));
-            if (record == null || Foreign(record, durable!.Snapshot.SchemaCatalog) != null)
+            if (record == null || Foreign(record, durable!.Snapshot.SchemaCatalog, durable.Version(key)) != null)
                 return null;
             return ToStoredDocument(record, durable.Version(key), durable.Snapshot.SchemaCatalog, DeserializePayload, out _);
         }

@@ -264,14 +264,26 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
             StageChecks(keys);
     }
 
-    // A manifest record no registered type claims, listed at the version its index record names.
-    private CultForeignRecord? ForeignAt(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog)
+    // A read-only store answers a batch's checks from its view and never creates the lease; a writable one reads the manifest
+    // under the commit lease.
+    protected internal override CultCommitOutcome JudgeChecks(IReadOnlyCollection<string> keys, bool wait)
     {
-        if (Foreign(record, catalog) is not { } carried)
-            return null;
-        carried.StoredVersion = VersionOf(record.Payload);
-        return carried;
+        if (IsReadOnly)
+            return base.JudgeChecks(keys, wait);
+        return Held(() =>
+        {
+            Directory.CreateDirectory(_manifestFile.DirectoryName!);
+            using var commitLease = AcquireCommitLease(wait, create: true);
+            if (commitLease == null)
+                return CultCommitOutcome.Contended;
+            RefuseUndeclaredOnDisk(ReadManifest().Snapshot, keys);
+            return CultCommitOutcome.Committed;
+        });
     }
+
+    // A manifest record no registered type claims, listed at the version its index record names.
+    private CultForeignRecord? ForeignAt(CultPersistedRecord record, IReadOnlyCollection<CultSchemaCatalogEntry> catalog) =>
+        Foreign(record, catalog, VersionOf(record.Payload));
 
     // The manifest's other records stay as they are, foreign and read-only ones included; a write that would replace or remove a
     // record the manifest holds under an id no registered type declares is refused before any page is written, by the one rule every
@@ -283,7 +295,7 @@ public sealed class DirectoryMessagePackBackingStore : CacheBackingStore
         RefuseUndeclaredOnDisk(
             written,
             key => HeldAt(key) is { } held ? Undeclared(held, currentManifest.SchemaCatalog, Registry.Declares) : null,
-            key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog) == null
+            key => HeldAt(key) is { } held && Foreign(held, currentManifest.SchemaCatalog, VersionOf(held.Payload)) == null
                 ? LoadPage(held, currentManifest.SchemaCatalog, out _, out _)
                 : null,
             key => HeldAt(key) is { } held ? ForeignAt(held, currentManifest.SchemaCatalog) : null,
