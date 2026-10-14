@@ -151,14 +151,17 @@ public sealed class SpanPrimitiveTests
             for (var i = 0; i < 3; i++)
             for (var j = i; j < 3; j++)
             {
-                // Richardson on the O(h^2) second difference: the extrapolation (4 S(h/2) - S(h)) / 3 is
-                // O(h^4); its own error is bounded by the gap between the two quotients, and the roundoff
-                // of snoise (a few ulp) over h^2 is added.
+                // Richardson on the O(h^2) second difference: (4 S(h/2) - S(h)) / 3 is O(h^4). Two such
+                // extrapolations, from (h, h/2) and from (h/2, h/4), differ by about fifteen times the
+                // error of the finer one, so the comparison is against the finer and its tolerance is
+                // four times that gap, plus the roundoff of snoise (a few ulp) over (h/4)^2.
                 const float h = 1.0f / 16.0f;
-                var coarse = SecondDifference(p, i, j, h);
-                var fine = SecondDifference(p, i, j, h / 2.0f);
-                var extrapolated = (4.0 * fine - coarse) / 3.0;
-                var tolerance = 2.0 * Math.Abs(coarse - fine) + 64.0 * Unit / ((h / 2.0) * (h / 2.0));
+                var s0 = SecondDifference(p, i, j, h);
+                var s1 = SecondDifference(p, i, j, h / 2.0f);
+                var s2 = SecondDifference(p, i, j, h / 4.0f);
+                var coarseExtrapolation = (4.0 * s1 - s0) / 3.0;
+                var extrapolated = (4.0 * s2 - s1) / 3.0;
+                var tolerance = 4.0 * Math.Abs(extrapolated - coarseExtrapolation) + 64.0 * Unit / ((h / 4.0) * (h / 4.0));
                 var error = Math.Abs(hessian[i][j] - extrapolated);
                 worst = Math.Max(worst, error / tolerance);
                 largest = Math.Max(largest, Math.Abs(hessian[i][j]));
