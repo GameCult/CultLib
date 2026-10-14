@@ -452,6 +452,24 @@ namespace GameCult.Caching.Tests
             Assert.That(Assign(arm, "r", deterministic: false), Is.EqualTo(1));
         }
 
+        // MessagePack writes a non-public [Key] member only under AllowPrivate, and the element-id walk reads public members, so
+        // an object list a non-public member leads to could never be checked. It is refused; a non-public member that reaches no
+        // object list is nobody's business.
+        [Test]
+        public void ANonPublicKeyedMemberOnTheWayToAnObjectListIsRefused()
+        {
+            foreach (var (type, member) in new[]
+            {
+                (typeof(HHiddenList), "Stash"), (typeof(HHiddenOwner), "stash"), (typeof(HOptHidden), "stash"), (typeof(HHiddenFromBase), "stash"),
+            })
+                Assert.That(Problems(type).Single(), Does.Contain(member).And.Contain("non-public"), type.Name);
+
+            Assert.That(Problems(typeof(HHiddenLeaf)), Is.Empty);
+            Assert.That(CultElementIds.Inspect(typeof(HHiddenLeaf)).IdPath, Is.EquivalentTo(new[] { typeof(HHiddenLeaf), typeof(List<EIded>), typeof(EIded) }),
+                "a hidden member adds nothing to the id path");
+            Assert.That(CultElementIds.Inspect(typeof(HHiddenList)).IdPath, Is.Empty);
+        }
+
         // ---- shapes ----
         [MessagePackObject] public class EBare { [Key(0)] public string X { get; set; } = ""; }
         [MessagePackObject] public class EIded { [Key(0)] public string X { get; set; } = ""; [Key(1)] [CultElementId] public string Id { get; set; } = ""; }
@@ -624,6 +642,15 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public class DerC : BaseC { [Key(1)] public List<EIded> L { get; set; } = new(); }
         [MessagePackObject] public class HBase { [Key(0)] public BaseC B { get; set; } = new(); }
         [MessagePackObject] public class HObject { [Key(0)] public object? O { get; set; } }
+
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject] public class HHiddenList { [Key(0)] private List<EIded> Stash { get; set; } = new(); }
+        [MessagePackObject] public class HHiddenOwner { [Key(0)] private HHasIds stash = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class HOptHidden { [Key(0)] private List<EIded> stash = new(); }
+        [MessagePackObject] public class HHiddenBase { [Key(0)] private List<EIded> stash = new(); }
+        [MessagePackObject] public class HHiddenFromBase : HHiddenBase { [Key(1)] public int N { get; set; } }
+        [MessagePackObject] public class HHiddenLeaf { [Key(0)] public List<EIded> Items { get; set; } = new(); [Key(1)] private int secret = 7; }
+#pragma warning restore CS0169, CS0414, CS0649
 
         [MessagePackObject] public class EDerivedText { [Key(0)] public string? Name { get; set; } [Key(1)] [CultElementId(nameof(Name))] public string Id { get; set; } = ""; }
         [MessagePackObject] public class HDerivedText { [Key(0)] public List<EDerivedText> Items { get; set; } = new(); }

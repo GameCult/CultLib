@@ -109,8 +109,10 @@ namespace GameCult.Caching
         // can sit in a cycle, so the path is a fixed point over these edges and not a stack.
         private sealed class Graph
         {
-            public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through)> Edges { get; } = new();
-            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through)> Lists { get; } = new();
+            // Hidden is true when the member that starts the entry is non-public: MessagePack writes it only under AllowPrivate,
+            // and the walk reads public members only.
+            public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through, bool Hidden)> Edges { get; } = new();
+            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through, bool Hidden)> Lists { get; } = new();
         }
 
         private static readonly ConcurrentDictionary<Type, bool> IdCapable = new();
@@ -133,15 +135,17 @@ namespace GameCult.Caching
             if (!seen.Add(type))
                 return;
             foreach (var (member, memberType) in KeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), seen, survey, graph);
+                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), false, seen, survey, graph);
+            foreach (var (member, memberType) in NonPublicKeyedMembers(type))
+                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), true, seen, survey, graph);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
             {
-                graph.Edges.Add((type, null, union.SubType, Array.Empty<Type>()));
+                graph.Edges.Add((type, null, union.SubType, Array.Empty<Type>(), false));
                 VisitObject(documentType, union.SubType, seen, survey, graph);
             }
         }
 
-        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, HashSet<Type> seen, Survey survey, Graph graph)
+        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, bool hidden, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
             var (kind, inner) = Classify(memberType);
@@ -150,14 +154,15 @@ namespace GameCult.Caching
                 case Kind.Leaf:
                     return;
                 case Kind.Map:
-                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), hidden, seen, survey, graph);
                     return;
                 case Kind.Sequence when IsElement(inner):
                     var concretes = ConcreteTypes(inner).ToList();
-                    graph.Lists.Add((owner, member, inner, concretes, through.Append(memberType).ToArray()));
+                    graph.Lists.Add((owner, member, inner, concretes, through.Append(memberType).ToArray(), hidden));
                     foreach (var concrete in concretes)
                     {
-                        if (!survey.Judged.Add(concrete))
+                        // A hidden list is refused as a member (Settle), not once per element type.
+                        if (hidden || !survey.Judged.Add(concrete))
                             continue;
                         var problem = IsElement(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
                         if (problem != null)
@@ -167,10 +172,10 @@ namespace GameCult.Caching
                     VisitObject(documentType, inner, seen, survey, graph);
                     return;
                 case Kind.Sequence:
-                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), hidden, seen, survey, graph);
                     return;
                 default:
-                    graph.Edges.Add((owner, member, memberType, through));
+                    graph.Edges.Add((owner, member, memberType, through, hidden));
                     VisitObject(documentType, memberType, seen, survey, graph);
                     return;
             }
@@ -184,15 +189,16 @@ namespace GameCult.Caching
         // that does not write the [Key] layout the id lives in.
         private static void Settle(Type documentType, Survey survey, Graph graph)
         {
-            var reaching = new HashSet<Type>(graph.Lists.Select(list => list.Owner));
-            var members = new List<MemberInfo>(graph.Lists.Select(list => list.Member));
-            var through = new List<Type>(graph.Lists.SelectMany(list => list.Through));
+            var lists = graph.Lists.Where(list => !list.Hidden).ToArray();
+            var reaching = new HashSet<Type>(lists.Select(list => list.Owner));
+            var members = new List<MemberInfo>(lists.Select(list => list.Member));
+            var through = new List<Type>(lists.SelectMany(list => list.Through));
             for (var grew = true; grew;)
             {
                 grew = false;
-                foreach (var (owner, member, child, via) in graph.Edges)
+                foreach (var (owner, member, child, via, hidden) in graph.Edges)
                 {
-                    if (!reaching.Contains(child))
+                    if (hidden || !reaching.Contains(child))
                         continue;
                     if (member != null && !members.Contains(member))
                         members.Add(member);
@@ -212,7 +218,7 @@ namespace GameCult.Caching
                 Add(type);
             foreach (var type in through)
                 Add(type);
-            foreach (var list in graph.Lists)
+            foreach (var list in lists)
             {
                 Add(list.Element);
                 foreach (var concrete in list.Concrete)
@@ -231,7 +237,17 @@ namespace GameCult.Caching
                 if (Declares(member, typeof(MessagePackFormatterAttribute)))
                     survey.Problems.Add($"Cult document {documentType.Name}: {member.DeclaringType!.Name}.{member.Name} leads to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute.");
             }
+
+            // The fixed point has settled which types reach a list through public members. A non-public [Key] member that starts
+            // a list, or leads to a type that reaches one, is refused: nothing reads or checks the ids it holds.
+            foreach (var list in graph.Lists.Where(list => list.Hidden))
+                survey.Problems.Add(HiddenProblem(documentType, list.Owner, list.Member));
+            foreach (var edge in graph.Edges.Where(edge => edge.Hidden && reaching.Contains(edge.Child)))
+                survey.Problems.Add(HiddenProblem(documentType, edge.Owner, edge.Member!));
         }
+
+        private static string HiddenProblem(Type documentType, Type owner, MemberInfo member) =>
+            $"Cult document {documentType.Name}: {owner.Name}.{member.Name} is a non-public [Key] member on the way to a list whose elements carry ids; MessagePack writes it only under AllowPrivate and the element-id walk reads public members, so its ids could never be checked. Make it public, or keep lists out of it.";
 
         // The types an element can actually be: the element type itself when it can be instantiated, and every union subtype
         // under it. Shapes are built from these, so registration judges exactly what minting will meet.
@@ -523,6 +539,21 @@ namespace GameCult.Caching
         // An attribute a member declares, or inherits through an override: MemberInfo.IsDefined ignores inherit for properties, so an
         // override of a base virtual member would not see its base's attribute.
         private static bool Declares(MemberInfo member, Type attribute) => Attribute.IsDefined(member, attribute, inherit: true);
+
+        // [Key] members MessagePack writes only under AllowPrivate: non-public fields and properties, up the base chain.
+        private static IEnumerable<(MemberInfo Member, Type Type)> NonPublicKeyedMembers(Type type)
+        {
+            for (var level = type; level != null && level != typeof(object); level = level.BaseType)
+            {
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                foreach (var member in level.GetFields(flags).Cast<MemberInfo>()
+                             .Concat(level.GetProperties(flags).Where(property => property.GetIndexParameters().Length == 0)))
+                {
+                    if (KeyOf(member) != null)
+                        yield return (member, TypeOf(member));
+                }
+            }
+        }
 
         private static int? KeyOf(MemberInfo member) => member.GetCustomAttribute<KeyAttribute>(true)?.IntKey;
 
