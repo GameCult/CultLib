@@ -10,6 +10,7 @@ format for the attribute-first `GameCult.Caching` stack.
 - `CultDocumentResolver`
 - `CultRecordRefFormatter<T>`
 - `CultMathResolver`: the canonical component-array encoding of every public CultMath value type, part of the default resolver chain
+- `CultMathExprResolver`: the canonical encoding of `CultMath.Expr.ExprGraph`, decoded through its validator, part of the default resolver chain
 
 Cult document payloads serialize through `MessagePackSerializer` with the
 options of the document's assembly (`CultDocumentMessagePackSerialization.OptionsFor`),
@@ -82,6 +83,13 @@ divergences from System.Text.Json: a bare number beyond a component's range
 refusal on write is a `JsonException` where System.Text.Json throws
 `ArgumentException`. A consumer resolver or converter
 registered ahead of these wins.
+
+`CultMath.Expr.ExprGraph` is a class, not a value type, and has its own shape
+(`CultMathExprResolver`, in the default chain): `[version, inputs, params, outputs, nodes]`,
+with a param `[name, default float bits]`, an output `[name, node]` and a node
+`[op name, operands, payload]`. Decoding runs the graph's one validator and refuses a
+broken graph whole (an `ExprGraphException` naming the rule), so a consumer
+`[CultDocument]` record with an `ExprGraph` field needs no registration. A nil graph is refused.
 
 | Type | MessagePack | JSON |
 | --- | --- | --- |
