@@ -229,8 +229,9 @@ float4 cultmath_snoise_grad(float3 value)
 }
 
 // Analytic Hessian of cultmath_snoise(float3); see the C# math.snoise_hessian comment for the
-// derivation. Every local up through p0..p3 and x0..x3 is cultmath_snoise_grad's own. A float3x3 built
-// from nine scalars reads as rows here and as columns in GLSL's mat3: the matrix is symmetric.
+// derivation. Every local up through p0..p3 and x0..x3 is cultmath_snoise_grad's own. The matrix is
+// built from nine scalars, which read as rows in HLSL and as columns in GLSL; it is symmetric, so the
+// two agree.
 float3x3 cultmath_snoise_hessian(float3 value)
 {
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
