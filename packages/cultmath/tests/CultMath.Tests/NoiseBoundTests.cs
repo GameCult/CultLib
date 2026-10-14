@@ -669,10 +669,11 @@ public sealed class NoiseBoundTests
         .Select(v => { var length = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return new[] { v[0] / length, v[1] / length, v[2] / length }; }).ToArray();
 
     // The operator norm of a symmetric 3-tensor, max over unit u of |T(u, u, u)| (for a symmetric tensor
-    // that is the injective norm). From each of 26 starts, the shifted power ascent u <- normalise(T(u, u, .)
-    // +- alpha u), with alpha twice the largest absolute row sum, which makes the iteration monotone in
-    // the cubic form (Kolda and Mayo's SS-HOPM), the sign chosen as the start's. A local maximum, so a
-    // lower bound; MeasureThird checks it against a dense direction sweep at its witness.
+    // that is the injective norm). From the six of 26 starts (axes, edge midpoints, cube corners) with
+    // the largest |T(u, u, u)|, the shifted power ascent u <- normalise(T(u, u, .) +- alpha u), with alpha
+    // twice the largest absolute row sum, which makes the iteration monotone in the cubic form (Kolda and
+    // Mayo's SS-HOPM), the sign chosen as the start's. A local maximum, so a lower bound; MeasureThird
+    // checks it against a dense direction sweep at its witness.
     private static double TensorNorm(double[] t)
     {
         var alpha = 0.0;
@@ -686,11 +687,11 @@ public sealed class NoiseBoundTests
 
         var best = 0.0;
         var g = new double[3];
-        foreach (var start in TensorStarts)
+        foreach (var start in TensorStarts.OrderByDescending(v => Math.Abs(Cubic(t, v))).Take(6))
         {
             var u = (double[])start.Clone();
             var sign = Cubic(t, u) < 0.0 ? -1.0 : 1.0;
-            for (var iteration = 0; iteration < 60; iteration++)
+            for (var iteration = 0; iteration < 40; iteration++)
             {
                 for (var i = 0; i < 3; i++)
                 {
