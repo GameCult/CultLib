@@ -2084,7 +2084,24 @@ nebula work picks it.
    on the tied kernel, `integral_clamp_linear`, in C#, HLSL and GLSL with fixture
    families. It touches no `expr-ir` file. Its provenance prose goes in code
    comments and the README, not `design.md`, which `expr-ir` edits.
-2. Question `span-chain-shape`, then the warp-stage and span-bound cut it picks.
+2. Ruled `stage-functions` (`span-chain-shape-ruled`), split in three for size, on one
+   branch `hands/cultmath-stage-functions`:
+   - `stage-functions` (spec `cut-stage-functions.r1`, base `2fd9431a`): the four
+     Lows of follow-up `span-pins-before-stage-functions` first, then C# only:
+     `SpanNoise` (field, curvature, fold), `span_fbm` and `span_ridged`.
+   - `stage-shaders`: their HLSL twins, the GLSL lowering and fixture families,
+     dxc and glslang. Merges with `stage-functions`.
+   - `span-compose`: the composition helper (`span_compose`) and `span_range` for
+     the empty and saturated proofs, in all three runtimes, with a two-stage chain
+     enclosure test against dense sampling.
+   `trophic-nodes` and `lattice-weighted-cellular` map after this branch merges.
+
+   Body fact (probe on Yggdrasil, scratch `edb3c1c3` over `2fd9431a`; log
+   `F:\Projects\eureka-handoff-aux-2026-10-14\imagination-stage-functions\probe2.log`):
+   the HLSL mirror that `HlslSourceCompatibilityTests` compiles exposes every
+   `static const` as a public static literal field of `CultMathHlsl.HlslShader`
+   (`CULTMATH_PI` through `CULTMATH_SNOISE_THIRD` and `CULTMATH_CYCLES_*`). So one
+   reflection test can pin every shader constant to its C# twin.
 3. The curl primitive, once the operator rules on curl (the Aetheria flow test).
 4. Question `site-ground-field`, then `cut-site-ground.r1` on the field it picks.
    The marched option carries all three site follow-ups; the other options
