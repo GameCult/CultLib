@@ -457,14 +457,32 @@ The derive/registry work should preserve that shape. Its job is to remove
 manual registration ceremony, not to loosen the closed-world boundary.
 
 Payload nesting is bounded at 256 MessagePack containers, checked before any
-recursion, and typed decode then runs under `serde_stacker`, which moves onto a
-fresh stack segment whenever less than 256 KiB of stack remains. A payload inside
-the bound therefore decodes on a small thread instead of aborting the process;
-past the bound the refusal is a typed `PayloadTooDeep`. The residual is a single
-stack frame larger than the 256 KiB red zone. Stack growth on Windows is not yet
-verified. On wasm32 the shadow stack grows the same way, but the engine's own
-call stack remains the host's limit. Building the crate needs a C toolchain
-(`psm`, `stacker`).
+recursion; past the bound the refusal is a typed `PayloadTooDeep`. Typed decode
+of stored bytes then grows its stack: the decoder checks the remaining stack
+before its first frame and `serde_stacker` checks it at every container, moving
+onto a fresh segment whenever less than 512 KiB remains, so a payload inside the
+bound decodes on a small thread instead of aborting the process. Envelope and
+store reads (single-file, redb, v1 snapshots) use the same grown decoder and
+keep accepting and refusing what they did, without the payload walk.
+
+The guarantee holds for records the derives produce. `MAX_RECORD_INLINE_BYTES`
+(16 KiB) is the largest `size_of` a `DatabaseEntry`, `CultSlots` or `CultUnion`
+record may have, and the derives refuse a larger one at compile time: put its
+large data behind a `Vec` or a `Box`. A field of a type the derives did not
+produce that is larger than that, behind a `Box` or `Vec`, is outside the
+guarantee. The caller's thread needs only its own frames, which hold the
+returned value. Stack growth on Windows is not yet verified. The crate does not
+build for wasm32 (`fs2`), and no wasm behaviour is claimed.
+
+### Build dependencies
+
+Stack growth adds these crates to every consumer's build, and a C toolchain
+(`psm`, `stacker`). On all targets: `serde_stacker` 0.1.14, `stacker` 0.1.25,
+`psm` 0.1.32, `cc` 1.8.0, `find-msvc-tools` 0.1.14, `shlex` 2.0.1 (MIT OR
+Apache-2.0), `object` 0.39.1 (Apache-2.0 OR MIT) and `ar_archive_writer` 0.5.3
+(Apache-2.0 WITH LLVM-exception, build-only). On `x86_64-pc-windows-msvc` also
+`libc` 0.2.190 and `windows-sys` 0.61.2 (MIT OR Apache-2.0), beside the 0.59 the
+crate uses itself.
 
 ## License
 
