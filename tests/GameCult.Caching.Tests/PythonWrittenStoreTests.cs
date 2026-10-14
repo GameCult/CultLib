@@ -150,9 +150,11 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
             var opened = await PulledAsync(path);
             var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
-            var py = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(pySource)).Records.Single(record => record.Key == "py");
+            var pySnapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(pySource));
+            var py = pySnapshot.Records.Single(record => record.Key == "py");
             change?.Invoke(py);
             snapshot.Records = snapshot.Records.Concat(new[] { py }).ToArray();
+            snapshot.SchemaCatalog = pySnapshot.SchemaCatalog;
             File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
             Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the foreign writer keeps the v1 it found");
             return opened;

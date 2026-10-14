@@ -173,23 +173,43 @@ public sealed class CultMeshSingleFileElementIdTests
         cache.Get<CultMeshBodyPublicationDocument>(Key)!.Representations.Select(entry => entry.Id).Should().Equal(first);
     }
 
-    // cultcache-py's record (tests/vectors/numeric-leaves/py-store/leaf-record.cc): v1 header, 12-hex element ids on its list. This
-    // assembly reads it through the same schema id with the two slots it needs; the member layout is narrower than the writer's.
+    // cultcache-py's record (tests/vectors/numeric-leaves/py-store/leaf-record.cc): v1 header, 12-hex element ids on its list.
+    // This assembly declares the same document, member for member, so its registry claims and reads the python record.
     [CultDocument("cultcache.leaf-record", "cultcache.leaf_record.v1")]
     [MessagePackObject]
     public sealed class MeshLeaf
     {
-        [Key(0)] [CultName] public string Id { get; set; } = "";
-        [Key(12)] public List<MeshLeafItem> Items { get; set; } = new();
+        [Key(0)] [CultName] public string Id = string.Empty;
+        [Key(1)] public bool Flag;
+        [Key(2)] public byte[] Blob = Array.Empty<byte>();
+        [Key(3)] public int I;
+        [Key(4)] public long L;
+        [Key(5)] public float F;
+        [Key(6)] public double D;
+        [Key(7)] public int? MaybeI;
+        [Key(8)] public List<string> Tags = new();
+        [Key(9)] public string[] Names = Array.Empty<string>();
+        [Key(10)] public object? Any;
+        [Key(11)] public MeshLeafInner? Nested;
+        [Key(12)] public List<MeshLeafInner> Items = new();
+        [Key(13)] public IMeshLeafShape? Shape;
+        [Key(14)] public float[] Floats = Array.Empty<float>();
+        [Key(15)] public float? MaybeF;
     }
 
     [MessagePackObject]
-    public sealed class MeshLeafItem
+    public sealed class MeshLeafInner
     {
-        [Key(0)] public string N { get; set; } = "";
-        [Key(1)] public float W { get; set; }
-        [Key(2)] [CultElementId] public string Id { get; set; } = "";
+        [Key(0)] public string N = string.Empty;
+        [Key(1)] public float W;
+        [Key(2)] [CultElementId] public string Id = string.Empty;
     }
+
+    [Union(0, typeof(MeshLeafCircle))]
+    public interface IMeshLeafShape { }
+
+    [MessagePackObject]
+    public sealed class MeshLeafCircle : IMeshLeafShape { [Key(0)] public float R; }
 
     private static readonly string[] PythonIds = { "000000000021", "000000000022" };
 
