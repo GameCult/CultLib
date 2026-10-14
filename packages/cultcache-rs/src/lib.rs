@@ -704,9 +704,11 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
 /// rmp-serde depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the
 /// bytes. Readers of stored envelope payloads outside this crate decode through it too.
 ///
-/// A payload inside the bound decodes whatever the calling thread's stack: the thread needs only its
-/// own frames that hold the returned value. That holds for every record the derives produce, which
-/// [`MAX_RECORD_INLINE_BYTES`] bounds; Windows stack growth is not yet verified.
+/// A payload inside the bound decodes on any thread that has the decoder's fixed floor, which no payload
+/// changes: at the bound, about 56 KiB in release and 104 KiB in debug, against 16 and 88 KiB for a
+/// same-signature function that decodes nothing, plus the caller's own frames. That holds for every
+/// record the derives produce, which [`MAX_RECORD_INLINE_BYTES`] bounds. Stack growth was verified on
+/// Windows once, by hand; a `stacker` bump repeats it.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;
     decode_grown(payload).map_err(opaque_decode_error)

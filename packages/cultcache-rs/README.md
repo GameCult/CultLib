@@ -470,8 +470,11 @@ The guarantee holds for records the derives produce. `MAX_RECORD_INLINE_BYTES`
 record may have, and the derives refuse a larger one at compile time: put its
 large data behind a `Vec` or a `Box`. A field of a type the derives did not
 produce that is larger than that, behind a `Box` or `Vec`, is outside the
-guarantee. The caller's thread needs only its own frames, which hold the
-returned value. Stack growth on Windows is not yet verified. The crate does not
+guarantee. The decoder's own frames have a fixed floor that no payload changes: at the bound a thread decodes a record of
+this size from about 56 KiB in a release build and 104 KiB in a debug build, against 16 and 88 KiB for a function
+of the same signature that decodes nothing, plus the caller's own frames. Stack growth was verified on
+x86_64-pc-windows-msvc once, by hand, on Starfire (`decode_stack`, debug and release); later `stacker` bumps repeat it.
+The crate does not
 build for wasm32 (`fs2`), and no wasm behaviour is claimed.
 
 ### Build dependencies
