@@ -52,7 +52,7 @@ public sealed class HlslSourceCompatibilityTests
     private static readonly string[] ConstantsWithoutTwin = Array.Empty<string>();
 
     /// <summary>
-    /// Every static const of the compiled HLSL mirror (a public static literal CULTMATH_* field) is the
+    /// Every static const of the compiled HLSL mirror (a static literal CULTMATH_* field, whatever its access) is the
     /// same float32, bit for bit, as the math constant of the same name without the prefix (private ones
     /// included), so a pin edited in one runtime and not the other fails here whichever constant it is.
     /// A constant with neither a twin nor a listing in ConstantsWithoutTwin fails too.
@@ -63,7 +63,7 @@ public sealed class HlslSourceCompatibilityTests
         var (assembly, errors) = CompileShaderMirror();
         Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
         var shader = assembly!.GetType("CultMathHlsl.HlslShader")!;
-        var constants = shader.GetFields(BindingFlags.Public | BindingFlags.Static)
+        var constants = shader.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
             .Where(f => f.IsLiteral && f.Name.StartsWith("CULTMATH_", StringComparison.Ordinal))
             .ToArray();
         Assert.True(constants.Length >= 10, $"only {constants.Length} shader constants were found by reflection");
