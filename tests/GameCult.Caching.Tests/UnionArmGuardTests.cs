@@ -454,6 +454,26 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // Composed after ListClaimResolver: once that resolver has answered FbArm with the standard formatter the composite never
+        // asks this one, so its claim on the same type must not refuse the document.
+        public sealed class FbLaterClaimResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new FbLaterClaimResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(FbArm) ? (IMessagePackFormatter<T>)(object)new LaterFormatter() : null;
+
+            private sealed class LaterFormatter : IMessagePackFormatter<FbArm>
+            {
+                public void Serialize(ref MessagePackWriter writer, FbArm value, MessagePackSerializerOptions options) => writer.WriteNil();
+
+                public FbArm Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.Skip();
+                    return new FbArm();
+                }
+            }
+        }
+
         [Test]
         public void OptionsRefuseANullDocumentTypeOrAssembly()
         {
