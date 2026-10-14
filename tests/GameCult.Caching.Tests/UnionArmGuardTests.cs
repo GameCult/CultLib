@@ -43,7 +43,7 @@ namespace GameCult.Caching.Tests
         };
 
         // Unit8: slots [id].
-        private static Emit UnitArm(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(1); w.Write("u"); };
+        private static Emit UnitArm(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(1); w.Write("000000000007"); };
 
         // Branch: slots [children, next, id].
         private static Emit BranchArm(int key, Emit next, params Emit[] children) => (ref MessagePackWriter w) =>
@@ -53,7 +53,7 @@ namespace GameCult.Caching.Tests
             w.WriteArrayHeader(children.Length);
             foreach (var child in children) child(ref w);
             next(ref w);
-            w.Write("b");
+            w.Write("000000000008");
         };
 
         private static Emit List(params Emit[] items) => (ref MessagePackWriter w) =>
@@ -123,22 +123,22 @@ namespace GameCult.Caching.Tests
         [TestCase(7)]
         [TestCase(10)]
         public void UnknownArmInFieldRefused(int key) =>
-            AssertRefused(Doc(LeafArm(key, "r", Canary, 7)), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(LeafArm(key, "000000000005", Canary, 7)), NodeName, key, "3, 5, 8, 9");
 
         [TestCase(0)]
         [TestCase(4)]
         [TestCase(10)]
         public void UnknownArmInListRefused(int key) =>
-            AssertRefused(Doc(LeafArm(3, "r", "ok", 1), List(UnitArm(8), LeafArm(key, "i", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(LeafArm(3, "000000000005", "ok", 1), List(UnitArm(8), LeafArm(key, "000000000004", Canary, 7))), NodeName, key, "3, 5, 8, 9");
 
         // Inside an arm's own list, and inside an arm's own field: the union nested under a union.
         [TestCase(4)]
         [TestCase(10)]
         public void UnknownArmNestedInArmRefused(int key)
         {
-            AssertRefused(Doc(BranchArm(5, Nil, UnitArm(8), LeafArm(key, "c", Canary, 7))), NodeName, key, "3, 5, 8, 9");
-            AssertRefused(Doc(BranchArm(5, LeafArm(key, "n", Canary, 7))), NodeName, key, "3, 5, 8, 9");
-            AssertRefused(Doc(BranchArm(5, Nil, BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(key, "deep", Canary, 7))))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, Nil, UnitArm(8), LeafArm(key, "000000000006", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, LeafArm(key, "000000000003", Canary, 7))), NodeName, key, "3, 5, 8, 9");
+            AssertRefused(Doc(BranchArm(5, Nil, BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(key, "000000000002", Canary, 7))))), NodeName, key, "3, 5, 8, 9");
         }
 
         // A union whose arms are also a union has its own key set: 7 is Outer's (OuterOnly) and not Inner's.
@@ -175,9 +175,9 @@ namespace GameCult.Caching.Tests
                 foreach (var doc in new[]
                 {
                     new GuardDoc { Root = new Rogue() },
-                    new GuardDoc { Items = { new Unit8 { Id = "u" }, new Rogue() } },
-                    new GuardDoc { Root = new Branch { Id = "b", Children = { new Rogue() } } },
-                    new GuardDoc { Root = new Branch { Id = "b", Next = new Rogue() } },
+                    new GuardDoc { Items = { new Unit8 { Id = "000000000007" }, new Rogue() } },
+                    new GuardDoc { Root = new Branch { Id = "000000000008", Children = { new Rogue() } } },
+                    new GuardDoc { Root = new Branch { Id = "000000000008", Next = new Rogue() } },
                     new GuardDoc { Root = new DerivedLeaf() },
                     new GuardDoc { Crafted = new Unlisted() },
                 })
@@ -206,26 +206,26 @@ namespace GameCult.Caching.Tests
             Id = "d1",
             Root = new Branch
             {
-                Id = "b",
+                Id = "000000000008",
                 Children =
                 {
-                    new Leaf { Id = "a", Content = "x", Weight = 1 },
-                    new Unit8 { Id = "u" },
-                    new Branch { Id = "b", Children = { new Branch { Id = "b", Children = { new Leaf { Id = "deep", Content = "y", Weight = 2 } } } } }
+                    new Leaf { Id = "000000000001", Content = "x", Weight = 1 },
+                    new Unit8 { Id = "000000000007" },
+                    new Branch { Id = "000000000008", Children = { new Branch { Id = "000000000008", Children = { new Leaf { Id = "000000000002", Content = "y", Weight = 2 } } } } }
                 },
-                Next = new Leaf { Id = "n", Content = "z", Weight = 3 }
+                Next = new Leaf { Id = "000000000003", Content = "z", Weight = 3 }
             },
-            Items = { new Unit8 { Id = "u" }, new Leaf { Id = "i", Content = "w", Weight = 4 }, null! },
+            Items = { new Unit8 { Id = "000000000007" }, new Leaf { Id = "000000000004", Content = "w", Weight = 4 }, null! },
             Crafted = new InnerB { N = 9 },
             Any = new InnerA { N = 8 }
         };
 
         private static byte[] KnownArmBytes() => Doc(
-            BranchArm(5, LeafArm(3, "n", "z", 3),
-                LeafArm(3, "a", "x", 1),
+            BranchArm(5, LeafArm(3, "000000000003", "z", 3),
+                LeafArm(3, "000000000001", "x", 1),
                 UnitArm(8),
-                BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(3, "deep", "y", 2)))),
-            List(UnitArm(8), LeafArm(3, "i", "w", 4), Nil),
+                BranchArm(5, Nil, BranchArm(5, Nil, LeafArm(3, "000000000002", "y", 2)))),
+            List(UnitArm(8), LeafArm(3, "000000000004", "w", 4), Nil),
             InnerArm(1, 9),
             InnerArm(1, 8));
 
@@ -458,13 +458,13 @@ namespace GameCult.Caching.Tests
                         new CultPersistedRecord
                         {
                             Key = "base", SchemaId = descriptor.SchemaId, StoredAt = "2026-01-01T00:00:00.0000000Z",
-                            Payload = Doc(LeafArm(3, "r", "ok", 1))
+                            Payload = Doc(LeafArm(3, "000000000005", "ok", 1))
                         },
                         new CultPersistedRecord
                         {
                             Key = "variant", SchemaId = descriptor.SchemaId, StoredAt = "2026-01-01T00:00:00.0000000Z",
                             Payload = Array.Empty<byte>(),
-                            Variant = new CultVariantDelta("base", new[] { CultVariantOverride.Set(1, Raw(LeafArm(4, "r", Canary, 7))) })
+                            Variant = new CultVariantDelta("base", new[] { CultVariantOverride.Set(1, Raw(LeafArm(4, "000000000005", Canary, 7))) })
                         }
                     }
                 }));
@@ -498,14 +498,14 @@ namespace GameCult.Caching.Tests
             try
             {
                 var path = Path.Combine(folder, "guard.cc");
-                var genuine = Doc(LeafArm(3, "r", Canary, 7));
+                var genuine = Doc(LeafArm(3, "000000000005", Canary, 7));
                 using (var writer = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = Registry, UseDirectoryStore = directory, StoreFlushOnDispose = true }))
                 {
-                    await writer.UpsertAsync(typeof(GuardDoc), new GuardDoc { Id = "d1", Root = new Leaf { Id = "r", Content = Canary, Weight = 7 } }, new CultRecordKey("d1"));
+                    await writer.UpsertAsync(typeof(GuardDoc), new GuardDoc { Id = "d1", Root = new Leaf { Id = "000000000005", Content = Canary, Weight = 7 } }, new CultRecordKey("d1"));
                     await writer.FlushAsync();
                 }
 
-                var forged = Doc(LeafArm(key, "r", Canary, 7));
+                var forged = Doc(LeafArm(key, "000000000005", Canary, 7));
                 Assert.That(forged.Length, Is.EqualTo(genuine.Length));
                 // A directory store names a page by the SHA-256 of its bytes and its manifest commits to that hash, so a forged
                 // page is renamed and the manifest told its new hash: the store then holds a well-formed page the reader must refuse.

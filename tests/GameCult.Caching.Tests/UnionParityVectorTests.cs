@@ -162,24 +162,24 @@ namespace GameCult.Caching.Tests
             Version = 3,
             Root = root ?? new Box
             {
-                Id = "root",
+                Id = "0000000000c0",
                 Children =
                 {
-                    new Text { Id = "t1", Content = "hello" },
+                    new Text { Id = "0000000000c1", Content = "hello" },
                     new Use
                     {
-                        Id = "u1",
+                        Id = "0000000000c2",
                         Composition = new Composition
                         {
                             Name = "comp",
-                            Body = new Box { Id = "inner", Children = { new Text { Id = "deep", Content = "x" }, new Image { Id = "img", Uri = "uri://a", Alt = "alt" } } }
+                            Body = new Box { Id = "0000000000d0", Children = { new Text { Id = "0000000000d1", Content = "x" }, new Image { Id = "0000000000d2", Uri = "uri://a", Alt = "alt" } } }
                         },
-                        Slots = { new Text { Id = "s1", Content = "slot" }, null!, new Box { Id = "b2" } }
+                        Slots = { new Text { Id = "0000000000e1", Content = "slot" }, null!, new Box { Id = "0000000000e2" } }
                     },
-                    new Image { Id = "i2", Uri = "uri://b", Alt = "" }
+                    new Image { Id = "0000000000c3", Uri = "uri://b", Alt = "" }
                 }
             },
-            Outcomes = { new Pending { Message = "wait", Id = "p" }, new Completed { SourceVersion = 7, Id = "c" }, new Denied { Id = "d" } },
+            Outcomes = { new Pending { Message = "wait", Id = "0000000000a1" }, new Completed { SourceVersion = 7, Id = "0000000000a2" }, new Denied { Id = "0000000000a3" } },
             Part = new Tool { Name = "hammer", Uses = 12 },
             Crafted = new Part { Name = "gear", Count = 4 },
             Missing = null
@@ -255,13 +255,13 @@ namespace GameCult.Caching.Tests
         private static byte[] Surface(Emit? root = null, Emit? outcomes = null, Emit? crafted = null, Extra? extra = null, Emit? trailing = null)
         {
             extra ??= new Extra();
-            root ??= BoxArm("root", Slots(
-                TextArm("t1", "hello"),
-                ArmOf(2, Str("u1"),
-                    Plus(extra.Composition, Str("comp"), BoxArm("inner", Slots(TextArm("deep", "x"), ImageArm("img", "uri://a", "alt")))),
-                    Slots(TextArm("s1", "slot", extra.ListElement), Nil, BoxArm("b2", Slots()))),
-                ImageArm("i2", "uri://b", "")), extra.RootArm);
-            outcomes ??= Slots(ArmOf(0, Str("wait"), Str("p")), ArmOf(1, Num(7), Str("c")), ArmOf(2, Str("d")));
+            root ??= BoxArm("0000000000c0", Slots(
+                TextArm("0000000000c1", "hello"),
+                ArmOf(2, Str("0000000000c2"),
+                    Plus(extra.Composition, Str("comp"), BoxArm("0000000000d0", Slots(TextArm("0000000000d1", "x"), ImageArm("0000000000d2", "uri://a", "alt")))),
+                    Slots(TextArm("0000000000e1", "slot", extra.ListElement), Nil, BoxArm("0000000000e2", Slots()))),
+                ImageArm("0000000000c3", "uri://b", "")), extra.RootArm);
+            outcomes ??= Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(1, Num(7), Str("0000000000a2")), ArmOf(2, Str("0000000000a3")));
             crafted ??= ArmOf(1, Str("gear"), Num(4));
             var slots = new[] { Str("surface"), Num(3), root, outcomes, ArmOf(1, Str("hammer"), Num(12)), crafted, Nil };
             return Raw(Slots(trailing != null ? slots.Append(trailing).ToArray() : extra.Record ? slots.Append(ExtraSlot).ToArray() : slots));
@@ -284,7 +284,7 @@ namespace GameCult.Caching.Tests
             new Case("unknown-arm-list.msgpack", "refused", "Outcome", 7, "unknown-arm",
                 Surface(outcomes: Slots(ArmOf(0, Str("wait")), ArmOf(7, Str(Canary))))),
             new Case("unknown-arm-nested.msgpack", "refused", "Node", 9, "unknown-arm",
-                Surface(root: BoxArm("root", Slots(BoxArm("l1", Slots(BoxArm("l2", Slots(ArmOf(9, Str("deep"), Str(Canary)))))))))),
+                Surface(root: BoxArm("0000000000c0", Slots(BoxArm("0000000000d3", Slots(BoxArm("0000000000d4", Slots(ArmOf(9, Str("deep"), Str(Canary)))))))))),
             new Case("inner-union-outer-key.msgpack", "refused", "CraftedItem", 2, "unknown-arm",
                 Surface(crafted: ArmOf(2, Str("gear"), Num(4)))),
             new Case("arm-arity.msgpack", "refused", "Node", 1, "arity",
@@ -461,30 +461,30 @@ namespace GameCult.Caching.Tests
             Slots(slots)(ref w);
         };
 
-        private static Emit WithOutcome(Emit element) => Slots(ArmOf(0, Str("wait"), Str("p")), ArmOf(1, Num(7), Str("c")), ArmOf(2, Str("d")), element);
+        private static Emit WithOutcome(Emit element) => Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(1, Num(7), Str("0000000000a2")), ArmOf(2, Str("0000000000a3")), element);
 
-        private static Emit WrapChain(int wraps, Emit leaf) => wraps == 0 ? leaf : ArmOf(6, WrapChain(wraps - 1, leaf), Str("w"));
+        private static Emit WrapChain(int wraps, Emit leaf) => wraps == 0 ? leaf : ArmOf(6, WrapChain(wraps - 1, leaf), Str("0000000000b1"));
 
         private static Node WrapChainValue(int wraps, Node leaf)
         {
-            for (var i = 0; i < wraps; i++) leaf = new Wrap { Inner = leaf, Id = "w" };
+            for (var i = 0; i < wraps; i++) leaf = new Wrap { Inner = leaf, Id = "0000000000b1" };
             return leaf;
         }
 
         // n arrays nested inside one another around a single string.
         private static Emit Nested(int n) => n == 1 ? Slots(Str(Canary)) : Slots(Nested(n - 1));
 
-        private static Emit AtLimitLeaf => BoxArm("leaf", Slots());
-        private static Emit PastLimitLeaf => TextArm("leaf", Canary);
+        private static Emit AtLimitLeaf => BoxArm("0000000000f0", Slots());
+        private static Emit PastLimitLeaf => TextArm("0000000000f0", Canary);
 
         private static IReadOnlyList<Case> BoundsCases() => new[]
         {
             new Case("arm-key-int32-min.msgpack", "accepted", "Outcome", int.MinValue, "arm-key-int32-min.msgpack",
-                Surface(outcomes: WithOutcome(ArmOf(int.MinValue, Str("f"))))),
+                Surface(outcomes: WithOutcome(ArmOf(int.MinValue, Str("0000000000a4"))))),
             new Case("arm-key-int32-max.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
-                Surface(outcomes: WithOutcome(ArmOf(int.MaxValue, Str("x"))))),
+                Surface(outcomes: WithOutcome(ArmOf(int.MaxValue, Str("0000000000a5"))))),
             new Case("arm-key-wide-coding.msgpack", "accepted", "Outcome", int.MaxValue, "arm-key-int32-max.msgpack",
-                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue), Str("x"))))),
+                Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.WriteUInt64(int.MaxValue), Str("0000000000a5"))))),
             new Case("arm-key-above-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
                 Surface(outcomes: WithOutcome(RawKey((ref MessagePackWriter w) => w.Write(0x80000000u))))),
             new Case("arm-key-below-int32.msgpack", "refused", "Outcome", null, "key-out-of-range",
@@ -650,7 +650,7 @@ namespace GameCult.Caching.Tests
             var payload = Committed("depth-at-limit.msgpack");
             Assert.That(DepthOf(payload), Is.EqualTo(Limit), "the vector nests exactly the limit, counted independently");
             Assert.That(Convert.ToHexString(SerializeValue(Decode(payload))), Is.EqualTo(Convert.ToHexString(payload)), "read, then written again");
-            var built = Constructed(WrapChainValue(AtLimitWraps, new Box { Id = "leaf" }));
+            var built = Constructed(WrapChainValue(AtLimitWraps, new Box { Id = "0000000000f0" }));
             Assert.That(Convert.ToHexString(SerializeValue(built)), Is.EqualTo(Convert.ToHexString(payload)), "the constructed value writes the vector");
         }
 
@@ -663,7 +663,7 @@ namespace GameCult.Caching.Tests
             Assert.That(read, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on read").And.Not.Contain(Canary));
 
             byte[]? written = null;
-            var write = Chain(Refusal(() => written = SerializeValue(Constructed(WrapChainValue(PastLimitWraps, new Text { Id = "leaf", Content = Canary })))));
+            var write = Chain(Refusal(() => written = SerializeValue(Constructed(WrapChainValue(PastLimitWraps, new Text { Id = "0000000000f0", Content = Canary })))));
             Assert.That(written, Is.Null, "nothing is returned");
             Assert.That(write, Does.Contain(typeof(UnionSurface).FullName).And.Contain($"the limit is {Limit}").And.Contain("refused on write").And.Not.Contain(Canary));
 
