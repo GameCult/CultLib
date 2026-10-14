@@ -290,6 +290,13 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        [Test]
+        public void OptionsRefuseANullDocumentTypeOrAssembly()
+        {
+            Assert.Throws<ArgumentNullException>(() => CultDocumentMessagePackSerialization.OptionsFor(null!));
+            Assert.Throws<ArgumentNullException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(null!));
+        }
+
         [Union(0, typeof(ClaimArm))]
         public abstract class ClaimNode { }
 

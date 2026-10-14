@@ -310,6 +310,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Problems(typeof(HFormattedOwner)).Single(), Does.Contain("FormattedOwner").And.Contain("[MessagePackFormatter]"));
             Assert.That(Problems(typeof(HFormattedMember)).Single(), Does.Contain("Inner").And.Contain("[MessagePackFormatter]"));
             Assert.That(Problems(typeof(HFormattedField)), Is.Empty, "a formatted type with no list below it is a field");
+            Assert.That(Problems(typeof(HFormattedDerived)).Single(), Does.Contain("FormattedDerived").And.Contain("[MessagePackFormatter]"), "the attribute is inherited");
         }
 
         // The id path is a fixed point, not the stack at the moment a list is found: a type in a cycle with the list's owner, and
@@ -321,6 +322,11 @@ namespace GameCult.Caching.Tests
             Assert.That(path, Is.EquivalentTo(new[] { typeof(HDiamond), typeof(HLeft), typeof(HRight), typeof(HCycle), typeof(HCycleBack), typeof(EIded) }));
             Assert.That(CultElementIds.Inspect(typeof(HFine)).IdPath, Is.EquivalentTo(new[] { typeof(HFine), typeof(ENest), typeof(EIded) }));
             Assert.That(CultElementIds.Inspect(typeof(HFormattedField)).IdPath, Is.Empty);
+
+            // A union base is on the path both as the type a list holds (its formatter writes the arm) and as a field type whose
+            // arm holds the list.
+            Assert.That(CultElementIds.Inspect(typeof(HPlainBaseList)).IdPath, Is.EquivalentTo(new[] { typeof(HPlainBaseList), typeof(PlainBase), typeof(PlainArm) }));
+            Assert.That(CultElementIds.Inspect(typeof(HIdBaseOwner)).IdPath, Is.EquivalentTo(new[] { typeof(HIdBaseOwner), typeof(IdBase), typeof(IdArm), typeof(EIded) }));
         }
 
         // ---- shapes ----
@@ -348,6 +354,15 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public class HFormattedMember { [Key(0)] [MessagePackFormatter(typeof(NoFormatter))] public HHasIds Inner { get; set; } = new(); }
         [MessagePackObject] [MessagePackFormatter(typeof(NoFormatter))] public class FormattedLeaf { [Key(0)] public int N { get; set; } }
         [MessagePackObject] public class HFormattedField { [Key(0)] public FormattedLeaf Leaf { get; set; } = new(); [Key(1)] public List<string> Tags { get; set; } = new(); }
+
+        [MessagePackObject] public class FormattedDerived : FormattedElement { }
+        [MessagePackObject] public class HFormattedDerived { [Key(0)] public List<FormattedDerived> Items { get; set; } = new(); }
+        [Union(0, typeof(IdArm))] public abstract class IdBase { }
+        [MessagePackObject] public class IdArm : IdBase { [Key(0)] [CultElementId] public string Id { get; set; } = ""; [Key(1)] public List<EIded> Items { get; set; } = new(); }
+        [Union(0, typeof(PlainArm))] public abstract class PlainBase { }
+        [MessagePackObject] public class PlainArm : PlainBase { [Key(0)] [CultElementId] public string Id { get; set; } = ""; }
+        [MessagePackObject] public class HPlainBaseList { [Key(0)] public List<PlainBase> Items { get; set; } = new(); }
+        [MessagePackObject] public class HIdBaseOwner { [Key(0)] public IdBase? Root { get; set; } }
 
         [MessagePackObject] public class HLeft { [Key(0)] public HCycle Cycle { get; set; } = new(); }
         [MessagePackObject] public class HRight { [Key(0)] public HCycle Cycle { get; set; } = new(); }
