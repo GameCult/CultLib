@@ -827,6 +827,40 @@ class ConvertTests(unittest.TestCase):
                 convert(store, failing, definitions)
         self.assertFalse(failing.exists())
 
+    def test_the_json_lines_bytes_are_key_sorted_utf8_lines_ending_in_lf(self) -> None:
+        later = CultCacheEnvelope(key="é", type="b.t", payload=b"x", stored_at="T1")
+        earlier = CultCacheEnvelope(key="a", type="a.t", payload=b"yy", stored_at="T2")
+        expected = (
+            '{"key": "a", "payload": "eXk=", "stored_at": "T2", "type": "a.t"}
+'
+            '{"key": "é", "payload": "eA==", "stored_at": "T1", "type": "b.t"}
+'
+        ).encode("utf-8")
+        self.assertEqual(JsonLinesBackingStore._file_bytes([later, earlier]), expected)
+        self.assertEqual(JsonLinesBackingStore._file_bytes([]), b"")
+
+    @unittest.skipIf(os.name != "posix", "an open file cannot be removed by someone else on Windows")
+    def test_a_destination_removed_by_someone_else_does_not_mask_the_refusal(self) -> None:
+        store = self._filled(
+            lambda name: SingleFileMessagePackBackingStore(self.directory / f"{name}.cc"), "vanished", {"k1": b'{"n": 1}'}
+        )
+        destination = self.directory / "vanished.out"
+        real = SingleFileMessagePackBackingStore.pull_all
+
+        def pull_all(self_store):
+            result = real(self_store)
+            destination.unlink()
+            return result
+
+        def validate(value: object) -> None:
+            raise AssertionError(CANARY)
+
+        with mock.patch.object(SingleFileMessagePackBackingStore, "pull_all", pull_all):
+            with self.assertRaises(CultCacheError) as caught:
+                convert(store, destination, [define_document_type("tests.mig", validate=validate)])
+        self.assertIn("AssertionError", str(caught.exception))
+        self.assertIsNone(caught.exception.__context__)
+
     def test_convert_finds_a_record_by_its_catalog_schema_name_and_skips_unlisted_types_anywhere(self) -> None:
         store = SingleFileMessagePackBackingStore(self.directory / "names.cc")
         store.push(CultCacheEnvelope.create(key="a", type="aaa.unlisted", payload=b"\x00opaque"))
