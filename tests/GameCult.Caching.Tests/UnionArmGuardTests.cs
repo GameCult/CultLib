@@ -396,7 +396,11 @@ namespace GameCult.Caching.Tests
             (shapes ?? List())(ref w);
         });
 
-        private static Emit CircleArm(int key, int radius) => InnerArm(key, radius);
+        private static Emit CircleArm(int key, int radius) => (ref MessagePackWriter w) =>
+        {
+            w.WriteArrayHeader(2); w.Write(key);
+            w.WriteArrayHeader(2); w.Write(radius); w.Write("0000000000a1");
+        };
 
         [TestCase(1)]
         [TestCase(3)]
@@ -429,7 +433,7 @@ namespace GameCult.Caching.Tests
         [Test]
         public void KnownArmsOfAnInterfaceUnionByteIdentical()
         {
-            var doc = new ShapeDoc { Id = "s1", Shape = new Square { N = 4 }, Shapes = { new Circle { N = 2 }, null! } };
+            var doc = new ShapeDoc { Id = "s1", Shape = new Square { N = 4, Id = "0000000000a1" }, Shapes = { new Circle { N = 2, Id = "0000000000a1" }, null! } };
             var expected = Shapes(CircleArm(2, 4), List(CircleArm(0, 2), Nil));
             Assert.That(Convert.ToHexString(CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ShapeDoc), Registry)), Is.EqualTo(Convert.ToHexString(expected)));
             Assert.That(Convert.ToHexString(MessagePackSerializer.Serialize(doc, MessagePackSerializerOptions.Standard)), Is.EqualTo(Convert.ToHexString(expected)));
@@ -642,8 +646,8 @@ namespace GameCult.Caching.Tests
         [Union(0, typeof(Circle)), Union(2, typeof(Square))]
         public interface IShape { }
 
-        [MessagePackObject] public class Circle : IShape { [Key(0)] public int N; }
-        [MessagePackObject] public sealed class Square : IShape { [Key(0)] public int N; }
+        [MessagePackObject] public class Circle : IShape { [Key(0)] public int N; [Key(1)] [CultElementId] public string Id = string.Empty; }
+        [MessagePackObject] public sealed class Square : IShape { [Key(0)] public int N; [Key(1)] [CultElementId] public string Id = string.Empty; }
         [MessagePackObject] public sealed class Triangle : IShape { }
         [MessagePackObject] public sealed class BigCircle : Circle { }
 
