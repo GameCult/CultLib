@@ -3545,8 +3545,9 @@ namespace GameCult.Caching
             return directoryStore ? DirectoryFormatV4 : holdsVariants ? CultPersistedStoreSnapshot.FormatV2 : CultPersistedStoreSnapshot.FormatV1;
         }
 
-        // The header a write leaves, for either store kind: HeaderFor decides. A record's bytes do not say whether it holds an
-        // element id (an id is an ordinary keyed string), so only the store header carries that fact. A write that copies any
+        // The header a write leaves, for either store kind: HeaderFor decides. An element id is an ordinary keyed string, so only a
+        // reader with the record's type can tell from its bytes whether it holds one; the store header is how a reader without the types
+        // learns it. A write that copies any
         // record forward keeps a marked header; a write that encodes every record the store will hold decides by content. An
         // opaque payload (null) never marks an unmarked store, and keeps a marked one marked. A copied record the writer decodes
         // under the store's lock holding an id marks the store too (SingleFileBackingStore.CopiedHoldIds): another runtime may
