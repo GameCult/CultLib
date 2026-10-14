@@ -275,6 +275,11 @@ fn slot_codec(ident: &syn::Ident, slots: &[CultCacheSlot]) -> proc_macro2::Token
     });
 
     quote! {
+        const _: () = ::core::assert!(
+            ::core::mem::size_of::<#ident>() <= ::cultcache_rs::MAX_RECORD_INLINE_BYTES,
+            "a CultCache record is at most cultcache_rs::MAX_RECORD_INLINE_BYTES bytes inline; box its largest slot"
+        );
+
         impl ::cultcache_rs::SlotRecord for #ident {
             fn __slots_array() {}
         }
@@ -509,6 +514,11 @@ fn union_codec(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     });
 
     Ok(quote! {
+        const _: () = ::core::assert!(
+            ::core::mem::size_of::<#ident>() <= ::cultcache_rs::MAX_RECORD_INLINE_BYTES,
+            "a CultCache record is at most cultcache_rs::MAX_RECORD_INLINE_BYTES bytes inline; box its largest slot"
+        );
+
         // An arm is a slots array: a newtype over anything else is refused here, by the
         // trait the CultSlots and DatabaseEntry derives implement.
         const _: fn() = || {

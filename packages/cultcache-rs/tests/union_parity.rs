@@ -781,12 +781,12 @@ fn the_raw_doors_hold_the_bound_for_arms_maps_and_arrays() {
     }
 }
 
-// A debug build on a 2 MiB thread carries 405 containers of this document; the bound keeps every
-// accepted payload below that, and every refusal is an error, not an abort.
+// The bound counts containers, not stack: decode grows its own stack, so the document at the limit
+// decodes on a 1 MiB thread in both profiles, and every refusal is an error, not an abort.
 #[test]
-fn stack_budget_debug_2mib() {
+fn the_union_chain_at_the_limit_decodes_on_a_1mib_thread() {
     std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
+        .stack_size(1024 * 1024)
         .spawn(|| {
             assert_eq!(
                 through_cache(&vector("depth-at-limit.msgpack")).unwrap(),
