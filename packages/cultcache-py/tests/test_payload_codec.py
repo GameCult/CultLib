@@ -831,10 +831,8 @@ class ConvertTests(unittest.TestCase):
         later = CultCacheEnvelope(key="é", type="b.t", payload=b"x", stored_at="T1")
         earlier = CultCacheEnvelope(key="a", type="a.t", payload=b"yy", stored_at="T2")
         expected = (
-            '{"key": "a", "payload": "eXk=", "stored_at": "T2", "type": "a.t"}
-'
-            '{"key": "é", "payload": "eA==", "stored_at": "T1", "type": "b.t"}
-'
+            '{"key": "a", "payload": "eXk=", "stored_at": "T2", "type": "a.t"}\n'
+            '{"key": "é", "payload": "eA==", "stored_at": "T1", "type": "b.t"}\n'
         ).encode("utf-8")
         self.assertEqual(JsonLinesBackingStore._file_bytes([later, earlier]), expected)
         self.assertEqual(JsonLinesBackingStore._file_bytes([]), b"")
