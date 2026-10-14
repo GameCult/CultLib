@@ -414,11 +414,68 @@ public sealed class ExprTests
         var bindings = ExprBindings.Bind(graph);
         Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[2], new float[5])).Rule);
         Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[3], new float[4])).Rule);
+        var short_ = new float[4];
+        Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, new float[1], short_)).Rule);
+        Assert.Equal("column-shape", Assert.Throws<ExprGraphException>(() => ExprEvaluator.Evaluate(graph, bindings, ReadOnlySpan<float>.Empty, short_)).Rule);
+        Assert.Equal(new float[4], short_);
         var outputs = new float[6];
         ExprEvaluator.Evaluate(graph, bindings, new[] { 1f, 2f, 3f }, outputs);
         var none = new ExprBuilder().Build();
         ExprEvaluator.Evaluate(none, ExprBindings.Bind(none), ReadOnlySpan<float>.Empty, Span<float>.Empty);
         Assert.Equal(new[] { 1f, 2f, 3f, -1f, -2f, -3f }, outputs);
+    }
+
+    [Fact]
+    public void AValidatedGraphCannotBeChangedThroughItsLists()
+    {
+        var b = new ExprBuilder();
+        var x = b.Input("x");
+        var k = b.Param("k", 2f);
+        b.Output("o", b.Call("mul", x, k));
+        var graph = b.Build();
+        var input = new[] { 1f, 2f, 3f };
+        var before = new float[3];
+        ExprEvaluator.Evaluate(graph, ExprBindings.Bind(graph), input, before);
+        var operands = graph.Nodes[2].Operands;
+
+        Assert.False(graph.InputNames is string[] || graph.ParamNames is string[] || graph.OutputNames is string[]);
+        Assert.False(graph.ParamDefaultBits is int[] || graph.OutputNodes is int[] || operands is int[] || graph.Nodes is ExprNode[]);
+        Assert.Throws<NotSupportedException>(() => ((IList<int>)operands)[0] = 7);
+        Assert.Throws<NotSupportedException>(() => ((IList<int>)graph.OutputNodes)[0] = 99);
+        Assert.Throws<NotSupportedException>(() => ((IList<int>)graph.ParamDefaultBits)[0] = 0);
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)graph.InputNames)[0] = "bad name");
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)graph.ParamNames)[0] = "bad name");
+        Assert.Throws<NotSupportedException>(() => ((IList<string>)graph.OutputNames)[0] = "bad name");
+        Assert.Throws<NotSupportedException>(() => ((IList<ExprNode>)graph.Nodes)[0] = graph.Nodes[1]);
+
+        var after = new float[3];
+        ExprEvaluator.Evaluate(graph, ExprBindings.Bind(graph), input, after);
+        Assert.Equal(before, after);
+        Assert.Equal(new[] { 2f, 4f, 6f }, after);
+    }
+
+    [Fact]
+    public void CreateCopiesWhatItIsGiven()
+    {
+        var inputs = new[] { "x" };
+        var outputs = new[] { "o" };
+        var outputNodes = new[] { 0 };
+        var nodes = new[] { ExprNode.Input(0) };
+        var graph = ExprGraph.Create(ExprGraph.FormatVersion, inputs, Array.Empty<string>(), Array.Empty<int>(), outputs, outputNodes, nodes);
+
+        inputs[0] = "bad name";
+        outputs[0] = "bad name";
+        outputNodes[0] = 99;
+        nodes[0] = ExprNode.Const(0);
+
+        Assert.Equal(new[] { "x" }, graph.InputNames);
+        Assert.Equal(new[] { "o" }, graph.OutputNames);
+        Assert.Equal(new[] { 0 }, graph.OutputNodes);
+        Assert.Equal(ExprNodeKind.Input, graph.Nodes[0].Kind);
+        var operands = new[] { 0 };
+        var call = ExprNode.Call("neg", operands);
+        operands[0] = 5;
+        Assert.Equal(new[] { 0 }, call.Operands);
     }
 
     private static ExprGraphException Refusal(Action action) => Assert.Throws<ExprGraphException>(action);

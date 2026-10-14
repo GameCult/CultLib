@@ -31,6 +31,7 @@ public sealed class ExprNode
         Kind = kind;
         WireName = wireName;
         operandArray = operands;
+        Operands = Array.AsReadOnly(operands);
         Payload = payload;
         Op = op;
         ResultCount = op?.ResultCount ?? 1;
@@ -41,7 +42,10 @@ public sealed class ExprNode
     /// <summary>The persisted name: an op name for a call, otherwise <c>input</c>, <c>param</c>, <c>const</c> or <c>pick</c>.</summary>
     public string WireName { get; }
 
-    public IReadOnlyList<int> Operands => operandArray;
+    public IReadOnlyList<int> Operands { get; }
+
+    /// <summary>The evaluator's view of the operands: the private array, never handed out.</summary>
+    internal int[] OperandArray => operandArray;
 
     public int Payload { get; }
 

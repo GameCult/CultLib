@@ -19,13 +19,14 @@ public static class ExprEvaluator
         var points = outputs.Length / outputCount;
         if (inputs.Length != points * graph.InputNames.Count) throw new ExprGraphException("column-shape");
 
-        var nodes = graph.Nodes;
+        var nodes = graph.NodeArray;
+        var outputNodes = graph.OutputNodeArray;
         var start = graph.SlotStart;
         var slots = new float[graph.SlotCount];
         Span<float> operands = stackalloc float[ExprOps.MaxArity];
         for (var point = 0; point < points; point++)
         {
-            for (var i = 0; i < nodes.Count; i++)
+            for (var i = 0; i < nodes.Length; i++)
             {
                 var node = nodes[i];
                 switch (node.Kind)
@@ -40,17 +41,17 @@ public static class ExprEvaluator
                         slots[start[i]] = BitConverter.Int32BitsToSingle(node.Payload);
                         break;
                     case ExprNodeKind.Pick:
-                        slots[start[i]] = slots[start[node.Operands[0]] + node.Payload];
+                        slots[start[i]] = slots[start[node.OperandArray[0]] + node.Payload];
                         break;
                     default:
                         var op = node.Op!;
-                        for (var k = 0; k < op.Arity; k++) operands[k] = slots[start[node.Operands[k]]];
+                        for (var k = 0; k < op.Arity; k++) operands[k] = slots[start[node.OperandArray[k]]];
                         op.Evaluate(operands.Slice(0, op.Arity), new Span<float>(slots, start[i], op.ResultCount));
                         break;
                 }
             }
 
-            for (var o = 0; o < outputCount; o++) outputs[o * points + point] = slots[start[graph.OutputNodes[o]]];
+            for (var o = 0; o < outputCount; o++) outputs[o * points + point] = slots[start[outputNodes[o]]];
         }
     }
 }

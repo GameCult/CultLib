@@ -26,6 +26,12 @@ public sealed class ExprGraph
         this.outputNames = outputNames;
         this.outputNodes = outputNodes;
         this.nodes = nodes;
+        InputNames = Array.AsReadOnly(inputNames);
+        ParamNames = Array.AsReadOnly(paramNames);
+        ParamDefaultBits = Array.AsReadOnly(paramDefaultBits);
+        OutputNames = Array.AsReadOnly(outputNames);
+        OutputNodes = Array.AsReadOnly(outputNodes);
+        Nodes = Array.AsReadOnly(nodes);
         SlotStart = new int[nodes.Length];
         var slots = 0;
         for (var i = 0; i < nodes.Length; i++)
@@ -37,19 +43,25 @@ public sealed class ExprGraph
         SlotCount = slots;
     }
 
-    public IReadOnlyList<string> InputNames => inputNames;
+    public IReadOnlyList<string> InputNames { get; }
 
-    public IReadOnlyList<string> ParamNames => paramNames;
+    public IReadOnlyList<string> ParamNames { get; }
 
     /// <summary>The default of each param as float bits, so a NaN payload or a signed zero survives.</summary>
-    public IReadOnlyList<int> ParamDefaultBits => paramDefaultBits;
+    public IReadOnlyList<int> ParamDefaultBits { get; }
 
-    public IReadOnlyList<string> OutputNames => outputNames;
+    public IReadOnlyList<string> OutputNames { get; }
 
     /// <summary>The node each output reads.</summary>
-    public IReadOnlyList<int> OutputNodes => outputNodes;
+    public IReadOnlyList<int> OutputNodes { get; }
 
-    public IReadOnlyList<ExprNode> Nodes => nodes;
+    public IReadOnlyList<ExprNode> Nodes { get; }
+
+    /// <summary>The evaluator's view of the nodes: the private array, never handed out.</summary>
+    internal ExprNode[] NodeArray => nodes;
+
+    /// <summary>The evaluator's view of the output nodes: the private array, never handed out.</summary>
+    internal int[] OutputNodeArray => outputNodes;
 
     /// <summary>Where each node's results start in an evaluator's value array.</summary>
     internal int[] SlotStart { get; }
