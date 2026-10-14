@@ -285,8 +285,10 @@ class UnionCodecRuleTests(unittest.TestCase):
         )
 
     def test_unit_arm_is_written_with_empty_slots_and_reads_back(self) -> None:
-        self.assertEqual(unit_outcome.encode(UnionArm("Denied")), [2, []])
-        self.assertEqual(unit_outcome.decode([2, []]), UnionArm("Denied", None))
+        # The bytes are the C# reference's (tests/vectors/union-parity/unit-arm-denied.msgpack), not spelled here.
+        reference = _vector("unit-arm-denied.msgpack")
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Denied"))), reference)
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(reference, raw=False)), UnionArm("Denied", None))
 
     def test_unit_arm_refuses_a_value_to_carry(self) -> None:
         with self.assertRaises(ValueError) as caught:
@@ -738,8 +740,12 @@ class UnionDecodeBoundsTests(unittest.TestCase):
                 self.assertEqual(str(caught.exception), expected)
 
     def test_the_ends_of_the_int32_key_domain_are_unit_arms_that_read_and_write(self) -> None:
-        self.assertEqual(unit_outcome.decode([-(2**31), []]), UnionArm("Floor"))
-        self.assertEqual(unit_outcome.encode(UnionArm("Ceiling")), [2**31 - 1, []])
+        floor = _vector("unit-arm-floor.msgpack")
+        ceiling = _vector("unit-arm-ceiling.msgpack")
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(floor, raw=False)), UnionArm("Floor"))
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Floor"))), floor)
+        self.assertEqual(unit_outcome.decode(msgpack.unpackb(ceiling, raw=False)), UnionArm("Ceiling"))
+        self.assertEqual(msgpack.packb(unit_outcome.encode(UnionArm("Ceiling"))), ceiling)
 
 
 if __name__ == "__main__":

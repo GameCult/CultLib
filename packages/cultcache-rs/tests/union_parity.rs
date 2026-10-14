@@ -100,6 +100,10 @@ enum Outcome {
 enum UnitOutcome {
     #[cultcache(key = 2)]
     Denied,
+    #[cultcache(key = -2147483648)]
+    Floor,
+    #[cultcache(key = 2147483647)]
+    Ceiling,
 }
 
 #[derive(Clone, Debug, PartialEq, CultSlots)]
@@ -250,8 +254,16 @@ fn union_surface_decodes_and_reencodes() {
 
 #[test]
 fn a_unit_arm_is_a_key_and_an_empty_slots_array() {
-    assert_eq!(rmp_serde::to_vec(&UnitOutcome::Denied).unwrap(), [0x92, 0x02, 0x90]);
-    assert_eq!(rmp_serde::from_slice::<UnitOutcome>(&[0x92, 0x02, 0x90]).unwrap(), UnitOutcome::Denied);
+    // The bytes are the C# reference's, not spelled here.
+    for (file, arm) in [
+        ("unit-arm-denied.msgpack", UnitOutcome::Denied),
+        ("unit-arm-floor.msgpack", UnitOutcome::Floor),
+        ("unit-arm-ceiling.msgpack", UnitOutcome::Ceiling),
+    ] {
+        let reference = vector(file);
+        assert_eq!(rmp_serde::to_vec(&arm).unwrap(), reference, "{file}");
+        assert_eq!(rmp_serde::from_slice::<UnitOutcome>(&reference).unwrap(), arm, "{file}");
+    }
 }
 
 #[test]

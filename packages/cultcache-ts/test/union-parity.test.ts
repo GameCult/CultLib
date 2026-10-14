@@ -219,8 +219,13 @@ test("the union surface vector decodes to the constructed value and re-encodes b
   assert.equal(hex(writeWire(surfaceCodec.encode(golden))), hex(committed));
 });
 
-test("a unit arm is written [key, []] and its payload must be an array", () => {
-  assert.deepEqual(outcome.encode({ kind: "Denied" }), [2, []]);
+test("a unit arm is written as the C# reference writes it, and its payload must be an array", async () => {
+  // The bytes are tests/vectors/union-parity/unit-arm-*.msgpack, written by the reference, not spelled here.
+  for (const [file, kind] of [["denied", "Denied"], ["floor", "Floor"], ["ceiling", "Ceiling"]] as const) {
+    const reference = await read(`unit-arm-${file}.msgpack`);
+    assert.deepEqual(outcome.decode(readWire(reference)), { kind }, file);
+    assert.equal(hex(writeWire(outcome.encode({ kind }))), hex(reference), file);
+  }
   assert.throws(() => outcome.decode([2, null]), /Union Outcome/u);
 });
 
