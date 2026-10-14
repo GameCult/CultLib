@@ -81,10 +81,10 @@ float cultmath_cycles_modulo(float a, float b)
     return b != 0.0 ? (a < 0.0 ? -remainder : remainder) : 0.0;
 }
 
-// safe_floored_modulo
+// safe_floored_modulo; a build that contracts it differs by a bound stated at cycles_floored_modulo in math.Cycles.cs and the README
 float cultmath_cycles_floored_modulo(float a, float b) { return b != 0.0 ? a - floor(a / b) * b : 0.0; }
 
-// wrapf (note the argument order: value, max, min)
+// wrapf (note the argument order: value, max, min); contraction bound as for floored_modulo
 float cultmath_cycles_wrap(float value, float max_value, float min_value)
 {
     float range = max_value - min_value;
@@ -128,6 +128,15 @@ float cultmath_cycles_fract(float a) { return a - floor(a); }
 
 // compatible_signf
 float cultmath_cycles_sign(float a) { return a == 0.0 ? 0.0 : (a < 0.0 ? -1.0 : 1.0); }
+
+// safe_asinf
+float cultmath_cycles_arcsine(float a) { return asin(clamp(a, -1.0, 1.0)); }
+
+// safe_acosf
+float cultmath_cycles_arccosine(float a) { return acos(clamp(a, -1.0, 1.0)); }
+
+// compatible_atan2 (a is y, b is x)
+float cultmath_cycles_arctan2(float a, float b) { return (b == 0.0 && a == 0.0) ? 0.0 : atan(a, b); }
 
 // ---- Map Range node (kernel/svm/map_range.h svm_node_map_range) ----
 // A Map Range node's Clamp option is a Clamp node of type Range on its result (MapRangeNode::expand):
