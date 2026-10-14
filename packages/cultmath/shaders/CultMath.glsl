@@ -315,7 +315,9 @@ float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float
     float leave = clamp(max(atLo, atHi), start, stop);
     float before = b > 0.0 ? lo : hi;
     float after = b > 0.0 ? hi : lo;
-    float total = before * (enter - start) + (a + b * (0.5 * (enter + leave))) * (leave - enter) + after * (stop - leave);
+    float held = enter > start ? before * (enter - start) : 0.0;
+    float kept = stop > leave ? after * (stop - leave) : 0.0;
+    float total = held + (a + b * (0.5 * (enter + leave))) * (leave - enter) + kept;
     return direction * total;
 }
 

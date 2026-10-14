@@ -319,6 +319,32 @@ public sealed class SpanPrimitiveTests
         Assert.True(zeroSlopes > 10_000 && reversed > 40_000 && both > 2_000 && neither > 2_000, $"the sample meets a branch too rarely: {zeroSlopes} flat, {reversed} reversed, {both} both, {neither} neither");
     }
 
+    /// <summary>
+    /// An infinite bound never reached by the line contributes nothing, not infinity times zero: relu
+    /// (hi = +inf) and its mirror (lo = -inf) give the finite integral, whether the line crosses the finite
+    /// bound inside the span or not.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearIsFiniteForInfiniteBounds()
+    {
+        var inf = float.PositiveInfinity;
+        // t over [0, 1] clamped below at 0: all ramp, 1/2.
+        Assert.Equal(0.5f, integral_clamp_linear(0.0f, 1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // t - 1/2 over [0, 1] clamped below at 0: 0 until 1/2, then the ramp's 1/8.
+        Assert.Equal(0.125f, integral_clamp_linear(-0.5f, 1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // The falling line 1/2 - t clamped below at 0 is the mirror: 1/8 over [0, 1].
+        Assert.Equal(0.125f, integral_clamp_linear(0.5f, -1.0f, 0.0f, inf, 0.0f, 1.0f));
+        // lo = -inf: clamp(t, -inf, 1/2) over [0, 1] is t up to 1/2 then 1/2 (1/8 + 1/4), and 1 - t clamped
+        // above at 1/2 is 1/2 until t = 1/2 and then falls (1/4 + 1/8).
+        Assert.Equal(0.375f, integral_clamp_linear(0.0f, 1.0f, -inf, 0.5f, 0.0f, 1.0f));
+        Assert.Equal(0.375f, integral_clamp_linear(1.0f, -1.0f, -inf, 0.5f, 0.0f, 1.0f));
+        // Both infinite: the line itself, the trapezoid, in either direction.
+        Assert.Equal(7.5f, integral_clamp_linear(0.0f, 1.0f, -inf, inf, 1.0f, 4.0f));
+        Assert.Equal(-7.5f, integral_clamp_linear(0.0f, 1.0f, -inf, inf, 4.0f, 1.0f));
+        // A line starting on the finite bound and rising into the infinite one: all ramp, the integral of t over [2, 4].
+        Assert.Equal(6.0f, integral_clamp_linear(0.0f, 1.0f, 2.0f, inf, 2.0f, 4.0f));
+    }
+
     [Fact]
     public void IntegralClampLinearHasExactValuesOnTheBinaryFloats()
     {

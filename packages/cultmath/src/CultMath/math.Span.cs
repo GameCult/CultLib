@@ -104,7 +104,9 @@ public static partial class math
     // line's value at the stretch's midpoint), and the stretch held at the far bound. b = 0 is the
     // constant clamp(a, lo, hi); t1 < t0 is the negative of the integral over [t1, t0]; lo above hi
     // clamps to hi everywhere, as clamp does. A crossing that overflows (b tiny) lies past the span and
-    // cuts nothing.
+    // cuts nothing. A held stretch contributes only when its length is positive, so an infinite bound
+    // (relu has hi = +inf) times a zero length never forms: the integral of a ramp clamped on one side
+    // only is finite.
     public static float integral_clamp_linear(float a, float b, float lo, float hi, float t0, float t1)
     {
         if (b == 0.0f)
@@ -120,7 +122,9 @@ public static partial class math
         var leave = clamp(max(atLo, atHi), start, stop);
         var before = b > 0.0f ? lo : hi;
         var after = b > 0.0f ? hi : lo;
-        var total = before * (enter - start) + (a + b * (0.5f * (enter + leave))) * (leave - enter) + after * (stop - leave);
+        var held = enter > start ? before * (enter - start) : 0.0f;
+        var kept = stop > leave ? after * (stop - leave) : 0.0f;
+        var total = held + (a + b * (0.5f * (enter + leave))) * (leave - enter) + kept;
         return direction * total;
     }
 }
