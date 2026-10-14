@@ -5,11 +5,16 @@
 //! fails one named test. Values are built, encoded, compared and dropped on a large thread; only
 //! the decode runs on the small one.
 
+use cultcache_rs::CacheBackingStore;
+use cultcache_rs::CultCacheEnvelope;
+use cultcache_rs::CultCacheStoreUnreadable;
+use cultcache_rs::CultCacheStoreUnreadableKind;
 use cultcache_rs::CultSlots;
 use cultcache_rs::CultUnion;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
 use cultcache_rs::MAX_RECORD_INLINE_BYTES;
 use cultcache_rs::PayloadTooDeep;
+use cultcache_rs::RedbMessagePackBackingStore;
 use cultcache_rs::SingleFileMessagePackBackingStore;
 use cultcache_rs::check_payload_depth;
 use cultcache_rs::decode_payload;
@@ -355,25 +360,105 @@ fn the_largest_record_at_the_limit_decodes_on_every_thread_size() {
     });
 }
 
+/// One stored envelope, `{key: "k", type: "t", payload: bin[1], storedAt: "s", extra: [[[...]]]}`,
+/// whose unknown key nests 1000 containers deep and is skipped without a payload walk.
+fn deep_envelope() -> Vec<u8> {
+    let mut bytes = vec![0x85];
+    for (name, value) in [("key", &[0xa1, b'k'][..]), ("type", &[0xa1, b't']), ("payload", &[0xc4, 1, 1]), ("storedAt", &[0xa1, b's'])] {
+        bytes.push(0xa0 | name.len() as u8);
+        bytes.extend(name.as_bytes());
+        bytes.extend(value);
+    }
+    bytes.extend([0xa5, b'e', b'x', b't', b'r', b'a']);
+    bytes.extend(std::iter::repeat_n(0x91u8, 999));
+    bytes.push(0x90);
+    bytes
+}
+
+fn fixstr(text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xa0 | text.len() as u8];
+    bytes.extend(text.as_bytes());
+    bytes
+}
+
 #[test]
 fn a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread() {
     in_child("a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread", || {
-        // [ {key: "k", type: "t", payload: bin[1], storedAt: "s", extra: [[[...]]]} ]: the envelope
-        // skips the unknown key, 1000 containers deep, with no payload walk (the bound is the payload's).
-        let mut bytes = vec![0x91, 0x85];
-        for (name, value) in [("key", &[0xa1, b'k'][..]), ("type", &[0xa1, b't']), ("payload", &[0xc4, 1, 1]), ("storedAt", &[0xa1, b's'])] {
-            bytes.push(0xa0 | name.len() as u8);
-            bytes.extend(name.as_bytes());
-            bytes.extend(value);
-        }
-        bytes.extend([0xa5, b'e', b'x', b't', b'r', b'a']);
-        bytes.extend(std::iter::repeat_n(0x91u8, 999));
-        bytes.push(0x90);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy.cc");
-        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(&path, [vec![0x91], deep_envelope()].concat()).unwrap();
         let entries = on_stack(256 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "k");
+    });
+}
+
+#[test]
+fn a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_256kib_thread() {
+    in_child("a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_256kib_thread", || {
+        // [header, [], [[key, schema, storedAt, payload, [[[...]]]]]]: the record's unknown fifth slot is
+        // skipped 1000 containers deep, then the record is refused.
+        let mut bytes = vec![0x93];
+        bytes.extend(fixstr("cultcache.store.v1"));
+        bytes.extend([0x90, 0x91, 0x95]);
+        for text in ["k", "s", "t"] {
+            bytes.extend(fixstr(text));
+        }
+        bytes.extend([0xc4, 1, 1]);
+        bytes.extend(std::iter::repeat_n(0x91u8, 999));
+        bytes.push(0x90);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v1.cc");
+        std::fs::write(&path, bytes).unwrap();
+        let error = on_stack(256 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap_err();
+        let unreadable = error.downcast_ref::<CultCacheStoreUnreadable>().expect("a typed refusal");
+        assert!(matches!(unreadable.kind, CultCacheStoreUnreadableKind::Undecodable));
+    });
+}
+
+/// A redb store holding the one deep envelope under its identity, `["t", "k"]`.
+fn redb_with_deep_row(path: &std::path::Path) {
+    let database = redb::Database::create(path).unwrap();
+    let write = database.begin_write().unwrap();
+    {
+        let mut table = write
+            .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("cultcache_envelopes"))
+            .unwrap();
+        table.insert([0x92, 0xa1, b't', 0xa1, b'k'].as_slice(), deep_envelope().as_slice()).unwrap();
+    }
+    write.commit().unwrap();
+}
+
+#[test]
+fn a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_1mib_thread() {
+    in_child("a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_1mib_thread", || {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rows.redb");
+        redb_with_deep_row(&path);
+        let entries = on_stack(1024 * KIB, move || RedbMessagePackBackingStore::new(path).unwrap().pull_all()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "k");
+    });
+}
+
+#[test]
+fn a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_1mib_thread() {
+    in_child("a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_1mib_thread", || {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("rows.redb");
+        redb_with_deep_row(&path);
+        let expected = CultCacheEnvelope {
+            key: "k".into(),
+            r#type: "t".into(),
+            payload: vec![1],
+            stored_at: "s".into(),
+            schema_id: None,
+        };
+        let replacement = CultCacheEnvelope { payload: vec![2], ..expected.clone() };
+        let swapped = on_stack(1024 * KIB, move || {
+            RedbMessagePackBackingStore::new(path).unwrap().compare_and_swap_entry(&expected, replacement)
+        })
+        .unwrap();
+        assert!(swapped);
     });
 }
