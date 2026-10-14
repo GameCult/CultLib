@@ -1020,6 +1020,73 @@ namespace GameCult.Caching.Tests
             Assert.That(HeaderOf(replaced), Is.EqualTo("cultcache.store.v1"));
         }
 
+        // Commits one plain item through a cache over `path` and reports how many copied records that write decoded to ask whether
+        // they hold an element id, and the header it left.
+        private (int Decoded, string Header) CommitItemCountingDecodes(string path, params Type[] types)
+        {
+            var registry = CultDocumentRegistry.ForTypes(types);
+            var store = new SingleFileMessagePackBackingStore(path);
+            using var cache = new CultCache(registry, CultCacheMessagePack.CreateCodec(registry));
+            cache.AddBackingStore(store);
+            cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+            store.CopiedRecordsDecoded = 0;
+            cache.Commit(batch => batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "p" }, new CultRecordKey("p")));
+            return (store.CopiedRecordsDecoded, HeaderOf(path));
+        }
+
+        // The copy check decodes a record only where the answer can change: each gate, removed, makes one of these counts wrong.
+        [Test]
+        public void TheCopyCheckDecodesOnlyWhatCouldMarkTheStore()
+        {
+            // A v3 header is already marked: nothing to decide.
+            var marked = PathOf("gate-marked.cc");
+            WritePreIdStore(marked, null, ("a", "a", 1), ("b", "b", 1), ("c", "c", 1));
+            var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(marked));
+            snapshot.FormatVersion = CultPersistedStoreSnapshot.FormatV3;
+            File.WriteAllBytes(marked, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+            Assert.That(CommitItemCountingDecodes(marked, typeof(IdDeck), typeof(PreCut2FixtureItem)), Is.EqualTo((0, "cultcache.store.v3")), "a marked store decodes nothing");
+
+            // Records whose type reaches no object list can hold no id.
+            var noLists = PathOf("gate-no-lists.cc");
+            using (var seed = OpenWith(noLists, false, typeof(PreCut2FixtureItem)))
+            {
+                foreach (var key in new[] { "x", "y", "z" })
+                    UpsertPlain(seed, key);
+            }
+
+            Assert.That(CommitItemCountingDecodes(noLists, typeof(PreCut2FixtureItem)), Is.EqualTo((0, "cultcache.store.v1")), "a type with no object list is not decoded");
+
+            // A written record that holds an id already marks the store.
+            var stagedPath = PathOf("gate-staged.cc");
+            WritePreIdStore(stagedPath, null, ("a", "a", 1), ("b", "b", 1), ("c", "c", 1));
+            var stagedStore = new SingleFileMessagePackBackingStore(stagedPath);
+            using (var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry)))
+            {
+                cache.AddBackingStore(stagedStore);
+                cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
+                stagedStore.CopiedRecordsDecoded = 0;
+                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("fresh"), new CultRecordKey("fresh")));
+            }
+
+            Assert.That(stagedStore.CopiedRecordsDecoded, Is.EqualTo(0), "a staged record holding an id marks without asking");
+            Assert.That(HeaderOf(stagedPath), Is.EqualTo("cultcache.store.v3"));
+
+            // Id-capable records without ids: each is decoded once, and the store stays unmarked.
+            var capable = PathOf("gate-capable.cc");
+            WritePreIdStore(capable, null, ("a", "a", 1), ("b", "b", 1), ("c", "c", 1));
+            Assert.That(CommitItemCountingDecodes(capable, typeof(IdDeck), typeof(PreCut2FixtureItem)), Is.EqualTo((3, "cultcache.store.v1")));
+
+            // A record the writer's registry does not claim is foreign: no type, no decode.
+            var foreign = PathOf("gate-foreign.cc");
+            WritePreIdStore(foreign, null, ("a", "a", 1), ("b", "b", 1), ("c", "c", 1));
+            Assert.That(CommitItemCountingDecodes(foreign, typeof(PreCut2FixtureItem)), Is.EqualTo((0, "cultcache.store.v1")), "a foreign record is not decoded");
+
+            // A variant is copied as its bytes: only a C# write of one holding ids marks the store, and that write marked it already.
+            var variant = PathOf("gate-variant.cc");
+            WriteV2StoreWithAnIdLessVariant(variant);
+            Assert.That(CommitItemCountingDecodes(variant, typeof(IdDeck), typeof(PreCut2FixtureItem)), Is.EqualTo((1, "cultcache.store.v2")), "the plain base is decoded, the variant is not");
+        }
+
         // Soul's probe: a C1 v2 store whose variant override holds no ids. Loading mints them in memory; the store keeps the delta
         // it read, so the file holds none and no write of a plain record beside it may mark the file.
         private static void WriteV2StoreWithAnIdLessVariant(string path)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using FluentAssertions;
@@ -170,5 +171,90 @@ public sealed class CultMeshSingleFileElementIdTests
             ReadOnly = true
         });
         cache.Get<CultMeshBodyPublicationDocument>(Key)!.Representations.Select(entry => entry.Id).Should().Equal(first);
+    }
+
+    // cultcache-py's record (tests/vectors/numeric-leaves/py-store/leaf-record.cc): v1 header, 12-hex element ids on its list. This
+    // assembly reads it through the same schema id with the two slots it needs; the member layout is narrower than the writer's.
+    [CultDocument("cultcache.leaf-record", "cultcache.leaf_record.v1")]
+    [MessagePackObject]
+    public sealed class MeshLeaf
+    {
+        [Key(0)] [CultName] public string Id { get; set; } = "";
+        [Key(12)] public List<MeshLeafItem> Items { get; set; } = new();
+    }
+
+    [MessagePackObject]
+    public sealed class MeshLeafItem
+    {
+        [Key(0)] public string N { get; set; } = "";
+        [Key(1)] public float W { get; set; }
+        [Key(2)] [CultElementId] public string Id { get; set; } = "";
+    }
+
+    private static readonly string[] PythonIds = { "000000000021", "000000000022" };
+
+    private string PythonStore()
+    {
+        string? vectors = null;
+        for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null && vectors == null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "tests", "vectors", "numeric-leaves", "py-store", "leaf-record.cc");
+            if (File.Exists(candidate)) vectors = candidate;
+        }
+
+        vectors.Should().NotBeNull("the shared vectors sit above the test directory");
+        var path = Path_("leaf-record.cc");
+        File.Copy(vectors!, path);
+        HeaderOf(path).Should().Be("cultcache.store.v1", "cultcache-py leaves the header unmarked");
+        return path;
+    }
+
+    private static CultDocumentRegistry Registry(params Type[] types) => CultDocumentRegistry.ForTypes(types);
+
+    // A CultMesh write is a writer with a type: it decides for the copied record from the bytes the file holds, whatever any
+    // earlier read saw (a fresh store per call has read nothing).
+    [Test]
+    public void ACultMeshWriteThatCopiesAPythonRecordHoldingIdsMarksTheStore()
+    {
+        var path = PythonStore();
+
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(MeshLeaf), typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v3");
+        CultMesh.ReadSingleFileDocument<MeshLeaf>(path, new CultRecordKey("py")).Items.Select(item => item.Id).Should().Equal(PythonIds);
+    }
+
+    // Soul s1 P8, committed: the writer's registry has only the type it writes, so the python record is foreign to it and it
+    // decides nothing for it (variants:question:non-csharp-writers-mark-ids-2).
+    [Test]
+    public void ACultMeshWriteWhoseRegistryLacksTheRecordsTypeDecidesNothingForIt()
+    {
+        var path = PythonStore();
+
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
+    // A raw payload is opaque by design: it attaches no registry and decides nothing, even beside a record it could have read.
+    [Test]
+    public void ARawCultMeshWriteBesideAPythonRecordHoldingIdsLeavesTheHeaderAlone()
+    {
+        var path = PythonStore();
+
+        CultMesh.WriteSingleFileDocumentPayload(path, RawKey, new CultMeshSingleFileDocumentSchema("raw:schema", "RawSchema", "1"), null, new byte[] { 0x90 });
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
+    // The check only marks: a typed write over a store already marked does not look at, and cannot drop, the mark.
+    [Test]
+    public void ATypedWriteBesideARecordThatHoldsNoIdKeepsTheStoreUnmarked()
+    {
+        var path = Path_("plain.cc");
+        CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+        CultMesh.WriteSingleFileDocument(path, new CultRecordKey("second"), Publication(), registry: Registry(typeof(CultMeshBodyPublicationDocument)));
+
+        HeaderOf(path).Should().Be("cultcache.store.v1");
     }
 }
