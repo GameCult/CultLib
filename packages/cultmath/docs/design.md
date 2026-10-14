@@ -764,12 +764,29 @@ radius is small and the axis carries the variation. `af_fbm` compounds octaves
 as `iv_fbm_ball` does. The float32 evaluation allowance is derived in
 `af_snoise`'s comment.
 
-`SNOISE_HESSIAN = 56.050385` is 1.10 times the refined maximum of the spectral
+`SNOISE_HESSIAN = 55.642143` is 1.10 times the refined maximum of the spectral
 norm of the Hessian of `snoise(float3)`, measured by
-`NoiseBoundTests.MeasureHessian` over 1e6 seeded points (central differences of
-`snoise_grad`) and refined by ascent from the 1e4 largest: sampled 50.1366,
-refined 50.9549, witness (-245.19885, -53.01323, -91.47363).
+`NoiseBoundTests.MeasureHessian` over 1e6 seeded points (the analytic
+`snoise_hessian`, below) and refined by ascent from the 1e4 largest: refined
+maximum 50.5838. The central differences of `snoise_grad` that an earlier pin
+used read 50.955 at h = 1e-3, their roundoff.
 `HessianConstantPinsSampledCurvature` fails on a 1% move.
+`snoise_hessian(float3)` (`math.Span.cs`) is the analytic Hessian of `snoise`: a
+symmetric `float3x3` on the same lattice, hash and tie order as `snoise_grad`,
+differentiating each corner's gradient `-8 m^3 s x + m^4 p` once more. Each
+off-diagonal entry is computed once and placed twice, so the matrix equals its
+transpose bit for bit, and a clamped corner (`m = 0`) contributes nothing. Built
+from nine scalars, the matrix reads as columns in GLSL (`mat3`) and rows in HLSL,
+which is the same matrix because it is symmetric. `SNOISE_THIRD = 536.9152`
+(`math.Span.cs`) is the next order: 1.10 times the maximum, over 1e6 seeded points,
+of the operator norm of the third-derivative tensor of `snoise` (central
+differences of `snoise_hessian` at h = 1e-3, then an ascent over unit vectors),
+refined from the 1e4 largest; measured 488.1047 on the tied kernel.
+`MeasureThird` takes the measurement and `ThirdConstantPinsSampled` pins it.
+`integral_clamp_linear(a, b, lo, hi, t0, t1)` is the closed-form integral over
+`[t0, t1]` of `clamp(a + b t, lo, hi)`. All three have HLSL and GLSL lowerings and
+`glsl-parity.json` fixture families (`snoise_hessian`, `integral_clamp_linear`; the
+`af_snoise` and `af_fbm` families are regenerated for the re-pin).
 `SNOISE2_LIPSCHITZ = 8.117002` is the same for the gradient of `snoise(float2)`
 (`MeasureLipschitz2`: sampled 7.2575, refined 7.3791, witness (-67.12454,
 -129.53296), `|snoise2|` at most 0.99964), and it backs `iv_snoise_ball(float2,
@@ -779,7 +796,7 @@ curvature constant 20% low, so `SNOISE_HESSIAN` is defended by
 (`af_snoise` at the point where the curvature is realised, along 4,000 directions: a
 constant of 40 misses there). The margin over the function itself: a scan of the whole
 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
-independently over every hash configuration gives 52.22, so 56.05 sits 7% above the
+independently over every hash configuration gives 52.22, so 55.64 sits 7% above the
 configuration bound. A change to the kernels must re-run the measurements.
 
 The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
