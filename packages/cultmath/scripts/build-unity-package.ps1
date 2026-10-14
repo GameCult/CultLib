@@ -86,7 +86,9 @@ $requiredTemplateFiles = @(
   "Shaders\CultMath.Interval.hlsl",
   "Shaders\CultMath.Interval.hlsl.meta",
   "Shaders\CultMath.Affine.hlsl",
-  "Shaders\CultMath.Affine.hlsl.meta"
+  "Shaders\CultMath.Affine.hlsl.meta",
+  "Shaders\CultMath.Cycles.hlsl",
+  "Shaders\CultMath.Cycles.hlsl.meta"
 )
 foreach ($relativePath in $requiredTemplateFiles) {
   if (-not (Test-Path -LiteralPath (Join-Path $templateRoot $relativePath) -PathType Leaf)) {

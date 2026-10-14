@@ -67,6 +67,7 @@ public sealed class HlslMirrorTests
     [InlineData("CultMath.Phacelle.hlsl")]
     [InlineData("CultMath.Interval.hlsl")]
     [InlineData("CultMath.Affine.hlsl")]
+    [InlineData("CultMath.Cycles.hlsl")]
     public void UnityPackageShaderIsIdenticalToTheCanonicalShader(string name)
     {
         var root = GetCultMathRoot();

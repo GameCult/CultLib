@@ -137,7 +137,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(67, compared.Count);
+        Assert.Equal(118, compared.Count);
     }
 
     /// <summary>
@@ -433,7 +433,7 @@ public sealed class HlslSourceCompatibilityTests
         return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + source + "\n}\n";
     }
 
-    private static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
+    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
     {
         var hlsl = ReadShaderSource(FindCultMathRoot());
         var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl));

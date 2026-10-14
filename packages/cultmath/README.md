@@ -33,9 +33,20 @@ shader semantics.
 - `shaders/CultMath.hlsl`, a canonical HLSL mirror include for shader-side
   parity. HLSL already owns `float2`, `float3`, and `float4`; the include
   exposes `cultmath_*` functions for shared semantics HLSL does not provide.
-  It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0) and
+  It includes `shaders/CultMath.Phacelle.hlsl` (MPL-2.0),
+  `shaders/CultMath.Cycles.hlsl` (Apache-2.0) and
   `shaders/CultMath.Interval.hlsl` and `shaders/CultMath.Affine.hlsl` from the same
-  directory, so ship all four.
+  directory, so ship all five.
+- Cycles node semantics (Apache-2.0): `cycles_*` functions that compute what
+  Blender's Cycles renderer computes for the Math node operations whose results
+  differ from a plain intrinsic (`cycles_divide`, `cycles_power`, `cycles_modulo`,
+  `cycles_wrap`, `cycles_pingpong`, `cycles_smooth_min`, ...), Map Range
+  (`cycles_map_range_linear`, `_stepped`, `_smoothstep`, `_smootherstep`), Clamp
+  (`cycles_clamp_minmax`, `cycles_clamp_range`), Mix (`cycles_mix_float`,
+  `cycles_mix_vector` and every colour blend mode as `cycles_mix_<mode>`), RGB to BW,
+  and `cycles_ramp_index`, where a Color Ramp reads its table. `cultmath_cycles_*` in
+  HLSL and GLSL. Operands are finite floats, and the tests hold every function to
+  the results of Blender 5.2.2's own CPU Cycles (`tools/cycles-oracle`).
 - interval arithmetic for culling empty space: `iv_*` functions
   over `float2(lo, hi)` (`iv_add`, `iv_mul`, `iv_exp`, `iv_smoothstep`, ...)
   and `iv_snoise_ball`/`iv_fbm_ball`, which bound `snoise` and `fbm_grad` over a
@@ -58,11 +69,14 @@ shader semantics.
 - `shaders/CultMath.glsl` (MIT), the same `cultmath_*` library in GLSL ES 3.00
   for WebGL2, generated from `CultMath.hlsl` (never edited by hand), and
   `shaders/CultMath.Phacelle.glsl` (MPL-2.0), generated from
-  `CultMath.Phacelle.hlsl`, which holds `cultmath_phacelle` alone. GLSL has no
+  `CultMath.Phacelle.hlsl`, which holds `cultmath_phacelle` alone, and
+  `shaders/CultMath.Cycles.glsl` (Apache-2.0), generated from
+  `CultMath.Cycles.hlsl`, which holds the `cultmath_cycles_*` functions. GLSL has no
   `#include`: a WebGL consumer concatenates `CultMath.glsl` after its own
   `#version 300 es` line and `precision highp float; precision highp int;`
   (the library declares no precision, and its hashes need 32-bit integers),
-  then `CultMath.Phacelle.glsl` only if it calls `cultmath_phacelle`, then its
+  then `CultMath.Phacelle.glsl` only if it calls `cultmath_phacelle` and
+  `CultMath.Cycles.glsl` only if it calls a `cultmath_cycles_` function, then its
   own shader source.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
