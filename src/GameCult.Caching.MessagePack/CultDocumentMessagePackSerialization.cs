@@ -38,11 +38,23 @@ public static class CultDocumentMessagePackSerialization
     private const int SchemaCatalogMemberFieldCount = 8;
     private const int StoreSnapshotFieldCount = 3;
 
-    public static readonly MessagePackSerializerOptions Options = Compose(Array.Empty<IFormatterResolver>());
+    private static readonly (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Plain = Compose(Array.Empty<IFormatterResolver>());
 
-    private static readonly ConcurrentDictionary<Assembly, MessagePackSerializerOptions> AssemblyOptions = new();
+    public static readonly MessagePackSerializerOptions Options = Plain.Options;
 
-    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly)
+    // Per assembly: the options a document type's bytes are written with, and the resolvers composed ahead of
+    // StandardResolver, the ones that can claim a type before its [Key] layout does.
+    private static readonly ConcurrentDictionary<Assembly, (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead)> AssemblyOptions = new();
+
+    // Per document type: why its element ids cannot reach disk under the composed resolvers, or null. Types and resolvers
+    // are fixed for the process, so this is a cache of a pure answer.
+    private static readonly ConcurrentDictionary<Type, string?> DocumentProblems = new();
+
+    private static readonly MethodInfo GetFormatterMethod = typeof(IFormatterResolver).GetMethod(nameof(IFormatterResolver.GetFormatter))!;
+
+    public static MessagePackSerializerOptions OptionsFor(Assembly documentAssembly) => ComposedFor(documentAssembly).Options;
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) ComposedFor(Assembly documentAssembly)
     {
         if (documentAssembly == null) throw new ArgumentNullException(nameof(documentAssembly));
         return AssemblyOptions.GetOrAdd(documentAssembly, static assembly =>
@@ -50,19 +62,46 @@ public static class CultDocumentMessagePackSerialization
             var resolvers = assembly.GetCustomAttributes<CultCacheFormatterResolverAttribute>()
                 .Select(attribute => CreateResolver(attribute.ResolverType))
                 .ToArray();
-            return resolvers.Length == 0 ? Options : Compose(resolvers);
+            return resolvers.Length == 0 ? Plain : Compose(resolvers);
         });
     }
 
-    private static MessagePackSerializerOptions Compose(IFormatterResolver[] consumerResolvers)
+    // The options a document's bytes are written and read with. A document's list elements carry their ids by their [Key]
+    // layout, so a resolver ahead of StandardResolver that formats a type on the way to those lists would write them
+    // without the id: refused here, once per document type, on every encode and decode path.
+    internal static MessagePackSerializerOptions OptionsForDocument(Type documentType)
+    {
+        if (documentType == null) throw new ArgumentNullException(nameof(documentType));
+        var (options, ahead) = ComposedFor(documentType.Assembly);
+        var problem = DocumentProblems.GetOrAdd(documentType, type => ResolverClaim(type, ahead));
+        return problem == null ? options : throw new InvalidOperationException(problem);
+    }
+
+    private static string? ResolverClaim(Type documentType, IFormatterResolver[] ahead)
+    {
+        foreach (var type in CultElementIds.Inspect(documentType).IdPath)
+        {
+            var generic = GetFormatterMethod.MakeGenericMethod(type);
+            foreach (var resolver in ahead)
+            {
+                if (generic.Invoke(resolver, null) != null)
+                    return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout or keep it out of the document's lists.";
+            }
+        }
+
+        return null;
+    }
+
+    private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Compose(IFormatterResolver[] consumerResolvers)
     {
         // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
         // resolver still encodes an arm while the key check runs.
-        var inner = CompositeResolver.Create(
-            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).Append(StandardResolver.Instance).ToArray());
-        return MessagePackSerializerOptions.Standard
+        var ahead = consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).ToArray();
+        var inner = CompositeResolver.Create(ahead.Append(StandardResolver.Instance).ToArray());
+        var options = MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(new CultUnionGuard(inner), inner))
             .WithSecurity(CultMessagePackSecurity.Instance);
+        return (options, ahead);
     }
 
     private static IFormatterResolver CreateResolver(Type resolverType)
@@ -84,7 +123,7 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null) registry.GetRequired(type);
-        var payload = MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        var payload = MessagePackSerializer.Serialize(type, value, OptionsForDocument(type));
         CultPayloadDepth.Check(payload, type, PayloadDirection.Write);
         return payload;
     }
@@ -99,7 +138,7 @@ public static class CultDocumentMessagePackSerialization
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         registry.GetRequired(type);
         CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
-        return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
+        return MessagePackSerializer.Deserialize(type, payload, OptionsForDocument(type))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }
 

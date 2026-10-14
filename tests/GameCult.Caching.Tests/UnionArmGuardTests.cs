@@ -20,7 +20,7 @@ namespace GameCult.Caching.Tests
     {
         private const string Canary = "CANARY-9d1e47";
 
-        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc), typeof(ShapeDoc) });
+        private static readonly CultDocumentRegistry Registry = CultDocumentRegistry.ForTypes(new[] { typeof(GuardDoc), typeof(ShapeDoc), typeof(StubDoc) });
 
         private delegate void Emit(ref MessagePackWriter writer);
 
@@ -246,13 +246,87 @@ namespace GameCult.Caching.Tests
         [Test]
         public void ConsumerResolverStillEncodesArms()
         {
-            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(new GuardDoc { Id = "d1", Root = new StubArm() }, typeof(GuardDoc), Registry);
-            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(Doc((ref MessagePackWriter w) =>
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(new StubDoc { Id = "d1", Root = new StubArm() }, typeof(StubDoc), Registry);
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(Raw((ref MessagePackWriter w) =>
             {
+                w.WriteArrayHeader(2); w.Write("d1");
                 w.WriteArrayHeader(2); w.Write(9); w.WriteArrayHeader(1); w.Write("via-resolver");
             }))));
-            var back = (GuardDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(GuardDoc), bytes, Registry);
+            var back = (StubDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(StubDoc), bytes, Registry);
             Assert.That(back.Root, Is.TypeOf<StubArm>());
+        }
+
+        // A list element is written by its [Key] layout or its id never reaches disk: a consumer resolver that claims the arm of
+        // a list's union is refused on every path that encodes or decodes the document, naming the arm and the resolver, and
+        // writes nothing.
+        [Test]
+        public void ListElementsClaimedByAResolverAreRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(ClaimDoc) });
+            var doc = new ClaimDoc { Id = "c1", Items = { new ClaimArm { N = 4 } } };
+            void Refused(TestDelegate attempt)
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(attempt)!;
+                Assert.That(thrown.Message, Does.Contain("ClaimArm").And.Contain(nameof(ClaimArmResolver)).And.Contain(nameof(ClaimDoc)));
+            }
+
+            Refused(() => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ClaimDoc), registry));
+            var held = Raw((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("c1"); w.WriteArrayHeader(0); });
+            Refused(() => CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ClaimDoc), held, registry));
+            Refused(() => CultCacheMessagePack.CreateCodec(registry).Serialize(doc.Items, typeof(List<ClaimNode>), typeof(ClaimDoc)));
+
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Path.Combine(scratch, "claim.cc");
+                using var cache = CultCacheMessagePack.Create(path, new CultCacheOpenOptions { Registry = registry });
+                Assert.That(Assert.Catch(() => cache.Commit(batch => batch.Upsert(typeof(ClaimDoc), doc, new CultRecordKey("c1"))))!.ToString(),
+                    Does.Contain(nameof(ClaimArmResolver)));
+                Assert.That(File.Exists(path), Is.False, "nothing reached disk");
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        [Union(0, typeof(ClaimArm))]
+        public abstract class ClaimNode { }
+
+        [MessagePackObject]
+        public sealed class ClaimArm : ClaimNode
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.claim_doc", "tests.claim_doc.v1")]
+        [MessagePackObject]
+        public sealed class ClaimDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ClaimNode> Items = new();
+        }
+
+        public sealed class ClaimArmResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ClaimArmResolver();
+            public IMessagePackFormatter<T>? GetFormatter<T>() => typeof(T) == typeof(ClaimArm) ? (IMessagePackFormatter<T>)(object)new ClaimFormatter() : null;
+
+            private sealed class ClaimFormatter : IMessagePackFormatter<ClaimArm>
+            {
+                public void Serialize(ref MessagePackWriter writer, ClaimArm value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(1);
+                    writer.Write(value.N);
+                }
+
+                public ClaimArm Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.ReadArrayHeader();
+                    return new ClaimArm { N = reader.ReadInt32() };
+                }
+            }
         }
 
         // The guard wraps the composite, so the composite's own order is still the contract: a consumer resolver outranks the
@@ -568,7 +642,7 @@ namespace GameCult.Caching.Tests
         }
 
         // An arm is [key, armSlots]; the keys here start at 3, skip 0-2, 4, 6 and 7, and never reuse a retired key.
-        [Union(3, typeof(Leaf)), Union(5, typeof(Branch)), Union(8, typeof(Unit8)), Union(9, typeof(StubArm))]
+        [Union(3, typeof(Leaf)), Union(5, typeof(Branch)), Union(8, typeof(Unit8)), Union(9, typeof(Nine))]
         public abstract class GuardNode { }
 
         [MessagePackObject]
@@ -592,11 +666,25 @@ namespace GameCult.Caching.Tests
 
         [MessagePackObject] public sealed class Unit8 : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
 
+        [MessagePackObject] public sealed class Nine : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+
         // A subtype the union does not name.
         [MessagePackObject] public sealed class Rogue : GuardNode { [Key(0)] public string Note = string.Empty; }
 
-        // Written and read by a consumer resolver, not by MessagePack.
-        public sealed class StubArm : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+        // Written and read by a consumer resolver, not by MessagePack. It can only sit outside a list: a list element is written
+        // by its [Key] layout, or its id never reaches disk (ListElementsClaimedByAResolverAreRefused).
+        [Union(9, typeof(StubArm))]
+        public abstract class StubNode { }
+
+        public sealed class StubArm : StubNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
+
+        [CultDocument("tests.stub_doc", "tests.stub_doc.v1")]
+        [MessagePackObject]
+        public sealed class StubDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public StubNode? Root;
+        }
 
         public sealed class StubArmResolver : IFormatterResolver
         {

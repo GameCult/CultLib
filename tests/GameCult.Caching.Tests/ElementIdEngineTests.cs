@@ -290,11 +290,70 @@ namespace GameCult.Caching.Tests
             Assert.That(Assert.Throws<CultElementIdException>(() => Assign(twice, "r", deterministic: false))!.Message, Does.Contain("'5'"));
         }
 
+        // A list element is written by its [Key] layout or its id never reaches disk. A union arm without [MessagePackObject]
+        // is written by some other formatter; a list of a type that is not keyed at all is a value list, replaced whole.
+        [Test]
+        public void ANonKeyedArmOfAListUnionIsRefusedAtRegistration()
+        {
+            var problem = Problems(typeof(HUnkeyedArmList)).Single();
+            Assert.That(problem, Does.Contain("UnkeyedArm").And.Contain("formatter the cache does not own").And.Contain("HUnkeyedArmList"));
+            Assert.That(Problems(typeof(HUnkeyedArmField)), Is.Empty, "the same union as a field has no element id to lose");
+            Assert.That(Problems(typeof(HValueList)), Is.Empty, "a list of a non-keyed type is a value list");
+        }
+
+        [Test]
+        public void AFormatterAttributeOnTheIdPathIsRefused()
+        {
+            Assert.That(Problems(typeof(HFormattedElement)).Single(), Does.Contain("FormattedElement").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedList)).Single(), Does.Contain("Items").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedId)).Single(), Does.Contain("Id").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedOwner)).Single(), Does.Contain("FormattedOwner").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedMember)).Single(), Does.Contain("Inner").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HFormattedField)), Is.Empty, "a formatted type with no list below it is a field");
+        }
+
+        // The id path is a fixed point, not the stack at the moment a list is found: a type in a cycle with the list's owner, and
+        // a type reached twice, are both on the way to it.
+        [Test]
+        public void TheIdPathHoldsEveryTypeThatReachesAnObjectList()
+        {
+            var path = CultElementIds.Inspect(typeof(HDiamond)).IdPath;
+            Assert.That(path, Is.EquivalentTo(new[] { typeof(HDiamond), typeof(HLeft), typeof(HRight), typeof(HCycle), typeof(HCycleBack), typeof(EIded) }));
+            Assert.That(CultElementIds.Inspect(typeof(HFine)).IdPath, Is.EquivalentTo(new[] { typeof(HFine), typeof(ENest), typeof(EIded) }));
+            Assert.That(CultElementIds.Inspect(typeof(HFormattedField)).IdPath, Is.Empty);
+        }
+
         // ---- shapes ----
         [MessagePackObject] public class EBare { [Key(0)] public string X { get; set; } = ""; }
         [MessagePackObject] public class EIded { [Key(0)] public string X { get; set; } = ""; [Key(1)] [CultElementId] public string Id { get; set; } = ""; }
         [MessagePackObject] public class ENest { [Key(0)] [CultElementId] public string Id { get; set; } = ""; [Key(1)] public List<EIded> Sub { get; set; } = new(); }
         [MessagePackObject] public class EBareNest { [Key(0)] [CultElementId] public string Id { get; set; } = ""; [Key(1)] public List<EBare> Sub { get; set; } = new(); }
+
+        public sealed class NoFormatter { }
+        public class UnkeyedArm : ArmBase { [Key(0)] public string Id { get; set; } = ""; }
+        [Union(0, typeof(KeyedArm)), Union(1, typeof(UnkeyedArm))] public abstract class ArmBase { }
+        [MessagePackObject] public class KeyedArm : ArmBase { [Key(0)] [CultElementId] public string Id { get; set; } = ""; }
+        [MessagePackObject] public class HUnkeyedArmList { [Key(0)] public List<ArmBase> Items { get; set; } = new(); }
+        [MessagePackObject] public class HUnkeyedArmField { [Key(0)] public ArmBase? Root { get; set; } }
+        public class PlainValue { public string X { get; set; } = ""; }
+        [MessagePackObject] public class HValueList { [Key(0)] public List<PlainValue> Items { get; set; } = new(); }
+
+        [MessagePackObject] [MessagePackFormatter(typeof(NoFormatter))] public class FormattedElement { [Key(0)] [CultElementId] public string Id { get; set; } = ""; }
+        [MessagePackObject] public class HFormattedElement { [Key(0)] public List<FormattedElement> Items { get; set; } = new(); }
+        [MessagePackObject] public class HFormattedList { [Key(0)] [MessagePackFormatter(typeof(NoFormatter))] public List<EIded> Items { get; set; } = new(); }
+        [MessagePackObject] public class FormattedIdElement { [Key(0)] [CultElementId] [MessagePackFormatter(typeof(NoFormatter))] public string Id { get; set; } = ""; }
+        [MessagePackObject] public class HFormattedId { [Key(0)] public List<FormattedIdElement> Items { get; set; } = new(); }
+        [MessagePackObject] [MessagePackFormatter(typeof(NoFormatter))] public class FormattedOwner { [Key(0)] public List<EIded> Items { get; set; } = new(); }
+        [MessagePackObject] public class HFormattedOwner { [Key(0)] public FormattedOwner Owner { get; set; } = new(); }
+        [MessagePackObject] public class HFormattedMember { [Key(0)] [MessagePackFormatter(typeof(NoFormatter))] public HHasIds Inner { get; set; } = new(); }
+        [MessagePackObject] [MessagePackFormatter(typeof(NoFormatter))] public class FormattedLeaf { [Key(0)] public int N { get; set; } }
+        [MessagePackObject] public class HFormattedField { [Key(0)] public FormattedLeaf Leaf { get; set; } = new(); [Key(1)] public List<string> Tags { get; set; } = new(); }
+
+        [MessagePackObject] public class HLeft { [Key(0)] public HCycle Cycle { get; set; } = new(); }
+        [MessagePackObject] public class HRight { [Key(0)] public HCycle Cycle { get; set; } = new(); }
+        [MessagePackObject] public class HCycle { [Key(0)] public HCycleBack Back { get; set; } = new(); }
+        [MessagePackObject] public class HCycleBack { [Key(0)] public HCycle? Up { get; set; } [Key(1)] public List<EIded> Items { get; set; } = new(); }
+        [MessagePackObject] public class HDiamond { [Key(0)] public HLeft Left { get; set; } = new(); [Key(1)] public HRight Right { get; set; } = new(); }
 
         [MessagePackObject] public class HList { [Key(0)] public List<EBare> Items { get; set; } = new(); }
         [MessagePackObject] public class HArray { [Key(0)] public EBare[] Items { get; set; } = Array.Empty<EBare>(); }

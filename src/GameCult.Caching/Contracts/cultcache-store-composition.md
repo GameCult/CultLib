@@ -294,6 +294,10 @@ exclusive open of the same lock file exclude each other is not established.
   for `X` that `Doc<X>` needs is declared in `Doc`'s assembly.
 - An assembly that declares nothing, and the store envelope, use the base
   options.
+- A resolver may not claim a type a document's element lists pass through: the list's
+  element types, the types and members on the way to them. Those are written by their
+  `[Key]` layout so each element's id reaches disk, and the codec refuses the document
+  on first encode or decode, naming the resolver and the type.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
 

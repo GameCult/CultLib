@@ -95,34 +95,52 @@ namespace GameCult.Caching
         internal sealed class Survey
         {
             public List<string> Problems { get; } = new();
+
+            // Every type whose bytes carry an element id: the types a walk descends through to reach an object list, the list's
+            // element types and every concrete type under them. A serialization codec must write all of these by their [Key]
+            // layout, so it checks them against the formatters it composed.
+            public List<Type> IdPath { get; } = new();
+        }
+
+        // What the walk saw, settled once it is complete: a type reaches a list only through types reached later, and a type
+        // can sit in a cycle, so the path is a fixed point over these edges and not a stack.
+        private sealed class Graph
+        {
+            public List<(Type Owner, MemberInfo? Member, Type Child)> Edges { get; } = new();
+            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete)> Lists { get; } = new();
         }
 
         // Every reason this document type cannot be registered under the id rule, one per offending concrete element type.
         internal static Survey Inspect(Type documentType)
         {
             var survey = new Survey();
-            VisitObject(documentType, documentType, new HashSet<Type>(), survey);
+            var graph = new Graph();
+            VisitObject(documentType, documentType, new HashSet<Type>(), survey, graph);
+            Settle(documentType, survey, graph);
             return survey;
         }
 
-        private static void VisitObject(Type documentType, Type type, HashSet<Type> seen, Survey survey)
+        private static void VisitObject(Type documentType, Type type, HashSet<Type> seen, Survey survey, Graph graph)
         {
             if (!seen.Add(type))
                 return;
             foreach (var (member, memberType) in KeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, seen, survey);
+                VisitMemberType(documentType, type, member, memberType, seen, survey, graph);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
-                VisitObject(documentType, union.SubType, seen, survey);
+            {
+                graph.Edges.Add((type, null, union.SubType));
+                VisitObject(documentType, union.SubType, seen, survey, graph);
+            }
         }
 
-        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, HashSet<Type> seen, Survey survey)
+        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
             if (IsLeaf(memberType))
                 return;
             if (DictionaryValueType(memberType) is { } valueType)
             {
-                VisitMemberType(documentType, owner, member, valueType, seen, survey);
+                VisitMemberType(documentType, owner, member, valueType, seen, survey, graph);
                 return;
             }
 
@@ -130,22 +148,80 @@ namespace GameCult.Caching
             {
                 if (IsObjectType(element))
                 {
-                    foreach (var concrete in ConcreteTypes(element))
+                    var concretes = ConcreteTypes(element).ToList();
+                    graph.Lists.Add((owner, member, element, concretes));
+                    foreach (var concrete in concretes)
                     {
-                        var problem = IdProblem(concrete);
+                        var problem = IsObjectType(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
                         if (problem != null)
                             survey.Problems.Add($"Cult document {documentType.Name}: list element type {concrete.Name} (in {owner.Name}.{member.Name}) {problem}");
                     }
 
-                    VisitObject(documentType, element, seen, survey);
+                    VisitObject(documentType, element, seen, survey, graph);
                 }
                 else
-                    VisitMemberType(documentType, owner, member, element, seen, survey);
+                    VisitMemberType(documentType, owner, member, element, seen, survey, graph);
                 return;
             }
 
             if (IsObjectType(memberType))
-                VisitObject(documentType, memberType, seen, survey);
+            {
+                graph.Edges.Add((owner, member, memberType));
+                VisitObject(documentType, memberType, seen, survey, graph);
+            }
+        }
+
+        private const string UnkeyedElementProblem =
+            "is written by a formatter the cache does not own, so its element id would never reach disk; mark it [MessagePackObject] with [Key] members, or keep it out of lists.";
+
+        // The id path: every type that reaches an object list, the list's element types and the concrete types under them.
+        // [MessagePackFormatter] on any of them, or on a member the walk descends through, would hand the bytes to a formatter
+        // that does not write the [Key] layout the id lives in.
+        private static void Settle(Type documentType, Survey survey, Graph graph)
+        {
+            var reaching = new HashSet<Type>(graph.Lists.Select(list => list.Owner));
+            var members = new List<MemberInfo>(graph.Lists.Select(list => list.Member));
+            for (var grew = true; grew;)
+            {
+                grew = false;
+                foreach (var (owner, member, child) in graph.Edges)
+                {
+                    if (!reaching.Contains(child))
+                        continue;
+                    if (member != null && !members.Contains(member))
+                        members.Add(member);
+                    grew |= reaching.Add(owner);
+                }
+            }
+
+            var path = new List<Type>();
+            void Add(Type type)
+            {
+                if (!path.Contains(type))
+                    path.Add(type);
+            }
+
+            foreach (var type in reaching)
+                Add(type);
+            foreach (var list in graph.Lists)
+            {
+                Add(list.Element);
+                foreach (var concrete in list.Concrete)
+                    Add(concrete);
+            }
+
+            foreach (var type in path)
+            {
+                survey.IdPath.Add(type);
+                if (type.IsDefined(typeof(MessagePackFormatterAttribute), true))
+                    survey.Problems.Add($"Cult document {documentType.Name}: {type.Name} is on the path to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute or keep this type out of the document's lists.");
+            }
+
+            foreach (var member in members)
+            {
+                if (member.IsDefined(typeof(MessagePackFormatterAttribute), true))
+                    survey.Problems.Add($"Cult document {documentType.Name}: {member.DeclaringType!.Name}.{member.Name} leads to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute.");
+            }
         }
 
         // The types an element can actually be: the element type itself when it can be instantiated, and every union subtype
@@ -177,6 +253,8 @@ namespace GameCult.Caching
             if (ids.Length > 1)
                 return $"has two [CultElementId] members ({ids[0].Name}, {ids[1].Name}); an element has one identity.";
             var id = ids[0];
+            if (id.IsDefined(typeof(MessagePackFormatterAttribute), true))
+                return $"declares [MessagePackFormatter] on its [CultElementId] member {id.Name}, so the id would not be written by its [Key].";
             if (TypeOf(id) != typeof(string))
                 return $"declares [CultElementId] on {id.Name}, which is not a string.";
             if (KeyOf(id) is not { } idKey)
