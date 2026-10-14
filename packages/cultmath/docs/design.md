@@ -834,6 +834,39 @@ interval, under the affine bound and under the oracle mask (one logarithmic
 scale) and the transmittance. Its run: 4.23, 3.60 and 2.02 cells per ray on
 average, 44 the most, mean transmittance 0.278.
 
+## Expressions
+
+`CultMath.Expr` holds a scalar SSA expression graph as a persisted value, a builder
+for it, and a C# evaluator.
+
+- **Graph (`ExprGraph`)**: a sealed immutable class. It has no name of its own; the
+  consumer record that holds it names it. Nodes are in topological order, an operand
+  names a lower node, and an edit builds a new graph. A persisted graph carries a
+  format version (1); one naming an unknown op, a newer format or a forward operand is
+  refused whole at decode. `ExprGraph.Create` is the one validator, run by the builder
+  and by decode.
+- **Node**: its index in the topological order. The builder hash-conses identical
+  (op, operands, constant bits) nodes and drops nodes no output reaches, so one
+  expression always builds the same bytes; any rebuild may renumber nodes.
+- **Port**: graph inputs vary per point, params are uniform per batch and carry a
+  default, outputs name a node. Names are `[A-Za-z_][A-Za-z0-9_]*`, unique per kind.
+  An op's operands are positional; a multi-result op (`cellular3`: nearest.xyzw,
+  edge.xyzw, id) is read only through `Pick`.
+- **Op vocabulary**: one table (`ExprOps`), a stable string per op, append-only.
+  Vector arguments are decomposed operands: `snoise2`, `snoise3`, `cellular3`. An op
+  calls its CultMath function; a function's value change is a Breaking release note.
+- **Evaluation**: `ExprEvaluator.Evaluate` runs the nodes in order through the table,
+  one IEEE single per op, so a result equals the direct composition of the same math
+  calls bit for bit. Params bind by name (`ExprBindings`): a missing name takes its
+  default and an unknown name is refused.
+- **Stencils** are substitution at build time (`ExprBuilder.Substitute`, Fidget's
+  `remap_xyz`): N substitutions of the position inputs combined by ops give an ordinary
+  flat graph. There is no loop construct.
+
+The MessagePack shape belongs to `GameCult.Caching.MessagePack` (`CultMathExprResolver`).
+Interval, affine and gradient evaluation over the graph, bytecode, the HLSL
+interpreter and pruning are not built.
+
 ## Rules
 
 - Keep type names HLSL-shaped: `float2`, `float3`, `float4`, `float3x3`, and `math`.
