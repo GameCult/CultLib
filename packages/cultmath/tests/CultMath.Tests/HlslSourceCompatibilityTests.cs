@@ -48,6 +48,42 @@ public sealed class HlslSourceCompatibilityTests
     // Mirror internals with no public C# math counterpart. Any other cultmath_* function must match one.
     private static readonly string[] MirrorOnly = { "cultmath_snoise_mod289", "cultmath_snoise_permute" };
 
+    // Shader constants with no C# twin of the same name (empty when every constant has one).
+    private static readonly string[] ConstantsWithoutTwin = Array.Empty<string>();
+
+    /// <summary>
+    /// Every static const of the compiled HLSL mirror (a public static literal CULTMATH_* field) is the
+    /// same float32, bit for bit, as the math constant of the same name without the prefix (private ones
+    /// included), so a pin edited in one runtime and not the other fails here whichever constant it is.
+    /// A constant with neither a twin nor a listing in ConstantsWithoutTwin fails too.
+    /// </summary>
+    [Fact]
+    public void EveryShaderConstantEqualsItsCSharpTwin()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shader = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var constants = shader.GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.Name.StartsWith("CULTMATH_", StringComparison.Ordinal))
+            .ToArray();
+        Assert.True(constants.Length >= 10, $"only {constants.Length} shader constants were found by reflection");
+        foreach (var constant in constants)
+        {
+            var name = constant.Name["CULTMATH_".Length..];
+            var twin = typeof(math).GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            if (twin is null)
+            {
+                Assert.True(ConstantsWithoutTwin.Contains(constant.Name), $"{constant.Name} has no math.{name} and is not listed in ConstantsWithoutTwin");
+                continue;
+            }
+
+            var shaderValue = (float)constant.GetRawConstantValue()!;
+            var mathValue = (float)twin.GetValue(null)!;
+            Assert.True(BitConverter.SingleToInt32Bits(shaderValue) == BitConverter.SingleToInt32Bits(mathValue),
+                $"{constant.Name} is {shaderValue:R} in the shader and math.{name} is {mathValue:R}");
+        }
+    }
+
     private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN };
 
     /// <summary>
