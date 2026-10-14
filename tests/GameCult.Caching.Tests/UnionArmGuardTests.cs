@@ -337,6 +337,63 @@ namespace GameCult.Caching.Tests
             Assert.That(back.Items.Single().Id, Is.EqualTo("000000000009"));
         }
 
+        // A consumer whose resolver composite ends in StandardResolverAllowPrivate (some models keep private [Key] members) gets
+        // that resolver's formatter for every keyed type. It writes the [Key] layout plus the private members, so it is no
+        // claim: the document encodes, the id is on disk, and the private value survives.
+        [Test]
+        public void AStandardResolverAllowPrivateFormatterIsNoClaim()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(ApDoc), typeof(ApPlainDoc) });
+            var doc = new ApDoc { Id = "a1", Items = { new ApArm { Id = "00000000000a", N = 4 }.WithSecret(11) } };
+
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ApDoc), registry);
+
+            var back = (ApDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(ApDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("00000000000a"));
+            Assert.That(back.Items.Single().Secret, Is.EqualTo(11), "a private plain-value [Key] member is written");
+
+            var plain = new ApPlainDoc { Id = "a2", Items = { new ApPlainArm { Id = "00000000000b", N = 5 } } };
+            var plainBytes = CultDocumentMessagePackSerialization.SerializeUntyped(plain, typeof(ApPlainDoc), registry);
+            Assert.That(Convert.ToHexString(plainBytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(plain, CultDocumentMessagePackSerialization.Options))));
+        }
+
+        [MessagePackObject]
+        public sealed class ApArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+            [Key(2)] private int secret;
+            [IgnoreMember] public int Secret => secret;
+            public ApArm WithSecret(int value)
+            {
+                secret = value;
+                return this;
+            }
+        }
+
+        [CultDocument("tests.ap_doc", "tests.ap_doc.v1")]
+        [MessagePackObject]
+        public sealed class ApDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ApArm> Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class ApPlainArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.ap_plain_doc", "tests.ap_plain_doc.v1")]
+        [MessagePackObject]
+        public sealed class ApPlainDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ApPlainArm> Items = new();
+        }
+
         [MessagePackObject]
         public sealed class LcArm
         {
@@ -400,6 +457,9 @@ namespace GameCult.Caching.Tests
                 if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
                 if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
                 if (typeof(T) == typeof(FbArm)) return global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(ApArm) || typeof(T) == typeof(ApDoc) || typeof(T) == typeof(List<ApArm>) ||
+                    typeof(T) == typeof(ApPlainArm) || typeof(T) == typeof(ApPlainDoc) || typeof(T) == typeof(List<ApPlainArm>))
+                    return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();
                 return null;
             }
 
