@@ -357,6 +357,46 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(plainBytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(plain, CultDocumentMessagePackSerialization.Options))));
         }
 
+        // StandardResolverAllowPrivate cannot always build a formatter (a private readonly [Key] field has no constructor to
+        // fill it). That is not an escape from the claim check: a resolver formatting such a type is refused like any other.
+        [Test]
+        public void AFormatterThatStandardResolverAllowPrivateCannotBuildStillClaims()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(ApRoDoc) });
+            var doc = new ApRoDoc { Id = "r1", Items = { new ApRoArm { Id = "00000000000c" } } };
+
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(ApRoDoc), registry))!;
+
+            Assert.That(thrown.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(ApRoArm)));
+        }
+
+        [MessagePackObject]
+        public sealed class ApRoArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] private readonly int fixedValue = 3;
+            [IgnoreMember] public int FixedValue => fixedValue;
+        }
+
+        [CultDocument("tests.ap_ro_doc", "tests.ap_ro_doc.v1")]
+        [MessagePackObject]
+        public sealed class ApRoDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<ApRoArm> Items = new();
+        }
+
+        private sealed class ApRoFormatter : IMessagePackFormatter<ApRoArm>
+        {
+            public void Serialize(ref MessagePackWriter writer, ApRoArm value, MessagePackSerializerOptions options) => writer.WriteNil();
+
+            public ApRoArm Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+            {
+                reader.Skip();
+                return new ApRoArm();
+            }
+        }
+
         [MessagePackObject]
         public sealed class ApArm
         {
@@ -457,6 +497,7 @@ namespace GameCult.Caching.Tests
                 if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
                 if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
                 if (typeof(T) == typeof(FbArm)) return global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(ApRoArm)) return (IMessagePackFormatter<T>)(object)new ApRoFormatter();
                 if (typeof(T) == typeof(ApArm) || typeof(T) == typeof(ApDoc) || typeof(T) == typeof(List<ApArm>) ||
                     typeof(T) == typeof(ApPlainArm) || typeof(T) == typeof(ApPlainDoc) || typeof(T) == typeof(List<ApPlainArm>))
                     return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();

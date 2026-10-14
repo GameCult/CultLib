@@ -567,8 +567,9 @@ namespace GameCult.Caching
 
         // The one recognition of what MessagePack writes for a declared type: registration, Plan, Holds and the codec's id path
         // all go through it. Inner is a map's value type, a sequence's element type, or the type itself for an owner.
-        //   Leaf      a value written whole that holds no element list: primitives, enums, strings, object (untyped on disk),
-        //             a struct with no [MessagePackObject] or [Union], and a class with neither.
+        //   Leaf      a value written whole that holds no element list: strings (an IEnumerable<char> MessagePack writes whole),
+        //             a struct, class or interface with no [MessagePackObject] or [Union] (primitives, enums, float2, DateTime,
+        //             and object, which is untyped on disk).
         //   Map       a class or interface implementing IDictionary<,> or IReadOnlyDictionary<,>.
         //   Sequence  an array or an IEnumerable<T>.
         //   Owner     a class, interface or struct MessagePack serializes by key. A keyed struct is walked as an owner; it is
@@ -576,7 +577,7 @@ namespace GameCult.Caching
         private static (Kind Kind, Type Inner) Classify(Type declared) => Classes.GetOrAdd(declared, static type =>
         {
             type = Nullable.GetUnderlyingType(type) ?? type;
-            if (type.IsPrimitive || type.IsEnum || type == typeof(string) || type == typeof(object))
+            if (type == typeof(string))
                 return (Kind.Leaf, type);
             if (type.IsValueType)
                 return IsKeyed(type) ? (Kind.Owner, type) : (Kind.Leaf, type);

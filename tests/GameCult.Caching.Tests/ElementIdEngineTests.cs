@@ -402,6 +402,21 @@ namespace GameCult.Caching.Tests
                 Is.EquivalentTo(new[] { typeof(HStructValues), typeof(List<EIded>), typeof(EIded) }), "a list of keyed structs is a value list");
             var values = new HStructValues { Structs = { new SValue { N = 1 } }, Objects = { new EIded() } };
             Assert.That(Assign(values, "r", deterministic: false), Is.EqualTo(1));
+
+            var nullable = new HNullableStructIded { Hold = new SHoldIded { Items = new List<EIded> { new EIded() } } };
+            Assert.That(Assign(nullable, "r", deterministic: false), Is.EqualTo(1), "a nullable struct is walked as its struct");
+            Assert.That(CultElementIds.Holds(typeof(HNullableStructIded), nullable), Is.True);
+        }
+
+        // A type is an owner or an element only when MessagePack serializes it by key ([MessagePackObject], inherited, or
+        // [Union]). A struct without either is a value however many [Key] members it carries.
+        [Test]
+        public void OnlyAKeyedTypeIsWalked()
+        {
+            Assert.That(Problems(typeof(HUnkeyedStruct)), Is.Empty);
+            Assert.That(CultElementIds.Inspect(typeof(HUnkeyedStruct)).IdPath, Is.Empty);
+            Assert.That(Problems(typeof(HInheritedBare)).Single(), Does.Contain("InheritedBare").And.Contain("[CultElementId]"),
+                "[MessagePackObject] reaches a subclass through inheritance");
         }
 
         // Every dictionary interface MessagePack writes as a map is walked by one path, and the minted path text is the one a
@@ -615,6 +630,11 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public struct SHold { [Key(0)] public List<EBare> Items; }
         [MessagePackObject] public struct SHoldIded { [Key(0)] public List<EIded> Items; }
         [MessagePackObject] public struct SValue { [Key(0)] public int N; }
+        public struct UnkeyedS { [Key(0)] public List<EBare> Items; }
+        [MessagePackObject] public class HUnkeyedStruct { [Key(0)] public UnkeyedS Value; }
+        public class InheritedBare : EBare { }
+        [MessagePackObject] public class HInheritedBare { [Key(0)] public List<InheritedBare> Items { get; set; } = new(); }
+        [MessagePackObject] public class HNullableStructIded { [Key(0)] public SHoldIded? Hold; }
         [MessagePackObject] public class HStruct { [Key(0)] public SHold Hold; }
         [MessagePackObject] public class HStructList { [Key(0)] public List<SHold> Holds { get; set; } = new(); }
         [MessagePackObject] public class HNullableStruct { [Key(0)] public SHold? Hold; }
