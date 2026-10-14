@@ -65,7 +65,7 @@ namespace GameCult.Caching.Tests
             return File.ReadAllBytes(path);
         }
 
-        // ---- the fixture: a recursive union, a unit arm, a union inside a record inside a union, a list of unions ----
+        // ---- the fixture: a recursive union, id-only arms, a union inside a record inside a union, a list of unions ----
 
         // Keys 0, 1, 2, 5 and 6: 3 and 4 are retired, so the key map is not sequential. Wrap is the +2 nesting step beside
         // Box's +3, so any container depth from 4 up is reachable exactly.
@@ -118,14 +118,14 @@ namespace GameCult.Caching.Tests
             [Key(1)] public Node? Body;
         }
 
-        // Floor and Ceiling are unit arms at the ends of the Int32 key domain.
+        // Floor and Ceiling are id-only arms at the ends of the Int32 key domain.
         [Union(0, typeof(Pending)), Union(1, typeof(Completed)), Union(2, typeof(Denied)),
          Union(int.MinValue, typeof(Floor)), Union(int.MaxValue, typeof(Ceiling))]
         public abstract class Outcome { }
 
         [MessagePackObject] public sealed class Pending : Outcome { [Key(0)] public string Message = string.Empty; [Key(1)] [CultElementId] public string Id = string.Empty; }
         [MessagePackObject] public sealed class Completed : Outcome { [Key(0)] public int SourceVersion; [Key(1)] [CultElementId] public string Id = string.Empty; }
-        // The arms of a list carry an id, so a unit arm is written [2, [id]].
+        // The arms of a list carry an id, so Denied, Floor and Ceiling are written [key, [id]], not as unit arms.
         [MessagePackObject] public sealed class Denied : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
         [MessagePackObject] public sealed class Floor : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
         [MessagePackObject] public sealed class Ceiling : Outcome { [Key(0)] [CultElementId] public string Id = string.Empty; }
@@ -328,6 +328,41 @@ namespace GameCult.Caching.Tests
             return string.Join(" <- ", parts);
         }
 
+        // ---- unit arms: a union no list reaches, so its arms carry no element id and a member-less arm is a unit arm ----
+
+        [Union(0, typeof(Waiting)), Union(2, typeof(Denied2)), Union(int.MinValue, typeof(Floor2)), Union(int.MaxValue, typeof(Ceiling2))]
+        public abstract class UnitOutcome { }
+
+        [MessagePackObject] public sealed class Waiting : UnitOutcome { [Key(0)] public string Message = string.Empty; }
+        [MessagePackObject] public sealed class Denied2 : UnitOutcome { }
+        [MessagePackObject] public sealed class Floor2 : UnitOutcome { }
+        [MessagePackObject] public sealed class Ceiling2 : UnitOutcome { }
+
+        private static MessagePackSerializerOptions UnitOptions => CultDocumentMessagePackSerialization.OptionsFor(typeof(UnionSurface).Assembly);
+
+        // The reference writes a member-less arm as [key, []]; the other runtimes read these files and write the same bytes.
+        [Test]
+        public void UnitArmVectorsAreWhatTheReferenceWrites()
+        {
+            var arms = new (string File, UnitOutcome Value, int Key, string Name)[]
+            {
+                ("unit-arm-denied.msgpack", new Denied2(), 2, nameof(Denied2)),
+                ("unit-arm-floor.msgpack", new Floor2(), int.MinValue, nameof(Floor2)),
+                ("unit-arm-ceiling.msgpack", new Ceiling2(), int.MaxValue, nameof(Ceiling2)),
+            };
+            foreach (var (file, value, key, name) in arms)
+            {
+                var written = MessagePackSerializer.Serialize(value, UnitOptions);
+                Assert.That(Convert.ToHexString(written), Is.EqualTo(Convert.ToHexString(Raw(ArmOf(key)))), $"{name}: a unit arm is [key, []]");
+                Check(file, written);
+
+                var committed = Committed(file);
+                var decoded = MessagePackSerializer.Deserialize<UnitOutcome>(committed, UnitOptions);
+                Assert.That(decoded.GetType().Name, Is.EqualTo(name), file);
+                Assert.That(Convert.ToHexString(MessagePackSerializer.Serialize(decoded, UnitOptions)), Is.EqualTo(Convert.ToHexString(committed)), $"{file} re-encodes byte-identical");
+            }
+        }
+
         // ---- tests ----
 
         [Test]
@@ -388,7 +423,7 @@ namespace GameCult.Caching.Tests
             var inner = (Box)use.Composition.Body!;
             Assert.Multiple(() =>
             {
-                Assert.That(value.Outcomes.OfType<Denied>().Count(), Is.EqualTo(1), "a unit arm");
+                Assert.That(value.Outcomes.OfType<Denied>().Count(), Is.EqualTo(1), "an id-only arm");
                 Assert.That(root.Children, Has.Count.GreaterThan(1), "a list of unions");
                 Assert.That(use.Slots.Any(s => s is Box) && use.Slots.Any(s => s is null), Is.True, "a list of unions holding a nested union arm and nil");
                 Assert.That(inner.Children.OfType<Image>().Count(), Is.EqualTo(1), "a union inside a record inside a union, four arms deep");

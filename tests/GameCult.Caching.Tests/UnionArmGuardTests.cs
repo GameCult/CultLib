@@ -229,7 +229,7 @@ namespace GameCult.Caching.Tests
             InnerArm(1, 9),
             InnerArm(1, 8));
 
-        // Non-zero-start keys with retired gaps, a unit arm, a union inside an arm four deep: the reference shape, unchanged.
+        // Non-zero-start keys with retired gaps, an id-only arm, a union inside an arm four deep: the reference shape, unchanged.
         [Test]
         public void KnownArmsRoundTripByteIdentical()
         {
