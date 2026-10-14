@@ -1255,14 +1255,14 @@ test("CultCache v1 stores stay readable across TS, Rust and Python when a schema
       members: interopNoteDocument.members,
     },
     storedAt: new Date().toISOString(),
-    payload: encode([
+    payload: documentPayloadFromBytes(encode([
       written.schemaVersion,
       "note:ts-after-rename",
       "ts-after-rename",
       "ts wrote a note under the renamed schema",
       "The v1 store format is the contract.",
       ["interop"],
-    ]),
+    ])),
   });
   const catalog = decode(await readFile(file)) as unknown[][];
   assert.deepEqual((catalog[1] as unknown[][]).map((entry) => [entry[0], entry[1]]), [["cultcache.interop-note", "cultcache.interop-note.renamed"]]);
@@ -1308,14 +1308,14 @@ test("A C# type that declares a compatible schema id opens a TypeScript record u
       members: interopNoteDocument.members,
     },
     storedAt: new Date().toISOString(),
-    payload: encode([
+    payload: documentPayloadFromBytes(encode([
       "cultcache.interop_note.v1",
       "note:ts-legacy",
       "ts-legacy",
       "ts wrote a note under an older schema id",
       "The v1 store format is the contract.",
       ["interop"],
-    ]),
+    ])),
   });
   const before = decode(await readFile(file)) as unknown[][];
   assert.equal((before[2] as unknown[][])[0]![1], legacyId);
@@ -1555,7 +1555,7 @@ test("the store publishes a record's schema id even when the envelope's catalog 
     key: "k",
     type: "tests.store-publishes",
     schemaId: "tests.store-publishes.record",
-    payload: encode({ name: "k" }),
+    payload: documentPayloadFromBytes(encode({ name: "k" })),
     storedAt: "2026-09-30T00:00:00.0000000Z",
     catalogEntry: {
       schemaId: "tests.store-publishes.other",
@@ -1586,7 +1586,7 @@ const writerRecord = (key: string, type: string, schemaId: string, catalogEntry?
   key,
   type,
   schemaId,
-  payload: encode({ key }),
+  payload: documentPayloadFromBytes(encode({ key })),
   storedAt: "2026-09-30T00:00:00.0000000Z",
   ...(catalogEntry ? { catalogEntry } : {}),
 });
@@ -2107,7 +2107,7 @@ test("reading a store that is not there writes nothing, and a read of a store th
   assert.deepEqual(await readdir(dir), []);
 
   const written = join(dir, "written.cc");
-  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
+  const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
   await new SingleFileMessagePackBackingStore(written).push(envelope);
   const before = await readFile(written);
   await new SingleFileMessagePackBackingStore(written).pullAll();
@@ -2116,8 +2116,8 @@ test("reading a store that is not there writes nothing, and a read of a store th
 
 test("a soft pushAll writes where nothing is, leaves a readable store alone, and refuses what the reader refuses", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cultcache-soft-"));
-  const envelope = { key: "k", type: "t", payload: Uint8Array.of(0x90), storedAt: "2026-09-30T00:00:00Z" };
-  const other = { key: "other", type: "t", payload: Uint8Array.of(0x91, 0x01), storedAt: "2026-09-30T00:00:00Z" };
+  const envelope = { key: "k", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x90)), storedAt: "2026-09-30T00:00:00Z" };
+  const other = { key: "other", type: "t", payload: documentPayloadFromBytes(Uint8Array.of(0x91, 0x01)), storedAt: "2026-09-30T00:00:00Z" };
 
   // Absent: the soft write seeds the store.
   const absent = join(dir, "absent.cc");
@@ -2344,7 +2344,7 @@ test("SingleFileMessagePackBackingStore reads a v3 element-id store and a rewrit
   const store = new SingleFileMessagePackBackingStore(v3);
   const envelopes = await store.pullAll();
   assert.deepEqual(envelopes.map((entry) => entry.key), ["alpha", "beta"]);
-  assert.deepEqual([...envelopes[0]!.payload], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
+  assert.deepEqual([...documentPayloadBytes(envelopes[0]!.payload)], [0x92, 0xa5, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x01]);
   await store.push({ ...envelopes[0]!, storedAt: "2026-09-30T00:00:00.0000000Z" });
   assert.equal((decode(await readFile(v3)) as unknown[])[0], "cultcache.store.v3");
 
