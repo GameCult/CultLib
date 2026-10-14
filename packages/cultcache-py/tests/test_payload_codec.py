@@ -910,8 +910,8 @@ class ConvertTests(unittest.TestCase):
     def test_convert_refusals_name_no_path(self) -> None:
         for label, make in self._stores():
             with self.subTest(store=label):
-                folder = self.directory / f"{CANARY}-dir"
-                folder.mkdir()
+                folder = self.directory / label / f"{CANARY}-dir"
+                folder.mkdir(parents=True)
                 definitions = [define_document_type("tests.mig")]
                 store = type(make("x"))(folder / f"{CANARY}-src")
                 taken = type(store)(folder / f"{CANARY}-taken")
