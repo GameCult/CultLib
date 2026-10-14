@@ -42,16 +42,18 @@ namespace GameCult.Caching.Tests
             w.WriteArrayHeader(4); w.Write(id); w.Write(content); w.WriteNil(); w.Write(weight);
         };
 
-        private static Emit UnitArm(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(0); };
+        // Unit8: slots [id].
+        private static Emit UnitArm(int key) => (ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write(key); w.WriteArrayHeader(1); w.Write("u"); };
 
-        // Branch: slots [children, next].
+        // Branch: slots [children, next, id].
         private static Emit BranchArm(int key, Emit next, params Emit[] children) => (ref MessagePackWriter w) =>
         {
             w.WriteArrayHeader(2); w.Write(key);
-            w.WriteArrayHeader(2);
+            w.WriteArrayHeader(3);
             w.WriteArrayHeader(children.Length);
             foreach (var child in children) child(ref w);
             next(ref w);
+            w.Write("b");
         };
 
         private static Emit List(params Emit[] items) => (ref MessagePackWriter w) =>
@@ -173,9 +175,9 @@ namespace GameCult.Caching.Tests
                 foreach (var doc in new[]
                 {
                     new GuardDoc { Root = new Rogue() },
-                    new GuardDoc { Items = { new Unit8(), new Rogue() } },
-                    new GuardDoc { Root = new Branch { Children = { new Rogue() } } },
-                    new GuardDoc { Root = new Branch { Next = new Rogue() } },
+                    new GuardDoc { Items = { new Unit8 { Id = "u" }, new Rogue() } },
+                    new GuardDoc { Root = new Branch { Id = "b", Children = { new Rogue() } } },
+                    new GuardDoc { Root = new Branch { Id = "b", Next = new Rogue() } },
                     new GuardDoc { Root = new DerivedLeaf() },
                     new GuardDoc { Crafted = new Unlisted() },
                 })
@@ -204,15 +206,16 @@ namespace GameCult.Caching.Tests
             Id = "d1",
             Root = new Branch
             {
+                Id = "b",
                 Children =
                 {
                     new Leaf { Id = "a", Content = "x", Weight = 1 },
-                    new Unit8(),
-                    new Branch { Children = { new Branch { Children = { new Leaf { Id = "deep", Content = "y", Weight = 2 } } } } }
+                    new Unit8 { Id = "u" },
+                    new Branch { Id = "b", Children = { new Branch { Id = "b", Children = { new Leaf { Id = "deep", Content = "y", Weight = 2 } } } } }
                 },
                 Next = new Leaf { Id = "n", Content = "z", Weight = 3 }
             },
-            Items = { new Unit8(), new Leaf { Id = "i", Content = "w", Weight = 4 }, null! },
+            Items = { new Unit8 { Id = "u" }, new Leaf { Id = "i", Content = "w", Weight = 4 }, null! },
             Crafted = new InnerB { N = 9 },
             Any = new InnerA { N = 8 }
         };
@@ -567,7 +570,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject]
         public class Leaf : GuardNode
         {
-            [Key(0)] public string Id = string.Empty;
+            [Key(0)] [CultElementId] public string Id = string.Empty;
             [Key(1)] public string Content = string.Empty;
             [Key(3)] public int Weight;
         }
@@ -580,15 +583,16 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] public List<GuardNode> Children = new();
             [Key(1)] public GuardNode? Next;
+            [Key(2)] [CultElementId] public string Id = string.Empty;
         }
 
-        [MessagePackObject] public sealed class Unit8 : GuardNode { }
+        [MessagePackObject] public sealed class Unit8 : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
 
         // A subtype the union does not name.
         [MessagePackObject] public sealed class Rogue : GuardNode { [Key(0)] public string Note = string.Empty; }
 
         // Written and read by a consumer resolver, not by MessagePack.
-        public sealed class StubArm : GuardNode { }
+        public sealed class StubArm : GuardNode { [Key(0)] [CultElementId] public string Id = string.Empty; }
 
         public sealed class StubArmResolver : IFormatterResolver
         {
