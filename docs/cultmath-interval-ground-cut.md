@@ -1646,3 +1646,289 @@ regenerated GLSL in one merge.
 - The `0.77` in `packages/cultmath/docs/design.md:376` and `NoiseGradTests.cs:195`
   is the upstream tie jump and is accurate; it is a different 0.77 from the
   range-ceiling ratio at line 1347 of this file.
+
+## Pass 7: the tape unparks (ruling `tape-unparked-for-trophic-graphs`)
+
+Written by Imagination (agent `imagination-tape-unpark`, session
+`self-2026-10-14-eureka`) against CultLib `origin/main` `9ec66d77`. The operator,
+2026-10-14: "Unpark the tape". Her choice (`aetheria-fauna:ruling:trophic-graph-tape-ruled`)
+scopes tape steps 2 and 4 of `docs/cultmath-tape-target.md`: a graph document, a
+C# evaluator and an HLSL interpreter. Pruning (step 3) and meshing (step 5) stay
+where the target sequences them. The first consumer is Aetheria's trophic
+placement graph (`aetheria-fauna:target:r4`; Aetheria map section r4 at
+`4354ef2c`, rows B28-B36). `aetheria-fauna:ruling:skein-filament-construction-ruled`
+picked `skein-web`, so fauna needs all five CultMath gaps that section names.
+
+The as-built forbidden writer "an evaluator over `CultMath.Expr`" (Pass 5 and
+the as-built section above) is lifted for the point evaluator and the HLSL
+interpreter only. Interval and affine evaluation over the graph belong to pruning
+and stay parked.
+
+### Body facts (Pass 7)
+
+| # | Question | Result |
+|---|---|---|
+| T1 | Does `CultMath.Expr` exist? | No. `git log --all -S "CultMath.Expr"` in CultLib finds only two map commits (`32ba1bfa`, `4b34b12b`); in Aetheria, nothing. `packages/cultmath/src/CultMath/` has no `Expr` folder. It exists as ruling `material-ir-cultmath-now` and spec `cut-expr-ir.r1` (base `a7966142`), which no report cites. |
+| T2 | Is the material consumer that shaped `expr-ir` r1 live? | Not now. `aetheria-release:ruling:demo-material-scope` (2026-10-06): demo hulls ship baked maps, "the material graph comes after the demo". The cones, frontiers and HLSL emitter of r1 served incremental per-ship bakes (`materials-baked-per-ship-incremental`) and generated kernels (`material-mod-graphs-same-lowering`). |
+| T3 | Does `expr-ir` need `cycles-converters`? | Only for `cycles_*` ops. The trophic graph uses none (Aetheria `trophic_probe.py` at `4354ef2c`: arithmetic, smoothstep, exp, hypot, floor, sin, hashing, Voronoi, segment distance). |
+| T4 | Who owns CultMath values' wire shape? | `GameCult.Caching.MessagePack`: `CultMathResolver` is the canonical MessagePack shape of every public CultMath value type, in the default chain (`CultDocumentMessagePackSerialization.cs:61`). CultMath references nothing (`CultMath.asmdef` `references: []`). |
+| T5 | What do the coverage tests demand of a new public type? | `CultMathSerializationTests.cs:187-196` and `CultMathJsonTests.cs:93-99,210-218`: every exported non-enum struct in the CultMath assembly has a MessagePack formatter, a JSON converter and a dictionary-key round trip, and `CultMathResolver` formats nothing else. A public struct in `CultMath.Expr` would have to be formatted; a class or enum is not covered, and `CultMathResolver` must not list a class. |
+| T6 | Can the HLSL mirror cover `out` parameters or buffers? | No. `HlslSourceCompatibilityTests.cs:120-131` builds each argument with `Activator.CreateInstance` over the parameter type, which a by-ref type refuses; `design.md:96-99` drops functions taking GPU resources. So an HLSL twin of `distance_to_segment` needs an `out`-free overload, and the interpreter's buffer reads are outside the mirror. |
+| T7 | What does the trophic graph need beyond scalar ops? | (a) Stencils: a predator is a mean over 8 taps of its prey at offset positions (`stencil`, B36); in a graph that is input substitution, as Fidget's `remap_xyz`. (b) Site spans: the slack layer and the strands read every well (`well_slack`, `pairs`, `strands`): a per-batch array input. (c) A per-site weight: the lattice node raises each cell's weight by its proximity to the wells (`lattice_web`, `prox`), a function evaluated at the site, not at the query point. |
+
+### The model (SKILL step 0b)
+
+| Kind | What names it | What happens to it over time | Who decides |
+|---|---|---|---|
+| Expression graph (`ExprGraph`, a sealed immutable class) | Nothing of its own: it is a value. The consumer record that holds it names it (an Aetheria species record's key). Its content hash is derived, for caches only. | Built by the builder or decoded; validated on both paths by one validator; never mutated. An edit builds a new graph. The persisted shape carries a format version; a graph naming an unknown op, a newer format, or a forward operand is refused whole at decode, never partly loaded. | `CultMath.Expr` owns shape, validation and op vocabulary. `GameCult.Caching.MessagePack` owns the wire shape (`CultMathExprResolver`, beside `CultMathResolver`: T4). The consumer's store owns the record, its key and when it changes. Sub-graph references are the consumer store's and are inlined before Build, so the graph stays flat (precedent `aetheria-release:ruling:material-graph-home-modular`). |
+| Node | Its index in the graph's topological order; an operand references only a lower index. | Exists only inside one graph value; any rebuild may renumber it. The builder hash-conses identical nodes and drops nodes no output reaches, so one expression always builds to one byte string. An editor that needs stable node ids keeps its own map. | The builder. |
+| Port | Input ports: the operand positions of the op's signature in the op table. Output: a node is one scalar; a multi-result op (cellular's fields) is read only through `Pick(node, k)` nodes and evaluated once. Graph ports: named inputs (vary per point: position, time), named params (uniform per batch, each with a default), named outputs; names unique per kind, `[A-Za-z_][A-Za-z0-9_]*`. | Graph port names are the graph's contract; renaming one makes a new graph. | The author, through the builder; the evaluator binds names to indices once per bind. |
+| Op vocabulary | A stable string per op: the CultMath function's name, with an arity suffix where overloads differ (`snoise2`, `snoise3`). Written into persisted graphs. | Append-only. A released op's meaning follows its CultMath function under semver (a value change, as the snoise tie, is a Breaking release note); removing an op is a major bump. | `CultMath.Expr`: one op table, read by the C# evaluator and later by the bytecode lowering. No second table. |
+| Parameter set (bindings) | The consumer's record (fauna: per-species settings); inside it, param name to value. | Edited freely by the consumer. At bind, a missing name takes the graph's default; an unknown name is refused, typed. CultMath persists no parameter-set type. | The consumer's store. |
+| Site span (input kind) | A span-input name in the graph. | Bound per evaluation batch by the caller (wells per tick); never persisted in the graph. C#: `ReadOnlySpan<float4>`; HLSL: `StructuredBuffer<float4>` plus a count. Read only by span-taking ops; no op produces one. Lands with `expr-trophic-ops` as an append-only format addition. | The caller binds the content; `CultMath.Expr` owns the kind. |
+| Bytecode (the lowered tape) | (graph content hash, bytecode format version). | Derived on demand, cache-only; never stored as truth or shipped as a document; rebuilt when the graph or CultMath changes. | `CultMath.Expr`'s lowering (the interpreter cut). Its register model is question `tape-register-model`. |
+| HLSL interpreter source (`shaders/CultMath.Tape.hlsl`) | The file, versioned by the CultMath release tag; it declares the bytecode format version it reads. | Changes only in releases under semver; a format change bumps the version and the lowering together. Copied byte-identical into the Unity package (`UnityPackageShaderIsIdenticalToTheCanonicalShader`). | CultMath. |
+| Compiled HLSL artifact | Under the interpreter there is no per-graph compiled HLSL. The one compiled artifact is the consumer's compute kernel that includes `CultMath.Tape.hlsl`, named by the consumer's build. | Compiled by the consumer's build (Unity), never generated per graph. Per-graph generated kernels (the r1 emitter) return only with the material line, as a derived artifact pinned against the C# evaluator. | The consumer's build; CultMath owns only the included source. |
+| Evaluation results | Derived. | Cache-only, the consumer's. | The consumer. |
+
+Gap (5) of the fauna map, "CultMath-owned parity for a consumer's combined HLSL",
+changes shape under the tape: a consumer's composition is a graph, not HLSL, so
+the parity CultMath owns is graph parity, the C# evaluator against the HLSL
+interpreter on the consumer's own graph. That harness belongs to the interpreter
+cut. `aetheria-fauna:follow_up:flow-parity-under-cultmath` (FlowField's `Tri3D`)
+resolves the same way: `Tri3D` becomes a CultMath function and op, with no
+Aetheria twin.
+
+### Decisions (defaults, not forks)
+
+- **`CultMath.Expr` is the tape's graph; there is one IR.** `expr-ir` r1 is
+  superseded by r2, the first tape cut, under the same label: ruling
+  `material-ir-cultmath-now` names the owner and the scalar SSA shape, and the
+  tape ruling consumes that graph. r2 drops what only the material line used
+  (cones, frontiers, the HLSL emitter: T2) and the `cycles-converters`
+  dependency (T3). Those return as lines when their consumers do.
+- **Scalar SSA**, as ruled: vector arguments are decomposed operands, and
+  multi-result ops are read through `Pick`. Fidget's tapes are scalar too.
+- **The graph is a class; its wire shape is a resolver beside `CultMathResolver`**
+  (T4, T5). CultMath stays reference-free and the coverage tests stay as they
+  are. No JSON shape in the first cut (JSON is debug and xenos export).
+- **Stencils are substitution at build time** (T7a), not a loop in the tape.
+  Each stencil level multiplies the graph by its tap count, as B36 measured.
+- **`cycles-noise` r1 is withdrawn**: base `a7966142`, it waits on the
+  `cycles-converters` merge and is not on this session's frontier. It is a line
+  below.
+
+### Questions (admitted in the mind)
+
+- `tape-register-model`: the HLSL interpreter's register model. Gates the
+  interpreter cut only.
+- `lattice-site-weight-source`: how a weighted lattice node gets a per-site
+  weight (T7c). Gates fauna gap (1) only.
+
+Prior art in hand: `F:\Projects\aetheria-material-path-prior-art.md` section 4
+(GPU interpreters: Fidget's crates, Dolphin ubershaders, Laine et al. on
+megakernel register pressure; no measured interpreter-versus-kernel timing was
+found) and section 6 (IR placement); Aetheria
+`docs/research/2026-10-14-trophic-dag-filaments-prior-art.md` (Voronoi,
+filaments). Neither covers a GPU tape interpreter's register storage (dynamic
+indexing of local arrays and scratch spill, groupshared memory, Fidget-wgpu's
+`tape_interpreter.wgsl`, Keeter's MPR 2020) or per-site weight fields in
+lattice Voronoi. Both questions lack that prior art; Self runs Eyes before
+putting them.
+
+### Cut sequence (Pass 7; one line each, mapped when about to run)
+
+Fauna's first cut, `fauna-trophic-habitat`, evaluates the habitat graph in C# at
+candidates. It needs `expr-ir` r2, gaps (2) and (4) with (3) under the strands,
+gap (1), and their ops registered (line 5). It does not need the interpreter or
+gap (5); its presenter does. The critical path is `cycles-converters` merge,
+then line 3 beside the ruling on `lattice-site-weight-source` and line 4, then
+line 5; line 1 runs now, off that path.
+
+1. `expr-ir` r2 (spec admitted): the graph, builder with substitution, decode
+   validation, wire shape, C# evaluator. Touches no file `cycles-converters`
+   touches (new `Expr` folder, `GameCult.Caching.MessagePack`), so it runs on
+   `origin/main` now and does not wait on that merge.
+2. (No sibling spec.) Gap (3) alone was the candidate. It and every node cut
+   append GLSL fixture families, bump the mirror's compared count and edit
+   `CultMath.hlsl`, and so does `cycles-converters` (`53f4c213`:
+   `GlslMirrorTests.cs`, `HlslSourceCompatibilityTests.cs`, `glsl-parity.json`,
+   `CultMath.hlsl`). Families append after the previous cut's, so these cuts
+   map on the merged head, not beside the branch. Gap (3) folds into line 3,
+   whose strand kernel is its only consumer.
+3. `trophic-nodes` (CultLib): gap (3), an `out`-free
+   `distance_to_segment(float2, float2, float2)` in C# with its HLSL twin (T6;
+   `point` is reserved in HLSL, so the parameter is `point_value`); gap (2), a
+   weighted diagram over a site span (F1, F2, first-order border distance;
+   multiplicative and power weights); and gap (4), the soft Gabriel gate
+   (computed per tick on the CPU from a site span; the per-point strand kernel
+   over the gated edge span has the HLSL twin), with the span convention of
+   the model page. Waits on the `cycles-converters` merge and its map pass.
+4. `lattice-weighted-cellular` (CultLib): gap (1), 2D, `pcg3d` cells, zone
+   time, smooth-min blend, a stated weight range sizing its window. Waits on
+   question `lattice-site-weight-source`.
+5. `expr-trophic-ops` (CultLib): the span input kind and ops for 2-4 in the op
+   table; a CultMath Unity tag for fauna. Waits on 1, 3 and 4. Fauna's first cut
+   waits on this.
+6. `tape-interpreter` (CultLib): bytecode lowering, `CultMath.Tape.hlsl`, and
+   the graph-parity harness (gap 5): C# evaluator against the interpreter on a
+   graph corpus and on a consumer's graph, dxc compile plus a device run, held
+   to tolerances measured per op under `cycles-kernel-reference-ruled`'s
+   stance. Waits on 1 and `tape-register-model`. Fauna's presenter waits on it.
+7. `expr-cycles-ops`: `cycles_*` ops, after `cycles-converters` merges.
+8. `cycles-noise`, re-mapped from the withdrawn r1, after `cycles-converters`
+   merges.
+9. Material line, when the material graph returns after the demo: cones,
+   frontiers and an HLSL emitter over the same graph.
+10. `cultmath-unity-math-parity` (follow-up): square, exp2, exp10, log2, log10.
+11. Pruning (tape step 3) and meshing (step 5): parked as the target says.
+
+## Pass 8: volumetric prioritized (ruling `volumetric-work-prioritized`)
+
+Written by Imagination (agent `imagination-volumetric-frontier`, session
+`self-2026-10-14-eureka`) against CultLib `main` `dfc720e7`. The operator,
+2026-10-14, relayed by the Aetheria Self: "I want that volumetric work
+prioritized, since it's a totally different authoring framework for the nebulae
+and I'll need to build on it to get it up to par". The ruling names three pieces
+(the interval- and affine-culled march, the site ground, the integration-native
+noise domain) and leaves their order to this Self. Later the same day she pointed
+at "the last nebula playground" as having sophisticated noise. Facts on her two
+playgrounds were extracted by the Aetheria Self's Eyes into
+`F:\Projects\eureka-handoff-aux-2026-10-14\eyes-nebula-labs\facts.md`.
+
+### The frontier as found
+
+| Piece | Record | State |
+| --- | --- | --- |
+| Interval ops | `cut-interval-ops.r4`, reports h1-h4, Soul s1-s3 (s3 all Holds) | Merged to main (`fb567472`). Open Soul findings: `cut-interval-ops.s1.lod-weights-never-exercised` (Low), `cut-interval-ops.s1.shipped-void-two-scenes` (Medium, pre-existing; Pass 4 picked the one shipped void, but the finding was never closed), `cut-interval-ops.s3.lodstep-footprint-branch-unpinned` (Low). |
+| GLSL lowering | `cut-glsl-lowering.r2`, h1-h4, s1-s3 (s3 all Holds) | Merged (`bb583e89`). Follow-ups `iv-exp-gpu-widening`, `glsl-fixture-uncovered` and `glsl-browser-parity-run` are open. |
+| Affine forms and shaders | `cut-affine-forms.r2` (h1-h3, s1-s3), `cut-affine-shaders.r2` (h1-h3, s1-s3) | Merged (`156782da`). Soul's s3 on affine-forms has one Falsified claim and no open finding; Self carried it as follow-up `gate-detail-scale-sensitivity`. |
+| Snoise tie | `cut-snoise-tie.r1`, h1-h2, s1 (all Holds) | Merged (`48aadda0`). It re-pinned `SNOISE_LIPSCHITZ` from 10.099261 to 7.9640074 (Pass 6). |
+| Site ground | No document in the mind. The file-era spec `docs/cultmath-interval-ground-cut-site-ground.r3.spec.json` (repo `GameCult/gamecult-site`, base `535d170`) and the stardust spec | Never run. The gamecult-site `origin/main` `af6e206` has no ground shader and vendors no CultMath GLSL. Follow-ups `site-ground-affine-and-centred-warp`, `site-ground-dense-check-blind-past-body` and `wells-oracle-shortfall-affine-forms` wait on its next revision. No site-ground spec was ever admitted to the mind, so its first spec there is `cut-site-ground.r1`, whatever the file era numbered it. |
+| Noise domain | Ruling `integration-native-noise-domain`; `docs/research/integration-native-noise-domain.md` (`114bb4f3`, on main) | The probe ran on 2026-10-03. There is no cut. Its source (`DomainProbe/Program.cs`, scratch commit `5ec9f529`, never merged) survived only in a temp scratchpad. It is now copied, with its images and log, to `F:\Projects\eureka-handoff-aux-2026-10-14\imagination-volumetric-frontier\`. |
+| Operator's playgrounds | Artifacts "Kernel Nebula Lab" (`c09d2762`, version 1791066352) and "Nebula Span Lab" (`be6a9e31`, version 1791074878, the later one) | Facts file above. The Kernel Lab is the probe's kernel cascade in a page and has no noise function. The Span Lab is the "last nebula playground". |
+
+No volumetric spec is in force without a report, so none is stale on an old
+base. Ruling `wells-overhead-plus-floor`, which the brief named as in force, is
+superseded by `affine-wells-contract-cheaper-than-interval`. The next spec does
+not touch (c), so it cites neither. Target `r1` is stale for this line: its
+`not_in_scope` still parks affine forms, and no invariant covers the noise
+domain. The target revision is Self's.
+
+### The Span Lab is the framework
+
+The Span Lab's density is a ramp, `ext · clamp((F − s)/B, 0, cap)`. Here `s` is a
+height pushed down by power brushes. It is then domain-warped twice by octave sums
+of `snoise`, each plain, ridged (`1 − 2|n|`) or curl, with an anisotropic stretch
+along a flow axis. The lab's own words: "The span integrator linearises the whole
+warp chain per span, bounds the error with a curvature bound, and integrates
+optical depth in closed form". Its bound is `0.5 K h²` from a hierarchical chain of
+speed, acceleration, Jacobian and second-derivative bounds. Its empty and saturated
+proofs use the same model, or the later warps' ranges alone.
+
+That is ruling `integration-native-noise-domain`'s domain, "built for interval
+integration", made with the noise she likes. It is also the "totally different
+authoring framework" she will build on. The kernel cascade (the probe and the Kernel
+Lab) is the earlier exploration, and it stays a line below.
+
+**Correction to the brief's expectation.** The next cut is not site-ground. The
+site ground's field is open: the Span Lab framework, the kernel cascade, or r3's
+marched void. The r3 machinery (the interval pre-pass, the centred warp, the
+debug-versus-dense readback) is shaped for a marched field. Question
+`site-ground-field` asks this.
+
+### `SNOISE_LIPSCHITZ`: 10.099 in the lab, 7.964 in CultMath
+
+- **Current: 7.9640074.** It is set in `math.Interval.cs:21`, `CultMath.Interval.hlsl`
+  and the generated GLSL. `MeasureLipschitz` (seed 0x11B5) refined 7.2400064, and
+  7.2400064 x 1.10 = 7.9640074. That measurement is on the tied kernel, re-pinned by
+  `cut-snoise-tie` (Pass 6 table; Soul's `cut-snoise-tie.s1` all Holds).
+- **Stale: 10.099261.** The same measurement on the pre-tie kernel refined 9.181147.
+  On that kernel snoise jumps by 0.21 to 0.72 inside a 1e-4 ball near lattice
+  diagonals, so gradient ascent climbed a near-discontinuity. Pass 6 recorded 926
+  `af_snoise` misses around that spike before the fix and 0 after.
+- **The lab embeds the pre-tie kernel.** Its `cultmath_snoise` uses
+  `step(x0.yzx, x0.xyz)`, the 0.3.0 cyclic tie (`SPAN` line 244). CultMath's has the
+  three-component Gustavson order (`CultMath.glsl:90`). Its pins
+  `SN_L = 10.099261`, `SN_H = 56.050385` and `SN_T = 540` were measured on that
+  kernel. `SN_T` came from the lab's own hill climb, 487.1 x 1.11.
+  - So the lab's constant agrees with the lab's kernel.
+  - But the kernel is discontinuous, so no derivative bound holds across the tie
+    set. The lab's "proved" span bounds and its bound audit can miss there.
+  - `SN_H` survived the tie fix unchanged (`MeasureHessian`, same witness). `SN_T`
+    has never been measured on the tied kernel.
+- **Nothing the interval march or the site ground reads is stale.**
+  - CultLib's march and every `iv_*` and `af_*` function read 7.9640074 in all three
+    runtimes.
+  - The site ground has no code.
+  - The file-era specs and Passes 1-5 cite 10.099261 only as history (as-built
+    section).
+  - The stale copy lives only in the lab page. It is recorded as follow-up
+    `span-lab-pre-tie-kernel`.
+
+### What of the Span Lab belongs in CultMath (the noise domain)
+
+One owner each, and the one rule each protects. CultMath owns noise primitives and
+their bounds. The consumer owns its composition: brushes, the ramp, which warps
+and in what order. The as-built negative "a flow or envelope function in CultMath"
+stands.
+
+| Piece (lab) | Owner | Rule it protects | Line |
+| --- | --- | --- | --- |
+| `cultmath_snoise_gh`, the analytic Hessian (`makeGH`, string-spliced from the pre-tie grad kernel) | `math.snoise_hessian` in C#, HLSL and GLSL | One snoise kernel. Value, gradient and Hessian come from the same tie order, so no consumer splices its own derivative from an old kernel | Cut `snoise-hessian` (admitted) |
+| `SN_T`, the third-derivative tensor norm pin | `SNOISE_THIRD` beside `SNOISE_HESSIAN` | One measured pin per derivative order, re-measured with the kernel | Cut `snoise-hessian` |
+| Closed-form optical depth of a clamped linear ramp over a span (`compField` clamp split) | `math.integral_clamp_linear` | One closed form, with the clamp split at the exact crossings | Cut `snoise-hessian` (generic math; no fork) |
+| Curl of a three-potential octave sum (`dispVec` mode 2, `curlK`), with its Jacobian from the Hessian | A CultMath curl primitive | Divergence-free by construction. Its bounds come from `L` and `H` | Waits on the curl ruling (not ruled); needs `snoise_hessian` |
+| Warp-stage octave field: per-component offsets, per-octave offset, anisotropic stretch `Mop`, ridged `1 − 2|n|` with its fold deviation | CultMath stage functions returning value, Jacobian and span bounds | A stage's bounds compose from the noise pins by the chain rule; a consumer never re-derives them | Waits on question `span-chain-shape` |
+| Span evaluator: linearise a composed chain, the curvature bound `K`, the empty and saturated proofs | Per `span-chain-shape` | One composition rule for bounds | Waits on `span-chain-shape` |
+| Brushes, the ramp, `ampG`, `brushPoint`, the chain's order, the scroll animation | The consumer (site, Aetheria) | The authored field is the consumer's | Never CultMath |
+
+`1 − 2|n|` is the affine image `2(1 − |n|) − 1` of `ridged_grad`'s octave term.
+Adding it as a variant is a naming choice inside the stage-function cut, not a fork.
+
+### The noise domain and a curl node (not decided: no ruling)
+
+The Aetheria Self is testing curl of simplex (`snoise_grad`) as a replacement for
+`Tri3D` flow noise. The Span Lab already has curl as a warp mode. The domain's
+owner would serve a curl node like this:
+
+- It is one CultMath primitive: the curl of three offset `snoise` (or octave-sum)
+  potentials from analytic gradients, with the `cultmath_` HLSL twin, the lowered
+  GLSL and a fixture family. Aetheria's flow law and the nebula's warp both call
+  it. Each consumer keeps its own composition and scaling: the lab's
+  `curlK = 0.25/F`, or Aetheria's amplitude and scroll.
+- Its Jacobian, which the span evaluator and the kernel cascade's per-kernel affine
+  warp both need, is a difference of Hessian entries. That is why `snoise-hessian`
+  comes first, and why the curl node is not in it.
+- Bounds without new constants:
+  - Each curl component is a difference of two partials, so its magnitude per
+    octave is at most `2 L` times the amplitude.
+  - Its variation over a ball is bounded through `SNOISE_HESSIAN`.
+  - Its curvature, which the span bound needs, is bounded through `SNOISE_THIRD`.
+- The as-built line "a flow or envelope function in CultMath" was written against
+  the site's flow law. A curl basis is a noise primitive like `snoise_grad`. If the
+  curl node is ruled, the line needs that clarification, not a waiver.
+
+### Kernel cascade (kept as a line)
+
+The probe found the cascade exact, and 0.48x the shipped march's cost at 4.2x its
+msf on the void. But it "cannot be marched", its look is fibres, and its GPU cost
+is traversal, which is unmeasured. Optical depth through it is a sum of per-kernel
+segment integrals, so it is order-independent. Additive blending of each kernel's
+screen footprint would give exact transmittance in WebGL2, with no compute and no
+sorting. Emission is not order-independent. This is a hypothesis with no probe
+behind it. The cascade becomes a cut only if `site-ground-field` or the operator's
+nebula work picks it.
+
+### Cut sequence (volumetric line)
+
+1. `snoise-hessian` (spec admitted): `snoise_hessian`, `SNOISE_THIRD` re-measured
+   on the tied kernel, `integral_clamp_linear`, in C#, HLSL and GLSL with fixture
+   families. It touches no `expr-ir` file. Its provenance prose goes in code
+   comments and the README, not `design.md`, which `expr-ir` edits.
+2. Question `span-chain-shape`, then the warp-stage and span-bound cut it picks.
+3. The curl primitive, once the operator rules on curl (the Aetheria flow test).
+4. Question `site-ground-field`, then `cut-site-ground.r1` on the field it picks.
+   The marched option carries all three site follow-ups; the other options
+   withdraw the two marched-only ones.
+5. The kernel cascade, if picked.

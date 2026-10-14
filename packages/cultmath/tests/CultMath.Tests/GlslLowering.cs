@@ -21,6 +21,8 @@ internal static class GlslLowering
         {
             // Phacelle is a port of MPL-2.0 code, and MPL-2.0 covers the files that carry it.
             ["CultMath.Phacelle.hlsl"] = ("CultMath.Phacelle.glsl", "MPL-2.0"),
+            // The Cycles node semantics are a port of Apache-2.0 code, and the licence travels with the file.
+            ["CultMath.Cycles.hlsl"] = ("CultMath.Cycles.glsl", "Apache-2.0"),
         };
 
     private const string Regenerate =
@@ -72,7 +74,9 @@ internal static class GlslLowering
         source = Regex.Replace(source, @"(?m)^[ \t]*#(ifndef|define|endif)\b.*$", string.Empty);
         source = Regex.Replace(source, @"(?ms)^\w+ \w+\([^)]*\b(Texture2D|SamplerState)\b[^)]*\)\s*\{.*?^\}[ \t]*$", string.Empty);
 
-        // 3. Type names: floatN, intN, uintN and boolN become vecN, ivecN, uvecN and bvecN.
+        // 3. Type names: floatN, intN, uintN and boolN become vecN, ivecN, uvecN and bvecN, and float3x3
+        //    becomes mat3 (the one matrix type the library returns: a float3x3 is built from nine scalars,
+        //    which HLSL reads as rows and GLSL as columns, so only symmetric matrices are exported).
         source = LowerTypeNames(source);
 
         // 4. File-scope `static const` becomes `const`.
@@ -84,13 +88,15 @@ internal static class GlslLowering
         source = LowerCasts(source);
 
         // 6. Intrinsic renames: lerp -> mix, frac -> fract, rsqrt -> inversesqrt, asuint ->
-        //    floatBitsToUint, asfloat -> uintBitsToFloat, and saturate(x) -> clamp(x, 0.0, 1.0).
+        //    floatBitsToUint, asfloat -> uintBitsToFloat, atan2 -> atan (GLSL's two-argument arctangent),
+        //    and saturate(x) -> clamp(x, 0.0, 1.0).
         //    Identifier boundaries keep cultmath_lerp and the rest of the cultmath_ names intact.
         source = Regex.Replace(source, @"\blerp\(", "mix(");
         source = Regex.Replace(source, @"\bfrac\(", "fract(");
         source = Regex.Replace(source, @"\brsqrt\(", "inversesqrt(");
         source = Regex.Replace(source, @"\basuint\(", "floatBitsToUint(");
         source = Regex.Replace(source, @"\basfloat\(", "uintBitsToFloat(");
+        source = Regex.Replace(source, @"\batan2\(", "atan(");
         source = LowerSaturate(source);
 
         // 7. Float literals pass through: HLSL's unsuffixed 0.5 and 1.0e30 are GLSL literals already.
@@ -106,7 +112,8 @@ internal static class GlslLowering
         source = Regex.Replace(source, @"\bfloat([234])\b", "vec$1");
         source = Regex.Replace(source, @"\bint([234])\b", "ivec$1");
         source = Regex.Replace(source, @"\buint([234])\b", "uvec$1");
-        return Regex.Replace(source, @"\bbool([234])\b", "bvec$1");
+        source = Regex.Replace(source, @"\bbool([234])\b", "bvec$1");
+        return Regex.Replace(source, @"\bfloat3x3\b", "mat3");
     }
 
     private static readonly Regex Cast = new(@"\((float|int|uint)\)");

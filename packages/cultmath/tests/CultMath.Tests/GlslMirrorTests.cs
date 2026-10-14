@@ -47,7 +47,7 @@ public sealed class GlslMirrorTests
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
     private static readonly Regex HlslOnly = new(
-        @"\b(float|u?int|bool)[234]\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
+        @"\b(float|u?int|bool)[234]\b|\bfloat3x3\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
 
     [Fact]
     public void NoHlslOnlyTokensSurvive()
@@ -86,6 +86,12 @@ public sealed class GlslMirrorTests
             Assert.DoesNotContain(token, library);
             Assert.Contains(token, phacelle);
         }
+
+        // The Apache-2.0 code is in its own file too, and the MPL-2.0 file holds none of it.
+        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text;
+        Assert.DoesNotContain("cultmath_cycles_divide(", library);
+        Assert.DoesNotContain("cultmath_cycles_divide(", phacelle);
+        Assert.Contains("float cultmath_cycles_divide(", cycles);
     }
 
     // The two-file contract a consumer relies on when it concatenates CultMath.Phacelle.glsl after
@@ -106,6 +112,12 @@ public sealed class GlslMirrorTests
         Assert.Contains("cultmath_phacelle is in CultMath.Phacelle.glsl", library);
         Assert.Contains(" MPL-2.0;", phacelle);
         Assert.DoesNotContain("MIT", phacelle);
+
+        var cycles = lowered.Single(output => output.File == "CultMath.Cycles.glsl").Text.Split('\n')[0];
+        Assert.Contains("cultmath_cycles_ramp_index is in CultMath.Cycles.glsl", library);
+        Assert.Contains(" Apache-2.0;", cycles);
+        Assert.DoesNotContain("MIT", cycles);
+        Assert.DoesNotContain("MPL", cycles);
     }
 
     [Fact]
@@ -503,6 +515,12 @@ public sealed class GlslMirrorTests
         "Tightness: R0 + d <= GPU radius <= R0 + d + 2^-19 (R0 + |c0|_1 + spread). " +
         "Report the least slack of each side; only the bounds fail the check.";
 
+    // The Cycles node families' operands: values past [0, 1] on both sides, so the clamps, the extrapolating
+    // factors and the divisions by a small number all show.
+    private static float CyclesValue(System.Random r) => Uniform(r, -20.0f, 20.0f);
+    private static float CyclesFactor(System.Random r) => Uniform(r, -0.5f, 1.5f);
+    private static float3 CyclesColor(System.Random r) => new(Uniform(r, -0.25f, 1.25f), Uniform(r, -0.25f, 1.25f), Uniform(r, -0.25f, 1.25f));
+
     // A Phacelle stripe wave vector: each component in [-6, 6], about one stripe per cell.
     private static float3 Side(System.Random r) => new(Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f), Uniform(r, -6.0f, 6.0f));
 
@@ -511,7 +529,7 @@ public sealed class GlslMirrorTests
     // float families are ulp-bounded, with the bound measured on the device by the consumer, and
     // iv_frustum_ball also carries an enclosure check. phacelle is in CultMath.Phacelle.glsl, so its
     // evaluator concatenates that file after CultMath.glsl; the site, which does not vendor it, skips it.
-    private static readonly Family[] Families =
+    private static readonly Family[] Families = new Family[]
     {
         new("float cultmath_snoise(vec3)", "ulp-bounded", r => new object[] { Point3(r) }),
         new("float cultmath_snoise(vec2)", "ulp-bounded", r => new object[] { new float2(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f)) }),
@@ -575,7 +593,52 @@ public sealed class GlslMirrorTests
         new("vec2 cultmath_iv_snoise_ball(vec2, float)", "ulp-bounded", r => new object[] { new float2(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f)), Uniform(r, 0.001f, 2.0f) }),
         new("vec3 cultmath_af_snoise(vec3, vec3, float)", "ulp-bounded, reach 1e-6 to 1e-3", SmallReachSlice, SnoiseSmallForm, Verify: cases => AssertSnoiseForm(cases, allowanceDecides: true)),
         new("vec3 cultmath_af_fbm(vec3, vec3, float, int, float, float)", "ulp-bounded, reach 1e-6 to 1e-3", r => SmallReachSlice(r).Concat(new object[] { 4, 2.0f, 0.5f }).ToArray(), FbmSmallForm, Verify: cases => AssertFbmForm(cases, allowanceDecides: true)),
-    };
+        new("float cultmath_cycles_divide(float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_power(float, float)", "ulp-bounded, platform pow", r => new object[] { Uniform(r, -4.0f, 4.0f), r.Next(2) == 0 ? r.Next(-4, 5) : Uniform(r, -3.0f, 3.0f) }, Platform: Platform.Ulp),
+        new("float cultmath_cycles_logarithm(float, float)", "ulp-bounded, platform log", r => new object[] { Uniform(r, 0.01f, 20.0f), Uniform(r, 0.01f, 20.0f) }, Platform: Platform.Ulp),
+        new("float cultmath_cycles_sqrt(float)", "ulp-bounded", r => new object[] { CyclesValue(r) }),
+        new("float cultmath_cycles_inverse_sqrt(float)", "ulp-bounded", r => new object[] { CyclesValue(r) }),
+        new("float cultmath_cycles_modulo(float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_floored_modulo(float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_wrap(float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), Uniform(r, -10.0f, 10.0f), Uniform(r, -10.0f, 10.0f) }),
+        new("float cultmath_cycles_snap(float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_pingpong(float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_smooth_min(float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), Uniform(r, -5.0f, 5.0f) }),
+        new("float cultmath_cycles_smooth_max(float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), Uniform(r, -5.0f, 5.0f) }),
+        new("float cultmath_cycles_compare(float, float, float)", "ulp-bounded", r => { var a = CyclesValue(r); return new object[] { a, a + Uniform(r, -1.0f, 1.0f) * 1.0e-3f, Uniform(r, 0.0f, 2.0e-3f) }; }),
+        new("float cultmath_cycles_round(float)", "ulp-bounded", r => new object[] { CyclesValue(r) }),
+        new("float cultmath_cycles_trunc(float)", "ulp-bounded", r => new object[] { CyclesValue(r) }),
+        new("float cultmath_cycles_fract(float)", "ulp-bounded", r => new object[] { CyclesValue(r) }),
+        new("float cultmath_cycles_sign(float)", "ulp-bounded", r => new object[] { r.Next(4) == 0 ? 0.0f : CyclesValue(r) }),
+        new("float cultmath_cycles_map_range_linear(float, float, float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_map_range_stepped(float, float, float, float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r), Uniform(r, -1.0f, 8.0f) }),
+        new("float cultmath_cycles_map_range_smoothstep(float, float, float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_map_range_smootherstep(float, float, float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_clamp_minmax(float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_clamp_range(float, float, float)", "ulp-bounded", r => new object[] { CyclesValue(r), CyclesValue(r), CyclesValue(r) }),
+        new("float cultmath_cycles_mix_float(float, float, float)", "ulp-bounded", r => new object[] { CyclesFactor(r), CyclesValue(r), CyclesValue(r) }),
+        new("vec3 cultmath_cycles_mix_vector(float, vec3, vec3)", "ulp-bounded", r => new object[] { CyclesFactor(r), CyclesColor(r), CyclesColor(r) }),
+        new("vec3 cultmath_cycles_rgb_to_hsv(vec3)", "ulp-bounded", r => new object[] { CyclesColor(r) }),
+        new("vec3 cultmath_cycles_hsv_to_rgb(vec3)", "ulp-bounded", r => new object[] { new float3(r.NextSingle(), r.NextSingle(), Uniform(r, 0.0f, 2.0f)) }),
+        new("float cultmath_cycles_rgb_to_bw(vec3)", "ulp-bounded", r => new object[] { CyclesColor(r) }),
+        new("vec2 cultmath_cycles_ramp_index(float, int)", "ulp-bounded", r => new object[] { Uniform(r, -0.25f, 1.25f), 257 }),
+    }.Concat(new[]
+    {
+        "blend", "add", "mul", "screen", "overlay", "sub", "div", "diff", "exclusion", "dark", "light", "dodge", "burn", "hue", "sat", "val", "color", "soft", "linear",
+    }.Select(mode => new Family($"vec3 cultmath_cycles_mix_{mode}(float, vec3, vec3)", "ulp-bounded", r => new object[] { CyclesFactor(r), CyclesColor(r), CyclesColor(r) }))).Concat(new[]
+    {
+        new Family("float cultmath_cycles_arcsine(float)", "ulp-bounded, platform asin", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
+        new Family("float cultmath_cycles_arccosine(float)", "ulp-bounded, platform acos", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
+        new Family("float cultmath_cycles_arctan2(float, float)", "ulp-bounded, platform atan", r => new object[] { Uniform(r, -20.0f, 20.0f), Uniform(r, -20.0f, 20.0f) }, Platform: Platform.Ulp),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded", r => new object[] { Point3(r) }),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded",
+            r =>
+            {
+                var lo = Uniform(r, -2.0f, 0.5f);
+                return new object[] { Uniform(r, -4.0f, 4.0f), r.Next(8) == 0 ? 0.0f : Uniform(r, -4.0f, 4.0f), lo, lo + Uniform(r, 0.0f, 3.0f), Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f) };
+            }),
+    }).ToArray();
 
     // The fixture text, each case's arguments given by family and point index.
     private static string GoldenFixture(Func<int, int, object[]> arguments)
@@ -638,8 +701,12 @@ public sealed class GlslMirrorTests
         _ => throw new InvalidOperationException(v.GetType().Name),
     }));
 
+    // A float3x3 flattens row by row; the matrices the library exports are symmetric, so the order is
+    // the same read as GLSL's columns.
     private static IEnumerable<object> Scalars(object value) => value is float or int or uint
         ? new[] { value }
+        : value is float3x3 matrix
+        ? new object[] { matrix._m00, matrix._m01, matrix._m02, matrix._m10, matrix._m11, matrix._m12, matrix._m20, matrix._m21, matrix._m22 }
         : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Scalars(f.GetValue(value)!));
 
     // ---- A small unified diff for the failure message ----

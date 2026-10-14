@@ -59,7 +59,7 @@ public static class CultDocumentMessagePackSerialization
         // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
         // resolver still encodes an arm while the key check runs.
         var inner = CompositeResolver.Create(
-            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(StandardResolver.Instance).ToArray());
+            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(CultMathExprResolver.Instance).Append(StandardResolver.Instance).ToArray());
         return MessagePackSerializerOptions.Standard
             .WithResolver(CompositeResolver.Create(new CultUnionGuard(inner), inner))
             .WithSecurity(CultMessagePackSecurity.Instance);

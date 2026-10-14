@@ -7,9 +7,16 @@ files, which are licensed under the Mozilla Public License 2.0 (`MPL-2.0`):
 - the Phacelle sources compiled into `Runtime/Plugins/CultMath.dll`
   (`math.Phacelle.cs` and `CultPhasor.cs` in the GameCult/CultLib repository)
 
-The package license expression is therefore `MIT AND MPL-2.0`, matching the
-`GameCult.Math` NuGet package. MPL-2.0 is file-level: it applies to those files
-and not to the rest of CultMath.
+and for the Cycles node semantics files, which are licensed under the Apache
+License 2.0 (`Apache-2.0`):
+
+- `Shaders/CultMath.Cycles.hlsl`
+- the Cycles sources compiled into `Runtime/Plugins/CultMath.dll`
+  (`math.Cycles.cs` in the GameCult/CultLib repository)
+
+The package license expression is therefore `MIT AND MPL-2.0 AND Apache-2.0`,
+matching the `GameCult.Math` NuGet package. MPL-2.0 and Apache-2.0 are file-level:
+each applies to its files and not to the rest of CultMath.
 
 The MPL-2.0 text is available from the Mozilla Foundation at
 <https://www.mozilla.org/MPL/2.0/>. Source and modification history for the
