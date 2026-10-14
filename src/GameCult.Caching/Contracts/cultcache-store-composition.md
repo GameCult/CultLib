@@ -295,9 +295,13 @@ exclusive open of the same lock file exclude each other is not established.
 - An assembly that declares nothing, and the store envelope, use the base
   options.
 - A resolver may not claim a type a document's element lists pass through: the list's
-  element types, the types and members on the way to them. Those are written by their
-  `[Key]` layout so each element's id reaches disk, and the codec refuses the document
-  on first encode or decode, naming the resolver and the type.
+  element types, the types and members on the way to them, and the collection types
+  the walk passes (`List<T>`, `T[]`, a collection class, a dictionary on the way).
+  Those are written by their `[Key]` layout so each element's id reaches disk, and the
+  codec refuses the document on first encode or decode, naming the resolver and the
+  type. A resolver that returns MessagePack's standard formatter for a type does not
+  claim it. A value list (`List<float2>`, a list of a non-keyed class) is not on the
+  path, so a resolver may claim it.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
 

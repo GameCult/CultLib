@@ -290,6 +290,170 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // A resolver's formatter for the list type of an object list drops the elements' ids as surely as one for the element,
+        // so the collection type is on the id path (Soul s1 P1). A claim on a value list, even beside an object list, is none.
+        [Test]
+        public void AResolverClaimingTheListTypeOfAnObjectListIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(LcDoc), typeof(LcValueDoc) });
+            var doc = new LcDoc { Id = "l1", Items = { new LcArm { Id = "000000000001", N = 4 } } };
+            var held = Raw((ref MessagePackWriter w) => { w.WriteArrayHeader(2); w.Write("l1"); w.WriteArrayHeader(0); });
+            foreach (var attempt in new TestDelegate[]
+            {
+                () => CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(LcDoc), registry),
+                () => CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(LcDoc), held, registry)
+            })
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(attempt)!;
+                Assert.That(thrown.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain("List`1").And.Contain(nameof(LcDoc)));
+            }
+
+            var values = new LcValueDoc
+            {
+                Id = "v1",
+                Items = { new LcOther { Id = "000000000002" } },
+                Values = { new LcValue { N = 3 }, new LcValue { N = 5 } },
+                Points = { new Pair { A = 1, B = 2 } }
+            };
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(values, typeof(LcValueDoc), registry);
+            var back = (LcValueDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(LcValueDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("000000000002"));
+            Assert.That(back.Values.Select(value => value.N), Is.EqualTo(new[] { 3, 5 }));
+            Assert.That(back.Points.Single(), Is.EqualTo(new Pair { A = 1, B = 2 }));
+        }
+
+        // A resolver that hands out MessagePack's own formatter for a type writes its [Key] layout: it claims nothing, however it
+        // got there, and the document encodes with the id present (Soul s1 P2).
+        [Test]
+        public void AResolverHandingBackTheStandardFormatterIsNoClaim()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(FbDoc) });
+            var doc = new FbDoc { Id = "f1", Items = { new FbArm { Id = "000000000009", N = 7 } } };
+
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(doc, typeof(FbDoc), registry);
+
+            Assert.That(Convert.ToHexString(bytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(doc, CultDocumentMessagePackSerialization.Options))));
+            var back = (FbDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(FbDoc), bytes, registry);
+            Assert.That(back.Items.Single().Id, Is.EqualTo("000000000009"));
+        }
+
+        [MessagePackObject]
+        public sealed class LcArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [MessagePackObject]
+        public sealed class LcOther
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+        }
+
+        public sealed class LcValue
+        {
+            public int N;
+        }
+
+        [CultDocument("tests.lc_doc", "tests.lc_doc.v1")]
+        [MessagePackObject]
+        public sealed class LcDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<LcArm> Items = new();
+        }
+
+        [CultDocument("tests.lc_value_doc", "tests.lc_value_doc.v1")]
+        [MessagePackObject]
+        public sealed class LcValueDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<LcOther> Items = new();
+            [Key(2)] public List<LcValue> Values = new();
+            [Key(3)] public List<Pair> Points = new();
+        }
+
+        [MessagePackObject]
+        public sealed class FbArm
+        {
+            [Key(0)] [CultElementId] public string Id = string.Empty;
+            [Key(1)] public int N;
+        }
+
+        [CultDocument("tests.fb_doc", "tests.fb_doc.v1")]
+        [MessagePackObject]
+        public sealed class FbDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public List<FbArm> Items = new();
+        }
+
+        // Claims List<LcArm> (an object list's type: refused), List<LcValue> and List<Pair> (value lists: accepted, as a math
+        // resolver claims List<float2>), and answers FbArm with MessagePack's own formatter (no claim).
+        public sealed class ListClaimResolver : IFormatterResolver
+        {
+            public static readonly IFormatterResolver Instance = new ListClaimResolver();
+
+            public IMessagePackFormatter<T>? GetFormatter<T>()
+            {
+                if (typeof(T) == typeof(List<LcArm>)) return (IMessagePackFormatter<T>)(object)new NilFormatter();
+                if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
+                if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
+                if (typeof(T) == typeof(FbArm)) return StandardResolver.Instance.GetFormatter<T>();
+                return null;
+            }
+
+            private sealed class NilFormatter : IMessagePackFormatter<List<LcArm>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<LcArm> value, MessagePackSerializerOptions options) => writer.WriteNil();
+
+                public List<LcArm> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    reader.Skip();
+                    return new List<LcArm>();
+                }
+            }
+
+            private sealed class ValuesFormatter : IMessagePackFormatter<List<LcValue>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<LcValue> value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(value.Count);
+                    foreach (var item in value) writer.Write(item.N);
+                }
+
+                public List<LcValue> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    var count = reader.ReadArrayHeader();
+                    var list = new List<LcValue>(count);
+                    for (var index = 0; index < count; index++) list.Add(new LcValue { N = reader.ReadInt32() });
+                    return list;
+                }
+            }
+
+            private sealed class PointsFormatter : IMessagePackFormatter<List<Pair>>
+            {
+                public void Serialize(ref MessagePackWriter writer, List<Pair> value, MessagePackSerializerOptions options)
+                {
+                    writer.WriteArrayHeader(value.Count);
+                    foreach (var item in value) { writer.WriteArrayHeader(2); writer.Write(item.A); writer.Write(item.B); }
+                }
+
+                public List<Pair> Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+                {
+                    var count = reader.ReadArrayHeader();
+                    var list = new List<Pair>(count);
+                    for (var index = 0; index < count; index++)
+                    {
+                        reader.ReadArrayHeader();
+                        list.Add(new Pair { A = reader.ReadSingle(), B = reader.ReadSingle() });
+                    }
+
+                    return list;
+                }
+            }
+        }
+
         [Test]
         public void OptionsRefuseANullDocumentTypeOrAssembly()
         {

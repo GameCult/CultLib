@@ -8,6 +8,7 @@ using MessagePack.Formatters;
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.StubArmResolver))]
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.ClaimArmResolver))]
 [assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.OrderResolver))]
+[assembly: CultCacheFormatterResolver(typeof(UnionArmGuardTests.ListClaimResolver))]
 
 namespace GameCult.Caching.Tests
 {

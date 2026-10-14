@@ -82,10 +82,17 @@ public static class CultDocumentMessagePackSerialization
         foreach (var type in CultElementIds.Inspect(documentType).IdPath)
         {
             var generic = GetFormatterMethod.MakeGenericMethod(type);
+            // A resolver that hands back MessagePack's own formatter for the type writes its [Key] layout: that is no claim, and the
+            // composite stops there, so no later resolver is asked.
+            var standard = generic.Invoke(StandardResolver.Instance, null);
             foreach (var resolver in ahead)
             {
-                if (generic.Invoke(resolver, null) != null)
-                    return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout or keep it out of the document's lists.";
+                var formatter = generic.Invoke(resolver, null);
+                if (formatter == null)
+                    continue;
+                if (ReferenceEquals(formatter, standard))
+                    break;
+                return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout or keep it out of the document's lists.";
             }
         }
 
