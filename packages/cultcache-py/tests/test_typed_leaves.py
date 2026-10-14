@@ -133,6 +133,7 @@ def _inner_record() -> t.SlotCodec:
         [
             database_entry_field("n", 0, default="", codec=t.string),
             database_entry_field("w", 1, default=0.0, codec=t.float32),
+            database_entry_field("id", 2, default="", codec=t.string),
         ],
         type_name=REFERENCE + "LeafInner",
     )
@@ -662,7 +663,7 @@ def _python_authored_leaf_record() -> dict:
     return {
         "id": "py", "flag": False, "blob": bytearray([1, 255]), "i": -(2**31), "l": 2**63 - 1, "f": 0.1, "d": 1e-300,
         "maybe_i": None, "tags": [], "names": ("\u00e9", "z"), "any": {"k": [1, True, None, 2.5, "s"], "n": -3},
-        "nested": None, "items": [{"n": "one", "w": 2**53 + 2**29 + 1}, {"n": "two", "w": 1e-40}],
+        "nested": None, "items": [{"n": "one", "w": 2**53 + 2**29 + 1, "id": "000000000021"}, {"n": "two", "w": 1e-40, "id": "000000000022"}],
         "shape": UnionArm("LeafCircle", {"r": 0.1}), "floats": [0.1, 3, -0.0, 1e39], "maybe_f": None,
     }
 

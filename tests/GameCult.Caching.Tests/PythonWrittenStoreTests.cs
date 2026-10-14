@@ -53,6 +53,7 @@ namespace GameCult.Caching.Tests
                     Assert.That(k[4], Is.EqualTo("s"));
                     Assert.That(doc.Nested, Is.Null);
                     Assert.That(doc.Items.Select(i => i.N), Is.EqualTo(new[] { "one", "two" }));
+                    Assert.That(doc.Items.Select(i => i.Id), Is.EqualTo(new[] { "000000000021", "000000000022" }), "a Python-written list of records keeps its element ids");
                     Assert.That(Bits(doc.Items[0].W), Is.EqualTo(Bits((float)(9007199254740992L + 536870913L))));
                     Assert.That(Bits(doc.Items[1].W), Is.EqualTo(Bits(1e-40f)));
                     Assert.That(Bits(((NumericLeafVectorTests.LeafCircle)doc.Shape!).R), Is.EqualTo(Bits(0.1f)));

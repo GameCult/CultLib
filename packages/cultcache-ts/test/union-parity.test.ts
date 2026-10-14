@@ -48,9 +48,16 @@ type Node =
   | { kind: "Text"; id: string; content: string }
   | { kind: "Use"; id: string; composition: Composition; slots: (Node | null)[] }
   | { kind: "Image"; id: string; uri: string; alt: string }
-  | { kind: "Wrap"; inner: Node | null };
+  | { kind: "Wrap"; inner: Node | null; id: string };
 interface Composition { name: string; body: Node | null }
 type Outcome = { kind: "Pending"; message: string } | { kind: "Completed"; sourceVersion: number } | { kind: "Denied" } | { kind: "Floor" } | { kind: "Ceiling" };
+// The golden's Outcome: the arms of a list carry an element id, so Denied, Floor and Ceiling are one-slot records.
+type GoldenOutcome =
+  | { kind: "Pending"; message: string; id: string }
+  | { kind: "Completed"; sourceVersion: number; id: string }
+  | { kind: "Denied"; id: string }
+  | { kind: "Floor"; id: string }
+  | { kind: "Ceiling"; id: string };
 type Item = { kind: "Gem"; name: string } | { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
 type CraftedItem = { kind: "Tool"; name: string; uses: number } | { kind: "Part"; name: string; count: number };
 interface Surface {
@@ -71,7 +78,7 @@ const node: Codec<Node | null> = union<Node>("Node", {
     0: ["id", string], 1: ["composition", composition], 2: ["slots", list(lazy(() => node))],
   })],
   5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })],
-  6: ["Wrap", slots<{ inner: Node | null }>({ 0: ["inner", lazy(() => node)] })],
+  6: ["Wrap", slots<{ inner: Node | null; id: string }>({ 0: ["inner", lazy(() => node)], 1: ["id", string] })],
 }, `${CS}Node`);
 const outcome = union<Outcome>("Outcome", {
   0: ["Pending", slots<{ message: string }>({ 0: ["message", string] })],
@@ -79,6 +86,14 @@ const outcome = union<Outcome>("Outcome", {
   2: ["Denied", unit],
   [-2147483648]: ["Floor", unit],
   2147483647: ["Ceiling", unit],
+}, `${CS}Outcome`);
+const idOnly = slots<{ id: string }>({ 0: ["id", string] });
+const goldenOutcome = union<GoldenOutcome>("Outcome", {
+  0: ["Pending", slots<{ message: string; id: string }>({ 0: ["message", string], 1: ["id", string] })],
+  1: ["Completed", slots<{ sourceVersion: number; id: string }>({ 0: ["sourceVersion", int32], 1: ["id", string] })],
+  2: ["Denied", idOnly],
+  [-2147483648]: ["Floor", idOnly],
+  2147483647: ["Ceiling", idOnly],
 }, `${CS}Outcome`);
 const toolArm = slots<{ name: string; uses: number }>({ 0: ["name", string], 1: ["uses", int32] });
 const partArm = slots<{ name: string; count: number }>({ 0: ["name", string], 1: ["count", int32] });
@@ -92,7 +107,7 @@ const surfaceCodec = slots<Surface>({
   0: ["id", string],
   1: ["version", int32],
   2: ["root", node],
-  3: ["outcomes", list(outcome)],
+  3: ["outcomes", list(goldenOutcome)],
   4: ["part", item],
   5: ["crafted", craftedItem],
   6: ["missing", node, null],
@@ -111,7 +126,7 @@ const nodeSchema: z.ZodType<Node | null> = z.lazy(() =>
         slots: z.array(nodeSchema),
       }),
       z.object({ kind: z.literal("Image"), id: z.string(), uri: z.string(), alt: z.string() }),
-      z.object({ kind: z.literal("Wrap"), inner: nodeSchema }),
+      z.object({ kind: z.literal("Wrap"), inner: nodeSchema, id: z.string() }),
     ]),
   ]));
 const surfaceSchema = z.object({
@@ -121,11 +136,11 @@ const surfaceSchema = z.object({
   outcomes: z.array(z.union([
     z.null(),
     z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("Pending"), message: z.string() }),
-      z.object({ kind: z.literal("Completed"), sourceVersion: z.number() }),
-      z.object({ kind: z.literal("Denied") }),
-      z.object({ kind: z.literal("Floor") }),
-      z.object({ kind: z.literal("Ceiling") }),
+      z.object({ kind: z.literal("Pending"), message: z.string(), id: z.string() }),
+      z.object({ kind: z.literal("Completed"), sourceVersion: z.number(), id: z.string() }),
+      z.object({ kind: z.literal("Denied"), id: z.string() }),
+      z.object({ kind: z.literal("Floor"), id: z.string() }),
+      z.object({ kind: z.literal("Ceiling"), id: z.string() }),
     ]),
   ])),
   part: z.union([z.null(), z.discriminatedUnion("kind", [
@@ -157,29 +172,33 @@ const golden: Surface = {
   version: 3,
   root: {
     kind: "Box",
-    id: "root",
+    id: "0000000000c0",
     children: [
-      { kind: "Text", id: "t1", content: "hello" },
+      { kind: "Text", id: "0000000000c1", content: "hello" },
       {
         kind: "Use",
-        id: "u1",
+        id: "0000000000c2",
         composition: {
           name: "comp",
           body: {
             kind: "Box",
-            id: "inner",
+            id: "0000000000d0",
             children: [
-              { kind: "Text", id: "deep", content: "x" },
-              { kind: "Image", id: "img", uri: "uri://a", alt: "alt" },
+              { kind: "Text", id: "0000000000d1", content: "x" },
+              { kind: "Image", id: "0000000000d2", uri: "uri://a", alt: "alt" },
             ],
           },
         },
-        slots: [{ kind: "Text", id: "s1", content: "slot" }, null, { kind: "Box", id: "b2", children: [] }],
+        slots: [{ kind: "Text", id: "0000000000e1", content: "slot" }, null, { kind: "Box", id: "0000000000e2", children: [] }],
       },
-      { kind: "Image", id: "i2", uri: "uri://b", alt: "" },
+      { kind: "Image", id: "0000000000c3", uri: "uri://b", alt: "" },
     ],
   },
-  outcomes: [{ kind: "Pending", message: "wait" }, { kind: "Completed", sourceVersion: 7 }, { kind: "Denied" }],
+  outcomes: [
+    { kind: "Pending", message: "wait", id: "0000000000a1" },
+    { kind: "Completed", sourceVersion: 7, id: "0000000000a2" },
+    { kind: "Denied", id: "0000000000a3" },
+  ],
   part: { kind: "Tool", name: "hammer", uses: 12 },
   crafted: { kind: "Part", name: "gear", count: 4 },
   missing: null,
@@ -814,14 +833,14 @@ test("a bytes slot reads a MessagePack str as its bytes and writes bin, and refu
 
 const wrapChain = (wraps: number, leaf: Node): Node => {
   let node: Node = leaf;
-  for (let index = 0; index < wraps; index += 1) node = { kind: "Wrap", inner: node };
+  for (let index = 0; index < wraps; index += 1) node = { kind: "Wrap", inner: node, id: "0000000000b1" };
   return node;
 };
 // A Wrap adds 2 containers, a Box with no children 3, a Text leaf 2, and the outermost array is 1 (the C# test's arithmetic).
 const AT_LIMIT_WRAPS = (MAX_PAYLOAD_DEPTH - 1 - 3) / 2;
 const PAST_LIMIT_WRAPS = (MAX_PAYLOAD_DEPTH + 1 - 1 - 2) / 2;
-const atLimitValue: Surface = { ...golden, root: wrapChain(AT_LIMIT_WRAPS, { kind: "Box", id: "leaf", children: [] }) };
-const pastLimitValue: Surface = { ...golden, root: wrapChain(PAST_LIMIT_WRAPS, { kind: "Text", id: "leaf", content: CANARY }) };
+const atLimitValue: Surface = { ...golden, root: wrapChain(AT_LIMIT_WRAPS, { kind: "Box", id: "0000000000f0", children: [] }) };
+const pastLimitValue: Surface = { ...golden, root: wrapChain(PAST_LIMIT_WRAPS, { kind: "Text", id: "0000000000f0", content: CANARY }) };
 
 async function boundsEntries() {
   const raw = decode(await read("bounds-outcomes.msgpack")) as unknown[][];
