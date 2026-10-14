@@ -418,6 +418,30 @@ the two CultLib cuts (pass 3):
 `interval-ops` (pass 4): `docs/cultmath-interval-ground-cut-interval-ops.r3.spec.json`;
 `glsl-lowering` r2 and `site-ground` r3 now depend on it.
 
+### The Cycles cuts (ruling `cycles-kernel-reference-ruled`)
+
+- `cycles-converters` r2 is the fix batch for Soul's s1. Its specs are typed
+  documents in the mind, not files here.
+- `cycles-noise` r1 waits on `cycles-converters` and reuses its oracle tool.
+  It inherits the ruling: its fixtures are the unfused SSE4.2 kernel's exact
+  witness, and every other build is held to the tolerance-class table that
+  `tools/cycles-oracle/README.md` holds.
+
+Body fact, probed 2026-10-14 on Yggdrasil. The job script, log and model are
+`job.sh`, `probe-avx2.log` and `model.py` in
+`F:\Projects\eureka-handoff-aux-2026-10-14\imagination-cycles-converters-r2\`.
+Blender 5.2.2 Linux was run on its default AVX2 kernel, with the oracle's
+kernel check removed, over the committed `math.json` operands at e48f9488.
+Results against the SSE4.2 fixture:
+
+- `cycles_floored_modulo` differs on 151 of 1024 rows and `cycles_wrap` on 30.
+- A single-rounding model, `fma(-floor(a / b), b, a)` (wrap:
+  `fma(-range, floor((value - min) / range), value)`), reproduces every one of
+  those rows bit for bit. So the contraction never moved the floor.
+- The worst `|delta|` is 0.91 x 2^-24 (|a| + |b|) for floored modulo and
+  0.77 x 2^-24 (|value| + |min| + |range|) for wrap. Both fall within the
+  documented bound of 2^-23 times the same sum.
+
 ## Standing design decisions (means; Self may overrule)
 
 - D1. Intervals are `float2(lo, hi)`. Affine arithmetic is not taken; the
