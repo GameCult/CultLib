@@ -1334,9 +1334,9 @@ namespace GameCult.Caching.Tests
             Assert.That(cache.Remove(new CultRecordKey("absent")), Is.False);
         }
 
-        // A batch that only checks keys commits through the one writable store; every other store answers the checks from its view.
+        // A batch that only checks keys commits through the one writable store; a read-only store answers the checks from its last load.
         [Test]
-        public void AStoreThatIsNotTheHomeAnswersTheChecksFromItsView([Values] bool directory)
+        public void AReadOnlyStoreAnswersTheChecksFromItsView([Values] bool directory)
         {
             var writable = PathOf("home.cc");
             using (var seed = Open(writable, Full, directory))
@@ -1395,6 +1395,119 @@ namespace GameCult.Caching.Tests
 
             Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
             try { cache.Dispose(); } catch (CultSchemaConflictException) { }
+        }
+
+        // Two writable stores: home.cc holds a deck and takes Deck, other.cc holds a gizmo and takes Gizmo, and, when asked, a widget at
+        // w that no registered type declares, so the cache lists it foreign at the load.
+        private (CultCache Cache, string Home, string Other) TwoWritableStores(bool directory, bool otherListsWidget)
+        {
+            var home = PathOf("home.cc");
+            using (var seed = Open(home, DeckOnly, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            var other = PathOf("other.cc");
+            using (var seed = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+            {
+                seed.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "g")), new CultRecordKey("g")));
+                if (otherListsWidget)
+                    seed.Commit(batch => batch.Upsert(Widget, WidgetOf("w"), W));
+            }
+
+            var cache = new CultCache(CultDocumentRegistry.ForTypes(new[] { Deck, Gizmo }));
+            cache.AddBackingStore(StoreAt(home, directory, readOnly: false), Deck);
+            cache.AddBackingStore(StoreAt(other, directory, readOnly: false), Gizmo);
+            return (cache, home, other);
+        }
+
+        // Every writable store judges a batch's checks under its own lock, whichever store the batch commits through: a record another
+        // writer put at a checked key in a store the batch does not write, after the load, refuses the whole commit and writes nothing.
+        [Test]
+        public void EveryWritableStoreRefusesACommitThatRemovesItsLateForeignRecord([Values] bool directory, [Values] bool withWrite)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: false);
+            using var _ = cache;
+            using (var late = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            var homeBefore = Fingerprint(home);
+            var otherBefore = Fingerprint(other);
+
+            var refusal = Assert.Throws<CultSchemaConflictException>(() => cache.Commit(batch =>
+            {
+                if (withWrite)
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }))!;
+
+            Assert.That((refusal.RecordKey, refusal.SchemaId), Is.EqualTo((W.Value, WidgetId)));
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+            Assert.That(Fingerprint(other), Is.EqualTo(otherBefore));
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Not.Contain("d2"));
+            Assert.That(cache.BackingStores[1].ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+        }
+
+        // The non-home judgement reads the store under its lock, not its listing: a foreign record that store listed at the load,
+        // since replaced by a declared one, no longer refuses the commit and is not removed.
+        [Test]
+        public void ANonHomeStoreJudgesACheckUnderItsLockNotFromItsLoad([Values] bool directory)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: true);
+            using var _ = cache;
+            Assert.That(cache.BackingStores[1].ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+            using (var late = Open(other, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Gizmo, New(Gizmo, ("Tag", "theirs")), W));
+            var theirs = Stored(other, W);
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                batch.Remove(W);
+            }), Is.True);
+
+            Assert.That(Read(home).Records.Select(record => record.Key), Does.Contain("d2"));
+            Assert.That(Stored(other, W), Is.EqualTo(theirs), "the declared record the checked key now holds is not removed");
+        }
+
+        // A store that is not the batch's home and cannot take its lock makes the commit contended before the home writes.
+        [Test]
+        public void ANonHomeStoreHeldByAnotherWriterMakesTryCommitContended()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: false, otherListsWidget: false);
+            using var _ = cache;
+            var homeBefore = Fingerprint(home);
+
+            using (new FileStream(other + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                var outcome = cache.TryCommit(batch =>
+                {
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                    batch.Remove(W);
+                });
+
+                Assert.That(outcome, Is.EqualTo(CultCommitOutcome.Contended));
+            }
+
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+        }
+
+        // A foreign record a refusal lists carries the version the refusal read, so a conditional commit over the stores that
+        // list it holds when nothing has changed since.
+        [Test]
+        public void ExpectUnchangedHoldsAfterARefusalListedTheForeignRecord([Values] bool directory)
+        {
+            var path = PathOf("refusal-listed.cc");
+            using (var seed = Open(path, Full, directory))
+                seed.Commit(batch => batch.Upsert(Deck, DeckOf("d"), D));
+            using var cache = Open(path, DeckOnly, directory);
+            using (var late = Open(path, Full, directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            Assert.That(cache.Remove(W), Is.False);
+            Assert.Throws<CultSchemaConflictException>(() => cache.FlushAsync().GetAwaiter().GetResult());
+            Assert.That(StoreOf(cache).ForeignRecords.Select(record => record.Key), Is.EqualTo(new[] { "w" }));
+
+            Assert.That(cache.Commit(batch =>
+            {
+                batch.ExpectUnchanged();
+                batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+            }), Is.True);
         }
     }
 }
