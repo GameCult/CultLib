@@ -263,6 +263,29 @@ public sealed class CultMeshSingleFileElementIdTests
         HeaderOf(path).Should().Be("cultcache.store.v1");
     }
 
+    // The copy check never refuses a write: a record the registry claims by schema name but cannot resolve (the catalog entry
+    // names another type for a slot) is copied as its bytes and decides nothing. Soul s2 P5, incompatible-catalog-slot12.
+    [Test]
+    public void AnUnresolvableCopiedRecordIsCopiedAndDecidesNothing()
+    {
+        var path = UnmarkedStoreHoldingIds();
+        var snapshot = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path));
+        const string changedId = "mesh.test.id_list.v0";
+        var entry = snapshot.SchemaCatalog.Single(candidate => candidate.SchemaName == "mesh.test.id_list");
+        entry.SchemaId = changedId;
+        entry.Members.Single(member => member.Slot == 1).TypeName = "System.Collections.Generic.List`1[[Other.Inner]]";
+        snapshot.Records.Single(record => record.Key == IdsKey.Value).SchemaId = changedId;
+        File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
+        var before = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == IdsKey.Value);
+
+        Assert.DoesNotThrow(() => CultMesh.WriteSingleFileDocument(path, Key, Publication(), registry: Registry(typeof(MeshIdList), typeof(CultMeshBodyPublicationDocument))));
+
+        var after = CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).Records.Single(record => record.Key == IdsKey.Value);
+        after.SchemaId.Should().Be(changedId);
+        after.Payload.Should().Equal(before.Payload);
+        HeaderOf(path).Should().Be("cultcache.store.v1");
+    }
+
     // Typed writes beside records that hold no id leave the store unmarked: the check marks only on an id it found.
     [Test]
     public void ATypedWriteBesideARecordThatHoldsNoIdKeepsTheStoreUnmarked()
