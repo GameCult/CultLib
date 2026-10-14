@@ -95,6 +95,13 @@ enum Outcome {
     Ceiling(IdArm),
 }
 
+// The codec's unit arm (no members, written [key, []]), kept apart from the golden: a document list's arms carry ids.
+#[derive(Clone, Debug, PartialEq, CultUnion)]
+enum UnitOutcome {
+    #[cultcache(key = 2)]
+    Denied,
+}
+
 #[derive(Clone, Debug, PartialEq, CultSlots)]
 struct PendingArm {
     #[cultcache(key = 0)]
@@ -242,6 +249,12 @@ fn union_surface_decodes_and_reencodes() {
 }
 
 #[test]
+fn a_unit_arm_is_a_key_and_an_empty_slots_array() {
+    assert_eq!(rmp_serde::to_vec(&UnitOutcome::Denied).unwrap(), [0x92, 0x02, 0x90]);
+    assert_eq!(rmp_serde::from_slice::<UnitOutcome>(&[0x92, 0x02, 0x90]).unwrap(), UnitOutcome::Denied);
+}
+
+#[test]
 fn an_id_only_arm_is_a_key_and_a_one_slot_array() {
     let mut bytes = vec![0x92, 0x02, 0x91, 0xac];
     bytes.extend_from_slice(b"0000000000a3");
@@ -307,8 +320,8 @@ fn a_union_that_is_not_a_key_and_slots_pair_is_refused_naming_the_enum() {
         ("a unit arm with slots", rmp_serde::to_vec(&(2u64, ("CANARY-slot",))).unwrap()),
     ];
     for (label, bytes) in cases {
-        let message = rmp_serde::from_slice::<Outcome>(&bytes).unwrap_err().to_string();
-        assert!(message.contains("Outcome"), "{label}: {message}");
+        let message = rmp_serde::from_slice::<UnitOutcome>(&bytes).unwrap_err().to_string();
+        assert!(message.contains("UnitOutcome"), "{label}: {message}");
         assert!(!message.contains("CANARY"), "{label}: {message}");
     }
 }

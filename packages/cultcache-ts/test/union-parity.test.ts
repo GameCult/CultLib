@@ -64,7 +64,7 @@ interface Surface {
   id: string;
   version: number;
   root: Node | null;
-  outcomes: (Outcome | null)[];
+  outcomes: (GoldenOutcome | null)[];
   part: Item | null;
   crafted: CraftedItem | null;
   missing: Node | null;

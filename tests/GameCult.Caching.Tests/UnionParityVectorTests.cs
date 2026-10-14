@@ -282,7 +282,7 @@ namespace GameCult.Caching.Tests
             new Case("unknown-arm-field.msgpack", "refused", "Node", 3, "unknown-arm",
                 Surface(root: ArmOf(3, Str("r"), Str(Canary)))),
             new Case("unknown-arm-list.msgpack", "refused", "Outcome", 7, "unknown-arm",
-                Surface(outcomes: Slots(ArmOf(0, Str("wait")), ArmOf(7, Str(Canary))))),
+                Surface(outcomes: Slots(ArmOf(0, Str("wait"), Str("0000000000a1")), ArmOf(7, Str(Canary))))),
             new Case("unknown-arm-nested.msgpack", "refused", "Node", 9, "unknown-arm",
                 Surface(root: BoxArm("0000000000c0", Slots(BoxArm("0000000000d3", Slots(BoxArm("0000000000d4", Slots(ArmOf(9, Str("deep"), Str(Canary)))))))))),
             new Case("inner-union-outer-key.msgpack", "refused", "CraftedItem", 2, "unknown-arm",
