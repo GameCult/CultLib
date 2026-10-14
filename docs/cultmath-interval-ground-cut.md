@@ -1782,3 +1782,153 @@ line 5; line 1 runs now, off that path.
    frontiers and an HLSL emitter over the same graph.
 10. `cultmath-unity-math-parity` (follow-up): square, exp2, exp10, log2, log10.
 11. Pruning (tape step 3) and meshing (step 5): parked as the target says.
+
+## Pass 8: volumetric prioritized (ruling `volumetric-work-prioritized`)
+
+Written by Imagination (agent `imagination-volumetric-frontier`, session
+`self-2026-10-14-eureka`) against CultLib `main` `dfc720e7`. The operator,
+2026-10-14, relayed by the Aetheria Self: "I want that volumetric work
+prioritized, since it's a totally different authoring framework for the nebulae
+and I'll need to build on it to get it up to par". The ruling names three pieces
+(the interval- and affine-culled march, the site ground, the integration-native
+noise domain) and leaves their order to this Self. Later the same day she pointed
+at "the last nebula playground" as having sophisticated noise. Facts on her two
+playgrounds were extracted by the Aetheria Self's Eyes into
+`F:\Projects\eureka-handoff-aux-2026-10-14\eyes-nebula-labs\facts.md`.
+
+### The frontier as found
+
+| Piece | Record | State |
+| --- | --- | --- |
+| Interval ops | `cut-interval-ops.r4`, reports h1-h4, Soul s1-s3 (s3 all Holds) | Merged to main (`fb567472`). Open Soul findings: `cut-interval-ops.s1.lod-weights-never-exercised` (Low), `cut-interval-ops.s1.shipped-void-two-scenes` (Medium, pre-existing; Pass 4 picked the one shipped void, but the finding was never closed), `cut-interval-ops.s3.lodstep-footprint-branch-unpinned` (Low). |
+| GLSL lowering | `cut-glsl-lowering.r2`, h1-h4, s1-s3 (s3 all Holds) | Merged (`bb583e89`). Follow-ups `iv-exp-gpu-widening`, `glsl-fixture-uncovered` and `glsl-browser-parity-run` are open. |
+| Affine forms and shaders | `cut-affine-forms.r2` (h1-h3, s1-s3), `cut-affine-shaders.r2` (h1-h3, s1-s3) | Merged (`156782da`). Soul's s3 on affine-forms has one Falsified claim and no open finding; Self carried it as follow-up `gate-detail-scale-sensitivity`. |
+| Snoise tie | `cut-snoise-tie.r1`, h1-h2, s1 (all Holds) | Merged (`48aadda0`). It re-pinned `SNOISE_LIPSCHITZ` from 10.099261 to 7.9640074 (Pass 6). |
+| Site ground | No document in the mind. The file-era spec `docs/cultmath-interval-ground-cut-site-ground.r3.spec.json` (repo `GameCult/gamecult-site`, base `535d170`) and the stardust spec | Never run. The gamecult-site `origin/main` `af6e206` has no ground shader and vendors no CultMath GLSL. Follow-ups `site-ground-affine-and-centred-warp`, `site-ground-dense-check-blind-past-body` and `wells-oracle-shortfall-affine-forms` wait on its next revision. No site-ground spec was ever admitted to the mind, so its first spec there is `cut-site-ground.r1`, whatever the file era numbered it. |
+| Noise domain | Ruling `integration-native-noise-domain`; `docs/research/integration-native-noise-domain.md` (`114bb4f3`, on main) | The probe ran on 2026-10-03. There is no cut. Its source (`DomainProbe/Program.cs`, scratch commit `5ec9f529`, never merged) survived only in a temp scratchpad. It is now copied, with its images and log, to `F:\Projects\eureka-handoff-aux-2026-10-14\imagination-volumetric-frontier\`. |
+| Operator's playgrounds | Artifacts "Kernel Nebula Lab" (`c09d2762`, version 1791066352) and "Nebula Span Lab" (`be6a9e31`, version 1791074878, the later one) | Facts file above. The Kernel Lab is the probe's kernel cascade in a page and has no noise function. The Span Lab is the "last nebula playground". |
+
+No volumetric spec is in force without a report, so none is stale on an old
+base. Ruling `wells-overhead-plus-floor`, which the brief named as in force, is
+superseded by `affine-wells-contract-cheaper-than-interval`. The next spec does
+not touch (c), so it cites neither. Target `r1` is stale for this line: its
+`not_in_scope` still parks affine forms, and no invariant covers the noise
+domain. The target revision is Self's.
+
+### The Span Lab is the framework
+
+The Span Lab's density is a ramp, `ext · clamp((F − s)/B, 0, cap)`. Here `s` is a
+height pushed down by power brushes. It is then domain-warped twice by octave sums
+of `snoise`, each plain, ridged (`1 − 2|n|`) or curl, with an anisotropic stretch
+along a flow axis. The lab's own words: "The span integrator linearises the whole
+warp chain per span, bounds the error with a curvature bound, and integrates
+optical depth in closed form". Its bound is `0.5 K h²` from a hierarchical chain of
+speed, acceleration, Jacobian and second-derivative bounds. Its empty and saturated
+proofs use the same model, or the later warps' ranges alone.
+
+That is ruling `integration-native-noise-domain`'s domain, "built for interval
+integration", made with the noise she likes. It is also the "totally different
+authoring framework" she will build on. The kernel cascade (the probe and the Kernel
+Lab) is the earlier exploration, and it stays a line below.
+
+**Correction to the brief's expectation.** The next cut is not site-ground. The
+site ground's field is open: the Span Lab framework, the kernel cascade, or r3's
+marched void. The r3 machinery (the interval pre-pass, the centred warp, the
+debug-versus-dense readback) is shaped for a marched field. Question
+`site-ground-field` asks this.
+
+### `SNOISE_LIPSCHITZ`: 10.099 in the lab, 7.964 in CultMath
+
+- **Current: 7.9640074.** It is set in `math.Interval.cs:21`, `CultMath.Interval.hlsl`
+  and the generated GLSL. `MeasureLipschitz` (seed 0x11B5) refined 7.2400064, and
+  7.2400064 x 1.10 = 7.9640074. That measurement is on the tied kernel, re-pinned by
+  `cut-snoise-tie` (Pass 6 table; Soul's `cut-snoise-tie.s1` all Holds).
+- **Stale: 10.099261.** The same measurement on the pre-tie kernel refined 9.181147.
+  On that kernel snoise jumps by 0.21 to 0.72 inside a 1e-4 ball near lattice
+  diagonals, so gradient ascent climbed a near-discontinuity. Pass 6 recorded 926
+  `af_snoise` misses around that spike before the fix and 0 after.
+- **The lab embeds the pre-tie kernel.** Its `cultmath_snoise` uses
+  `step(x0.yzx, x0.xyz)`, the 0.3.0 cyclic tie (`SPAN` line 244). CultMath's has the
+  three-component Gustavson order (`CultMath.glsl:90`). Its pins
+  `SN_L = 10.099261`, `SN_H = 56.050385` and `SN_T = 540` were measured on that
+  kernel. `SN_T` came from the lab's own hill climb, 487.1 x 1.11.
+  - So the lab's constant agrees with the lab's kernel.
+  - But the kernel is discontinuous, so no derivative bound holds across the tie
+    set. The lab's "proved" span bounds and its bound audit can miss there.
+  - `SN_H` survived the tie fix unchanged (`MeasureHessian`, same witness). `SN_T`
+    has never been measured on the tied kernel.
+- **Nothing the interval march or the site ground reads is stale.**
+  - CultLib's march and every `iv_*` and `af_*` function read 7.9640074 in all three
+    runtimes.
+  - The site ground has no code.
+  - The file-era specs and Passes 1-5 cite 10.099261 only as history (as-built
+    section).
+  - The stale copy lives only in the lab page. It is recorded as follow-up
+    `span-lab-pre-tie-kernel`.
+
+### What of the Span Lab belongs in CultMath (the noise domain)
+
+One owner each, and the one rule each protects. CultMath owns noise primitives and
+their bounds. The consumer owns its composition: brushes, the ramp, which warps
+and in what order. The as-built negative "a flow or envelope function in CultMath"
+stands.
+
+| Piece (lab) | Owner | Rule it protects | Line |
+| --- | --- | --- | --- |
+| `cultmath_snoise_gh`, the analytic Hessian (`makeGH`, string-spliced from the pre-tie grad kernel) | `math.snoise_hessian` in C#, HLSL and GLSL | One snoise kernel. Value, gradient and Hessian come from the same tie order, so no consumer splices its own derivative from an old kernel | Cut `snoise-hessian` (admitted) |
+| `SN_T`, the third-derivative tensor norm pin | `SNOISE_THIRD` beside `SNOISE_HESSIAN` | One measured pin per derivative order, re-measured with the kernel | Cut `snoise-hessian` |
+| Closed-form optical depth of a clamped linear ramp over a span (`compField` clamp split) | `math.integral_clamp_linear` | One closed form, with the clamp split at the exact crossings | Cut `snoise-hessian` (generic math; no fork) |
+| Curl of a three-potential octave sum (`dispVec` mode 2, `curlK`), with its Jacobian from the Hessian | A CultMath curl primitive | Divergence-free by construction. Its bounds come from `L` and `H` | Waits on the curl ruling (not ruled); needs `snoise_hessian` |
+| Warp-stage octave field: per-component offsets, per-octave offset, anisotropic stretch `Mop`, ridged `1 − 2|n|` with its fold deviation | CultMath stage functions returning value, Jacobian and span bounds | A stage's bounds compose from the noise pins by the chain rule; a consumer never re-derives them | Waits on question `span-chain-shape` |
+| Span evaluator: linearise a composed chain, the curvature bound `K`, the empty and saturated proofs | Per `span-chain-shape` | One composition rule for bounds | Waits on `span-chain-shape` |
+| Brushes, the ramp, `ampG`, `brushPoint`, the chain's order, the scroll animation | The consumer (site, Aetheria) | The authored field is the consumer's | Never CultMath |
+
+`1 − 2|n|` is the affine image `2(1 − |n|) − 1` of `ridged_grad`'s octave term.
+Adding it as a variant is a naming choice inside the stage-function cut, not a fork.
+
+### The noise domain and a curl node (not decided: no ruling)
+
+The Aetheria Self is testing curl of simplex (`snoise_grad`) as a replacement for
+`Tri3D` flow noise. The Span Lab already has curl as a warp mode. The domain's
+owner would serve a curl node like this:
+
+- It is one CultMath primitive: the curl of three offset `snoise` (or octave-sum)
+  potentials from analytic gradients, with the `cultmath_` HLSL twin, the lowered
+  GLSL and a fixture family. Aetheria's flow law and the nebula's warp both call
+  it. Each consumer keeps its own composition and scaling: the lab's
+  `curlK = 0.25/F`, or Aetheria's amplitude and scroll.
+- Its Jacobian, which the span evaluator and the kernel cascade's per-kernel affine
+  warp both need, is a difference of Hessian entries. That is why `snoise-hessian`
+  comes first, and why the curl node is not in it.
+- Bounds without new constants:
+  - Each curl component is a difference of two partials, so its magnitude per
+    octave is at most `2 L` times the amplitude.
+  - Its variation over a ball is bounded through `SNOISE_HESSIAN`.
+  - Its curvature, which the span bound needs, is bounded through `SNOISE_THIRD`.
+- The as-built line "a flow or envelope function in CultMath" was written against
+  the site's flow law. A curl basis is a noise primitive like `snoise_grad`. If the
+  curl node is ruled, the line needs that clarification, not a waiver.
+
+### Kernel cascade (kept as a line)
+
+The probe found the cascade exact, and 0.48x the shipped march's cost at 4.2x its
+msf on the void. But it "cannot be marched", its look is fibres, and its GPU cost
+is traversal, which is unmeasured. Optical depth through it is a sum of per-kernel
+segment integrals, so it is order-independent. Additive blending of each kernel's
+screen footprint would give exact transmittance in WebGL2, with no compute and no
+sorting. Emission is not order-independent. This is a hypothesis with no probe
+behind it. The cascade becomes a cut only if `site-ground-field` or the operator's
+nebula work picks it.
+
+### Cut sequence (volumetric line)
+
+1. `snoise-hessian` (spec admitted): `snoise_hessian`, `SNOISE_THIRD` re-measured
+   on the tied kernel, `integral_clamp_linear`, in C#, HLSL and GLSL with fixture
+   families. It touches no `expr-ir` file. Its provenance prose goes in code
+   comments and the README, not `design.md`, which `expr-ir` edits.
+2. Question `span-chain-shape`, then the warp-stage and span-bound cut it picks.
+3. The curl primitive, once the operator rules on curl (the Aetheria flow test).
+4. Question `site-ground-field`, then `cut-site-ground.r1` on the field it picks.
+   The marched option carries all three site follow-ups; the other options
+   withdraw the two marched-only ones.
+5. The kernel cascade, if picked.
