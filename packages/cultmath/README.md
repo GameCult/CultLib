@@ -82,7 +82,9 @@ shader semantics.
   the analytic Hessian of `snoise(float3)` on the same lattice, hash and tie order as
   `snoise_grad` (a symmetric `float3x3`; GLSL `mat3`), and `integral_clamp_linear(a,
   b, lo, hi, t0, t1)`, the closed-form integral over `[t0, t1]` of `clamp(a + b t,
-  lo, hi)`. Three measured bounds describe `snoise`: `SNOISE_LIPSCHITZ` (gradient
+  lo, hi)`; and, in C# for now (shaders follow), the octave stages `span_fbm` and
+  `span_ridged`, which return a `SpanNoise` (`field` as `float4(gradient, value)`,
+  `curvature`, `fold`) for a stretched, offset, shifted octave sum over a span. Three measured bounds describe `snoise`: `SNOISE_LIPSCHITZ` (gradient
   length, `NoiseBoundTests.MeasureLipschitz`), `SNOISE_HESSIAN` (Hessian spectral
   norm, `MeasureHessian`) and `SNOISE_THIRD` (third-derivative operator norm,
   `MeasureThird`); each is 1.10 times a seeded maximum refined by ascent, and a

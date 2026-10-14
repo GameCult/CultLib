@@ -806,6 +806,38 @@ constant of 40 misses there). The margin over the function itself: a scan of the
 independently over every hash configuration gives 52.22, so 55.64 sits 7% above the
 configuration bound. A change to the kernels must re-run the measurements.
 
+### Span stages
+
+`span_fbm` and `span_ridged` (`math.Span.cs`, C# only so far) are the octave stages
+of a warp chain, each returning one `SpanNoise { float4 field; float curvature; float
+fold; }`. The span is the path `q(t)`, `|t| <= halfLength`, through `q` with the given
+`velocity` at its midpoint, `|q'| <= speed` and `|q''| <= acceleration` along it.
+Octave `o` samples `snoise_grad` at `x_o(q) = f_o (M q + shift) + offset + o
+octaveStep`, with `f_o = lacunarity^o`, amplitude `gain^o`, and `M = frequency (I +
+(1/stretch - 1) a a^T)`, `a = normalize(axis)`; a zero axis or `stretch` 1 means no
+stretch, and `stretch` must be positive and finite (unguarded, like `lacunarity`).
+`field` is the octave sum and its gradient in `q` (`f_o M grad n_o`); at frequency 1,
+stretch 1 and zero shift, offset and octaveStep it equals `fbm_grad` and
+`ridged_grad` bit for bit. `span_ridged` sums `gain^o (1 - |n_o|)`, `ridged_grad`'s
+convention; the Span Lab's `1 - 2|n|` is twice this minus the gain sum, which the
+consumer forms.
+
+Bounds come from the three pins only. With `|M| = |frequency| max(1, 1/stretch)` and
+`nu = f_o |M| speed` the noise-space speed, the Hessian of the noise on the span has
+operator norm at most `Hl = min(SNOISE_HESSIAN, ||snoise_hessian(x_mid)||_F +
+SNOISE_THIRD nu halfLength)`, so `curvature = sum gain^o f_o^2 |M|^2 Hl` bounds the
+operator norm of the field's Hessian in `q` at every point of the span (the pin takes
+over once the third-derivative term exceeds it, and at `halfLength` 0 the local tier
+alone remains). For `span_ridged`, an octave leaves the branch it is on at the
+midpoint (`1 - s n`, `s` the midpoint's sign of `n`) only where `n` changes sign, and
+there `|n| <= V - |n_mid|`, with `V = |grad n_mid . w| halfLength + (Hl nu |w| + Gl f_o
+|M| acceleration) halfLength^2 / 2`, `w = f_o M velocity` and `Gl = min(SNOISE_LIPSCHITZ,
+|grad n_mid| + Hl nu halfLength)`; `fold = sum 2 gain^o max(V - |n_mid|, 0)`, exactly 0
+for `span_fbm` and for an octave that cannot reach zero. Rounding is not widened: the
+Frobenius norm exceeds the operator norm except on a rank-one Hessian, and the pins
+carry a 10% margin. `SpanStageTests` encloses the Hessian norm and the branch
+departure at 64 points of seeded spans, in the local and the global regime.
+
 The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
 warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1
 footprintPerDepth + warpVariation`, with `af_frustum_axis` the axis `(m_c, 1) h`:

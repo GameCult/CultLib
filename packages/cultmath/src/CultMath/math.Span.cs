@@ -128,4 +128,104 @@ public static partial class math
         var total = held + (a + b * (0.5f * (enter + leave))) * (leave - enter) + kept;
         return direction * total;
     }
+
+    private static float span_frobenius(float3x3 m) =>
+        sqrt(m._m00 * m._m00 + m._m01 * m._m01 + m._m02 * m._m02 + m._m10 * m._m10 + m._m11 * m._m11 + m._m12 * m._m12
+            + m._m20 * m._m20 + m._m21 * m._m21 + m._m22 * m._m22);
+
+    // Plain fbm of snoise over a span: the octave stage of a warp chain, its value and gradient at the
+    // span's midpoint and the bounds that hold over the whole span. See span_stage for the span, the
+    // transform and the bound rules. At frequency 1, stretch 1 and zero shift, offset and octaveStep the
+    // field equals fbm_grad(q, octaves, lacunarity, gain) bit for bit.
+    public static SpanNoise span_fbm(float3 q, float3 velocity, float speed, float acceleration, float halfLength,
+        float frequency, float stretch, float3 axis, float3 shift, float3 offset, float3 octaveStep, int octaves, float lacunarity, float gain) =>
+        span_stage(false, q, velocity, speed, acceleration, halfLength, frequency, stretch, axis, shift, offset, octaveStep, octaves, lacunarity, gain);
+
+    // Ridged fbm over a span: octave o contributes gain^o (1 - |n_o|), ridged_grad's convention (the Span
+    // Lab's 1 - 2|n| is twice this minus the gain sum, the consumer's to form). fold bounds how far the
+    // sum can leave the branch it is on at the midpoint. At the identity transform the field equals
+    // ridged_grad bit for bit.
+    public static SpanNoise span_ridged(float3 q, float3 velocity, float speed, float acceleration, float halfLength,
+        float frequency, float stretch, float3 axis, float3 shift, float3 offset, float3 octaveStep, int octaves, float lacunarity, float gain) =>
+        span_stage(true, q, velocity, speed, acceleration, halfLength, frequency, stretch, axis, shift, offset, octaveStep, octaves, lacunarity, gain);
+
+    // The span is the path q(t), |t| <= halfLength, through q at t = 0 with the given velocity there,
+    // |q'| <= speed and |q''| <= acceleration along it (speed at least |velocity|; all three and halfLength
+    // non-negative). Octave o samples snoise_grad at x_o(q) = f_o (M q + shift) + offset + o octaveStep with
+    // f_o = lacunarity^o, amplitude gain^o and M = frequency (I + (1/stretch - 1) a a^T), a = normalize(axis);
+    // a zero axis, or stretch 1, means no stretch. stretch must be positive and finite, and nothing guards
+    // it, as nothing guards lacunarity. octaves clamps to [0, 16] as fbm_grad's does. The field is the
+    // octave sum in q: gradient f_o M grad n_o (M is symmetric), the same octave loop as fbm_grad and
+    // ridged_grad.
+    //
+    // Bounds, per octave, from SNOISE_LIPSCHITZ (L), SNOISE_HESSIAN (H) and SNOISE_THIRD (T) only. With
+    // |M| = |frequency| max(1, 1/stretch) (1 without stretch) and nu = f_o |M| speed, the noise-space speed:
+    //  * |x(t) - x_mid| <= nu halfLength, so the Hessian of n at x(t) has operator norm at most
+    //    Hl = min(H, ||hessian(x_mid)||_F + T nu halfLength) (the Hessian is T-Lipschitz in operator norm,
+    //    and the Frobenius norm bounds the operator norm), and |grad n(x(t))| at most
+    //    Gl = min(L, |grad n_mid| + Hl nu halfLength).
+    //  * curvature = sum gain^o f_o^2 |M|^2 Hl: the Hessian in q of n(x_o(q)) is f_o^2 M H M.
+    //  * fold, ridged only. Over the span the octave's value departs from its midpoint branch
+    //    gain^o (1 - s n) (s the sign of n at the midpoint) only where n has changed sign, and there
+    //    |n(t)| <= V - |n_mid|, V bounding |n(t) - n_mid|. Writing n(t) - n_mid as the integral of
+    //    grad n . x', x' = w + rho with w = f_o M velocity and |rho| <= f_o |M| acceleration |t|, and
+    //    grad n = grad n_mid + delta with |delta| <= Hl nu |t|:
+    //    V = |grad n_mid . w| halfLength + (Hl nu |w| + Gl f_o |M| acceleration) halfLength^2 / 2,
+    //    and the octave's fold is 2 gain^o max(V - |n_mid|, 0), zero when it cannot reach zero.
+    // Rounding is not widened: the Frobenius norm exceeds the operator norm except on a rank-one
+    // Hessian, and the pins carry a 10% margin.
+    private static SpanNoise span_stage(bool ridged, float3 q, float3 velocity, float speed, float acceleration, float halfLength,
+        float frequency, float stretch, float3 axis, float3 shift, float3 offset, float3 octaveStep, int octaves, float lacunarity, float gain)
+    {
+        octaves = clamp(octaves, 0, 16);
+        var stretched = dot(axis, axis) > 0.0f && stretch != 1.0f;
+        var direction = stretched ? normalize(axis) : new float3(0.0f, 0.0f, 0.0f);
+        var squeeze = stretched ? 1.0f / stretch - 1.0f : 0.0f;
+        var norm = abs(frequency) * (stretched ? max(1.0f, 1.0f / stretch) : 1.0f);
+        var mq = stretched ? frequency * (q + squeeze * dot(direction, q) * direction) : frequency * q;
+        var mv = stretched ? frequency * (velocity + squeeze * dot(direction, velocity) * direction) : frequency * velocity;
+        var amplitude = 1.0f;
+        var scale = 1.0f;
+        var value = 0.0f;
+        var gradient = new float3(0.0f, 0.0f, 0.0f);
+        var curvature = 0.0f;
+        var fold = 0.0f;
+        for (var i = 0; i < octaves; i++)
+        {
+            var x = scale * (mq + shift) + (offset + (float)i * octaveStep);
+            var n = snoise_grad(x);
+            var g = new float3(n.x, n.y, n.z);
+            var mg = stretched ? frequency * (g + squeeze * dot(direction, g) * direction) : frequency * g;
+            if (ridged)
+            {
+                var s = (float)sign(n.w);
+                value += amplitude * (1.0f - abs(n.w));
+                gradient += -amplitude * scale * s * mg;
+            }
+            else
+            {
+                value += amplitude * n.w;
+                gradient += amplitude * scale * mg;
+            }
+
+            var weight = abs(amplitude);
+            var factor = abs(scale) * norm;
+            var nu = factor * speed;
+            var local = min(SNOISE_HESSIAN, span_frobenius(snoise_hessian(x)) + SNOISE_THIRD * nu * halfLength);
+            curvature += weight * factor * factor * local;
+            if (ridged)
+            {
+                var w = scale * mv;
+                var reach = local * nu * halfLength;
+                var gl = min(SNOISE_LIPSCHITZ, length(g) + reach);
+                var travel = abs(dot(g, w)) * halfLength + (local * nu * length(w) + gl * factor * acceleration) * (0.5f * halfLength * halfLength);
+                fold += 2.0f * weight * max(travel - abs(n.w), 0.0f);
+            }
+
+            scale *= lacunarity;
+            amplitude *= gain;
+        }
+
+        return new SpanNoise(new float4(gradient, value), curvature, fold);
+    }
 }
