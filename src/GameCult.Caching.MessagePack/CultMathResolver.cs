@@ -180,7 +180,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     return value;
                 }),
 
-            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin].
+            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin], SpanNoise is [field, curvature, fold].
             Shape<float2x2>((ref MessagePackWriter w, float2x2 v) => { w.WriteArrayHeader(2); PutFloat2(ref w, v[0]); PutFloat2(ref w, v[1]); },
                 (ref MessagePackReader r) =>
                 {
@@ -231,6 +231,22 @@ public sealed class CultMathResolver : IFormatterResolver
                         {
                             case 0: value.cos = GetFloat4(ref r); break;
                             case 1: value.sin = GetFloat4(ref r); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<SpanNoise>((ref MessagePackWriter w, SpanNoise v) => { w.WriteArrayHeader(3); PutFloat4(ref w, v.field); w.Write(v.curvature); w.Write(v.fold); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(SpanNoise);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.field = GetFloat4(ref r); break;
+                            case 1: value.curvature = r.ReadSingle(); break;
+                            case 2: value.fold = r.ReadSingle(); break;
                             default: r.Skip(); break;
                         }
                     }

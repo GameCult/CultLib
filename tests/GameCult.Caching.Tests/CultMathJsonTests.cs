@@ -45,6 +45,8 @@ namespace GameCult.Caching.Tests
                 """{"nearest":{"x":1,"y":2,"z":3,"w":4},"edge":{"x":5,"y":6,"z":7,"w":8},"id":0.25}""");
             Json(new CultPhasor(new float4(1f, 2f, 3f, 4f), new float4(5f, 6f, 7f, 8f))).Should().Be(
                 """{"cos":{"x":1,"y":2,"z":3,"w":4},"sin":{"x":5,"y":6,"z":7,"w":8}}""");
+            Json(new SpanNoise(new float4(1f, 2f, 3f, 4f), 0.25f, 0.5f)).Should().Be(
+                """{"field":{"x":1,"y":2,"z":3,"w":4},"curvature":0.25,"fold":0.5}""");
         }
 
         [Test]
@@ -69,6 +71,7 @@ namespace GameCult.Caching.Tests
             RoundTrip(new rect(-1f, -2f, 5f, 7f));
             RoundTrip(new CultCellular(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8), 0.25f));
             RoundTrip(new CultPhasor(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8)));
+            RoundTrip(new SpanNoise(new float4(1, 2, 3, 4), 0.25f, 0.5f));
         }
 
         [Test]
