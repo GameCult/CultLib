@@ -273,6 +273,8 @@ struct LargestUnionArm {
     next: Option<Box<LargestUnion>>,
 }
 
+// The fixture is the largest arm the derives accept next to a unit variant, which is the point.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, CultUnion)]
 enum LargestUnion {
     #[cultcache(key = 0)]
