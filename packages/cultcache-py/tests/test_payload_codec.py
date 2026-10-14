@@ -335,8 +335,9 @@ class PayloadCodecTests(unittest.TestCase):
         self.assertEqual((refusal.code, str(refusal)), ("value_kind", text.format("read")))
 
     def test_mixed_width_nan_keys_are_a_documented_refusal(self) -> None:
-        # The bytes the C# reference writes for a map holding float.NaN and double.NaN keys: it reads them as two keys.
+        # The bytes C# accepts for a map holding float.NaN and double.NaN keys (two keys); it writes the values as int32.
         row = "82 ca ffc00000 01 cb fff8000000000000 02"
+        written = "82 ca ffc00000 d2 00000001 cb fff8000000000000 d2 00000002"
         with self.assertRaises(PayloadCodecFault) as caught:
             MESSAGEPACK_PAYLOAD_CODEC.decode(bytes.fromhex(row))
         self.assertEqual((caught.exception.code, caught.exception.kind), ("duplicate_map_key", ""))
@@ -346,6 +347,10 @@ class PayloadCodecTests(unittest.TestCase):
         section = readme.split("## Wire Parity", 1)[1].split("\n## ", 1)[0]
         self.assertIn("duplicate_map_key", section)
         self.assertIn(row, section)
+        self.assertIn(written, section)
+        with self.assertRaises(PayloadCodecFault) as caught:
+            MESSAGEPACK_PAYLOAD_CODEC.decode(bytes.fromhex(written))
+        self.assertEqual(caught.exception.code, "duplicate_map_key")
 
     def test_every_nan_key_is_one_key_both_ways(self) -> None:
         from cultcache_py.leaves import Float32
@@ -918,19 +923,40 @@ class ConvertTests(unittest.TestCase):
                 taken.push(CultCacheEnvelope.create(key="k", type="tests.mig", payload=b'{"n": 1}'))
                 store.push(CultCacheEnvelope.create(key="k", type="tests.mig", payload=b'{"n": 1}'))
                 missing = type(store)(folder / f"{CANARY}-missing")
+                dangling = folder / f"{CANARY}-dangling"
+                os.symlink(folder / f"{CANARY}-nowhere", dangling)
+                raced = folder / f"{CANARY}-raced"
+                real_exists = Path.exists
+
+                def exists_then_created(path):
+                    if path == raced:
+                        raced.write_bytes(b"raced")
+                        return False
+                    return real_exists(path)
+
                 for expected, call in (
                     (SOURCE_MISSING, lambda: convert(missing, folder / f"{CANARY}-out", definitions)),
                     (DESTINATION_EXISTS, lambda: convert(store, taken.path, definitions)),
+                    # The late refusal: the create itself finds the destination (a dangling symlink, or a creator
+                    # racing between the existence check and the create).
+                    (DESTINATION_EXISTS, lambda: convert(store, dangling, definitions)),
+                    (DESTINATION_EXISTS, lambda: self._convert_racing(exists_then_created, store, raced, definitions)),
                 ):
                     with self.assertRaises(CultCacheError) as caught:
                         call()
                     refusal = caught.exception
                     self.assertEqual(str(refusal), expected)
-                    for text in (str(refusal), repr(refusal), repr(refusal.args), repr(vars(refusal)), _chain_text(refusal)):
+                    notes = repr(getattr(refusal, "__notes__", None))
+                    for text in (str(refusal), repr(refusal), repr(refusal.args), repr(vars(refusal)), notes, _chain_text(refusal)):
                         self.assertNotIn(CANARY, text)
                         self.assertNotIn(str(folder), text)
                     self.assertIsNone(refusal.__context__)
                     self.assertIsNone(refusal.__cause__)
+
+    @staticmethod
+    def _convert_racing(exists, store, destination, definitions):
+        with mock.patch.object(Path, "exists", exists):
+            return convert(store, destination, definitions)
 
     def _one_record(self, label, name):
         store = self._filled(dict(self._stores())[label], name, {"k1": b'{"n": 1}'})

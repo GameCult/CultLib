@@ -622,13 +622,13 @@ def convert(
     )
     if destination.exists():
         raise exists
-    refused = False
+    target = None
     failure: CultCacheError | None = None
     try:
         try:
             target = open(destination, "xb")
         except FileExistsError:
-            refused = True
+            pass
         else:
             with target:
                 converted: list[CultCacheEnvelope] = []
@@ -654,9 +654,8 @@ def convert(
                 target.flush()
                 os.fsync(target.fileno())
     except BaseException:
-        if not refused:
-            destination.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
         raise
-    if refused:
+    if target is None:
         raise exists
     return count

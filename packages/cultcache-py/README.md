@@ -251,8 +251,9 @@ python -m cultcache_py.interop read --file cache.cc
 
 One deliberate exception to leaf acceptance following the reference: Python reads `float32` and `float64` map keys as
 one float, so a map holding a `float32` NaN key beside a `float64` NaN key is refused on read and on write as
-`duplicate_map_key`. C# writes and reads that map as two keys, as the bytes `82 ca ffc00000 01 cb fff8000000000000 02`
-(`float.NaN` and `double.NaN` keys with values 1 and 2); every pair of NaN keys of one width is refused by both runtimes.
+`duplicate_map_key`. C# reads that map as two keys, from the bytes `82 ca ffc00000 01 cb fff8000000000000 02` (fixint
+values) and from the bytes it writes itself, `82 ca ffc00000 d2 00000001 cb fff8000000000000 d2 00000002` (`float.NaN`
+and `double.NaN` keys with values 1 and 2, written as int32); every pair of NaN keys of one width is refused by both runtimes.
 
 `packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
 CultCache v1 parity matrix with TypeScript, Rust, and C#. `cultcache_py` ships
