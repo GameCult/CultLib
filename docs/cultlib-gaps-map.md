@@ -18,11 +18,11 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
 4. `cultmath-rotation-algebra`: quaternion algebra, swing-twist and joint clamps (ruling
    `aetheria-release:ruling:solver-in-gamecult-animation`). Ships in the CultMath release that the first
    GameCult.Animation release pins; that release is mapped with GameCult.Animation.
-5. `py-msgpack-default` revision 3 (section P, "Revision 3"): the fix batch (h3) for Soul s2's open findings and
-   s1's `store-and-sniff-decide-format` on `hands/py-msgpack-default` at `57f85acd`. Its merge to main waits on the
-   Brokkr cut (follow-up `brokkr-msgpack-payloads-r3`).
+5. `py-msgpack-default` revision 4 (section P, "Revision 4"): the fix batch (h4) on `hands/py-msgpack-default`
+   at `a59bbc7d`. `migrate_payloads` is replaced by `convert` (ruling `py-migration-shape-ruled`), and Soul s3's
+   open codec Lows are fixed. Its merge to main waits on the Brokkr cut (follow-up `brokkr-msgpack-payloads-r4`).
 5a. Not mapped: the Python store takes the cross-process sidecar lock the C# and Rust stores take (follow-up
-   `py-ts-store-cross-process-lock`); `migrate_payloads` then holds it too.
+   `py-ts-store-cross-process-lock`). It is a store parity cut of its own; `convert` does not need it (P15).
 6. Not mapped: the C# leaf-vectors revision (`leaf-vectors-next`) gains the P2 map-key rows, so the Python
    key tests read C#-written bytes instead of literals.
 
@@ -218,7 +218,7 @@ Quaternions are Hamilton, stored xyzw, unit for rotation; angles are radians, ri
 - A CultMath release that carries cut 4, which `org.gamecult.animation`'s `package.json` pins. That release is
   mapped with GameCult.Animation, so one Soul-verified release pair ships both.
 
-## P. cultcache-py payload format (py-msgpack-default, revisions 2 and 3)
+## P. cultcache-py payload format (py-msgpack-default, revisions 2 to 4)
 
 Imagination pass `imagination-py-msgpack-r2`, session `self-2026-10-12-eureka`, against `hands/py-msgpack-default`
 at `7f2c7477`. Probes ran from the session scratchpad and were removed afterwards; their results are recorded here (`jobK` ran
@@ -337,28 +337,28 @@ stranded a store with it. Revision 2 replaces the procedure with
 5. Records of other types keep their bytes and `stored_at`. The return value is the count rewritten.
 
 It never sniffs, and it cannot leave a store half-migrated. Revision 2 also claimed that a second run is refused;
-Soul s2 falsified that (P10), and a concurrent writer strands the store (P11). Revision 3 replaces this shape
-(see "Revision 3").
+Soul s2 falsified that (P10), and a concurrent writer strands the store (P11). Revision 3 replaced this shape with a
+backup-and-swap (P12), which Soul s3 broke three more ways. Revision 4 deletes the in-place migration: CultLib owns
+only `convert`, which writes a new file and never writes its source (P14).
 
 Rejected alternatives:
 - A sniffing reader that accepts both formats: P1's one-digit payloads are valid in both formats, and r1's map
   forbade readers that try one format and then another.
 - A consumer-run loop over `put`: that is the procedure that stranded the store.
 
-### Brokkr landing contract (follow-up `brokkr-msgpack-payloads-r2`)
+### Brokkr landing contract (follow-up `brokkr-msgpack-payloads-r4`)
 
 The merge of `hands/py-msgpack-default` to main waits on three things:
 1. Soul holds on the fix batch.
 2. A Brokkr branch, Soul-held, is ready in its own campaign. On it, the daemon writes MessagePack
    (`put_messagepack_document`) into both stores. The JSON-first read becomes a read of exactly one MessagePack
-   value with a trailing-bytes check, and the bridge's 8 definitions are unchanged. The Blender store is migrated
-   by `cultcache_py.migrate_payloads` over those 8 definitions, because those payloads came from cultcache-py's
-   old default. From revision 3 the call names a backup path that must not exist (P12), and the original JSON
-   store is kept there. The daemon-written JSON receipts in the Unity store are the daemon's own, and it rewrites
-   them.
+   value with a trailing-bytes check, and the bridge's 8 definitions are unchanged. The Blender store is converted
+   by `cultcache_py.convert` over those 8 definitions into a new file beside it, because those payloads came from
+   cultcache-py's old default (P14). The daemon-written JSON receipts in the Unity store are the daemon's own, and
+   it rewrites them, also into a new file.
 3. An operator window: close Blender and stop sync, Self merges CultLib and Brokkr together, build the daemon,
-   run both migrations, then restart. The backup stays until the operator has opened the migrated store; deleting
-   it is the operator's step, after which a rerun is no longer guarded (P12).
+   run both conversions, open each new file, swap it into place, then restart. The JSON originals are kept under
+   another name for as long as the operator wants them.
 
 ### Revision 3
 
@@ -437,6 +437,53 @@ two NaN keys read back as two keys. The rule that matches decode exactly compare
 `duplicate_map_key`. The reference reads all four collision maps as two keys (Soul s2 KEYPROBE). Python cannot,
 for the same reason it cannot read `{1, 1.0}`, which is the residual already recorded. Refusing on write keeps
 Python inside what it can read back, and it is the write half of that residual.
+
+### Revision 4
+
+Imagination pass `imagination-py-msgpack-r4`, session `self-2026-10-14-eureka`, against `hands/py-msgpack-default`
+at `a59bbc7d`, under ruling `py-migration-shape-ruled` (convert-to-new-file). Source reads only; nothing was run.
+
+P14. **The shape ruled.** `convert(source, destination, definitions, *, source_codec=JSON_PAYLOAD_CODEC) -> int`
+replaces `migrate_payloads`. It creates `destination` with exclusive create (`open(path, "xb")`) before it reads
+anything, so an existing file (the source itself, an earlier output, anything) is refused and left alone. It reads
+the source once through the source store's `pull_all`, rewrites the listed records in memory, writes the store
+bytes into the file it created, and fsyncs it. Any failure after the create removes that file. It never opens the
+source for writing. The destination is the same store kind as the source, and its bytes come from the same
+per-kind encoder `_replace_all` uses, so the two writers cannot drift. The caller stops writers, converts, opens
+the new file and swaps it in. This follows SQLite `VACUUM INTO` and LMDB `mdb_env_copy` (P12) without the backup
+role that r3 added to them.
+
+P15. **What the shape makes impossible, and what stays.** The library no longer writes a live store during a
+format change. That leaves no code to fix for s2's `migrate-races-concurrent-writer` or s3's
+`inflight-writer-strands-migration`, `rerun-guard-is-per-backup-path` and `stopped-migration-has-no-recovery`,
+because the backup, the compare and the swap are deleted. The library does not lose a write made during
+`convert`. The write lands in the source, and only the caller's swap can drop it. The README makes stopping
+writers the caller's precondition, as SQLite's offline tools do. A killed run leaves the source intact and possibly
+a partial destination; recovery is to delete the destination and run again. A partial JSON Lines destination can
+parse as a smaller store, so the README says the destination is complete only once `convert` has returned.
+Converting a store that is already MessagePack can still produce wrong values in the destination (P10: `b'5'`),
+but the source is untouched. The cross-process store lock (follow-up `py-ts-store-cross-process-lock`) is still a
+store parity gap, but nothing in this cut waits on it.
+
+P16. **The codec decodes only what it writes.** At `a59bbc7d`, `MESSAGEPACK_PAYLOAD_CODEC.decode` is `_unpack_tree`
+alone. It returns trees 257 or more deep, `ExtType` values, and timestamps outside .NET `DateTime` (Soul s3); the
+definition or the reference refuses every one of them. Revision 4 also runs the write check over the decoded tree
+(`_check_carried`, renamed from `_check_writable`). That gives one rule in both directions. The depth walk, the
+integer range and the key kinds apply as before. No `ExtType` node is carried (code `value_kind`, kind `ext`).
+A timestamp's seconds must lie within `-62135596800..253402300799` (code `timestamp_out_of_range`). That interval
+is `DateTime.MinValue` to `DateTime.MaxValue`. It is derived from MessagePack-CSharp's timestamp reader, which adds
+the seconds to the Unix epoch and then the nanoseconds as ticks. It was not measured at the seam here, and a
+C#-written seam row belongs to follow-up `leaf-vectors-next`. The store's whole-file read keeps `_unpack_tree`
+alone, because a store frame is not a payload. The `any` leaf keeps its own ext refusal, which is the slot's rule
+for a value handed to it directly.
+
+P17. **NaN keys.** The reference holds a map's keys in a `Dictionary` keyed by CLR type and value, where a NaN
+equals a NaN of the same width. It therefore refuses two float64 NaN keys and accepts a float64 NaN beside a
+float32 NaN (Soul s3). Python reads both widths as one `float` and cannot tell them apart. Revision 4 gives
+`_key_image` one NaN image, used by `_checked_map` on read and by `_check_carried` on write. Any two NaN keys are
+refused both ways as `duplicate_map_key`. On the mixed-width pair this refuses something the reference accepts,
+the same kind of residual as `1` beside `1.0`. The other choice would read two float64 NaN keys that the
+reference refuses.
 
 ## Observed, not owned by these cuts
 
