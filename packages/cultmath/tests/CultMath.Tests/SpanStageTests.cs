@@ -453,4 +453,51 @@ public sealed class SpanStageTests
 
         Assert.True(found >= 5, $"only {found} calm midpoints found");
     }
+
+    /// <summary>
+    /// The fold's acceleration term, alone: the midpoint velocity is zero and the acceleration points along
+    /// the gradient, against the sign of n, so n reaches zero and crosses it on the way to the span's ends
+    /// by acceleration only. Without the acceleration term (or with the gradient bound under the gradient
+    /// the path reaches) the departure from the midpoint branch exceeds fold.
+    /// </summary>
+    [Fact]
+    public void SpanFoldCoversAccelerationAlone()
+    {
+        var random = new System.Random(0xACCE1);
+        var identity = new Stage(1.0f, 1.0f, new float3(0.0f, 0.0f, 0.0f), new float3(0.0f, 0.0f, 0.0f), new float3(0.0f, 0.0f, 0.0f), new float3(0.0f, 0.0f, 0.0f), 1, 2.0f, 0.5f);
+        var still = new float3(0.0f, 0.0f, 0.0f);
+        var cases = 0;
+        var crossings = 0;
+        var tightest = double.MaxValue;
+        for (var trial = 0; trial < 200_000 && cases < 150; trial++)
+        {
+            var q = Vector(random, -60.0f, 60.0f);
+            var n = snoise_grad(q);
+            var gradient = new float3(n.x, n.y, n.z);
+            var halfLength = Uniform(random, 0.05f, 0.15f);
+            var acceleration = Uniform(random, 4.0f, 12.0f);
+            // n at the midpoint close enough to zero that the acceleration alone carries it across.
+            if (length(gradient) < 1.5f || abs(n.w) > 0.4f * length(gradient) * acceleration * halfLength * halfLength * 0.5f)
+                continue;
+            var c = -(float)Math.Sign(n.w) * acceleration * normalize(gradient);
+            var span = new Span(q, still, c, acceleration * halfLength, acceleration, halfLength);
+            var fold = identity.Ridged(q, still, span.Speed, acceleration, halfLength).fold;
+            var departure = 0.0;
+            for (var s = 0; s < 64; s++)
+            {
+                var value = (double)snoise(span.At(halfLength * (2.0f * s / 63 - 1.0f)));
+                departure = Math.Max(departure, Math.Abs(Math.Sign(n.w) * value - Math.Abs(value)));
+            }
+
+            if (departure > 0.0)
+                crossings++;
+            Assert.True(departure <= fold * (1.0 + 1.0e-3), $"q {q}, acceleration {acceleration:R}, half-length {halfLength:R}: the branch departure is {departure:R}, above fold {fold:R}");
+            if (departure > 0.0)
+                tightest = Math.Min(tightest, departure / fold);
+            cases++;
+        }
+
+        Assert.True(crossings >= 100, $"only {crossings} of {cases} paths crossed zero by acceleration alone");
+        output.WriteLine($"IV-REPORT span fold, acceleration only: {crossings} of {cases} paths cross zero, tightest departure / fold {tightest:R}");
+    }
 }
