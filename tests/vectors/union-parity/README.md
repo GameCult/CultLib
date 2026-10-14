@@ -10,7 +10,7 @@ Document `tests.union_surface` (schema `tests.union_surface.v1`), a positional a
 | Union | Arm keys | Arm slots |
 |---|---|---|
 | Node | 0 Box, 1 Text, 2 Use, 5 Image, 6 Wrap (3 and 4 retired) | Box `[Id, Children: Node list]`; Text `[Id, Content]`; Use `[Id, Composition, Slots: Node list]`; Image `[Id, Uri, nil (retired 2), Alt]`; Wrap `[Inner: Node]` |
-| Outcome | 0 Pending, 1 Completed, 2 Denied, -2147483648 Floor, 2147483647 Ceiling | Pending `[Message]`; Completed `[SourceVersion]`; Denied, Floor and Ceiling are unit arms, `[2, []]` |
+| Outcome | 0 Pending, 1 Completed, 2 Denied, -2147483648 Floor, 2147483647 Ceiling | Pending `[Message, Id]`; Completed `[SourceVersion, Id]`; Denied, Floor and Ceiling `[Id]`: the arms of a list carry an element id |
 | Item | 0 Gem, 1 Tool, 2 Part | Gem `[Name]`; Tool `[Name, Uses]`; Part `[Name, Count]` |
 | CraftedItem | 0 Tool, 1 Part | the same arms as Item under its own keys; a key only Item declares is unknown to it |
 
@@ -21,11 +21,14 @@ Composition is a record, not an arm: `[Name, Body: Node]`.
 - `union-surface.msgpack`: the payload. Value: Id `surface`, Version 3; Root is a Box `root` holding Text `t1`, a Use
   `u1` and Image `i2`; the Use's Composition `comp` holds Box `inner` (Text `deep`, Image `img`), and its Slots are
   Text `s1`, nil, Box `b2` (empty); Outcomes are Pending, Completed, Denied; Part is Tool `hammer`; Crafted (a
-  CraftedItem field) is Part `gear`; Missing is nil. A union inside a record inside a union, a unit arm, a list of
+  CraftedItem field) is Part `gear`; Missing is nil. A union inside a record inside a union, an id-only arm, a list of
   unions with a nil element, an inner union keyed apart from its outer. Written by C#.
 - `union-surface.cc`: a single-file store written by the C# store holding that one record under key `surface`. Its
   payload equals `union-surface.msgpack`; rewriting the loaded store is byte-identical. The writer pins the store's
   clock, so the record's stored-at is `2026-01-01T00:00:00.0000000+00:00` and the whole file reproduces byte for byte.
+- `unit-arm-denied.msgpack`, `unit-arm-floor.msgpack`, `unit-arm-ceiling.msgpack`: a member-less arm of a union no list reaches
+  (so its arms carry no element id), alone, written by C#: `[2, []]`, `[-2147483648, []]`, `[2147483647, []]`. These pin the
+  unit-arm encoding; the id-only arms above are not unit arms.
 - `outcomes.msgpack`: the expected outcome of every file below, as data. An array of entries
   `[file, outcome, union, key, detail]`: `outcome` is `refused` or `read-only`; `union` is the union (or record)
   named; `key` is the arm key or nil; `detail` is as in the tables below.
