@@ -1056,16 +1056,21 @@ namespace GameCult.Caching.Tests
 
             Assert.That(CommitItemCountingDecodes(noLists, typeof(PreCut2FixtureItem)), Is.EqualTo((0, "cultcache.store.v1")), "a type with no object list is not decoded");
 
-            // A written record that holds an id already marks the store.
+            // A written record that holds an id already marks the store, whichever of the written records it is.
             var stagedPath = PathOf("gate-staged.cc");
             WritePreIdStore(stagedPath, null, ("a", "a", 1), ("b", "b", 1), ("c", "c", 1));
             var stagedStore = new SingleFileMessagePackBackingStore(stagedPath);
-            using (var cache = new CultCache(Registry, CultCacheMessagePack.CreateCodec(Registry)))
+            var stagedRegistry = CultDocumentRegistry.ForTypes(new[] { typeof(IdDeck), typeof(PreCut2FixtureItem) });
+            using (var cache = new CultCache(stagedRegistry, CultCacheMessagePack.CreateCodec(stagedRegistry)))
             {
                 cache.AddBackingStore(stagedStore);
                 cache.PullAllBackingStoresAsync().GetAwaiter().GetResult();
                 stagedStore.CopiedRecordsDecoded = 0;
-                cache.Commit(batch => batch.Upsert(typeof(IdDeck), Deck("fresh"), new CultRecordKey("fresh")));
+                cache.Commit(batch =>
+                {
+                    batch.Upsert(typeof(PreCut2FixtureItem), new PreCut2FixtureItem { Name = "plain" }, new CultRecordKey("plain"));
+                    batch.Upsert(typeof(IdDeck), Deck("fresh"), new CultRecordKey("fresh"));
+                });
             }
 
             Assert.That(stagedStore.CopiedRecordsDecoded, Is.EqualTo(0), "a staged record holding an id marks without asking");
