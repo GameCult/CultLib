@@ -487,6 +487,14 @@ refused both ways as `duplicate_map_key`. On the mixed-width pair this refuses s
 the same kind of residual as `1` beside `1.0`. The other choice would read two float64 NaN keys that the
 reference refuses.
 
+Revision 5 records this as a deliberate exception to ruling `leaf-acceptance-follows-reference`, because Python
+cannot tell the two widths apart (msgpack-python decodes both to one `float`) and no ruling lets the codec read a
+pair the reference refuses. Soul s4 probed the C# behaviour: `Dictionary<object,object>{float.NaN, double.NaN}`
+serialises as `82 ca ffc00000 01 cb fff8000000000000 02`, the reference reads it back as two keys, and cultcache-py
+refuses it on read as `duplicate_map_key` (base `a59bbc7d` accepted that read). Every same-width NaN pair, with
+equal or different payload bits and with +NaN beside -NaN, is refused by both runtimes. The exception lives where a
+consumer reads it: the cultcache-py README's Wire Parity section, pinned by a test vector (the bytes above).
+
 ## D. cultcache-rs decode stack safety (cut `decode-stack-safety`)
 
 Pinned base: `origin/main` at `ae6ef5a8` (2026-10-14). Imagination pass `imagination-decode-stack`, session
