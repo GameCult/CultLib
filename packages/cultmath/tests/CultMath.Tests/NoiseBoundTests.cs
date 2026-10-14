@@ -605,7 +605,7 @@ public sealed class NoiseBoundTests
     }
 
     // The start MeasureHessian printed as its witness.
-    private static readonly float3 HessianWitness = new(-245.19885f, -53.01323f, -91.47363f);
+    private static readonly float3 HessianWitness = new(-13.7920685f, -9.672134f, 61.563934f);
 
     /// <summary>
     /// Pins SNOISE_HESSIAN: no Hessian norm over 1e5 seeded points exceeds it, and the ascent from
@@ -780,7 +780,7 @@ public sealed class NoiseBoundTests
     }
 
     // The start MeasureThird printed as its witness.
-    private static readonly float3 ThirdWitness = new(0.0f, 0.0f, 0.0f);
+    private static readonly float3 ThirdWitness = new(-168.3755f, -3.8205261f, -109.16948f);
 
     /// <summary>
     /// Pins SNOISE_THIRD: no third-derivative norm over 1e5 seeded points exceeds it, and the ascent from

@@ -21,9 +21,10 @@ public static partial class math
     // plain function of float values, so it mirrors into the HLSL common subset.
 
     // An upper bound on the spectral norm of the Hessian of snoise(float3). Provenance:
-    // NoiseBoundTests.MeasureHessian (slow, explicit) takes the largest Hessian norm (central
-    // differences of snoise_grad, largest absolute eigenvalue) over 1e6 seeded points, refines the 1e4
-    // largest by ascent, and multiplies the refined maximum by 1.10;
+    // NoiseBoundTests.MeasureHessian (slow, explicit) takes the largest Hessian norm (snoise_hessian,
+    // largest absolute eigenvalue) over 1e6 seeded points, refines the 1e4 largest by ascent, and
+    // multiplies the refined maximum by 1.10 (50.5838 measured, 55.642143 pinned; the central
+    // differences of snoise_grad it replaced read 50.955 here, their roundoff at h = 1e-3);
     // NoiseBoundTests.HessianConstantPinsSampledCurvature pins this value against a fast re-measure and
     // the ascent from MeasureHessian's witness. Empirical with a margin, not a proof. Random balls
     // cannot see a constant 20% low, so the defence is those two curvature tests plus
@@ -32,7 +33,7 @@ public static partial class math
     // whole 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
     // independently over every hash configuration gives 52.22 (Soul pass s1). A change to the snoise
     // kernel must re-run MeasureHessian and re-pin it. SNOISE_THIRD (math.Span.cs) is the next-order pin.
-    public const float SNOISE_HESSIAN = 56.050385f;
+    public const float SNOISE_HESSIAN = 55.642143f;
 
     /// <summary>The point form (x, 0, 0): the value x at every eps. Exact.</summary>
     public static float3 af_point(float value) => new(value, 0.0f, 0.0f);

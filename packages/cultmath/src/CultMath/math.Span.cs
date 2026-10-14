@@ -10,9 +10,10 @@ public static partial class math
     // refines the 1e4 largest by ascent over the point, and multiplies the maximum by 1.10; it prints
     // the witness start. NoiseBoundTests.ThirdConstantPinsSampled pins the value against a fast
     // re-measure and the ascent from that witness. Measured on the tied kernel (snoise_grad's order),
-    // not on any pre-tie splice. Empirical with a margin, not a proof. A change to the snoise kernel
+    // not on any pre-tie splice. Measured 488.1047 (a dense sweep of 20,000 directions at the witness
+    // found 99.9998% of the tensor norm there). Empirical with a margin, not a proof. A change to the snoise kernel
     // must re-run MeasureThird and re-pin it.
-    public const float SNOISE_THIRD = 1.0f;
+    public const float SNOISE_THIRD = 536.9152f;
 
     // Analytic Hessian of snoise(float3): the symmetric matrix of second partial derivatives, same
     // lattice, hash and tie order as snoise_grad, whose kernel it differentiates once more. Every local

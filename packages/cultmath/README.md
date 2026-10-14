@@ -78,6 +78,15 @@ shader semantics.
   then `CultMath.Phacelle.glsl` only if it calls `cultmath_phacelle` and
   `CultMath.Cycles.glsl` only if it calls a `cultmath_cycles_` function, then its
   own shader source.
+- Span primitives (`math.Span.cs`, `cultmath_*` in HLSL and GLSL): `snoise_hessian`,
+  the analytic Hessian of `snoise(float3)` on the same lattice, hash and tie order as
+  `snoise_grad` (a symmetric `float3x3`; GLSL `mat3`), and `integral_clamp_linear(a,
+  b, lo, hi, t0, t1)`, the closed-form integral over `[t0, t1]` of `clamp(a + b t,
+  lo, hi)`. Three measured bounds describe `snoise`: `SNOISE_LIPSCHITZ` (gradient
+  length, `NoiseBoundTests.MeasureLipschitz`), `SNOISE_HESSIAN` (Hessian spectral
+  norm, `MeasureHessian`) and `SNOISE_THIRD` (third-derivative operator norm,
+  `MeasureThird`); each is 1.10 times a seeded maximum refined by ascent, and a
+  fast test pins it. They are empirical with a margin, not proofs.
 - `Voronoi.SampleTones`, a C# batch surface that calls the Rust
   `cultmath-core` native kernel when `cultmath_core` is available and falls back
   to the managed parity path otherwise.
