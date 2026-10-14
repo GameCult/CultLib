@@ -365,14 +365,14 @@ namespace GameCult.Caching.Tests
         public void TheIdPathHoldsEveryTypeThatReachesAnObjectList()
         {
             var path = CultElementIds.Inspect(typeof(HDiamond)).IdPath;
-            Assert.That(path, Is.EquivalentTo(new[] { typeof(HDiamond), typeof(HLeft), typeof(HRight), typeof(HCycle), typeof(HCycleBack), typeof(EIded) }));
-            Assert.That(CultElementIds.Inspect(typeof(HFine)).IdPath, Is.EquivalentTo(new[] { typeof(HFine), typeof(ENest), typeof(EIded) }));
+            Assert.That(path, Is.EquivalentTo(new[] { typeof(HDiamond), typeof(HLeft), typeof(HRight), typeof(HCycle), typeof(HCycleBack), typeof(EIded), typeof(List<EIded>) }));
+            Assert.That(CultElementIds.Inspect(typeof(HFine)).IdPath, Is.EquivalentTo(new[] { typeof(HFine), typeof(ENest), typeof(EIded), typeof(List<ENest>), typeof(List<EIded>) }));
             Assert.That(CultElementIds.Inspect(typeof(HFormattedField)).IdPath, Is.Empty);
 
             // A union base is on the path both as the type a list holds (its formatter writes the arm) and as a field type whose
             // arm holds the list.
-            Assert.That(CultElementIds.Inspect(typeof(HPlainBaseList)).IdPath, Is.EquivalentTo(new[] { typeof(HPlainBaseList), typeof(PlainBase), typeof(PlainArm) }));
-            Assert.That(CultElementIds.Inspect(typeof(HIdBaseOwner)).IdPath, Is.EquivalentTo(new[] { typeof(HIdBaseOwner), typeof(IdBase), typeof(IdArm), typeof(EIded) }));
+            Assert.That(CultElementIds.Inspect(typeof(HPlainBaseList)).IdPath, Is.EquivalentTo(new[] { typeof(HPlainBaseList), typeof(PlainBase), typeof(PlainArm), typeof(List<PlainBase>) }));
+            Assert.That(CultElementIds.Inspect(typeof(HIdBaseOwner)).IdPath, Is.EquivalentTo(new[] { typeof(HIdBaseOwner), typeof(IdBase), typeof(IdArm), typeof(EIded), typeof(List<EIded>) }));
         }
 
         // ---- shapes ----
