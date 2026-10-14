@@ -674,7 +674,12 @@ class ConvertTests(unittest.TestCase):
                     {item.key: definition.decode_payload(item.payload) for item in opened.pull_all() if item.type == "tests.mig"},
                     {"k1": 5, "k2": 53, "k3": {"n": 1}},
                 )
-                self.assertEqual(sorted(self._pull_with(opened, MESSAGEPACK_PAYLOAD_CODEC), key=str), [5, 53, {"n": 1}])
+                plain = self._filled(make, f"plain-{label}", records)
+                plain_destination = self.directory / f"plain-{label}.out"
+                convert(plain, plain_destination, [definition])
+                self.assertEqual(
+                    sorted(self._pull_with(type(store)(plain_destination), MESSAGEPACK_PAYLOAD_CODEC), key=str), [5, 53, {"n": 1}]
+                )
                 raw = destination.read_bytes()
                 if label == "jsonl":
                     self.assertEqual(raw[:1], b"{")
