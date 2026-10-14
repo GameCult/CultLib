@@ -408,8 +408,9 @@ fifth slot:
 
 ## Element Ids
 
-Every object that sits in a list, array or dictionary value of a registered document
-type, union subtypes included, carries an id: one string member with an integer `[Key]`
+Every object that sits in a list, array or dictionary value (`IDictionary<,>` or
+`IReadOnlyDictionary<,>`) of a registered document type, or of a keyed struct a document
+holds, union subtypes included, carries an id: one string member with an integer `[Key]`
 and `[CultElementId]`. The id identifies the element inside its list, so an override can
 name it (a path step is `[slot, elementId]`) and a base edit that reorders or inserts
 elements retargets nothing.
@@ -432,7 +433,13 @@ elements retargets nothing.
   store; they carry ids and do not decide when a document carries them.
 - An object list's elements are written by their `[Key]` layout, because the id is a
   keyed member of the element. A list whose element type is not keyed
-  (`[MessagePackObject]` or `[Union]`) is a value list and is replaced whole. For an
+  (`[MessagePackObject]` or `[Union]`) is a value list and is replaced whole; so is a list
+  of keyed structs, since a struct is a value and never an element, but an object list
+  inside a keyed struct is walked like any other. The walk follows declared member types:
+  a member declared `object` is untyped on disk, and a subclass's extra members under a
+  non-union base-typed member are not written, so neither is walked. A non-public `[Key]`
+  member on the way to an object list is refused at registration, because MessagePack
+  writes it only under `AllowPrivate` and the element-id walk reads public members. For an
   object list, C# refuses at registration a concrete element type that is not keyed and
   `[MessagePackFormatter]` on any type, collection type or member on the way to the list or on the id
   member, and refuses at the first encode or decode of the document a formatter

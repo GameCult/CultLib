@@ -299,8 +299,9 @@ exclusive open of the same lock file exclude each other is not established.
   the walk passes (`List<T>`, `T[]`, a collection class, a dictionary on the way).
   Those are written by their `[Key]` layout so each element's id reaches disk, and the
   codec refuses the document on first encode or decode, naming the resolver and the
-  type. A resolver that returns MessagePack's standard formatter for a type does not
-  claim it. A value list (`List<float2>`, a list of a non-keyed class) is not on the
+  type. The formatter `StandardResolver` or `StandardResolverAllowPrivate` hands out for a
+  type does not claim it (registration refuses a non-public `[Key]` member on the way to
+  an object list, so the private-member formatter writes every id). A value list (`List<float2>`, a list of a non-keyed class) is not on the
   path, so a resolver may claim it.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.
