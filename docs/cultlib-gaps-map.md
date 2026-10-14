@@ -583,6 +583,87 @@ all `MIT OR Apache-2.0`; plus `cfg-if`, `libc`, `cc` (build) and `windows-sys` o
 stacker compiles C at build time, so a C toolchain becomes a build requirement (gcc in the rust image, MSVC on
 Starfire). cultcache-rs is MIT. Written by hand, the wrapper would be serde_stacker's ~650 lines of forwarding.
 
+### Body facts, revision 2 (verdict `cut-decode-stack-safety.s1`)
+
+Imagination pass `imagination-decode-stack-r2`, session `self-2026-10-14-eureka`, on branch
+`hands/decode-stack-safety` at `2505c0c4`. Probes live under the session scratchpad,
+`imagination-decode-stack-r2/` (`gen.py`, `gen2.py`, `driver*.rs.in`, jobs `jobP1` to `jobP4`), run on Yggdrasil
+in the rust image (rustc 1.95.0). None of it is committed. `jobP1` patches a copy of serde_stacker 0.1.14 so
+each of its five `maybe_grow` calls (`de.rs:476-520`, the wrapper visitor's container entries) records the
+stack pointer, and reads the door's red zone and segment from the environment. Shapes: `wide` is the committed
+`Wide32` (32 slots of `[u64; 32]`, 8 KiB inline); `bigN` is 32 slots of an N-array record (32·N KiB inline:
+32, 64, 128, 256 KiB), each with an `Option<Box<Self>>` slot; `lim` is 31 slots of a 2-array record (15,880 B).
+A caller is one `#[inline(never)]` function holding the `Result<T>`.
+
+D10. **The gap between checks is linear in the record's inline size.** Stack used between two consecutive
+checks, the worst over a 6-level decode on a 1 GiB thread (every gap in a shape is the same value):
+
+| Shape (inline) | wide (8 KiB) | big4 (32) | big8 (64) | big16 (128) | big32 (256) |
+|---|---|---|---|---|---|
+| debug gap | 115 KiB | 451 | 899 | 1,795 | 3,587 |
+| debug frames before the first check | 131 KiB | 515 | 1,027 | 2,051 | 4,099 |
+| release gap | 48 KiB | 192 | 384 | 768 | 1,536 |
+| release frames before the first check | 48 KiB | 192 | 384 | 768 | 1,536 |
+
+So the gap is 14·S + 3 KiB in debug and 6·S in release, for S = `size_of` of the record entered: the frames
+between a container check and the next one each hold the record being built or a `Result` of it (rmp-serde's
+`any_inner`, the wrapper visitor, the derive's `visit_seq` with one `Option` per slot, the seed). D4's 128-144
+KiB debug gap for `fat` is this line at 8 KiB plus a margin. The stack touched below the deepest check is 6 KiB
+in debug and 0 in release, so the excursions between checks are the gaps above.
+
+D11. **Why the thread size decided, in two ways.** (a) Before the first check the decode has already used the
+second row of D10: `rmp-serde`'s `deserialize_tuple`, `any_inner` and the wrapper's frames sit between
+`decode_payload` and the wrapper's first `maybe_grow`, and each holds `Result<T>`. A thread smaller than that
+row aborts whatever the red zone: `wide` aborts on every thread up to 144 KiB in debug. (b) Mid-decode, a check
+with between R and the gap remaining lets the next gap overrun; after the first grow the positions in each
+segment are fixed, so which check first grows (set by the thread size) decides, which is the non-monotonic
+pattern Soul measured. Thread sweeps at the bound (threads from 64 KiB in steps of a 64th of the span, plus
+1, 1.5, 2, 3, 4 and 64 MiB):
+
+| Profile, shape | R = 256 KiB | R = gap - 48 KiB | R = gap rounded up + 64 KiB |
+|---|---|---|---|
+| debug wide | 6 of 65 sweep threads abort (64-144 KiB); none at 1-64 MiB | all 65; and at 1-4 MiB | 6 (64-144 KiB); none at 1-64 MiB |
+| debug big4 | 39 of 65; and at 1.5, 2, 3, 4, 64 MiB | 29; and at 2, 64 MiB | 24, the lowest from 64 KiB; none at 1-64 MiB |
+| release wide | none | 14, spread from 112 to 864 KiB; and at 1, 4 MiB | none |
+| release big4 | 9 (64-192 KiB) | 18, including 448-480 KiB | 9 (64-192 KiB) |
+| release big8 | 40; and at 1.5, 2, 3, 64 MiB | 20; and at 1.5 MiB | 17, the lowest from 64 KiB; none at 1-64 MiB |
+
+With R at least the gap, the abort counts match the threads smaller than the frames before the first check
+(D10's second row plus the harness) in every shape and profile, big16 and big32 included (segments 4·R); with
+R below the gap, threads well above those frames abort mid-decode.
+
+D12. **Checking at the top of the door** (`jobP4`). `decode_payload` patched so its whole body runs inside
+`stacker::maybe_grow(R, segment, ..)` before the walk and the wrapper, R = 512 KiB, segment 2 MiB. Every
+thread from 24 KiB to 1 MiB in 8 KiB steps, then 1.5, 2, 3, 4, 8 and 64 MiB:
+
+| Profile | wide (8 KiB), 1 level | wide, 255 levels | lim (15,880 B), 1 level | lim, 254 levels |
+|---|---|---|---|---|
+| debug: smallest thread that decodes | 40 KiB | 40 KiB | 72 KiB | 72 KiB |
+| release: smallest thread that decodes | 24 KiB | 24 KiB | 40 KiB | 40 KiB |
+
+No thread at or above the smallest one aborts, in any of the four columns, in either profile. lim's gap is
+220 KiB in debug and 93 KiB in release (D10's lines give 220 and 93), so R = 512 KiB is 2.3 times the debug
+gap of a record at 16 KiB. What a thread needs is now the caller's own frames, which hold the returned value
+and do not depend on the payload's depth.
+
+D13. **No red zone or placement removes the bound.** Every frame that holds a value of type T sits between the
+check before T's container and the check inside it, and serde's own impls add frames that hold T before T's
+first check: `Box<T>`'s `Deserialize` holds the `Result<T>` it boxes, and the `Option` check before it sized
+nothing larger than a pointer. A per-type red zone (a forked wrapper sized by `size_of::<V::Value>()`, or a
+grow in the derive sized by `size_of::<Self>()`) still leaves that frame of about one to three T outside any
+sized check. So the stack a decode needs between checks is bounded only by bounding the inline size of the
+records it builds. The derive is the one place that sees every record type it produces: a `const` assertion on
+`size_of::<Self>()` refuses an oversized record at compile time. A field of a type the derive did not produce
+(a fixed array of arrays, a large tuple, a plain serde struct) behind a `Box` or `Vec` is not reached by it.
+
+D14. **Build closure and wasm, measured by Soul (`soul-decode-stack-s1` jobD, `cargo tree -e normal,build`
+at `2505c0c4` against `ae6ef5a8`).** Added on `x86_64-unknown-linux-gnu`: serde_stacker 0.1.14, stacker 0.1.25,
+psm 0.1.32, cc 1.8.0, find-msvc-tools 0.1.14, shlex 2.0.1, object 0.39.1 (`Apache-2.0 OR MIT`), all
+`MIT OR Apache-2.0` except ar_archive_writer 0.5.3 (`Apache-2.0 WITH LLVM-exception`, build-only, via psm).
+On `x86_64-pc-windows-msvc` the same plus libc 0.2.190 and windows-sys 0.61.2 (`MIT OR Apache-2.0`, beside the
+crate's own windows-sys 0.59). `fs2 0.4` (8 call sites in `lib.rs`, the store's file locks) has no wasi
+backend, so cultcache-rs does not build for `wasm32-wasip1`; D8 measured serde_stacker in a separate crate.
+
 ### Authority, and why
 
 The door owns stack safety as it owns the bound: `decode_payload` runs the bound walk, then rmp-serde through
@@ -591,8 +672,12 @@ door descend through" is met there, because every derived level is entered throu
 `maybe_grow` in the derive would be a second owner of the same check, needs a red zone of 128 KiB in release
 and 256 KiB in debug for fat where the wrapper needs 32 and 144 KiB (D4), and still misses foreign recursive types. The derive is unchanged.
 
-The thread's size no longer decides whether an accepted payload decodes, on targets where stacker switches
-stacks. rmp-serde's 1024 counter stays a backstop that never decides. Callers that decode a payload with
+Revision 2 (D10-D13): the door's first act is a check, so no frame holding T precedes it, and the red zone is
+set against the gap of the largest record the derive may produce. That size is a public constant the derive
+asserts at compile time, because nothing at decode time can bound a frame that holds a T before T's own check
+(D13). The thread's size then decides nothing beyond the caller's own frames, which hold the returned value
+whatever the payload's depth (D12). Envelope and store decodes enter through the same grown decoder, without
+the payload walk, so what they accept is unchanged. rmp-serde's 1024 counter stays a backstop that never decides. Callers that decode a payload with
 `rmp_serde::from_slice` directly bypass the door, the bound and the grow alike; cultnet-rs re-decodes
 door-checked `rmpv::Value`s that way (follow-up `rs-redecode-outside-door-r2`).
 
