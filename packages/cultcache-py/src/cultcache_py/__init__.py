@@ -1,7 +1,7 @@
 ﻿from .backing_store import BackingStore, CultCacheEnvelope
 from .backing_store import CultCacheSchemaCatalogEntry, CultCacheSchemaCatalogMember
 from . import leaves
-from .cache import CultCache, CultCacheBuilder, migrate_payloads
+from .cache import CultCache, CultCacheBuilder, convert
 from .documents import (
     MAX_PAYLOAD_DEPTH,
     JSON_PAYLOAD_CODEC,
@@ -52,5 +52,5 @@ __all__ = [
     "define_document_type",
     "define_record_codec",
     "define_union",
-    "migrate_payloads",
+    "convert",
 ]

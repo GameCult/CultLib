@@ -45,7 +45,8 @@ class CultCachePayloadDepthError(ValueError):
 
 class PayloadCodecFault(ValueError):
     """A codec raises this for a payload its format cannot carry. `code` names the rule (the library's are
-    `map_key_kind`, `duplicate_map_key`, `integer_out_of_range` and `depth_limit`) and `kind` the kind of node at fault (a MessagePack
+    `map_key_kind`, `duplicate_map_key`, `integer_out_of_range`, `depth_limit`, `value_kind` and
+    `timestamp_out_of_range`) and `kind` the kind of node at fault (a MessagePack
     kind such as `nil` or `bin`); neither is ever a payload value. A consumer-built codec may raise it."""
 
     def __init__(self, code: str, kind: str = "") -> None:
@@ -56,8 +57,8 @@ class PayloadCodecFault(ValueError):
 
 class CultCachePayloadFormatError(ValueError):
     """A payload is not one value of its definition's codec (read), or holds a key or integer the codec cannot carry.
-    Names the type, the codec, the direction and a `code`; `detail` is the fault's class or the key's kind. Never a
-    payload byte or value."""
+    Names the type, the codec, the direction and a `code`; `detail` is the fault's class or the kind of the key or
+    extension value. Never a payload byte or value."""
 
     def __init__(self, type_name: str, codec: str, direction: str, code: str, detail: str) -> None:
         self.type_name = type_name
@@ -75,6 +76,13 @@ class CultCachePayloadFormatError(ValueError):
             message = f"{type_name} payload has two map keys Python holds as one; refused on {direction}."
         elif code == "integer_out_of_range":
             message = f"{type_name} payload has an integer beyond 64 bits; refused on write."
+        elif code == "value_kind":
+            message = (
+                f"{type_name} payload holds a value of kind {detail}; "
+                f"{codec} payloads carry no extension type but the timestamp (refused on {direction})."
+            )
+        elif code == "timestamp_out_of_range":
+            message = f"{type_name} payload holds a timestamp outside years 1 to 9999; refused on {direction}."
         else:
             message = f"{type_name} payload is refused by the {codec} codec ({code}); refused on {direction}."
         super().__init__(message)
@@ -169,6 +177,8 @@ class PayloadCodec:
 
 
 _INTEGER_RANGE = (-(2**63), 2**64 - 1)
+_TIMESTAMP_SECONDS = (-62135596800, 253402300799)
+_NAN_KEY = object()
 _KEY_TYPES = (str, int, float, Float32, msgpack.Timestamp)
 
 
@@ -187,33 +197,43 @@ def _node_kind(node: Any) -> str:
     return "unsupported"
 
 
+def _key_image(key: Any) -> Any:
+    """A map key as the reader holds it, and the one key identity of read and write: a `Float32` is written as float32
+    and read back as that float, and every NaN is one key (the reference refuses two of them)."""
+    if isinstance(key, Float32):
+        key = struct.unpack(">f", struct.pack(">f", key.value))[0]
+    return _NAN_KEY if isinstance(key, float) and key != key else key
+
+
 def _checked_map(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
     """The read hook of every MessagePack map: the keys the C# reference's object reader accepts (str, int, float,
     bool, timestamp) and no duplicate."""
     for key, _ in pairs:
         if not isinstance(key, _KEY_TYPES):
             raise PayloadCodecFault("map_key_kind", _node_kind(key))
-    held = dict(pairs)
-    if len(held) != len(pairs):
+    if len(dict.fromkeys(_key_image(key) for key, _ in pairs)) != len(pairs):
         raise PayloadCodecFault("duplicate_map_key")
-    return held
+    return dict(pairs)
 
 
-def _key_image(key: Any) -> Any:
-    """A map key as the reader holds it: a `Float32` is written as float32 and read back as that float."""
-    return struct.unpack(">f", struct.pack(">f", key.value))[0] if isinstance(key, Float32) else key
-
-
-def _check_writable(tree: Any) -> None:
-    """The write side of the key, integer and depth rule: what `_checked_map` refuses on read, and nesting past
-    `MAX_PAYLOAD_DEPTH`, is refused here, so nothing this codec writes is refused by its own decode. Keys that collide
-    once decoded (a `Float32` beside an equal int, bool or float) are the reader's duplicate."""
-    if isinstance(tree, int) and not _INTEGER_RANGE[0] <= tree <= _INTEGER_RANGE[1]:
+def _check_scalar(node: Any) -> None:
+    if isinstance(node, int) and not _INTEGER_RANGE[0] <= node <= _INTEGER_RANGE[1]:
         raise PayloadCodecFault("integer_out_of_range")
+    if isinstance(node, msgpack.Timestamp) and not _TIMESTAMP_SECONDS[0] <= node.seconds <= _TIMESTAMP_SECONDS[1]:
+        raise PayloadCodecFault("timestamp_out_of_range")
+
+
+def _check_carried(tree: Any) -> None:
+    """The one check of what a MessagePack payload carries, on read and on write: the keys, integers, timestamps and
+    nesting the C# reference's object reader takes, no extension type but the timestamp, and no two keys that decode
+    as one (a `Float32` beside an equal int, bool or float, or two NaNs), so nothing this codec writes is refused by
+    its own decode."""
+    _check_scalar(tree)
     for node in _containers(tree):
+        if isinstance(node, msgpack.ExtType):
+            raise PayloadCodecFault("value_kind", "ext")
         for child in _children(node):
-            if isinstance(child, int) and not _INTEGER_RANGE[0] <= child <= _INTEGER_RANGE[1]:
-                raise PayloadCodecFault("integer_out_of_range")
+            _check_scalar(child)
         if isinstance(node, Mapping):
             for key in node:
                 if not isinstance(key, _KEY_TYPES):
@@ -226,8 +246,14 @@ def _unpack_tree(payload: bytes) -> Any:
     return msgpack.unpackb(payload, raw=False, strict_map_key=False, object_pairs_hook=_checked_map)
 
 
+def _unpack_checked_tree(payload: bytes) -> Any:
+    tree = _unpack_tree(payload)
+    _check_carried(tree)
+    return tree
+
+
 def _pack_checked_tree(tree: Any) -> bytes:
-    _check_writable(tree)
+    _check_carried(tree)
     return _pack_tree(tree)
 
 
@@ -240,11 +266,12 @@ def _load_json(payload: bytes) -> Any:
 
 
 MESSAGEPACK_PAYLOAD_CODEC = PayloadCodec(
-    "MessagePack", _pack_checked_tree, _unpack_tree, depth_faults=(msgpack.exceptions.StackError,)
+    "MessagePack", _pack_checked_tree, _unpack_checked_tree, depth_faults=(msgpack.exceptions.StackError,)
 )
 """The default payload format. It carries what the C# reference's object reader accepts: str, int, float, bool and
-timestamp keys, no duplicate key, and integers within -(2**63)..2**64-1, nested no deeper than `MAX_PAYLOAD_DEPTH`. It refuses the rest on read through its
-map hook and on write through its encode, so it never writes a record it cannot read."""
+timestamp keys, no duplicate key (two NaN keys are one), integers within -(2**63)..2**64-1, timestamps within years 1 to
+9999, no extension type but the timestamp, and nesting no deeper than `MAX_PAYLOAD_DEPTH`. One check refuses the rest on
+read and on write, so it never writes a record it cannot read."""
 
 JSON_PAYLOAD_CODEC = PayloadCodec("JSON", _dump_json, _load_json, depth_faults=(RecursionError,))
 """The 0.3 default, kept for stores written before MessagePack: it writes exactly the 0.3 bytes. Never a default."""
@@ -404,8 +431,8 @@ def define_document_type(
     members: Iterable[CultCacheSchemaCatalogMember] | Callable[[], tuple[CultCacheSchemaCatalogMember, ...]] | None = None,
 ) -> DocumentDefinition[T]:
     """Define a document type. Its payload is the MessagePack of what `encode` returns; pass
-    `payload_codec=JSON_PAYLOAD_CODEC` to read a store written by cultcache-py 0.3 or earlier, and `migrate_payloads` to
-    rewrite it."""
+    `payload_codec=JSON_PAYLOAD_CODEC` to read a store written by cultcache-py 0.3 or earlier, and `convert` to write
+    it as a new MessagePack store."""
     codec = {} if payload_codec is None else {"payload_codec": payload_codec}
     return DocumentDefinition(
         type=type,

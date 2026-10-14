@@ -590,72 +590,66 @@ class CultCache:
         return self._state.documents_by_schema_name.get(envelope.type)
 
 
-def migrate_payloads(
-    store: SingleFileMessagePackBackingStore | JsonLinesBackingStore,
+def convert(
+    source: SingleFileMessagePackBackingStore | JsonLinesBackingStore,
+    destination: str | os.PathLike[str],
     definitions: Iterable[DocumentDefinition[Any]],
     *,
-    backup: str | os.PathLike[str],
     source_codec: PayloadCodec = JSON_PAYLOAD_CODEC,
 ) -> int:
-    """Rewrite the records of `definitions` in `store` from `source_codec` to each definition's own codec, whole or not
-    at all, and return the count rewritten. Stop every writer of the store first: a writer between the copy and the swap
-    makes the call refuse, but the swap itself takes no cross-process lock.
-
-    The store's bytes are copied to `backup`, which must not exist. The copy is read, every listed record is rewritten
-    in memory, and only if the store is byte-identical to the copy is it replaced, once, with the result; any refusal
-    (a record, a changed store) removes the backup and leaves the store as it was. The source is never written. Records
-    of other types keep their bytes. The backup is also the rerun guard, since payload bytes cannot say whether a store
-    was migrated (the JSON `5` is the MessagePack `53`): a second call finds it and is refused. Delete the backup only
-    after the migrated store opens, and never rerun after deleting it. A count of 0 writes nothing and keeps no backup.
+    """Write the records of `source` to a new store of the same kind at `destination`, the records of `definitions`
+    rewritten from `source_codec` to each definition's own codec, and return the count rewritten. Records of other types
+    keep their bytes. Stop every writer of the source before calling. `destination` must not exist: the call creates it
+    exclusively, and it is complete only once the call returns. A refusal (a record, a failed write) removes it and
+    leaves the source as it was. A killed run leaves the source intact and a partial destination: delete the destination
+    and run again. The source is only read, never written; swap the new store in yourself once it opens. A count of 0
+    still writes the destination.
     """
-    if not isinstance(store, (SingleFileMessagePackBackingStore, JsonLinesBackingStore)):
-        raise TypeError(f"migrate_payloads takes a library file store, not {type(store).__name__}")
-    backup = Path(backup)
+    if not isinstance(source, (SingleFileMessagePackBackingStore, JsonLinesBackingStore)):
+        raise TypeError(f"convert takes a library file store, not {type(source).__name__}")
+    if not source.path.exists():
+        raise CultCacheError(f"{source.path} does not exist; there is nothing to convert.")
     by_type: dict[str, DocumentDefinition[Any]] = {}
     for definition in definitions:
         by_type[definition.type] = definition
         by_type.setdefault(definition.catalog_entry().schema_name, definition)
-    original = store.path.read_bytes()
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(backup, "xb") as copy:
-            copy.write(original)
+        target = open(destination, "xb")
     except FileExistsError:
-        failure = CultCacheError(
-            f"{backup} already exists: a migration already ran or was stopped; the store is unchanged."
+        failure: CultCacheError | None = CultCacheError(
+            f"{destination} already exists; convert writes only a new store. {source.path} is unchanged."
         )
     else:
         failure = None
     if failure is not None:
         raise failure
     try:
-        migrated: list[CultCacheEnvelope] = []
-        count = 0
-        for envelope in type(store)(backup).pull_all():
-            definition = by_type.get(envelope.type)
-            if definition is not None:
-                try:
-                    value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
-                    envelope = replace(envelope, payload=definition.encode_payload(value))
-                except Exception as refusal:
-                    code = getattr(refusal, "code", type(refusal).__name__)
-                    failure = CultCacheError(
-                        f"Cannot migrate {envelope.type} record {envelope.key}: {code}; the store is unchanged."
-                    )
-                else:
-                    count += 1
-            if failure is not None:
-                raise failure
-            migrated.append(envelope)
-        if count:
-            with store._lock:
-                if store.path.read_bytes() != original:
-                    raise CultCacheError(
-                        f"{store.path} changed during migration; stop every writer and retry. The store is unchanged."
-                    )
-                store._replace_all(migrated)
+        with target:
+            converted: list[CultCacheEnvelope] = []
+            count = 0
+            for envelope in source.pull_all():
+                definition = by_type.get(envelope.type)
+                if definition is not None:
+                    try:
+                        value = replace(definition, payload_codec=source_codec).decode_payload(envelope.payload)
+                        envelope = replace(envelope, payload=definition.encode_payload(value))
+                    except Exception as refusal:
+                        code = getattr(refusal, "code", type(refusal).__name__)
+                        failure = CultCacheError(
+                            f"Cannot convert {envelope.type} record {envelope.key}: {code}; "
+                            "no store was written and the source is unchanged."
+                        )
+                    else:
+                        count += 1
+                if failure is not None:
+                    raise failure
+                converted.append(envelope)
+            target.write(type(source)._file_bytes(converted))
+            target.flush()
+            os.fsync(target.fileno())
     except BaseException:
-        backup.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
         raise
-    if not count:
-        backup.unlink()
     return count

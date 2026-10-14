@@ -70,9 +70,8 @@ class JsonLinesBackingStore:
             existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
             self._replace_all(existing)
 
-    def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.path.with_suffix(self.path.suffix + ".tmp")
+    @staticmethod
+    def _file_bytes(envelopes: list[CultCacheEnvelope]) -> bytes:
         lines = []
         for envelope in sorted(envelopes, key=lambda item: (item.type, item.key)):
             lines.append(json.dumps({
@@ -81,7 +80,12 @@ class JsonLinesBackingStore:
                 "payload": base64.b64encode(envelope.payload).decode("ascii"),
                 "stored_at": envelope.stored_at,
             }, ensure_ascii=False, sort_keys=True))
-        temp.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+
+    def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp.write_bytes(self._file_bytes(envelopes))
         temp.replace(self.path)
 
 
@@ -120,10 +124,14 @@ class SingleFileMessagePackBackingStore:
             existing = [item for item in self.pull_all() if not (item.type == type and item.key == key)]
             self._replace_all(existing)
 
+    @staticmethod
+    def _file_bytes(envelopes: list[CultCacheEnvelope]) -> bytes:
+        return msgpack.packb(_encode_v1_snapshot(envelopes), use_bin_type=True)  # type: ignore[no-any-return]
+
     def _replace_all(self, envelopes: list[CultCacheEnvelope]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp.write_bytes(msgpack.packb(_encode_v1_snapshot(envelopes), use_bin_type=True))
+        temp.write_bytes(self._file_bytes(envelopes))
         temp.replace(self.path)
 
 
