@@ -619,7 +619,11 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// #[derive(CultSlots)]
 /// struct TooLarge {
 ///     #[cultcache(key = 0)]
-///     bytes: [u8; 16 * 1024 + 1],
+///     a: [[u64; 32]; 32],
+///     #[cultcache(key = 1)]
+///     b: [[u64; 32]; 32],
+///     #[cultcache(key = 2)]
+///     one_more: u8,
 /// }
 /// ```
 ///
@@ -645,17 +649,40 @@ const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 /// }
 /// ```
 ///
-/// Just under the limit compiles:
+/// A record of exactly the limit, a union over a record of exactly the limit's half, and a record
+/// under it with a `Vec` for its large data compile:
 ///
 /// ```
-/// use cultcache_rs::CultSlots;
+/// use cultcache_rs::{CultSlots, CultUnion};
 ///
 /// #[derive(CultSlots)]
-/// struct JustUnder {
+/// struct AtTheLimit {
 ///     #[cultcache(key = 0)]
-///     bytes: Vec<u8>,
+///     a: [[u64; 32]; 32],
 ///     #[cultcache(key = 1)]
-///     header: [[u64; 32]; 63],
+///     b: [[u64; 32]; 32],
+/// }
+///
+/// #[derive(CultSlots)]
+/// struct Half {
+///     #[cultcache(key = 0)]
+///     a: [[u64; 32]; 32],
+/// }
+///
+/// #[derive(CultUnion)]
+/// enum Fits {
+///     #[cultcache(key = 0)]
+///     Half(Half),
+///     #[cultcache(key = 1)]
+///     Leaf,
+/// }
+///
+/// #[derive(CultSlots)]
+/// struct Boxed {
+///     #[cultcache(key = 0)]
+///     large: Vec<u8>,
+///     #[cultcache(key = 1)]
+///     header: [[u64; 32]; 31],
 /// }
 /// ```
 pub const MAX_RECORD_INLINE_BYTES: usize = 16 * 1024;
