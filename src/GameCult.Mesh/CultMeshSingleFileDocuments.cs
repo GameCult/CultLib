@@ -108,7 +108,8 @@ namespace GameCult.Mesh
                     descriptor.ToCatalogEntry(),
                     storedAt,
                     CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    CultElementIds.Holds(document));
+                    CultElementIds.Holds(document),
+                    resolvedRegistry);
             }
             catch
             {
@@ -146,7 +147,7 @@ namespace GameCult.Mesh
             byte[] payload)
         {
             if (schema == null) throw new ArgumentNullException(nameof(schema));
-            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: null);
+            WriteSingleFileDocumentPayload(path, key, schema.ToCatalogEntry(payload), storedAt, payload, holdsIds: null, registry: null);
         }
 
         /// <summary>
@@ -229,7 +230,8 @@ namespace GameCult.Mesh
             CultSchemaCatalogEntry catalogEntry,
             string? storedAt,
             byte[] payload,
-            bool? holdsIds)
+            bool? holdsIds,
+            CultDocumentRegistry? registry)
         {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Value must be non-empty.", nameof(path));
             if (catalogEntry == null) throw new ArgumentNullException(nameof(catalogEntry));
@@ -239,8 +241,13 @@ namespace GameCult.Mesh
             payload ??= Array.Empty<byte>();
             // The write replaces this one key and copies every other record and catalog entry forward as the store holds them, under
             // the store's lock. A typed write sees its document, so its ids decide the header; a raw payload is opaque (holdsIds null),
-            // so a file already marked stays marked. A store this runtime cannot read refuses the write instead of being overwritten.
-            StoreAt(path).ApplyWriteSet(
+            // so a file already marked stays marked. A typed write attaches the registry its payload was encoded with, so the write
+            // decides for copied records that registry can read; a raw payload attaches none and decides nothing. A store this runtime
+            // cannot read refuses the write instead of being overwritten.
+            var store = StoreAt(path);
+            if (registry != null)
+                store.AttachRegistry(registry);
+            store.ApplyWriteSet(
                 new[]
                 {
                     new CultStagedRecord(

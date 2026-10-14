@@ -3491,6 +3491,9 @@ namespace GameCult.Caching
         protected CultDocumentRegistry Registry =>
             _registry ?? throw new InvalidOperationException("Backing store is not attached to a CultDocumentRegistry.");
 
+        // Null for a store no registry was attached to (CultMesh's raw single-file write).
+        private protected CultDocumentRegistry? AttachedRegistry => _registry;
+
         protected ConcurrentDictionary<string, CultStoredDocument> Entries { get; } =
             new(StringComparer.Ordinal);
 
@@ -3545,9 +3548,9 @@ namespace GameCult.Caching
         // The header a write leaves, for either store kind: HeaderFor decides. A record's bytes do not say whether it holds an
         // element id (an id is an ordinary keyed string), so only the store header carries that fact. A write that copies any
         // record forward keeps a marked header; a write that encodes every record the store will hold decides by content. An
-        // opaque payload (null) never marks an unmarked store, and keeps a marked one marked. A copied record this store read
-        // holding an id, at the version the file still holds, marks the store too: another runtime may have written ids under
-        // an unmarked header. Nothing a load records can unmark a store.
+        // opaque payload (null) never marks an unmarked store, and keeps a marked one marked. A copied record the writer decodes
+        // under the store's lock holding an id marks the store too (SingleFileBackingStore.CopiedHoldIds): another runtime may
+        // have written ids under an unmarked header. Nothing a load or a decode records can unmark a store.
         protected static string HeaderForWrite(string? durableHeader, IReadOnlyCollection<bool?> written, bool copiesAny, bool copiedHoldIds, bool directoryStore, bool holdsVariants) =>
             HeaderFor(
                 holdsIds: copiedHoldIds || written.Any(value => value == true),
@@ -3946,10 +3949,6 @@ namespace GameCult.Caching
         // A write into a store holding a variant lands only while the durable versions still equal these.
         private readonly Dictionary<string, string> _lastRead = new(StringComparer.Ordinal);
 
-        // The version of each plain record a pull decoded holding an element id. Only a positive fact about those bytes: a
-        // write marks the header for a copied record still at that version, and nothing here ever unmarks a store.
-        private readonly Dictionary<string, string> _readHoldingIds = new(StringComparer.Ordinal);
-
         /// <summary>
         /// A store file from its parts, each already encoded: a catalog entry or record this store carries forward is the bytes its
         /// file held, one it writes is <see cref="SerializeCatalogEntry"/> or <see cref="SerializeRecord"/> of the object.
@@ -3973,6 +3972,9 @@ namespace GameCult.Caching
 
         // Test seam: how many record encodings this store has hashed, to prove what a write hashes.
         internal int RecordsHashed;
+
+        // Test seam: how many copied records a write decoded to ask whether they hold an element id.
+        internal int CopiedRecordsDecoded;
 
         private string VersionOfBytes(byte[] bytes)
         {
@@ -4038,7 +4040,6 @@ namespace GameCult.Caching
             if (durable == null)
             {
                 _lastRead.Clear();
-                _readHoldingIds.Clear();
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
                 SetForeignRecords(Array.Empty<CultForeignRecord>());
                 return;
@@ -4049,7 +4050,6 @@ namespace GameCult.Caching
             var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
             var foreign = new List<CultForeignRecord>();
             var versions = new Dictionary<string, string>(StringComparer.Ordinal);
-            var holdingIds = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
                 var version = versions[record.Key] = durable.Version(record.Key);
@@ -4062,8 +4062,6 @@ namespace GameCult.Caching
                 var stored = ToStoredDocument(record, version, snapshot.SchemaCatalog, DeserializePayload, out var report);
                 reports.Add(report);
                 persisted[stored.Key.Value] = stored;
-                if (stored.Variant == null && CultElementIds.Holds(stored.Document))
-                    holdingIds[stored.Key.Value] = version;
             }
 
             var loaded = persisted.Values
@@ -4081,9 +4079,6 @@ namespace GameCult.Caching
             _lastRead.Clear();
             foreach (var (key, version) in versions)
                 _lastRead[key] = version;
-            _readHoldingIds.Clear();
-            foreach (var (key, version) in holdingIds)
-                _readHoldingIds[key] = version;
             SetLastSchemaMigrationReports(reports);
             SetForeignRecords(foreign);
         }
@@ -4219,7 +4214,8 @@ namespace GameCult.Caching
         // write that then has nothing to write but keys it checked writes no file. Then a store that holds
         // a variant, or would after this write, is written only while its record versions are what this store last read: a variant
         // resolves against other records, and a write decodes none it did not stage, so it cannot judge another writer's. Versions
-        // only: a write hashes other records' bytes, never decodes them. Otherwise the whole write is refused and what it refused is
+        // only: a write hashes other records' bytes, never decodes them. That holds for the variant gate; the one decode of a copied
+        // record is the element-id check (CopiedHoldIds), which runs only on an unmarked store and can only mark it. Otherwise the whole write is refused and what it refused is
         // reloaded (Refuse). Every record the writer staged is encoded from its object now, and its version is the hash of that
         // encoding; every other record is copied as the slice the file holds. Returns the records written, each with the version of
         // the bytes written.
@@ -4263,8 +4259,7 @@ namespace GameCult.Caching
                 durable?.Snapshot.FormatVersion,
                 upserts.Select(staged => staged.HoldsIds).ToArray(),
                 copiesAny: copied.Length > 0,
-                copiedHoldIds: copied.Any(record => _readHoldingIds.TryGetValue(record.Key, out var read) &&
-                                                    SameStoredIdentity(read, durable!.Version(record.Key))),
+                copiedHoldIds: CopiedHoldIds(durable, copied, upserts),
                 directoryStore: false,
                 holdsVariants: records.Any(record => record.Variant != null));
 
@@ -4276,6 +4271,43 @@ namespace GameCult.Caching
             foreach (var (staged, version) in versions)
                 _lastRead[staged.Record.Key] = version;
             return versions;
+        }
+
+        // Whether a record this write copies forward holds an element id, decided from the bytes the file holds under the store's
+        // lock, so every C# writer with a type for the record decides the same from the same bytes. Positive-only: it runs only
+        // while the header on disk is unmarked and can only mark the store, so a narrower type that decodes no ids changes nothing.
+        // It never refuses a write: a record that does not resolve or decode is copied as its bytes and decides nothing. Gates, in
+        // order, so the decode runs only where it can change the answer.
+        private bool CopiedHoldIds(Durable? durable, CultPersistedRecord[] copied, IReadOnlyCollection<CultStagedRecord> upserts)
+        {
+            if (durable == null || copied.Length == 0 ||
+                string.Equals(durable.Snapshot.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal) ||
+                upserts.Any(staged => staged.HoldsIds == true) ||
+                AttachedRegistry is not { } registry)
+                return false;
+            var catalog = durable.Snapshot.SchemaCatalog;
+            foreach (var record in copied)
+            {
+                if (record.Variant != null)
+                    continue;
+                try
+                {
+                    if (registry.Claimant(record.SchemaId, catalog, out _) == null)
+                        continue;
+                    var type = registry.ResolvePersistedSchemaDetailed(record.SchemaId, catalog).Descriptor.DocumentType;
+                    if (!CultElementIds.CanHoldIds(type))
+                        continue;
+                    CopiedRecordsDecoded++;
+                    if (CultElementIds.Holds(DeserializePayload(type, record.Payload)))
+                        return true;
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    // Copied as its bytes: no type, or no decode, is no fact.
+                }
+            }
+
+            return false;
         }
 
         private void RefuseWriteIntoMovedVariantStore(Durable? durable, IReadOnlyCollection<CultStagedRecord> upserts, IReadOnlyCollection<string> removals)

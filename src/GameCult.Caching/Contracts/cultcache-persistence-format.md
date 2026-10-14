@@ -336,8 +336,11 @@ an element id, variants or not). A single-file store declares `v3` when any reco
 holds carries an element id: a non-empty `[CultElementId]` value in a record's document,
 or in a variant's override values. A store that cannot read a variant's override values
 (no codec attached) counts the variant as holding one. An element id is an ordinary keyed
-string in the payload, so no reader can tell from a record's bytes whether it holds one;
-a writer knows it only for the records it encodes. A write that copies any record forward
+string in the payload, so only a reader with the record's type can tell; a C# write
+decides for the records it encodes and, while the header it found is unmarked, for every
+plain record it copies forward that its registry can read, decoding the bytes the file
+holds under the store's lock. A copied record it cannot read, and a raw CultMesh payload,
+decide nothing. A write that copies any record forward
 therefore keeps a `v3` header it found. Only a write that encodes every record the store
 will hold decides by content, and drops to `v1` (or `v2` with a variant) when none holds
 an id. A directory store's manifest says
@@ -423,8 +426,8 @@ elements retargets nothing.
   the record's next write, or `CultCache.MintElementIds()`.
 - A store that holds an id declares the `v3` header (above), so a reader older than ids
   refuses it instead of skipping the id slot and rewriting the elements without ids.
-  A C# write also marks the store when it carries forward a record it read holding an
-  id, as long as the file still holds that record at the version it read. TypeScript,
+  A C# write also marks the store when a record it copies forward holds an id, judged
+  from the file's bytes at the write (above). TypeScript,
   Python and Rust read `v3` and keep a `v3` header they found when they rewrite a
   store; they carry ids and do not decide when a document carries them.
 - An object list's elements are written by their `[Key]` layout, because the id is a

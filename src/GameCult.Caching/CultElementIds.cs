@@ -110,6 +110,11 @@ namespace GameCult.Caching
             public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete)> Lists { get; } = new();
         }
 
+        private static readonly ConcurrentDictionary<Type, bool> IdCapable = new();
+
+        // A document type whose walk reaches no object list can hold no element id, so a write never decodes one to ask.
+        internal static bool CanHoldIds(Type documentType) => IdCapable.GetOrAdd(documentType, type => Inspect(type).IdPath.Count > 0);
+
         // Every reason this document type cannot be registered under the id rule, one per offending concrete element type.
         internal static Survey Inspect(Type documentType)
         {
