@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -38,8 +38,33 @@ let browser;
 
 try {
   const tsc = join(repoRoot, "node_modules", "typescript", "bin", "tsc");
+  await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultcache-ts", "tsconfig.json"), "--pretty", "false"]);
   await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultnet-ts", "tsconfig.json"), "--pretty", "false"]);
   await run(process.execPath, [tsc, "-p", join(repoRoot, "packages", "cultmesh-browser", "tsconfig.json"), "--pretty", "false"]);
+  // esbuild strips types, so a package signature change would otherwise surface as a browser error. The page is
+  // type-checked against the same module map the bundle uses.
+  const moduleMap = {
+    "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
+    "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
+    "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
+    "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
+  };
+  const sampleTsconfig = join(workRoot, "tsconfig.json");
+  await writeFile(sampleTsconfig, JSON.stringify({
+    compilerOptions: {
+      target: "ES2022",
+      module: "ES2022",
+      moduleResolution: "Bundler",
+      lib: ["ES2022", "ESNext.Disposable", "DOM", "DOM.Iterable"],
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+      types: [],
+      paths: Object.fromEntries(Object.entries(moduleMap).map(([name, target]) => [name, [target]])),
+    },
+    files: [join(sampleRoot, "browser", "main.ts")],
+  }));
+  await run(process.execPath, [tsc, "-p", sampleTsconfig, "--pretty", "false"]);
   await build({
     entryPoints: [join(sampleRoot, "browser", "main.ts")],
     outfile: bundlePath,
@@ -48,12 +73,7 @@ try {
     platform: "browser",
     target: "es2022",
     sourcemap: true,
-    alias: {
-      "@gamecult/eve-contracts": join(eveRoot, "packages", "eve-contracts", "src", "index.ts"),
-      "@gamecult/eve-browser-lowering": join(eveRoot, "packages", "eve-browser-lowering", "src", "index.ts"),
-      "cultmesh-browser": join(repoRoot, "packages", "cultmesh-browser", "src", "index.ts"),
-      "cultnet-ts/contracts": join(repoRoot, "packages", "cultnet-ts", "src", "contracts.ts"),
-    },
+    alias: moduleMap,
     logLevel: "warning",
   });
   const bundle = await readFile(bundlePath, "utf8");
@@ -222,10 +242,15 @@ function startDotnet(arguments_) {
       waiter.reject(new Error(`dotnet sample exited ${code}\n${output}\n${error}`));
     }
   });
+  // A line is complete once its newline has arrived: a stdout chunk can end inside a line, and the 10,000-operation
+  // benchmark line was parsed as JSON half-written.
+  function completeLines() {
+    return output.split(/\r?\n/u).slice(0, -1);
+  }
   function settle() {
     for (let index = waiters.length - 1; index >= 0; index--) {
       const waiter = waiters[index];
-      const line = output.split(/\r?\n/u).find(value => value.startsWith(waiter.prefix));
+      const line = completeLines().find(value => value.startsWith(waiter.prefix));
       if (!line) continue;
       waiters.splice(index, 1);
       clearTimeout(waiter.timer);
@@ -238,7 +263,7 @@ function startDotnet(arguments_) {
       process.stdin.write(`${line}\n`);
     },
     waitFor(prefix, timeoutMs = 30_000) {
-      const existing = output.split(/\r?\n/u).find(value => value.startsWith(prefix));
+      const existing = completeLines().find(value => value.startsWith(prefix));
       if (existing) return Promise.resolve(existing.slice(prefix.length));
       return new Promise((resolve, reject) => {
         const waiter = {

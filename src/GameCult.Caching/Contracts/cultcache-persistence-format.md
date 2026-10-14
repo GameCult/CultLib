@@ -364,6 +364,13 @@ array (an array of `key`/`type`/`payload`/`storedAt` maps) and replace it; C# ha
 reader and refuses it. The shared byte vectors and each runtime's verdict are
 `tests/vectors/document-variants-c2a/readability/manifest.txt`.
 
+A record's payload nests at most 256 MessagePack containers. Every array and map
+counts, whether a reader decodes it or skips past it, and the outermost array is
+depth 1: a payload of depth 256 is accepted and one of depth 257 is refused. Every
+runtime enforces the same bound on read and on write, and the refusal names the type,
+the depth and the limit, never payload bytes. The vectors are in
+`tests/vectors/union-parity` (`bounds-outcomes.msgpack`).
+
 ## Variant Records
 
 A variant record is a record whose document is a base record's document with some

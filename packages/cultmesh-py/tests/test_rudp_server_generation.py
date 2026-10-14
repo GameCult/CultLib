@@ -48,7 +48,8 @@ class RudpServerGenerationTests(unittest.TestCase):
     def setUp(self) -> None:
         node = create_node(runtime_id="rudp-generation")
         node.database.register_document(NOTE)
-        self.server = CultMeshLocalServer(node=node, rudp_connection_id=CONNECTION_ID)
+        # Replies stay whole datagrams here, so each server packet the pump reads is one message.
+        self.server = CultMeshLocalServer(node=node, rudp_connection_id=CONNECTION_ID, rudp_max_fragment_bytes=60_000)
         self.server.start()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", 0))

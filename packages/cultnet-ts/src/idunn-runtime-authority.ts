@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { readSingleFileStore } from "@gamecult/cultcache-ts";
+import { documentPayloadBytes, documentPayloadFromBytes } from "@gamecult/cultcache-ts/document";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
@@ -278,7 +279,7 @@ export function createIdunnRuntimeSigner(options: IdunnRuntimeSignerOptions): Id
         recordKey: expected.target,
         storedAt: new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: new Uint8Array(signed.payload),
+        payload: documentPayloadFromBytes(new Uint8Array(signed.payload)),
         sourceRuntimeId: expected.runtimeId,
         sourceRole: "runtime-presence-health-publisher",
         tags: ["cultnet.transport.rudp.v0", "runtime-presence"],
@@ -324,7 +325,7 @@ function readAuthorityRecord(filePath: string, type: string, schemaId: string): 
   const record = store.envelopes[0]!;
   if (record.schemaId !== schemaId) throw new Error(`Idunn authority file must contain exactly one ${schemaId} record.`);
   if (record.type !== type) throw new Error(`Idunn authority record has unexpected CultCache type ${record.type}.`);
-  return { payload: record.payload };
+  return { payload: documentPayloadBytes(record.payload) };
 }
 
 function decodeExpected(payload: Uint8Array): ExpectedIncarnation {

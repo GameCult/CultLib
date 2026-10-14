@@ -67,6 +67,7 @@ store.
 - `define_document_type(...)`
 - `define_database_entry_type(...)`
 - `database_entry_field(...)`
+- `leaves` (typed slot leaves)
 - `define_document_registry(...)`
 - `CultCache.builder()`
 - `register_document_type(...)`
@@ -147,6 +148,55 @@ The payload is a MessagePack array. Field keys are durable slot indexes:
 That matches the Rust `#[derive(DatabaseEntry)]` formatter shape and the C#
 `[Key(n)]` intent: schema evolution comes from stable field slots, not source
 member order.
+
+## Typed Leaves
+
+A slot with no codec is untyped: it is an `object` in C#, cataloged `System.Object`, and takes any MessagePack value.
+Give a slot a leaf from `cultcache_py.leaves` and it writes and reads exactly what the C# type does, refuses the rest
+on write and on read, and carries the C# type name in the schema catalog, which the C# reference checks against its
+own class.
+
+```python
+from cultcache_py import database_entry_field, define_database_entry_type, leaves as t
+
+settings_doc = define_database_entry_type(
+    "settings",
+    [
+        database_entry_field("theme", 0, codec=t.string),
+        database_entry_field("retries", 1, codec=t.int32, default=0),
+        database_entry_field("tags", 2, codec=t.list(t.string), default=list),
+    ],
+)
+```
+
+| Leaf | C# type | Python value |
+| --- | --- | --- |
+| `t.string` | `string` | `str` |
+| `t.boolean` | `bool` | `bool` |
+| `t.bytes` | `byte[]` | `bytes`, `bytearray`, `memoryview`; a MessagePack str reads as its UTF-8 bytes |
+| `t.int32`, `t.int64` | `int`, `long` | `int` within range (not `bool`, not `float`) |
+| `t.float32`, `t.float64` | `float`, `double` | `int` or `float`; a float32 is written as MessagePack float 32 |
+| `t.list(x)` | `List<T>` | `list` or `tuple`, each element through `x` |
+| `t.array(x)` | `T[]` | the same wire as `t.list(x)` |
+| `t.any` | `object` | any plain MessagePack value or a timestamp; the default of an untyped slot |
+| `t.nullable(x)` | `T?` | `None`, or whatever `x` takes |
+| `t.lazy(get)` | | a leaf resolved on first use, for a union that refers to itself |
+
+Nil is refused unless the slot is wrapped in `t.nullable`. Wrap a C# `string`, `byte[]`, `List`, array, class or
+interface slot that may hold null (`t.nullable(t.string)`), and a value type that may hold null (`int?` is
+`t.nullable(t.int32)`, cataloged `System.Nullable<System.Int32>`); a reference type keeps its own name. A `default`
+fills a slot the payload is too short to have, never a nil that is present.
+
+A record or union is named for C# with `type_name=`, the class's `FullName` (a nested class joins with `+`):
+
+```python
+inner = define_record_codec("Inner", [database_entry_field("n", 0, codec=t.string)], type_name="My.App.Doc+Inner")
+shape = define_union("Shape", {0: ("Circle", circle)}, type_name="My.App.Doc+IShape")
+```
+
+Without `type_name=` the slot is cataloged `System.Object`. A refusal reads `<type> slot <key> (<field>): expected
+<what>, found <kind>`, prefixed `element <i>: ` inside a list and `Union '<name>' arm <key>: ` inside a union, and never
+carries the value.
 
 ## Wire Parity
 

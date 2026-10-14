@@ -56,9 +56,12 @@ public static class CultDocumentMessagePackSerialization
 
     private static MessagePackSerializerOptions Compose(IFormatterResolver[] consumerResolvers)
     {
+        // The guard goes first and wraps whatever formatter the rest of the composite would hand out, so a consumer
+        // resolver still encodes an arm while the key check runs.
+        var inner = CompositeResolver.Create(
+            consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(StandardResolver.Instance).ToArray());
         return MessagePackSerializerOptions.Standard
-            .WithResolver(CompositeResolver.Create(
-                consumerResolvers.Append(CultDocumentResolver.Instance).Append(CultMathResolver.Instance).Append(StandardResolver.Instance).ToArray()))
+            .WithResolver(CompositeResolver.Create(new CultUnionGuard(inner), inner))
             .WithSecurity(CultMessagePackSecurity.Instance);
     }
 
@@ -81,7 +84,9 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         if (value != null) registry.GetRequired(type);
-        return MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        var payload = MessagePackSerializer.Serialize(type, value, OptionsFor(type.Assembly));
+        CultPayloadDepth.Check(payload, type, PayloadDirection.Write);
+        return payload;
     }
 
     public static object DeserializeUntyped(Type type, byte[] payload)
@@ -93,6 +98,7 @@ public static class CultDocumentMessagePackSerialization
     {
         if (registry == null) throw new ArgumentNullException(nameof(registry));
         registry.GetRequired(type);
+        CultPayloadDepth.Check(payload, type, PayloadDirection.Read);
         return MessagePackSerializer.Deserialize(type, payload, OptionsFor(type.Assembly))
             ?? throw new InvalidOperationException($"MessagePack returned null for Cult document type {type.FullName}.");
     }

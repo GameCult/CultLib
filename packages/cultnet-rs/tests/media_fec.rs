@@ -1141,3 +1141,198 @@ fn a_budget_at_the_media_record_ceiling_admits_large_shards_end_to_end() {
     .unwrap();
     decode_media_wire_record(&wire).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Known answers from the fixture: every standard geometry and the policy's
+// edges, byte for byte. The fixture's header states how its data is made.
+// ---------------------------------------------------------------------------
+
+/// The data of a fixture case, as the fixture's header defines it.
+fn kat_data(k: usize, m: usize, shard_bytes: usize, fill: &str) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|i| match fill {
+            "lcg" => bytes((k * 65_536 + m * 256 + i) as u32, shard_bytes),
+            "zero" => vec![0; shard_bytes],
+            "ff" => vec![0xff; shard_bytes],
+            other => panic!("unknown fill {other}"),
+        })
+        .collect()
+}
+
+struct KatCase {
+    k: usize,
+    m: usize,
+    shard_bytes: usize,
+    fill: String,
+    parity: Vec<Vec<u8>>,
+    erasures: Vec<Vec<usize>>,
+}
+
+impl KatCase {
+    fn name(&self) -> String {
+        format!("k={} m={} {} bytes {}", self.k, self.m, self.shard_bytes, self.fill)
+    }
+
+    /// The case's data as an audio block: the codec path that takes any `(k, m)`.
+    fn packets(&self) -> Vec<GameCultMediaAudioPacketRecord> {
+        let mut packets = audio_run(self.k as u64, self.shard_bytes);
+        for (packet, data) in packets.iter_mut().zip(kat_data(self.k, self.m, self.shard_bytes, &self.fill)) {
+            packet.payload = data;
+        }
+        packets
+    }
+
+    fn policy(&self) -> MediaFecPolicy {
+        MediaFecPolicy {
+            audio_data_shards: self.k as u16,
+            audio_parity_shards: self.m as u16,
+            max_wire_bytes: GAMECULT_MEDIA_MAX_WIRE_BYTES,
+            ..STANDARD
+        }
+    }
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("fixture hex"))
+        .collect()
+}
+
+fn kat_cases() -> Vec<KatCase> {
+    let mut cases: Vec<KatCase> = Vec::new();
+    for line in include_str!("fixtures/media_fec_rs_gf256_v1.kat").lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            [] => {}
+            [comment, ..] if comment.starts_with('#') => {}
+            ["case", k, m, shard_bytes, fill] => cases.push(KatCase {
+                k: k.parse().unwrap(),
+                m: m.parse().unwrap(),
+                shard_bytes: shard_bytes.parse().unwrap(),
+                fill: fill.to_string(),
+                parity: Vec::new(),
+                erasures: Vec::new(),
+            }),
+            ["parity", index, bytes] => {
+                let case = cases.last_mut().expect("parity follows a case");
+                assert_eq!(index.parse::<usize>().unwrap(), case.parity.len(), "{}", case.name());
+                case.parity.push(unhex(bytes));
+            }
+            ["erase", slots] => cases
+                .last_mut()
+                .expect("erase follows a case")
+                .erasures
+                .push(slots.split(',').map(|slot| slot.parse().unwrap()).collect()),
+            other => panic!("unreadable fixture line {other:?}"),
+        }
+    }
+    cases
+}
+
+/// Parity bytes of every fixture case, byte for byte. If these ever change,
+/// `rs-gf256-v1` changed meaning: bump the scheme id, do not edit the fixture.
+#[test]
+fn every_rs_gf256_v1_known_answer_parity_matches_byte_for_byte() {
+    let cases = kat_cases();
+    assert_eq!(cases.len(), 35, "the fixture's case count");
+    for case in &cases {
+        assert_eq!(case.parity.len(), case.m, "{}", case.name());
+        let parity = protect_audio_block(&case.packets(), &case.policy(), provenance())
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name()));
+        let produced: Vec<String> = parity.iter().map(|shard| hex(&shard.payload)).collect();
+        let expected: Vec<String> = case.parity.iter().map(|shard| hex(shard)).collect();
+        assert_eq!(produced, expected, "{}", case.name());
+    }
+}
+
+/// Every fixture erasure pattern, data and parity mixed, recovers exactly
+/// the erased data from the fixture's own parity bytes.
+#[test]
+fn every_rs_gf256_v1_known_erasure_pattern_recovers_the_data() {
+    for case in kat_cases() {
+        let packets = case.packets();
+        let mut parity = protect_audio_block(&packets, &case.policy(), provenance()).unwrap();
+        for (shard, bytes) in parity.iter_mut().zip(&case.parity) {
+            shard.payload = bytes.clone(); // decode from the fixture, not from the encoder
+        }
+        assert!(!case.erasures.is_empty(), "{}", case.name());
+        for erased in &case.erasures {
+            let data: Vec<_> =
+                (0..case.k).filter(|slot| !erased.contains(slot)).map(|slot| packets[slot].clone()).collect();
+            let present: Vec<_> = (0..case.m)
+                .filter(|slot| !erased.contains(&(case.k + slot)))
+                .map(|slot| parity[slot].clone())
+                .collect();
+            let recovered = recover_audio_block(&present, &data)
+                .unwrap_or_else(|error| panic!("{} erased {erased:?}: {error}", case.name()));
+            let lost: Vec<usize> = erased.iter().copied().filter(|&slot| slot < case.k).collect();
+            assert_eq!(recovered.len(), lost.len(), "{} erased {erased:?}", case.name());
+            for (packet, slot) in recovered.iter().zip(lost) {
+                assert_eq!(packet.packet_id, packets[slot].packet_id, "{} erased {erased:?}", case.name());
+                assert_eq!(packet.payload, packets[slot].payload, "{} erased {erased:?}", case.name());
+            }
+        }
+    }
+}
+
+/// Seeded random geometries past the fixture's: any `e <= m` erasures, data
+/// and parity mixed, recover the data exactly, and `m + 1` are refused.
+#[test]
+fn random_erasures_up_to_m_recover_exactly_and_m_plus_one_is_refused() {
+    let mut state = 0x9e37_79b9_u32;
+    let mut next = |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state as usize % bound
+    };
+    for trial in 0..300 {
+        let k = 1 + next(48);
+        let m = 1 + next(24);
+        let shard_bytes = 1 + next(40);
+        let mut packets = audio_run(k as u64, shard_bytes);
+        for (index, packet) in packets.iter_mut().enumerate() {
+            packet.payload = bytes((trial * 1_000 + index) as u32, shard_bytes);
+        }
+        let policy = MediaFecPolicy {
+            audio_data_shards: k as u16,
+            audio_parity_shards: m as u16,
+            ..STANDARD
+        };
+        let parity = protect_audio_block(&packets, &policy, provenance()).unwrap();
+        for erasures in [1 + next(m), m + 1] {
+            if erasures + 1 > k + m {
+                continue; // at least one parity shard must arrive to recover with
+            }
+            // A random erasure set that leaves at least one parity shard.
+            let mut slots: Vec<usize> = (0..k + m).collect();
+            let erased = loop {
+                for at in 0..slots.len() {
+                    let swap = at + next(slots.len() - at);
+                    slots.swap(at, swap);
+                }
+                let erased = slots[..erasures].to_vec();
+                if (k..k + m).any(|slot| !erased.contains(&slot)) {
+                    break erased;
+                }
+            };
+            let data: Vec<_> =
+                (0..k).filter(|slot| !erased.contains(slot)).map(|slot| packets[slot].clone()).collect();
+            let present: Vec<_> =
+                (0..m).filter(|slot| !erased.contains(&(k + slot))).map(|slot| parity[slot].clone()).collect();
+            let outcome = recover_audio_block(&present, &data);
+            let context = format!("trial {trial}: k={k} m={m} {shard_bytes} bytes erased {erased:?}");
+            if erasures <= m {
+                let mut all = data;
+                all.extend(outcome.unwrap_or_else(|error| panic!("{context}: {error}")));
+                all.sort_by_key(|packet| packet.packet_id);
+                let payloads: Vec<_> = all.iter().map(|packet| &packet.payload).collect();
+                let expected: Vec<_> = packets.iter().map(|packet| &packet.payload).collect();
+                assert_eq!(payloads, expected, "{context}");
+            } else {
+                assert!(matches!(outcome, Err(MediaFecError::BeyondRepair { .. })), "{context}: {outcome:?}");
+            }
+        }
+    }
+}

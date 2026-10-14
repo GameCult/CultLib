@@ -12,6 +12,8 @@ import {
   CultNetRudpSocketTransportConnection,
   decodeRudpPacket,
   encodeRudpPacket,
+  isPermanentSendError,
+  sendRudpDatagram,
   rudpClientBindHost,
   type CultNetRudpPacket,
 } from "./rudp";
@@ -39,6 +41,12 @@ export interface CultNetOperationServer {
   readonly endpoint: string;
   /** Datagrams read and discarded: malformed, unadmitted, refused by their session, or failed in handling. */
   readonly packetsDropped: number;
+  /**
+   * Datagrams that could not be sent to a peer and may yet be (no route, full buffers):
+   * each is that peer's lost datagram, resent if it was reliable. One that can never be
+   * sent as built ends that peer's session instead and is not counted here.
+   */
+  readonly sendFailures: number;
   close(): Promise<void>;
 }
 
@@ -56,7 +64,11 @@ interface RemoteSession {
   handling: number;
   /** When the last handler finished: the response still needs its acknowledgement. */
   lastHandledAtMs: number;
+  /** A packet it owed could never be sent, so the session ended. */
+  unsendable: boolean;
 }
+
+type SendPacket = (key: string, peer: RemoteSession, packet: CultNetRudpPacket) => void;
 
 export async function startCultNetOperationServer(
   options: CultNetOperationServerOptions,
@@ -66,16 +78,32 @@ export async function startCultNetOperationServer(
   const socket = createSocket("udp4");
   const connectionId = options.connectionId ?? DEFAULT_CONNECTION_ID;
   const sessions = new Map<string, RemoteSession>();
-  const sendPacket = (remote: RemoteInfo, packet: CultNetRudpPacket): void => {
-    const wire = encodeRudpPacket(packet);
-    socket.send(wire, remote.port, remote.address);
-  };
   let packetsDropped = 0;
+  let sendFailures = 0;
+  const sendPacket: SendPacket = (key, peer, packet) => {
+    const generation = peer.session.generation;
+    sendRudpDatagram(socket, encodeRudpPacket(packet), peer.remote.port, peer.remote.address, (error) => {
+      if (!isPermanentSendError(error)) {
+        sendFailures += 1;
+        return;
+      }
+      // A failure reported after the generation that sent the datagram ended is owed by
+      // nothing: that generation's end already told the peer, and a client that connected
+      // again from the endpoint owns it now. A live generation is the one in `sessions`.
+      if (peer.session.generation !== generation) return;
+      // The datagram can never be sent as built: the session that owes it ends, never
+      // the server, and the peer is told.
+      peer.unsendable = true;
+      sessions.delete(key);
+      const goodbye = encodeRudpPacket(peer.session.endUnsendableSession(error));
+      sendRudpDatagram(socket, goodbye, peer.remote.port, peer.remote.address, () => {});
+    });
+  };
   socket.on("message", (wire, remote) => {
     // What a datagram carries is the sender's business: a rejection here must
     // drop and count the packet, never become an unhandled rejection that ends
     // the process.
-    handleServerDatagram(sessions, connectionId, options, wire, remote, sendPacket).then(
+    handleServerDatagram(sessions, connectionId, options, wire, remote, socket, sendPacket).then(
       admitted => { if (!admitted) packetsDropped += 1; },
       () => { packetsDropped += 1; },
     );
@@ -90,8 +118,8 @@ export async function startCultNetOperationServer(
       if (peer.handling > 0 || now - peer.lastHandledAtMs < idleTimeoutMs) continue;
       if (peer.session.checkTimeout(now, idleTimeoutMs)) sessions.delete(key);
     }
-    for (const peer of sessions.values()) {
-      for (const packet of peer.session.dueResends(Date.now())) sendPacket(peer.remote, packet);
+    for (const [key, peer] of sessions) {
+      for (const packet of peer.session.dueResends(Date.now())) sendPacket(key, peer, packet);
     }
   }, 25);
   resendTimer.unref?.();
@@ -100,6 +128,7 @@ export async function startCultNetOperationServer(
   return {
     endpoint,
     get packetsDropped() { return packetsDropped; },
+    get sendFailures() { return sendFailures; },
     close: async () => {
       clearInterval(resendTimer);
       await closeSocket(socket);
@@ -155,7 +184,8 @@ async function handleServerDatagram(
   options: CultNetOperationServerOptions,
   wire: Buffer,
   remote: RemoteInfo,
-  sendPacket: (remote: RemoteInfo, packet: CultNetRudpPacket) => void,
+  socket: Socket,
+  sendPacket: SendPacket,
 ): Promise<boolean> {
   let packet: CultNetRudpPacket;
   try {
@@ -167,14 +197,24 @@ async function handleServerDatagram(
   const key = `${remote.address}:${remote.port}`;
   let peer = sessions.get(key);
   if (packet.packetType === "connect") {
-    if (!peer) {
-      if (sessions.size >= MAX_OPERATION_SESSIONS) return false;
-      peer = { session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }), remote, handling: 0, lastHandledAtMs: 0 };
-      sessions.set(key, peer);
+    if (peer) {
+      // A Connect from an admitted peer repeats: the session answers with the
+      // Accept already owed and queues nothing.
+      sendPacket(key, peer, peer.session.acceptConnect(packet, Date.now(), encode("cultnet-operation-service")));
+      return true;
     }
-    // A Connect from an admitted peer repeats: the session answers with the
-    // Accept already owed and queues nothing.
-    sendPacket(remote, peer.session.acceptConnect(packet, Date.now(), encode("cultnet-operation-service")));
+    if (sessions.size >= MAX_OPERATION_SESSIONS) return false;
+    const candidate: RemoteSession = {
+      session: new CultNetRudpSession({ connectionId, resendDelayMs: 25 }),
+      remote,
+      handling: 0,
+      lastHandledAtMs: 0,
+      unsendable: false,
+    };
+    sendPacket(key, candidate, candidate.session.acceptConnect(packet, Date.now(), encode("cultnet-operation-service")));
+    // A peer whose Accept can never be sent cannot be answered, so no session starts.
+    if (candidate.unsendable) return false;
+    sessions.set(key, candidate);
     return true;
   }
   if (!peer) return false;
@@ -182,15 +222,20 @@ async function handleServerDatagram(
   try {
     result = peer.session.receive(packet, Date.now());
   } catch {
-    endSession(sessions, key, peer, sendPacket);
+    endSession(sessions, key, peer, socket);
     return false;
   }
-  if (result.reply) sendPacket(remote, result.reply);
-  for (const ready of result.readyToSend ?? []) sendPacket(remote, ready);
+  if (result.reply) sendPacket(key, peer, result.reply);
+  for (const ready of result.readyToSend ?? []) sendPacket(key, peer, ready);
   if (result.disconnected) {
     sessions.delete(key);
     return true;
   }
+  // A request belongs to the session generation it arrived on. If that generation ends while a
+  // handler runs (a goodbye, a refusal, a timeout, a new Connect from the same endpoint), what
+  // the handler returns or throws belongs to no live session, and nothing of it may reach the
+  // endpoint: a client that connected again there owns it now.
+  const generation = peer.session.generation;
   for (const frame of result.delivered) {
     if (frame.channelId !== "schema") continue;
     try {
@@ -204,22 +249,24 @@ async function handleServerDatagram(
         peer.handling -= 1;
         peer.lastHandledAtMs = Date.now();
       }
+      if (peer.session.generation !== generation) return true;
       const payload = encode(encodeCultNetMessageForWire(response, "cultnet.schema.v0"));
       for (const responsePacket of peer.session.sendMany("schema", payload, {
         reliable: true,
         ordered: true,
         nowMs: Date.now(),
         maxFragmentBytes: options.maxFragmentBytes ?? 2048,
-      })) sendPacket(remote, responsePacket);
+      })) sendPacket(key, peer, responsePacket);
     } catch {
+      if (peer.session.generation !== generation) return true;
       // The session recorded this request's sequence, so keeping it would
       // acknowledge the retransmit of a request that was never handled.
-      endSession(sessions, key, peer, sendPacket);
+      endSession(sessions, key, peer, socket);
       return false;
     }
   }
   if (packet.packetType === "data" || result.delivered.length > 0) {
-    sendPacket(remote, peer.session.createAckForReceived(packet.sequence));
+    sendPacket(key, peer, peer.session.createAckForReceived(packet.sequence));
   }
   return true;
 }
@@ -227,17 +274,19 @@ async function handleServerDatagram(
 /**
  * Ends a session that took a packet it could not serve, and tells the peer. The
  * reset comes first, or the goodbye's ack field would acknowledge the very
- * packet that was refused. A session already replaced under the same key is left.
+ * packet that was refused. The goodbye is best-effort: the session ends whether
+ * or not the peer hears it.
  */
 function endSession(
   sessions: Map<string, RemoteSession>,
   key: string,
   peer: RemoteSession,
-  sendPacket: (remote: RemoteInfo, packet: CultNetRudpPacket) => void,
+  socket: Socket,
 ): void {
-  if (sessions.get(key) === peer) sessions.delete(key);
+  sessions.delete(key);
   peer.session.resetPeerState();
-  sendPacket(peer.remote, peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+  const goodbye = encodeRudpPacket(peer.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+  sendRudpDatagram(socket, goodbye, peer.remote.port, peer.remote.address, () => {});
 }
 
 function parseRudpEndpoint(endpoint: string): { host: string; port: number } {

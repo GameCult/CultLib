@@ -1,0 +1,268 @@
+{
+  "campaign": "cultmath-tapes",
+  "cut": "interval-ops",
+  "revision": 3,
+  "title": "Interval ops r3: the frustum ball widened by its derived float32 bound, the analytic constant-density body, one shipped void, (c) held to its ceiling, LOD weights exercised, Stryker kills demonstrated",
+  "repo": "GameCult/CultLib",
+  "branch": "hands/cultmath-interval-ops",
+  "base": "43183276",
+  "depends_on": [],
+  "first": [
+    "Follow-up on cut report cultmath-tapes:cut_report:cut-interval-ops.h2 (head 43183276, worktree F:\\Projects\\CultLib-iv) and Soul's verdict cultmath-tapes:verdict:cut-interval-ops.s1 with its five findings, each resolved below in order. New rulings in force: operator-wells-contract-vs-ceiling ((c)'s contract is at least 90% of the probe-free ceiling, not 2x) and operator-analytic-wall-body (where the envelope interval proves the density constant, one closed-form Beer-Lambert step). Map: docs/cultmath-interval-ground-cut.md, 'Pass 4'. r2's ops, field models, tile march and scenarios stand; this revision touches math.Interval.cs, both tracked CultMath.Interval.hlsl copies, NoiseBoundTests.cs, SnoiseBall tests in the same file, design.md and README only. Nothing new in src beyond the radius widening.",
+    "Finding 1, frustum-ball-float-crossing (Medium). The ball is widened, in C# and both HLSL copies: radius += (|c.x| + |c.y| + |c.z| + radius) * 2^-20 (the literal 9.5367431640625e-7, exact in float32), after the r2 radius. Derivation, u = 2^-24: the centre c = (m_c z_m, z_m) carries at most two roundings per component (z_m = fl(z0 + z1) * 0.5, then the product), so |c_float - c_exact| <= 2u |c|_1; the radius carries at most seven first-order roundings (z1 - z0; the axis sqrt at 3u; the product; z1 * footprint; the sum; + warp), so r_exact <= r_float (1 + 7u); the widening's own addition rounds once more. 2^-20 = 16u covers 8u (|c|_1 + r) twice over. fma contraction removes roundings and only tightens, so dxc's HLSL and any driver's GLSL stay covered. The sentence 'the two vectors are never parallel, so the inequality is strict and float32 cannot cross it' leaves math.Interval.cs:179-180, the HLSL and design.md:412; the rule and its derivation take its place.",
+    "(Finding 1, continued.) TileBallEnclosesEveryRaySegment gains Soul's extreme families beside the r2 domain, 2,000 cases each, 8 footprint corners at both depth ends with the flow pointed outward along the corner's direction from the centre, the distance computed in double from the float ball and the float ray (point (m z, z) formed in double from the float m and z), no tolerance: z0 == z1; thin (z1 - z0 = 1e-6 z1); |m_c| up to 1000; far (z up to 1e7); z0 = 0 with z1 down to 1e-3; f down to 1; warp up to 1e6. The derivation pin becomes two-sided: r_exact <= ball.w <= r_exact + 2^-19 (r_exact + |c|_1), r_exact in double, so a ball that forgets the widening fails and a ball that grows past the rule fails. The hand mutations of r2 stay; a fourth, the widening dropped, must fail the degenerate family alone. WarpedPointsStayEnclosed is unchanged.",
+    "Finding 2, aetheria-far-plane-miscited (Low). FogField's grid becomes Quadratic(0.3, 2048, 256), cited as the Main Camera (Aetheria d3075eb0 Assets/Scenes/ARPG.unity:31777 m_Name Main Camera, :31830 far clip plane 2048; VolumeCloudRenderer.cs:36 RequireComponent(Camera)); the comment at NoiseBoundTests.cs:594 no longer names the Tint camera's 1000. Soul re-measured (c) at far 2048: 1.39-1.51x at warp D, 2.46-2.74x at warp 0, ceiling within 1-2% of the ratio; the verdict on (c) does not move. Print every (a)-(c) row again at 2048.",
+    "Finding 3, shipped-void-two-scenes (Medium). ONE shipped void, authored as (Rh, S) per the map's own rule, everything else derived; the map, the site-ground r3 spec and the test agree on it: Rh = 198, S = 50, so Rc = Rh + S = 248 and e = -ln CARVE / ln(1 - (Rh / Rc)^2) = 0.40 (CARVE 1.5); fade band [Rh - S, Rh], A = 20, F0 = 0.01, D = 10, K = 1/30. This is the scene r2 measured (2.21x) and the Footprint-LOD rule's; the map's site section (Rc 640, e 4, a 442-wide ramp) was the other scene and is superseded. The honest choice changes the look (a 50-wide noisy wall with a kinked outer edge, not a soft pseudo-Gaussian wall), so it is Q9 in the map, a fork for the operator with (a) recommended. Hands codes (a); another ruling moves only the shipped constants and the site section. VoidField's doc comment derives (Rc, e) from (Rh, S) and names it the one shipped void.",
+    "Finding 4, lod-weights-never-exercised (Low). VoidField takes a focal length. One configuration reaches the weights: '(e) LOD far' Rh = 4000, S = 50, camera low, f = 467 (1080 rows at a 98 degree vertical FOV): theta = 1/467, so the fine weight (wavelength 25) is below 1 past z = 1460 and 0 past 2920, the coarse weight (100) below 1 past 5840, and the grid (|camera - c_v| + Rc + 6/K, about 7990) reaches both; 4 z theta exceeds 12.5 past z = 1460, so LodStep is footprint-set there too. It joins EnvelopeBoundEnclosesDensity's field list (the truncated check is no longer vacuous) and the saving test prints it, not asserted. Hand mutation that must fail the truncated check on it: w(z0) for w(z1) in WeightBound.",
+    "(Finding 4, continued: the deviation.) Recorded in the test's doc and design.md: the bound takes each octave weight over [w(z1), 1], not the spec's [w(z1), w(z0)], because one Bound serves the full field (w = 1) and the truncated one (w in [w(z1), w(z0)], w decreasing in z). [w(z1), 1] contains both, iv_mul is monotone in its interval argument, so the composed interval is a superset of either field's and encloses both. The slack is only in far tiles whose step the footprint already sets.",
+    "Finding 5, stryker-timeout-survivor (Low). Mutant 2525 (iv_sqr a.x >= 0 to a.x > 0) is equivalent: at a.x == 0 both branches return the same ends ((0, h) either way, (0, 0) when a.y == 0); the report says so by its diff, since numbers are per run. New enclosure cases kill the mirror-only survivors semantically: SnoiseBallEnclosesPoints and FbmBallEnclosesPoints draw radii LogUniform(1e-3, 1e3), so L / r in iv_snoise_ball (too tight once r > 1: at r = 100 the mutant's bound is 0.2 wide while snoise over the ball spans [-1, 1]) dies to an enclosure test, not only to the HLSL mirror. The mutants Soul listed as mirror-only (iv_scale s >= 0 to s > 0; the two iv_abs mutants) are hand-run and each either named equivalent with the one-line argument (signed zero or a boundary both branches map alike) or killed by one added point case in IntervalTests.",
+    "(Finding 5, continued.) Stryker runs again as r2 did, --since:43183276; every timeout in math.Interval.cs is hand-run (patch from the mutation report, dotnet test minus IntervalSkipHalvesEvaluations) and the report lists killed, survived and equivalent by diff. The report claims only demonstrated kills; a timeout is not a kill.",
+    "The analytic body (ruling operator-analytic-wall-body), consumer-side in the test and the site, no new CultMath function. When it applies: the Scenario's Bound over the remaining range [z, z_end] of the grid, gated, is a point interval with positive value: the envelope with the free noise interval [-1.5, 1.5] (coverage in [-1, 1] plus half the detail) proves fade = 1 and d_lo + A (fade n)_lo >= Rc, so every point of every ray of the tile over the rest of the grid has density exactly K for any noise value; or, generically, lo == hi > 0 from whichever path the bound took. Only then does the march integrate T *= exp(-K ext (z_end - z) |dir|) in one step and terminate (the grid end is past opacity by construction). For (a)-(d) no Bound is a positive point (the fog's density varies with s'), so the step never applies there, and the test asserts bodyStart = -1 for every (a)-(d) tile.",
+    "(Analytic body, continued.) MarchTile returns (dense cells, bodyStart, bodyDensity). As r2 on cell ranges; when a single cell is found not provably empty and its own gated bound is a positive point (the cell is provably constant), one more probe over [grid[j], grid[^1]]: if that is a positive point too, bodyStart = j, bodyDensity = its value, and every remaining cell is appended dense without probing (adding cells is always sound; it also drops the body's probes). The mask's meaning is unchanged, so the masked fixed-step march's exact agreement with the reference stands as the soundness pin. MarchLod: inside unmasked runs as r2; on reaching a cell >= bodyStart it takes the one analytic step over [z, grid end], counts one step, and stops.",
+    "(Analytic body, the grid end.) Every void configuration's grid ends at |camera - c_v| + Rc + 6/K (was 5/K): the body starts at d >= Rc + A 1.5 = Rc + 30 plus box slack, so 6/K leaves at least 4.9 of optical depth, T <= 0.0075 < 0.02, and 'unfinished rays 0' still prints. This is the grid end, not the field; the reference stops by opacity and its count does not move.",
+    "(Analytic body, the pin.) New test AnalyticBodyMatchesFineMarch over the (e) grid, the shipped void and the LOD-far configuration, 2,000 seeded tiles at N in {1, 4, 8, 16}: (1) wherever MarchTile reports bodyStart b: the Bound over [grid[b], grid end] is a positive point; the full and the truncated Density at 64 random (pixel, sub-pixel, cell >= b, depth in cell) points equal bodyDensity exactly, no tolerance; (2) the analytic factor exp(-bodyDensity ext L) over the body equals the fixed-step product of the body cells' Integrate factors (no early-out, same cells) within 1e-4 relative; (3) for every (a)-(d) tile bodyStart = -1. Hand mutation that must fail (1): in VoidField.Compose, CarveRadius for HollowRadius in the lo test (the body claimed from the ramp). The site's mirror of this (site-ground r3): the pre-pass writes the body-start cell in the texel's fourth word, the main pass takes the same one step; its browser check is the dense-reference agreement already in that spec.",
+    "Contracts after r3, asserted at N = 8 in IntervalSkipHalvesEvaluations, else one Assert.Skip naming saving-2x-scenarios with every shortfall: (a) at least 2x combined cost (the lower of warp 0 and D), measured 16384x. (c) at least 0.90 of its probe-free ceiling (Ratio / Ceiling, the lower of warp 0 and D), measured 0.99 at warp D and 0.96 at warp 0 in r2; the ruling's reading is that the ceiling is what intervals control and the fog band's cost is the field's. (e) at least 2x fewer LOD steps per pixel than the fixed-step reference at the ONE shipped void (200 tiles), the masked fixed-step march agreeing exactly and the LOD march within 0.02 of the reference. (b), (d) and the (e) grid incl. LOD-far: printed, not asserted. Nothing is tuned toward any contract: the fields, the grids (beyond the stated 6/K end), e = 0.2 and the seeds stay.",
+    "Predictions to confirm or refute (Imagination's rule from r2's printed rows: the LOD steps that evaluated noise are about snoise / 2.8 plus two pre-band steps; the rest were constant-body steps, which the analytic step makes one). Shipped void: steps per pixel 36.34 (ref) to about 12.5 (was 16.45), 2.6-3.3x fewer; snoise per pixel about 26.6, unchanged; combined cost about 1.38x (was 1.34x); envelope probes per tile about 50 (was 59.1). Grid, low camera, ref/LOD steps: S = 10 about 5-6x at Rh 100-400 and 11x at Rh 1000 (was 2.1-3.4x and 6.8x); S = 50 about 2.5x, 2.8x, 3.5x, 5.2x for Rh 100, 200, 400, 1000 (was 1.8, 2.2, 2.9, 4.5); S = 150 unchanged (rays end inside the 150-wide ramp before the body is proven). Rh 1000 centred S 10: about 30x (was 12.4x). LOD-far: printed, none predicted. If the shipped point lands under 2.6x, say which assumption failed: the pre-band's 0-snoise steps, or a body start later than Rc + 30 by box slack.",
+    "Compile and mutation checks as r2: Yggdrasil dotnet test (counts and every IV-REPORT line pasted); Stryker --since:43183276 -m math.Interval.cs from a plain clone with every timeout hand-run as in Finding 5; Starfire FXC cs_5_0 over every cultmath_iv_* on both HLSL copies and tools/get-dxc.ps1 then dxc -T lib_6_3 -HV 2021 on both, exit 0 (Soul could not re-run these for r2; they are re-run here because the HLSL changes). Carried and still out of scope, named in the report: the Unity CultMath.dll is not rebuilt; the Unity HLSL copies stay one blob with packages/cultmath/shaders; public asfloat(uint) stays. Main moved by docs only since 43183276's base (Imagination passes 3-3d and 4); say so. glsl-lowering r2 rebases onto this revision's head, not r2's (its fixture family for cultmath_iv_frustum_ball changes with the widening); its spec now says so."
+  ],
+  "deletes": [
+    {
+      "path": "packages/cultmath/src/CultMath/math.Interval.cs",
+      "lines": 2,
+      "note": ":179-180 the sentence 'The two vectors are never parallel, so the triangle inequality is strict' and its float32 claim; replaced by the widening rule and its derivation."
+    },
+    {
+      "path": "packages/cultmath/docs/design.md",
+      "lines": 1,
+      "note": ":412 'the two vectors are never parallel, so the bound is strict'; replaced by the rule."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 1,
+      "note": ":594 the Tint camera citation (ARPG.unity:635-636, far 1000); replaced by the Main Camera's :31830, far 2048."
+    },
+    {
+      "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+      "lines": 3,
+      "note": ":1181-1194 the 2x test on ratios[c] and the skip message's wording; replaced by the 0.90-of-ceiling test and a message naming each shortfall."
+    },
+    {
+      "path": "packages/cultmath/docs/design.md",
+      "lines": 12,
+      "note": ":461-497 the r2 numbers (1.41x, 16.45, 2.21x, the (c) shortfall paragraph); replaced by r3's printed numbers and the three contracts."
+    }
+  ],
+  "keeps_moves": [
+    "Every iv_* op, iv_snoise_ball, iv_fbm_ball, SNOISE_LIPSCHITZ and its provenance tests: untouched. iv_frustum_ball's centre and the r2 radius terms: untouched; only the widening term is appended.",
+    "FogField, SlabField, WarpedNoise, Compose, the gated probe (BestBall), MarchTile's range hierarchy, the masked fixed-step march and Run: kept; MarchTile gains the body return and MarchLod the one analytic step.",
+    "VoidField's field, Density, Bound, Weight, WeightBound and LodStep: kept; the constructor gains the focal length and the grid end moves to 6/K; the shipped point stays Shipped() = (198, 50, shipped camera).",
+    "TileBallEnclosesEveryRaySegment's r2 domain, EnvelopeBoundEnclosesDensity, IntervalTests, TightnessReport, MeasureLipschitz, LipschitzConstantPinsSampledGradients: kept; the first two gain cases.",
+    "HlslSourceCompatibilityTests: the mirror count stays 53; cultmath_iv_frustum_ball's new text must match the C# bit for bit."
+  ],
+  "adds": [
+    "math.Interval.cs and both CultMath.Interval.hlsl: the widening line in iv_frustum_ball / cultmath_iv_frustum_ball, and the rule in the doc comment.",
+    "NoiseBoundTests.cs: the extreme families and the two-sided derivation pin in TileBallEnclosesEveryRaySegment; VoidField focal parameter and the LOD-far configuration; MarchTile's (bodyStart, bodyDensity); MarchLod's analytic step; AnalyticBodyMatchesFineMarch; the (c) ceiling contract; radii to 1e3 in the two ball tests; the WeightBound deviation in the doc comment; the shipped-void derivation in VoidField's doc comment.",
+    "IntervalTests.cs: at most three point cases for the mirror-only mutants that are not equivalent (Finding 5).",
+    "design.md 'Intervals': the widening rule and derivation; the analytic-body paragraph (condition, pre-pass word, one step, the pin); the WeightBound deviation; r3's printed numbers under the three contracts; the one shipped void with (Rc, e) derived.",
+    "README.md :41: one clause that iv_frustum_ball's radius carries its float32 rounding bound."
+  ],
+  "file_changes": [
+    {
+      "location": {
+        "path": "packages/cultmath/src/CultMath/math.Interval.cs",
+        "line": 183
+      },
+      "change": "iv_frustum_ball: after the r2 radius, radius += (abs(cx) + abs(cy) + abs(zm) + radius) * 9.5367431640625e-7f; doc comment :168-182 states the rule and derivation in place of the strictness sentence."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/shaders/CultMath.Interval.hlsl",
+        "line": 110
+      },
+      "change": "cultmath_iv_frustum_ball: the same widening line; both tracked copies (packages/cultmath/unity/org.gamecult.cultmath/Shaders/CultMath.Interval.hlsl identical blob)."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 128
+      },
+      "change": "TileBallEnclosesEveryRaySegment: the seven extreme families, outward flow at corners, double distance, the two-sided pin; the file header lists the fourth hand mutation (widening dropped) and the WeightBound and Compose mutations."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 58
+      },
+      "change": "SnoiseBallEnclosesPoints and FbmBallEnclosesPoints: radius LogUniform(1e-3, 1e3)."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 594
+      },
+      "change": "FogField: Grid = Quadratic(0.3, 2048, 256), Main Camera citation."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 829
+      },
+      "change": "VoidField: focal parameter (default 935); LodFar() = (4000, 50, low, f 467); grid end reach + Rc + 6/K; doc comment with the (Rh, S) -> (Rc, e) derivation, the one shipped void, the [w(z1), 1] deviation."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1009
+      },
+      "change": "MarchTile returns (cells, bodyStart, bodyDensity) with the one confirming probe; MarchLod takes the analytic step at bodyStart; Run and RunStats carry it; ReportVoid prints body steps."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/tests/CultMath.Tests/NoiseBoundTests.cs",
+        "line": 1160
+      },
+      "change": "IntervalSkipHalvesEvaluations: (c) asserted as Ratio >= 0.90 Ceiling; the LOD-far row printed; the (e) grid printed with the analytic body; AnalyticBodyMatchesFineMarch added beside it."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/docs/design.md",
+        "line": 403
+      },
+      "change": ":403-430 the frustum-ball paragraph gains the widening rule; :412 strictness sentence deleted; :461-497 the saving section rewritten with r3's printed numbers, the three contracts, the analytic body and the shipped void."
+    },
+    {
+      "location": {
+        "path": "packages/cultmath/README.md",
+        "line": 41
+      },
+      "change": "iv_frustum_ball: 'its radius carries its own float32 rounding bound'."
+    }
+  ],
+  "authority_map": {
+    "owner": "CultMath owns the interval ops, the noise bounds and the frustum ball, whose enclosure promise now covers its own float32 rounding (the widening is part of the function, not of any consumer). The consumer (the test's Scenario, the site's pre-pass) owns the envelope, the composed bound, the body proof and the Beer-Lambert step. The saving test owns the proving-ground numbers; the operator owns the shipped void (Q9) and the contracts (the two rulings).",
+    "inputs": [
+      "the r2 surface unchanged; a tile's geometry and warp; a scenario's grid, wells, camera, focal length and units, Aetheria's Main Camera far plane 2048 cited by line",
+      "the one shipped void as (Rh, S) = (198, 50); every other void constant derived from it"
+    ],
+    "outputs": [
+      "iv_frustum_ball / cultmath_iv_frustum_ball: a float32 ball that encloses every exact point of every ray of the tile over the segment, warped, under float32 evaluation of the ball itself",
+      "per tile: the dense cells and, when the envelope proves the rest constant, the body-start cell and its density; printed numbers per scenario including the body steps"
+    ],
+    "derived_state": [
+      "the widening is derived from the computed centre and radius (2^-20 of |c|_1 + r), never a tuned epsilon; a consumer adds nothing for the ball's own rounding and remains responsible for its world transform",
+      "(Rc, e) are derived from (Rh, S): Rc = Rh + S, e = -ln CARVE / ln(1 - (Rh/Rc)^2); no void constant is authored twice",
+      "the body start is derived from the same Bound the mask is derived from, by one more probe; the main pass reads it, never decides it",
+      "the (c) contract value is derived from the run (0.90 of its own ceiling); no absolute target is written for (c)"
+    ],
+    "forbidden_writers": [
+      "no change to SNOISE_LIPSCHITZ, iv_snoise_ball, iv_fbm_ball, the noise shape, e = 0.2, the seeds or any field toward a contract; the grid end moves to 6/K for termination only",
+      "no analytic step from a pointwise density or from the noise ball alone: only a point-interval Bound over the whole remaining range proves the body",
+      "no early-out of the pre-pass on transmittance; no probe in the main pass (the body-start cell is read, its constant is one pointwise envelope value)",
+      "no second shipped void anywhere: the map's site section, the site-ground spec and VoidField.Shipped() name (198, 50) and derive the rest; no number in a doc or comment that the committed test did not print in this run",
+      "no new CultMath function; PowerPulse, the box, the composition and the Beer-Lambert step stay consumer-side; no tape, prune, affine or choice token in the interval files"
+    ],
+    "shared_paths": [
+      "the masked fixed-step march still integrates exactly the dense march's cells (the soundness pin); only MarchLod takes the analytic step, and AnalyticBodyMatchesFineMarch ties that step to the fixed-step product over the same cells",
+      "one Bound serves the enclosure tests, the mask, the body proof and the gated probe; no second composition and no second constancy test",
+      "the widening lives once in C# and is mirrored bit for bit into both HLSL copies by the existing mirror test; GLSL follows by the lowering (glsl-lowering r2 rebases onto this head)"
+    ],
+    "deletion_line": "The false strictness claim leaves the C# doc, the HLSL and design.md before the widening is written; the Tint camera citation leaves before the Main Camera's is written; the (c) 2x assertion and the second shipped void leave before the ceiling contract and the one void are written. Net in src: one line and a doc comment. In tests: one new pin test, seven case families, one configuration, the body return; what they buy is intervals-enclose holding for the ball's own float32 evaluation, the analytic body the ruling asked for with its soundness pinned, LOD weights actually exercised, and a mutation report that claims only what it demonstrated."
+  },
+  "verification": {
+    "builds": [
+      "Yggdrasil: dotnet test packages/cultmath/tests/CultMath.Tests green (MeasureLipschitz/MeasureMonotonicity excluded by trait); paste counts and every IV-REPORT line, (a)-(d) at far 2048, the (e) grid with body steps, LOD-far, the shipped headline",
+      "Yggdrasil: dotnet stryker --since:43183276 -m math.Interval.cs from a plain clone; every timeout hand-run; killed, survived and equivalent listed by diff; 0 undemonstrated",
+      "Starfire: FXC cs_5_0 kernel over every cultmath_iv_* including cultmath_iv_frustum_ball, both HLSL copies, exit 0",
+      "Starfire: tools/get-dxc.ps1 (pinned) then dxc -T lib_6_3 -HV 2021 on both HLSL copies, exit 0, no diagnostics"
+    ],
+    "tests": [
+      {
+        "name": "NoiseBoundTests.TileBallEnclosesEveryRaySegment",
+        "pins": "every exact point of every ray of the tile, corners at both depth ends with an outward flow, lies inside the float32 ball, in the r2 domain and in the seven extreme families, distance in double, no tolerance; the radius is the derivation plus at most 2^-19 (r + |c|_1) and at least the derivation."
+      },
+      {
+        "name": "NoiseBoundTests.EnvelopeBoundEnclosesDensity",
+        "pins": "the composed bound encloses the full and the footprint-truncated density at every warped point of 2,000 slices, including the LOD-far configuration where octave weights are strictly between 0 and 1 and at 0."
+      },
+      {
+        "name": "NoiseBoundTests.AnalyticBodyMatchesFineMarch",
+        "pins": "a body start is reported only where the Bound over the whole remaining range is a positive point and every sampled density there equals it exactly; the analytic factor equals the fixed-step product within 1e-4 relative; no (a)-(d) tile reports a body."
+      },
+      {
+        "name": "NoiseBoundTests.IntervalSkipHalvesEvaluations",
+        "pins": "(a) at least 2x combined cost; (c) at least 0.90 of its probe-free ceiling; (e) at the one shipped void at least 2x fewer LOD steps per pixel, the masked fixed-step march exact, the LOD march within 0.02; every row printed including body steps; one Skip naming saving-2x-scenarios on any shortfall."
+      },
+      {
+        "name": "NoiseBoundTests.SnoiseBallEnclosesPoints and FbmBallEnclosesPoints",
+        "pins": "the ball bounds enclose their functions for radii up to 1e3, so a bound tightened for r > 1 (L / r) dies to an enclosure test."
+      },
+      {
+        "name": "IntervalTests.EveryOpEnclosesItsPoints (existing, plus point cases)",
+        "pins": "r1's enclosure for every op still holds; any non-equivalent mirror-only mutant from Finding 5 has a point case that kills it."
+      },
+      {
+        "name": "HlslSourceCompatibilityTests.EveryMirrorFunctionMatchesCSharpMath (existing)",
+        "pins": "the widened cultmath_iv_frustum_ball matches iv_frustum_ball bit for bit; 53 functions compared."
+      }
+    ],
+    "negative": [
+      {
+        "pattern": "never parallel|cannot cross|strict",
+        "scope": "math.Interval.cs iv_frustum_ball doc comment, CultMath.Interval.hlsl, design.md 'Intervals' frustum-ball paragraph: 0 matches."
+      },
+      {
+        "pattern": "635-636|far 1000|Tint",
+        "scope": "NoiseBoundTests.cs: 0 matches; ':31830' and '2048' appear in FogField's citation."
+      },
+      {
+        "pattern": "Rc = 640|e = 4\\b|Rc ~ 220|e ~ 0\\.6|about 220|about 0\\.6",
+        "scope": "NoiseBoundTests.cs and design.md: 0 matches; the shipped void is derived from (198, 50) as Rc = 248, e = 0.40."
+      },
+      {
+        "pattern": "tape|prune|affine|choice|PowerPulse|pulse|envelope|Scenario|body|Beer",
+        "scope": "math.Interval.cs and CultMath.Interval.hlsl: 0 matches (case-insensitive); the analytic body is consumer-side."
+      },
+      {
+        "pattern": "Assert\\.Skip",
+        "scope": "NoiseBoundTests.cs: at most one, in IntervalSkipHalvesEvaluations, naming saving-2x-scenarios; 0 if (a), (c) and (e) meet their contracts."
+      },
+      {
+        "pattern": "10\\.099261|0\\.35f",
+        "scope": "git diff 43183276..HEAD -- packages/cultmath/src: the constant is not touched; the slab's F0 stays in (d)."
+      },
+      {
+        "pattern": "git diff --name-only 43183276..HEAD",
+        "scope": "only packages/cultmath/**; both tracked CultMath.Interval.hlsl copies change together and stay one blob."
+      },
+      {
+        "pattern": "git diff 43183276..HEAD -- packages/cultmath/src | grep '^[-+]' | grep -v '^[-+][-+]' | grep -v '///' | wc -l",
+        "scope": "at most 4 changed code lines in src: the widening line in iv_frustum_ball and nothing else."
+      }
+    ],
+    "operator": []
+  },
+  "estimate": {
+    "lines_added": 260,
+    "lines_removed": 40,
+    "dependencies_added": [],
+    "dependencies_removed": [],
+    "formats_added": [],
+    "formats_removed": [],
+    "targets_added": [],
+    "targets_removed": []
+  },
+  "rulings": [
+    "cultmath-tapes:ruling:operator-wells-contract-vs-ceiling",
+    "cultmath-tapes:ruling:operator-analytic-wall-body",
+    "cultmath-tapes:ruling:operator-tile-amortized-march",
+    "cultmath-tapes:ruling:operator-measure-with-empty-space",
+    "cultmath-tapes:ruling:operator-footprint-lod-march",
+    "cultmath-tapes:ruling:operator-ground-void-brush",
+    "cultmath-tapes:ruling:operator-void-true-cavity",
+    "cultmath-tapes:ruling:operator-compiler-downloads",
+    "cultmath-tapes:ruling:operator-campaign-home"
+  ],
+  "questions": [
+    "Q9 in the map: the one shipped void. (a, recommended) Rh 198, S 50, derived Rc 248, e 0.40, the scene r2 measured; (b) the site section's Rc 640, e 4; (c) Rh 198, S 100. Hands codes (a)."
+  ]
+}

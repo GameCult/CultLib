@@ -1,5 +1,5 @@
 import { createSocket, type Socket } from "node:dgram";
-import { decode, encode } from "@msgpack/msgpack";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 
 import {
   CultCache,
@@ -10,6 +10,8 @@ import {
   type CacheBackingStore,
   type CultCacheEnvelope,
   type CultCacheDocumentValue,
+  type DocumentPayload,
+  decodeDocumentPayload,
 } from "@gamecult/cultcache-ts";
 import {
   CultNetDocumentRegistry,
@@ -24,7 +26,9 @@ import {
   defineCultNetDocumentBinding,
   encodeCultNetMessageForWire,
   encodeRudpPacket,
+  isPermanentSendError,
   parseCultNetMessage,
+  sendRudpDatagram,
   type CultNetErrorMessage,
   type CultNetDocumentBinding,
   type CultNetMessage,
@@ -32,6 +36,7 @@ import {
   type CultNetOperationResponseMessage,
   type CultNetRawDocumentRecord,
   type CultNetReconnectPolicy,
+  type CultNetRudpPacket,
   type CultNetSchemaCatalogOptions,
   type CultNetSnapshotResponseRawMessage,
   type CultNetWireContract,
@@ -125,7 +130,7 @@ export type CultMeshDocumentPublicationSource =
     };
 
 export interface CultMeshPublicationDocumentBinding {
-  readonly schema: string | AnyCultCacheDocumentDefinition;
+  readonly schema: AnyCultCacheDocumentDefinition;
   readonly recordKey: string;
   readonly documentId?: string;
   readonly sourceId?: string;
@@ -2522,54 +2527,29 @@ export function cultMeshDocumentFromCache<TDefinition extends AnyCultCacheDocume
   );
 }
 
-export function cultMeshDocumentFromStore(
-  store: CacheBackingStore,
-  schemaId: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
   store: CacheBackingStore,
   definition: TDefinition,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromStore(
-  store: CacheBackingStore,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
     sourceId?: string;
     pollMs?: number;
   } = {},
-): CultMeshDocumentHandle<unknown> {
-  const schema = typeof schemaOrDefinition === "string"
-    ? { schemaId: schemaOrDefinition }
-    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  const schema = cultMeshSchemaFromDefinition(definition);
   const resolvedSchemaId = schema.schemaId ?? schema.type;
   if (!resolvedSchemaId) {
     throw new Error("CultMesh store document requires a schema id or document type.");
   }
-  if (typeof schemaOrDefinition === "string") {
-    requireNonEmpty(schemaOrDefinition, "schemaId");
-  }
   const documentId = options.documentId ?? resolvedSchemaId;
-  const read = async () => {
+  const read = async (): Promise<CultCacheDocumentValue<TDefinition>> => {
     const records = await store.pullAll();
-    const record = resolveCultMeshStoreDocumentRecord(records, schemaOrDefinition);
+    const record = resolveCultMeshStoreDocumentRecord(records, schema, definition);
     if (!record) {
       throw new Error(`CultMesh store document '${documentId}' did not contain schema ${resolvedSchemaId}.`);
     }
-    return parseCultMeshDocumentValue(schemaOrDefinition, decode(record.payload));
+    return decodeDocumentPayload(definition, record.payload);
   };
 
   return cultMeshDocument(
@@ -2586,77 +2566,28 @@ export function cultMeshDocumentFromStore(
   );
 }
 
-export function cultMeshDocumentFromSingleFile(
-  path: string,
-  schemaId: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
   path: string,
   definition: TDefinition,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    pollMs?: number;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromSingleFile(
-  path: string,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
     sourceId?: string;
     pollMs?: number;
   } = {},
-): CultMeshDocumentHandle<unknown> {
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
   requireNonEmpty(path, "path");
   const store = new SingleFileMessagePackBackingStore(path);
-  const resolvedOptions = {
+  return cultMeshDocumentFromStore(store, definition, {
     ...options,
     routeHint: options.routeHint ?? cultMeshRouteHint("shared-memory", path),
-  };
-  return typeof schemaOrDefinition === "string"
-    ? cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions)
-    : cultMeshDocumentFromStore(store, schemaOrDefinition, resolvedOptions);
+  });
 }
 
-export function cultMeshDocumentFromPeerSnapshot(
-  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaId: string,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
   peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
   definition: TDefinition,
   recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromPeerSnapshot(
-  peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-  recordKey: string,
   options: {
     documentId?: string;
     routeHint?: CultMeshRouteHint;
@@ -2665,35 +2596,26 @@ export function cultMeshDocumentFromPeerSnapshot(
     pollMs?: number;
     messageIdPrefix?: string;
   } = {},
-): CultMeshDocumentHandle<unknown> {
-  const schema = typeof schemaOrDefinition === "string"
-    ? { schemaId: schemaOrDefinition }
-    : cultMeshSchemaFromDefinition(schemaOrDefinition);
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+  const schema = cultMeshSchemaFromDefinition(definition);
   const resolvedSchemaId = schema.schemaId ?? schema.type;
   if (!resolvedSchemaId) {
     throw new Error("CultMesh peer snapshot document requires a schema id or document type.");
   }
-  if (typeof schemaOrDefinition === "string") {
-    requireNonEmpty(schemaOrDefinition, "schemaId");
-  }
   requireNonEmpty(recordKey, "recordKey");
   const documentId = options.documentId ?? recordKey;
-  const read = async () =>
-    parseCultMeshDocumentValue(
-      schemaOrDefinition,
-      decodeCultNetRawDocumentPayload(
-        await requestCultNetRawSnapshotDocument(
-          peer,
-          resolvedSchemaId,
-          recordKey,
-          {
-            timeoutMs: options.timeoutMs,
-            messageIdPrefix: options.messageIdPrefix ?? documentId,
-            firstRecordAtKey: typeof schemaOrDefinition === "string",
-          },
-        ),
-      ),
+  const read = async (): Promise<CultCacheDocumentValue<TDefinition>> => {
+    const record = await requestCultNetRawSnapshotDocument(
+      peer,
+      cultMeshAcceptedSchemaIds(definition),
+      recordKey,
+      {
+        timeoutMs: options.timeoutMs,
+        messageIdPrefix: options.messageIdPrefix ?? documentId,
+      },
     );
+    return decodeDocumentPayload(definition, record.payload);
+  };
 
   return cultMeshDocument(
     documentId,
@@ -2709,35 +2631,9 @@ export function cultMeshDocumentFromPeerSnapshot(
   );
 }
 
-export function cultMeshDocumentFromPublication(
-  source: CultMeshDocumentPublicationSource,
-  schemaId: string,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<unknown>;
 export function cultMeshDocumentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
   source: CultMeshDocumentPublicationSource,
   definition: TDefinition,
-  recordKey: string,
-  options?: {
-    documentId?: string;
-    routeHint?: CultMeshRouteHint;
-    sourceId?: string;
-    timeoutMs?: number;
-    pollMs?: number;
-    messageIdPrefix?: string;
-  },
-): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-export function cultMeshDocumentFromPublication(
-  source: CultMeshDocumentPublicationSource,
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
   recordKey: string,
   options: {
     documentId?: string;
@@ -2747,7 +2643,7 @@ export function cultMeshDocumentFromPublication(
     pollMs?: number;
     messageIdPrefix?: string;
   } = {},
-): CultMeshDocumentHandle<unknown> {
+): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
   if (!source) {
     throw new Error("CultMesh publication source is required.");
   }
@@ -2755,14 +2651,12 @@ export function cultMeshDocumentFromPublication(
 
   switch (source.kind) {
     case "live-publication": {
-      const schema = typeof schemaOrDefinition === "string"
-        ? { schemaId: schemaOrDefinition }
-        : cultMeshSchemaFromDefinition(schemaOrDefinition);
+      const schema = cultMeshSchemaFromDefinition(definition);
       const schemaId = schema.schemaId ?? schema.type;
       if (!schemaId) {
         throw new Error("CultMesh live publication document requires a schema id or document type.");
       }
-      const parse = (value: unknown) => parseCultMeshDocumentValue(schemaOrDefinition, value);
+      const parse = (value: unknown) => definition.schema.parse(value) as CultCacheDocumentValue<TDefinition>;
       return cultMeshDocument(
         options.documentId ?? recordKey,
         schema,
@@ -2782,51 +2676,28 @@ export function cultMeshDocumentFromPublication(
       );
     }
     case "single-file":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          })
-        : cultMeshDocumentFromSingleFile(source.path, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          });
+      return cultMeshDocumentFromSingleFile(source.path, definition, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint,
+        sourceId: options.sourceId ?? recordKey,
+        pollMs: options.pollMs,
+      });
     case "store":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          })
-        : cultMeshDocumentFromStore(source.store, schemaOrDefinition, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint,
-            sourceId: options.sourceId ?? recordKey,
-            pollMs: options.pollMs,
-          });
+      return cultMeshDocumentFromStore(source.store, definition, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint,
+        sourceId: options.sourceId ?? recordKey,
+        pollMs: options.pollMs,
+      });
     case "peer-snapshot":
-      return typeof schemaOrDefinition === "string"
-        ? cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
-            sourceId: options.sourceId ?? recordKey,
-            timeoutMs: options.timeoutMs,
-            pollMs: options.pollMs,
-            messageIdPrefix: options.messageIdPrefix,
-          })
-        : cultMeshDocumentFromPeerSnapshot(source.peer, schemaOrDefinition, recordKey, {
-            documentId: options.documentId ?? recordKey,
-            routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
-            sourceId: options.sourceId ?? recordKey,
-            timeoutMs: options.timeoutMs,
-            pollMs: options.pollMs,
-            messageIdPrefix: options.messageIdPrefix,
-          });
+      return cultMeshDocumentFromPeerSnapshot(source.peer, definition, recordKey, {
+        documentId: options.documentId ?? recordKey,
+        routeHint: options.routeHint ?? cultMeshRouteHint("network", source.endpoint ?? "CultNet snapshot"),
+        sourceId: options.sourceId ?? recordKey,
+        timeoutMs: options.timeoutMs,
+        pollMs: options.pollMs,
+        messageIdPrefix: options.messageIdPrefix,
+      });
     default:
       throw new Error(`Unsupported CultMesh publication source kind '${(source as { kind?: string }).kind}'.`);
   }
@@ -2888,11 +2759,6 @@ export async function cultMeshSyncDocumentsFromPublication(
     if (!binding) {
       throw new Error("CultMesh publication binding is required.");
     }
-    if (typeof binding.schema === "string") {
-      throw new Error(
-        `CultMesh synced publication binding '${binding.recordKey}' requires a document definition, not only a schema id.`,
-      );
-    }
     const resolvedSource = binding.source ??
       (typeof source === "function" ? source(binding) : source);
     await node.syncDocumentFromPublication(
@@ -2950,7 +2816,7 @@ export function cultMeshDocuments(
 }
 
 export function cultMeshPublicationDocument(
-  schema: string | AnyCultCacheDocumentDefinition,
+  schema: AnyCultCacheDocumentDefinition,
   recordKey: string,
   options: {
     documentId?: string;
@@ -2992,33 +2858,19 @@ export function cultMeshDocumentsFromPublication(
       }
       const resolvedSource = binding.source ??
         (typeof source === "function" ? source(binding) : source);
-      return typeof binding.schema === "string"
-        ? cultMeshDocumentFromPublication(
-            resolvedSource,
-            binding.schema,
-            binding.recordKey,
-            {
-              documentId: binding.documentId ?? binding.recordKey,
-              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
-              routeHint: options.routeHint,
-              timeoutMs: options.timeoutMs,
-              pollMs: options.pollMs,
-              messageIdPrefix: options.messageIdPrefix,
-            },
-          )
-        : cultMeshDocumentFromPublication(
-            resolvedSource,
-            binding.schema,
-            binding.recordKey,
-            {
-              documentId: binding.documentId ?? binding.recordKey,
-              sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
-              routeHint: options.routeHint,
-              timeoutMs: options.timeoutMs,
-              pollMs: options.pollMs,
-              messageIdPrefix: options.messageIdPrefix,
-            },
-          );
+      return cultMeshDocumentFromPublication(
+        resolvedSource,
+        binding.schema,
+        binding.recordKey,
+        {
+          documentId: binding.documentId ?? binding.recordKey,
+          sourceId: binding.sourceId ?? binding.documentId ?? binding.recordKey,
+          routeHint: options.routeHint,
+          timeoutMs: options.timeoutMs,
+          pollMs: options.pollMs,
+          messageIdPrefix: options.messageIdPrefix,
+        },
+      );
     }),
   );
 }
@@ -4006,7 +3858,7 @@ export class CultMeshNode {
     }
     const document = await requestCultNetRawSnapshotDocument(
       peer,
-      schemaId,
+      [schemaId],
       key,
       {
         timeoutMs: options.timeoutMs,
@@ -4115,11 +3967,16 @@ export interface CultMeshPeerCard {
   authorityLeaseId?: string;
 }
 
-export interface CultMeshRudpDocumentPut {
+/**
+ * A document put as `onDocumentPutRaw` receives it. `decoded` says which read the payload is ready for: `true` when the
+ * registry held a definition for `schemaId` and `payload` is the document read through it; `false` when it did not, and
+ * `payload` is the opaque `DocumentPayload`, untouched, for a handler that holds the definition itself to read with
+ * `decodeDocumentPayload`. Narrowing on `decoded` needs no cast in either branch.
+ */
+export type CultMeshRudpDocumentPut = {
   schemaId: string;
   recordKey: string;
   storedAt: string;
-  payload: unknown;
   sourceRuntimeId: string | null;
   sourceAgentId: string | null;
   sourceRole: string | null;
@@ -4129,7 +3986,10 @@ export interface CultMeshRudpDocumentPut {
     family: string;
     port: number;
   };
-}
+} & (
+  | { readonly decoded: true; readonly payload: unknown }
+  | { readonly decoded: false; readonly payload: DocumentPayload }
+);
 
 export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDocumentDefinition = AnyCultCacheDocumentDefinition> {
   binding: CultNetDocumentBinding<TDefinition>;
@@ -4142,6 +4002,30 @@ export interface CultMeshRudpDocumentReceipt<TDefinition extends AnyCultCacheDoc
   tags?: string[];
 }
 
+/**
+ * Options for `CultMesh.createRudpDocumentServer`.
+ *
+ * The server fragments its replies by `maxFragmentBytes` (default
+ * `CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES`) and sends no
+ * reply larger than `maxPayloadBytes`. A put is judged by what serving it
+ * would send, not by the size of its own frame: a put whose snapshot reply
+ * could never be sent within those limits, 65535 fragments and
+ * `maxPendingReliablePackets`, is refused before `onDocumentPutRaw` sees it:
+ * `onError` receives a `CultMeshRudpUnservableDocumentError` and the peer a
+ * `cultnet.error.v0`.
+ *
+ * The snapshot reply is sized from the record `documents` would store for the
+ * put, serving it alone. The judgement is exact only for an application whose
+ * `onDocumentPutRaw` stores the put through that registry
+ * (`applyRawDocumentPutMessage`) and whose `getCache` serves that store; a
+ * handler that stores another record is judged by the registry's record, not
+ * its own. A receipt is not part of the judgement: whether one is sent is the
+ * handler's to decide after it stores the put.
+ *
+ * A reply that cannot be sent all the same, such as a receipt larger than
+ * `maxPayloadBytes`, reaches `onError`, and the peer receives a
+ * `cultnet.error.v0` in its place.
+ */
 export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOptions {
   documents: CultNetDocumentRegistry;
   getCache?: () => Promise<CultCache> | CultCache;
@@ -4159,6 +4043,39 @@ export interface CultMeshRudpDocumentServerOptions extends CultMeshRudpSocketOpt
   sessionTimeoutMs?: number;
 }
 
+/** Replies larger than one fragment are split into fragments of at most this many bytes. */
+export const CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES = 1200;
+
+const RUDP_MAX_FRAGMENTS_PER_MESSAGE = 0xffff;
+
+/** CultNet parses no message id shorter than one character, so no reply is smaller. */
+const SHORTEST_MESSAGE_ID = "0";
+
+/**
+ * A put the document server refused because it could never serve the document:
+ * the snapshot reply carrying it alone (`responseBytes`) would exceed the
+ * server's reply limits.
+ */
+export class CultMeshRudpUnservableDocumentError extends Error {
+  constructor(
+    readonly messageId: string,
+    readonly recordKey: string,
+    readonly responseBytes: number,
+    readonly maxPayloadBytes: number | undefined,
+    readonly fragmentCount: number,
+    readonly maxFragmentCount: number,
+  ) {
+    // The sentence names sizes only: it is sent to the peer, and a record key of
+    // any length would make the refusal itself too large to send.
+    super(
+      `Document can never be served: its reply is ${responseBytes} bytes in `
+      + `${fragmentCount} fragments; limits are ${maxPayloadBytes ?? "unbounded"} bytes and `
+      + `${maxFragmentCount} fragments.`,
+    );
+    this.name = "CultMeshRudpUnservableDocumentError";
+  }
+}
+
 export interface CultMeshRudpServerSession {
   readonly sessionId: string;
   readonly remote: { address: string; family: string; port: number };
@@ -4168,6 +4085,12 @@ export interface CultMeshRudpServerSession {
 
 export interface CultMeshRudpDocumentServer {
   readonly bind: { host: string; port: number };
+  /**
+   * Datagrams that could not be sent to a peer. Each is that peer's lost datagram: a
+   * reliable packet stays pending and is resent, and no other peer is affected. A datagram
+   * that can never be sent as built is not counted here: it ends that peer's session.
+   */
+  readonly sendFailures: number;
   start(): Promise<void>;
   close(): void;
 }
@@ -4830,106 +4753,36 @@ export class CultMesh {
     return cultMeshDocumentFromCache(cache, definition, key, options);
   }
 
-  public static documentFromStore(
-    store: CacheBackingStore,
-    schemaId: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromStore<TDefinition extends AnyCultCacheDocumentDefinition>(
     store: CacheBackingStore,
     definition: TDefinition,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromStore(
-    store: CacheBackingStore,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
       sourceId?: string;
       pollMs?: number;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromStore(store, schemaOrDefinition, options)
-      : cultMeshDocumentFromStore(store, schemaOrDefinition, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromStore(store, definition, options);
   }
 
-  public static documentFromSingleFile(
-    path: string,
-    schemaId: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromSingleFile<TDefinition extends AnyCultCacheDocumentDefinition>(
     path: string,
     definition: TDefinition,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      pollMs?: number;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromSingleFile(
-    path: string,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
       sourceId?: string;
       pollMs?: number;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options)
-      : cultMeshDocumentFromSingleFile(path, schemaOrDefinition, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromSingleFile(path, definition, options);
   }
 
-  public static documentFromPeerSnapshot(
-    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-    schemaId: string,
-    recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromPeerSnapshot<TDefinition extends AnyCultCacheDocumentDefinition>(
     peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
     definition: TDefinition,
     recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromPeerSnapshot(
-    peer: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-    recordKey: string,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -4938,42 +4791,14 @@ export class CultMesh {
       pollMs?: number;
       messageIdPrefix?: string;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options)
-      : cultMeshDocumentFromPeerSnapshot(peer, schemaOrDefinition, recordKey, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromPeerSnapshot(peer, definition, recordKey, options);
   }
 
-  public static documentFromPublication(
-    source: CultMeshDocumentPublicationSource,
-    schemaId: string,
-    recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<unknown>;
   public static documentFromPublication<TDefinition extends AnyCultCacheDocumentDefinition>(
     source: CultMeshDocumentPublicationSource,
     definition: TDefinition,
     recordKey: string,
-    options?: {
-      documentId?: string;
-      routeHint?: CultMeshRouteHint;
-      sourceId?: string;
-      timeoutMs?: number;
-      pollMs?: number;
-      messageIdPrefix?: string;
-    },
-  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>>;
-  public static documentFromPublication(
-    source: CultMeshDocumentPublicationSource,
-    schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
-    recordKey: string,
     options: {
       documentId?: string;
       routeHint?: CultMeshRouteHint;
@@ -4982,10 +4807,8 @@ export class CultMesh {
       pollMs?: number;
       messageIdPrefix?: string;
     } = {},
-  ): CultMeshDocumentHandle<unknown> {
-    return typeof schemaOrDefinition === "string"
-      ? cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options)
-      : cultMeshDocumentFromPublication(source, schemaOrDefinition, recordKey, options);
+  ): CultMeshDocumentHandle<CultCacheDocumentValue<TDefinition>> {
+    return cultMeshDocumentFromPublication(source, definition, recordKey, options);
   }
 
   public static globalDocumentFromCache<TDefinition extends AnyCultCacheDocumentDefinition>(
@@ -5047,7 +4870,7 @@ export class CultMesh {
   }
 
   public static publicationDocument(
-    schema: string | AnyCultCacheDocumentDefinition,
+    schema: AnyCultCacheDocumentDefinition,
     recordKey: string,
     options: {
       documentId?: string;
@@ -5628,18 +5451,33 @@ export class CultMesh {
     const port = options.bindPort ?? 0;
     const bind = { host, port };
     const socket = options.socket ?? createSocket(host.includes(":") ? "udp6" : "udp4");
-    const sessions = new Map<string, {
+    type SessionRecord = {
       sessionId: string;
       remote: { address: string; family: string; port: number };
       session: CultNetRudpSession;
       connectPayload: Uint8Array;
       closed: boolean;
+      /** A packet it owed could never be sent, so the session ended. */
+      unsendable: boolean;
       work: Promise<void>;
-    }>();
+    };
+    const sessions = new Map<string, SessionRecord>();
     let sessionSequence = 0;
+    let sendFailures = 0;
     const resendPollMs = Math.max(10, options.resendPollMs ?? 25);
     const sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? 30_000);
     const wireContract = options.wireContract ?? "cultnet.schema.v0";
+    const maxFragmentBytes = options.maxFragmentBytes ?? CULTMESH_RUDP_DOCUMENT_SERVER_DEFAULT_MAX_FRAGMENT_BYTES;
+    if (!(maxFragmentBytes > 0)) {
+      throw new Error("CultMesh RUDP document server maxFragmentBytes must be greater than zero.");
+    }
+    const maxPayloadBytes = options.maxPayloadBytes;
+    // The most fragments one reply can take: the wire's fragment count, and the
+    // reliable queue a reply must fit into whole.
+    const maxReplyFragments = Math.min(
+      RUDP_MAX_FRAGMENTS_PER_MESSAGE,
+      options.maxPendingReliablePackets ?? RUDP_MAX_FRAGMENTS_PER_MESSAGE,
+    );
     let resendTimer: NodeJS.Timeout | undefined;
 
     function reportError(error: unknown): void {
@@ -5661,19 +5499,15 @@ export class CultMesh {
         if (packet.packetType === "connect") {
           const connectPayload = Uint8Array.from(packet.payload ?? []);
           if (record?.session.connectRepeats(packet)) {
-            socket.send(
-              encodeRudpPacket(record.session.acceptConnect(packet, nowMs)),
-              remote.port,
-              remote.address,
-            );
+            sendPacket(record, record.session.acceptConnect(packet, nowMs));
             return;
           }
-          if (record) closeSession(record);
-          record = {
+          const next: SessionRecord = {
             sessionId: `${runtimeId}:${++sessionSequence}`,
             remote: { address: remote.address, family: remote.family, port: remote.port },
             connectPayload,
             closed: false,
+            unsendable: false,
             session: new CultNetRudpSession({
               connectionId,
               initialSequence: options.initialSequence,
@@ -5682,8 +5516,12 @@ export class CultMesh {
             }),
             work: Promise.resolve(),
           };
-          sessions.set(key, record);
-          socket.send(encodeRudpPacket(record.session.acceptConnect(packet, nowMs)), remote.port, remote.address);
+          sendPacket(next, next.session.acceptConnect(packet, nowMs));
+          // A peer whose Accept can never be sent cannot be answered: no session
+          // starts, and one already there is left as it was.
+          if (next.unsendable) return;
+          if (record) closeSession(record);
+          sessions.set(key, next);
           return;
         }
 
@@ -5691,12 +5529,22 @@ export class CultMesh {
           return;
         }
 
-        const result = record.session.receive(packet, nowMs);
+        let result: ReturnType<CultNetRudpSession["receive"]>;
+        try {
+          result = record.session.receive(packet, nowMs);
+        } catch {
+          // receive() has already recorded the packet's reliable sequence, so the
+          // session cannot be kept: a retransmit would be acknowledged and the frame
+          // silently lost. It ends, never the server, and the peer is told. What a
+          // datagram carries is the sender's business, so nothing is reported.
+          endRefusedSession(key, record);
+          return;
+        }
         if (result.reply) {
-          socket.send(encodeRudpPacket(result.reply), record.remote.port, record.remote.address);
+          sendPacket(record, result.reply);
         }
         for (const ready of result.readyToSend ?? []) {
-          socket.send(encodeRudpPacket(ready), record.remote.port, record.remote.address);
+          sendPacket(record, ready);
         }
         for (const frame of result.delivered) {
           if (frame.channelId !== "schema") {
@@ -5712,11 +5560,7 @@ export class CultMesh {
           return;
         }
         if (packet.reliable) {
-          socket.send(
-            encodeRudpPacket(record.session.createAckForReceived(packet.sequence)),
-            record.remote.port,
-            record.remote.address,
-          );
+          sendPacket(record, record.session.createAckForReceived(packet.sequence));
         }
       } catch (error) {
         reportError(error);
@@ -5725,11 +5569,11 @@ export class CultMesh {
     socket.on("error", reportError);
 
     async function handleDocumentServerFrame(
-      record: { sessionId: string; remote: { address: string; family: string; port: number }; session: CultNetRudpSession; connectPayload: Uint8Array; closed: boolean },
+      record: SessionRecord,
       payload: Uint8Array,
     ): Promise<void> {
       if (record.closed) return;
-      const message = parseCultNetMessage(decode(payload), wireContract);
+      const message = parseCultNetMessage(decodeWireValue(payload), wireContract);
       switch (message.schemaVersion) {
         case "cultnet.snapshot_request.v0": {
           if (!options.getCache) {
@@ -5739,14 +5583,25 @@ export class CultMesh {
             });
             return;
           }
+          let reply: CultNetMessage;
           try {
             const cache = await options.getCache();
-            sendSchemaMessage(record, options.documents.createRawSnapshotResponse(cache, message.messageId, message));
+            reply = options.documents.createRawSnapshotResponse(cache, message.messageId, message);
           } catch (error) {
-            sendSchemaMessage(record, {
-              schemaVersion: "cultnet.error.v0",
-              error: error instanceof Error ? error.message : String(error),
-            });
+            reportError(error);
+            refuse(record, "the snapshot source failed");
+            return;
+          }
+          try {
+            sendSchemaMessage(record, reply);
+          } catch (error) {
+            reportError(error);
+            refuse(
+              record,
+              maxPayloadBytes !== undefined && encodeSchemaMessage(reply).byteLength > maxPayloadBytes
+                ? "the snapshot response is too large"
+                : "the snapshot response could not be queued",
+            );
           }
           return;
         }
@@ -5755,17 +5610,24 @@ export class CultMesh {
           return;
         case "cultnet.document_put_raw.v0":
           if (options.onDocumentPutRaw) {
-            const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote));
+            const unservable = unservablePut(message);
+            if (unservable) {
+              reportError(unservable);
+              sendSchemaMessage(record, { schemaVersion: "cultnet.error.v0", error: unservable.message });
+              return;
+            }
+            const receipt = await options.onDocumentPutRaw(normalizeRudpDocumentPut(message, record.remote, options.documents));
             if (receipt) {
-              sendSchemaMessage(record, options.documents.createRawDocumentPutMessage(
-                receipt.binding, receipt.messageId ?? message.messageId, receipt.recordKey, receipt.value,
-                {
-                  sourceRuntimeId: receipt.sourceRuntimeId ?? runtimeId,
-                  sourceAgentId: receipt.sourceAgentId,
-                  sourceRole: receipt.sourceRole ?? "provider",
-                  tags: receipt.tags ?? ["receipt"],
-                },
-              ));
+              try {
+                sendSchemaMessage(record, receiptMessage(receipt, message.messageId));
+              } catch (error) {
+                // The put is stored: the peer must hear that its receipt is not coming.
+                reportError(error);
+                sendSchemaMessage(record, {
+                  schemaVersion: "cultnet.error.v0",
+                  error: `CultMesh RUDP document server stored a put but could not send its receipt.`,
+                });
+              }
             }
           }
           return;
@@ -5787,13 +5649,7 @@ export class CultMesh {
       }
     }
 
-    function publicSession(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): CultMeshRudpServerSession {
+    function publicSession(record: SessionRecord): CultMeshRudpServerSession {
       return {
         sessionId: record.sessionId,
         remote: { ...record.remote },
@@ -5805,46 +5661,156 @@ export class CultMesh {
       };
     }
 
-    function notifySessionClosed(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): void {
+    function notifySessionClosed(record: SessionRecord): void {
       if (!options.onSessionClosed) return;
       void Promise.resolve(options.onSessionClosed(publicSession(record))).catch(reportError);
     }
 
-    function closeSession(record: {
-      sessionId: string;
-      remote: { address: string; family: string; port: number };
-      session: CultNetRudpSession;
-      connectPayload: Uint8Array;
-      closed: boolean;
-    }): void {
+    function closeSession(record: SessionRecord): void {
       if (record.closed) return;
       record.closed = true;
       notifySessionClosed(record);
     }
 
+    /**
+     * Sends one packet to a session's peer. A failure is that peer's alone: one that may
+     * pass (no route, full buffers) is a lost datagram, counted, and resent if it was
+     * reliable; one that can never pass as built ends that peer's session. Neither ends
+     * the server, a timer or another peer's session.
+     */
+    function sendPacket(record: SessionRecord, packet: CultNetRudpPacket): void {
+      sendRudpDatagram(socket, encodeRudpPacket(packet), record.remote.port, record.remote.address, (error) => {
+        if (isPermanentSendError(error)) {
+          endUnsendableSession(record, error);
+        } else {
+          sendFailures += 1;
+        }
+      });
+    }
+
+    function endRefusedSession(key: string, record: SessionRecord): void {
+      sessions.delete(key);
+      closeSession(record);
+      // The goodbye is built after the reset, or its ack field would acknowledge the
+      // very frame the session refused.
+      record.session.resetPeerState();
+      const goodbye = encodeRudpPacket(record.session.createDisconnect(Buffer.from("session refused a packet", "utf8")));
+      sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
+    }
+
+    /** The session owes its peer a packet that can never be sent as built. */
+    function endUnsendableSession(record: SessionRecord, error: Error): void {
+      if (record.unsendable) return;
+      record.unsendable = true;
+      const key = `${record.remote.address}:${record.remote.port}`;
+      // A session that never started, or was already replaced, has nothing to end.
+      if (sessions.get(key) !== record) return;
+      sessions.delete(key);
+      closeSession(record);
+      const goodbye = encodeRudpPacket(record.session.endUnsendableSession(error));
+      sendRudpDatagram(socket, goodbye, record.remote.port, record.remote.address, () => {});
+    }
+
     function sendSchemaMessage(
-      record: { sessionId: string; remote: { address: string; port: number }; session: CultNetRudpSession; closed: boolean },
+      record: SessionRecord,
       message: CultNetMessage,
     ): void {
       if (record.closed) throw new Error(`CultMesh RUDP session ${record.sessionId} is closed.`);
-      const payload = encode(encodeCultNetMessageForWire(message, wireContract));
+      const payload = encodeSchemaMessage(message);
+      if (maxPayloadBytes !== undefined && payload.byteLength > maxPayloadBytes) {
+        throw new Error(
+          `CultMesh RUDP reply ${message.schemaVersion} is ${payload.byteLength} bytes; `
+          + `maxPayloadBytes is ${maxPayloadBytes}.`,
+        );
+      }
       for (const packet of record.session.sendMany("schema", payload, {
         reliable: true,
         ordered: true,
         nowMs: Date.now(),
+        maxFragmentBytes,
       })) {
-        socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+        sendPacket(record, packet);
       }
+    }
+
+    /**
+     * Answers a request the server cannot serve with fixed text, never an error's message,
+     * which can quote what a peer or the application supplied. The answer is unreliable and
+     * unordered, so it needs no room in a reliable queue that may just have refused the reply,
+     * and its acknowledgement fields acknowledge nothing, as every runtime's refusal does.
+     */
+    function refuse(record: SessionRecord, text: string): void {
+      if (record.closed) return;
+      const payload = encodeSchemaMessage({ schemaVersion: "cultnet.error.v0", error: text });
+      for (const packet of record.session.sendMany("schema", payload, {
+        reliable: false,
+        ordered: false,
+        nowMs: Date.now(),
+        maxFragmentBytes,
+      })) {
+        sendPacket(record, { ...packet, ack: 0, ackMask: 0 });
+      }
+    }
+
+    /** The one reply encoder, shared by sends and by put admission. */
+    function encodeSchemaMessage(message: CultNetMessage): Uint8Array {
+      return encodeWireValue(encodeCultNetMessageForWire(message, wireContract));
+    }
+
+    /** Builds the receipt `onDocumentPutRaw` returned, under the put's message id by default. */
+    function receiptMessage(receipt: CultMeshRudpDocumentReceipt, putMessageId: string): CultNetMessage {
+      return options.documents.createRawDocumentPutMessage(
+        receipt.binding, receipt.messageId ?? putMessageId, receipt.recordKey, receipt.value,
+        {
+          sourceRuntimeId: receipt.sourceRuntimeId ?? runtimeId,
+          sourceAgentId: receipt.sourceAgentId,
+          sourceRole: receipt.sourceRole ?? "provider",
+          tags: receipt.tags ?? ["receipt"],
+        },
+      );
+    }
+
+    /**
+     * Refuse a put whose document could never be served: the snapshot reply
+     * carrying it alone, under the shortest message id CultNet parses, sized as
+     * `sendSchemaMessage` would send it. It is built from the record the
+     * registry would store, which is exact only when the application stores
+     * through the registry; a document the registry has no binding for is
+     * sized as received.
+     */
+    function unservablePut(message: CultNetMessage): CultMeshRudpUnservableDocumentError | undefined {
+      if (message.schemaVersion !== "cultnet.document_put_raw.v0") return undefined;
+      let reply: CultNetMessage;
+      try {
+        reply = options.documents.createRawSnapshotResponseForPut(message, SHORTEST_MESSAGE_ID);
+      } catch {
+        reply = {
+          schemaVersion: "cultnet.snapshot_response_raw.v0",
+          messageId: SHORTEST_MESSAGE_ID,
+          documents: [message.document],
+        };
+      }
+      const responseBytes = encodeSchemaMessage(reply).byteLength;
+      const fragmentCount = Math.max(1, Math.ceil(responseBytes / maxFragmentBytes));
+      if ((maxPayloadBytes === undefined || responseBytes <= maxPayloadBytes)
+        && fragmentCount <= maxReplyFragments) {
+        return undefined;
+      }
+      return new CultMeshRudpUnservableDocumentError(
+        message.messageId,
+        message.document.recordKey,
+        responseBytes,
+        maxPayloadBytes,
+        fragmentCount,
+        maxReplyFragments,
+      );
     }
 
     return {
       bind,
+      get sendFailures() {
+        return sendFailures;
+      },
       async start(): Promise<void> {
         await new Promise<void>((resolve, reject) => {
           socket.once("error", reject);
@@ -5866,7 +5832,7 @@ export class CultMesh {
               continue;
             }
             for (const packet of record.session.dueResends(nowMs)) {
-              socket.send(encodeRudpPacket(packet), record.remote.port, record.remote.address);
+              sendPacket(record, packet);
             }
           }
         }, resendPollMs);
@@ -5981,9 +5947,9 @@ export class CultMesh {
         const onMessage = (message: CultNetMessage): void => {
           if (message.schemaVersion !== "cultnet.document_put_raw.v0" || message.messageId !== messageId || message.document.schemaId !== receiptBinding.definition.schemaId) return;
           try {
-            const decoded = decode(new Uint8Array(message.document.payload));
+            const decoded = decodeDocumentPayload(receiptBinding.definition, message.document.payload);
             cleanup();
-            resolve(receiptBinding.definition.schema.parse(decoded) as CultCacheDocumentValue<TReceiptDefinition>);
+            resolve(decoded);
           } catch (error) { cleanup(); reject(error); }
         };
         const cleanup = (): void => { clearTimeout(timeout); peer.off("message", onMessage); };
@@ -6246,22 +6212,23 @@ function inferCultMeshSchemaName(schemaId: string | undefined): string | undefin
   return /^\d+$/.test(version) ? schemaId.slice(0, marker) : undefined;
 }
 
-// The record a store document reads: the one under the handle's schema id, else, for a definition, one under an id the
-// definition lists as compatible, as CultCache resolves it. A record under any other id is not this document, whatever
+// The record a store document reads: the one under the handle's schema id, else one under an id the definition lists as
+// compatible, as CultCache resolves it. A record under any other id is not this document, whatever
 // its payload parses as.
 function resolveCultMeshStoreDocumentRecord(
   records: readonly CultCacheEnvelope[],
-  schemaOrDefinition: string | AnyCultCacheDocumentDefinition,
+  schema: CultMeshDocumentSchemaDescriptor,
+  definition: AnyCultCacheDocumentDefinition,
 ): CultCacheEnvelope | undefined {
-  const schemaIds = cultMeshAcceptedSchemaIds(schemaOrDefinition);
-  return records.find(candidate => candidate.schemaId === schemaIds[0])
-    ?? records.find(candidate => candidate.schemaId !== undefined && schemaIds.includes(candidate.schemaId));
+  const own = schema.schemaId ?? schema.type;
+  const accepted = [own, ...cultMeshAcceptedSchemaIds(definition)];
+  return records.find(candidate => candidate.schemaId === own)
+    ?? records.find(candidate => candidate.schemaId !== undefined && accepted.includes(candidate.schemaId));
 }
 
-function cultMeshAcceptedSchemaIds(schemaOrDefinition: string | AnyCultCacheDocumentDefinition): readonly string[] {
-  return typeof schemaOrDefinition === "string"
-    ? [schemaOrDefinition]
-    : schemaIdentityOf(schemaOrDefinition).compatibleSchemaIds;
+// The ids a definition's records may be stored under: its own first, then the ids it declares compatible.
+function cultMeshAcceptedSchemaIds(definition: AnyCultCacheDocumentDefinition): readonly string[] {
+  return schemaIdentityOf(definition).compatibleSchemaIds;
 }
 
 function cultMeshSchemaLabel(schema: CultMeshDocumentSchemaDescriptor): string {
@@ -6280,6 +6247,7 @@ function requireNonEmpty(value: string, name: string): void {
 function normalizeRudpDocumentPut(
   message: CultNetMessage,
   remote: { address: string; family: string; port: number },
+  documents: CultNetDocumentRegistry,
 ): CultMeshRudpDocumentPut {
   if (message.schemaVersion !== "cultnet.document_put_raw.v0") {
     throw new Error(`Expected cultnet.document_put_raw.v0, received ${message.schemaVersion}.`);
@@ -6291,34 +6259,31 @@ function normalizeRudpDocumentPut(
   if (document.payloadEncoding !== "messagepack") {
     throw new Error(`Unsupported raw payload encoding ${document.payloadEncoding}.`);
   }
+  const definition = documents.getBySchemaId(document.schemaId)?.definition;
   return {
     schemaId: document.schemaId,
     recordKey: document.recordKey,
     storedAt: document.storedAt ?? new Date().toISOString(),
-    payload: decode(document.payload),
     sourceRuntimeId: document.sourceRuntimeId ?? null,
     sourceAgentId: document.sourceAgentId ?? null,
     sourceRole: document.sourceRole ?? null,
     tags: Array.isArray(document.tags) ? document.tags : [],
     remote,
+    ...(definition
+      ? { decoded: true, payload: decodeDocumentPayload(definition, document.payload) }
+      : { decoded: false, payload: document.payload }),
   };
 }
 
-// The peer's record at the key under exactly this schema id. A record at the key under another id is another type's, and
-// is never taken in its place; none under this id is not-found.
-//
-// HELD (fork raised to Self, 2026-09-30): a handle named by a bare schema-id string still takes the first record at the
-// key when none carries that id. Eve Electron reads the C# Aetheria daemon this way: the daemon stamps SHA-256 schema ids
-// and the client asks by "gamecult.eve.provider_advertisement.v1", so only this fallback finds its records. It is removed
-// when the fork on how a TS reader names a C#-hosted schema is ruled. Definition handles and sync never take it.
+// The peer's record at the key under the first schema id, else under another id in the list. A record at the key under any
+// other id is another type's, and is never taken in its place, whatever its payload parses as; none is not-found.
 async function requestCultNetRawSnapshotDocument(
   peerOrProvider: CultNetPeer | (() => CultNetPeer | Promise<CultNetPeer>),
-  schemaId: string,
+  schemaIds: readonly string[],
   recordKey: string,
   options: {
     timeoutMs?: number;
     messageIdPrefix?: string;
-    firstRecordAtKey?: boolean;
   } = {},
 ): Promise<CultNetRawDocumentRecord> {
   const peer = await resolveCultNetPeer(peerOrProvider);
@@ -6328,10 +6293,10 @@ async function requestCultNetRawSnapshotDocument(
     timeoutMs: options.timeoutMs,
   });
   const atKey = response.documents.filter(candidate => candidate.recordKey === recordKey);
-  const document = atKey.find(candidate => candidate.schemaId === schemaId)
-    ?? (options.firstRecordAtKey ? atKey[0] : undefined);
+  const document = atKey.find(candidate => candidate.schemaId === schemaIds[0])
+    ?? atKey.find(candidate => schemaIds.includes(candidate.schemaId));
   if (!document) {
-    throw new Error(`CultMesh peer snapshot did not return ${schemaId} at ${recordKey}.`);
+    throw new Error(`CultMesh peer snapshot did not return ${schemaIds[0]} at ${recordKey}.`);
   }
   return document;
 }
@@ -6398,34 +6363,8 @@ async function resolveCultNetPeer(
     : peerOrProvider;
 }
 
-function decodeCultNetRawDocumentPayload(document: CultNetRawDocumentRecord): unknown {
-  if (document.payloadEncoding !== "messagepack") {
-    throw new Error(`Unsupported CultNet raw document payload encoding ${document.payloadEncoding}.`);
-  }
-  return decode(toUint8Array(document.payload));
-}
-
-function parseCultMeshDocumentValue<TDefinition extends AnyCultCacheDocumentDefinition>(
-  schemaOrDefinition: string | TDefinition,
-  value: unknown,
-): unknown | CultCacheDocumentValue<TDefinition> {
-  return typeof schemaOrDefinition === "string"
-    ? value
-    : schemaOrDefinition.schema.parse(value);
-}
-
 function isCultNetErrorMessage(message: CultNetMessage): message is CultNetErrorMessage {
   return message.schemaVersion === "cultnet.error.v0";
-}
-
-function toUint8Array(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return Uint8Array.from(value);
-  }
-  throw new Error("CultNet raw document payload was not binary.");
 }
 
 async function bindRudpSocket(host: string, options: CultMeshRudpSocketOptions): Promise<Socket> {

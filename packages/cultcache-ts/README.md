@@ -32,6 +32,37 @@ This is not an ORM in a fake mustache. It is for cases where you want:
 
 That keeps the polymorphic boundary tight without making callers write boilerplate by candlelight.
 
+## Reading And Writing Payloads
+
+A document's bytes travel as a `DocumentPayload`: in a store envelope, a CultNet record and a
+realtime frame. At run time it is the same `Uint8Array`, so nothing on the wire changes. At compile
+time it is opaque: it is assignable to and from neither `Uint8Array` nor `ArrayLike<number>`, so no
+MessagePack decoder accepts it.
+
+What the type guarantees is that a payload cannot be read or assigned directly: a decoder call, an
+assignment to `Uint8Array` and `new Uint8Array(payload)` fail to compile. It does not stop what the
+runtime value allows, because the value is a `Uint8Array`. These routes read it without the owner:
+`instanceof Uint8Array` or `ArrayBuffer.isView` narrowing, `Object.values`, `Object.assign` onto a
+`Uint8Array`, a JSON round trip, `Reflect.get`, and a cast. A read made that way sees the raw bytes,
+which for a codec or formatter document are not the document. No lint or guard closes them. Read
+through `decodeDocumentPayload`, and when you need the bytes themselves (hashing, signing, a store
+write) take them with `documentPayloadBytes`, the sanctioned escape.
+
+- `decodeDocumentPayload(definition, payload)` reads a payload through the definition's formatter,
+  codec or plain map and then its schema. The definition is required.
+- `encodeDocumentPayload(definition, value)` is the writer: the schema first, then the formatter,
+  codec or plain map.
+- `documentPayloadFromBytes(bytes)` is where bytes enter (a record you validated, a store read, a
+  writer of pre-encoded or signed bytes) and `documentPayloadBytes(payload)` is where they leave (a
+  store write, a frame encode, hashing or signing). Reach for them only at those edges.
+
+```ts
+const note = decodeDocumentPayload(noteDocument, envelope.payload); // parsed Note
+const payload = encodeDocumentPayload(noteDocument, note); // DocumentPayload
+```
+
+Browsers import the same names from `@gamecult/cultcache-ts/document`, which holds no Node built-ins.
+
 ## `.cc` Inspection
 
 CultCache files may use the `.cc` extension. The bytes are still the canonical
@@ -222,6 +253,10 @@ const combatLogDocument = defineDocumentType({
 
 If you do not supply one, `CultCacheTS` uses MessagePack plus Zod validation by default.
 
+The 256-container nesting bound (`MAX_PAYLOAD_DEPTH`, refused with `CultCachePayloadDepthError`) covers the MessagePack the
+library itself writes: the default format and a codec. A payload your formatter writes is opaque bytes in any format, so the
+library does not walk it as MessagePack; its format and its bounds are your formatter's.
+
 Zod is no longer mandatory. Any schema object with a `parse(...)` function will
 do, which means generated Ajv-backed JSON-schema contracts can feed the cache
 directly as long as they expose the same parse surface.
@@ -233,6 +268,54 @@ The important boundary is this:
 - the decoded value is still validated against the declared schema
 
 So callers get typed values, and the persistence layer does not become an open polymorphic sewer.
+
+## Slot Records and Unions
+
+`codec` writes the reference runtimes' record shape: a MessagePack array indexed by slot key, nil in a gap, and a
+union as `[armKey, [armSlots...]]`. A union value is `{ kind: armName, ...armFields }`.
+
+```ts
+import { codecs, defineDocumentType } from "@gamecult/cultcache-ts";
+const { slots, union, list, lazy, string } = codecs;
+
+const NS = "MyApp.Scene+"; // the C# names of the types, as the reference writes them into a store's schema catalog
+
+type Node =
+  | { kind: "Box"; id: string; children: (Node | null)[] }
+  | { kind: "Text"; id: string; content: string }
+  | { kind: "Image"; id: string; uri: string; alt: string };
+
+const node: codecs.Codec<Node | null> = union<Node>("Node", {
+  0: ["Box", slots<{ id: string; children: (Node | null)[] }>({ 0: ["id", string], 1: ["children", list(lazy(() => node))] })],
+  1: ["Text", slots<{ id: string; content: string }>({ 0: ["id", string], 1: ["content", string] })],
+  5: ["Image", slots<{ id: string; uri: string; alt: string }>({ 0: ["id", string], 1: ["uri", string], 3: ["alt", string] })], // slot 2 retired
+}, `${NS}Node`);
+
+const sceneDocument = defineDocumentType({
+  type: "scene",
+  schema: sceneSchema,
+  codec: slots<Scene>({ 0: ["id", string], 1: ["root", node], 2: ["title", string, ""] }),
+  name: "id",
+});
+```
+
+- A slot is `[name, codec, default?]`. A gap is written nil and skipped on read; an extra trailing slot is skipped; a
+  slot missing from the payload (or nil, when a default is declared) takes its default, and is refused without one.
+- A union refuses an undeclared arm key on read, naming the union, the key and the declared keys. Nothing falls back
+  to a default arm. An arm with no slots is `codecs.unit` and is written `[key, []]`.
+- A refusal names the union, the field and the slot; it never echoes the value it refused.
+- The leaves are `string`, `boolean`, `bytes`, `int32`, `int64`, `float32` and `float64`, each writing the MessagePack the
+  C# type writes and refusing what C# refuses (a float in an int slot, an `int` outside Int32). `int64` reads a number
+  when the value is a safe integer and a bigint beyond 2^53, and refuses a number beyond 2^53 on write. `list`, `array`
+  and `nullable` wrap a leaf, a union or a record. A `float32` slot rounds an integer once, as the reference's cast does.
+- Every codec carries the reference's type name, and a store's schema catalog is derived from those names, because the
+  reference refuses a store whose slot names another type. The leaves know theirs; give a union or a record its C# name
+  as the last argument of `union(name, arms, typeName)` or `slots(spec, typeName)`. A codec with a slot it cannot name
+  refuses to derive members: pass `members` instead.
+- An arm key is an integer within Int32 (negative too), in any MessagePack integer encoding. A float key (even `1.0`) is
+  refused on read, and a union refuses a key outside Int32 when it is defined. A slot key is within 0 to Int32 max.
+- `codec` supplies the document's formatter and, unless `members` is given, its catalog members. A definition may not
+  carry both `codec` and `formatter`. `schema.parse` still runs on every decoded value.
 
 ## Raw Envelope Fast Path
 

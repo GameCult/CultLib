@@ -184,6 +184,49 @@ without pretending Rust has runtime reflection hiding under the floorboards.
 - `load_soa`
 - `SingleFileMessagePackBackingStore`
 
+## Unions
+
+A union that crosses runtimes is written `[armKey, [armSlots...]]`, the shape the C# reference writes for
+`[Union(key, type)]`. Derive `CultUnion` on an enum: every variant carries `#[cultcache(key = N)]` and is a unit
+(`[N, []]`) or a newtype over a `#[derive(CultSlots)]` struct, which is a `DatabaseEntry`'s slot array without the
+entry consts (a `String` or an `Option` is not an arm, and is a compile error). An arm key is the reference's Int32, negatives included, and is given once. A key the enum does not declare is a decode error naming the enum and the declared keys, and never
+quoting the payload. A null union is `Option<Enum>`. Plain serde enums are untouched and keep their bytes.
+
+```rust
+use cultcache_rs::{CultSlots, CultUnion};
+
+#[derive(Clone, Debug, PartialEq, CultUnion)]
+enum Node {
+    #[cultcache(key = 0)]
+    Box(BoxArm),
+    #[cultcache(key = 1)]
+    Text(TextArm),
+    #[cultcache(key = 5)]
+    Spacer, // a unit arm: [5, []]
+}
+
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct BoxArm {
+    #[cultcache(key = 0)]
+    id: String,
+    #[cultcache(key = 1)]
+    children: Vec<Node>, // recursive
+}
+
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct TextArm {
+    #[cultcache(key = 0)]
+    id: String,
+    #[cultcache(key = 1)]
+    content: String,
+}
+
+let tree = Node::Box(BoxArm { id: "root".into(), children: vec![Node::Spacer] });
+let bytes = rmp_serde::to_vec(&tree)?;
+assert_eq!(rmp_serde::from_slice::<Node>(&bytes)?, tree);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## Structure Of Arrays
 
 The C# CultCache hot path exposes CPU-local SoA scans as:

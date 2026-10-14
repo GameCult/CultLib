@@ -13,6 +13,25 @@ Depends on: `hands/cultmesh-put-serve-bound` merging first. It introduces `docum
 cultmesh-rs (`c9cdad12`, `85288a5a`). The cuts below convert those sites. Their anchors are by commit, not by
 line, because the branch is not on main.
 
+Found by the put-serve Hands (batch 3, `38000efa`, 2026-09-30); they belong to this map's cuts:
+- **Python codes outside the closed code list.** Python refuses with `document_unservable`,
+  `malformed_document_put` and `snapshot_*_exceeded`. None of these are in the closed `cultnet.error.v0` code
+  list, and Rust and TS peers refuse to decode an unknown code.
+- **Two error-map shapes.** TS sends a two-key error map that its own peers cannot parse. Rust sends the five-key
+  contract shape. The two agree only at the message level.
+- **The session after a refusal.** TS and Python keep the session open after a refusal; Rust sends a goodbye and
+  ends it.
+- **New Rust refusal frame.** The put-serve branch adds a Rust refusal frame, `cultnet.error.v0` carrying the
+  reason text with no code and no details, sent before the goodbye and acknowledging nothing. Cut 1 gives it a
+  code.
+- Found by the put-serve Soul (merge verdict, 2026-09-30):
+  - A store `OSError(ENOSPC)` in Python is refused as `malformed_document_put`, with the text "Raw put document could
+    not be stored." That is a server fault reported as the peer's fault.
+  - Over RUDP, Python's `document_unservable` details add `fragmentCount` and `maxFragmentCount`, and send
+    `maxSnapshotBytes: null` when it is unbounded. The map specifies `{responseBytes, maxSnapshotBytes}`.
+  - `response_unqueueable` (Python, P3) is a new code outside the closed list.
+  - A TS peer cannot tell "stored, receipt lost" from "refused" (put-serve Soul F4, pass 3).
+
 Map branch: `main`.
 
 ---

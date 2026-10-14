@@ -12,6 +12,13 @@ jobs:
     name: C# / TypeScript / Rust / Python / Kotlin
     runs-on: windows-latest
     timeout-minutes: 60
+    # Windows runners default to pwsh, which does not stop when a native command fails: a
+    # multi-command step reported only its last command, and a failing cultnet-py suite
+    # went green that way. Git Bash runs as `bash -e -o pipefail`, so every command counts.
+    # Steps that name `shell: pwsh` check $LASTEXITCODE themselves.
+    defaults:
+      run:
+        shell: bash
 
     env:
       DOTNET: dotnet
@@ -69,7 +76,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $stray = git ls-files '*.schema.json' | Where-Object { $_ -notmatch '^contracts/cultnet/' }
+          # packages/cultnet-rs/contracts/cultnet/ holds R-AB's vendored byte copies (the crate must build
+          # when copied alone). Their drift guard is packages/cultnet-rs/tests/schema_discovery_contracts.rs:74-99.
+          $tracked = git ls-files '*.schema.json'
+          if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
+          $stray = $tracked | Where-Object { $_ -notmatch '^(packages/cultnet-rs/)?contracts/cultnet/' }
           # -I skips binary files: unity/org.gamecult.cultlib/Runtime/Plugins/GameCult.Networking.dll
           # still embeds the retired namespace until it is rebuilt (REC-032 D4, deferred).
           $oldNamespace = git grep -I -lE 'GameCult/cultnet-ts/(integration/)?contracts' -- ':!.voidbot'

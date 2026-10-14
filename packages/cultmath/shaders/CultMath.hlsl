@@ -80,13 +80,14 @@ float3 cultmath_snoise_permute(float3 value) { return cultmath_snoise_mod289(((v
 float4 cultmath_snoise_permute(float4 value) { return cultmath_snoise_mod289(((value * 34.0) + 10.0) * value); }
 
 // Ashima Arts / Ian McEwan 3D simplex noise (MIT), same float32 evaluation
-// order as the C# math.snoise(float3) mirror.
+// order as the C# math.snoise(float3) mirror. Ties resolve in simplexnoise1234's
+// total order; see math.snoise.
 float cultmath_snoise(float3 value)
 {
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
     float3 i = floor(value + dot(value, c.yyy));
     float3 x0 = value - i + dot(i, c.xxx);
-    float3 g = step(x0.yzx, x0.xyz);
+    float3 g = float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     float3 l = 1.0 - g;
     float3 i1 = min(g.xyz, l.zxy);
     float3 i2 = max(g.xyz, l.zxy);
@@ -111,7 +112,7 @@ float cultmath_snoise(float3 value)
     float4 b1 = float4(x.zw, y.zw);
     float4 s0 = floor(b0) * 2.0 + 1.0;
     float4 s1 = floor(b1) * 2.0 + 1.0;
-    float4 sh = -step(h, 0.0);
+    float4 sh = -step(h, float4(0.0, 0.0, 0.0, 0.0));
     float4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
     float4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
 
@@ -172,7 +173,7 @@ float4 cultmath_snoise_grad(float3 value)
     float2 c = float2(1.0 / 6.0, 1.0 / 3.0);
     float3 i = floor(value + dot(value, c.yyy));
     float3 x0 = value - i + dot(i, c.xxx);
-    float3 g = step(x0.yzx, x0.xyz);
+    float3 g = float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
     float3 l = 1.0 - g;
     float3 i1 = min(g.xyz, l.zxy);
     float3 i2 = max(g.xyz, l.zxy);
@@ -197,7 +198,7 @@ float4 cultmath_snoise_grad(float3 value)
     float4 b1 = float4(x.zw, y.zw);
     float4 s0 = floor(b0) * 2.0 + 1.0;
     float4 s1 = floor(b1) * 2.0 + 1.0;
-    float4 sh = -step(h, 0.0);
+    float4 sh = -step(h, float4(0.0, 0.0, 0.0, 0.0));
     float4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
     float4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
 
@@ -316,17 +317,20 @@ float cultmath_damp(float start, float end, float lambda_value, float dt)
 
 float2 cultmath_damp(float2 start, float2 end, float lambda_value, float dt)
 {
-    return cultmath_lerp(start, end, 1.0 - exp(-lambda_value * dt));
+    float amount = 1.0 - exp(-lambda_value * dt);
+    return cultmath_lerp(start, end, float2(amount, amount));
 }
 
 float3 cultmath_damp(float3 start, float3 end, float lambda_value, float dt)
 {
-    return cultmath_lerp(start, end, 1.0 - exp(-lambda_value * dt));
+    float amount = 1.0 - exp(-lambda_value * dt);
+    return cultmath_lerp(start, end, float3(amount, amount, amount));
 }
 
 float4 cultmath_damp(float4 start, float4 end, float lambda_value, float dt)
 {
-    return cultmath_lerp(start, end, 1.0 - exp(-lambda_value * dt));
+    float amount = 1.0 - exp(-lambda_value * dt);
+    return cultmath_lerp(start, end, float4(amount, amount, amount, amount));
 }
 
 float cultmath_catmullrom(float p0, float p1, float p2, float p3, float t)
@@ -393,7 +397,7 @@ float cultmath_hash(float3 value) { return cultmath_hash(dot(value, float3(127.1
 uint cultmath_pcg(uint value)
 {
     uint state = value * 747796405u + 2891336453u;
-    uint word = ((state >> (int)((state >> 28) + 4)) ^ state) * 277803737u;
+    uint word = ((state >> (int)((state >> 28) + 4u)) ^ state) * 277803737u;
     return (word >> 22) ^ word;
 }
 
@@ -406,8 +410,8 @@ int3 cultmath_pcg3d(int3 value)
     return int3((int)x, (int)y, (int)z);
 }
 
-int3 cultmath_pcg3d(float2 value) { return cultmath_pcg3d(float3(value, 0.0)); }
 int3 cultmath_pcg3d(float3 value) { return cultmath_pcg3d(int3((int)asuint(value.x), (int)asuint(value.y), (int)asuint(value.z))); }
+int3 cultmath_pcg3d(float2 value) { return cultmath_pcg3d(float3(value, 0.0)); }
 
 int4 cultmath_pcg4d(int4 value)
 {
@@ -468,9 +472,9 @@ CultCellular cultmath_cellular(float3 p)
                 float3 neighbor = cell + float3(dx, dy, dz);
                 int3 hash = cultmath_pcg3d(int3(neighbor));
                 float3 jitter = float3(
-                    ((uint)hash.x >> 8) * (1.0 / 16777216.0),
-                    ((uint)hash.y >> 8) * (1.0 / 16777216.0),
-                    ((uint)hash.z >> 8) * (1.0 / 16777216.0));
+                    (float)((uint)hash.x >> 8) * (1.0 / 16777216.0),
+                    (float)((uint)hash.y >> 8) * (1.0 / 16777216.0),
+                    (float)((uint)hash.z >> 8) * (1.0 / 16777216.0));
                 float3 feature = neighbor + jitter;
                 float d = cultmath_distance(p, feature);
 
@@ -499,11 +503,13 @@ CultCellular cultmath_cellular(float3 p)
     CultCellular result;
     result.nearest = float4(grad1, f1);
     result.edge = float4(grad2 - grad1, f2 - f1);
-    result.id = ((uint)idHash.w >> 8) * (1.0 / 16777216.0);
+    result.id = (float)((uint)idHash.w >> 8) * (1.0 / 16777216.0);
     return result;
 }
 
 #include "CultMath.Phacelle.hlsl"
+#include "CultMath.Interval.hlsl"
+#include "CultMath.Affine.hlsl"
 
 float cultmath_value_noise(float2 position)
 {

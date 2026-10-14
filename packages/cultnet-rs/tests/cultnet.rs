@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Duration;
 use chrono::Utc;
+use cultcache_rs::CacheBackingStore;
 use cultcache_rs::CultCache;
 use cultcache_rs::DatabaseEntry;
 use cultcache_rs::SingleFileMessagePackBackingStore;
@@ -1775,6 +1776,49 @@ fn document_registry_advertises_mutation_contracts_with_bindings() -> Result<()>
     )?;
 
     assert_eq!(registry.mutation_contracts(), vec![contract]);
+    Ok(())
+}
+
+#[test]
+fn a_stored_payload_nested_past_the_bound_is_not_replicated_as_a_document() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = temp.path().join("foreign.msgpack");
+    let limit = cultcache_rs::MAX_PAYLOAD_DEPTH;
+    let envelope = |key: &str, levels: usize| cultcache_rs::CultCacheEnvelope {
+        key: key.to_string(),
+        r#type: GhostlightAgentStateFixture::TYPE.to_string(),
+        payload: [vec![0x91u8; levels], vec![0xc0]].concat(),
+        stored_at: "2026-10-11T00:00:00Z".to_string(),
+        schema_id: None,
+    };
+    let mut registry = CultNetDocumentRegistry::new();
+    registry.register(CultNetDocumentBinding::for_entry::<GhostlightAgentStateFixture>(
+        "ghostlight.agent_state.v0".to_string(),
+    ));
+    // A store written by something that does not hold the bound.
+    let mut backing = SingleFileMessagePackBackingStore::new(&store);
+    backing.push(&envelope("at", limit))?;
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<GhostlightAgentStateFixture>()?;
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store))?;
+    cache.pull_all_backing_stores()?;
+
+    let at_limit = registry.create_snapshot_response(&cache, "at", None, None)?;
+    let CultNetMessage::SnapshotResponse { documents, .. } = at_limit else {
+        panic!("expected a snapshot response");
+    };
+    assert_eq!(documents.len(), 1);
+
+    backing.push(&envelope("past", limit + 1))?;
+    let mut cache = CultCache::new();
+    cache.register_entry_type::<GhostlightAgentStateFixture>()?;
+    cache.add_generic_backing_store(SingleFileMessagePackBackingStore::new(&store))?;
+    cache.pull_all_backing_stores()?;
+    let error = registry.create_snapshot_response(&cache, "past", None, None).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<cultcache_rs::PayloadTooDeep>(),
+        Some(&cultcache_rs::PayloadTooDeep { depth: limit + 1, limit })
+    );
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 import { decode } from "@msgpack/msgpack";
 
+import { checkPayloadDepth } from "./payload-depth";
 import { type StoreFormat, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 
 export interface CultCacheInspection {
@@ -233,9 +234,15 @@ function decodeLegacyEnvelope(value: unknown): InspectedRecord {
   };
 }
 
+// The inspector's one payload read: the depth walk first, so a payload past the limit is refused before any decoder sees it.
+function decodeBoundedPayload(payload: Uint8Array): unknown {
+  checkPayloadDepth(payload);
+  return decode(payload);
+}
+
 function previewPayload(payload: Uint8Array): Pick<InspectedRecord, "payloadPreview" | "payloadDecodeError"> {
   try {
-    return { payloadPreview: toJsonSafe(decode(payload)) };
+    return { payloadPreview: toJsonSafe(decodeBoundedPayload(payload)) };
   } catch (error) {
     return {
       payloadPreview: {

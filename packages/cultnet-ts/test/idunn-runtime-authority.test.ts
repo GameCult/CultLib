@@ -5,7 +5,7 @@ import dgram from "node:dgram";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { StoreUnreadableError } from "@gamecult/cultcache-ts";
+import { StoreUnreadableError, documentPayloadBytes, documentPayloadFromBytes, type DocumentPayload } from "@gamecult/cultcache-ts";
 import { decode, encode } from "@msgpack/msgpack";
 
 import {
@@ -215,18 +215,18 @@ test("an authority record whose catalog names another type is refused, naming th
   assert.throws(() => openAuthority(context, "web", { bundle }), /unexpected CultCache type idunn.other_type/);
 });
 
-function presenceSlot(document: { payload: Uint8Array }, slot: number): unknown {
-  return (decode(document.payload) as unknown[])[slot];
+function presenceSlot(document: { payload: DocumentPayload }, slot: number): unknown {
+  return (decode(documentPayloadBytes(document.payload)) as unknown[])[slot];
 }
 
 // Every committed vector is asserted, dead ones included. Stateless sets sign at sequence 1.
 for (const set of ["web", "service", "rudp-route"] as const) {
   test(`${set}: a fresh signer answers warming, and after reportHealth('active') answers active, byte for byte as the Rust-verified vectors`, (context) => {
     freezeClock(context);
-    assert.deepEqual(Buffer.from(signerFor(context, set).answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-warming.bin"));
+    assert.deepEqual(Buffer.from(documentPayloadBytes(signerFor(context, set).answerRouteObservation(CHALLENGE).payload)), fixtureFile(set, "presence-warming.bin"));
     const active = signerFor(context, set);
     active.reportHealth("active");
-    assert.deepEqual(Buffer.from(active.answerRouteObservation(CHALLENGE).payload), fixtureFile(set, "presence-active.bin"));
+    assert.deepEqual(Buffer.from(documentPayloadBytes(active.answerRouteObservation(CHALLENGE).payload)), fixtureFile(set, "presence-active.bin"));
   });
 }
 
@@ -234,7 +234,7 @@ test("a shortfall signs the vector Rust correlates to the typed capacity disagre
   freezeClock(context);
   const signer = signerFor(context, "service", -1);
   signer.reportHealth("active");
-  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile("service", "presence-active-below-minimum.bin"));
+  assert.deepEqual(Buffer.from(documentPayloadBytes(signer.answerRouteObservation(CHALLENGE).payload)), fixtureFile("service", "presence-active-below-minimum.bin"));
 });
 
 test("the signer owns the reported health: a fresh signer is warming, reportHealth moves it, the sequence keeps counting", (context) => {
@@ -279,7 +279,7 @@ async function startOdinPeer(context: TestContext, endpoint: string) {
   context.after(() => peer.close());
   const state = {
     reject: false,
-    received: [] as Array<{ schemaVersion?: string; document: { payload: Uint8Array } }>,
+    received: [] as Array<{ schemaVersion?: string; document: { payload: DocumentPayload } }>,
     responseAck: undefined as number | undefined,
     failure: undefined as Error | undefined,
   };
@@ -321,7 +321,7 @@ test("the Odin publisher publishes the signer's document to the endpoint Expecte
 
   await publisher.publish("accepted presence");
   assert.equal(peer.received[0]?.schemaVersion, "cultnet.document_put_raw.v0");
-  const published = decode(peer.received[0]!.document.payload) as unknown[];
+  const published = decode(documentPayloadBytes(peer.received[0]!.document.payload)) as unknown[];
   assert.equal(published[RUNTIME_PRESENCE_SLOT.state], "warming");
   assert.equal(published[RUNTIME_PRESENCE_SLOT.publisherSequence], 1);
   assert.equal(peer.responseAck, 2, "the response data packet must acknowledge the publisher's reliable schema packet");
@@ -339,7 +339,7 @@ test("the Odin publisher leaves a capability shortfall to the Rust correlation i
   signer.reportHealth("active");
   const publisher = createIdunnRuntimePresencePublisher({ signer, endpoint });
   await publisher.publish("below minimum");
-  const capabilities = (decode(peer.received[0]!.document.payload) as unknown[])[RUNTIME_PRESENCE_SLOT.capabilities] as unknown[][];
+  const capabilities = (decode(documentPayloadBytes(peer.received[0]!.document.payload)) as unknown[])[RUNTIME_PRESENCE_SLOT.capabilities] as unknown[][];
   assert.equal(capabilities[0]![3], expectedFacts("service").capabilities[0]!.capacity - 1);
 });
 
@@ -386,16 +386,16 @@ function statefulSigner(context: TestContext, lease = "lease.cc") {
 test("stateful: warming, active and degraded match the Rust-verified vectors byte for byte, active and degraded bound to Rust's lease", (context) => {
   freezeClock(context);
   const signer = statefulSigner(context);
-  assert.deepEqual(Buffer.from(signer.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-warming.bin"));
+  assert.deepEqual(Buffer.from(documentPayloadBytes(signer.answerRouteObservation(CHALLENGE).payload)), fixtureFile(STATEFUL, "presence-warming.bin"));
   signer.reportHealth("active");
   const active = signer.answerRouteObservation(CHALLENGE);
-  assert.deepEqual(Buffer.from(active.payload), fixtureFile(STATEFUL, "presence-active.bin"));
+  assert.deepEqual(Buffer.from(documentPayloadBytes(active.payload)), fixtureFile(STATEFUL, "presence-active.bin"));
   assert.match(String(presenceSlot(active, RUNTIME_PRESENCE_SLOT.writeLeaseSha256)), /^sha256-[0-9a-f]{64}$/);
 
   const degraded = statefulSigner(context);
   degraded.answerRouteObservation(CHALLENGE);
   degraded.reportHealth("degraded");
-  assert.deepEqual(Buffer.from(degraded.answerRouteObservation(CHALLENGE).payload), fixtureFile(STATEFUL, "presence-degraded.bin"));
+  assert.deepEqual(Buffer.from(documentPayloadBytes(degraded.answerRouteObservation(CHALLENGE).payload)), fixtureFile(STATEFUL, "presence-degraded.bin"));
 });
 
 test("a warming answered on the route becomes a lease target: Rust's lease naming it is accepted", (context) => {
@@ -403,7 +403,7 @@ test("a warming answered on the route becomes a lease target: Rust's lease namin
   const signer = statefulSigner(context);
   assert.throws(() => signer.assertWriteLease(), /does not match the current Expected incarnation/, "no warming signed yet");
   signer.answerRouteObservation(CHALLENGE);
-  assert.equal(signer.assertWriteLease(), presenceSlot({ payload: fixtureFile(STATEFUL, "presence-active.bin") }, RUNTIME_PRESENCE_SLOT.writeLeaseSha256));
+  assert.equal(signer.assertWriteLease(), presenceSlot({ payload: documentPayloadFromBytes(fixtureFile(STATEFUL, "presence-active.bin")) }, RUNTIME_PRESENCE_SLOT.writeLeaseSha256));
 });
 
 for (const [lease, reason] of [["lease-other-warming.cc", "names another warming digest"], ["lease-other-target.cc", "names another target"]] as const) {

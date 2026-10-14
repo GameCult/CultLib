@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using CultMath;
 using Xunit;
@@ -597,6 +598,219 @@ public sealed class BoundedLeastSquaresTests
     }
 
     [Fact]
+    public void ValidateNamesTheFirstInvalidInput()
+    {
+        const int m = 5, n = 3;
+        var nan = float.NaN;
+        var inf = float.PositiveInfinity;
+        const double goodTol = 1e-6;
+        var cases = new (string name, BoundedLeastSquaresInput expected, double tol, Action<float[], float[], float[], float[]> corrupt)[]
+        {
+            ("valid", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { }),
+            ("infinite bounds are unbounded", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { lo[0] = -inf; hi[1] = inf; }),
+            ("lo = hi", BoundedLeastSquaresInput.Valid, goodTol, (a, b, lo, hi) => { lo[2] = 0.5f; hi[2] = 0.5f; }),
+            ("tolerance 0", BoundedLeastSquaresInput.InvalidTolerance, 0.0, (a, b, lo, hi) => { }),
+            ("tolerance negative", BoundedLeastSquaresInput.InvalidTolerance, -1e-6, (a, b, lo, hi) => { }),
+            ("tolerance NaN", BoundedLeastSquaresInput.InvalidTolerance, double.NaN, (a, b, lo, hi) => { }),
+            ("tolerance +Inf", BoundedLeastSquaresInput.InvalidTolerance, double.PositiveInfinity, (a, b, lo, hi) => { }),
+            ("tolerance tiny but positive", BoundedLeastSquaresInput.Valid, double.Epsilon, (a, b, lo, hi) => { }),
+            ("lo NaN", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => lo[1] = nan),
+            ("hi NaN", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => hi[2] = nan),
+            ("lo > hi", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[1] = 0.5f; hi[1] = 0.25f; }),
+            ("lo = +Inf", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[0] = inf; hi[0] = inf; }),
+            ("hi = -Inf", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[0] = -inf; hi[0] = -inf; }),
+            ("A NaN", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[4] = nan),
+            ("A +Inf", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[7] = inf),
+            ("A -Inf in the last entry", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => a[m * n - 1] = -inf),
+            ("b NaN", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[2] = nan),
+            ("b +Inf in the first entry", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[0] = inf),
+            ("b -Inf in the last entry", BoundedLeastSquaresInput.NonFiniteTarget, goodTol, (a, b, lo, hi) => b[m - 1] = -inf),
+            // Two faults at once: the earlier member in the order wins, whichever input comes first in the argument list.
+            ("tolerance and bounds", BoundedLeastSquaresInput.InvalidTolerance, 0.0, (a, b, lo, hi) => lo[0] = nan),
+            ("tolerance and A", BoundedLeastSquaresInput.InvalidTolerance, double.NaN, (a, b, lo, hi) => a[0] = nan),
+            ("tolerance and b", BoundedLeastSquaresInput.InvalidTolerance, -1.0, (a, b, lo, hi) => b[0] = nan),
+            ("bounds and A", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { hi[0] = nan; a[0] = nan; }),
+            ("bounds and b", BoundedLeastSquaresInput.InvalidBounds, goodTol, (a, b, lo, hi) => { lo[2] = 1f; hi[2] = -1f; b[4] = inf; }),
+            ("A and b", BoundedLeastSquaresInput.NonFiniteMatrix, goodTol, (a, b, lo, hi) => { a[14] = inf; b[0] = nan; }),
+        };
+        foreach (var (name, expected, tol, corrupt) in cases)
+        {
+            var a = (float[])A54.Clone();
+            var b = (float[])B5.Clone();
+            var lo = Fill(-1f, n);
+            var hi = Fill(1f, n);
+            corrupt(a, b, lo, hi);
+            var verdict = BoundedLeastSquares.Validate(m, n, a, b, lo, hi, tol);
+            Assert.True(expected == verdict, $"{name}: {verdict}");
+
+            var x = new float[n];
+            var status = BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, new float[BoundedLeastSquares.WorkspaceLength(n)], out _, tol);
+            Assert.True((status == BoundedLeastSquaresStatus.InvalidInput) == (expected != BoundedLeastSquaresInput.Valid), $"{name}: Solve {status}");
+        }
+
+        // The overload without a tolerance validates against the default one.
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(m, n, A54, B5, Fill(-1f, n), Fill(1f, n)));
+        Assert.Equal(BoundedLeastSquaresInput.InvalidBounds, BoundedLeastSquares.Validate(m, n, A54, B5, Fill(2f, n), Fill(1f, n)));
+    }
+
+    [Fact]
+    public void ValidateReadsOnlyTheStatedDimensions()
+    {
+        // Entries beyond m * n, m and n are not inputs: a NaN there is not a fault.
+        const int m = 2, n = 2;
+        var a = new[] { 1f, 0f, 0f, 1f, float.NaN };
+        var b = new[] { 1f, 1f, float.NaN };
+        var lo = new[] { -1f, -1f, float.NaN };
+        var hi = new[] { 1f, 1f, float.NaN };
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(m, n, a, b, lo, hi));
+
+        // A problem with no unknown has no use for b, so a non-finite b is not an invalid input there.
+        var nanB = new[] { float.NaN, 1f };
+        Assert.Equal(BoundedLeastSquaresInput.Valid, BoundedLeastSquares.Validate(2, 0, ReadOnlySpan<float>.Empty, nanB, ReadOnlySpan<float>.Empty, ReadOnlySpan<float>.Empty));
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, BoundedLeastSquares.Solve(2, 0, ReadOnlySpan<float>.Empty, nanB, ReadOnlySpan<float>.Empty, ReadOnlySpan<float>.Empty,
+            Span<float>.Empty, Span<float>.Empty, out _));
+    }
+
+    [Fact]
+    public void ValidateThrowsOnAShortSpanLikeSolve()
+    {
+        const int m = 5, n = 3;
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        // The caller-bug contract holds ahead of any value check: a NaN tolerance does not hide it.
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54.AsSpan(1), B5, lo, hi, double.NaN));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5.AsSpan(1), lo, hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5, lo.AsSpan(1), hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, n, A54, B5, lo, hi.AsSpan(1)));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(-1, n, A54, B5, lo, hi));
+        Assert.Throws<ArgumentException>(() => BoundedLeastSquares.Validate(m, -1, A54, B5, lo, hi));
+    }
+
+    [Fact]
+    public void ValidateAllocatesNothing()
+    {
+        const int m = 5, n = 3;
+        var bad = (float[])A54.Clone();
+        bad[14] = float.NaN;
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        foreach (var (name, a, tol) in new[] { ("valid", A54, 1e-6), ("invalid matrix", bad, 1e-6), ("invalid tolerance", A54, 0.0) })
+        {
+            var bytes = new long[2];
+            for (var call = 0; call < 2; call++)
+            {
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                BoundedLeastSquares.Validate(m, n, a, B5, lo, hi, tol);
+                bytes[call] = GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+            Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
+        }
+    }
+
+    [Fact]
+    public void SolveReturnsInvalidInputExactlyWhenValidateIsNotValid()
+    {
+        var invalid = 0;
+        for (uint seed = 1; seed <= 300; seed++)
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var rng = new CultMath.Random(seed * 104729u);
+            var tol = 1e-6;
+            // Corrupt zero to three inputs, so some problems stay clean.
+            for (var k = rng.NextInt(4); k > 0; k--)
+            {
+                switch (rng.NextInt(5))
+                {
+                    case 0: tol = rng.NextInt(2) == 0 ? 0.0 : double.NaN; break;
+                    case 1: lo[rng.NextInt(n)] = float.NaN; break;
+                    case 2: { var j = rng.NextInt(n); lo[j] = hi[j] + 1f; } break;
+                    case 3: a[rng.NextInt(m * n)] = rng.NextInt(2) == 0 ? float.NaN : float.NegativeInfinity; break;
+                    default: b[rng.NextInt(m)] = float.PositiveInfinity; break;
+                }
+            }
+            var verdict = BoundedLeastSquares.Validate(m, n, a, b, lo, hi, tol);
+            var start = Fill(0.5f, n);
+            var x = (float[])start.Clone();
+            var status = BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, new float[BoundedLeastSquares.WorkspaceLength(n)], out var iterations, tol);
+            Assert.True((status == BoundedLeastSquaresStatus.InvalidInput) == (verdict != BoundedLeastSquaresInput.Valid), $"seed {seed}: {verdict} but {status}");
+            if (verdict != BoundedLeastSquaresInput.Valid)
+            {
+                invalid++;
+                Assert.Equal(0, iterations);
+                Assert.Equal(start, x);
+            }
+        }
+        Assert.InRange(invalid, 100, 280);
+    }
+
+    // ANoiseLevelViolationIsNeverReleased with the columns rescaled by S (x scales by 1/S, so A x is unchanged): the gate is
+    // the rounding bound of the released column's own gradient, whatever the scale of that column or of its neighbours. A gate
+    // read from another column's row, or one that shrinks as the terms grow, releases rounding noise and spins.
+    [Fact]
+    public void ANoiseLevelViolationIsNeverReleasedAtAnyColumnScale()
+    {
+        const int m = 2, n = 6;
+        var a0 = new[]
+        {
+            1.0213068f, 0.97530603f, -0.5673449f, -0.64136946f, -0.07432885f, -0.35571396f,
+            0.4326824f, 1.1969734f, -0.1343108f, -0.23431005f, -1.4009786f, 0.10656489f,
+        };
+        var lo0 = new[] { -0.44782114f, 0f, -0.008422324f, -0.03878026f, 0f, -6.6434336f };
+        var hi0 = new[] { 0.0448007f, 0f, 0.005942123f, 0.0785512f, 0f, 0.23079813f };
+        var x0 = new[] { -0.28347927f, 0f, 0.0051532285f, -0.03878026f, 0f, 0.23079813f };
+        var patterns = new (string name, float[] scale)[]
+        {
+            ("uniform 1e3", Fill(1e3f, n)),
+            ("uniform 1e-3", Fill(1e-3f, n)),
+            ("ascending", new[] { 1f, 1e1f, 1e2f, 1e3f, 1e4f, 1e5f }),
+            ("descending", new[] { 1e5f, 1e4f, 1e3f, 1e2f, 1e1f, 1f }),
+            ("one heavy column", new[] { 1f, 1f, 1e4f, 1f, 1f, 1f }),
+            ("one light column", new[] { 1e3f, 1e3f, 1e-3f, 1e3f, 1e3f, 1e3f }),
+        };
+        foreach (var (name, scale) in patterns)
+        {
+            var a = new float[m * n];
+            var lo = new float[n];
+            var hi = new float[n];
+            var x = new float[n];
+            for (var j = 0; j < n; j++)
+            {
+                for (var i = 0; i < m; i++) a[i * n + j] = a0[i * n + j] * scale[j];
+                lo[j] = lo0[j] / scale[j];
+                hi[j] = hi0[j] / scale[j];
+                x[j] = Math.Clamp(x0[j] / scale[j], lo[j], hi[j]);
+            }
+            var status = Solve(m, n, a, new float[m], lo, hi, x, out var iterations);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"{name}: {status}");
+            Assert.True(iterations <= 8, $"{name}: {iterations} iterations");
+        }
+    }
+
+    // Soul's stall-after-a-release family (cut bls-release-stop, s1): after a release the next stationarity miss is not yet
+    // a stall, so the solve takes one more pass to confirm before it stops. Two small problems whose release is followed by
+    // exactly such a miss; ending that first miss at once (a stall mark that starts below every cost) stops one pass early.
+    [Theory]
+    [InlineData(
+        new[] { -0.0067761745f, -207.21786f, -0.004115388f, -751.1994f, -8.1700025E-05f, -481.7794f, 0.0038280683f, 480.12833f },
+        new[] { 1.7477255f, 2.4914713f, -2.3861952f, 2.187128f },
+        -1f, 1f, -0.25f, 0.1f)]
+    [InlineData(
+        new[] { 70.07762f, 5.7015634f, 111.790436f, -12.586686f, 75.29796f, 12.872999f, -402.25464f, -1.8093401f, -524.51056f, -8.649797f },
+        new[] { -1.8312539f, 2.9556413f, 0.7550676f, -2.1365998f, 2.30717f },
+        -1f, 1f, 0f, 1f)]
+    public void AReleaseIsConfirmedByAPassBeforeTheSolveStops(float[] a, float[] b, float lo0, float hi0, float lo1, float hi1)
+    {
+        var m = b.Length;
+        const int n = 2;
+        var lo = new[] { lo0, lo1 };
+        var hi = new[] { hi0, hi1 };
+        var x = (float[])lo.Clone();
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, x, out var iterations, 1e-12));
+        Assert.Equal(2, iterations);
+        AssertKkt(m, n, a, b, lo, hi, x);
+    }
+
+    [Fact]
     public void InfiniteBoundsMeanUnbounded()
     {
         const int m = 5, n = 3;
@@ -728,48 +942,6 @@ public sealed class BoundedLeastSquaresTests
         }
     }
 
-    // A = U diag(s) V^T with s geometric from 1 down to 1/cond, so cond(A) is the requested value (float rounding of A
-    // perturbs it slightly). m x n with m >= n; b is generic, so it has a real residual when m > n.
-    private static (float[] a, float[] b) ConditionedProblem(int m, int n, double cond, uint seed, double aScale = 1.0, bool bAlongSmallestSingularVector = false)
-    {
-        var rng = new CultMath.Random(seed * 2654435761u + 17u);
-        double[][] Orthonormal(int dim, int count)
-        {
-            var q = new double[count][];
-            for (var k = 0; k < count; k++)
-            {
-                var v = new double[dim];
-                for (var i = 0; i < dim; i++) v[i] = rng.NextFloat(-1f, 1f);
-                for (var pass = 0; pass < 2; pass++)
-                    for (var l = 0; l < k; l++)
-                    {
-                        var dot = 0.0;
-                        for (var i = 0; i < dim; i++) dot += v[i] * q[l][i];
-                        for (var i = 0; i < dim; i++) v[i] -= dot * q[l][i];
-                    }
-                var norm = 0.0;
-                for (var i = 0; i < dim; i++) norm += v[i] * v[i];
-                norm = Math.Sqrt(norm);
-                for (var i = 0; i < dim; i++) v[i] /= norm;
-                q[k] = v;
-            }
-            return q;
-        }
-        var u = Orthonormal(m, n);
-        var w = Orthonormal(n, n);
-        var a = new float[m * n];
-        for (var k = 0; k < n; k++)
-        {
-            var s = aScale * Math.Pow(cond, -(double)k / Math.Max(1, n - 1));
-            for (var r = 0; r < m; r++)
-                for (var c = 0; c < n; c++)
-                    a[r * n + c] += (float)(u[k][r] * s * w[k][c]);
-        }
-        var b = new float[m];
-        for (var i = 0; i < m; i++) b[i] = bAlongSmallestSingularVector ? (float)u[n - 1][i] : rng.NextFloat(-3f, 3f);
-        return (a, b);
-    }
-
     // A pass can end with the KKT test still failing and the cost exactly where it was: a dependent free column keeps a
     // gradient above the tolerance, or a bound release lands on a column the factor drops. The solver must call that
     // converged; if the stall rule mis-reads the cost scale or the progress, it spins to the iteration cap instead.
@@ -802,11 +974,11 @@ public sealed class BoundedLeastSquaresTests
             float[] bWeak = null;
             if (kind == "weak")
             {
-                (a, bWeak) = ConditionedProblem(m, n, Math.Pow(10.0, 6.0 + rng.NextFloat()), seed, 1.0, true);
+                (a, bWeak) = BlsTrace.ConditionedProblem(m, n, Math.Pow(10.0, 6.0 + rng.NextFloat()), seed, 1.0, true);
             }
             else if (kind == "cond")
             {
-                a = ConditionedProblem(m, n, Math.Pow(10.0, 5.0 + 0.5 * rng.NextFloat()), seed).a;
+                a = BlsTrace.ConditionedProblem(m, n, Math.Pow(10.0, 5.0 + 0.5 * rng.NextFloat()), seed).a;
             }
             else
             {
@@ -878,7 +1050,7 @@ public sealed class BoundedLeastSquaresTests
         const int m = 28, n = 24;
         for (uint seed = 1; seed <= 30; seed++)
         {
-            var (a, b) = ConditionedProblem(m, n, cond, seed);
+            var (a, b) = BlsTrace.ConditionedProblem(m, n, cond, seed);
             var x = new float[n];
             var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
@@ -902,7 +1074,7 @@ public sealed class BoundedLeastSquaresTests
         var confirmed = 0;
         for (uint seed = 1; seed <= 60; seed++)
         {
-            var (a, b) = ConditionedProblem(m, n, 3e7, seed);
+            var (a, b) = BlsTrace.ConditionedProblem(m, n, 3e7, seed);
             var x = new float[n];
             var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"seed {seed}: {status}");
@@ -925,7 +1097,7 @@ public sealed class BoundedLeastSquaresTests
         var confirmed = 0;
         for (uint seed = 1; seed <= 30; seed++)
         {
-            var (a, b) = ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: true);
+            var (a, b) = BlsTrace.ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: true);
             var x = new float[n];
             var status = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
@@ -945,7 +1117,7 @@ public sealed class BoundedLeastSquaresTests
         const int m = 28, n = 24;
         for (uint seed = 1; seed <= 30; seed++)
         {
-            var (a, b) = ConditionedProblem(m, n, cond, seed, 1e6);
+            var (a, b) = BlsTrace.ConditionedProblem(m, n, cond, seed, 1e6);
             var x = new float[n];
             var status = Solve(m, n, a, b, Fill(-1e3f, n), Fill(1e3f, n), x, out var iterations);
             Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} seed {seed}: {status} after {iterations}");
@@ -1137,5 +1309,426 @@ public sealed class BoundedLeastSquaresTests
             }
             Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
         }
+    }
+
+    // The allocator problem of the Aetheria thrust allocator: four throttles u in [0,1] and four slack pairs
+    // e+x e-x e+y e-y in [0,2]. Rows: x and y translation, yaw, four slack pulls, four throttle regularisers. Duel columns.
+    private static readonly float[] DuelX = { 0f, 0f, 29.08f, -21.80f };
+    private static readonly float[] DuelY = { 53.94f, 61.19f, 0f, 0f };
+    private static readonly float[] DuelYaw = { 49.24f, -55.86f, 166.26f, -124.63f };
+
+    private static (int m, int n, float[] a, float[] b, float[] lo, float[] hi) DuelProblem(float ix, float iy, float iz)
+    {
+        const int m = 11, n = 8;
+        const float h = 100f, wy = 1000f, w = 0.3f, kappa = 10f, rho = 0.1f;
+        var a = new float[m * n];
+        var b = new float[m];
+        var rows = new[] { DuelX, DuelY, DuelYaw };
+        var intent = new[] { ix, iy, iz };
+        for (var r = 0; r < 3; r++)
+        {
+            var pos = 0f;
+            var neg = 0f;
+            foreach (var v in rows[r]) { if (v > 0f) pos += v; else neg -= v; }
+            var s = Math.Max(pos, neg);
+            var d = intent[r] * (intent[r] >= 0f ? pos : neg);
+            var weight = r == 2 ? wy : h;
+            for (var k = 0; k < 4; k++) a[r * n + k] = weight * rows[r][k] / s;
+            if (r < 2)
+            {
+                a[r * n + 4 + 2 * r] = -weight;
+                a[r * n + 5 + 2 * r] = weight;
+            }
+            b[r] = weight * d / s;
+        }
+        for (var k = 0; k < 4; k++)
+        {
+            a[(3 + k) * n + 4 + k] = w;
+            b[3 + k] = -w * kappa;
+            a[(7 + k) * n + k] = rho;
+        }
+        var lo = new float[n];
+        var hi = new float[n];
+        for (var j = 0; j < n; j++) hi[j] = j < 4 ? 1f : 2f;
+        return (m, n, a, b, lo, hi);
+    }
+
+    private static string Bits(BoundedLeastSquaresStatus status, int iterations, float[] x)
+    {
+        var sb = new System.Text.StringBuilder().Append(status).Append(' ').Append(iterations);
+        foreach (var v in x) sb.Append(' ').Append(BitConverter.SingleToInt32Bits(v).ToString("x8"));
+        return sb.ToString();
+    }
+
+    // The before/after pin of the cut that added a tolerance argument: literals recorded by running the pre-cut solver.
+    [Fact]
+    public void DefaultSolvesAreBitIdenticalToTheirGoldenBits()
+    {
+        List<string> Run(bool passTheDefault)
+        {
+            var cases = new List<string>();
+            BoundedLeastSquaresStatus Go(int m, int n, float[] a, float[] b, float[] lo, float[] hi, float[] x, out int it)
+                => passTheDefault
+                    ? SolveAt(m, n, a, b, lo, hi, x, out it, BoundedLeastSquares.DefaultKktRelativeTolerance)
+                    : Solve(m, n, a, b, lo, hi, x, out it);
+            {
+                const int m = 5, n = 3;
+                var x = new float[n];
+                var status = Go(m, n, A54, B5, Fill(-1f, n), Fill(1f, n), x, out var it);
+                cases.Add(Bits(status, it, x));
+            }
+            foreach (var seed in new uint[] { 3, 11, 29 })
+            {
+                var (m, n, a, b, lo, hi) = RandomProblem(seed);
+                var x = new float[n];
+                var status = Go(m, n, a, b, lo, hi, x, out var it);
+                cases.Add(Bits(status, it, x));
+            }
+            {
+                var (m, n, a, b, lo, hi) = DuelProblem(0f, 0.5f, 0.25f);
+                var x = new float[n];
+                var status = Go(m, n, a, b, lo, hi, x, out var it);
+                cases.Add(Bits(status, it, x));
+            }
+            return cases;
+        }
+        var golden = new[]
+        {
+            "Converged 0 3e8cfe03 bdd096e8 3f65616f",
+            "Converged 7 3f800000 00000000 be800000 bdb5b48d 00000000 3f800000 bf3f85df 3dca36f5 3dd187b0 3dcccccd 3f469416 3ea87652 3f4e1a2a",
+            "Converged 2 be800000 be2481b8 bf1f1f78 3eb37f7c 3ec24a46 bdbe3cf6 3dcccccd",
+            "Converged 3 00000000 3d0d206f 3dcccccd 3f800000 3ef2bfd6 3ebe0bf2 bf600698 bf800000 3f528e24 bddf446c 3c173499 00000000",
+            "Converged 5 3f800000 00000000 3ce45d43 00000000 3ce39ffe 00000000 00000000 3d0098ef",
+        };
+        Assert.Equal(string.Join("\n", golden), string.Join("\n", Run(false)));
+        Assert.Equal(string.Join("\n", golden), string.Join("\n", Run(true)));
+    }
+
+    private static BoundedLeastSquaresStatus SolveAt(int m, int n, float[] a, float[] b, float[] lo, float[] hi, float[] x,
+        out int iterations, double kktRelativeTolerance, int maxIterations = BoundedLeastSquares.DefaultMaxIterations)
+        => BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, new float[BoundedLeastSquares.WorkspaceLength(n)], out iterations,
+            kktRelativeTolerance, maxIterations);
+
+    private static float[] Start(int n, float throttles)
+    {
+        var x = new float[n];
+        for (var k = 0; k < 4; k++) x[k] = throttles;
+        return x;
+    }
+
+    [Fact]
+    public void TheDefaultToleranceConstantIsOneEMinusSix()
+    {
+        Assert.Equal(1e-6, BoundedLeastSquares.DefaultKktRelativeTolerance);
+        for (uint seed = 1; seed <= 50; seed++)
+        {
+            var (m, n, a, b, lo, hi) = RandomProblem(seed);
+            var omitted = new float[n];
+            var passed = new float[n];
+            var s1 = Solve(m, n, a, b, lo, hi, omitted, out var i1);
+            var s2 = SolveAt(m, n, a, b, lo, hi, passed, out var i2, BoundedLeastSquares.DefaultKktRelativeTolerance);
+            Assert.Equal(Bits(s1, i1, omitted), Bits(s2, i2, passed));
+        }
+    }
+
+    // Row 0 is heavy (gradient scale 1e4); row 1 carries a light term whose gradient w^2 = 9e-6 sits under 1e-6 of
+    // that scale, so the default calls x0 stationary at 0 although cost falls by 90 when x0 rises to 1.
+    private static readonly float[] HeavyA = { 10f, 100f, 0.003f, 0f };
+    private static readonly float[] HeavyB = { 100f, 0.003f };
+
+    [Fact]
+    public void ALightTermUnderAHeavyRowIsResolvedOnlyByATightEnoughTolerance()
+    {
+        const int m = 2, n = 2;
+        var lo = new float[n];
+        var hi = Fill(1f, n);
+        foreach (var tol in new[] { BoundedLeastSquares.DefaultKktRelativeTolerance, 1e-9 })
+        {
+            var x = new float[n];
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, HeavyA, HeavyB, lo, hi, x, out _, tol));
+            Assert.Equal(0f, x[0]);
+        }
+        var tight = new float[n];
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, HeavyA, HeavyB, lo, hi, tight, out _, 1e-12));
+        Assert.Equal(1f, tight[0], 1e-5);
+        Assert.Equal(0.9f, tight[1], 1e-5);
+    }
+
+    [Fact]
+    public void ATightToleranceDoesNotDependOnTheStart()
+    {
+        const int m = 2, n = 2;
+        var lo = new float[n];
+        var hi = Fill(1f, n);
+        foreach (var (s0, s1) in new[] { (0f, 0f), (1f, 0f), (0.5f, 0.5f), (1f, 1f) })
+        {
+            var x = new[] { s0, s1 };
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, HeavyA, HeavyB, lo, hi, x, out _, 1e-12));
+            Assert.Equal(1f, x[0], 1e-5);
+            Assert.Equal(0.9f, x[1], 1e-5);
+        }
+        var cold = new float[n];
+        var warm = new[] { 1f, 0f };
+        Solve(m, n, HeavyA, HeavyB, lo, hi, cold, out _);
+        Solve(m, n, HeavyA, HeavyB, lo, hi, warm, out _);
+        Assert.Equal(0f, cold[0]);
+        Assert.Equal(1f, warm[0]);
+    }
+
+    [Theory]
+    [InlineData(0f, 0.5f, 0.25f)]
+    [InlineData(-1f, 0f, 0.25f)]
+    public void AnAllocatorShapedProblemIsStartIndependentAtATightTolerance(float ix, float iy, float iz)
+    {
+        var (m, n, a, b, lo, hi) = DuelProblem(ix, iy, iz);
+        var cold = Start(n, 0f);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, cold, out var coldIterations, 1e-12));
+        Assert.True(coldIterations <= 20, $"cold {coldIterations} iterations");
+        foreach (var throttles in new[] { 1f, 0.5f })
+        {
+            var x = Start(n, throttles);
+            var status = SolveAt(m, n, a, b, lo, hi, x, out var iterations, 1e-12);
+            Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+            Assert.True(iterations <= 20, $"start {throttles}: {iterations} iterations");
+            for (var k = 0; k < 4; k++) Assert.Equal(cold[k], x[k], 1e-4);
+        }
+
+        var defaultCold = Start(n, 0f);
+        var defaultOnes = Start(n, 1f);
+        Solve(m, n, a, b, lo, hi, defaultCold, out _);
+        Solve(m, n, a, b, lo, hi, defaultOnes, out _);
+        var spread = 0.0;
+        for (var k = 0; k < 4; k++) spread = Math.Max(spread, Math.Abs(defaultOnes[k] - defaultCold[k]));
+        Assert.True(spread >= 0.5, $"default tolerance: starts differ by only {spread}");
+    }
+
+    // Soul's W5 (finding aetheria-release:finding:cut-thrust-allocator-core.s1.solver-converged-early): an allocator
+    // matrix (3 force rows, 4 slack pulls, 8 ridge rows; 8 throttles in [0,1], 4 slacks in [0,2]). From x = 0 the
+    // last release lowered the cost by less than the stall band while throttle 7 still sat at its upper bound
+    // with a gradient ten thousand times the tolerance, and the solver reported Converged there.
+    [Theory]
+    [InlineData(1e-12)]
+    [InlineData(1e-9)]
+    public void TheStopAfterAReleaseIsOnTheGradientNotTheCost(double tolerance)
+    {
+        var (m, n, a, b, lo, hi) = BlsTrace.AllocatorW5(0);
+        var cold = new float[n];
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, cold, out _, tolerance));
+        Assert.Equal(0.92221445f, cold[7], 1e-4);
+
+        var again = (float[])cold.Clone();
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, a, b, lo, hi, again, out var iterations, tolerance));
+        Assert.Equal(0, iterations);
+        for (var j = 0; j < n; j++) Assert.Equal(cold[j], again[j], 1e-6);
+    }
+
+    // The same problem with its columns rotated by `shift`, so that throttle 7 sits in every column position in turn and the
+    // release the old rule misjudged is a release of column 0, of the last column and of every one between. The stop after a
+    // release reads the gradient of whichever column was released, never a fixed one.
+    [Theory]
+    [InlineData(1e-12)]
+    [InlineData(1e-9)]
+    public void TheStopAfterAReleaseIsOnTheGradientWhicheverColumnWasReleased(double tolerance)
+    {
+        const int n = 12;
+        for (var shift = 0; shift < n; shift++)
+        {
+            var (m, _, a, b, lo, hi) = BlsTrace.AllocatorW5(shift);
+            var cold = new float[n];
+            Assert.True(BoundedLeastSquaresStatus.Converged == SolveAt(m, n, a, b, lo, hi, cold, out _, tolerance), $"shift {shift}");
+            Assert.True(Math.Abs(cold[(7 + shift) % n] - 0.92221445f) <= 1e-4, $"shift {shift}: throttle 7 is {cold[(7 + shift) % n]}");
+
+            var again = (float[])cold.Clone();
+            Assert.True(BoundedLeastSquaresStatus.Converged == SolveAt(m, n, a, b, lo, hi, again, out var iterations, tolerance), $"shift {shift}: re-solve");
+            Assert.True(iterations == 0, $"shift {shift}: re-solve took {iterations} iterations");
+        }
+    }
+
+    // b = 0 with the origin inside the box: the optimum is any x with Ax = 0, the gradient scale is 0 and so is the tolerance, and
+    // every gradient component the solve leaves behind is rounding. Releasing on such a violation cycles release /
+    // stationarity miss / re-bind until the iteration cap (the plain-batch problem at seed 141 in miniature).
+    [Fact]
+    public void ANoiseLevelViolationIsNeverReleased()
+    {
+        const int m = 2, n = 6;
+        var a = new[]
+        {
+            1.0213068f, 0.97530603f, -0.5673449f, -0.64136946f, -0.07432885f, -0.35571396f,
+            0.4326824f, 1.1969734f, -0.1343108f, -0.23431005f, -1.4009786f, 0.10656489f,
+        };
+        var b = new float[m];
+        var lo = new[] { -0.44782114f, 0f, -0.008422324f, -0.03878026f, 0f, -6.6434336f };
+        var hi = new[] { 0.0448007f, 0f, 0.005942123f, 0.0785512f, 0f, 0.23079813f };
+        var x = new[] { -0.28347927f, 0f, 0.0051532285f, -0.03878026f, 0f, 0.23079813f };
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, Solve(m, n, a, b, lo, hi, x, out var iterations));
+        Assert.True(iterations <= 4, $"{iterations} iterations");
+        for (var i = 0; i < m; i++)
+        {
+            var r = 0.0;
+            for (var j = 0; j < n; j++) r += a[i * n + j] * x[j];
+            Assert.Equal(0.0, r, 1e-5);
+        }
+    }
+
+    [Fact]
+    public void AnInvalidToleranceIsRejectedAndLeavesXUntouched()
+    {
+        const int m = 5, n = 3;
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        foreach (var tol in new[] { 0.0, -1e-6, double.NaN, double.PositiveInfinity, double.NegativeInfinity, double.MinValue })
+        {
+            var x = new[] { 0.25f, -0.5f, 2f };
+            var before = (float[])x.Clone();
+            var status = SolveAt(m, n, A54, B5, lo, hi, x, out var iterations, tol);
+            Assert.True(status == BoundedLeastSquaresStatus.InvalidInput, $"tolerance {tol}: {status}");
+            Assert.Equal(0, iterations);
+            for (var j = 0; j < n; j++)
+                Assert.Equal(BitConverter.SingleToInt32Bits(before[j]), BitConverter.SingleToInt32Bits(x[j]));
+        }
+        var tiny = new float[n];
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, SolveAt(m, n, A54, B5, lo, hi, tiny, out _, double.Epsilon));
+    }
+
+    [Theory]
+    [InlineData(1e6, 1e-12)]
+    [InlineData(1e6, 1e-30)]
+    [InlineData(1e7, 1e-12)]
+    [InlineData(1e7, 1e-30)]
+    public void ATightToleranceStopsOnProgressNotOnTheCap(double cond, double tol)
+    {
+        const int m = 28, n = 24;
+        var worst = 0;
+        for (uint seed = 1; seed <= 30; seed++)
+        {
+            var (a, b) = BlsTrace.ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: true);
+            var x = new float[n];
+            var status = SolveAt(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), x, out var iterations, tol);
+            Assert.True(status == BoundedLeastSquaresStatus.Converged, $"cond {cond} tol {tol} seed {seed}: {status} after {iterations}");
+            worst = Math.Max(worst, iterations);
+        }
+        Assert.True(worst <= 30, $"cond {cond} tol {tol}: {worst} iterations");
+    }
+
+    [Fact]
+    public void TheTolerancePathAllocatesNothing()
+    {
+        const int m = 4, n = 3;
+        var a = new[] { 1.0f, 0.2f, 0.1f, 0.1f, 1.0f, 0.3f, -0.2f, 0.2f, 1.0f, 0.5f, 0.5f, 0.4f };
+        var b = new[] { 10f, -10f, 10f, 1f };
+        var lo = Fill(-1f, n);
+        var hi = Fill(1f, n);
+        var workspace = new float[BoundedLeastSquares.WorkspaceLength(n)];
+        var x = new float[n];
+        var paths = new (string name, double tol, BoundedLeastSquaresStatus expected)[]
+        {
+            ("tight", 1e-12, BoundedLeastSquaresStatus.Converged),
+            ("invalid", double.NaN, BoundedLeastSquaresStatus.InvalidInput),
+        };
+        foreach (var (name, tol, expected) in paths)
+        {
+            var bytes = new long[2];
+            for (var call = 0; call < 2; call++)
+            {
+                Array.Clear(x);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                var status = BoundedLeastSquares.Solve(m, n, a, b, lo, hi, x, workspace, out _, tol);
+                bytes[call] = GC.GetAllocatedBytesForCurrentThread() - before;
+                Assert.Equal(expected, status);
+            }
+            Assert.True(bytes[0] == 0 && bytes[1] == 0, $"{name}: first call {bytes[0]} B, second {bytes[1]} B");
+        }
+    }
+
+    [Fact]
+    public void TheOriginalSolveSignatureStillExists()
+    {
+        var original = typeof(BoundedLeastSquares).GetMethod(nameof(BoundedLeastSquares.Solve), new[]
+        {
+            typeof(int), typeof(int),
+            typeof(ReadOnlySpan<float>), typeof(ReadOnlySpan<float>), typeof(ReadOnlySpan<float>), typeof(ReadOnlySpan<float>),
+            typeof(Span<float>), typeof(Span<float>),
+            typeof(int).MakeByRefType(), typeof(int),
+        });
+        Assert.NotNull(original);
+    }
+
+    // The heavy-row shape with a free light weight w: at (x0, x1) = (0, 1) the gradient of x0 is w^2 against a
+    // gradient scale of 1e4, so x0's release flips where the caller's tolerance crosses the relative gradient
+    // computed here from the inputs alone.
+    private static float[] ShapeA(float w) => new[] { 10f, 100f, w, 0f };
+    private static float[] ShapeB(float w) => new[] { 100f, w };
+
+    private static double ShapeRelativeGradient(float w)
+    {
+        var a = ShapeA(w);
+        var b = ShapeB(w);
+        double atb0 = (double)a[0] * b[0] + (double)a[2] * b[1];
+        double atb1 = (double)a[1] * b[0] + (double)a[3] * b[1];
+        var gScale = Math.Max(Math.Abs(atb0), Math.Abs(atb1));
+        double ata01 = (double)a[0] * a[1] + (double)a[2] * a[3];
+        return Math.Abs(ata01 - atb0) / gScale;
+    }
+
+    private static float ShapeX0(float w, double? tolerance)
+    {
+        var x = new float[2];
+        var lo = new float[2];
+        var hi = Fill(1f, 2);
+        var status = tolerance is { } t
+            ? SolveAt(2, 2, ShapeA(w), ShapeB(w), lo, hi, x, out _, t)
+            : Solve(2, 2, ShapeA(w), ShapeB(w), lo, hi, x, out _);
+        Assert.Equal(BoundedLeastSquaresStatus.Converged, status);
+        return x[0];
+    }
+
+    // Weights put the relative gradient at about 1e-5 (above the default tolerance) and 9e-10, 9e-12, 9e-14 (below it).
+    [Theory]
+    [InlineData(0.316f)]
+    [InlineData(0.03f)]
+    [InlineData(0.003f)]
+    [InlineData(0.0003f)]
+    public void TheReleaseFlipsAtTheCallersToleranceTimesTheGradientScale(float w)
+    {
+        var rel = ShapeRelativeGradient(w);
+        Assert.True(ShapeX0(w, rel * 1.05) == 0f, $"w {w} rel {rel:R}: above the threshold x0 stays at 0");
+        var below = ShapeX0(w, rel * 0.95);
+        Assert.True(Math.Abs(below - 1f) < 1e-4, $"w {w} rel {rel:R}: below the threshold x0 is {below}");
+    }
+
+    // A relative gradient 10% either side of 1e-6: the solve that omits the tolerance releases the one above and
+    // not the one below, and equals the solve that passes the default, so the forwarded default is 1e-6 and no
+    // other value within 10%.
+    [Theory]
+    [InlineData(0.104881f, 1f)]
+    [InlineData(0.094868f, 0f)]
+    public void TheOmittedToleranceReleasesAtOneEMinusSixAndNowhereNear(float w, float expectedX0)
+    {
+        var rel = ShapeRelativeGradient(w);
+        Assert.InRange(rel, 0.9e-6 * 0.99, 1.1e-6 * 1.01);
+        Assert.Equal(expectedX0, ShapeX0(w, null), 1e-4);
+        Assert.Equal(expectedX0, ShapeX0(w, BoundedLeastSquares.DefaultKktRelativeTolerance), 1e-4);
+    }
+
+    // The box is wide enough that no bound is ever released, so any difference between the default and a tight
+    // tolerance is decided by the stationarity test of the free set alone.
+    [Fact]
+    public void AllFreeConditionedProblemsHonourTheToleranceAtTheFreeSetTest()
+    {
+        const int m = 28, n = 24;
+        int differ = 0, total = 0;
+        foreach (var cond in new[] { 1e2, 1e3, 1e4, 1e5, 1e6 })
+            foreach (var along in new[] { true, false })
+                for (uint seed = 1; seed <= 30; seed++)
+                {
+                    var (a, b) = BlsTrace.ConditionedProblem(m, n, cond, seed, 1.0, bAlongSmallestSingularVector: along);
+                    var byDefault = new float[n];
+                    var tight = new float[n];
+                    var s1 = Solve(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), byDefault, out var i1);
+                    var s2 = SolveAt(m, n, a, b, Fill(-1e9f, n), Fill(1e9f, n), tight, out var i2, 1e-12);
+                    total++;
+                    if (Bits(s1, i1, byDefault) != Bits(s2, i2, tight)) differ++;
+                }
+        Assert.True(differ >= total / 10, $"only {differ} of {total} all-free solves changed between the default and 1e-12");
     }
 }

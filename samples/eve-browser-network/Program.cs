@@ -244,11 +244,13 @@ static async Task RunHeadlessAsync(Args arguments)
         Console.WriteLine("HEADLESS_READY " + JsonSerializer.Serialize(new { count = initial.Count }));
     }
     if (initial.Count >= arguments.ExpectedCount) completion.TrySetResult();
+    var commandReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var commandTask = Task.Run(async () =>
     {
         var line = await Console.In.ReadLineAsync();
         if (line == null || !line.StartsWith("INVOKE ", StringComparison.Ordinal))
             throw new InvalidOperationException("The headless sample expected 'INVOKE <idempotency-key>' on stdin.");
+        commandReceived.TrySetResult();
         var commandId = line["INVOKE ".Length..].Trim();
         var result = await mesh.InvokeAsync<IncrementRequest, IncrementReceipt>(
             target,
@@ -268,6 +270,9 @@ static async Task RunHeadlessAsync(Args arguments)
         Console.WriteLine("HEADLESS_NETWORK_BENCHMARK " + JsonSerializer.Serialize(
             await MeasureOperationSessionAsync(mesh, target, arguments)));
     });
+    // How long the caller takes to send the command is the caller's to bound
+    // (closing stdin ends the wait); this process bounds only its own work.
+    await Task.WhenAny(commandReceived.Task, commandTask);
     await Task.WhenAll(completion.Task, commandTask).WaitAsync(TimeSpan.FromSeconds(45));
 }
 

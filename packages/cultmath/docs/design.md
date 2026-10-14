@@ -133,6 +133,130 @@ as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
+### GLSL Target: Source Transformations
+
+`shaders/CultMath.glsl` is a GLSL ES 3.00 (WebGL2) library generated from
+`shaders/CultMath.hlsl` by `GlslLowering` (in the test project), and
+`shaders/CultMath.Phacelle.glsl` is generated beside it from
+`shaders/CultMath.Phacelle.hlsl`. Both are derived files: never edit them by
+hand. Regenerate them, and the golden fixture
+`tests/CultMath.Tests/fixtures/glsl-parity.json`, with:
+
+```powershell
+$env:CULTMATH_WRITE_GLSL = "1"; dotnet test packages/cultmath/tests/CultMath.Tests --filter GlslMirrorTests
+```
+
+`GlslMirrorTests.CommittedGlslEqualsLowering` fails on any difference between
+either committed file and the lowering of the committed HLSL. These
+transformations, in order, are the complete list:
+
+1. Each `#include "name"` is replaced in place by the included file, by the
+   same resolver the C# mirror uses; GLSL has no `#include`. The exception is
+   an include under a file-level licence of its own, listed in one table,
+   `GlslLowering.SeparateFiles`: its line is dropped and the file is lowered on
+   its own, by the same steps, into its own output. The table has one entry,
+   `CultMath.Phacelle.hlsl` to `CultMath.Phacelle.glsl`, because Phacelle is
+   MPL-2.0 and MPL-2.0 is file-level: kept separate, it leaves
+   `CultMath.glsl` MIT. Nothing else in the lowering is keyed by name.
+2. Include guards are dropped, and so are the functions taking
+   `Texture2D`/`SamplerState`; the host shader samples its own textures.
+3. Type names: `floatN`, `intN`, `uintN` and `boolN` become `vecN`, `ivecN`,
+   `uvecN` and `bvecN`.
+4. File-scope `static const` becomes `const`.
+5. C-style casts `(float)x`, `(int)x` and `(uint)x` become `float(x)`, `int(x)`
+   and `uint(x)`. The operand is found by a balanced-bracket scanner:
+   `(int)((state >> 28) + 4u)` nests parentheses.
+6. Intrinsics are renamed: `lerp` to `mix`, `frac` to `fract`, `rsqrt` to
+   `inversesqrt`, `asuint` to `floatBitsToUint`, `asfloat` to
+   `uintBitsToFloat`, and `saturate(x)` becomes `clamp(x, 0.0, 1.0)`.
+7. Float literals pass through unchanged.
+8. Each output is wrapped in a guard named for its file: `CULTMATH_GLSL`,
+   `CULTMATH_PHACELLE_GLSL`.
+9. The first line names the file as generated, its sources and its licence,
+   and says how to regenerate it; `CultMath.glsl`'s also says which
+   functions live in the separate file.
+
+GLSL ES 3.00 is stricter than HLSL: no implicit conversions between int, uint
+and float, no C-style casts, and no `step(genType, float)` overload. Those gaps
+are closed in the HLSL, never in the lowering: the HLSL is written in the subset
+both languages share, with edits that are legal HLSL and compute the same bits
+(`step(h, float4(0.0, 0.0, 0.0, 0.0))` rather than `step(h, 0.0)`, `+ 4u` where
+a uint is added, `(float)((uint)hash.x >> 8)` before a float multiply). The C#
+mirror and the FXC and dxc compiles keep those edits honest. A body that needs a
+transformation outside the list fails `GlslMirrorTests.NoHlslOnlyTokensSurvive`
+rather than gaining a special case.
+
+The library declares no precision. The host shader does, and it must be
+`precision highp float; precision highp int;`: the PCG hashes need 32-bit
+integers. `tools/compile-glsl.ps1` writes such a wrapper (its own `#version
+300 es` line, the precision, the library by string concatenation, and one call
+of every public function) and compiles it with glslang, which
+`tools/get-glslang.ps1` fetches pinned. It runs twice: over `CultMath.glsl`
+alone, and with `-Phacelle` over `CultMath.glsl` followed by
+`CultMath.Phacelle.glsl`, the order a consumer that calls `cultmath_phacelle`
+concatenates them in. Two negative controls must fail: `-Body` with an HLSL
+token (`float x = lerp(0.0, 1.0, 0.5);`), and `-Body` calling
+`cultmath_phacelle` without `-Phacelle`, which proves the MIT file does not
+carry it. The Unity package ships neither GLSL file.
+
+Parity runs in two legs, each with one owner: HLSL against C# by the mirror
+test, bit for bit; GLSL against C# by the golden fixture, which records 256
+seeded cases per function family as float32 bit patterns, evaluated by the
+consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
+exact; the float families are ulp-bounded, the bound measured on the device.
+
+`iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
+3.00 does not require to be correctly rounded, and WebGL2 compilers may
+reassociate. On a GTX 1070 under ANGLE's D3D11 backend its radius differs from
+C# by up to 2 ulp in 43 of 256 cases, sometimes smaller. What the march needs
+is enclosure, and what culling needs is a ball no wider than its rounding
+widening, so the family's fixture entry carries a `check` the consumer applies
+to every case: from the case's arguments `(mx, my, z0, z1, fp, warp)`, compute
+in double `zm = (z0 + z1) / 2`, the centre `c = (mx zm, my zm, zm)`, its
+`|c|_1 = |mx zm| + |my zm| + |zm|`, the radius
+`r = (z1 - z0) / 2 sqrt(mx^2 + my^2 + 1) + z1 fp + warp` and
+`d = |GPU centre - c|`, and require
+`r + d <= GPU radius <= r + d + 2^-19 (r + |c|_1)`. The lower side is
+enclosure; the upper side is the bound `NoiseBoundTests` pins in C#, so a
+lowering that inflates the ball fails too. Only those two bounds fail the
+check; the largest ulp distance is reported as for any ulp-bounded family.
+`GoldenFixtureMatchesCSharp` applies the same check to C#'s own results.
+
+Every `af_*` function is an ulp-bounded family, and `af_snoise`, `af_fbm` and `af_frustum_ball` also carry a two-sided `check`
+of their own, applied the same way: the device's own `snoise` or fBm at 75 sampled points of the case's set must lie in the device's
+form with no tolerance (a device whose gradient error exceeds the allowance fails), its width must not pass the Lipschitz form's
+allowance, and the device's `af_frustum_ball` radius must enclose the sampled ray points and stay within its rounding widening.
+The reference is the device's own noise, which is right for culling soundness but would pass a device whose noise is wrong
+everywhere, so two appended families (`af_snoise` and `af_fbm`, 256 cases each) add the centre leg: the fixture's own `x0`
+(C#'s value at the centre) must lie in the device form's `[x0 - e, x0 + e]`, for every `af_snoise` and `af_fbm` family. They
+also draw reach `|axis| + radius` from 1e-6 to 1e-3, the short slices near a camera, where the float32 allowance is most of `e`:
+the main families' reach is at least about 1e-3, where the second-order remainder is far larger and a device that drops the
+allowance still passes. `GoldenFixtureMatchesCSharp` requires each of the two to hold cases that fail on C#'s own results once
+the allowance is removed.
+
+`GoldenFixtureMatchesCSharp` evaluates C# on the committed fixture's own
+arguments. Arguments are drawn only when the fixture is regenerated
+(`CULTMATH_WRITE_GLSL=1`), because the draw itself calls `MathF.Pow`, whose
+bits differ by OS. `iv_exp` and `phacelle` take their C# results from the
+platform's `exp`, `sin` and `cos`, which also differ by OS, so their entries
+name the platform that generated them and the test compares them case by case
+against the running platform, printing the largest distance. `iv_exp`
+("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
+("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
+max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
+ulps mean nothing, and Windows differs from the Linux fixture by up to
+`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`CultMath.Phacelle.glsl`, so the evaluator concatenates
+`CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
+normalization 0.5. The site does not vendor the MPL file and skips the family.
+Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
+by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
+fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
+`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
+readback of `snoise`, and evaluates no GLSL.
+
 ## Invariant 8: Value-and-Gradient Primitives
 
 A primitive tagged invariant 8 returns its value and analytic gradient
@@ -244,7 +368,14 @@ together, laid out as `float4(gradient.xyz, value.w)`, with no value-only twin
   that permutation helper, so its values changed too, while its own kernel
   (`0.5`) and scale (`130`) already matched upstream.
   `NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries`
-  pins the continuity.
+  pins the continuity. Ties in the offset `x0` resolve in Gustavson's
+  `simplexnoise1234` order (x over y, y over z, x over z), a total order, so the
+  four corners are always a simplex. Upstream's `step` compares are cyclic: where
+  the three components are equal, which is every input whose differences `y - x`
+  and `z - x` are whole numbers (every integer point, the origin and every
+  `(t, t, t)` among them), the corners repeat the origin vertex and the value
+  jumps by about 0.77 near the origin and up to 1.56 at magnitudes of 64 and
+  above. `SnoiseTieScopeTests` pins the set against the 0.3.0 values. `NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal` pins the order.
 - `snoise_grad(float3 p)` carries `snoise(float3)` to value-and-gradient form,
   following the differentiation in webgl-noise `src/noise3Dgrad.glsl` (Ashima
   Arts / Ian McEwan, MIT), which uses the same radius, permutation and scale as
@@ -340,6 +471,368 @@ code.
 Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
+
+## Intervals
+
+`math.Interval.cs` and `shaders/CultMath.Interval.hlsl` (included from
+`CultMath.hlsl` after the Phacelle include) carry interval arithmetic for
+culling empty space with a proof. Their invariant, **intervals-enclose**: every
+interval function returns a `[lo, hi]` that contains `f(x)` for every `x` in
+its input region, where `f(x)` is the same function evaluated pointwise in
+float32. A consumer that skips a region because `hi < cutoff` has skipped
+nothing that was there.
+
+Representation: an interval is `float2(lo, hi)` with `lo <= hi`, both finite.
+There is no empty interval; a caller that needs "provably empty" tests
+`hi < cutoff`. `iv_point(x)` is `float2(x, x)`.
+
+Ops: `iv_point`, `iv_add`, `iv_sub`, `iv_neg`, `iv_mul` (the least and greatest
+of the four corner products), `iv_scale(iv, float)`, `iv_abs` and `iv_sqr`
+(an interval straddling zero starts at 0), `iv_min`, `iv_max`, `iv_sqrt`
+(`lo` clamped at 0), `iv_exp`, `iv_clamp(iv, float, float)`, `iv_saturate`,
+`iv_smoothstep(float, float, iv)` (its ordered endpoints) and
+`iv_lerp(iv, iv, float)`. No others until a consumer names one. Each has an
+HLSL mirror named `cultmath_iv_*`, compared bit for bit by
+`HlslSourceCompatibilityTests`.
+
+The ulp-widening rule. Each bound is computed with the pointwise function's
+own float32 operations. IEEE round-to-nearest is monotone, so an op that is
+monotone on its region encloses its float32 evaluation exactly, with no
+widening; that covers every op above except two, which widen by exactly one
+ulp, in the implementation and never in the test:
+
+- `iv_exp`: `exp` is not required to be correctly rounded, so a libm need not
+  be monotone. .NET's `MathF.Exp` on Linux steps down 0 times over every float
+  in [-87, 88.7] (`IntervalTests.MeasureMonotonicity`), so on that CPU the
+  widening is a margin; it is there for other libms and GPUs.
+- `iv_smoothstep`: `t * t * (3 - 2t)` in float32 steps down 337,095 times over
+  the floats in [0, 1], each time by at most 1 ulp (`MeasureMonotonicity`).
+  Since `t = saturate((x - minimum) / (maximum - minimum))` is itself monotone
+  in `x`, that covers every `smoothstep`.
+
+`iv_lerp` is the natural interval extension of `x + (y - x) * amount`, which is
+how `lerp` evaluates; every step is monotone, so it encloses with no widening
+for any `amount`, and it is tight only when `a` is a point, because `x` appears
+twice.
+
+`IntervalTests` runs every op over 10,000 seeded intervals (centres in
+[-20, 20], widths log-uniform in [1e-4, 10], every eighth a point) and 16
+points inside each, endpoints and zero included, with no tolerance; and for
+every op it raises `lo` and lowers `hi` by one ulp and requires the harness to
+catch each. A new op is one entry in that table.
+
+Noise bounds. `iv_snoise_ball(c, r)` is `[n - L r, n + L r]` intersected with
+`[-1, 1]`, where `n = snoise(c)` and `L = SNOISE_LIPSCHITZ`: one `snoise`, value
+only. No interval function reads `snoise_grad`, and none has a value-only or
+gradient twin. `iv_fbm_ball(c, r, octaves, lacunarity, gain)` is the octave sum
+of `iv_snoise_ball(c * f_i, r * |f_i|)` scaled by `a_i`, compounding frequency
+and amplitude exactly as `fbm_grad` does, octaves clamped to [0, 16]. A domain
+warp that moves a point by at most `D` is enclosed by the radius `r + D`
+(`NoiseBoundTests.WarpedPointsStayEnclosed`); this is what the gamecult.org
+ground's march rests on.
+
+`iv_frustum_ball(m_c, z0, z1, footprintPerDepth, warp)` is the ball one probe
+serves a whole screen tile with. In a pinhole camera frame looking down `+z`,
+where the ray of slope `m` is the points `(m z, z)`, it encloses every point of
+every ray whose slope lies within `footprintPerDepth` of `m_c` (`N / (sqrt(2) f)`
+for an `N x N` tile at focal length `f` pixels: the full pixel footprint, so
+sub-pixel jitter is covered), over depths `[z0, z1]`, each point moved by a warp
+of length at most `warp`. The centre is `(m_c z_m, z_m)`, `z_m` the mid-depth;
+the radius is `((z1 - z0) / 2) |(m_c, 1)| + z1 footprintPerDepth + warp`. A point
+of slope `m_c + e` at depth `z` is the centre plus `(z - z_m)(m_c, 1)` plus
+`z (e, 0)`. The returned ball is float32, and on a degenerate (`z0 == z1`),
+thin or far segment the rounding of the centre alone exceeds the gap the
+triangle inequality leaves, so the radius is widened by
+`(|c|_1 + radius) 2^-20`. With `u = 2^-24`, each centre component carries at most
+two roundings (`z_m`, then the product), so the float centre is within
+`2u |c|_1` of the exact one; the radius carries at most seven (`z1 - z0`, the
+axis length at `3u`, the product, `z1 footprintPerDepth`, the sum, `+ warp`), so
+the exact radius is at most `(1 + 7u)` times the float one; the widening rounds
+once more. `2^-20 = 16u` covers `8u (|c|_1 + radius)` twice over, and fma
+contraction only removes roundings. The axis count assumes a correctly rounded
+`sqrt`, which IEEE gives C#. GLSL ES 3.00 does not: it inherits `sqrt`'s
+precision from `inversesqrt`, and D3D-backed compilers may reassociate. So the
+bound is proven for C# and HLSL on IEEE hardware, and on GLSL it is measured:
+on a GTX 1070 under ANGLE's D3D11 backend the fixture's 256 cases keep a
+minimum relative slack of `1.98e-6` (about `33u`), the same as C#'s. The
+fixture's enclosure check is what measures it on each device. The caller rotates and translates the centre into world space and scales
+centre and radius by its noise frequency; the rounding of that transform is the
+caller's. `NoiseBoundTests.TileBallEnclosesEveryRaySegment` checks 2,000 seeded
+tiles x 64 points of the r2 domain and 2,000 tiles x 8 corner points of each of
+seven extreme families (`z0 == z1`, `z1 - z0 = 1e-6 z1`, `|m_c|` to 1000, `z` to
+`1e7`, `z0 = 0` with `z1` to `1e-3`, `f` down to 1, warp to `1e6`), corner flows
+full-length and outward, distances in double, with no tolerance. It pins the ball
+to the derivation both ways (`r <= ball.w <= r + 2^-19 (r + |c|_1)`), so a ball
+that forgets the widening fails and one grown past it fails too. A moving camera needs nothing
+more: each frame's probes use that frame's camera, and no ball, mask or probe
+result is carried from one frame to the next.
+
+The noise ball alone proves little: at `L` near 10 it bounds `snoise` to a width
+of `2 L r`, which covers all of `[-1, 1]` once `L r` reaches 1. Empty space
+becomes provable through an analytic envelope. The consumer's density is a
+pre-distortion SDF (a height fog, a well map, a carved sphere) that noise
+displaces only near its surface, and the consumer composes the bound from `iv_*`
+ops. The envelope is taken over the slice's exact box (`iv_mul` of the depth
+range by each slope range, then the SDF's own monotone pieces), together with its
+fade. The noise is `iv_snoise_ball` over `iv_frustum_ball`, scaled by the noise
+frequency. The warp moves only the noise argument, so it enlarges the ball and
+the envelope's box takes none of it. Where the fade's upper end is 0 the noise
+term is identically 0 and no `snoise` is evaluated. Where the envelope already
+proves the slice empty with the noise at its full range, the ball is not
+evaluated either. A probe is worth attempting only when the best result any
+centre value could give would prove the slice, and a ball with `L r >= 2` is
+`[-1, 1]` whatever `snoise(c)` is, so it costs nothing. CultMath owns none of the
+envelope: the interval files have no envelope function, and each consumer composes
+its own. `NoiseBoundTests.EnvelopeBoundEnclosesDensity` checks that composition,
+the one the site and Aetheria use, over 2,000 seeded slices x 64 warped points
+with no tolerance.
+
+`L` has provenance, not a proof. `NoiseBoundTests.MeasureLipschitz` (slow,
+explicit) takes the largest `|snoise_grad|` over 1e6 seeded points in
+[-256, 256]^3 (7.1933103), refines the 1e4 largest by gradient ascent
+(7.2400064), and multiplies by 1.10: `L = 7.9640074`. It also reaches
+`|snoise| = 0.9718335` by the same ascent on the value, which is what lets the
+bound intersect with `[-1, 1]`. `LipschitzConstantPinsSampledGradients`
+checks 1e5 more seeded points against `L` and climbs again from the start
+`MeasureLipschitz` prints as its witness, failing if `L` is not 1.10 times that
+maximum to within half a percent, so a 1% move of `L` fails. The enclosure tests
+over 2,000 balls x 64 points are the defence. A change to the `snoise` kernel
+must re-run `MeasureLipschitz` and re-pin `L` and the witness.
+
+What the ball bounds guarantee: enclosure of `snoise` and `fbm_grad(...).w` over
+the ball, in float32. What they do not: anything about tapes, pruning or choice tracking. Correlation
+between the operands of one expression is what "Affine forms" below adds.
+How loose the ball bounds are is a number:
+`NoiseBoundTests.TightnessReport` prints the mean interval width over the
+sampled range: 5.08 for `iv_snoise_ball` at `r = 0.05`, 1.96 at 0.25 and 1.28
+at 1.0; 6.64 and 2.82 for 4-octave `iv_fbm_ball` at 0.05 and 0.25.
+
+The saving is measured where there is empty space to find.
+`NoiseBoundTests.IntervalSkipHalvesEvaluations` draws screen tiles, each with
+its own camera, and runs one pre-pass per tile over the dense grid's cell ranges:
+it starts with the whole grid, skips and doubles a range it proves empty, halves
+one it cannot, and runs to the grid's end. It then draws the tile's `N^2` ray
+slopes, one per pixel, jittered inside it. Each ray is marched three times with
+the same integrator and the same early-out at transmittance 0.02: over every
+cell (dense), over the tile's unproven cells (the tile march), and over the
+oracle mask, the cells whose mid-depth density is nonzero for at least one of
+the tile's rays. The tile march and the oracle march integrate the dense march's
+nonzero cells, so their transmittance agrees with it exactly in every
+configuration. The oracle is a ceiling the pre-pass cannot move: dense cost over
+oracle cost. Against it the test prints the efficiency (oracle cost over the
+tile march's cost with its probes) and the cull fraction (the oracle-empty cells
+the pre-pass proves empty). The probe overhead is the tile march's cost over that
+cost plus the probes'. Cost is counted in `snoise` evaluations, with an envelope
+evaluation or probe weighted 0.2. That weight is an estimate, and both counts are
+printed. The flow is not counted. At `N = 8`, in Aetheria's units on its
+256-cell quadratic grid out to the Main Camera's far plane, 2048:
+
+- (a) Height fog, camera above the safety band, rays level and up: the whole
+  grid is one envelope probe per tile, against 256 envelope evaluations per ray,
+  16384x. Every cell is oracle-empty and the pre-pass proves them all.
+- (b) Inside the fog: 1.16x, and 1.11x with the warp. Most cells are fog, and
+  the pre-pass probes each one.
+- (c) The deep well (ruling `wells-scale-order-of-magnitude`): the zone bowl
+  plus one well at its centre, `PowerPulse` exponent 2, scale 2220, depth 600.
+  The band `G = 60` is where only the noise decides density (`s` within
+  `F -+ 1.5 A` with the fade at 1); depth and half-depth radius are each
+  `10 G`. The camera's `xz` is uniform within 300 of the centre, at
+  `y = F - h(xz) / 2`, so it looks across the bowl from inside it. Both rows run
+  on the same seeds. With no warp, the centred interval takes 3.20x (oracle
+  ceiling 5.24x, efficiency 0.611, cull fraction 0.988, probe overhead 0.940)
+  and the affine bound 3.57x (efficiency 0.682, cull 0.993, overhead 0.905). With
+  the warp `D = 60`: 3.12x (ceiling 5.31x, efficiency 0.588, cull 0.987, overhead
+  0.929) against 3.46x (efficiency 0.651, cull 0.993, overhead 0.880), so affine
+  is 1.12x and 1.11x cheaper. The range mask (the oracle cells plus every cell
+  where any of 5 x 5 slopes x 9 depths has density above zero) gives a range
+  ceiling of 0.859 (0.848 with the warp), the cost a bound that proves exactly
+  the range-empty cells would reach against the oracle's; the efficiencies
+  against it are 0.794 and 0.712 (warp 0), 0.768 and 0.694 (warp `D`).
+- (c-band) The shallow wells, four mass-derived wells in the zone bowl with
+  the camera gazing across, whose geometry is band-dominated, printed only.
+  Centred interval 3.01x (efficiency 0.414, cull 0.960, overhead 0.958), affine
+  3.95x (0.544, 0.980, 0.901); with the warp 2.75x (0.383, 0.954, 0.944) against
+  3.54x (0.494, 0.976, 0.865).
+- (d) r1's uniform slab, which has no envelope: 1.38x with the warp 0.05, and
+  1.67x with no warp.
+- (e) The void at the shipped point (ruling `operator-shipped-void`): `Rh = 198`,
+  `S = 50`, `Rc = Rh + S = 248`, `e = -ln 1.5 / ln(1 - (Rh / Rc)^2)`, the
+  shipped camera, 200 tiles. The fixed-step reference takes 36.34 steps per
+  pixel. The same cells masked by the pre-pass take 20.08, with identical
+  transmittance. The footprint-aware march takes 13.50: 2.69x fewer. `snoise`
+  per pixel goes from 32.98 to 26.70, and combined cost from 40.25 to 29.54 with
+  the probes, 1.36x. Every one of the 200 tiles proves a body. Before the body
+  both marches are measured against a converged one (midpoint quadrature at
+  `h = 0.5` over every cell, trusting no pre-pass): the relative optical-depth
+  error at the body start is at most 0.0608 for the fixed-step march and 0.08639
+  for the footprint march, 1.42x. Over the grid of hollow radius, camera offset
+  and ramp width the steps ratio runs from 1.59x (`Rh = 100`, low, `S = 150`) to
+  27.45x (`Rh = 1000`, centred, `S = 10`), the cost ratio from 1.26x to 3.89x,
+  and the depth-error ratio from 0.85 to 4.72 (`Rh = 200`, centred, `S = 150`,
+  where the errors are 0.01504 and 0.003188). LOD-far takes 14.19x fewer steps;
+  its depth errors, 0.2849 and 0.205, are not comparable, because its
+  fixed-step reference keeps the octaves the footprint march truncates.
+
+The analytic body (ruling `operator-analytic-wall-body`). When a single dense
+cell's own bound is a positive point, the pre-pass spends one more probe over
+the rest of the grid. If that bound is a positive point too, every point of
+every ray of the tile from there on has exactly that density, so the footprint
+march takes one closed-form step, `exp(-BodyDepth)`, from the body start to the
+grid's end and stops. `BodyDepth` is density x extinction x length x `|dir|`.
+`NoiseBoundTests.AnalyticBodyMatchesFineMarch` pins it: the bound, the mask and
+the pointwise densities agree exactly at the body, and `BodyDepth` equals the
+summed fixed-step depth of the body cells within 1e-4 relative. The comparison
+is in the depth domain, so LOD-far's deep bodies do not underflow.
+
+The footprint-truncated void weights its octaves by `w_i(z)`, decreasing in `z`.
+Its bound takes each weight over `[w_i(z1), 1]` rather than
+`[w_i(z1), w_i(z0)]`, because one bound serves both the full field (`w = 1`) and
+the truncated one. `[w_i(z1), 1]` contains both, and `iv_mul` is monotone in its
+interval argument, so the composed interval encloses both fields.
+`NoiseBoundTests.WeightBoundEnclosesOneSignedNoise` checks it on LOD-far over
+2,000 segments: each weight lies in its bound, and `w(z) n` lies in
+`iv_mul(bound, n)` for a one-signed `n`. A lower end of `w(z0)` fails it.
+
+The contracts, at `N = 8`, the lower of warp 0 and `D`:
+
+- (a) at least 2x combined cost;
+- (c) on the deep well (rulings `affine-wells-contract-cheaper-than-interval`
+  and `wells-overhead-plus-floor`): the affine bound's combined cost ratio is
+  above the centred interval's at warp 0 and at warp `D`; and, hard, the
+  pre-pass proves at least half of the oracle-empty cells empty under both
+  bounds, so a pre-pass that skips nothing fails. The probe overhead, the
+  efficiencies against the oracle and the range ceiling, the ceilings and the
+  cull fraction are printed, not asserted; (c-band) is printed only;
+- (e) at the shipped void: the masked fixed-step march agrees with the reference
+  exactly; the footprint march's optical depth at the body start is off the
+  converged march's by at most twice the fixed-step march's error; and it takes
+  at most half the reference's steps per pixel.
+
+This run meets every contract: (a) 16384x, (c) affine 3.57x and 3.46x against
+the centred interval's 3.20x and 3.12x, with a cull fraction of 0.987 at the
+lowest, (e) 2.69x fewer steps and a depth error 1.42x the fixed-step march's.
+The fields, the grids, the 0.2 envelope weight and the 2.0 gradient weight are
+not tuned toward the contracts. An affine probe is one `snoise_grad`, counted at
+2.0 `snoise` evaluations (an estimate, printed beside the count).
+
+Consumers: the gamecult.org ground shader (through the GLSL lowering) and
+Aetheria's nebula raymarch at its CultMath pin bump.
+
+## Affine forms
+
+`math.Affine.cs` carries reduced affine forms with one shared symbol: a
+`float3(x0, a, e)` is the set `x0 + a eps + e delta` with `eps` and `delta` in
+`[-1, 1]` and `e >= 0` (Messine's AF1, as Gamito and Maddock use it for gradient
+noise, in one register as an interval is a `float2`). `eps` is shared by every
+form over one region (for a screen-tile slice, the depth parameter, `z = z_m +
+h eps`), so `af_sub(x, x)` has `a = 0`; `delta` is private to the form, and
+every term that cannot be tracked is condensed into `e`. A slice is a
+`float4(centre, radius)` with a `float3` axis. No op takes a compound type, a
+reference parameter or a swizzle write, so each mirrors into the HLSL common
+subset.
+
+The ops: `af_point`, `af_symbol`, `af_from_iv`, `af_range` (the bridge back to
+`iv_*`), `af_add`, `af_sub`, `af_neg`, `af_scale`, `af_add_iv`, `af_mul` (the
+product `|a_x a_y|` and the cross-error terms condensed into `e`, so there is
+no `af_sqr`), `af_snoise` and `af_fbm`, and the slice pair `af_frustum_axis` and
+`af_frustum_ball`.
+
+Rounding. Every op returns a form whose set at each `eps` contains the float32
+value of its function at every point of its operands' sets at that `eps`. Each
+op folds its own float32 rounding into `e` as `S 2^-20`, `S` the sum of the
+magnitudes its roundings are relative to (named in the op's comment): at most
+`8u S` is needed with `u = 2^-24`, and the factor of two over that is the
+allowance for a device whose `+` and `*` are faithful rather than correctly
+rounded. `AffineTests.EveryOpEnclosesItsPoints` evaluates the form's set in
+double and the function in float32 with no tolerance. Products and `af_from_iv` also
+add `2^-126`, the most an underflow to a subnormal can lose (`TinyOperandsEncloseTheirPoints`).
+`af_from_iv` halves its endpoints before it sums and differences them, and `af_range`
+scales its terms before it sums them, so endpoints near the float maximum do not overflow
+in the middle of the op; a form that overflows anyway gives `af_range` infinite endpoints,
+never NaN (`FromIntervalAndRangeHoldAtTheExtremes`). `af_range` finds a NaN endpoint by its bit pattern, because
+`lo == lo` is a compare dxc marks `fast` and deletes under its default flags. `AbsorptionsArePinned` and
+`SnoiseFormCarriesItsDocumentedWidth` pin each absorption and `af_snoise`'s float32 allowance both
+ways: the enclosure tests alone cannot see them on a CPU, where float32 is exact.
+
+`af_snoise(centre, axis, radius)` encloses `snoise` over `centre + axis eps + w`,
+`|w| <= radius`, from one `snoise_grad`. It returns the narrower of the
+Lipschitz form `(n, 0, L R)` and the centred form `(n, g . axis, |g| radius +
+M R^2 / 2)` (`R = |axis| + radius`, `L = SNOISE_LIPSCHITZ`, `M =
+SNOISE_HESSIAN`), so its total width is never more than the Lipschitz form's.
+The centred form is Taylor's theorem, which is why it beats the ball when the
+radius is small and the axis carries the variation. `af_fbm` compounds octaves
+as `iv_fbm_ball` does. The float32 evaluation allowance is derived in
+`af_snoise`'s comment.
+
+`SNOISE_HESSIAN = 56.050385` is 1.10 times the refined maximum of the spectral
+norm of the Hessian of `snoise(float3)`, measured by
+`NoiseBoundTests.MeasureHessian` over 1e6 seeded points (central differences of
+`snoise_grad`) and refined by ascent from the 1e4 largest: sampled 50.1366,
+refined 50.9549, witness (-245.19885, -53.01323, -91.47363).
+`HessianConstantPinsSampledCurvature` fails on a 1% move.
+`SNOISE2_LIPSCHITZ = 8.117002` is the same for the gradient of `snoise(float2)`
+(`MeasureLipschitz2`: sampled 7.2575, refined 7.3791, witness (-67.12454,
+-129.53296), `|snoise2|` at most 0.99964), and it backs `iv_snoise_ball(float2,
+float)`. Both are empirical with a margin, not proofs. A random ball cannot see a
+curvature constant 20% low, so `SNOISE_HESSIAN` is defended by
+`HessianConstantPinsSampledCurvature` and `SnoiseFormEnclosesTheCurvatureWitness`
+(`af_snoise` at the point where the curvature is realised, along 4,000 directions: a
+constant of 40 misses there). The margin over the function itself: a scan of the whole
+289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
+independently over every hash configuration gives 52.22, so 56.05 sits 7% above the
+configuration bound. A change to the kernels must re-run the measurements.
+
+The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
+warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1
+footprintPerDepth + warpVariation`, with `af_frustum_axis` the axis `(m_c, 1) h`:
+every ray point at depth `z` is `centre + axis eps(z) + w`. Its derivation
+and the clamp residual are in the comment. The caller rotates, translates and
+scales the slice into the noise's frame, and owns the rounding of that.
+
+The centred warp. A flow-warped sample reads `snoise` at `p + flow(p) shift`. The
+caller does not enlarge the ball by the whole displacement `|flow| shift`; it
+moves the centre by the flow at the centre, `c + flow(c) shift`, and widens the
+radius by the flow's variation across the ball, `r + |shift| rho` with `rho =
+FlowAmplitude (SNOISE2_LIPSCHITZ FlowFrequency r + a) sqrt 2` (the clamp to the unit
+disc is nonexpansive), where `a = 2^-14 + L2 2^-20 (|q|_1 + r FlowFrequency)` is the
+float32 allowance of the flow's two `snoise(float2)` reads (the point `q` plus its offset rounds at the
+magnitude of `q`, and a float32 flow at two points of a ball differs by more than the exact
+function can). CultMath owns neither the flow nor the envelope: the warp's
+centre and variation are the caller's, and a consumer adds them to the slice's
+`warpVariation` or to the form's radius. With two phases that cross-fade, each
+phase takes its own centre; one ball serves when the phases' centres coincide
+(warp 0). `NoiseBoundTests.CentredWarpStaysEnclosed` checks 2,000 balls, radius 1e-3 to
+500, and fails when `rho` is dropped or halved; `AffineWarpStaysEnclosed` checks
+3,000 tile slices of `FogField.Slice`, which returns the final `af_snoise` arguments
+(each phase's moved centre and grown radius, the detail's unwarped set, the shared axis),
+so the affine bound wires nothing itself: the reach over which the flow is varied is
+`|axis| + radius`, each phase carries its own growth, and the gate reads each argument's
+reach. It fails when the reach is the ball's radius or the larger of the two, a phase's
+growth is dropped or taken from the other phase, the axis or the detail radius is scaled,
+or `rho` is halved. `AffineCompositionTightensItsRanges` sees the shared-symbol
+composition itself: the bound is exactly the intersection of the affine arithmetic's piece
+and the interval composition over the forms' ranges, and the affine piece is the narrower
+of the two in at least 35% of the open slices (the piece alone is wider in total).
+
+The deep well is the representative Aetheria case: the camera inside a sun's
+bowl, looking across. `DeepWellIsTenBandsDeepAndWide` computes the band `G` from
+`FogField`'s own floor offset, amplitude and noise range (60) and requires the
+depth (633 at the centre against the rim) and the half-depth radius to be at
+least `10 G`, every drawn camera sitting inside the well below the rim; a well of
+depth 150 fails. The shallow wells stay as the printed shallow-well, band-dominated row (c-band).
+
+The test field's affine bound takes depth as `af_symbol(z_m, h)`, builds `s`
+affine in it with the height interval, the footprint and the slope-depth
+product in `e` through `af_add_iv`, takes the noise through `af_frustum_*` and
+`af_snoise` per phase and for the detail octave, fades by `af_from_iv` and
+`af_mul`, reads the range with `af_range`, and intersects with the centred
+interval's bound (both sound). `FogField.Bound` makes no direct `snoise` call.
+The cull-map render (`DeepWellCullMap`, explicit) writes a PNG when
+`CULTMATH_WRITE_CULLMAP` names a directory: one deep-well camera at warp `D`,
+960 x 540 in 8 x 8 tiles, with panels for dense cells per ray under the centred
+interval, under the affine bound and under the oracle mask (one logarithmic
+scale) and the transmittance. Its run: 4.23, 3.60 and 2.02 cells per ray on
+average, 44 the most, mean transmittance 0.278.
 
 ## Rules
 

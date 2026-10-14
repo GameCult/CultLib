@@ -2525,18 +2525,18 @@ namespace GameCult.Caching
 
         // Call under the gate that admits the result, so no load can land a later storedAt in between.
         private CultStoredDocument Stamp(CultRecordKey key, CultDocumentDescriptor descriptor, object document) =>
-            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, document);
+            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, document);
 
         // An unresolved variant: the admitting hold resolves it against its base before anything lands.
         private CultStoredDocument StampVariant(CultRecordKey key, CultDocumentDescriptor descriptor, CultVariantDelta delta) =>
-            new(key, MintStoredAt(PreviousStoredAt(key)), descriptor, delta, null, _codec);
+            new(key, MintStoredAt(PreviousStoredAt(key), Clock()), descriptor, delta, null, _codec);
 
         // The plain record a Flatten stages: the variant's resolved document, under the variant's own key and schema.
         private CultStoredDocument StampFlatten(CultRecordKey key)
         {
             if (!_entries.TryGetValue(key.Value, out var existing) || existing.Variant == null)
                 throw new InvalidOperationException($"Flatten({key.Value}): the record is not a variant.");
-            return new CultStoredDocument(key, MintStoredAt(existing.StoredAt), existing.Descriptor, existing.Document) { Flattens = true };
+            return new CultStoredDocument(key, MintStoredAt(existing.StoredAt, Clock()), existing.Descriptor, existing.Document) { Flattens = true };
         }
 
         private string? PreviousStoredAt(CultRecordKey key) => _entries.TryGetValue(key.Value, out var previous) ? previous.StoredAt : null;
@@ -2587,9 +2587,11 @@ namespace GameCult.Caching
             throw new ArgumentException($"Expect({key.Value}) was given an instance this cache does not hold at that key.", nameof(current));
         }
 
-        internal static string MintStoredAt(string? previous)
+        // The wall clock behind every storedAt. Internal: a test that writes a golden store pins it, so the bytes reproduce.
+        internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
+
+        internal static string MintStoredAt(string? previous, DateTimeOffset now)
         {
-            var now = DateTimeOffset.UtcNow;
             if (previous != null &&
                 DateTimeOffset.TryParse(previous, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last) &&
                 now <= last)
@@ -3121,7 +3123,7 @@ namespace GameCult.Caching
                     {
                         // A value that no longer decodes refuses exactly as a plain record holding it does.
                         throw new InvalidOperationException(
-                            $"Variant {key} overrides '{member.Member.Name}' (slot {slot}) with a value that does not decode as {member.MemberType.Name}: " +
+                            $"Variant {key} (schema '{descriptor.SchemaId}') overrides '{member.Member.Name}' (slot {slot}) with a value that does not decode as {member.MemberType.Name}: " +
                             exception.GetBaseException().Message, exception);
                     }
 
@@ -3612,7 +3614,18 @@ namespace GameCult.Caching
                 };
             }
 
-            var document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
+            object document;
+            try
+            {
+                document = deserializePayload(resolution.Descriptor.DocumentType, record.Payload);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                // The codec knows what it refused but not which record; the store does. Say both, and never null the record.
+                var causes = new List<string>();
+                for (var cause = exception; cause != null; cause = cause.InnerException) causes.Add(cause.Message);
+                throw new InvalidDataException($"Record '{record.Key}' (schema '{record.SchemaId}') cannot be decoded: {string.Join(" <- ", causes.Distinct())}", exception);
+            }
             return new CultStoredDocument(
                 new CultRecordKey(record.Key),
                 record.StoredAt,
@@ -3765,8 +3778,8 @@ namespace GameCult.Caching
         // The one re-mint, for every store kind (storedat-on-change): a record written over one the store holds is stored at a storedAt
         // later than the one it replaces, whoever wrote that. The staged storedAt stands only when it is already later (both parsed
         // RoundtripKind; an unparsable one counts as not later); otherwise it is minted from the replaced one.
-        protected static string StoredAtOver(string storedAt, string replacedAt) =>
-            StoredLater(storedAt, replacedAt) ? storedAt : CultCache.MintStoredAt(replacedAt);
+        protected string StoredAtOver(string storedAt, string replacedAt) =>
+            StoredLater(storedAt, replacedAt) ? storedAt : CultCache.MintStoredAt(replacedAt, (Cache?.Clock ?? (() => DateTimeOffset.UtcNow))());
 
         private static bool StoredLater(string storedAt, string than) =>
             DateTimeOffset.TryParse(storedAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var later) &&

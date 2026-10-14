@@ -1,12 +1,15 @@
-import { decode, encode } from "@msgpack/msgpack";
+import type {
+  AnyCultCacheDocumentDefinition,
+  CultCache,
+  CultCacheDocumentValue,
+  CultCacheEnvelope,
+} from "@gamecult/cultcache-ts";
 import {
-  type AnyCultCacheDocumentDefinition,
-  type CultCache,
-  type CultCacheDocumentDefinition,
-  type CultCacheDocumentFormatter,
-  type CultCacheDocumentValue,
-  type CultCacheEnvelope,
   SchemaConflictError,
+  decodeDocumentPayload,
+  documentPayloadBytes,
+  documentPayloadFromBytes,
+  encodeDocumentPayload,
   schemaIdentityOf,
 } from "@gamecult/cultcache-ts";
 
@@ -169,8 +172,6 @@ export class CultNetDocumentRegistry {
       tags?: string[];
     } = {},
   ): CultNetDocumentPutRawMessage {
-    const parsed = binding.definition.schema.parse(value);
-    const formatter = formatterFor(binding.definition);
     return {
       schemaVersion: "cultnet.document_put_raw.v0",
       messageId,
@@ -179,7 +180,7 @@ export class CultNetDocumentRegistry {
         recordKey: documentKey,
         storedAt: options.storedAt ?? new Date().toISOString(),
         payloadEncoding: "messagepack",
-        payload: formatter.encode(parsed),
+        payload: encodeDocumentPayload(binding.definition, value),
         sourceRuntimeId: options.sourceRuntimeId,
         sourceAgentId: options.sourceAgentId,
         sourceRole: options.sourceRole,
@@ -209,7 +210,7 @@ export class CultNetDocumentRegistry {
         continue;
       }
 
-      const payload = decodeDocumentValue(binding.definition, envelope.payload);
+      const payload = decodeDocumentPayload(binding.definition, envelope.payload);
       documents.push({
         schemaId,
         recordKey: envelope.key,
@@ -280,14 +281,43 @@ export class CultNetDocumentRegistry {
     cache: CultCache,
     message: CultNetDocumentPutRawMessage,
   ): Promise<unknown> {
+    const { binding, envelope } = this.#rawPutEnvelope(message);
+    return cache.putEnvelope(binding.definition, envelope);
+  }
+
+  /**
+   * The snapshot response that would serve this raw put's document alone: the
+   * record `applyRawDocumentPutMessage` would store, as `createRawSnapshotResponse`
+   * would serve it. A server uses it to judge a put by the size it would be
+   * served at. Throws, as the put would, when no binding accepts the document.
+   */
+  createRawSnapshotResponseForPut(
+    message: CultNetDocumentPutRawMessage,
+    messageId: string,
+  ): CultNetSnapshotResponseRawMessage {
+    const { envelope } = this.#rawPutEnvelope(message);
+    return {
+      schemaVersion: "cultnet.snapshot_response_raw.v0",
+      messageId,
+      documents: [this.#createRawDocumentRecord(envelope)],
+    };
+  }
+
+  #rawPutEnvelope(message: CultNetDocumentPutRawMessage): {
+    binding: CultNetDocumentBinding;
+    envelope: CultCacheEnvelope;
+  } {
     const binding = this.#requireSchemaBinding(message.document.schemaId);
-    return cache.putEnvelope(binding.definition, {
-      key: message.document.recordKey,
-      type: binding.definition.type,
-      schemaId: schemaIdForBinding(binding),
-      payload: new Uint8Array(message.document.payload),
-      storedAt: message.document.storedAt,
-    });
+    return {
+      binding,
+      envelope: {
+        key: message.document.recordKey,
+        type: binding.definition.type,
+        schemaId: schemaIdForBinding(binding),
+        payload: documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(message.document.payload))),
+        storedAt: message.document.storedAt,
+      },
+    };
   }
 
   async applySnapshotResponse(
@@ -341,7 +371,7 @@ export class CultNetDocumentRegistry {
       recordKey: envelope.key,
       storedAt: envelope.storedAt,
       payloadEncoding: "messagepack",
-      payload: new Uint8Array(envelope.payload),
+      payload: documentPayloadFromBytes(new Uint8Array(documentPayloadBytes(envelope.payload))),
     };
   }
 }
@@ -367,22 +397,13 @@ function schemaIdForEnvelope(
   return envelope.schemaId ?? schemaIdForBinding(binding);
 }
 
-function decodeDocumentValue<TDefinition extends CultCacheDocumentDefinition>(
-  definition: TDefinition,
-  payload: Uint8Array,
-): CultCacheDocumentValue<TDefinition> {
-  const formatter = formatterFor(definition);
-  const decoded = formatter.decode(payload);
-  return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
-}
+function resolvePayloadSchemaVersion<TDefinition extends AnyCultCacheDocumentDefinition>(
+  binding: CultNetDocumentBinding<TDefinition>,
+  value: CultCacheDocumentValue<TDefinition>,
+): string | undefined {
+  if (typeof binding.payloadSchemaVersion === "function") {
+    return binding.payloadSchemaVersion(value);
+  }
 
-function formatterFor<TDefinition extends CultCacheDocumentDefinition>(
-  definition: TDefinition,
-): CultCacheDocumentFormatter<CultCacheDocumentValue<TDefinition>> {
-  return (definition.formatter as CultCacheDocumentFormatter<
-    CultCacheDocumentValue<TDefinition>
-  > | undefined) ?? {
-    encode: (value: CultCacheDocumentValue<TDefinition>) => encode(value),
-    decode: (bytes: Uint8Array) => decode(bytes) as CultCacheDocumentValue<TDefinition>,
-  };
+  return binding.payloadSchemaVersion;
 }

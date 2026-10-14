@@ -423,11 +423,13 @@ before using the peer-card endpoint as a dial target.
 snapshots. It hides the snapshot request message id, response listener, raw
 payload binary normalization, and MessagePack decode behind the same
 `CultMeshDocumentHandle` shape as local documents. The helper prefers an exact
-schema id match and falls back to the requested record key, so a publication
-stored under another runtime's generated schema id can still be read with one
-CultMesh call. Pass a CultCache document
-definition instead of a raw schema id when you want a typed handle whose
-`latest()` result is parsed through that definition.
+schema id match, else a record at the requested key under an id the
+definition declares compatible; a record under any other schema id is another
+type's and is never read in its place, whatever its payload parses as. The
+handle takes a CultCache document definition, and its `latest()` result is read
+and parsed through that definition: a payload is a `DocumentPayload`, which only
+`decodeDocumentPayload(definition, payload)` reads, so no document is read
+without the definition that says how its bytes are laid out.
 
 Use `node.syncDocumentFromPeerSnapshot(...)` or
 `CultMesh.syncDocumentFromPeerSnapshot(...)` when a runtime should hydrate its
@@ -438,8 +440,8 @@ typed definition. The record then lives in the node: the caller can keep using
 `authoritativeWriter()`, `predictionWriter()`, or `observe()`
 without re-threading the RUDP peer.
 
-The same typed-definition overload is available for
-`CultMesh.documentFromStore(...)` and `CultMesh.documentFromSingleFile(...)`, so
+`CultMesh.documentFromStore(...)` and `CultMesh.documentFromSingleFile(...)` take
+the same definition, so
 local schema publications can be read as typed reactive documents without
 manually pulling records, decoding MessagePack, or parsing the payload.
 When the caller wants source selection to be configuration, use

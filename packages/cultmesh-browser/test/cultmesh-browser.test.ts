@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { decode, encode } from "@msgpack/msgpack";
+import { codecs, defineDocumentType, documentPayloadFromBytes } from "@gamecult/cultcache-ts";
+import { decodeWireValue, encodeWireValue } from "cultnet-ts/wire";
 import {
   encodeCultNetMessageForWire,
   parseCultNetMessage,
@@ -120,6 +121,13 @@ test("Odin rendezvous rejects a poisoned route without vetoing a certified fallb
   assert.equal(selected.endpoint, signed.route.endpoint);
 });
 
+// The counter document the fake provider serves: a plain map.
+const counterDocument = defineDocumentType({
+  type: "sample.counter_state",
+  schemaId: "sample.counter_state.v1",
+  schema: { parse: (value: unknown) => value as { count: number } },
+});
+
 test("browser client leases provider state, invokes an operation, and follows route replacement", async () => {
   const first = new FakeProvider("ws://127.0.0.1:4101/mesh", 4);
   const second = new FakeProvider("ws://127.0.0.1:4102/mesh", 9);
@@ -139,11 +147,11 @@ test("browser client leases provider state, invokes an operation, and follows ro
     schemaId: "sample.counter_state.v1",
     recordKey: "counter:main",
   });
-  assert.deepEqual(decodeCultNetPayload<{ count: number }>(lease.current!).count, 4);
+  assert.deepEqual(decodeCultNetPayload(lease.current!, counterDocument).count, 4);
 
   const observed: number[] = [];
   const unwatch = lease.watch(record => {
-    if (record) observed.push(decodeCultNetPayload<{ count: number }>(record).count);
+    if (record) observed.push(decodeCultNetPayload(record, counterDocument).count);
   });
   const response = await client.invoke({
     serviceId: "sample.counter",
@@ -158,7 +166,7 @@ test("browser client leases provider state, invokes an operation, and follows ro
   route = second.route;
   await client.refreshRoute();
   assert.equal(client.state, "connected");
-  assert.deepEqual(decodeCultNetPayload<{ count: number }>(lease.current!).count, 9);
+  assert.deepEqual(decodeCultNetPayload(lease.current!, counterDocument).count, 9);
   assert.deepEqual(observed, [4, 6, 9]);
   assert.equal(first.activeSubscriptionCount, 0);
   assert.equal(second.activeSubscriptionCount, 1);
@@ -372,7 +380,7 @@ test("browser client replays one idempotent operation after route loss without d
   const open = () => {
     let socket: FakeSocket;
     socket = new FakeSocket(wire => {
-      const message = parseCultNetMessage(decode(wire));
+      const message = parseCultNetMessage(decodeWireValue(wire));
       if (message.schemaVersion === "cultmesh.session_open.v2") {
         socket.deliver({
           schemaVersion: "cultmesh.session_accepted.v2",
@@ -400,7 +408,7 @@ test("browser client replays one idempotent operation after route loss without d
           status: "accepted",
           payloadSchema: "sample.increment_receipt.v1",
           payloadEncoding: "messagepack-base64",
-          payload: Buffer.from(encode({ count: effectCount })).toString("base64"),
+          payload: Buffer.from(encodeWireValue({ count: effectCount })).toString("base64"),
           sourceRuntimeId: "sample.counter-daemon",
         };
         results.set(message.messageId, response!);
@@ -600,7 +608,7 @@ class FakeProvider {
   }
 
   private receive(socket: FakeSocket, wire: Uint8Array): void {
-    const message = parseCultNetMessage(decode(wire));
+    const message = parseCultNetMessage(decodeWireValue(wire));
     switch (message.schemaVersion) {
       case "cultmesh.session_open.v2":
         this.acceptSession(socket, message);
@@ -654,7 +662,7 @@ class FakeProvider {
         status: "invalid",
         payloadSchema: "gamecult.cultnet.operation_failure.v1",
         payloadEncoding: "messagepack-base64",
-        payload: bytesToBase64(encode({
+        payload: bytesToBase64(encodeWireValue({
           code: "request-schema-mismatch",
           message: "Expected payload schema 'sample.increment.v1'.",
         })),
@@ -663,7 +671,7 @@ class FakeProvider {
       });
       return;
     }
-    const payload = decode(base64ToBytes(message.payload)) as { amount: number };
+    const payload = decodeWireValue(base64ToBytes(message.payload)) as { amount: number };
     this.#count += payload.amount;
     for (const [peer, subscriptions] of this.#subscriptions) {
       for (const subscriptionId of subscriptions.keys()) {
@@ -684,7 +692,7 @@ class FakeProvider {
       status: "accepted",
       payloadSchema: "sample.increment_receipt.v1",
       payloadEncoding: "messagepack-base64",
-      payload: bytesToBase64(encode({ count: this.#count })),
+      payload: bytesToBase64(encodeWireValue({ count: this.#count })),
       sourceRuntimeId: this.#responseRuntimeId,
     });
   }
@@ -698,7 +706,7 @@ class FakeProvider {
       recordKey: "counter:main",
       storedAt: "2026-08-17T00:00:00Z",
       payloadEncoding: "messagepack",
-      payload: encode({ count: this.#count }),
+      payload: documentPayloadFromBytes(encodeWireValue({ count: this.#count })),
       sourceRuntimeId: this.#runtimeId,
     };
   }
@@ -716,7 +724,7 @@ class FakeOdin {
 
   open(): FakeSocket {
     const socket = new FakeSocket(wire => {
-      const message = parseCultNetMessage(decode(wire));
+      const message = parseCultNetMessage(decodeWireValue(wire));
       if (message.schemaVersion !== "cultmesh.verse_catalog_request.v0") return;
       socket.deliver({
         schemaVersion: "cultmesh.verse_catalog_response.v0",
@@ -785,7 +793,7 @@ function routeForCatalog(route: CultMeshBrowserRoute): NonNullable<
 function handshakeOnlySocket(route: CultMeshBrowserRoute): FakeSocket {
   let socket: FakeSocket;
   socket = new FakeSocket(wire => {
-    const message = parseCultNetMessage(decode(wire));
+    const message = parseCultNetMessage(decodeWireValue(wire));
     if (message.schemaVersion !== "cultmesh.session_open.v2") return;
     socket.deliver({
       schemaVersion: "cultmesh.session_accepted.v2",
@@ -850,7 +858,7 @@ class FakeSocket implements CultMeshBrowserSocket {
   }
 
   deliver(message: CultNetMessage): void {
-    const wire = encode(encodeCultNetMessageForWire(message));
+    const wire = encodeWireValue(encodeCultNetMessageForWire(message));
     queueMicrotask(() => this.onmessage?.({ data: wire.slice().buffer } as MessageEvent));
   }
 }
@@ -899,7 +907,7 @@ async function createSignedRoute(endpoint: string): Promise<{
 function signedHandshakeSocket(route: CultMeshBrowserRoute, providerPrivate: CryptoKey): FakeSocket {
   let socket: FakeSocket;
   socket = new FakeSocket(wire => {
-    const message = parseCultNetMessage(decode(wire));
+    const message = parseCultNetMessage(decodeWireValue(wire));
     if (message.schemaVersion !== "cultmesh.session_open.v2") return;
     void crypto.subtle.sign(
       { name: "ECDSA", hash: "SHA-256" },
@@ -975,3 +983,26 @@ function base64ToBytes(value: string): Uint8Array {
   const binary = atob(value);
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
+
+test("decodeCultNetPayload reads a payload through the definition it is given: plain map, codec or formatter", () => {
+  const record = (bytes: Uint8Array) => ({
+    schemaId: "t.v0", recordKey: "k", payloadEncoding: "messagepack", payload: documentPayloadFromBytes(bytes),
+  }) as unknown as CultNetRawDocumentRecord;
+  const schema = { parse: (value: unknown) => value as { count: number } };
+  const plain = defineDocumentType({ type: "t.plain", schemaId: "t.plain.v0", schema });
+  const codec = defineDocumentType({
+    type: "t.codec", schemaId: "t.codec.v0", schema, codec: codecs.slots<{ count: number }>({ 0: ["count", codecs.int32] }, "T.Count"),
+  });
+  const formatted = defineDocumentType({
+    type: "t.formatted", schemaId: "t.formatted.v0", schema,
+    formatter: { encode: value => encodeWireValue([value.count]), decode: payload => ({ count: (decodeWireValue(payload) as number[])[0]! }) },
+  });
+  assert.deepEqual(decodeCultNetPayload(record(encodeWireValue({ count: 7 })), plain), { count: 7 });
+  assert.deepEqual(decodeCultNetPayload(record(encodeWireValue([7])), codec), { count: 7 });
+  assert.deepEqual(decodeCultNetPayload(record(encodeWireValue([7])), formatted), { count: 7 });
+});
+
+test("decodeCultNetPayload refuses a payload that is not messagepack, naming the encoding and not the payload", () => {
+  const record = { schemaId: "t.v0", recordKey: "k", payloadEncoding: "json", payload: documentPayloadFromBytes(encodeWireValue("secret-value")) } as unknown as CultNetRawDocumentRecord;
+  assert.throws(() => decodeCultNetPayload(record, counterDocument), (error: Error) => error.message === "Unsupported CultNet document payload 'json'.");
+});

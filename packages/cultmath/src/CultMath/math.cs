@@ -388,6 +388,7 @@ public static partial class math
     public static float hash(float3 value) => hash(dot(value, new float3(127.1f, 311.7f, 74.7f)));
 
     public static uint asuint(float value) => (uint)BitConverter.SingleToInt32Bits(value);
+    public static float asfloat(uint value) => BitConverter.Int32BitsToSingle((int)value);
 
     // PCG hashes from Jarzynski and Olano, "Hash Functions for GPU Rendering" (JCGT 9(3), 2020). Integer-only, so
     // dxc and C# agree bit for bit. pcg3d/pcg4d carry uint bit patterns in int3/int4; float overloads hash IEEE bits.
@@ -598,14 +599,19 @@ public static partial class math
     // in shaders/CultMath.hlsl with the same float32 evaluation order. Follows stegu/webgl-noise
     // src/noise3D.glsl at 22434e04d7 (kernel radius^2 0.5, scale 105, permute (34x+10)x); see
     // THIRD-PARTY-NOTICES.md. Continuous across simplex-cell boundaries
-    // (NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries).
+    // (NoiseGradTests.SnoiseAndItsGradientAreContinuousAcrossSimplexCellBoundaries). Ties in x0 resolve
+    // in Gustavson's simplexnoise1234 order (x over y, y over z, x over z), a total order, so the four
+    // corners are always a simplex; upstream's step is cyclic and degenerates where x0's components are
+    // equal (NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal).
+    // SNOISE_LIPSCHITZ (math.Interval.cs) is measured from this kernel: a change here must re-run
+    // NoiseBoundTests.MeasureLipschitz and re-pin it.
     public static float snoise(float3 value)
     {
         const float cx = 1.0f / 6.0f;
         const float cy = 1.0f / 3.0f;
         var i = floor(value + dot(value, new float3(cy, cy, cy)));
         var x0 = value - i + dot(i, new float3(cx, cx, cx));
-        var g = step(new float3(x0.y, x0.z, x0.x), x0);
+        var g = new float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0f - step(x0.z, x0.x));
         var l = 1.0f - g;
         var lzxy = new float3(l.z, l.x, l.y);
         var i1 = min(g, lzxy);
@@ -711,7 +717,7 @@ public static partial class math
         const float cy = 1.0f / 3.0f;
         var i = floor(value + dot(value, new float3(cy, cy, cy)));
         var x0 = value - i + dot(i, new float3(cx, cx, cx));
-        var g = step(new float3(x0.y, x0.z, x0.x), x0);
+        var g = new float3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0f - step(x0.z, x0.x));
         var l = 1.0f - g;
         var lzxy = new float3(l.z, l.x, l.y);
         var i1 = min(g, lzxy);

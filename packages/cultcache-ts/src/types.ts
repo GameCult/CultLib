@@ -1,3 +1,6 @@
+import type { SlotsCodec } from "./codec";
+import type { DocumentPayload } from "./document";
+
 export type CultCacheIndexScalar = string | number | boolean | bigint;
 
 export interface CultCacheSchema<TValue = unknown> {
@@ -60,6 +63,7 @@ export interface CultCacheDocumentDefinition<TSchema extends CultCacheSchema = C
     | Readonly<Record<string, CultCacheDocumentAccessor<InferCultCacheSchemaValue<TSchema>>>>
     | readonly CultCacheDocumentIndexDefinition<InferCultCacheSchemaValue<TSchema>>[];
   formatter?: CultCacheDocumentFormatter<InferCultCacheSchemaValue<TSchema>>;
+  codec?: SlotsCodec<InferCultCacheSchemaValue<TSchema> & object>;
 }
 
 export type CultCacheDocumentValue<TDefinition extends CultCacheDocumentDefinition> = InferCultCacheSchemaValue<
@@ -77,7 +81,7 @@ export interface CultCacheDocumentRegistry<
 export interface CultCacheEnvelope {
   key: string;
   type: string;
-  payload: Uint8Array;
+  payload: DocumentPayload;
   storedAt: string;
   schemaId?: string;
   catalogEntry?: CultCacheSchemaCatalogEntry;

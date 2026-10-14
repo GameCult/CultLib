@@ -9,7 +9,9 @@ Gustavson's `webgl-noise` project and Unity Mathematics.
 `math.snoise(float3)` and `cultmath_snoise(float3)` follow `src/noise3D.glsl` and
 `math.snoise(float2)` follows `src/noise2D.glsl` of stegu/webgl-noise at commit
 `22434e04d7753f7e949e8d724ab3da2864c17a0f` (the simplex-boundary fix is
-`21d9fe23d7`, scale `ff3b5d34ea`, permutation `a3e6d57095`).
+`21d9fe23d7`, scale `ff3b5d34ea`, permutation `a3e6d57095`). Modified from upstream:
+the 3D corner tie order follows Gustavson's `simplexnoise1234`, because the
+upstream `step` compares are cyclic where the offset's components are equal.
 
 `math.snoise_grad`/`cultmath_snoise_grad` (and the `fbm_grad`/`ridged_grad`
 octave sums built on them) follow the analytic-gradient differentiation from
@@ -35,7 +37,9 @@ gradient and the exact pruning are new here.
 - License: MPL-2.0 (<https://mozilla.org/MPL/2.0/>). MPL-2.0 is file-level, so it
   covers exactly the files that carry the port and nothing else:
   `src/CultMath/math.Phacelle.cs`, `src/CultMath/CultPhasor.cs`,
-  `shaders/CultMath.Phacelle.hlsl` and the Unity copy of that include. Each
-  carries the MPL-2.0 header and this attribution. The rest of CultMath is MIT,
-  so the `GameCult.Math` NuGet package declares `MIT AND MPL-2.0` and ships this
-  file. The Unity package as a whole is MPL-2.0.
+  `shaders/CultMath.Phacelle.hlsl` and the Unity copy of that include, and
+  `shaders/CultMath.Phacelle.glsl`, which is generated from that include. Each
+  carries the MPL-2.0 header and this attribution. The rest of CultMath, the
+  generated GLSL library included, is MIT, so the `GameCult.Math` NuGet
+  package and the `org.gamecult.cultmath` Unity package both declare
+  `MIT AND MPL-2.0` and ship this file.

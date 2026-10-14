@@ -1,7 +1,11 @@
+import { resolveDocumentFormatter } from "./document-formatter";
+import { checkPayloadDepth } from "./payload-depth";
 import type {
   AnyCultCacheDocumentDefinition,
+  CultCacheSchemaCatalogMember,
   CultCacheDocumentDefinition,
   CultCacheDocumentRegistry,
+  CultCacheDocumentValue,
   CultCacheSchema,
 } from "./types";
 
@@ -66,7 +70,83 @@ export function defineDocumentType<TSchema extends CultCacheSchema>(
     }
   }
 
-  return Object.freeze({ ...definition });
+  resolveDocumentFormatter(definition);
+  return Object.freeze(definition.codec ? { ...definition, members: resolveDocumentMembers(definition) } : { ...definition });
+}
+
+/**
+ * The bytes of one document, as they travel in a store envelope, a CultNet record or a realtime frame.
+ *
+ * At run time this is the same `Uint8Array`, so frames encode as they always did. At compile time it is opaque: it is not
+ * assignable to or from `Uint8Array` or `ArrayLike<number>`, so no byte decoder accepts it. The only reader is
+ * `decodeDocumentPayload(definition, payload)`, which needs the definition that says how the bytes are laid out, and the
+ * only writer is `encodeDocumentPayload(definition, value)`. The two escapes are named: `documentPayloadFromBytes` where
+ * bytes enter (a validated record, a store read, tests, a writer of pre-encoded or signed bytes) and
+ * `documentPayloadBytes` where they leave (a store write, a frame encode, hashing or signing).
+ *
+ * The key is a plain string, not a unique symbol, so two installed copies of this package stay compatible.
+ *
+ * What the type guarantees: a payload cannot be read or assigned directly (a decoder call, `const b: Uint8Array = p`,
+ * `new Uint8Array(p)` fail to compile). What it does not: the runtime value is a `Uint8Array`, so these routes read it
+ * without the owner: `instanceof Uint8Array` or `ArrayBuffer.isView` narrowing, `Object.values`, `Object.assign` onto a
+ * `Uint8Array`, a JSON round trip, `Reflect.get`, and a cast. A codec or formatter document read that way is raw bytes,
+ * not the document. The sanctioned escape for bytes is `documentPayloadBytes`; the reader is `decodeDocumentPayload`.
+ */
+export interface DocumentPayload {
+  readonly "cultcache.documentPayload": true;
+  readonly byteLength: number;
+}
+
+export function documentPayloadFromBytes(bytes: Uint8Array): DocumentPayload {
+  return bytes as unknown as DocumentPayload;
+}
+
+export function documentPayloadBytes(payload: DocumentPayload): Uint8Array {
+  return payload as unknown as Uint8Array;
+}
+
+export { CultCachePayloadDepthError, MAX_PAYLOAD_DEPTH } from "./payload-depth";
+
+// The payload nesting bound covers the MessagePack the library itself writes: the plain default formatter and a codec. A
+// user formatter's bytes are opaque and in any format; its format and bounds are its own.
+function writesLibraryMessagePack(definition: AnyCultCacheDocumentDefinition): boolean {
+  return !definition.formatter;
+}
+
+// The one reader of a document payload: through the definition's formatter, codec or plain map, then its schema. A
+// reader holds the definition or it has no business reading the bytes, so there is no definition-less form.
+export function decodeDocumentPayload<TDefinition extends AnyCultCacheDocumentDefinition>(
+  definition: TDefinition,
+  payload: DocumentPayload,
+): CultCacheDocumentValue<TDefinition> {
+  const bytes = documentPayloadBytes(payload);
+  if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" payload`);
+  const decoded = resolveDocumentFormatter(definition).decode(bytes);
+  return definition.schema.parse(decoded) as CultCacheDocumentValue<TDefinition>;
+}
+
+// The one writer: the definition's schema first, then its formatter, codec or plain map.
+export function encodeDocumentPayload(definition: AnyCultCacheDocumentDefinition, value: unknown): DocumentPayload {
+  const bytes = resolveDocumentFormatter(definition).encode(definition.schema.parse(value));
+  if (writesLibraryMessagePack(definition)) checkPayloadDepth(bytes, `document type "${definition.type}" value`);
+  return documentPayloadFromBytes(bytes);
+}
+
+// The schema members of a document: the ones it declares, else those its codec derives, else none.
+export function resolveDocumentMembers(definition: AnyCultCacheDocumentDefinition): readonly CultCacheSchemaCatalogMember[] {
+  if (definition.members || !definition.codec) {
+    return definition.members ?? [];
+  }
+  const codec = definition.codec;
+  const indexAlias = (slotName: string) =>
+    !Array.isArray(definition.indexes) && definition.indexes
+      ? Object.entries(definition.indexes).find(([, accessor]) => accessor === slotName)?.[0] ?? null
+      : null;
+  return codec.members.map((member, index) => ({
+    ...member,
+    isName: (definition.name as unknown) === codec.names[index],
+    indexAlias: indexAlias(codec.names[index]),
+  }));
 }
 
 // The identity a definition's records carry: the schema id they are stamped with, the schema name and version, and every id

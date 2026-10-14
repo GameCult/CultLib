@@ -1,5 +1,28 @@
 # CultNet RUDP: Acknowledged means delivered, one watermark owns ordered delivery, and a write belongs to its session
 
+**PIVOT, 2026-09-30 (operator): RUDP is retired in favour of QUIC.** Operator: "RUDP really ballooned into
+maintaining a robust custom transport across runtimes, when it started as just 'hey, let's do LiteNetLib but
+better'. Is there any point maintaining it when we have QUIC?" and then "Yeah, pivot to QUIC adoption, I ain't
+gonna let sunk costs take the wheel."
+- **Landed 2026-09-30: Cut D, merged at `2f06ef84`** (Soul passes 1-4, batch 5 closing pass 4). It fixes live crashes: a spoofed datagram crashing Node, a malformed frame
+  killing Python's server, C# stale peers corrupting sessions.
+- **Parked, not built:** Cut F, Cut 2 (held on F), Cut 4, Cut K and K1 (including the Kotlin resend-loop gap), Cut 7
+  and the receipts port. Nothing of theirs exists to tag, so this map is their record.
+- Defects found in RUDP from here on are fixed only if they are live crashes or data loss, until the QUIC campaign
+  sets RUDP's retirement.
+- **Data-loss item from Odin Soul S-5 (2026-09-30).** At Odin's pin `3bf1c0ce`, cultnet-rs records a reliable
+  packet as received when it arrives, and `create_ack` reports it while ordered delivery still holds an earlier
+  packet.
+  - Probe: two pipelined puts, with the first datagram dropped. The second put was ACKed but not on disk. If the
+    first never arrives, the ACKed second put is never delivered.
+  - Sessions that carry a single put are safe.
+  - **Checked (Odin Q5 Imagination, probe P1 at `e4e2a0b9`): still open after ack Cuts 1-1c.** A held, undelivered
+    put is ACKed, so the pin bump does not close it, and it is a data-loss fix under the pivot rule. Related, P2: a
+    Pong ACKs a put received before the Ping; P3: a reliable reply created after a put ACKs it. The Odin writer-thread
+    cut (C5) adds `acknowledgement_withheld` to the document server; the transport fix belongs in cultnet-rs.
+- The "CultNet over QUIC" campaign is new, so it opens as a typed Eureka campaign in the Huginn-backed session, not
+  as a prose map here.
+
 Status: cut map, Imagination pass 3, 2026-09-30. Pass 3 maps the four rulings below, re-maps Cuts 1c and
 4, and adds Cut F (FORWARD-TSN), Cuts 6a-6c (receipts), Cut 7 (expiry, if Q-A8), Cut K (Kotlin), Cut 2c (the
 C# fragment bound) and Cut D (a failed send to one peer stays that peer's loss). The text of Cuts 1, 1b, 2
@@ -730,7 +753,7 @@ The ack cuts build on these behaviours and do not alter them:
 | Rust hub `CultNetRudpServerHub` | `poll_resends` returns on the first failure (`rudp.rs:1762-1777`); the receive path's sends to one peer abort `receive_event_once` (`:1644`, `:1673`, `:1708`, `:1711`, `:1714`, `:1759`, through `send_packet` `:1799-1804`) | Cut D |
 | C# `CultNetRudpSocketTransportServer` (and `RudpCultNetSchemaServer` over it) | `PollResends` walks every peer and the first `SocketException` from `SendTo` (`CultNetTransport.cs:2829-2834`) escapes the loop (`:2796-2805`); `TryReceiveOnce`'s sends are unguarded except the refusal goodbye (`:2687`, `:2704`, `:2749-2750`, `:2788`; guarded `:2739-2745`) | Cut D |
 | cultmesh-py server | worse: an `OSError` from `sendto` (`server.py:302-307`) in `_poll_rudp_resends` (`:277-285`) or the receive path escapes `_rudp_loop` (`:203-…`, which catches only `recvfrom`'s errors), and the RUDP thread dies for every peer | Cut D |
-| cultmesh-ts document server | none: Node's `socket.send` is asynchronous and reports failures on the socket's `error` event (`cultmesh-ts/src/index.ts:5858`), which `reportError` logs (`:5778-5785`) | none |
+| cultmesh-ts document server | none. **Corrected 2026-09-30:** Node does not report send failures on the socket's `error` event. With a callback they go to the callback; without one, libuv drops them silently (Node 24). Only port 0 throws synchronously. Cut D routes every send through `sendRudpDatagram`. | none |
 | Kotlin interop server | none that matters: a catch-all logs and continues (K:4025), and it is interop-only | none (Cut K1 reviews it) |
 
 
@@ -1048,8 +1071,8 @@ Design in §10. Independent of every other cut; it touches send sites, not sessi
     (`:2739-2745`) becomes redundant and goes;
   - cultmesh-py `server.py`: `_send_rudp_packet` (`:302-307`) catches `OSError` and counts it.
 - **Not changed:** single-peer socket transports (a failed send already concerns only their one peer, and
-  their callers, flush among them, get the error); `cultmesh-ts`'s document server (Node reports send
-  failures on the socket's `error` event, `index.ts:5858`).
+  their callers, flush among them, get the error); `cultmesh-ts`'s document server. (Corrected 2026-09-30: Node reports send failures only to a send
+  callback, never on the socket's `error` event; see the table above.)
 - **Authority map:**
   - Owner: each peer's session owns its peer's fate (idle timeout, lifetime, refusal, Disconnect). A send
     failure is an input to nothing but a counter.
@@ -1590,6 +1613,25 @@ profiles.
   a permanent failure is returned from a caller-directed send and, inside a poll, ends only that peer's session with a
   typed reason; transient failures stay counted losses. Windows `ConnectionResetError` on receive is idle, never fatal,
   in every server. Cut D's negative grep `send_packet(...)?;` is obsolete: the `?` now propagates encode errors only.
+- **Cut 3 merged at `1210fdc7` (2026-09-30).**
+  - Batch 2 fixed Rust `send`, which checked the window before purging expired packets. It also added a
+    new-generation test in all four runtimes.
+  - Soul pass on batch 2: nothing found. 18 mutants were killed. Interop was 27/27, run in `ack1d-interop:2`,
+    whose Linux wrappers let the Windows-only Kotlin build run.
+  - Residual: `packages/cultmesh-rs/Cargo.lock` is stale.
+  - Also recorded: `packages/cultmesh-kotlin/build.ps1` is Windows-only, so Kotlin interop runs off Windows only
+    through an image with wrappers.
+  - P2 (the expiry hole) stays with Cut F.
+- **Cut D batch 2, Soul pass 2: fix first.**
+  - cultnet-ts emits transient send failures as `"error"`, which crashes processes with no listener. Section 10's
+    claim that "Node reports send failures on the socket's error event" is false on Node 24 without a callback:
+    they are dropped silently.
+  - C# stale peer objects write into the replacing session.
+  - cultmesh-py dies on a non-ValueError per-peer failure.
+  - Six guards are unpinned.
+  - Batch 3 is in Hands.
+  - **K1 gains:** Kotlin's idle resend loop (`CultMesh.kt:4033-4036`) is one `try`, so one peer's permanent failure
+    stops resends for every later peer. That is in addition to a refused packet not ending that peer's session.
 - **Recorded (liveness, not fixed):** a lowest reliable packet lost forever stalls the sender 1,023 sequences ahead
   while the peer stays alive; session timeout doesn't end it. TCP ends such a connection after a retransmission
   limit (R2). Decide with Cut F (abandonment) whether a reliable packet outstanding past a bound ends the session.

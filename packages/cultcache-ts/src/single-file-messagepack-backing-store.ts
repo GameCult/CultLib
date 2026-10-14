@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { decode, encode } from "@msgpack/msgpack";
 import { z } from "zod";
 
+import { documentPayloadBytes, documentPayloadFromBytes } from "./document";
 import { STORE_FORMAT_VERSION, SchemaConflictError, type StoreFormat, StoreUnreadableError, isStoreSnapshot, requireStoreSlots, requireV1RecordSlots } from "./store-format";
 import type {
   CacheBackingStore,
@@ -248,7 +249,7 @@ function encodeSnapshot(supplied: CultCacheEnvelope[], arrived: CultCacheEnvelop
       entry.key,
       schemaIdForEnvelope(entry),
       entry.storedAt,
-      entry.payload,
+      documentPayloadBytes(entry.payload),
     ]);
 
   return [
@@ -435,7 +436,7 @@ function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> 
         type: catalogEntry.schemaName,
         schemaId: record.schemaId,
         catalogEntry,
-        payload: record.payload,
+        payload: documentPayloadFromBytes(record.payload),
         storedAt: record.storedAt,
       };
     });
@@ -459,7 +460,7 @@ function decodeStoreFile(data: Uint8Array): Omit<SingleFileStoreRead, "absent"> 
       payload,
     };
   });
-  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized) as CultCacheEnvelope[], repairedLegacyPayload };
+  return { format: STORE_FORMAT_VERSION, envelopes: envelopeArraySchema.parse(normalized).map((entry) => ({ ...entry, payload: documentPayloadFromBytes(entry.payload) })) as CultCacheEnvelope[], repairedLegacyPayload };
 }
 
 function decodeSnapshot(decoded: unknown): DecodedSnapshot | undefined {
