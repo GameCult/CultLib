@@ -228,6 +228,97 @@ vec4 cultmath_snoise_grad(vec3 value)
     return vec4(grad, value2);
 }
 
+// Analytic Hessian of cultmath_snoise(vec3); see the C# math.snoise_hessian comment for the
+// derivation. Every local up through p0..p3 and x0..x3 is cultmath_snoise_grad's own. The matrix is
+// built from nine scalars, which read as rows in HLSL and as columns in GLSL; it is symmetric, so the
+// two agree.
+mat3 cultmath_snoise_hessian(vec3 value)
+{
+    vec2 c = vec2(1.0 / 6.0, 1.0 / 3.0);
+    vec3 i = floor(value + dot(value, c.yyy));
+    vec3 x0 = value - i + dot(i, c.xxx);
+    vec3 g = vec3(step(x0.y, x0.x), step(x0.z, x0.y), 1.0 - step(x0.z, x0.x));
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + c.xxx;
+    vec3 x2 = x0 - i2 + c.yyy;
+    vec3 x3 = x0 - 0.5;
+
+    i = cultmath_snoise_mod289(i);
+    vec4 p = cultmath_snoise_permute(cultmath_snoise_permute(cultmath_snoise_permute(
+        i.z + vec4(0.0, i1.z, i2.z, 1.0)) + i.y + vec4(0.0, i1.y, i2.y, 1.0)) + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+    const float n_ = 0.142857142857;
+    vec3 ns = vec3(2.0 * n_, 0.5 * n_ - 1.0, n_);
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ * ns.x + ns.yyyy;
+    vec4 y = y_ * ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0) * 2.0 + 1.0;
+    vec4 s1 = floor(b1) * 2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0, 0.0, 0.0, 0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = 1.79284291400159 - 0.85373472095314 * vec4(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    vec4 m0 = max(0.5 - vec4(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), 0.0);
+    vec4 m2 = m0 * m0;
+    vec4 m3 = m2 * m0;
+    vec4 px = vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3));
+    vec4 wide = 48.0 * m2 * px;
+    vec4 narrow = 8.0 * m3;
+
+    vec4 cxx = vec4(x0.x, x1.x, x2.x, x3.x);
+    vec4 cxy = vec4(x0.y, x1.y, x2.y, x3.y);
+    vec4 cxz = vec4(x0.z, x1.z, x2.z, x3.z);
+    vec4 cpx = vec4(p0.x, p1.x, p2.x, p3.x);
+    vec4 cpy = vec4(p0.y, p1.y, p2.y, p3.y);
+    vec4 cpz = vec4(p0.z, p1.z, p2.z, p3.z);
+
+    float hxx = 105.0 * (dot(wide * cxx, cxx) - dot(narrow, 2.0 * cpx * cxx + px));
+    float hyy = 105.0 * (dot(wide * cxy, cxy) - dot(narrow, 2.0 * cpy * cxy + px));
+    float hzz = 105.0 * (dot(wide * cxz, cxz) - dot(narrow, 2.0 * cpz * cxz + px));
+    float hxy = 105.0 * (dot(wide * cxx, cxy) - dot(narrow, cpx * cxy + cpy * cxx));
+    float hxz = 105.0 * (dot(wide * cxx, cxz) - dot(narrow, cpx * cxz + cpz * cxx));
+    float hyz = 105.0 * (dot(wide * cxy, cxz) - dot(narrow, cpy * cxz + cpz * cxy));
+    return mat3(hxx, hxy, hxz, hxy, hyy, hyz, hxz, hyz, hzz);
+}
+
+// The integral over [t0, t1] of clamp(a + b t, lo, hi); see the C# math.integral_clamp_linear comment.
+float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float t0, float t1)
+{
+    if (b == 0.0)
+        return clamp(a, lo, hi) * (t1 - t0);
+
+    lo = min(lo, hi);
+    float direction = t1 < t0 ? -1.0 : 1.0;
+    float start = min(t0, t1);
+    float stop = max(t0, t1);
+    float atLo = (lo - a) / b;
+    float atHi = (hi - a) / b;
+    float enter = clamp(min(atLo, atHi), start, stop);
+    float leave = clamp(max(atLo, atHi), start, stop);
+    float before = b > 0.0 ? lo : hi;
+    float after = b > 0.0 ? hi : lo;
+    float total = before * (enter - start) + (a + b * (0.5 * (enter + leave))) * (leave - enter) + after * (stop - leave);
+    return direction * total;
+}
+
 // Octave sum of cultmath_snoise_grad (invariant 8); see the C# math.fbm_grad comment for the
 // per-octave frequency/amplitude derivation and why octaves is clamped.
 vec4 cultmath_fbm_grad(vec3 p, int octaves, float lacunarity, float gain)
@@ -653,7 +744,11 @@ vec4 cultmath_iv_frustum_ball(vec2 centreSlope, float z0, float z1, float footpr
 
 // An upper bound on the spectral norm of the Hessian of cultmath_snoise(vec3); provenance in
 // math.Affine.cs (SNOISE_HESSIAN).
-const float CULTMATH_SNOISE_HESSIAN = 56.050385;
+const float CULTMATH_SNOISE_HESSIAN = 55.642143;
+
+// An upper bound on the operator norm of the third-derivative tensor of cultmath_snoise(vec3), the
+// next order after CULTMATH_SNOISE_HESSIAN; provenance in math.Span.cs (SNOISE_THIRD).
+const float CULTMATH_SNOISE_THIRD = 536.9152;
 
 vec3 cultmath_af_point(float value) { return vec3(value, 0.0, 0.0); }
 vec3 cultmath_af_symbol(float x0, float a) { return vec3(x0, a, 0.0); }
