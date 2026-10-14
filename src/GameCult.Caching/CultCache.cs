@@ -4280,7 +4280,7 @@ namespace GameCult.Caching
         // order, so the decode runs only where it can change the answer.
         private bool CopiedHoldIds(Durable? durable, CultPersistedRecord[] copied, IReadOnlyCollection<CultStagedRecord> upserts)
         {
-            if (durable == null || copied.Length == 0 ||
+            if (durable == null ||
                 string.Equals(durable.Snapshot.FormatVersion, CultPersistedStoreSnapshot.FormatV3, StringComparison.Ordinal) ||
                 upserts.Any(staged => staged.HoldsIds == true) ||
                 AttachedRegistry is not { } registry)
