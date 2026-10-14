@@ -1,11 +1,17 @@
-//! Typed decode never aborts a payload inside the nesting bound, whatever the caller's stack.
+//! Typed decode never aborts a payload inside the nesting bound, whatever the caller's stack, for
+//! every record the derives accept (up to `MAX_RECORD_INLINE_BYTES` inline); envelope reads of a
+//! store go through the same grown decoder.
 //! Each test runs its decode in a child test process on a thread of a stated size, so an abort
 //! fails one named test. Values are built, encoded, compared and dropped on a large thread; only
 //! the decode runs on the small one.
 
 use cultcache_rs::CultSlots;
+use cultcache_rs::CultUnion;
 use cultcache_rs::MAX_PAYLOAD_DEPTH;
+use cultcache_rs::MAX_RECORD_INLINE_BYTES;
 use cultcache_rs::PayloadTooDeep;
+use cultcache_rs::SingleFileMessagePackBackingStore;
+use cultcache_rs::check_payload_depth;
 use cultcache_rs::decode_payload;
 use serde::de::DeserializeOwned;
 
@@ -235,5 +241,136 @@ fn a_skipped_slot_at_the_limit_decodes_on_a_64kib_thread() {
         bytes.push(0x90);
         let decoded = decode_on::<One>(64 * KIB, bytes).unwrap();
         assert_eq!(decoded, One { a: 1 });
+    });
+}
+
+// A record the derives accept at the bound: two slots of 31 arrays of 32 words, 15,880 bytes inline.
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct Largest {
+    #[cultcache(key = 0)]
+    a: [[u64; 32]; 31],
+    #[cultcache(key = 1)]
+    b: [[u64; 32]; 31],
+    #[cultcache(key = 2)]
+    next: Option<Box<Largest>>,
+}
+
+#[derive(Clone, Debug, PartialEq, CultSlots)]
+struct LargestUnionArm {
+    #[cultcache(key = 0)]
+    a: [[u64; 32]; 31],
+    #[cultcache(key = 1)]
+    b: [[u64; 32]; 31],
+    #[cultcache(key = 2)]
+    next: Option<Box<LargestUnion>>,
+}
+
+#[derive(Clone, Debug, PartialEq, CultUnion)]
+enum LargestUnion {
+    #[cultcache(key = 0)]
+    Arm(LargestUnionArm),
+    #[cultcache(key = 1)]
+    Leaf,
+}
+
+// The fixtures sit within a KiB under the bound, so a decode that survives them survives any record.
+const _: () = assert!(
+    std::mem::size_of::<Largest>() <= MAX_RECORD_INLINE_BYTES
+        && std::mem::size_of::<Largest>() + KIB >= MAX_RECORD_INLINE_BYTES
+        && std::mem::size_of::<LargestUnion>() <= MAX_RECORD_INLINE_BYTES
+        && std::mem::size_of::<LargestUnion>() + KIB >= MAX_RECORD_INLINE_BYTES
+);
+
+fn largest_chain(levels: usize) -> Largest {
+    let mut chain: Option<Box<Largest>> = None;
+    for level in (0..levels).rev() {
+        let mut a = [[0u64; 32]; 31];
+        a[0][0] = level as u64;
+        chain = Some(Box::new(Largest { a, b: [[0; 32]; 31], next: chain }));
+    }
+    *chain.unwrap()
+}
+
+fn union_chain(levels: usize) -> LargestUnion {
+    let mut chain = LargestUnion::Leaf;
+    for level in (0..levels).rev() {
+        let mut a = [[0u64; 32]; 31];
+        a[0][0] = level as u64;
+        chain = LargestUnion::Arm(LargestUnionArm { a, b: [[0; 32]; 31], next: Some(Box::new(chain)) });
+    }
+    chain
+}
+
+#[test]
+fn a_wide_record_20_levels_deep_decodes_on_a_1mib_thread() {
+    in_child("a_wide_record_20_levels_deep_decodes_on_a_1mib_thread", || decode_wide_chain(20, 1024 * KIB));
+}
+
+#[test]
+fn a_wide_record_100_levels_deep_decodes_on_a_1mib_thread() {
+    in_child("a_wide_record_100_levels_deep_decodes_on_a_1mib_thread", || decode_wide_chain(100, 1024 * KIB));
+}
+
+#[test]
+fn a_wide_record_decodes_on_a_64kib_thread_at_one_level_and_at_the_limit() {
+    in_child("a_wide_record_decodes_on_a_64kib_thread_at_one_level_and_at_the_limit", || {
+        decode_wide_chain(1, 64 * KIB);
+        decode_wide_chain(MAX_PAYLOAD_DEPTH - 1, 64 * KIB);
+    });
+}
+
+fn decode_wide_chain(levels: usize, stack: usize) {
+    let bytes = on_stack(64 * KIB * KIB, move || rmp_serde::to_vec(&wide_chain(levels)).unwrap());
+    let decoded = decode_on::<Wide32>(stack, bytes).unwrap();
+    on_stack(64 * KIB * KIB, move || assert!(decoded == wide_chain(levels)));
+}
+
+#[test]
+fn the_largest_record_at_the_limit_decodes_on_every_thread_size() {
+    in_child("the_largest_record_at_the_limit_decodes_on_every_thread_size", || {
+        // 254 records of Largest are 256 containers deep (each is one, its slots' arrays two more);
+        // 127 union levels are the same (a union and its arm are two each, the leaf's arrays two).
+        let (records, unions) = on_stack(64 * KIB * KIB, || {
+            let records = rmp_serde::to_vec(&largest_chain(254)).unwrap();
+            let unions = rmp_serde::to_vec(&union_chain(127)).unwrap();
+            assert!(check_payload_depth(&records).is_ok());
+            assert!(check_payload_depth(&unions).is_ok());
+            assert!(check_payload_depth(&rmp_serde::to_vec(&largest_chain(255)).unwrap()).is_err());
+            assert!(check_payload_depth(&rmp_serde::to_vec(&union_chain(128)).unwrap()).is_err());
+            (records, unions)
+        });
+        let sizes = (128..=1024).step_by(32).map(|kib| kib * KIB).chain([1536, 2048, 3072, 4096, 8192].map(|kib| kib * KIB));
+        for size in sizes {
+            println!("thread of {} KiB", size / KIB);
+            let decoded = decode_on::<Largest>(size, records.clone()).unwrap();
+            let decoded_union = decode_on::<LargestUnion>(size, unions.clone()).unwrap();
+            on_stack(64 * KIB * KIB, move || {
+                assert!(decoded == largest_chain(254));
+                assert!(decoded_union == union_chain(127));
+            });
+        }
+    });
+}
+
+#[test]
+fn a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread() {
+    in_child("a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread", || {
+        // [ {key: "k", type: "t", payload: bin[1], storedAt: "s", extra: [[[...]]]} ]: the envelope
+        // skips the unknown key, 1000 containers deep, with no payload walk (the bound is the payload's).
+        let mut bytes = vec![0x91, 0x85];
+        for (name, value) in [("key", &[0xa1, b'k'][..]), ("type", &[0xa1, b't']), ("payload", &[0xc4, 1, 1]), ("storedAt", &[0xa1, b's'])] {
+            bytes.push(0xa0 | name.len() as u8);
+            bytes.extend(name.as_bytes());
+            bytes.extend(value);
+        }
+        bytes.extend([0xa5, b'e', b'x', b't', b'r', b'a']);
+        bytes.extend(std::iter::repeat_n(0x91u8, 999));
+        bytes.push(0x90);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.cc");
+        std::fs::write(&path, bytes).unwrap();
+        let entries = on_stack(256 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "k");
     });
 }
