@@ -177,10 +177,90 @@ namespace GameCult.Caching.Tests
         [Test]
         public void DecodeRefusesNilAndWrongShapes()
         {
-            Refused(Bytes(null), "shape");
             Refused(Bytes(new object[] { 1, new object[0] }), "shape");
-            var act = () => MessagePackSerializer.Serialize<ExprGraph>(null!, Options);
-            act.Should().Throw<MessagePackSerializationException>().Which.InnerException.Should().BeOfType<ExprGraphException>();
+        }
+
+        [Test]
+        public void ANilGraphIsNilLikeEveryOtherReferenceSlot()
+        {
+            MessagePackSerializer.Serialize<ExprGraph?>(null, Options).Should().Equal(new byte[] { 0xc0 });
+            MessagePackSerializer.Deserialize<ExprGraph?>(new byte[] { 0xc0 }, Options).Should().BeNull();
+
+            var bytes = MessagePackSerializer.Serialize(new ExprHolder { Graph = null!, Scale = 3f }, Options);
+            var decoded = MessagePackSerializer.Deserialize<ExprHolder>(bytes, Options);
+
+            decoded.Graph.Should().BeNull();
+            decoded.Scale.Should().Be(3f);
+        }
+
+        // [1, ["x"], [], [["o", 0]], [["input", [], 0]]]
+        private static readonly byte[] Minimal =
+        {
+            0x95, 0x01, 0x91, 0xa1, 0x78, 0x90, 0x91, 0x92, 0xa1, 0x6f, 0x00, 0x91, 0x93, 0xa5, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x90, 0x00,
+        };
+
+        private static byte[] Replace(byte[] bytes, int at, int length, params byte[] with) =>
+            bytes.Take(at).Concat(with).Concat(bytes.Skip(at + length)).ToArray();
+
+        [Test]
+        public void DecodeRefusesEveryEncodingButTheOneEncodeWrites()
+        {
+            Encode(Decode(Minimal)).Should().Equal(Minimal);
+
+            Refused(Replace(Minimal, 1, 1, 0xd2, 0, 0, 0, 1), "non-canonical");           // version as int32
+            Refused(Replace(Minimal, 1, 1, 0xcc, 1), "non-canonical");                     // version as uint8
+            Refused(Replace(Minimal, 3, 2, 0xd9, 1, 0x78), "non-canonical");              // "x" as str8
+            Refused(Replace(Minimal, 2, 1, 0xdc, 0, 1), "non-canonical");                 // input list header as array16
+            Refused(Replace(Minimal, 5, 1, 0xdd, 0, 0, 0, 0), "non-canonical");           // empty param list as array32
+            Refused(Replace(Minimal, Minimal.Length - 1, 1, 0xcc, 0), "non-canonical");   // payload as uint8
+            Refused(Replace(Minimal, 10, 1, 0xd0, 0), "non-canonical");                   // output node as int8
+        }
+
+        [Test]
+        public void DecodeRefusesNestedShapesAndNilNames()
+        {
+            var node = new object[] { "input", new object[0], 0 };
+            object[] Graph(object[]? param = null, object[]? output = null, object? node0 = null) =>
+                new object[]
+                {
+                    1,
+                    new object[] { "x" },
+                    param is null ? new object[0] : new object[] { param },
+                    new object[] { output ?? new object[] { "o", 0 } },
+                    new object[] { node0 ?? node },
+                };
+
+            Decode(Bytes(Graph(param: new object[] { "k", 0 }, node0: new object[] { "param", new object[0], 0 })))
+                .ParamNames.Should().Equal("k");
+
+            Refused(Bytes(Graph(param: new object[] { "k", 0, 0 })), "shape");
+            Refused(Bytes(Graph(param: new object[] { "k" })), "shape");
+            Refused(Bytes(Graph(output: new object[] { "o", 0, 0 })), "shape");
+            Refused(Bytes(Graph(output: new object[] { "o" })), "shape");
+            Refused(Bytes(Graph(node0: new object[] { "input", new object[0], 0, 0 })), "shape");
+            Refused(Bytes(Graph(node0: new object[] { "input", new object[0] })), "shape");
+            Refused(Bytes(new object[] { 1, new object?[] { null }, new object[0], new object[0], new object[0] }), "shape");
+            Refused(Bytes(Graph(param: new object?[] { null, 0 })), "shape");
+            Refused(Bytes(Graph(output: new object?[] { null, 0 })), "shape");
+            Refused(Bytes(Graph(node0: new object?[] { null, new object[0], 0 })), "shape");
+            Refused(Bytes(new object[] { 1, new object[0], new object[0], new object[0], new object[0], 0 }), "shape");
+        }
+
+        [Test]
+        public void DepthIsReleasedAfterEachGraph()
+        {
+            var shallow = Options.WithSecurity(MessagePackSecurity.UntrustedData.WithMaximumObjectGraphDepth(4));
+            var graphs = Enumerable.Range(0, 40).Select(_ => Sample()).ToArray();
+
+            var bytes = MessagePackSerializer.Serialize(graphs, shallow);
+            var decoded = MessagePackSerializer.Deserialize<ExprGraph[]>(bytes, shallow);
+
+            decoded.Should().HaveCount(40);
+            Encode(decoded[39]).Should().Equal(Encode(graphs[0]));
+
+            var tooDeep = Options.WithSecurity(MessagePackSecurity.UntrustedData.WithMaximumObjectGraphDepth(1));
+            var act = () => MessagePackSerializer.Deserialize<ExprGraph[]>(bytes, tooDeep);
+            act.Should().Throw<Exception>();
         }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using CultMath.Expr;
 using MessagePack;
@@ -13,7 +14,8 @@ namespace GameCult.Caching.MessagePack;
 /// (the payload is the port index of an input or param, the float bits of a constant, the result index of a pick,
 /// zero for a call). Decoding runs <see cref="ExprGraph.Create"/>, the one validator, so a graph that breaks a rule
 /// (unknown op, newer version, forward operand) is refused whole with an <see cref="ExprGraphException"/> and never
-/// partly loaded. A nil graph is refused both ways.
+/// partly loaded. Decoding also refuses any encoding other than the one <c>Serialize</c> writes (a wider integer,
+/// a longer length prefix), so a graph has one byte string. A nil graph is nil, as in every reference slot.
 /// </summary>
 public sealed class CultMathExprResolver : IFormatterResolver
 {
@@ -28,11 +30,21 @@ public sealed class CultMathExprResolver : IFormatterResolver
             typeof(T) == typeof(ExprGraph) ? (IMessagePackFormatter<T>)(object)new GraphFormatter() : null;
     }
 
-    private sealed class GraphFormatter : IMessagePackFormatter<ExprGraph>
+    private sealed class GraphFormatter : IMessagePackFormatter<ExprGraph?>
     {
-        public void Serialize(ref MessagePackWriter writer, ExprGraph value, MessagePackSerializerOptions options)
+        public void Serialize(ref MessagePackWriter writer, ExprGraph? value, MessagePackSerializerOptions options)
         {
-            if (value is null) throw new ExprGraphException("shape");
+            if (value is null)
+            {
+                writer.WriteNil();
+                return;
+            }
+
+            Write(ref writer, value);
+        }
+
+        private static void Write(ref MessagePackWriter writer, ExprGraph value)
+        {
             writer.WriteArrayHeader(5);
             writer.Write(ExprGraph.FormatVersion);
 
@@ -66,12 +78,13 @@ public sealed class CultMathExprResolver : IFormatterResolver
             }
         }
 
-        public ExprGraph Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
+        public ExprGraph? Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options)
         {
-            if (reader.TryReadNil()) throw new ExprGraphException("shape");
+            if (reader.TryReadNil()) return null;
             options.Security.DepthStep(ref reader);
             try
             {
+                var start = reader.Position;
                 Expect(ref reader, 5);
                 var version = reader.ReadInt32();
 
@@ -106,12 +119,26 @@ public sealed class CultMathExprResolver : IFormatterResolver
                     nodes.Add(ExprNode.FromWire(wireName, operands, reader.ReadInt32()));
                 }
 
-                return ExprGraph.Create(version, inputs, paramNames, paramBits, outputNames, outputNodes, nodes);
+                var graph = ExprGraph.Create(version, inputs, paramNames, paramBits, outputNames, outputNodes, nodes);
+                RequireCanonical(ref reader, start, graph);
+                return graph;
             }
             finally
             {
                 reader.Depth--;
             }
+        }
+
+        /// <summary>The bytes just read must be the bytes <see cref="Write"/> produces for the graph they decoded to.</summary>
+        private static void RequireCanonical(ref MessagePackReader reader, SequencePosition start, ExprGraph graph)
+        {
+            var canonical = new ArrayBufferWriter<byte>();
+            var writer = new MessagePackWriter(canonical);
+            Write(ref writer, graph);
+            writer.Flush();
+            var read = reader.Sequence.Slice(start, reader.Position);
+            if (read.Length != canonical.WrittenCount || !read.ToArray().AsSpan().SequenceEqual(canonical.WrittenSpan))
+                throw new ExprGraphException("non-canonical");
         }
 
         private static void Expect(ref MessagePackReader reader, int count)

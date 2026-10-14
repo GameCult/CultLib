@@ -89,7 +89,7 @@ registered ahead of these wins.
 with a param `[name, default float bits]`, an output `[name, node]` and a node
 `[op name, operands, payload]`. Decoding runs the graph's one validator and refuses a
 broken graph whole (an `ExprGraphException` naming the rule), so a consumer
-`[CultDocument]` record with an `ExprGraph` field needs no registration. A nil graph is refused.
+`[CultDocument]` record with an `ExprGraph` field needs no registration. A nil graph is nil, as in every reference slot; decoding refuses any encoding but the canonical one.
 
 | Type | MessagePack | JSON |
 | --- | --- | --- |
