@@ -268,6 +268,43 @@ public sealed class ExprTests
         Assert.Equal("bare-multi-result", Assert.Throws<ExprGraphException>(() => d.Substitute(field, new Dictionary<string, ExprValue> { ["x"] = cell })).Rule);
     }
 
+    [Fact]
+    public void SubstituteCarriesParamsConstantsAndPicks()
+    {
+        // o = p * k + cellular(p, p, k).edge.w - 0.5, with k a param of default 0.25.
+        var g = new ExprBuilder();
+        var gp = g.Input("p");
+        var gk = g.Param("k", 0.25f);
+        var cell = g.Call("cellular3", gp, gp, gk);
+        g.Output("o", g.Call("sub", g.Call("add", g.Call("mul", gp, gk), g.Pick(cell, 7)), g.Const(0.5f)));
+        var graph = g.Build();
+
+        var b = new ExprBuilder();
+        var shifted = b.Call("add", b.Input("x"), b.Const(1.5f));
+        b.Output("o", b.Substitute(graph, new Dictionary<string, ExprValue> { ["p"] = shifted })["o"]);
+        var rebuilt = b.Build();
+
+        Assert.Equal(new[] { "x" }, rebuilt.InputNames);
+        Assert.Equal(graph.ParamNames, rebuilt.ParamNames);
+        Assert.Equal(graph.ParamDefaultBits, rebuilt.ParamDefaultBits);
+        var x = Column(new System.Random(3), 512, -5f, 5f, 0.1);
+        foreach (var k in new[] { 0.25f, 0.9f })
+        {
+            var expected = x.Select(v =>
+            {
+                var p = v + 1.5f;
+                return p * k + cellular(new float3(p, p, k)).edge.w - 0.5f;
+            }).ToArray();
+            var bindings = ExprBindings.Bind(rebuilt, new Dictionary<string, float> { ["k"] = k });
+            AssertSame(expected, Run(rebuilt, bindings, x), 0, "substituted graph, k=" + k);
+        }
+
+        // A param met again with other default bits is a conflict, not a silent pick.
+        var c = new ExprBuilder();
+        c.Param("k", 0.5f);
+        Assert.Equal("port-conflict", Refusal(() => c.Substitute(graph, new Dictionary<string, ExprValue>())).Rule);
+    }
+
     private static string Signature(ExprGraph g) =>
         string.Join(";", g.InputNames) + "|" + string.Join(";", g.ParamNames.Zip(g.ParamDefaultBits, (n, v) => n + "=" + v)) + "|" +
         string.Join(";", g.OutputNames.Zip(g.OutputNodes, (n, v) => n + "=" + v)) + "|" +
