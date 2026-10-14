@@ -423,8 +423,17 @@ elements retargets nothing.
   the record's next write, or `CultCache.MintElementIds()`.
 - A store that holds an id declares the `v3` header (above), so a reader older than ids
   refuses it instead of skipping the id slot and rewriting the elements without ids.
-  TypeScript, Python and Rust read `v3` and keep a `v3` header they found when they
-  rewrite a store; they do not decide when a document carries ids.
+  A C# write also marks the store when it carries forward a record it read holding an
+  id, as long as the file still holds that record at the version it read. TypeScript,
+  Python and Rust read `v3` and keep a `v3` header they found when they rewrite a
+  store; they carry ids and do not decide when a document carries them.
+- An object list's elements are written by their `[Key]` layout, because the id is a
+  keyed member of the element. A list whose element type is not keyed
+  (`[MessagePackObject]` or `[Union]`) is a value list and is replaced whole. For an
+  object list, C# refuses at registration a concrete element type that is not keyed and
+  `[MessagePackFormatter]` on any type or member on the way to the list or on the id
+  member, and refuses at the first encode or decode of the document a formatter
+  resolver that claims one of those types.
 
 ## Canonical Semantic Schema Hash
 

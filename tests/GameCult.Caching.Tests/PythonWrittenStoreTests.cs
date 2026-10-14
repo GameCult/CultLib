@@ -67,6 +67,71 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        private static string HeaderOf(string path) =>
+            CultDocumentMessagePackSerialization.DeserializeSnapshot(File.ReadAllBytes(path)).FormatVersion;
+
+        private static async Task<(CultCache Cache, SingleFileMessagePackBackingStore Store)> PulledAsync(string path)
+        {
+            var cache = new CultCache();
+            var store = new SingleFileMessagePackBackingStore(path);
+            cache.AddBackingStore(store);
+            await cache.PullAllBackingStoresAsync();
+            return (cache, store);
+        }
+
+        // cultcache-py writes element ids under an unmarked v1 header. A C# write that carries such a record forward marks the
+        // store, because a reader from before ids would otherwise rewrite the elements without them.
+        [Test]
+        public async Task ACSharpWriteThatCopiesAPythonRecordHoldingIdsMarksTheStore()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Store("leaf-record.cc", scratch);
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "cultcache-py leaves the header unmarked");
+                var (cache, store) = await PulledAsync(path);
+                await cache.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
+                store.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV3));
+
+                var (reloaded, _) = await PulledAsync(path);
+                var py = reloaded.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single(record => record.Id == "py");
+                Assert.That(py.Items.Select(item => item.Id), Is.EqualTo(new[] { "000000000021", "000000000022" }));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
+        // What a load saw is a fact about those bytes at that version. Another writer replaced the record since, so the copy this
+        // write makes is not the record the load saw, and the header is not judged by it.
+        [Test]
+        public async Task ACopiedRecordAnotherWriterChangedIsNotJudgedByTheOldRead()
+        {
+            var scratch = Directory.CreateTempSubdirectory().FullName;
+            try
+            {
+                var path = Store("leaf-record.cc", scratch);
+                var (reader, readerStore) = await PulledAsync(path);
+
+                var (writer, writerStore) = await PulledAsync(path);
+                var py = writer.AllEntries.OfType<NumericLeafVectorTests.LeafRecord>().Single(record => record.Id == "py");
+                py.Items.Clear();
+                await writer.AddAsync(py);
+                writerStore.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1), "the replacement holds no id");
+
+                await reader.AddAsync(new NumericLeafVectorTests.LeafRecord { Id = "other" });
+                readerStore.PushAll();
+                Assert.That(HeaderOf(path), Is.EqualTo(CultPersistedStoreSnapshot.FormatV1));
+            }
+            finally
+            {
+                Directory.Delete(scratch, true);
+            }
+        }
+
         [TestCase(3)]
         [TestCase(5)]
         [TestCase(7)]

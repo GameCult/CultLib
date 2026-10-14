@@ -3545,10 +3545,12 @@ namespace GameCult.Caching
         // The header a write leaves, for either store kind: HeaderFor decides. A record's bytes do not say whether it holds an
         // element id (an id is an ordinary keyed string), so only the store header carries that fact. A write that copies any
         // record forward keeps a marked header; a write that encodes every record the store will hold decides by content. An
-        // opaque payload (null) never marks an unmarked store, and keeps a marked one marked.
-        protected static string HeaderForWrite(string? durableHeader, IReadOnlyCollection<bool?> written, bool copiesAny, bool directoryStore, bool holdsVariants) =>
+        // opaque payload (null) never marks an unmarked store, and keeps a marked one marked. A copied record this store read
+        // holding an id, at the version the file still holds, marks the store too: another runtime may have written ids under
+        // an unmarked header. Nothing a load records can unmark a store.
+        protected static string HeaderForWrite(string? durableHeader, IReadOnlyCollection<bool?> written, bool copiesAny, bool copiedHoldIds, bool directoryStore, bool holdsVariants) =>
             HeaderFor(
-                holdsIds: written.Any(value => value == true),
+                holdsIds: copiedHoldIds || written.Any(value => value == true),
                 durableHeader,
                 wholeStore: !copiesAny && written.All(value => value != null),
                 directoryStore,
@@ -3944,6 +3946,10 @@ namespace GameCult.Caching
         // A write into a store holding a variant lands only while the durable versions still equal these.
         private readonly Dictionary<string, string> _lastRead = new(StringComparer.Ordinal);
 
+        // The version of each plain record a pull decoded holding an element id. Only a positive fact about those bytes: a
+        // write marks the header for a copied record still at that version, and nothing here ever unmarks a store.
+        private readonly Dictionary<string, string> _readHoldingIds = new(StringComparer.Ordinal);
+
         /// <summary>
         /// A store file from its parts, each already encoded: a catalog entry or record this store carries forward is the bytes its
         /// file held, one it writes is <see cref="SerializeCatalogEntry"/> or <see cref="SerializeRecord"/> of the object.
@@ -4032,6 +4038,7 @@ namespace GameCult.Caching
             if (durable == null)
             {
                 _lastRead.Clear();
+                _readHoldingIds.Clear();
                 SetLastSchemaMigrationReports(Array.Empty<CultSchemaMigrationReport>());
                 SetForeignRecords(Array.Empty<CultForeignRecord>());
                 return;
@@ -4042,6 +4049,7 @@ namespace GameCult.Caching
             var persisted = new Dictionary<string, CultStoredDocument>(StringComparer.Ordinal);
             var foreign = new List<CultForeignRecord>();
             var versions = new Dictionary<string, string>(StringComparer.Ordinal);
+            var holdingIds = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var record in snapshot.Records)
             {
                 var version = versions[record.Key] = durable.Version(record.Key);
@@ -4054,6 +4062,8 @@ namespace GameCult.Caching
                 var stored = ToStoredDocument(record, version, snapshot.SchemaCatalog, DeserializePayload, out var report);
                 reports.Add(report);
                 persisted[stored.Key.Value] = stored;
+                if (stored.Variant == null && CultElementIds.Holds(stored.Document))
+                    holdingIds[stored.Key.Value] = version;
             }
 
             var loaded = persisted.Values
@@ -4071,6 +4081,9 @@ namespace GameCult.Caching
             _lastRead.Clear();
             foreach (var (key, version) in versions)
                 _lastRead[key] = version;
+            _readHoldingIds.Clear();
+            foreach (var (key, version) in holdingIds)
+                _readHoldingIds[key] = version;
             SetLastSchemaMigrationReports(reports);
             SetForeignRecords(foreign);
         }
@@ -4250,6 +4263,8 @@ namespace GameCult.Caching
                 durable?.Snapshot.FormatVersion,
                 upserts.Select(staged => staged.HoldsIds).ToArray(),
                 copiesAny: copied.Length > 0,
+                copiedHoldIds: copied.Any(record => _readHoldingIds.TryGetValue(record.Key, out var read) &&
+                                                    SameStoredIdentity(read, durable!.Version(record.Key))),
                 directoryStore: false,
                 holdsVariants: records.Any(record => record.Variant != null));
 
