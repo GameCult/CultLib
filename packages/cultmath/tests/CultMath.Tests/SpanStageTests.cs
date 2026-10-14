@@ -217,6 +217,28 @@ public sealed class SpanStageTests
             var span = Span.Draw(random, q, 0.1f, 0.1f);
             SpanNoise At(float3 p) => ridged ? stage.Ridged(p, span.Velocity, span.Speed, span.AccelerationBound, span.HalfLength) : stage.Fbm(p, span.Velocity, span.Speed, span.AccelerationBound, span.HalfLength);
             var centre = At(q);
+            // The value and gradient from an independent assembly of the octaves: pins shift, offset, octaveStep,
+            // M, lacunarity and gain themselves, which a value/gradient self-consistency check cannot see.
+            var matrix = stage.Matrix();
+            var referenceValue = 0.0;
+            var referenceGradient = new double[3];
+            for (var o = 0; o < stage.Octaves; o++)
+            {
+                var n = snoise_grad(stage.Point(q, o));
+                var sign = ridged ? -Math.Sign(n.w) : 1.0;
+                referenceValue += stage.Amplitude(o) * (ridged ? 1.0 - Math.Abs(n.w) : n.w);
+                var g = new double[] { n.x, n.y, n.z };
+                for (var i = 0; i < 3; i++)
+                for (var j = 0; j < 3; j++)
+                    referenceGradient[i] += sign * stage.Amplitude(o) * stage.Scale(o) * matrix[i, j] * g[j];
+            }
+
+            var weight = 0.0;
+            for (var o = 0; o < stage.Octaves; o++)
+                weight += stage.Amplitude(o) * stage.Scale(o) * stage.Norm();
+            Assert.True(Math.Abs(referenceValue - centre.field.w) <= 5.0e-4 * (1.0 + weight), $"stage {stage}: the value is {centre.field.w:R}, an independent octave sum gives {referenceValue:R}");
+            for (var i = 0; i < 3; i++)
+                Assert.True(Math.Abs(referenceGradient[i] - centre.field[i]) <= 5.0e-3 * (1.0 + weight), $"stage {stage}: gradient {"xyz"[i]} is {centre.field[i]:R}, an independent octave sum gives {referenceGradient[i]:R}");
             // A step of 0.02 in the noise space of the fastest octave.
             var fastest = stage.Norm() * Math.Pow(stage.Lacunarity, stage.Octaves - 1);
             var h = (float)(0.02 / fastest);
