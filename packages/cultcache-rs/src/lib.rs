@@ -708,7 +708,7 @@ fn decode_grown<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> std::result::Re
 /// result (`is_ok`), plus the caller's own frames. The figure depends on how the caller holds the result:
 /// one that moves the record out holds a second copy and needs more (about 104 KiB in debug). That holds
 /// for every record the derives produce, which [`MAX_RECORD_INLINE_BYTES`] bounds. Stack growth was
-/// verified on x86_64-pc-windows-msvc by hand (`decode_stack`, WINREV, 13 tests, debug and release); a
+/// verified on x86_64-pc-windows-msvc by hand (`decode_stack`, revision 10a39dac, 13 tests, debug and release); a
 /// `stacker` bump or a change to the stack-size tests repeats it.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;

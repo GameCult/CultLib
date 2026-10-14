@@ -474,7 +474,7 @@ guarantee. The decoder's own frames have a fixed floor that no payload changes: 
 this size from about 56 KiB in a release build and 72 KiB in a debug build for a caller that only tests the result
 (`is_ok`), plus the caller's own frames. The figure depends on how the caller holds the result: one that moves the
 record out holds a second copy and needs more (about 104 KiB in debug). Stack growth was verified on
-x86_64-pc-windows-msvc by hand (`decode_stack`, WINREV, 13 tests, debug and release); a `stacker` bump or a change
+x86_64-pc-windows-msvc by hand (`decode_stack`, revision 10a39dac, 13 tests, debug and release); a `stacker` bump or a change
 to the stack-size tests repeats it.
 The crate does not
 build for wasm32 (`fs2`), and no wasm behaviour is claimed.
