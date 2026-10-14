@@ -47,7 +47,7 @@ public sealed class GlslMirrorTests
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
     private static readonly Regex HlslOnly = new(
-        @"\b(float|u?int|bool)[234]\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
+        @"\b(float|u?int|bool)[234]\b|\bfloat3x3\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
 
     [Fact]
     public void NoHlslOnlyTokensSurvive()
@@ -630,6 +630,14 @@ public sealed class GlslMirrorTests
         new Family("float cultmath_cycles_arcsine(float)", "ulp-bounded, platform asin", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
         new Family("float cultmath_cycles_arccosine(float)", "ulp-bounded, platform acos", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
         new Family("float cultmath_cycles_arctan2(float, float)", "ulp-bounded, platform atan", r => new object[] { Uniform(r, -20.0f, 20.0f), Uniform(r, -20.0f, 20.0f) }, Platform: Platform.Ulp),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded", r => new object[] { Point3(r) }),
+        new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded",
+            r =>
+            {
+                var lo = Uniform(r, -2.0f, 0.5f);
+                return new object[] { Uniform(r, -4.0f, 4.0f), r.Next(8) == 0 ? 0.0f : Uniform(r, -4.0f, 4.0f), lo, lo + Uniform(r, 0.0f, 3.0f), Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f) };
+            }),
     }).ToArray();
 
     // The fixture text, each case's arguments given by family and point index.
@@ -693,8 +701,12 @@ public sealed class GlslMirrorTests
         _ => throw new InvalidOperationException(v.GetType().Name),
     }));
 
+    // A float3x3 flattens row by row; the matrices the library exports are symmetric, so the order is
+    // the same read as GLSL's columns.
     private static IEnumerable<object> Scalars(object value) => value is float or int or uint
         ? new[] { value }
+        : value is float3x3 matrix
+        ? new object[] { matrix._m00, matrix._m01, matrix._m02, matrix._m10, matrix._m11, matrix._m12, matrix._m20, matrix._m21, matrix._m22 }
         : value.GetType().GetFields().Where(f => !f.IsStatic).SelectMany(f => Scalars(f.GetValue(value)!));
 
     // ---- A small unified diff for the failure message ----

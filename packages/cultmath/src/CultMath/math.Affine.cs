@@ -31,7 +31,7 @@ public static partial class math
     // curvature is realised if the constant is under it. The margin over the function: a scan of the
     // whole 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
     // independently over every hash configuration gives 52.22 (Soul pass s1). A change to the snoise
-    // kernel must re-run MeasureHessian and re-pin it.
+    // kernel must re-run MeasureHessian and re-pin it. SNOISE_THIRD (math.Span.cs) is the next-order pin.
     public const float SNOISE_HESSIAN = 56.050385f;
 
     /// <summary>The point form (x, 0, 0): the value x at every eps. Exact.</summary>

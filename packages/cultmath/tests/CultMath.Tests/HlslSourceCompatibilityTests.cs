@@ -28,6 +28,8 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_smin_grad", typeof(float4), typeof(float4), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_cellular", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_grad", typeof(float3)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_hessian", typeof(float3)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_integral_clamp_linear", typeof(float), typeof(float), typeof(float), typeof(float), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_fbm_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_ridged_grad", typeof(float3), typeof(int), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_phacelle", typeof(float3), typeof(float3), typeof(float), typeof(float)));
@@ -137,7 +139,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(118, compared.Count);
+        Assert.Equal(120, compared.Count);
     }
 
     /// <summary>
@@ -377,6 +379,9 @@ public sealed class HlslSourceCompatibilityTests
     /// </summary>
     private static Leaf[] Values(object value, string path = "") => Scalars.Contains(value.GetType())
         ? new[] { new Leaf(path, value.GetType(), value) }
+        : value is float3x3 matrix
+        ? new[] { matrix._m00, matrix._m01, matrix._m02, matrix._m10, matrix._m11, matrix._m12, matrix._m20, matrix._m21, matrix._m22 }
+            .Select((entry, k) => new Leaf((path.Length == 0 ? "" : path + ".") + "_m" + k / 3 + k % 3, typeof(float), entry)).ToArray()
         : value.GetType().GetFields().Where(f => !f.IsStatic)
             .SelectMany(f => Values(f.GetValue(value)!, path.Length == 0 ? f.Name : path + "." + f.Name))
             .ToArray();
