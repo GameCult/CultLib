@@ -595,12 +595,30 @@ fn element_header(bytes: &[u8], position: usize) -> Option<(usize, Option<usize>
     })
 }
 
+/// The stack left below which a decode moves to a fresh segment. Measured (map D4): the worst
+/// distance between two stack checks is 128-144 KiB in a debug build and under 32 KiB in release,
+/// so 256 KiB leaves a margin in both. A frame larger than this between two checks still overruns.
+const DECODE_RED_ZONE: usize = 256 * 1024;
+
+/// The size of each segment a decode grows onto. It does not change the cost of a decode (map D6).
+const DECODE_STACK_SEGMENT: usize = 2 * 1024 * 1024;
+
 /// The one decode of a document payload: the nesting bound first, then the deserializer, whose own
 /// depth counter (1024) is only a backstop. A failure keeps its kind and never quotes the bytes.
 /// Readers of stored envelope payloads outside this crate decode through it too.
+///
+/// The deserializer runs under `serde_stacker`, which moves onto a fresh stack segment whenever less
+/// than the red zone remains, at every container level serde's impls descend through, skipped values
+/// included. The calling thread's stack size therefore never decides whether a payload inside the
+/// bound decodes. The one residual is a single frame larger than the red zone. On wasm32 the shadow
+/// stack grows the same way, while the engine's own call stack stays the host's limit.
 pub fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
     check_payload_depth(payload)?;
-    rmp_serde::from_slice(payload).map_err(opaque_decode_error)
+    let mut reader = rmp_serde::Deserializer::from_read_ref(payload);
+    let mut grown = serde_stacker::Deserializer::new(&mut reader);
+    grown.red_zone = DECODE_RED_ZONE;
+    grown.stack_size = DECODE_STACK_SEGMENT;
+    <T as serde::Deserialize>::deserialize(grown).map_err(opaque_decode_error)
 }
 
 /// The nesting bound for an envelope admitted without a typed decode, from the same walk that

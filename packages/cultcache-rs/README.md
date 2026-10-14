@@ -456,6 +456,16 @@ That is the Rust version of the original trick:
 The derive/registry work should preserve that shape. Its job is to remove
 manual registration ceremony, not to loosen the closed-world boundary.
 
+Payload nesting is bounded at 256 MessagePack containers, checked before any
+recursion, and typed decode then runs under `serde_stacker`, which moves onto a
+fresh stack segment whenever less than 256 KiB of stack remains. A payload inside
+the bound therefore decodes on a small thread instead of aborting the process;
+past the bound the refusal is a typed `PayloadTooDeep`. The residual is a single
+stack frame larger than the 256 KiB red zone. Stack growth on Windows is not yet
+verified. On wasm32 the shadow stack grows the same way, but the engine's own
+call stack remains the host's limit. Building the crate needs a C toolchain
+(`psm`, `stacker`).
+
 ## License
 
 Private GameCult infrastructure for now. Public packaging can wait until the
