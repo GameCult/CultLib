@@ -25,6 +25,8 @@ copy of the solver and the warm/cold sweep, `suite` a scratch copy of `packages/
    `py-ts-store-cross-process-lock`). It is a store parity cut of its own; `convert` does not need it (P15).
 6. Not mapped: the C# leaf-vectors revision (`leaf-vectors-next`) gains the P2 map-key rows, so the Python
    key tests read C#-written bytes instead of literals.
+7. `decode-stack-safety` (section D): cultcache-rs's one decode door grows its stack at every container level
+   (ruling `decode-stack-mechanism-ruled`). Independent of 5 and 6; thing2's contract-rs merge waits on it.
 
 ## B. BoundedLeastSquares stopping
 
@@ -484,6 +486,110 @@ float32 NaN (Soul s3). Python reads both widths as one `float` and cannot tell t
 refused both ways as `duplicate_map_key`. On the mixed-width pair this refuses something the reference accepts,
 the same kind of residual as `1` beside `1.0`. The other choice would read two float64 NaN keys that the
 reference refuses.
+
+## D. cultcache-rs decode stack safety (cut `decode-stack-safety`)
+
+Pinned base: `origin/main` at `ae6ef5a8` (2026-10-14). Imagination pass `imagination-decode-stack`, session
+`self-2026-10-14-eureka`. Ruling `decode-stack-mechanism-ruled` (grow-stack); prior art
+`docs/research/decode-stack-safety.md`. Probes live under the session scratchpad, `imagination-decode-stack/`:
+`probe` decodes through a scratch copy of cultcache-rs at the base whose derive calls a hook per derived level
+(off, observe the stack used between levels, or `stacker::maybe_grow`), against Eve's `thing-contract` at
+`2467e1b`; `wasmprobe` is the wasm run. Yggdrasil rust image (rustc 1.95.0, rmp-serde 1.3.1, serde_stacker
+0.1.14, stacker 0.1.25, psm 0.1.32), jobs `job1` to `job5`. None of it is committed.
+
+Shapes: `box` is a thing-contract Box chain (3 containers a level, the bound admits 83), `repeat` a Repeat chain
+(2 a level, admits 125), `fat` a 32-slot record of `[u64; 32]` with an `Option<Box<Self>>` slot (1 a level,
+admits 255, so the leaf arrays sit at depth 256), `json` a one-slot record holding a `serde_json::Value` nested
+255 arrays, `ignored` a one-slot record whose extra trailing slot nests 255 arrays (skipped as `IgnoredAny`).
+
+### Body facts
+
+D1. **Today's abort, reproduced.** `decode_payload` at the bound, first level that aborts (process abort, no
+exit code, every time):
+
+| Profile, thread | box (83) | repeat (125) | fat (255) | json, 64 KiB | ignored, 32 KiB |
+|---|---|---|---|---|---|
+| release, 1 MiB | 44 | 56 | 13 | 115 | 24 |
+| release, 2 MiB | ok | 114 | 25 | | |
+| debug, 1 MiB | 11 | 14 | 5 | 15 | 8 |
+| debug, 2 MiB | 23 | 30 | 10 | | |
+
+One level past the bound is refused typed (`PayloadTooDeep { depth: 257, limit: 256 }`) for every shape and
+every variant, before any recursion.
+
+D2. **Recursion points.** Per container level a typed decode passes through: the derive's generated
+`Deserialize::deserialize` (`cultcache-rs-derive/src/lib.rs:294-330` for slots, `534-684` for unions), which
+calls `deserialize_tuple`; rmp-serde's `Deserializer::any_inner` (`decode.rs:530`), which calls
+`visitor.visit_seq`/`visit_map`/`visit_newtype_struct` under `depth_count!` (566, 583, 616); the derive's
+`visit_seq`, whose frame holds one `Option<T>` per slot; and `next_element`, which re-enters either a derived
+type, serde's own impls (`Vec`, `Option`, `Box`) or another crate's (`serde_json::Value`, `rmpv::Value`).
+rmp-serde 1.3.1 has no skip of its own: `IgnoredAny` goes through `any_inner` and a visitor like any value.
+`check_payload_depth` is iterative.
+
+D3. **Where the grow must sit.** A `maybe_grow` in the derive's `deserialize` covers derived levels only: `json`
+on a 64 KiB debug thread still aborts at 15 with a 32 KiB red zone, and passes only when the first derived
+level happens to hand it a whole new segment. A `serde_stacker::Deserializer` over rmp-serde at the door checks
+at every `deserialize_*` call it forwards (`maybe_grow` at `de.rs:476, 489, 502, 511, 520`), so
+rmp-serde's recursion, serde's impls, foreign `Value` types and `IgnoredAny` skips all re-enter through a check:
+every shape passes in both profiles (D4). Consumers decode non-derived recursive types through the door today:
+cultnet-rs `replication.rs:525` (`serde_json::Value`) and `contracts.rs:607` (`rmpv::Value`).
+
+D4. **The frame between checks, measured.** Stack used from one derived `deserialize` to the next nested one,
+at the bound: release box 13,168 B, repeat 12,192 B, fat 84,944 B; debug box 52,064 B, repeat 49,760 B, fat
+207,504 B. The door wrapper checks more often, so its gap is smaller: release, every shape passes at a red zone
+of 32 KiB on 128 KiB, 1 MiB and 2 MiB threads; debug, box and repeat pass at 32 KiB, fat fails at 128 KiB and
+passes at 144 KiB through 256 KiB (1 MiB thread). So the worst gap constructed is between 128 and 144 KiB,
+the debug `visit_seq` of the 32-slot record. serde_stacker's defaults (red zone 64 KiB, segment 2 MiB,
+`param.rs:10-11`) fail debug fat. The cut sets 256 KiB and 2 MiB: 1.8x the worst measured gap. A type whose
+single `visit_seq` frame exceeds the red zone can still overflow; that is documented, not prevented.
+
+D5. **Same values, same errors.** Through the wrapper, box 83, repeat 125 and a 1,000-node surface decode equal
+to the plain decode. The wrapper forwards `is_human_readable` (`de.rs:313`) and returns rmp-serde's own error
+type, so `opaque_decode_error` and the derive's refusal texts are unchanged.
+
+D6. **Cost.** No growth (release, repeat 125 on an 8 MiB thread): 322-339 us through the wrapper against 320 us
+plain. A shallow 27 KB, 1,000-node surface on 1 MiB: 1.57 ms plain, 1.61-1.80 ms wrapped (run-to-run noise is
+about that wide). When the decode does grow, it pays for faulting in fresh segment pages: repeat 125 on a 1 MiB
+thread 1.5-1.7 ms; fat 255 on 1 MiB 25 ms against 9.3 ms on a 64 MiB thread. A 1 MiB and a 2 MiB segment cost
+the same.
+
+D7. **Windows x86_64: source read, not run.** stacker 0.1.25 does not use psm on Windows: `backends/windows.rs`
+grows by fibers (`ConvertThreadToFiber`, `CreateFiber`, `SwitchToFiber`, `SetThreadStackGuarantee`), reads the
+limit with `VirtualQuery`, and links a C helper built by `cc`. psm's README marks its own Windows stack switching
+disabled; that is the other layer, so the research's conflict (C) is two layers, not a contradiction. Yggdrasil
+has no Windows: the rust image carries `x86_64-pc-windows-gnu` (cross-compile, no run). Whether it actually grows
+on Starfire is question `decode-stack-windows-check`.
+
+D8. **wasm32: stacker is not a no-op.** psm's `build.rs:53` ships a precompiled `wasm32.o` and sets
+`switchable_stack`; stacker then allocates segments from the global allocator with no guard page
+(`alloc_stack_restore_guard.rs`). `remaining_stack()` is `None` on wasm, so the first check always grows and
+the limit is known from then on. Under wasmtime 48.0.5 (wasm32-wasip1, release), a nested 9-slot record: plain
+decodes 48 levels and traps at 64 ("out of bounds memory access" at `0xffffe510`: the stack-first shadow stack
+wrapped below zero); wrapped decodes 64, 255, 400 and 600 levels (linear memory 1,088 KiB before, 8,896 KiB
+after 255) and traps at 1,000 with "call stack exhausted", the engine's own stack, which stacker cannot grow.
+`wasm32-unknown-unknown` builds. This corrects the ruling's premise that wasm keeps the abort: the shadow stack
+grows and the engine stack is the host's setting, so the documentation says that instead.
+
+D9. **Dependency.** `serde_stacker` 0.1.14 (dtolnay), pulling `stacker` 0.1.25 and `psm` 0.1.32 (rust-lang),
+all `MIT OR Apache-2.0`; plus `cfg-if`, `libc`, `cc` (build) and `windows-sys` on Windows. psm assembles and
+stacker compiles C at build time, so a C toolchain becomes a build requirement (gcc in the rust image, MSVC on
+Starfire). cultcache-rs is MIT. Written by hand, the wrapper would be serde_stacker's ~650 lines of forwarding.
+
+### Authority, and why
+
+The door owns stack safety as it owns the bound: `decode_payload` runs the bound walk, then rmp-serde through
+`serde_stacker::Deserializer` with two private constants. The ruling's "every container level the derive and the
+door descend through" is met there, because every derived level is entered through the wrapper (D3); a
+`maybe_grow` in the derive would be a second owner of the same check, needs a red zone of 128 KiB in release
+and 256 KiB in debug for fat where the wrapper needs 32 and 144 KiB (D4), and still misses foreign recursive types. The derive is unchanged.
+
+The thread's size no longer decides whether an accepted payload decodes, on targets where stacker switches
+stacks. rmp-serde's 1024 counter stays a backstop that never decides. Callers that decode a payload with
+`rmp_serde::from_slice` directly bypass the door, the bound and the grow alike; cultnet-rs re-decodes
+door-checked `rmpv::Value`s that way (follow-up `rs-redecode-outside-door-r2`).
+
+Rejected inside the ruling: the derive placement (above), and writing the wrapper by hand (D9: established
+tooling, one owner upstream).
 
 ## Observed, not owned by these cuts
 
