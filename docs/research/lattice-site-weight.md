@@ -34,7 +34,9 @@ The eureka-state view of the question id failed (`view` wants a PipelineRef, not
 
 Scripts: `siteweight_probe.py`, `siteweight_probe2.py`; raw numbers `probe_results.json`, `probe_results2.json`. numpy, scratch; hash is a lowbias32-style integer hash (stand-in for pcg3d). Units: lattice cell = 1; domain [1,7]^2, 500x500 grid (600 for shape rows); wells with radii .6-1.2 cells orbiting a centre; weight `wt = base(.5..1) * (1 + B*prox)`, B = 1.6, WIN = 2, the fauna probe's smooth-min and border output.
 
-Variants: `base` (no field); `site` (field at the jittered site position: the fauna probe's method); `qpt` (field at the query point, same factor on every candidate); `cellc` (node calls the field at the integer cell centre, `cell + .5`, no jitter); `site_t0` (as `site` but field read at t=0 while wells have moved); `warp` (extra: query scaled `q*(1+B*prox(q))`).
+Correction (2026-10-14, from the Aetheria Self's body-Voronoi probe, Aetheria 05a44541): the fauna probe's `trophic_probe.py` weights at the cell centre `(cx+.5)*LAT` (section 1 above), which is the `cellc` variant below, not `site`. An earlier label here called `site` the fauna probe's method.
+
+Variants: `base` (no field); `site` (field at the jittered site position); `qpt` (field at the query point, same factor on every candidate); `cellc` (node calls the field at the integer cell centre, `cell + .5`, no jitter); `site_t0` (as `site` but field read at t=0 while wells have moved); `warp` (extra: query scaled `q*(1+B*prox(q))`).
 
 ### 4a. Winner identity, fraction of grid pixels whose winning cell differs (t=0 / t=8)
 
