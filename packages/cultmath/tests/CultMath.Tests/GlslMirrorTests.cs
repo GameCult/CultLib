@@ -47,7 +47,7 @@ public sealed class GlslMirrorTests
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
     private static readonly Regex HlslOnly = new(
-        @"\b(float|u?int|bool)[234]\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
+        @"\b(float|u?int|bool)[234]\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
 
     [Fact]
     public void NoHlslOnlyTokensSurvive()
@@ -625,7 +625,12 @@ public sealed class GlslMirrorTests
     }.Concat(new[]
     {
         "blend", "add", "mul", "screen", "overlay", "sub", "div", "diff", "exclusion", "dark", "light", "dodge", "burn", "hue", "sat", "val", "color", "soft", "linear",
-    }.Select(mode => new Family($"vec3 cultmath_cycles_mix_{mode}(float, vec3, vec3)", "ulp-bounded", r => new object[] { CyclesFactor(r), CyclesColor(r), CyclesColor(r) }))).ToArray();
+    }.Select(mode => new Family($"vec3 cultmath_cycles_mix_{mode}(float, vec3, vec3)", "ulp-bounded", r => new object[] { CyclesFactor(r), CyclesColor(r), CyclesColor(r) }))).Concat(new[]
+    {
+        new Family("float cultmath_cycles_arcsine(float)", "ulp-bounded, platform asin", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
+        new Family("float cultmath_cycles_arccosine(float)", "ulp-bounded, platform acos", r => new object[] { Uniform(r, -1.5f, 1.5f) }, Platform: Platform.Ulp),
+        new Family("float cultmath_cycles_arctan2(float, float)", "ulp-bounded, platform atan", r => new object[] { Uniform(r, -20.0f, 20.0f), Uniform(r, -20.0f, 20.0f) }, Platform: Platform.Ulp),
+    }).ToArray();
 
     // The fixture text, each case's arguments given by family and point index.
     private static string GoldenFixture(Func<int, int, object[]> arguments)

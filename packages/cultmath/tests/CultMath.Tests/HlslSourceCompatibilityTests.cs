@@ -137,7 +137,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(115, compared.Count);
+        Assert.Equal(118, compared.Count);
     }
 
     /// <summary>

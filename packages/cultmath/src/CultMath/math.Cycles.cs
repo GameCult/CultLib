@@ -92,10 +92,17 @@ public static partial class math
         return b != 0.0f ? (a < 0.0f ? -remainder : remainder) : 0.0f;
     }
 
-    /// <summary>Math node Floored Modulo (safe_floored_modulo): a - floor(a / b) b, or 0 when b is 0.</summary>
+    /// <summary>Math node Floored Modulo (safe_floored_modulo): a - floor(a / b) b, or 0 when b is 0, with one IEEE single
+    /// rounding per operation (the reference of ruling cycles-kernel-reference-ruled). A build that contracts
+    /// a - floor(a / b) b into one fused operation differs by at most 2^-23 (|a / b| + 1) |b| (measured 0.91 of 2^-24 (|a| + |b|)
+    /// on Blender 5.2.2's AVX2 kernel); a fast-math build may also move floor(a / b) by one near an integer quotient,
+    /// so the result differs by a whole |b|. See tools/cycles-oracle/README.md.</summary>
     public static float cycles_floored_modulo(float a, float b) => b != 0.0f ? a - floor(a / b) * b : 0.0f;
 
-    /// <summary>Math node Wrap (wrapf; note the argument order): value wrapped into [min_value, max_value), or min_value for an empty range.</summary>
+    /// <summary>Math node Wrap (wrapf; note the argument order): value wrapped into [min_value, max_value), or min_value for an empty range,
+    /// with one IEEE single rounding per operation. A build that contracts value - range floor(...) into one fused operation differs by at
+    /// most 2^-23 (|value| + |min_value| + |range|) (measured 0.77 of 2^-24 on the AVX2 kernel); a fast-math build may also move floor by one,
+    /// a whole |range|. See tools/cycles-oracle/README.md.</summary>
     public static float cycles_wrap(float value, float max_value, float min_value)
     {
         var range = max_value - min_value;
@@ -137,6 +144,15 @@ public static partial class math
 
     /// <summary>Math node Sign (compatible_signf): 0 for 0, -1 below, 1 above.</summary>
     public static float cycles_sign(float a) => a == 0.0f ? 0.0f : (a < 0.0f ? -1.0f : 1.0f);
+
+    /// <summary>Math node Arcsine (safe_asinf, util/math_base.h): asin of a clamped to [-1, 1].</summary>
+    public static float cycles_arcsine(float a) => asin(clamp(a, -1.0f, 1.0f));
+
+    /// <summary>Math node Arccosine (safe_acosf, util/math_base.h): acos of a clamped to [-1, 1].</summary>
+    public static float cycles_arccosine(float a) => acos(clamp(a, -1.0f, 1.0f));
+
+    /// <summary>Math node Arctan2 (compatible_atan2, util/math_base.h; a is y, b is x): 0 at the origin, else atan2(a, b).</summary>
+    public static float cycles_arctan2(float a, float b) => (b == 0.0f && a == 0.0f) ? 0.0f : atan2(a, b);
 
     // ---- Map Range node (kernel/svm/map_range.h svm_node_map_range) ----
     // A Map Range node's Clamp option is a Clamp node of type Range on its result (MapRangeNode::expand):

@@ -17,15 +17,33 @@ script and runs only under Blender, never under a plain Python.
 
 It refuses to run under any Blender but **5.2.2 LTS, build hash `d13f752e3b9c`**, exits nonzero and names
 the version and build it found beside the ones it needs. Blender 5.2.2 is
-<https://download.blender.org/release/Blender5.2/> (`blender-5.2.2-linux-x64.tar.xz`, or the Windows build
-from Steam). The fixtures record the version, the hash and the platform they were written on.
+<https://download.blender.org/release/Blender5.2/> (`blender-5.2.2-linux-x64.tar.xz`). The platform is Linux x64: the fixtures reproduce
+byte for byte only there, and the Steam/Windows build is another build (see below). The fixtures record the
+version, the hash and the platform they were written on, as provenance.
 
-## The CPU kernel
+## The reference and other builds
 
-Cycles' AVX2 CPU kernel is compiled with fused multiply-add, so an expression such as `a - floor(a / b) b` is
-one fused operation there, and CultMath's C# (which fuses nothing) computes the unfused one. The fixtures pin
-the SSE4.2 kernel, which has no FMA, by `CYCLES_CPU_NO_AVX2=1`; the tool bakes `10000 mod 0.1` before anything
-else and exits 4 if the result is the fused one, so a run on the wrong kernel writes nothing.
+Ruling `cultmath-tapes:ruling:cycles-kernel-reference-ruled`: CultMath's Cycles converters mean Cycles' formulas
+evaluated with IEEE single rounding per operation, and the Linux SSE4.2 oracle stays their bit-exact witness.
+Every other Cycles build (AVX2 FMA-contracted, MSVC /fp:fast, GPU backends) and CultMath's own HLSL lowering are
+held to a stated per-function tolerance class measured on that build; cancellation-prone functions (floored
+modulo, wrap) get an error bound relative to |b| and a documented divergence note.
+
+Cycles' AVX2 CPU kernel is compiled with fused multiply-add, so `a - floor(a / b) b` is one fused operation
+there, and CultMath's C# (which fuses nothing) computes the unfused one. The fixtures pin the SSE4.2 kernel,
+which has no FMA, by `CYCLES_CPU_NO_AVX2=1`; the tool bakes `10000 mod 0.1` before anything else and exits 4 if
+the result is the fused one, so a run on the wrong kernel writes nothing. Other kernels are other builds:
+measured under the table below, never written to these fixtures.
+
+| build | how it was measured | fixture | per-function ulp or bound |
+| --- | --- | --- | --- |
+| Blender 5.2.2 Linux x64, SSE4.2 kernel (the reference) | `oracle.py` with `CYCLES_CPU_NO_AVX2=1`; `CyclesOracleTests` holds every function to the fixtures | `tests/CultMath.Tests/fixtures/cycles-oracle/*.json` | 0 ulp, every function |
+| Blender 5.2.2 Linux x64, AVX2 kernel | the same oracle without the pin, 1024 rows per function, against the single-rounding model `fma(-floor(a / b), b, a)` (wrap: `fma(-range, floor((value - min) / range), value)`) | none committed | floored modulo: at most 2^-23 (\|a / b\| + 1) \|b\|, measured 0.91 of 2^-24 (\|a\| + \|b\|) on 151 rows; wrap: at most 2^-23 (\|value\| + \|min\| + \|range\|), measured 0.77 of 2^-24 on 30 rows; other functions unmeasured |
+
+The divergence note: a build compiled with fast-math may also move `floor(a / b)` by one near an integer
+quotient, so the result differs by a whole \|b\| (wrap: a whole range). Further rows come from follow-up
+`cultmath-tapes:follow_up:cycles-tolerance-classes`; its per-build fixtures go under
+`fixtures/cycles-oracle/<build>/` with their tolerances beside `Tolerances` in `CyclesOracleTests`.
 
 ## Method
 
@@ -42,8 +60,8 @@ whose product with 255 is the entry's index, so the first 256 cases are the ramp
 ## Fixtures
 
 Written by this tool and never edited by hand. Rerunning it under the same Blender build on the same
-platform rewrites them byte for byte; another platform's libm can differ in the transcendental families
-(`power`, `logarithm`), which is why `CyclesOracleTests` states a tolerance for them.
+platform rewrites them byte for byte; `CyclesOracleTests` holds every function to them at 0 ulp. Run the
+oracle on Yggdrasil-class Linux, never on the workstation.
 
 ## Licence
 

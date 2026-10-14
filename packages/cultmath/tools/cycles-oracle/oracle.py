@@ -9,8 +9,11 @@
 # the node under test with Cycles on the CPU and writes tests/CultMath.Tests/fixtures/cycles-oracle/<family>.json.
 # Method: operands go into float, Non-Color input images read with Closest interpolation; one Emit bake per
 # output channel (1 sample, margin 0, no denoising) writes the node's result to a float image whose pixels are
-# the results, bit for bit. The fixtures are this tool's output and are never edited by hand.
+# the results, bit for bit. The fixtures are this tool's output and are never edited by hand. They witness the
+# reference of ruling cultmath-tapes:ruling:cycles-kernel-reference-ruled (one IEEE single rounding per operation,
+# the SSE4.2 kernel, CYCLES_CPU_NO_AVX2=1); other kernels are other builds and are never written here.
 
+import hashlib
 import json
 import os
 import sys
@@ -60,7 +63,8 @@ def bits(value):
 
 
 def rng_for(name):
-    return np.random.default_rng(int.from_bytes(name.encode(), "little") % (2**32))
+    # One stream per name: a function, a blend mode's second colours (name + "2"), a ramp. Sharing a seed shares the draws.
+    return np.random.default_rng(int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little"))
 
 
 def new_image(name, rgba=None):
@@ -232,6 +236,9 @@ MATH = [
     ("cycles_trunc", "TRUNC", 1, [SPECIAL], [(-20, 20)]),
     ("cycles_fract", "FRACT", 1, [SPECIAL], [(-20, 20)]),
     ("cycles_sign", "SIGN", 1, [SPECIAL], [(-20, 20)]),
+    ("cycles_arcsine", "ARCSINE", 1, [SPECIAL], [(-1.5, 1.5)]),
+    ("cycles_arccosine", "ARCCOSINE", 1, [SPECIAL], [(-1.5, 1.5)]),
+    ("cycles_arctan2", "ARCTAN2", 2, [SPECIAL, SPECIAL], [(-20, 20)] * 2),
 ]
 
 # Operands that must be present as exact pairs whatever the random draws: the quirks the port names.
@@ -244,6 +251,10 @@ EXTRA_ROWS = {
     # Burn with a divisor of exactly 0 (tm + t col2 = 0) and a colour above 1: the result is 1 for the channel Cycles reads
     # as 0, and an infinity the film would hide for the others.
     "cycles_mix_burn": [(2.0, 1.5, 0.5, 2.5, 0.5, 0.5, 0.5), (0.5, 1.5, 2.0, 3.0, -1.0, -1.0, -1.0)],
+    # safe_asinf / safe_acosf clamp to [-1, 1]; compatible_atan2 guards only the origin (y = a, x = b).
+    "cycles_arcsine": [(2.0,), (-2.0,), (1.0,), (-1.0,), (1.0000001,), (-1.0000001,), (1.5,)],
+    "cycles_arccosine": [(2.0,), (-2.0,), (1.0,), (-1.0,), (1.0000001,), (-1.0000001,), (1.5,)],
+    "cycles_arctan2": [(0.0, 0.0), (0.0, -0.0), (-0.0, -0.0), (-0.0, -1.0), (0.0, -1.0), (1.0, 0.0), (-1.0, 0.0), (1.0e-7, -1.0e-7)],
     "cycles_modulo": [(0.3, 0.1), (-0.3, 0.1), (5.5, -2.0), (-5.5, -2.0), (1.0, 0.0), (1.0e7, 3.0), (7.0, 7.0), (-7.0, 7.0)],
 }
 
@@ -309,6 +320,11 @@ def family_map_range():
             columns[1][CASES - 1 - r], columns[2][CASES - 1 - r] = max(columns[1][CASES - 1 - r], columns[2][CASES - 1 - r]), min(columns[1][CASES - 1 - r], columns[2][CASES - 1 - r])
         for r in range(16, 24):
             columns[5][CASES - 1 - r] = float(r - 18)
+        if kind == "SMOOTHSTEP":
+            # An overflowing range: from_max - from_min is infinite, and Cycles' smoothstep decides x >= edge1 before dividing.
+            for r, row in ((24, (3.0e38, -3.0e38, 3.0e38, 0.0, 1.0, 4.0)), (25, (3.0e38, 3.0e38, -3.0e38, 0.0, 1.0, 4.0))):
+                for k in range(6):
+                    columns[k][CASES - 1 - r] = row[k]
         images = pack_operands(columns)
 
         def build(tree, imgs, kind=kind):
@@ -526,11 +542,12 @@ def identity_check():
 
 
 def kernel_check():
-    """The CPU kernel must not fuse multiply-adds.
+    """The fixtures witness the ruled reference: Cycles' formulas with one IEEE single rounding per operation.
 
-    Cycles' AVX2 CPU kernel is compiled with FMA, so a - floor(a / b) b is one fused operation there and
-    10000 mod 0.1 is -1.5e-4; the SSE4.2 kernel has none, and gives the unfused result 0 that CultMath's C#
-    computes. The fixtures pin the SSE4.2 kernel: run with CYCLES_CPU_NO_AVX2=1.
+    Ruling cultmath-tapes:ruling:cycles-kernel-reference-ruled. Cycles' AVX2 CPU kernel is compiled with FMA, so
+    a - floor(a / b) b is one fused operation there and 10000 mod 0.1 is -1.5e-4; the SSE4.2 kernel has none, and
+    gives the unfused result 0 that CultMath's C# computes. Other kernels are other builds, measured under the
+    tolerance classes and never written here: run with CYCLES_CPU_NO_AVX2=1.
     """
     a = f32([10000.0] * CASES)
     b = f32([0.1] * CASES)
@@ -547,7 +564,7 @@ def kernel_check():
 
     got = bake("kernel", images, build, 1)[0]
     if not np.array_equal(got.view(np.uint32), unfused.astype(np.float32).view(np.uint32)):
-        sys.stderr.write("cycles-oracle: this Cycles CPU kernel fuses multiply-adds; run with CYCLES_CPU_NO_AVX2=1\n")
+        sys.stderr.write("cycles-oracle: this Cycles CPU kernel fuses multiply-adds, which is not the reference of ruling cycles-kernel-reference-ruled; run with CYCLES_CPU_NO_AVX2=1\n")
         sys.exit(4)
 
 

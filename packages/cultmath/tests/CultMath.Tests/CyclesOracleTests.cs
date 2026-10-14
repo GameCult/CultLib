@@ -6,25 +6,24 @@ namespace CultMath.Tests;
 
 /// <summary>
 /// math.cycles_* and the shader mirror's cultmath_cycles_* (shaders/CultMath.Cycles.hlsl, compiled as C#) against
-/// the results of Blender 5.2.2's own Cycles on the CPU. The fixtures under fixtures/cycles-oracle are written by
+/// the results of Blender 5.2.2's own Cycles on the CPU, the reference of ruling
+/// cultmath-tapes:ruling:cycles-kernel-reference-ruled: Cycles' formulas with one IEEE single rounding per
+/// operation. The fixtures under fixtures/cycles-oracle are written by
 /// tools/cycles-oracle/oracle.py (never by hand): each case is the operands and the node's baked results as
 /// float32 bit patterns. Every function is compared at every case within the tolerance named in
 /// <see cref="Tolerances"/>; a function not named there is held to 0 ulp. Signed zeros are not distinguished (-0
 /// equals 0), and NaN equals NaN. The fixtures come from Cycles' SSE4.2 CPU kernel, which does not fuse
-/// multiply-adds as C# does not (oracle.py checks this before it bakes). Cycles' film writes 0 for an infinite or
+/// multiply-adds as C# does not (oracle.py checks this before it bakes); other builds are other tolerance classes
+/// (tools/cycles-oracle/README.md). Cycles' film writes 0 for an infinite or
 /// NaN result, so a case whose result here is not finite and whose fixture result is 0 holds nothing to compare.
 /// </summary>
 public sealed class CyclesOracleTests
 {
-    // The ulp distance a function is allowed from Cycles. The two that call the platform's libm have the bound the
-    // golden fixture gives a platform libm family (GlslMirrorTests, Platform.Ulp): Blender's powf and logf are
-    // glibc's, measured here at 0 ulp from MathF.Pow and MathF.Log on Linux, and another OS's libm may differ by
-    // one. That allowance is the golden fixture's, not a measurement on another OS.
-    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new()
-    {
-        ["cycles_power"] = (1, "0 ulp on Linux"),
-        ["cycles_logarithm"] = (1, "0 ulp on Linux"),
-    };
+    // The ulp distance a function is allowed from the reference. Empty: the fixtures are the SSE4.2 kernel's results
+    // and every function equals them, power and logarithm included (glibc's powf and logf, 0 ulp from MathF on Linux).
+    // An entry needs a measured case on the reference named in it (a failing case's bits and ulp); other builds'
+    // tolerances belong to the class table in tools/cycles-oracle/README.md, not here.
+    private static readonly Dictionary<string, (int Ulp, string Measured)> Tolerances = new();
 
     private const string CSharp = "C#";
     private const string Mirror = "HLSL mirror";
@@ -232,6 +231,145 @@ public sealed class CyclesOracleTests
         Assert.Equal(0.0f, One("cycles_inverse_sqrt", 0.0f));
         Assert.Equal(0.0f, One("cycles_modulo", 1.0f, 0.0f));
         Assert.Equal(0.0f, One("cycles_floored_modulo", 1.0f, 0.0f));
+    }
+
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void InverseTrigonometryFollowsTheCyclesGuards(string target)
+    {
+        // util/math_base.h: safe_asinf and safe_acosf clamp to [-1, 1] before asinf and acosf; compatible_atan2 returns 0
+        // at the origin (x == 0 && y == 0) and is atan2f everywhere else, so its guard is only the origin.
+        float One(string function, params float[] arguments) => (float)Call(target, function, arguments.Cast<object>().ToArray());
+        Assert.Equal(MathF.Asin(1.0f), One("cycles_arcsine", 2.0f));
+        Assert.Equal(MathF.Asin(-1.0f), One("cycles_arcsine", -1.5f));
+        Assert.Equal(MathF.Asin(1.0f), One("cycles_arcsine", 1.0000001f));
+        Assert.Equal(0.0f, One("cycles_arccosine", 2.0f));
+        Assert.Equal(MathF.Acos(-1.0f), One("cycles_arccosine", -2.0f));
+        Assert.Equal(0.0f, One("cycles_arctan2", 0.0f, 0.0f));
+        Assert.Equal(0.0f, One("cycles_arctan2", 0.0f, -0.0f));
+        Assert.Equal(0.0f, One("cycles_arctan2", -0.0f, -0.0f));
+        Assert.Equal(MathF.Atan2(-0.0f, -1.0f), One("cycles_arctan2", -0.0f, -1.0f));
+        Assert.Equal(MathF.Atan2(0.0f, -1.0f), One("cycles_arctan2", 0.0f, -1.0f));
+        Assert.Equal(MathF.Atan2(1.0f, 0.0f), One("cycles_arctan2", 1.0f, 0.0f));
+        Assert.Equal(MathF.Atan2(-1.0f, 0.0f), One("cycles_arctan2", -1.0f, 0.0f));
+        // The guard is the origin alone: a guard on either zero would zero these (the plain atan2 values are pi and pi/2).
+        Assert.NotEqual(0.0f, One("cycles_arctan2", 0.0f, -1.0f));
+        Assert.NotEqual(0.0f, One("cycles_arctan2", 1.0f, 0.0f));
+        foreach (var value in new[] { One("cycles_arcsine", 2.0f), One("cycles_arccosine", -2.0f), One("cycles_arctan2", 0.0f, -0.0f), One("cycles_arctan2", 1.0f, 0.0f) })
+            Assert.True(float.IsFinite(value));
+    }
+
+    [Theory]
+    [MemberData(nameof(Targets))]
+    public void MapRangeSmoothStepDecidesTheTopEdgeBeforeDividing(string target)
+    {
+        // util/math_base.h smoothstep returns 1 for x >= edge1 before it forms t. With an overflowing range
+        // (high - low = infinity) the division would be infinity / infinity, NaN.
+        float Smooth(params float[] arguments) => (float)Call(target, "cycles_map_range_smoothstep", arguments.Cast<object>().ToArray());
+        Assert.Equal(1.0f, Smooth(3.0e38f, -3.0e38f, 3.0e38f, 0.0f, 1.0f));
+        Assert.Equal(0.0f, Smooth(3.0e38f, 3.0e38f, -3.0e38f, 0.0f, 1.0f));
+        Assert.Equal(0.0f, Smooth(-3.0e38f, -3.0e38f, 3.0e38f, 0.0f, 1.0f));
+    }
+
+    [Fact]
+    public void FlooredModuloAndWrapUnderContractionStayWithinTheBound()
+    {
+        // Ruling cycles-kernel-reference-ruled: a build that contracts a - floor(a / b) b into one fused operation differs
+        // from the reference by at most 2^-23 (|a| + |b|), and the wrap model by 2^-23 (|value| + |min| + |range|). The fused
+        // model is MathF.FusedMultiplyAdd, test-only; no cycles_* function uses it.
+        var bound = Math.ScaleB(1.0, -23);
+        var worstModulo = 0.0;
+        var worstWrap = 0.0;
+        var seenPair = false;
+        foreach (var entry in Load("math")["functions"]!.AsArray())
+        {
+            var name = (string)entry!["function"]!;
+            if (name != "cycles_floored_modulo" && name != "cycles_wrap")
+                continue;
+            foreach (var line in entry["cases"]!.AsArray())
+            {
+                var o = ((string)line!).Split(" -> ")[0].Split(' ').Select(Float).ToArray();
+                if (name == "cycles_floored_modulo")
+                {
+                    float a = o[0], b = o[1];
+                    if (b == 0.0f)
+                        continue;
+                    var fused = MathF.FusedMultiplyAdd(-MathF.Floor(a / b), b, a);
+                    var scale = Math.Abs((double)a) + Math.Abs((double)b);
+                    var difference = Math.Abs((double)fused - math.cycles_floored_modulo(a, b));
+                    Assert.True(difference <= bound * scale, $"floored modulo ({line}): fused {fused} is {difference / scale} of |a| + |b| from the reference");
+                    worstModulo = Math.Max(worstModulo, difference / scale);
+                    if (a == 10000.0f && b == 0.1f)
+                    {
+                        seenPair = true;
+                        Assert.Equal(-1.4901161e-4f, fused);
+                        Assert.Equal(0.0f, math.cycles_floored_modulo(a, b));
+                    }
+                }
+                else
+                {
+                    float value = o[0], max = o[1], min = o[2];
+                    var range = max - min;
+                    if (range == 0.0f)
+                        continue;
+                    var fused = MathF.FusedMultiplyAdd(-range, MathF.Floor((value - min) / range), value);
+                    var scale = Math.Abs((double)value) + Math.Abs((double)min) + Math.Abs((double)range);
+                    var difference = Math.Abs((double)fused - math.cycles_wrap(value, max, min));
+                    Assert.True(difference <= bound * scale, $"wrap ({line}): fused {fused} is {difference / scale} of |value| + |min| + |range| from the reference");
+                    worstWrap = Math.Max(worstWrap, difference / scale);
+                }
+            }
+        }
+
+        Assert.True(seenPair, "the fixture holds no (10000, 0.1) floored modulo case");
+        // The cases reach the contraction regime: a bound of 2^-25 would fail.
+        Assert.True(worstModulo > Math.ScaleB(1.0, -25), $"the worst floored modulo contraction is only {worstModulo} of |a| + |b|");
+        Assert.True(worstWrap > Math.ScaleB(1.0, -25), $"the worst wrap contraction is only {worstWrap} of |value| + |min| + |range|");
+    }
+
+    // The values oracle.py draws the specials of a function from (SPECIAL, plus the arcsine and arccosine edge rows); a row with any other operand holds a random draw.
+    private static readonly HashSet<float> Alphabet = new[]
+    {
+        0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 3.0, -2.75, 0.1, -0.1, 7.5, -7.5, 1.0e-7, -1.0e-7, 100.0, -100.0, 1.0e4, 0.3, 0.7, 1.5, 1.0000001, -1.0000001,
+    }.Select(v => (float)v).ToHashSet();
+
+    [Fact]
+    public void OperandStreamsDifferPerFunction()
+    {
+        // oracle.py seeds every function, every blend mode's second colours and every ramp from its own name, so no two
+        // share a stream of draws. At e48f9488 the seed was the name's first four bytes, and 'cycles_' shared them all.
+        var functions = Load("math")["functions"]!.AsArray()
+            .Select(e => (Name: (string)e!["function"]!, Rows: e["cases"]!.AsArray().Select(l => ((string)l!).Split(" -> ")[0]).ToArray()))
+            .ToArray();
+        Assert.True(functions.Length >= 17, "the math fixture lost functions");
+        foreach (var f in functions)
+        {
+            var draws = f.Rows.Where(row => row.Split(' ').Any(token => !Alphabet.Contains(Float(token)))).ToHashSet();
+            Assert.True(draws.Count >= 8, $"{f.Name} holds only {draws.Count} random-draw rows");
+            foreach (var g in functions.Where(g => string.CompareOrdinal(f.Name, g.Name) < 0 && g.Rows[0].Split(' ').Length == f.Rows[0].Split(' ').Length))
+            {
+                var shared = g.Rows.Count(row => draws.Contains(row));
+                Assert.True(shared == 0, $"{f.Name} and {g.Name} share {shared} random-draw rows");
+            }
+        }
+
+        var modes = Load("mix")["functions"]!.AsArray()
+            .Where(e => ((string)e!["function"]!).StartsWith("cycles_mix_") && ((string)e["cases"]![0]!).Split(" -> ")[0].Split(' ').Length == 7)
+            .Select(e => (Name: (string)e!["function"]!, Rows: e["cases"]!.AsArray().Select(l => ((string)l!).Split(" -> ")[0].Split(' ')).ToArray()))
+            .ToArray();
+        Assert.True(modes.Length >= 15, "the mix fixture lost blend modes");
+        static string Multiset(IEnumerable<string[]> rows, int first) => string.Join("|", rows.Select(r => string.Join(" ", r.Skip(first).Take(3))).OrderBy(x => x, StringComparer.Ordinal));
+        foreach (var mode in modes)
+            Assert.True(Multiset(mode.Rows, 1) != Multiset(mode.Rows, 4), $"{mode.Name}: the second colours are the first colours");
+        foreach (var f in modes)
+            foreach (var g in modes.Where(g => string.CompareOrdinal(f.Name, g.Name) < 0))
+                Assert.True(Multiset(f.Rows, 4) != Multiset(g.Rows, 4), $"{f.Name} and {g.Name} draw the same second colours");
+
+        var ramps = Load("ramp")["functions"]!.AsArray()
+            .Select(e => e!["cases"]!.AsArray().Select(l => ((string)l!).Split(" -> ")[0]).ToArray()).ToArray();
+        Assert.Equal(2, ramps.Length);
+        var tail = ramps[0].TakeLast(100).ToHashSet();
+        Assert.True(!ramps[1].TakeLast(100).Any(tail.Contains), "the ramps' random t tails overlap");
     }
 
     [Theory]

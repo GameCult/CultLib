@@ -86,13 +86,15 @@ internal static class GlslLowering
         source = LowerCasts(source);
 
         // 6. Intrinsic renames: lerp -> mix, frac -> fract, rsqrt -> inversesqrt, asuint ->
-        //    floatBitsToUint, asfloat -> uintBitsToFloat, and saturate(x) -> clamp(x, 0.0, 1.0).
+        //    floatBitsToUint, asfloat -> uintBitsToFloat, atan2 -> atan (GLSL's two-argument arctangent),
+        //    and saturate(x) -> clamp(x, 0.0, 1.0).
         //    Identifier boundaries keep cultmath_lerp and the rest of the cultmath_ names intact.
         source = Regex.Replace(source, @"\blerp\(", "mix(");
         source = Regex.Replace(source, @"\bfrac\(", "fract(");
         source = Regex.Replace(source, @"\brsqrt\(", "inversesqrt(");
         source = Regex.Replace(source, @"\basuint\(", "floatBitsToUint(");
         source = Regex.Replace(source, @"\basfloat\(", "uintBitsToFloat(");
+        source = Regex.Replace(source, @"\batan2\(", "atan(");
         source = LowerSaturate(source);
 
         // 7. Float literals pass through: HLSL's unsuffixed 0.5 and 1.0e30 are GLSL literals already.
