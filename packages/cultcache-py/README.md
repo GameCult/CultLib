@@ -126,7 +126,7 @@ another format is refused with `CultCachePayloadFormatError`, never guessed at.
   keeps those apart and a Python `dict` cannot. The same keys are refused on
   write as `duplicate_map_key`, which includes a `Float32` key beside an equal
   int, bool or float key, and two NaN keys, which are one key: the codec never
-  writes bytes its own reader refuses.
+  writes bytes its own reader refuses. One pair of keys is the exception to the reference, see Wire Parity.
 - Arrays and maps nest at most 256 deep (`MAX_PAYLOAD_DEPTH`), on read and on
   write, in the codec and in the definition alike.
 - Integers beyond 64 bits (outside `-(2**63)..2**64-1`) are refused on write as
@@ -248,6 +248,11 @@ The store interop peer is `cultcache_py.interop`:
 python -m cultcache_py.interop write --file cache.cc --runtime-id python
 python -m cultcache_py.interop read --file cache.cc
 ```
+
+One deliberate exception to leaf acceptance following the reference: Python reads `float32` and `float64` map keys as
+one float, so a map holding a `float32` NaN key beside a `float64` NaN key is refused on read and on write as
+`duplicate_map_key`. C# writes and reads that map as two keys, as the bytes `82 ca ffc00000 01 cb fff8000000000000 02`
+(`float.NaN` and `double.NaN` keys with values 1 and 2); every pair of NaN keys of one width is refused by both runtimes.
 
 `packages/cultcache-ts/test/cult-cache.test.ts` includes Python in the shared
 CultCache v1 parity matrix with TypeScript, Rust, and C#. `cultcache_py` ships
