@@ -273,6 +273,7 @@ public sealed class CultMeshSingleFileElementIdTests
         const string changedId = "mesh.test.id_list.v0";
         var entry = snapshot.SchemaCatalog.Single(candidate => candidate.SchemaName == "mesh.test.id_list");
         entry.SchemaId = changedId;
+        entry.ContentHash = "persisted-by-another-runtime";
         entry.Members.Single(member => member.Slot == 1).TypeName = "System.Collections.Generic.List`1[[Other.Inner]]";
         snapshot.Records.Single(record => record.Key == IdsKey.Value).SchemaId = changedId;
         File.WriteAllBytes(path, CultDocumentMessagePackSerialization.SerializeSnapshot(snapshot));
