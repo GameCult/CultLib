@@ -399,7 +399,7 @@ namespace GameCult.Caching.Tests
                 if (typeof(T) == typeof(List<LcArm>)) return (IMessagePackFormatter<T>)(object)new NilFormatter();
                 if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
                 if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
-                if (typeof(T) == typeof(FbArm)) return MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(FbArm)) return global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
                 return null;
             }
 
