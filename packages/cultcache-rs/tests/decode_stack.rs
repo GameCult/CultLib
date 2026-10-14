@@ -329,6 +329,18 @@ fn a_wide_record_decodes_on_a_96kib_thread_at_one_level_and_at_the_limit() {
     });
 }
 
+#[test]
+fn the_largest_record_decodes_on_an_88kib_thread_at_one_level() {
+    in_child("the_largest_record_decodes_on_an_88kib_thread_at_one_level", || {
+        // The door's own floor, not the payload, decides this size: one Largest level, boxed as decode_on
+        // does, needs 72 KiB in debug and 56 in release with the outer stack check, and 104 in release
+        // without it.
+        let bytes = on_stack(64 * KIB * KIB, || rmp_serde::to_vec(&largest_chain(1)).unwrap());
+        let decoded = decode_on::<Largest>(88 * KIB, bytes).unwrap();
+        on_stack(64 * KIB * KIB, move || assert!(decoded == largest_chain(1)));
+    });
+}
+
 fn decode_wide_chain(levels: usize, stack: usize) {
     let bytes = on_stack(64 * KIB * KIB, move || rmp_serde::to_vec(&wide_chain(levels)).unwrap());
     let decoded = decode_on::<Wide32>(stack, bytes).unwrap();
@@ -384,20 +396,20 @@ fn fixstr(text: &str) -> Vec<u8> {
 }
 
 #[test]
-fn a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread() {
-    in_child("a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_256kib_thread", || {
+fn a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_64kib_thread() {
+    in_child("a_legacy_store_with_a_deep_unknown_envelope_key_reads_on_a_64kib_thread", || {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy.cc");
         std::fs::write(&path, [vec![0x91], deep_envelope()].concat()).unwrap();
-        let entries = on_stack(256 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap();
+        let entries = on_stack(64 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "k");
     });
 }
 
 #[test]
-fn a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_256kib_thread() {
-    in_child("a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_256kib_thread", || {
+fn a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_64kib_thread() {
+    in_child("a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_64kib_thread", || {
         // [header, [], [[key, schema, storedAt, payload, [[[...]]]]]]: the record's unknown fifth slot is
         // skipped 1000 containers deep, then the record is refused.
         let mut bytes = vec![0x93];
@@ -412,7 +424,7 @@ fn a_v1_store_with_a_deep_fifth_record_slot_is_refused_typed_on_a_256kib_thread(
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("v1.cc");
         std::fs::write(&path, bytes).unwrap();
-        let error = on_stack(256 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap_err();
+        let error = on_stack(64 * KIB, move || SingleFileMessagePackBackingStore::new(path).pull_all_read_only_snapshot()).unwrap_err();
         let unreadable = error.downcast_ref::<CultCacheStoreUnreadable>().expect("a typed refusal");
         assert!(matches!(unreadable.kind, CultCacheStoreUnreadableKind::Undecodable));
     });
@@ -432,20 +444,20 @@ fn redb_with_deep_row(path: &std::path::Path) {
 }
 
 #[test]
-fn a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_1mib_thread() {
-    in_child("a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_1mib_thread", || {
+fn a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_104kib_thread() {
+    in_child("a_redb_store_with_a_deep_unknown_envelope_key_reads_on_a_104kib_thread", || {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rows.redb");
         redb_with_deep_row(&path);
-        let entries = on_stack(1024 * KIB, move || RedbMessagePackBackingStore::new(path).unwrap().pull_all()).unwrap();
+        let entries = on_stack(104 * KIB, move || RedbMessagePackBackingStore::new(path).unwrap().pull_all()).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].key, "k");
     });
 }
 
 #[test]
-fn a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_1mib_thread() {
-    in_child("a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_1mib_thread", || {
+fn a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_104kib_thread() {
+    in_child("a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_104kib_thread", || {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rows.redb");
         redb_with_deep_row(&path);
@@ -457,7 +469,7 @@ fn a_redb_compare_and_swap_reads_a_deep_unknown_envelope_key_on_a_1mib_thread() 
             schema_id: None,
         };
         let replacement = CultCacheEnvelope { payload: vec![2], ..expected.clone() };
-        let swapped = on_stack(1024 * KIB, move || {
+        let swapped = on_stack(104 * KIB, move || {
             RedbMessagePackBackingStore::new(path).unwrap().compare_and_swap_entry(&expected, replacement)
         })
         .unwrap();
