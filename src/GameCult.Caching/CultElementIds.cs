@@ -85,7 +85,7 @@ namespace GameCult.Caching
             public Action<object, string>? SetId;
             public Func<object, string?>? Derive;
             public string? DerivedFrom;
-            public (int Slot, Func<object, object?> Get)[] Walk = Array.Empty<(int, Func<object, object?>)>();
+            public (int Slot, Type Type, Func<object, object?> Get)[] Walk = Array.Empty<(int, Type, Func<object, object?>)>();
         }
 
         private static readonly ConcurrentDictionary<Type, Shape> Shapes = new();
@@ -144,40 +144,35 @@ namespace GameCult.Caching
         private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
-            if (IsLeaf(memberType))
-                return;
-            if (DictionaryValueType(memberType) is { } valueType)
+            var (kind, inner) = Classify(memberType);
+            switch (kind)
             {
-                VisitMemberType(documentType, owner, member, valueType, through.Append(memberType).ToArray(), seen, survey, graph);
-                return;
-            }
-
-            if (ElementTypeOf(memberType) is { } element)
-            {
-                if (IsObjectType(element))
-                {
-                    var concretes = ConcreteTypes(element).ToList();
-                    graph.Lists.Add((owner, member, element, concretes, through.Append(memberType).ToArray()));
+                case Kind.Leaf:
+                    return;
+                case Kind.Map:
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
+                    return;
+                case Kind.Sequence when IsElement(inner):
+                    var concretes = ConcreteTypes(inner).ToList();
+                    graph.Lists.Add((owner, member, inner, concretes, through.Append(memberType).ToArray()));
                     foreach (var concrete in concretes)
                     {
                         if (!survey.Judged.Add(concrete))
                             continue;
-                        var problem = IsObjectType(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
+                        var problem = IsElement(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
                         if (problem != null)
                             survey.Problems.Add($"Cult document {documentType.Name}: list element type {concrete.Name} (in {owner.Name}.{member.Name}) {problem}");
                     }
 
-                    VisitObject(documentType, element, seen, survey, graph);
-                }
-                else
-                    VisitMemberType(documentType, owner, member, element, through.Append(memberType).ToArray(), seen, survey, graph);
-                return;
-            }
-
-            if (IsObjectType(memberType))
-            {
-                graph.Edges.Add((owner, member, memberType, through));
-                VisitObject(documentType, memberType, seen, survey, graph);
+                    VisitObject(documentType, inner, seen, survey, graph);
+                    return;
+                case Kind.Sequence:
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
+                    return;
+                default:
+                    graph.Edges.Add((owner, member, memberType, through));
+                    VisitObject(documentType, memberType, seen, survey, graph);
+                    return;
             }
         }
 
@@ -295,40 +290,37 @@ namespace GameCult.Caching
         // ---- write: what the stored form holds ----
 
         // True when some element under root holds a non-empty id: the one fact a store marks its header by. It reads the value
-        // as it is now, refuses nothing and changes nothing, so a writer asks it of exactly what it is about to write.
-        internal static bool Holds(object? root)
+        // as it is now, refuses nothing and changes nothing, so a writer asks it of exactly what it is about to write. The walk
+        // follows declared types, as registration does; a value's own type picks only a union arm.
+        internal static bool Holds(Type declared, object? root)
         {
             if (root == null)
                 return false;
-            var type = root.GetType();
-            if (IsLeaf(type))
-                return false;
-            if (root is IDictionary dictionary)
+            var (kind, inner) = Classify(declared);
+            switch (kind)
             {
-                foreach (DictionaryEntry entry in dictionary)
-                {
-                    if (Holds(entry.Value))
-                        return true;
-                }
+                case Kind.Leaf:
+                    return false;
+                case Kind.Map:
+                    return MapEntries(declared)(root).Any(entry => Holds(inner, entry.Value));
+                case Kind.Sequence:
+                    var elements = IsElement(inner);
+                    if (!elements && Classify(inner).Kind == Kind.Leaf)
+                        return false;
+                    foreach (var item in (IEnumerable)root)
+                    {
+                        if (item == null)
+                            continue;
+                        if (elements && OwnerShape(inner, item).GetId is { } getId && !string.IsNullOrEmpty(getId(item)))
+                            return true;
+                        if (Holds(inner, item))
+                            return true;
+                    }
 
-                return false;
+                    return false;
+                default:
+                    return OwnerShape(declared, root).Walk.Any(member => Holds(member.Type, member.Get(root)));
             }
-
-            if (root is IEnumerable list)
-            {
-                foreach (var item in list)
-                {
-                    if (item != null && IsObjectType(item.GetType()) && ShapeOf(item.GetType()).GetId is { } getId &&
-                        !string.IsNullOrEmpty(getId(item)))
-                        return true;
-                    if (Holds(item))
-                        return true;
-                }
-
-                return false;
-            }
-
-            return IsObjectType(type) && ShapeOf(type).Walk.Any(member => Holds(member.Get(root)));
         }
 
         // ---- write and load: mint and check ----
@@ -337,41 +329,48 @@ namespace GameCult.Caching
         // that is not 12 lowercase hex characters, a duplicate id in one list, a derived id whose source is null or empty.
         // rootPath (the record key) seeds deterministic minting and names the record in a refusal. An element object that sits
         // twice in one list is refused too: planning would give it two ids and it would then be a duplicate on load.
-        internal static IdPlan Plan(object? root, string rootPath, bool deterministic)
+        internal static IdPlan Plan(Type declared, object? root, string rootPath, bool deterministic)
         {
             var plan = new IdPlan();
-            Visit(root, rootPath);
+            Visit(declared, root, rootPath);
             return plan;
 
-            void Visit(object? value, string path)
+            void Visit(Type type, object? value, string path)
             {
                 if (value == null)
                     return;
-                var type = value.GetType();
-                if (IsLeaf(type))
-                    return;
-                if (value is IDictionary dictionary)
+                var (kind, inner) = Classify(type);
+                switch (kind)
                 {
-                    foreach (DictionaryEntry entry in dictionary)
-                        Visit(entry.Value, path + "{" + Convert.ToString(entry.Key, CultureInfo.InvariantCulture) + "}");
-                }
-                else if (value is IEnumerable list)
-                    Elements(list, path);
-                else if (IsObjectType(type))
-                {
-                    foreach (var (slot, get) in ShapeOf(type).Walk)
-                        Visit(get(value), path + "." + slot.ToString(CultureInfo.InvariantCulture));
+                    case Kind.Map:
+                        foreach (var entry in MapEntries(type)(value))
+                            Visit(inner, entry.Value, path + "{" + Convert.ToString(entry.Key, CultureInfo.InvariantCulture) + "}");
+                        break;
+                    case Kind.Sequence when IsElement(inner):
+                        Elements(inner, (IEnumerable)value, path);
+                        break;
+                    case Kind.Sequence:
+                        if (Classify(inner).Kind == Kind.Leaf)
+                            break;
+                        var index = 0;
+                        foreach (var item in (IEnumerable)value)
+                            Visit(inner, item, path + "/" + (index++).ToString(CultureInfo.InvariantCulture));
+                        break;
+                    case Kind.Owner:
+                        foreach (var (slot, memberType, get) in OwnerShape(type, value).Walk)
+                            Visit(memberType, get(value), path + "." + slot.ToString(CultureInfo.InvariantCulture));
+                        break;
                 }
             }
 
-            void Elements(IEnumerable list, string path)
+            void Elements(Type element, IEnumerable list, string path)
             {
                 var items = list.Cast<object?>().ToArray();
                 var taken = new HashSet<string>(StringComparer.Ordinal);
                 var objects = new HashSet<object>(ReferenceComparer.Instance);
                 foreach (var item in items)
                 {
-                    if (item == null || !IsObjectType(item.GetType()) || ShapeOf(item.GetType()) is not { GetId: { } getId } shape)
+                    if (item == null || OwnerShape(element, item) is not { GetId: { } getId } shape)
                         continue;
                     if (!objects.Add(item))
                         throw new CultElementIdException(
@@ -394,7 +393,7 @@ namespace GameCult.Caching
                     if (item == null)
                         continue;
                     var itemPath = path + "/" + index.ToString(CultureInfo.InvariantCulture);
-                    if (IsObjectType(item.GetType()) && ShapeOf(item.GetType()) is { SetId: { } , GetId: { } get } itemShape &&
+                    if (OwnerShape(element, item) is { SetId: { } , GetId: { } get } itemShape &&
                         string.IsNullOrEmpty(get(item)))
                     {
                         string id;
@@ -413,7 +412,7 @@ namespace GameCult.Caching
                         plan.Add(item, itemShape, get(item), id);
                     }
 
-                    Visit(item, itemPath);
+                    Visit(element, item, itemPath);
                 }
             }
 
@@ -481,6 +480,14 @@ namespace GameCult.Caching
 
         private static Shape ShapeOf(Type type) => Shapes.GetOrAdd(type, Build);
 
+        // The shape of an owner or element a walk holds under a declared type: a union base writes its arm, so the value's own
+        // type picks the arm; any other declared type is written by its own [Key] layout, whatever a subclass adds.
+        private static Shape OwnerShape(Type declared, object value)
+        {
+            declared = Nullable.GetUnderlyingType(declared) ?? declared;
+            return declared.IsDefined(typeof(UnionAttribute), false) ? ShapeOf(value.GetType()) : ShapeOf(declared);
+        }
+
         private static Shape Build(Type type)
         {
             var shape = new Shape();
@@ -498,8 +505,8 @@ namespace GameCult.Caching
             }
 
             shape.Walk = KeyedMembers(type)
-                .Where(entry => !IsLeaf(Nullable.GetUnderlyingType(entry.Type) ?? entry.Type))
-                .Select(entry => (Slot: KeyOf(entry.Member)!.Value, Get: entry.Member is FieldInfo fi
+                .Where(entry => Classify(entry.Type).Kind != Kind.Leaf)
+                .Select(entry => (Slot: KeyOf(entry.Member)!.Value, entry.Type, Get: entry.Member is FieldInfo fi
                     ? (Func<object, object?>)(o => fi.GetValue(o))
                     : o => ((PropertyInfo)entry.Member).GetValue(o)))
                 .ToArray();
@@ -523,18 +530,38 @@ namespace GameCult.Caching
 
         // ---- type classification ----
 
-        // A value MessagePack writes whole and that cannot hold an element list. Structs are values: never elements, never walked.
-        private static bool IsLeaf(Type type)
-        {
-            if (type.IsPrimitive || type.IsEnum || type == typeof(string) || type.IsValueType)
-                return true;
-            return type.IsArray && IsLeaf(type.GetElementType()!);
-        }
+        private enum Kind { Leaf, Map, Sequence, Owner }
 
-        // An object a store can hold an element list under, or hold as an element: a class MessagePack serializes by key.
-        private static bool IsObjectType(Type type) =>
-            (type.IsClass || type.IsInterface) && type != typeof(string) && type != typeof(object) &&
-            (type.IsDefined(typeof(MessagePackObjectAttribute), true) || type.IsDefined(typeof(UnionAttribute), true));
+        private static readonly ConcurrentDictionary<Type, (Kind Kind, Type Inner)> Classes = new();
+
+        // The one recognition of what MessagePack writes for a declared type: registration, Plan, Holds and the codec's id path
+        // all go through it. Inner is a map's value type, a sequence's element type, or the type itself for an owner.
+        //   Leaf      a value written whole that holds no element list: primitives, enums, strings, object (untyped on disk),
+        //             a struct with no [MessagePackObject] or [Union], and a class with neither.
+        //   Map       a class or interface implementing IDictionary<,> or IReadOnlyDictionary<,>.
+        //   Sequence  an array or an IEnumerable<T>.
+        //   Owner     a class, interface or struct MessagePack serializes by key. A keyed struct is walked as an owner; it is
+        //             never an element (IsElement), since a boxed copy cannot carry a minted id.
+        private static (Kind Kind, Type Inner) Classify(Type declared) => Classes.GetOrAdd(declared, static type =>
+        {
+            type = Nullable.GetUnderlyingType(type) ?? type;
+            if (type.IsPrimitive || type.IsEnum || type == typeof(string) || type == typeof(object))
+                return (Kind.Leaf, type);
+            if (type.IsValueType)
+                return IsKeyed(type) ? (Kind.Owner, type) : (Kind.Leaf, type);
+            if (MapTypes(type) is { } map)
+                return (Kind.Map, map.Value);
+            if (ElementTypeOf(type) is { } element)
+                return (Kind.Sequence, element);
+            return IsKeyed(type) ? (Kind.Owner, type) : (Kind.Leaf, type);
+        });
+
+        // A type MessagePack serializes by key: [MessagePackObject] or [Union].
+        private static bool IsKeyed(Type type) =>
+            type.IsDefined(typeof(MessagePackObjectAttribute), true) || type.IsDefined(typeof(UnionAttribute), true);
+
+        // What an object list holds: a keyed class or interface. Never a struct.
+        private static bool IsElement(Type type) => !type.IsValueType && Classify(type).Kind == Kind.Owner;
 
         private static Type? ElementTypeOf(Type type)
         {
@@ -549,15 +576,34 @@ namespace GameCult.Caching
             return null;
         }
 
-        private static Type? DictionaryValueType(Type type)
+        // The key and value types of a map MessagePack writes as a map: IDictionary<,> or IReadOnlyDictionary<,>.
+        private static (Type Key, Type Value)? MapTypes(Type type)
         {
             foreach (var candidate in type.GetInterfaces().Append(type))
             {
-                if (candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IDictionary<,>))
-                    return candidate.GetGenericArguments()[1];
+                if (candidate.IsGenericType &&
+                    (candidate.GetGenericTypeDefinition() == typeof(IDictionary<,>) || candidate.GetGenericTypeDefinition() == typeof(IReadOnlyDictionary<,>)))
+                {
+                    var arguments = candidate.GetGenericArguments();
+                    return (arguments[0], arguments[1]);
+                }
             }
 
             return null;
         }
+
+        private static readonly ConcurrentDictionary<Type, Func<object, IEnumerable<(object? Key, object? Value)>>> MapReaders = new();
+
+        // A map's entries read through the generic interface Classify found, so no map shape is recognised twice.
+        private static Func<object, IEnumerable<(object? Key, object? Value)>> MapEntries(Type map) => MapReaders.GetOrAdd(map, static type =>
+        {
+            var (key, value) = MapTypes(type)!.Value;
+            return (Func<object, IEnumerable<(object? Key, object? Value)>>)Delegate.CreateDelegate(
+                typeof(Func<object, IEnumerable<(object? Key, object? Value)>>),
+                typeof(CultElementIds).GetMethod(nameof(ReadMap), BindingFlags.NonPublic | BindingFlags.Static)!.MakeGenericMethod(key, value));
+        });
+
+        private static IEnumerable<(object? Key, object? Value)> ReadMap<TKey, TValue>(object map) =>
+            ((IEnumerable<KeyValuePair<TKey, TValue>>)map).Select(entry => ((object?)entry.Key, (object?)entry.Value));
     }
 }

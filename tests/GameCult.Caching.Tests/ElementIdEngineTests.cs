@@ -16,7 +16,7 @@ namespace GameCult.Caching.Tests
 
         private static int Assign(object root, string key, bool deterministic)
         {
-            var plan = CultElementIds.Plan(root, key, deterministic);
+            var plan = CultElementIds.Plan(root.GetType(), root, key, deterministic);
             plan.Apply();
             return plan.Count;
         }
@@ -30,7 +30,8 @@ namespace GameCult.Caching.Tests
             foreach (var holder in new[]
             {
                 typeof(HList), typeof(HArray), typeof(HDictionary), typeof(HNested), typeof(HListOfLists),
-                typeof(HElementNest), typeof(HUnion), typeof(HNullableInner)
+                typeof(HElementNest), typeof(HUnion), typeof(HNullableInner), typeof(HStruct), typeof(HStructList), typeof(HNullableStruct),
+                typeof(HReadOnlyMap)
             })
                 RefusesBare(holder);
             Assert.That(Problems(typeof(HFine)), Is.Empty);
@@ -72,28 +73,28 @@ namespace GameCult.Caching.Tests
         public void HoldsFindsASetIdWhereverAListCanSitAndNothingElse()
         {
             const string id = "0123456789ab";
-            Assert.That(CultElementIds.Holds(null), Is.False);
-            Assert.That(CultElementIds.Holds(new HAll
+            Assert.That(CultElementIds.Holds(typeof(HAll), null), Is.False);
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll
             {
                 Dict = { ["k"] = new HHasIds { Items = { new EIded() } } },
                 Grid = { new List<EIded> { new EIded() } },
                 Nest = { new ENest { Sub = { new EIded() } } },
             }), Is.False, "unset ids hold nothing");
-            Assert.That(CultElementIds.Holds(new HAll { Dict = { ["k"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "a dictionary value");
-            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded { Id = id } } } }), Is.True, "a list of lists");
-            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "a list under an unset element");
-            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest { Id = id } } }), Is.True, "an element");
-            Assert.That(CultElementIds.Holds(new HAll { Dict = { ["a"] = new HHasIds { Items = { new EIded() } }, ["b"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "the second dictionary value");
-            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded() }, new List<EIded> { new EIded { Id = id } } } }), Is.True, "the second list");
-            Assert.That(CultElementIds.Holds(new HAll { Nest = { new ENest(), new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "the second item of a list of elements");
-            Assert.That(CultElementIds.Holds(new HAll { Grid = { new List<EIded> { new EIded(), new EIded { Id = id } } } }), Is.True, "the second element of a list");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Dict = { ["k"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "a dictionary value");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Grid = { new List<EIded> { new EIded { Id = id } } } }), Is.True, "a list of lists");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Nest = { new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "a list under an unset element");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Nest = { new ENest { Id = id } } }), Is.True, "an element");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Dict = { ["a"] = new HHasIds { Items = { new EIded() } }, ["b"] = new HHasIds { Items = { new EIded { Id = id } } } } }), Is.True, "the second dictionary value");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Grid = { new List<EIded> { new EIded() }, new List<EIded> { new EIded { Id = id } } } }), Is.True, "the second list");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Nest = { new ENest(), new ENest { Sub = { new EIded { Id = id } } } } }), Is.True, "the second item of a list of elements");
+            Assert.That(CultElementIds.Holds(typeof(HAll), new HAll { Grid = { new List<EIded> { new EIded(), new EIded { Id = id } } } }), Is.True, "the second element of a list");
         }
 
         [Test]
         public void APlanCountsAndChangesNothingUntilApplied()
         {
             var root = new HHasIds { Items = { new EIded(), new EIded() } };
-            var plan = CultElementIds.Plan(root, "r", deterministic: true);
+            var plan = CultElementIds.Plan(typeof(HHasIds), root, "r", deterministic: true);
             Assert.That(plan.Count, Is.EqualTo(2));
             Assert.That(root.Items.Select(x => x.Id), Has.All.Empty);
             plan.Apply();
@@ -184,7 +185,7 @@ namespace GameCult.Caching.Tests
             Assert.That(root.Dict["k"].Items.Select(x => x.Id), Has.All.Empty, "the list before the refused one was not minted into");
 
             var ok = new HHasIds { Items = { new EIded(), new EIded { Id = "dddddddddddd" } } };
-            var plan = CultElementIds.Plan(ok, "r", deterministic: false);
+            var plan = CultElementIds.Plan(typeof(HHasIds), ok, "r", deterministic: false);
             plan.Apply();
             plan.Undo();
             Assert.That(ok.Items.Select(x => x.Id), Is.EqualTo(new[] { "", "dddddddddddd" }));
@@ -375,6 +376,82 @@ namespace GameCult.Caching.Tests
             Assert.That(CultElementIds.Inspect(typeof(HIdBaseOwner)).IdPath, Is.EquivalentTo(new[] { typeof(HIdBaseOwner), typeof(IdBase), typeof(IdArm), typeof(EIded), typeof(List<EIded>) }));
         }
 
+        // A keyed struct is a value MessagePack writes by key, and an object list inside one carries element ids like any other.
+        // It is walked as an owner and is never an element: a boxed copy cannot carry a minted id.
+        [Test]
+        public void AKeyedStructIsWalkedAsAnOwnerAndNeverAnElement()
+        {
+            var root = new HStructIded
+            {
+                Hold = new SHoldIded { Items = new List<EIded> { new EIded() } },
+                Many = { new SHoldIded { Items = new List<EIded> { new EIded() } } },
+            };
+            Assert.That(Problems(typeof(HStructIded)), Is.Empty);
+            Assert.That(CultElementIds.Inspect(typeof(HStructIded)).IdPath,
+                Is.EquivalentTo(new[] { typeof(HStructIded), typeof(SHoldIded), typeof(List<SHoldIded>), typeof(List<EIded>), typeof(EIded) }));
+            Assert.That(CultElementIds.Holds(typeof(HStructIded), root), Is.False);
+            Assert.That(Assign(root, "r", deterministic: false), Is.EqualTo(2));
+            Assert.That(root.Hold.Items[0].Id, Is.Not.Empty, "visible through the struct copy");
+            Assert.That(root.Many[0].Items[0].Id, Is.Not.Empty, "visible through the struct in a list");
+            Assert.That(CultElementIds.Holds(typeof(HStructIded), root), Is.True);
+            var one = new HStructIded { Hold = new SHoldIded { Items = new List<EIded> { new EIded { Id = "0123456789ab" } } } };
+            Assert.That(CultElementIds.Holds(typeof(HStructIded), one), Is.True);
+
+            Assert.That(Problems(typeof(HStructValues)), Is.Empty);
+            Assert.That(CultElementIds.Inspect(typeof(HStructValues)).IdPath,
+                Is.EquivalentTo(new[] { typeof(HStructValues), typeof(List<EIded>), typeof(EIded) }), "a list of keyed structs is a value list");
+            var values = new HStructValues { Structs = { new SValue { N = 1 } }, Objects = { new EIded() } };
+            Assert.That(Assign(values, "r", deterministic: false), Is.EqualTo(1));
+        }
+
+        // Every dictionary interface MessagePack writes as a map is walked by one path, and the minted path text is the one a
+        // store loaded before ids already holds, so its deterministic ids do not move.
+        [Test]
+        public void EveryMapInterfaceIsWalkedByTheSamePath()
+        {
+            var element = new Func<HHasIds>(() => new HHasIds { Items = { new EIded() } });
+            var viaInterface = new HReadOnlyIded { Map = new Dictionary<string, HHasIds> { ["k"] = element() } };
+            var viaClass = new HReadOnlyIded { Map = new RoMap(new Dictionary<string, HHasIds> { ["k"] = element() }) };
+            var viaDictionary = new HMapIded { Map = { ["k"] = element() } };
+            Assert.That(Assign(viaInterface, "r", deterministic: true), Is.EqualTo(1));
+            Assert.That(Assign(viaClass, "r", deterministic: true), Is.EqualTo(1), "a class implementing only IReadOnlyDictionary<,>");
+            Assert.That(Assign(viaDictionary, "r", deterministic: true), Is.EqualTo(1));
+            var id = viaDictionary.Map["k"].Items[0].Id;
+            Assert.That(viaInterface.Map["k"].Items[0].Id, Is.EqualTo(id));
+            Assert.That(viaClass.Map["k"].Items[0].Id, Is.EqualTo(id));
+
+            // SHA-256 of "<record key>|<element path>|0": slot 0, the key in braces, slot 0, the index.
+            var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("r|r.0{k}.0/0|0"));
+            Assert.That(id, Is.EqualTo(Convert.ToHexString(hash, 0, 6).ToLowerInvariant()), "the path text is unchanged");
+
+            var held = new HReadOnlyIded { Map = new RoMap(new Dictionary<string, HHasIds> { ["k"] = new HHasIds { Items = { new EIded { Id = "0123456789ab" } } } }) };
+            Assert.That(CultElementIds.Holds(typeof(HReadOnlyIded), held), Is.True);
+            Assert.That(CultElementIds.Holds(typeof(HReadOnlyIded), viaInterface), Is.True);
+            Assert.That(CultElementIds.Holds(typeof(HMapIded), new HMapIded { Map = { ["k"] = new HHasIds { Items = { new EIded() } } } }), Is.False);
+        }
+
+        // Registration judges the declared shape, so minting and reading follow it: a member declared object is untyped on disk,
+        // and what a subclass adds under a base-typed member is not written, so neither is walked.
+        [Test]
+        public void TheWalkFollowsTheDeclaredShape()
+        {
+            var derived = new HBase { B = new DerC { L = { new EIded(), new EIded { Id = "0123456789ab" } } } };
+            Assert.That(CultElementIds.Plan(typeof(HBase), derived, "r", deterministic: false).Count, Is.Zero);
+            Assert.That(CultElementIds.Holds(typeof(HBase), derived), Is.False);
+            var opaque = new HObject { O = new HHasIds { Items = { new EIded(), new EIded { Id = "0123456789ab" } } } };
+            Assert.That(CultElementIds.Plan(typeof(HObject), opaque, "r", deterministic: false).Count, Is.Zero);
+            Assert.That(CultElementIds.Holds(typeof(HObject), opaque), Is.False);
+            foreach (var type in new[] { typeof(HBase), typeof(HObject) })
+            {
+                Assert.That(Problems(type), Is.Empty, type.Name);
+                Assert.That(CultElementIds.Inspect(type).IdPath, Is.Empty, type.Name);
+            }
+
+            // A union base still writes its arm, so the arm is walked.
+            var arm = new HIdBaseOwner { Root = new IdArm { Items = { new EIded() } } };
+            Assert.That(Assign(arm, "r", deterministic: false), Is.EqualTo(1));
+        }
+
         // ---- shapes ----
         [MessagePackObject] public class EBare { [Key(0)] public string X { get; set; } = ""; }
         [MessagePackObject] public class EIded { [Key(0)] public string X { get; set; } = ""; [Key(1)] [CultElementId] public string Id { get; set; } = ""; }
@@ -516,6 +593,37 @@ namespace GameCult.Caching.Tests
             [Key(1)] public List<List<EIded>> Grid { get; set; } = new();
             [Key(2)] public List<ENest> Nest { get; set; } = new();
         }
+
+        [MessagePackObject] public struct SHold { [Key(0)] public List<EBare> Items; }
+        [MessagePackObject] public struct SHoldIded { [Key(0)] public List<EIded> Items; }
+        [MessagePackObject] public struct SValue { [Key(0)] public int N; }
+        [MessagePackObject] public class HStruct { [Key(0)] public SHold Hold; }
+        [MessagePackObject] public class HStructList { [Key(0)] public List<SHold> Holds { get; set; } = new(); }
+        [MessagePackObject] public class HNullableStruct { [Key(0)] public SHold? Hold; }
+        [MessagePackObject] public class HStructIded { [Key(0)] public SHoldIded Hold; [Key(1)] public List<SHoldIded> Many = new(); }
+        [MessagePackObject] public class HStructValues { [Key(0)] public List<SValue> Structs = new(); [Key(1)] public List<EIded> Objects = new(); }
+
+        [MessagePackObject] public class HReadOnlyMap { [Key(0)] public IReadOnlyDictionary<string, HList> Map { get; set; } = new Dictionary<string, HList>(); }
+        [MessagePackObject] public class HReadOnlyIded { [Key(0)] public IReadOnlyDictionary<string, HHasIds> Map { get; set; } = new Dictionary<string, HHasIds>(); }
+        [MessagePackObject] public class HMapIded { [Key(0)] public Dictionary<string, HHasIds> Map { get; set; } = new(); }
+        public sealed class RoMap : IReadOnlyDictionary<string, HHasIds>
+        {
+            private readonly Dictionary<string, HHasIds> _inner;
+            public RoMap(Dictionary<string, HHasIds> inner) => _inner = inner;
+            public HHasIds this[string key] => _inner[key];
+            public IEnumerable<string> Keys => _inner.Keys;
+            public IEnumerable<HHasIds> Values => _inner.Values;
+            public int Count => _inner.Count;
+            public bool ContainsKey(string key) => _inner.ContainsKey(key);
+            public bool TryGetValue(string key, out HHasIds value) => _inner.TryGetValue(key, out value!);
+            public IEnumerator<KeyValuePair<string, HHasIds>> GetEnumerator() => _inner.GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
+        [MessagePackObject] public class BaseC { [Key(0)] public int X { get; set; } }
+        [MessagePackObject] public class DerC : BaseC { [Key(1)] public List<EIded> L { get; set; } = new(); }
+        [MessagePackObject] public class HBase { [Key(0)] public BaseC B { get; set; } = new(); }
+        [MessagePackObject] public class HObject { [Key(0)] public object? O { get; set; } }
 
         [MessagePackObject] public class EDerivedText { [Key(0)] public string? Name { get; set; } [Key(1)] [CultElementId(nameof(Name))] public string Id { get; set; } = ""; }
         [MessagePackObject] public class HDerivedText { [Key(0)] public List<EDerivedText> Items { get; set; } = new(); }

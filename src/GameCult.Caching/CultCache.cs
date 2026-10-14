@@ -545,11 +545,14 @@ namespace GameCult.Caching
             get
             {
                 if (Variant == null)
-                    return CultElementIds.Holds(_document);
+                    return CultElementIds.Holds(Descriptor.DocumentType, _document);
                 if (_codec == null)
                     return true;
-                return Variant.Overrides.Any(entry => CultElementIds.Holds(_codec.Deserialize(
-                    Descriptor.RichMembers.First(member => member.Slot == entry.Path[0].Slot).MemberType, Descriptor.DocumentType, entry.Value)));
+                return Variant.Overrides.Any(entry =>
+                {
+                    var memberType = Descriptor.RichMembers.First(member => member.Slot == entry.Path[0].Slot).MemberType;
+                    return CultElementIds.Holds(memberType, _codec.Deserialize(memberType, Descriptor.DocumentType, entry.Value));
+                });
             }
         }
 
@@ -2734,7 +2737,7 @@ namespace GameCult.Caching
             // again, and lands in memory only (variants mint inside Resolve, into their override values).
             var idPlans = admitted
                 .Where(stored => stored.Variant == null)
-                .Select(stored => (Stored: stored, Plan: CultElementIds.Plan(stored.Document, stored.Key.Value, deterministic: source != null)))
+                .Select(stored => (Stored: stored, Plan: CultElementIds.Plan(stored.Descriptor.DocumentType, stored.Document, stored.Key.Value, deterministic: source != null)))
                 .ToArray();
             VariantPlan plan;
             CultCommitOutcome outcome;
@@ -3176,7 +3179,7 @@ namespace GameCult.Caching
                     // The override's value is minted like a plain record's members: ids the store never held are filled here, in the
                     // decoded copy, and the delta this hold lands carries them.
                     var bytes = entry.Value;
-                    var idPlan = CultElementIds.Plan(value, key + "." + slot.ToString(CultureInfo.InvariantCulture), deterministic: source != null);
+                    var idPlan = CultElementIds.Plan(member.MemberType, value, key + "." + slot.ToString(CultureInfo.InvariantCulture), deterministic: source != null);
                     if (idPlan.Count > 0)
                     {
                         idPlan.Apply();
@@ -4299,7 +4302,7 @@ namespace GameCult.Caching
                     if (!CultElementIds.CanHoldIds(type))
                         continue;
                     CopiedRecordsDecoded++;
-                    if (CultElementIds.Holds(DeserializePayload(type, record.Payload)))
+                    if (CultElementIds.Holds(type, DeserializePayload(type, record.Payload)))
                         return true;
                 }
                 catch (Exception e) when (e is not OperationCanceledException)

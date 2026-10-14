@@ -98,7 +98,7 @@ namespace GameCult.Mesh
             var descriptor = resolvedRegistry.GetRequired<TDocument>();
             // Element ids are decided as a cache write decides them, before anything is written: an unset id is minted, a
             // refused list refuses the write, and the file is marked when it holds an id. A failed write gives the ids back.
-            var ids = CultElementIds.Plan(document, key.Value, deterministic: false);
+            var ids = CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: false);
             ids.Apply();
             try
             {
@@ -108,7 +108,7 @@ namespace GameCult.Mesh
                     descriptor.ToCatalogEntry(),
                     storedAt,
                     CultDocumentMessagePackSerialization.SerializeUntyped(document, typeof(TDocument)),
-                    CultElementIds.Holds(document),
+                    CultElementIds.Holds(typeof(TDocument), document),
                     resolvedRegistry);
             }
             catch
@@ -132,7 +132,7 @@ namespace GameCult.Mesh
             var payload = ReadSingleFileDocumentPayload(path, key, descriptor.SchemaId);
             var document = (TDocument)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(TDocument), payload);
             // A load refuses what a write refuses, and mints the ids a cache load of the same file would mint.
-            CultElementIds.Plan(document, key.Value, deterministic: true).Apply();
+            CultElementIds.Plan(typeof(TDocument), document, key.Value, deterministic: true).Apply();
             return document;
         }
 
