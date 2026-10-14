@@ -1,6 +1,7 @@
 # CultMath intervals and the gamecult.org ground: cut map
 
-Status, 2026-10-04: interval-ops, glsl-lowering, snoise-tie (48aadda0) and affine-forms with
+Status, 2026-10-14: the target is r2 (section "Target r2"); snoise-hessian, expr-ir and
+cycles-converters are on main. Earlier status, 2026-10-04: interval-ops, glsl-lowering, snoise-tie (48aadda0) and affine-forms with
 affine-shaders (156782da) are on main; the as-built record is the last section. Figures quoted in
 Passes 1-5 at SNOISE_LIPSCHITZ 10.099261 predate the tie fix (now 7.9640074) and are conservative;
 design.md carries the current measurements. Map history: Imagination pass 4, 2026-10-03. Pass 1's Q1–Q3 are answered (below);
@@ -86,25 +87,180 @@ pane and read back. CultLib has no GPU harness (follow-up
 
 ### Campaign
 
-`cultmath-tapes` (Q1), repos `GameCult/CultLib` and `GameCult/gamecult-site`,
-target doc `docs/cultmath-tape-target.md` unparked for step 1 only. The site
-cuts cite `site-masthead:ruling:operator-chromeless-column` and depend on
-`wash-home-only` landing first, because they rewrite the same lines.
+`cultmath-tapes`, repos `GameCult/CultLib` and `GameCult/gamecult-site`, in the
+Eureka Self area (ruling `adopted-by-eureka-self-area`). The tape target doc
+`docs/cultmath-tape-target.md` has steps 1 (intervals), 2 (graph and C#
+evaluator) and 4 (HLSL interpreter) unparked, with affine forms beside step 1
+(rulings `affine-forms-unparked`, `material-ir-cultmath-now`,
+`tape-unparked-for-trophic-graphs`). Steps 3 (pruning) and 5 (meshing) stay
+parked. The volumetric line (the culled march's proofs, the integration-native
+noise domain, the site ground) leads the campaign (ruling
+`volumetric-work-prioritized`). Site cuts cite
+`site-masthead:ruling:operator-chromeless-column`.
 
-### Owner, consumers, invariant
+### Target r2: owners, consumers, invariants
 
-- Owner: CultMath owns interval arithmetic and the noise bounds in C# and HLSL,
-  GLSL derived. The site owns its field, flow, march, TAA, stardust, DoF and
-  budget controller. `custom.scss` owns the brand palette the shader reads
-  (four nebula tokens) and the seed values of the ground tokens. `ground.js`
-  owns the sampled ground tokens while it runs.
-- Consumers: the site ground now; Aetheria's nebula raymarch at its CultMath
-  pin bump; the tapes campaign's HLSL interpreter later.
-- Protected invariant, **`intervals-enclose`**: every interval function returns
-  a `[lo, hi]` containing `f(x)` for every `x` in its input region, in C#, HLSL
-  and GLSL alike. A consumer that skips a region because `hi < cutoff` has
-  skipped nothing that was there. The domain warp does not weaken it: a warped
-  point lies in the ball enlarged by the warp bound, and a test says so.
+**Owners.** CultMath owns every function a consumer evaluates and every bound on
+it: the snoise kernel and its derivatives, the noise pins, intervals, affine
+forms, the warp-chain stage functions and their span bounds, the closed-form span
+integral, the Cycles converters, the trophic node primitives, and the expression
+graph with its evaluator and interpreter. C# is the reference; the HLSL mirrors it;
+the GLSL is generated. `GameCult.Caching.MessagePack` owns the wire shape of CultMath
+values and graphs. A consumer owns its composition and nothing below it: the site
+owns its field's brush, ramp, chain order and parameters, its motion, TAA,
+stardust, DoF, budget controller and sampled tokens; Aetheria owns its species
+graphs, their settings and when they are evaluated. `custom.scss` owns the four
+nebula input tokens and the seed values of the ground tokens.
+
+**Consumers.**
+
+- The gamecult.org ground: the Span Lab framework with the void as its brush
+  (ruling `site-ground-field-ruled`), in WebGL2 GLSL, vendoring CultMath's
+  generated GLSL by CultLib commit.
+- Aetheria fauna (`aetheria-fauna:target:r4`): trophic species graphs as
+  `CultMath.Expr` documents, evaluated by the C# evaluator in ServerShared and by
+  the HLSL interpreter in its presenters, over CultMath's node primitives.
+- Aetheria's Cycles-matched bakes (`aetheria-release`): reference bakes compared
+  with CultMath's Cycles converters within the measured tolerance class.
+
+**Not consumers.** Asura (its field is noise-dominated and needs no tape).
+AetheriaEve and AetheriaThing (archived). The material graph line until it returns
+after the demo (`aetheria-release:ruling:demo-material-scope`). The brush-grammar
+station, until pruning and meshing unpark. Whether Aetheria's nebula moves onto the
+span framework is not decided; until it is, the nebula consumes CultMath noise at
+its pin bump and nothing else from this line.
+
+**Invariants.**
+
+- **`intervals-enclose`**: every interval function returns a `[lo, hi]`, and every
+  affine form's range is an interval, containing `f(x)` for every `x` in its input
+  region, in C#, HLSL and GLSL alike. A domain warp bounded by `D` is enclosed by
+  enlarging the ball radius by `D`. A consumer that skips a region because
+  `hi < cutoff` has skipped nothing that was there.
+- **`affine-beats-interval-on-wells`**: on the deep-well scenario (wells about an
+  order of magnitude larger than the fog gradient), the affine bound's combined cost
+  ratio exceeds the centred interval bound's at warp 0 and at warp `D`, with the
+  cull floor at 0.5 (rulings `wells-scale-order-of-magnitude`,
+  `affine-wells-contract-cheaper-than-interval`).
+- **`noise-pins-measured`**: there is one snoise kernel, and its value, gradient
+  and Hessian come from the same tie order. `SNOISE_LIPSCHITZ`, `SNOISE_HESSIAN`
+  and `SNOISE_THIRD` are each measured on that kernel by a committed test (the
+  refined maximum times 1.10), and every runtime's copy is pinned equal to the C#
+  constant by a value test. A kernel change re-measures every pin in the same
+  merge. Consumers read the pins and the derivative functions from CultMath,
+  never from page-local copies.
+- **`span-bounds-enclose`**: each warp-chain stage (per-component offsets,
+  anisotropic stretch, plain or ridged `1 − 2|n|`, curl if ruled) is a CultMath
+  function in C#, HLSL and GLSL returning value, Jacobian and span bounds (speed,
+  acceleration, curvature, fold deviation) derived only from the noise pins. Each
+  bound holds at every point of its span. The composition helper composes them by
+  the chain rule; a consumer writes its chain and never derives a bound (ruling
+  `span-chain-shape-ruled`).
+- **`span-integration-closed-form`**: along a span, optical depth is integrated in
+  closed form, the clamped linear ramp by `integral_clamp_linear` (split at the
+  exact clamp crossings, finite for infinite clamp bounds) and a proven
+  constant-density body by Beer–Lambert in one step (ruling
+  `operator-analytic-wall-body`). The linearisation error is bounded by the
+  composed stage bounds, and a span proved empty or saturated by them is so at
+  every point.
+- **`glsl-derived`**: `CultMath.glsl`, `CultMath.Phacelle.glsl`,
+  `CultMath.Cycles.glsl` and the golden fixture are generated by one enumerated
+  lowering from the HLSL and C# and pinned by tests; the Unity package's shaders
+  are byte-identical copies. Nobody edits them by hand, and a dialect gap is fixed
+  in the HLSL common subset. The site vendors the GLSL by CultLib commit, SHA in
+  the header, with a drift check.
+- **`three-runtimes-agree`**: HLSL is a bit-for-bit mirror of C#, and the GLSL
+  agrees with C# on the golden fixture within each family's stated tolerance,
+  evaluated on a WebGL2 device.
+- **`cycles-exact-to-unfused`**: CultMath's `cycles_*` functions are Cycles'
+  formulas with one IEEE single rounding per operation, bit-exact to the Blender
+  5.2.2 Linux SSE4.2 oracle fixtures. Every other Cycles build and CultMath's own
+  shader lowerings are held to a per-function tolerance class measured on that
+  build and recorded in the oracle README; cancellation-prone functions (floored
+  modulo, wrap) carry an error bound relative to the operand scale and a divergence
+  note (ruling `cycles-kernel-reference-ruled`).
+- **`one-expression-graph`**: `CultMath.Expr`'s `ExprGraph` is the one IR. One
+  validator admits a graph whole at build and at decode; one op table, append-only,
+  names every op; the graph has no loop construct, and stencils are build-time
+  substitution. Bytecode is derived from the graph, cache-only, and is never stored
+  as truth. The MessagePack resolver is the wire shape; JSON is never load-bearing.
+- **`evaluator-composes-cultmath`**: the C# evaluator's result equals the direct
+  composition of the same CultMath calls bit for bit, one IEEE single per op; an
+  op's meaning is its CultMath function's, and a function's value change is a
+  Breaking release note.
+- **`tape-interpreter-compute`**: the HLSL interpreter is one included source,
+  `CultMath.Tape.hlsl`, never a per-graph generated kernel. Its registers are
+  linear-scan allocated at lowering and live in groupshared memory, a slice per
+  thread, the group size shrinking as the register cap grows (64 registers: 128
+  threads; 128: 64; 255: 32). It and every presenter that uses it run as compute
+  passes writing to a texture (ruling `tape-register-model-ruled`).
+- **`interpreter-matches-evaluator`**: the HLSL interpreter agrees with the C#
+  evaluator on a graph corpus and on each consumer's own graph within tolerances
+  measured per op, compiled by dxc and run on a device.
+- **`lattice-node-reads-bodies`**: the weighted lattice cellular node takes the
+  zone body span and a falloff and weights each candidate cell at its cell centre
+  inside the node. It states a supported weight-ratio range, its search window
+  holds every cell that can win within that range, and graph validation refuses
+  parameters outside it (ruling `lattice-weight-from-bodies-ruled`).
+- **`site-field-span-framework`**: the gamecult.org ground's density is a
+  site-owned composition over CultMath stage functions, integrated span by span:
+  a ramp, a warp chain, and one authored brush, the void, a true 3D spherical
+  cavity of hollow radius 198 and ramp 50 inside a full cloud volume, a sun in its
+  floor and the camera orbiting low (rulings `operator-ground-void-brush`,
+  `operator-void-true-cavity`, `operator-shipped-void`). The site defines no noise,
+  derivative or bound.
+- **`one-motion-owner`**: the ground has one motion law, owned by the site's field.
+  What moves the density is what TAA reprojection and the stardust read; nothing
+  evaluates motion a second way.
+- **`shader-owns-ground`**: the ground is the shader's moving render. The CSS wash
+  tokens are sampled from its output by a non-stalling readback, carried across
+  page loads in `sessionStorage`, and are seed or fallback only. The shader reads
+  the four nebula input tokens, never an output token.
+- **`dof-from-transmittance`**: the stardust's blur is driven by the cloud layer's
+  accumulated opacity at that pixel, so the clouds blur what lies behind them.
+- **`budget-measured`**: quality steps down by measured GPU or frame time only
+  (samples, then resolution, then the CSS wash), never by user agent.
+
+**Not in scope.**
+
+- Pruning (tape step 3) and meshing (step 5). Interval, affine and gradient
+  evaluation over `ExprGraph` belong to pruning and stay parked.
+- Span evaluation over the graph (`tape-span-eval`): the later generalisation of
+  the stage functions once the interpreter exists.
+- A GLSL or WebGL2 tape interpreter: groupshared memory exists only in compute
+  shaders, and WebGL2 has none. The site's field is written in GLSL against the
+  stage functions.
+- The material line (cones, frontiers, a per-graph HLSL emitter), until the
+  material graph returns after the demo.
+- Flow laws, envelopes, brushes and chain order in CultMath: the consumer's. A
+  curl noise primitive waits on the operator's answer to follow-up
+  `curl-warp-primitives`.
+- The kernel cascade, unless the operator's nebula work picks it.
+- Per-depth transmittance for the stardust DoF.
+- A CultMath release for the site; the site consumes a CultLib commit.
+
+**Canonical implementations.** Paths are under `packages/cultmath/` unless named.
+
+- Kernel, pins and span primitives: `src/CultMath/math.cs`, `math.Interval.cs`,
+  `math.Affine.cs`, `math.Span.cs`; `shaders/CultMath.hlsl`,
+  `CultMath.Interval.hlsl`, `CultMath.Affine.hlsl`. The stage functions land
+  beside them.
+- Lowering and parity: `tests/CultMath.Tests/GlslLowering.cs`,
+  `GlslMirrorTests.cs`, `HlslMirrorTests.cs`, `fixtures/glsl-parity.json`;
+  generated `shaders/*.glsl`; Unity copies under
+  `unity/org.gamecult.cultmath/Shaders/`.
+- Cycles: `src/CultMath/math.Cycles.cs`, `shaders/CultMath.Cycles.hlsl`,
+  `tools/cycles-oracle/` (oracle and the tolerance-class table),
+  `tests/CultMath.Tests/fixtures/cycles-oracle/`.
+- Graph: `src/CultMath/Expr/`; wire shape
+  `src/GameCult.Caching.MessagePack/CultMathExprResolver.cs`; interpreter
+  `shaders/CultMath.Tape.hlsl` (cut `tape-interpreter`).
+- Ground: gamecult-site, created by `cut-site-ground.r1` (no ground code on
+  `origin/main` `af6e206`); palette input the four `--gamecult-nebula-*` tokens in
+  `custom.scss`.
+- Research behind the rulings: `docs/research/integration-native-noise-domain.md`,
+  `span-chain-and-site-field.md`, `tape-register-model.md`,
+  `lattice-site-weight.md`.
 
 ## The authority map (all four cuts)
 
@@ -390,7 +546,9 @@ from the mobile preset, the phone's GPU time from the operator's phone.
    tolerance class and device named in the report.
 
 Not proved here, said plainly: tape evaluation, automatic pruning, `min`/`max`
-choice tracking, affine arithmetic. Those unpark with steps 2–4.
+choice tracking, affine arithmetic. Pruning and choice tracking stay parked;
+the graph, its evaluator and interpreter, and affine forms have since unparked
+(Target r2).
 
 ## Cut order
 
@@ -444,8 +602,8 @@ Results against the SSE4.2 fixture:
 
 ## Standing design decisions (means; Self may overrule)
 
-- D1. Intervals are `float2(lo, hi)`. Affine arithmetic is not taken; the
-  tightness number says whether it is ever worth it.
+- D1. Intervals are `float2(lo, hi)`. Affine forms sit beside them (ruling
+  `affine-forms-unparked`); the wells contract says where they pay.
 - D2. No `iv_*` function has a value-only or gradient twin; the bounds take
   the point value only.
 - D3. The site vendors `CultMath.glsl` by CultLib commit, SHA in the header, a
