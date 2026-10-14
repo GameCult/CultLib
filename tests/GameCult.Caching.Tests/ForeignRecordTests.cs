@@ -1488,6 +1488,85 @@ namespace GameCult.Caching.Tests
             Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
         }
 
+        private static void CopyStoreOver(string from, string to, bool directory)
+        {
+            if (directory)
+            {
+                var source = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(from);
+                var target = DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(to);
+                Directory.CreateDirectory(target);
+                foreach (var file in Directory.GetFiles(source, "*.msgpack"))
+                    File.Copy(file, Path.Combine(target, Path.GetFileName(file)), true);
+            }
+            File.Copy(from, to, true);
+        }
+
+        private static FileStream HoldStoreLock(string path, bool directory) => directory
+            ? new FileStream(Path.Combine(DirectoryMessagePackBackingStore.DefaultRecordDirectoryPath(path), ".commit.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)
+            : new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        // A non-home store is judged only after the commit holds that store's own lock: a foreign record another writer lands at the
+        // checked key while the commit waits for the lock is refused, whichever kind the store is and whether or not the batch writes.
+        [Test]
+        public void ANonHomeStoreIsReadOnlyAfterItsLockIsTaken([Values] bool directory, [Values] bool withWrite)
+        {
+            var (cache, home, other) = TwoWritableStores(directory, otherListsWidget: false);
+            using var _ = cache;
+            var copy = PathOf("copy.cc");
+            CopyStoreOver(other, copy, directory);
+            using (var late = Open(copy, CultDocumentRegistry.ForTypes(new[] { Gizmo, Widget }), directory))
+                late.Commit(batch => batch.Upsert(Widget, WidgetOf("late"), W));
+            var homeBefore = Fingerprint(home);
+
+            Exception? thrown = null;
+            var held = HoldStoreLock(other, directory);
+            var worker = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    cache.Commit(batch =>
+                    {
+                        if (withWrite)
+                            batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                        batch.Remove(W);
+                    });
+                }
+                catch (Exception ex) { thrown = ex; }
+            });
+            worker.Start();
+            // The lock wait is a Thread.Sleep retry loop, so the worker sleeping is the worker waiting for the held lock.
+            Assert.That(System.Threading.SpinWait.SpinUntil(
+                () => (worker.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0, TimeSpan.FromSeconds(10)), Is.True, "the commit waits on the held lock");
+            CopyStoreOver(copy, other, directory);
+            var otherAfterSwap = Fingerprint(other);
+            held.Dispose();
+
+            Assert.That(worker.Join(TimeSpan.FromSeconds(40)), Is.True, "the commit finished");
+            Assert.That(thrown, Is.TypeOf<CultSchemaConflictException>());
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore), "the home is unwritten");
+            Assert.That(Fingerprint(other), Is.EqualTo(otherAfterSwap), "the non-home store is unwritten");
+        }
+
+        // A directory store judging a check honours wait=false: its lease held by another writer makes TryCommit contended at once.
+        [Test]
+        public void ADirectoryNonHomeStoreWhoseLeaseIsHeldMakesTryCommitContended()
+        {
+            var (cache, home, other) = TwoWritableStores(directory: true, otherListsWidget: false);
+            using var _ = cache;
+            var homeBefore = Fingerprint(home);
+
+            CultCommitOutcome outcome;
+            using (HoldStoreLock(other, directory: true))
+                outcome = cache.TryCommit(batch =>
+                {
+                    batch.Upsert(Deck, DeckOf("d2"), new CultRecordKey("d2"));
+                    batch.Remove(W);
+                });
+
+            Assert.That(outcome, Is.EqualTo(CultCommitOutcome.Contended));
+            Assert.That(Fingerprint(home), Is.EqualTo(homeBefore));
+        }
+
         // A non-home store the cache attached before anything was written to it has no directory and no lease yet: judging a check
         // there creates what it locks, finds nothing, and writes no store.
         [Test]
