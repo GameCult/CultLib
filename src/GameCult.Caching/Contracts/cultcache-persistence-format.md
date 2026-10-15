@@ -408,12 +408,18 @@ fifth slot:
 
 ## Element Ids
 
-Every object that sits in a list, array or dictionary value (`IDictionary<,>` or
-`IReadOnlyDictionary<,>`) of a registered document type, or of a keyed struct a document
-holds, union subtypes included, carries an id: one string member with an integer `[Key]`
-and `[CultElementId]`. The id identifies the element inside its list, so an override can
-name it (a path step is `[slot, elementId]`) and a base edit that reorders or inserts
-elements retargets nothing.
+Every object that sits in a list, array or dictionary value of a shape the element-id walk
+owns carries an id: one string member with an integer `[Key]` and `[CultElementId]`. The
+owned shapes are arrays, `IEnumerable<T>` classes and interfaces, `IDictionary<,>` and
+`IReadOnlyDictionary<,>` values, and `[MessagePackObject]` or `[Union]` types with integer
+keys (a keyed struct included), read through the members MessagePack writes. Union subtypes
+are included. The id identifies the element inside its list, so an override can name it (a
+path step is `[slot, elementId]`) and a base edit that reorders or inserts elements
+retargets nothing.
+
+Any other shape is one whole value. Its elements carry no element ids: a `[CultElementId]`
+member inside it is a plain string, never minted or checked and never counted for `v3`. A
+variant replaces it whole (operator, 2026-10-16).
 
 - A random id is 12 lowercase hex characters. A derived id
   (`[CultElementId(nameof(Source))]`, for content-addressed elements) is the
@@ -432,28 +438,27 @@ elements retargets nothing.
   Python and Rust read `v3` and keep a `v3` header they found when they rewrite a
   store; they carry ids and do not decide when a document carries them.
 - An object list's elements are written by their `[Key]` layout, because the id is a
-  keyed member of the element. A list whose element type is not keyed
-  (`[MessagePackObject]` or `[Union]`) is a value list and is replaced whole; so is a list
-  of keyed structs, since a struct is a value and never an element, but an object list
-  inside a keyed struct is walked like any other. The walk follows declared member types:
-  a member declared `object` is untyped on disk, and a subclass's extra members under a
-  non-union base-typed member are not written, so neither is walked. The walk reads the
-  members MessagePack writes: an integer `[Key]`, no `[IgnoreMember]`, a public field or a
-  property whose getter is public. Any other `[Key]` member on the way to an object list
-  (non-public, or a property with a non-public getter) is refused at registration, because
-  MessagePack writes it only under `AllowPrivate` and the element-id walk reads public
-  members. An id member needs a public setter or `init`, so the id MessagePack writes is read
-  back; one with a non-public setter, or one MessagePack does not write, is refused. A
-  `[MessagePackObject]` type is read by key even when it is `IEnumerable<T>`; MessagePack
-  writes a keyed type that is also a collection (`ICollection<T>`, `IList`, `IDictionary`)
-  as a collection, so C# refuses such a type at the first encode or decode when it is on the
-  path to an object list. A `[DataContract]` type the walk reads as a collection, which
-  MessagePack writes by its members, is refused the same way. A formatter MessagePack's
-  source generator emits is not refused. For an
-  object list, C# refuses at registration a concrete element type that is not keyed and
-  `[MessagePackFormatter]` on any type, collection type or member on the way to the list or on the id
-  member, and refuses at the first encode or decode of the document a formatter
-  resolver that claims one of those types.
+  keyed member of the element. Value lists are replaced whole: a list of a non-keyed
+  class or struct, or of primitives. So is a list of keyed structs, since a struct is a
+  value and never an element, but an object list inside a keyed struct is walked like any
+  other. The walk follows declared member types: a member declared `object` is untyped on
+  disk, and a subclass's extra members under a non-union base-typed member are not written,
+  so neither is walked. Whole values are `ImmutableArray<T>`, `ArraySegment<T>`,
+  `Memory<T>`, `KeyValuePair`, tuples, `Lazy<T>`, a class or struct without
+  `[MessagePackObject]`, a `[DataContract]` type, a string-keyed type, a type or member
+  declaring `[MessagePackFormatter]`, and a non-public member of a type without
+  `AllowPrivate`. The members read are an integer `[Key]` with no `[IgnoreMember]`: a
+  public field or a property whose getter is public, or any visibility up the base chain
+  under the most derived `[MessagePackObject(AllowPrivate = true)]` declaration. An id member
+  needs a setter MessagePack calls (public or `init`; any under `AllowPrivate`), so the id
+  MessagePack writes is read back. Still refused: a bad id member (missing, duplicate, not
+  a string, no integer `[Key]`, `[MessagePackFormatter]` on it, one MessagePack does not
+  write or cannot assign, a key shared with another member, a bad derived source), a
+  concrete union arm that is not keyed, a keyed type that is also a collection
+  (`ICollection<T>`, `IList`, `IDictionary`: MessagePack writes it as a collection, so C#
+  refuses it at the first encode or decode when it is on the path to an object list), a
+  type MessagePack has no formatter for, and a formatter resolver that claims a type on the
+  path. A formatter MessagePack's source generator emits is not refused.
 
 ## Canonical Semantic Schema Hash
 
