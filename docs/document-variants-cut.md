@@ -184,6 +184,28 @@ what was run and what it showed.
 - Not measured: Unity/IL2CPP, where the package bundles its own `MessagePack.dll` (version not read) and the
   dynamic resolvers cannot emit, and MessagePack versions other than 3.1.7.
 
+**Whole-list holders at `57fdf70c`** (Imagination r2 for `c2a-id-closed-world`, 2026-10-16; probe tests in a
+scratch commit `dc629459` that was never pushed, Yggdrasil `sdk:10.0`; logs `job1.log` and `job2.log` in the
+Imagination scratchpad `imagination-c2a-closed-world-r2`).
+- Shapes the walk does not own already behave as whole values. A keyed document holding
+  `ImmutableArray<PElem>`, `(List<PElem>, int)`, `KeyValuePair<string, List<PElem>>`, a non-enumerable
+  `[DataContract]` holder, or a string-keyed holder (`[Key("items")]`) gives `Inspect` problems 0, an empty
+  IdPath, `CanHoldIds` false, `Plan` 0 (random and deterministic), and `Holds` false with ids set.
+- The marker and the copy check do not count them. Committed with ids `aaaaaaaaaaaa`/`bbbbbbbbbbbb`, the store
+  header stays `cultcache.store.v1`. A fresh cache that writes another record over that file (the copy-forward
+  check) keeps `v1`. Reload returns the ids exactly as written, and unset ids stay null after write and reload.
+- Variants replace them whole, and that is the C2a resolver's behaviour for every list. A variant `Set` of the
+  `ImmutableArray` slot resolved to `[9:eeeeeeeeeeee]` with the base untouched, header `v2`, `HoldsIds` false.
+  A path step `[1:aaaaaaaaaaaa]` is refused: "this runtime resolves top-level Set overrides only". No C2a gap.
+  The gap belongs to C2b, in the cut sequence below.
+- AllowPrivate is read from the most derived `[MessagePackObject]`. `ApDerived` (AllowPrivate over a base
+  without it) is written `[[],[],4,[]]`: base-chain privates and a private-getter property, with
+  `ObjectSerializationInfo` at `allowPrivate: true` = `[baseStash, own, N, Pg]`. `NoApDerived` (plain over an
+  AllowPrivate base) is written `[nil, 5]`. The walk read only `[N]` for both.
+- A `[DataContract]` `List<T>` subclass is written by `NonGenericListFormatter`, and its record does not read
+  back ("System.Object[] is not of type PElem"), whatever the walk does. That is a MessagePack limit, not an
+  id fact.
+
 ## 2. Model page (step 0b)
 
 | Kind | Named by | Over time | Decided by |
@@ -192,7 +214,7 @@ what was run and what it showed.
 | Base reference | the base's key, in the record's variant slot | changed only by an explicit rebase; a base cannot be deleted while it has variants, unless the same batch rebases or removes them | author; the cache refuses a cycle, a missing base, a different concrete type, a global type |
 | Override entry | `(op, path, id, value)`; op is Set, Insert or Remove | added by editing; removed by clearing; survives base edits while its path resolves | author; the cache refuses entries a base edit strands (Q2); an entry whose member left the type soft-drifts with a warning (Q4 c) |
 | Member path | a sequence of `(slot, elementId)` steps; `slot` is the MessagePack `[Key]`; `elementId` is `""` unless the step enters an object-list element | a type change can invalidate it | the type's owner (slot authority); ids by the element's creator |
-| Element id | a `[CultElementId]` string member on an object-list element type, one MessagePack writes and reads back (integer `[Key]`, no `[IgnoreMember]`, public getter, public setter or `init`); `""` means unset | minted by the cache on write when unset; copied unchanged into variants; a moved element is a new element | cache mints it; it is never retargeted |
+| Element id | a `[CultElementId]` string member on the element type of an object list in a shape the walk owns (arrays, `IEnumerable<T>`, `IDictionary`/`IReadOnlyDictionary` values, `[MessagePackObject]`/`[Union]` types with integer keys), one MessagePack writes and reads back (integer `[Key]`, no `[IgnoreMember]`; public, or any visibility under the most derived `AllowPrivate`); `""` means unset. **Exception (q3 amended 2026-10-16):** a shape the walk does not own is one whole value: `ImmutableArray`, `ArraySegment`, `Memory`, `KeyValuePair`, tuples, `Lazy`, unkeyed or `[DataContract]` classes, string-keyed types, a type or member with `[MessagePackFormatter]`, and a non-public member without `AllowPrivate`. Its elements carry no ids: a `[CultElementId]` inside is a plain string | minted by the cache on write when unset; copied unchanged into variants; a moved element is a new element. Inside a whole value: never minted, never checked, never counted for `v3` | cache mints it; it is never retargeted. `CultElementIds.Classify` alone decides owned versus whole |
 | Resolved view | `CultStoredDocument.Document` for a variant key | recomputed inside the hold that admits the variant, or any base on its chain | the cache only; never persisted, never written back (Q1) |
 | Index and name entries | as today, from the resolved view | a dependent's entries are dropped and re-added in the same `Apply` as its base change | the cache; a variant must override the `[CultName]` member (rule R6) |
 | Watches | as today; each re-resolved dependent emits `Updated` with its own `Sequence` | published in the same hold as the base change | the cache |
@@ -201,7 +223,7 @@ what was run and what it showed.
 | Single-file store file | the path; one MessagePack array `[header, catalog, records]` | replaced whole and atomically; refused when unreadable; see "Store authorities" | each runtime's one reader decides what is a store; the writer derives the header from it |
 | Store lock and staging files | `<file>.lock`; a unique temp beside the store | the lock is taken by C# and Rust writers (CultMesh included, through `ReplaceDurable`); staging is removed on a failed write | the store, never CultMesh or a consumer |
 | Variant slot on the wire (CultNet) | **empty cell**: no CultNet message carries a delta today | C5 | ruling 4 decides deltas; the message shape is C5's design |
-| Dictionary entries, scalar lists, arrays | **empty cell**: no stable identity exists | whole-member Set only (Q7) | Q7 |
+| Dictionary entries, scalar lists, arrays, whole-list holders | **empty cell**: no stable identity exists | whole-member Set only (Q7; whole-list holders by q3 amended) | Q7, q3 amended |
 | Template (non-item) bases | **empty cell**: parked by ruling 6 | none | not in these cuts |
 
 ## 3. Where the Body contradicts the target
@@ -318,8 +340,9 @@ Dictionary entries, scalar lists and arrays are replaced whole.
 Landed since 2026-10-12: `c2a-declared-apply` (r3, Soul s5) and `main-into-c2a` (r2, Soul s2); the
 reconcile step is done, `hands/variants-c2a` is at the reconciled head `6afa8ed9`. Element ids part 1,
 `c2a-element-id-holes` (r6), is held by Soul s5/s6 on `hands/variants-c2a-element-id-holes`. Mapped
-now: part 2, `c2a-id-closed-world` r1, blocked on `variants:question:c2a-unowned-holders` and owed a
-revision (below). Later cuts, one line each, mapped only when Self is about to dispatch them:
+now: part 2, `c2a-id-closed-world` r2 (2026-10-16, under the amended q3), not blocked. Its open fork
+`variants:question:c2a-whole-list-opt-in` holds under every option. Later cuts, one line each, mapped
+only when Self is about to dispatch them:
 
 1. **reconcile**: done at `6afa8ed9`.
 2. **parity-ts**: TypeScript write set, one record per key, undeclared records carried and refused,
@@ -335,7 +358,10 @@ revision (below). Later cuts, one line each, mapped only when Self is about to d
    with an empty diff against the verified head; no tag. Waits on write-set-vectors, Soul holding,
    and `asura:cut_spec:cut-semver-measured` landed. Asura Cut 3 bases on its merge commit.
 
-Element-id part 2: `c2a-id-closed-world` absorbs deferred findings `s5.member-set-misses-allowprivate`, `s5.enumerating-rule-unpinned`, `s6.null-standard-untyped`, `s6.two-recognisers-one-rule`, `s4.unrecognised-holders-fail-open` and follow-up `c2a-datacontract-holder-unwalked`.
+Element-id part 2: `c2a-id-closed-world` r2 decides deferred findings `s5.member-set-misses-allowprivate`, `s5.enumerating-rule-unpinned`, `s6.null-standard-untyped`, `s6.two-recognisers-one-rule`, `s4.unrecognised-holders-fail-open` and follow-up `c2a-datacontract-holder-unwalked` (see its `first`).
+
+- **marker-for-whole-lists** (only if `c2a-whole-list-opt-in` is ruled `marker-when-ids-declared` or `marker-for-any-keyed-object`): a CarriesElements predicate, a refusal unless the member is marked, and a public attribute. It is additive after part 2.
+- **C2b constraint** (owed to `variants:follow_up:remaining-variant-cuts`): nested path resolution must refuse a step `[slot:elementId]` that enters a whole value, naming the holder. A whole value is any shape `CultElementIds.Classify` calls Leaf, so C2b asks Classify and keeps no recogniser of its own. Today's C2a resolver refuses every non-top-level step, so no store can hold such an override yet.
 
 Rationale. The 2026-10-02 order (parity, vectors, then merge main) was right when main was close.
 Main has since moved 453 commits and rebuilt exactly what the parity cuts change: cultcache-ts
