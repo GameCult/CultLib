@@ -511,7 +511,165 @@ namespace GameCult.Caching.Tests
             Assert.That(CultElementIds.Holds(typeof(KBagIded), bag), Is.True);
         }
 
+        // The walk reads the members MessagePack writes: a public field or a property with a public getter, no [IgnoreMember].
+        // Anything else that carries a [Key] is MessagePack's AllowPrivate business and, on the way to an object list, is refused.
+        [Test]
+        public void TheWalkReadsTheMembersMessagePackWrites()
+        {
+            Assert.That(Problems(typeof(PubIgn)), Is.Empty, "an ignored member is never written, so its list is nobody's business");
+            Assert.That(Problems(typeof(ApIgn)), Is.Empty, "an ignored private member is not a hidden list");
+            var held = Problems(typeof(PgHold)).Single();
+            Assert.That(held, Does.Contain("Items").And.Contain("non-public"));
+
+            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix) })
+            {
+                var written = MessagePackMembers(type, allowPrivate: false);
+                Assert.That(CultElementIds.WrittenKeyedMembers(type).Select(member => member.Name), Is.EquivalentTo(written), type.Name);
+                var readable = MessagePackMembers(type, allowPrivate: true);
+                Assert.That(CultElementIds.UnreadMembers(type).Select(member => member.Name), Is.EquivalentTo(readable.Except(written)), type.Name);
+            }
+
+            Assert.That(CultElementIds.UnreadMembers(typeof(MemberMix)).Select(member => member.Name), Is.EquivalentTo(new[] { "priv" }));
+            Assert.That(CultElementIds.UnreadMembers(typeof(PgHold)).Select(member => member.Name), Is.EquivalentTo(new[] { "Items" }));
+        }
+
+        // The names of the members MessagePack's own discovery reads for a type, by reflection into its internal type: the
+        // oracle the walk's member set is pinned to.
+        private static List<string> MessagePackMembers(Type type, bool allowPrivate)
+        {
+            const string moved = "MessagePack moved its member discovery; re-derive MembersOf";
+            const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance |
+                                                       System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            var info = typeof(MessagePackSerializer).Assembly.GetType("MessagePack.Internal.ObjectSerializationInfo");
+            var create = info?.GetMethod("CreateOrNull", all);
+            if (create == null || create.GetParameters().Length != 4)
+            {
+                Assert.Fail(moved);
+                return new List<string>();
+            }
+
+            var result = create.Invoke(null, new object[] { type, false, false, allowPrivate });
+            var members = result?.GetType().GetProperty("Members", all)?.GetValue(result) as System.Collections.IEnumerable;
+            if (members == null)
+            {
+                Assert.Fail(moved);
+                return new List<string>();
+            }
+
+            var names = new List<string>();
+            foreach (var member in members)
+            {
+                var readable = member.GetType().GetProperty("IsReadable", all)?.GetValue(member);
+                var name = member.GetType().GetProperty("Name", all)?.GetValue(member) as string;
+                if (readable is not bool || name == null)
+                    Assert.Fail(moved);
+                if ((bool)readable!)
+                    names.Add(name!);
+            }
+
+            return names;
+        }
+
+        // An id MessagePack writes but cannot read back would be re-minted differently on every load; one it does not write
+        // never reaches disk.
+        [Test]
+        public void AnIdMessagePackCannotReadBackIsRefused()
+        {
+            Assert.That(Problems(typeof(HPrivSet)).Single(), Does.Contain("setter is not public").And.Contain("Id"));
+            Assert.That(Problems(typeof(HIgnId)).Single(), Does.Contain("does not write").And.Contain("Id"));
+            Assert.That(Problems(typeof(HPrivateId)).Single(), Does.Contain("does not write").And.Contain("id"));
+            Assert.That(Problems(typeof(HInit)), Is.Empty);
+            Assert.That(Problems(typeof(HCtorId)), Is.Empty);
+
+            foreach (var holder in new object[]
+            {
+                new HInit { Items = { new EInit(), new EInit() } },
+                new HCtorId { Items = { new ECtorId(null), new ECtorId(null) } },
+            })
+            {
+                Assert.That(Assign(holder, "r", deterministic: false), Is.EqualTo(2), holder.GetType().Name);
+                var bytes = MessagePackSerializer.Serialize(holder.GetType(), holder, GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options);
+                var back = MessagePackSerializer.Deserialize(holder.GetType(), bytes, GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options);
+                Assert.That(Ids(back), Is.EqualTo(Ids(holder)), holder.GetType().Name);
+                Assert.That(Ids(back), Has.All.Match("^[0-9a-f]{12}$"), holder.GetType().Name);
+            }
+        }
+
+        private static string?[] Ids(object holder) => holder switch
+        {
+            HInit init => init.Items.Select(item => item.Id).ToArray(),
+            HCtorId ctor => ctor.Items.Select(item => item.Id).ToArray(),
+            _ => throw new ArgumentException(holder.GetType().Name),
+        };
+
+        // A subclass that redeclares the id member does not change which member the declared element writes.
+        [Test]
+        public void AnElementIsReadByItsDeclaredTypeNotItsRuntimeType()
+        {
+            Assert.That(Problems(typeof(HDoc2)), Is.Empty);
+            static HE Hd(string? declared = null, string? redeclared = null)
+            {
+                var item = new HD { Id = redeclared };
+                ((HE)item).Id = declared;
+                return item;
+            }
+
+            var minted = new HDoc2 { Items = { Hd() } };
+            Assert.That(Assign(minted, "r", deterministic: false), Is.EqualTo(1));
+            Assert.That(minted.Items[0].Id, Does.Match("^[0-9a-f]{12}$"));
+            Assert.That(((HD)minted.Items[0]).Id, Is.Null, "the redeclared member is never written, so it is not minted");
+
+            Assert.That(() => CultElementIds.Plan(typeof(HDoc2), new HDoc2 { Items = { Hd(declared: "not-hex") } }, "r", false),
+                Throws.TypeOf<CultElementIdException>(), "the declared member is checked");
+            Assert.That(() => CultElementIds.Plan(typeof(HDoc2), new HDoc2 { Items = { Hd(redeclared: "not-hex") } }, "r", false),
+                Throws.Nothing, "the redeclared member is never read");
+
+            Assert.That(CultElementIds.Holds(typeof(HDoc2), new HDoc2 { Items = { Hd(declared: "0123456789ab") } }), Is.True);
+            Assert.That(CultElementIds.Holds(typeof(HDoc2), new HDoc2 { Items = { Hd(redeclared: "0123456789ab") } }), Is.False);
+        }
+
         // ---- shapes ----
+        [MessagePackObject] public class PubIgn { [Key(0)] [IgnoreMember] public List<EBare> L { get; set; } = new(); }
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject] public class ApIgn { [Key(0)] [IgnoreMember] private List<EIded> l = new(); }
+#pragma warning restore CS0169, CS0414, CS0649
+        [MessagePackObject] public class PgHold { [Key(0)] public List<EIded> Items { private get; set; } = new(); }
+        [MessagePackObject]
+        public class MemberMix
+        {
+            [Key(0)] public int A;
+            [Key(1)] [IgnoreMember] public List<EBare>? Ign;
+            [Key(2)] public string? PS { get; private set; }
+            [Key(3)] public string? GetOnly { get; }
+#pragma warning disable CS0169, CS0414, CS0649
+            [Key(4)] private int priv;
+#pragma warning restore CS0169, CS0414, CS0649
+            [Key(5)] public string? InitOnly { get; init; }
+            [IgnoreMember] public int Priv => priv;
+        }
+
+        [MessagePackObject] public class EPrivSet { [Key(0)] [CultElementId] public string? Id { get; private set; } }
+        [MessagePackObject] public class HPrivSet { [Key(0)] public List<EPrivSet> Items { get; set; } = new(); }
+        [MessagePackObject] public class EIgnId { [Key(0)] [IgnoreMember] [CultElementId] public string? Id { get; set; } }
+        [MessagePackObject] public class HIgnId { [Key(0)] public List<EIgnId> Items { get; set; } = new(); }
+        #pragma warning disable CS0169, CS0649
+        [MessagePackObject] public class EPrivateId { [Key(0)] [CultElementId] private string? id; }
+#pragma warning restore CS0169, CS0649
+        [MessagePackObject] public class HPrivateId { [Key(0)] public List<EPrivateId> Items { get; set; } = new(); }
+        [MessagePackObject] public class EInit { [Key(0)] [CultElementId] public string? Id { get; init; } }
+        [MessagePackObject] public class HInit { [Key(0)] public List<EInit> Items { get; set; } = new(); }
+        [MessagePackObject]
+        public class ECtorId
+        {
+            [SerializationConstructor] public ECtorId(string? id) { Id = id; }
+            [Key(0)] [CultElementId] public string? Id { get; set; }
+        }
+        [MessagePackObject] public class HCtorId { [Key(0)] public List<ECtorId> Items { get; set; } = new(); }
+
+        [MessagePackObject] public class HE { [Key(0)] [CultElementId] public string? Id { get; set; } }
+        [MessagePackObject] public class HD : HE { [Key(2)] [CultElementId] public new string? Id { get; set; } }
+        [MessagePackObject] public class HDoc2 { [Key(0)] public List<HE> Items { get; set; } = new(); }
+
         [MessagePackObject]
         public class KNode : IEnumerable<KNode>
         {

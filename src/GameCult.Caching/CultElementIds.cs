@@ -136,7 +136,7 @@ namespace GameCult.Caching
                 return;
             foreach (var (member, memberType) in KeyedMembers(type))
                 VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), false, seen, survey, graph);
-            foreach (var (member, memberType) in NonPublicKeyedMembers(type))
+            foreach (var (member, memberType) in UnreadKeyedMembers(type))
                 VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), true, seen, survey, graph);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
             {
@@ -276,7 +276,10 @@ namespace GameCult.Caching
 
         private static string? IdProblem(Type element)
         {
-            var ids = MembersOf(element).Where(member => Declares(member, typeof(CultElementIdAttribute))).ToArray();
+            // Candidates come from every instance member up the base chain, public or not, so an id MessagePack does not write
+            // is named as such instead of being reported missing. An override or a hiding member is one member, the most derived.
+            var ids = AllInstanceMembers(element).Where(member => Declares(member, typeof(CultElementIdAttribute)))
+                .GroupBy(member => member.Name).Select(group => group.First()).ToArray();
             if (ids.Length == 0)
                 return "has no [CultElementId] member; add a public string member with [Key] and [CultElementId] so each element has an identity.";
             if (ids.Length > 1)
@@ -288,11 +291,16 @@ namespace GameCult.Caching
                 return $"declares [CultElementId] on {id.Name}, which is not a string.";
             if (KeyOf(id) is not { } idKey)
                 return $"declares [CultElementId] on {id.Name}, which has no integer [Key], so it is never persisted.";
+            if (MembersOf(element).FirstOrDefault(member => member.Name == id.Name && member.MemberType == id.MemberType) is not { } written)
+                return $"declares [CultElementId] on {id.Name}, which MessagePack does not write ([IgnoreMember], non-public, or a property whose getter is not public); the id would never reach disk.";
+            id = written;
             var sharing = KeyedMembers(element).FirstOrDefault(entry => entry.Member != id && KeyOf(entry.Member) == idKey);
             if (sharing.Member != null)
                 return $"declares [CultElementId] on {id.Name} with [Key({idKey})], which {sharing.Member.Name} also uses; an id needs a key of its own.";
             if (id is PropertyInfo { SetMethod: null } or FieldInfo { IsInitOnly: true })
                 return $"declares [CultElementId] on {id.Name}, which cannot be assigned; the cache mints into it.";
+            if (id is PropertyInfo { SetMethod.IsPublic: false })
+                return $"declares [CultElementId] on {id.Name}, whose setter is not public: MessagePack writes the id but does not read it back, so every load would mint a different one. Make the setter public (init is fine).";
             var source = id.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom;
             if (source != null)
             {
@@ -533,9 +541,33 @@ namespace GameCult.Caching
             return shape;
         }
 
+        // The members MessagePack's StandardResolver writes for an integer-keyed type: public instance fields, and public
+        // instance properties with a public getter, none of them [IgnoreMember]. TheWalkReadsTheMembersMessagePackWrites checks
+        // this set against MessagePack's own member discovery.
         private static IEnumerable<MemberInfo> MembersOf(Type type) =>
             type.GetFields(BindingFlags.Instance | BindingFlags.Public).Cast<MemberInfo>()
-                .Concat(type.GetProperties(BindingFlags.Instance | BindingFlags.Public).Where(property => property.GetIndexParameters().Length == 0 && property.GetMethod != null));
+                .Concat(type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(property => property.GetIndexParameters().Length == 0 && property.GetMethod is { IsPublic: true }))
+                .Where(member => !Declares(member, typeof(IgnoreMemberAttribute)));
+
+        // Every instance field and indexer-free property declared on the type or any base, most derived first.
+        private static IEnumerable<MemberInfo> AllInstanceMembers(Type type)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            for (var level = type; level != null && level != typeof(object); level = level.BaseType)
+            {
+                foreach (var field in level.GetFields(flags))
+                    yield return field;
+                foreach (var property in level.GetProperties(flags).Where(property => property.GetIndexParameters().Length == 0))
+                    yield return property;
+            }
+        }
+
+        // The members the walk reads, as MessagePack writes them, for the oracle test that checks both against MessagePack.
+        internal static IEnumerable<MemberInfo> WrittenKeyedMembers(Type type) => KeyedMembers(type).Select(entry => entry.Member);
+
+        // The [Key] members MessagePack writes only under AllowPrivate, for the same test.
+        internal static IEnumerable<MemberInfo> UnreadMembers(Type type) => UnreadKeyedMembers(type).Select(entry => entry.Member);
 
         private static IEnumerable<(MemberInfo Member, Type Type)> KeyedMembers(Type type) =>
             MembersOf(type).Where(member => KeyOf(member) != null).Select(member => (member, TypeOf(member)));
@@ -544,16 +576,18 @@ namespace GameCult.Caching
         // override of a base virtual member would not see its base's attribute.
         private static bool Declares(MemberInfo member, Type attribute) => Attribute.IsDefined(member, attribute, inherit: true);
 
-        // [Key] members MessagePack writes only under AllowPrivate: non-public fields and properties, up the base chain.
-        private static IEnumerable<(MemberInfo Member, Type Type)> NonPublicKeyedMembers(Type type)
+        // [Key] members MessagePack writes only under AllowPrivate: non-public fields and properties, and public properties whose
+        // getter is not public, up the base chain. An [IgnoreMember] member is never written, so it is not one of them.
+        private static IEnumerable<(MemberInfo Member, Type Type)> UnreadKeyedMembers(Type type)
         {
             for (var level = type; level != null && level != typeof(object); level = level.BaseType)
             {
-                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-                foreach (var member in level.GetFields(flags).Cast<MemberInfo>()
-                             .Concat(level.GetProperties(flags).Where(property => property.GetIndexParameters().Length == 0)))
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                foreach (var member in level.GetFields(flags).Where(field => !field.IsPublic).Cast<MemberInfo>()
+                             .Concat(level.GetProperties(flags).Where(property =>
+                                 property.GetIndexParameters().Length == 0 && property.GetMethod is { IsPublic: false })))
                 {
-                    if (KeyOf(member) != null)
+                    if (KeyOf(member) != null && !Declares(member, typeof(IgnoreMemberAttribute)))
                         yield return (member, TypeOf(member));
                 }
             }
