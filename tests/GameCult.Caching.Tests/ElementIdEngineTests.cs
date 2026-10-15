@@ -485,7 +485,64 @@ namespace GameCult.Caching.Tests
             Assert.That(CultElementIds.Inspect(typeof(HHiddenList)).IdPath, Is.Empty);
         }
 
+        // MessagePack writes a [MessagePackObject] class that is only IEnumerable<T> by its keys, so the walk reads it by key. A
+        // keyed tree node that enumerates its own children is the shape that overflowed the stack when enumeration came first.
+        [Test]
+        public void ATypeThatEnumeratesItselfIsWalkedByKeyAndTerminates()
+        {
+            var survey = CultElementIds.Inspect(typeof(HKNode));
+            Assert.That(survey.Problems, Is.Empty);
+            Assert.That(survey.IdPath, Is.EquivalentTo(new[] { typeof(HKNode), typeof(List<KNode>), typeof(KNode) }));
+
+            var root = new HKNode { Nodes = { new KNode { Children = { new KNode { Children = { new KNode() } } } } } };
+            Assert.That(Assign(root, "r", deterministic: true), Is.EqualTo(3));
+            Assert.That(root.Nodes[0].Id, Has.Length.EqualTo(12));
+            Assert.That(root.Nodes[0].Children[0].Children[0].Id, Has.Length.EqualTo(12));
+
+            // An unkeyed type that enumerates itself holds no element list and ends the type walk.
+            var unkeyed = CultElementIds.Inspect(typeof(HUNode));
+            Assert.That(unkeyed.Problems, Is.Empty);
+            Assert.That(unkeyed.IdPath, Is.Empty);
+
+            // A keyed class that only enumerates is read by its keyed lists, so both are judged and minted.
+            Assert.That(Problems(typeof(KBag)).Single(), Does.Contain("EBare"));
+            var bag = new KBagIded { Items = { new EIded(), new EIded() } };
+            Assert.That(Assign(bag, "r", deterministic: false), Is.EqualTo(2));
+            Assert.That(CultElementIds.Holds(typeof(KBagIded), bag), Is.True);
+        }
+
         // ---- shapes ----
+        [MessagePackObject]
+        public class KNode : IEnumerable<KNode>
+        {
+            [Key(0)] [CultElementId] public string? Id { get; set; }
+            [Key(1)] public List<KNode> Children { get; set; } = new();
+            public IEnumerator<KNode> GetEnumerator() => Children.GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [MessagePackObject] public class HKNode { [Key(0)] public List<KNode> Nodes { get; set; } = new(); }
+        public class UNode : IEnumerable<UNode>
+        {
+            public IEnumerator<UNode> GetEnumerator() { yield break; }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [MessagePackObject] public class HUNode { [Key(0)] public UNode? N { get; set; } }
+        [MessagePackObject]
+        public class KBag : IEnumerable<EIded>
+        {
+            [Key(0)] public List<EIded> Items { get; set; } = new();
+            [Key(1)] public List<EBare> Other { get; set; } = new();
+            public IEnumerator<EIded> GetEnumerator() { yield break; }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [MessagePackObject]
+        public class KBagIded : IEnumerable<EIded>
+        {
+            [Key(0)] public List<EIded> Items { get; set; } = new();
+            public IEnumerator<EIded> GetEnumerator() { yield break; }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
         [MessagePackObject] public class EBare { [Key(0)] public string X { get; set; } = ""; }
         [MessagePackObject] public class EIded { [Key(0)] public string X { get; set; } = ""; [Key(1)] [CultElementId] public string Id { get; set; } = ""; }
         [MessagePackObject] public class ENest { [Key(0)] [CultElementId] public string Id { get; set; } = ""; [Key(1)] public List<EIded> Sub { get; set; } = new(); }

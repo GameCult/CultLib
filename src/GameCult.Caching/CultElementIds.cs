@@ -148,6 +148,10 @@ namespace GameCult.Caching
         private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, bool hidden, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
+            // A sequence or map whose element is itself (an unkeyed Node : IEnumerable<Node>) ends the type walk here; without
+            // this it would recurse until the stack overflows.
+            if (Array.IndexOf(through, memberType) >= 0)
+                return;
             var (kind, inner) = Classify(memberType);
             switch (kind)
             {
@@ -565,8 +569,10 @@ namespace GameCult.Caching
 
         private static readonly ConcurrentDictionary<Type, (Kind Kind, Type Inner)> Classes = new();
 
-        // The one recognition of what MessagePack writes for a declared type: registration, Plan, Holds and the codec's id path
-        // all go through it. Inner is a map's value type, a sequence's element type, or the type itself for an owner.
+        // The walk's model of a declared type: registration, Plan, Holds and the codec's id path all go through it. A
+        // [MessagePackObject] or [Union] type is read by key even when it is also IEnumerable<T>; the codec checks, for every type
+        // on the id path, that MessagePack writes it the way this model reads it, and refuses the document when it does not.
+        // Inner is a map's value type, a sequence's element type, or the type itself for an owner.
         //   Leaf      a value written whole that holds no element list: strings (an IEnumerable<char> MessagePack writes whole),
         //             a struct, class or interface with no [MessagePackObject] or [Union] (primitives, enums, float2, DateTime,
         //             and object, which is untyped on disk).
@@ -579,13 +585,15 @@ namespace GameCult.Caching
             type = Nullable.GetUnderlyingType(type) ?? type;
             if (type == typeof(string))
                 return (Kind.Leaf, type);
+            if (IsKeyed(type))
+                return (Kind.Owner, type);
             if (type.IsValueType)
-                return IsKeyed(type) ? (Kind.Owner, type) : (Kind.Leaf, type);
+                return (Kind.Leaf, type);
             if (MapTypes(type) is { } map)
                 return (Kind.Map, map.Value);
             if (ElementTypeOf(type) is { } element)
                 return (Kind.Sequence, element);
-            return IsKeyed(type) ? (Kind.Owner, type) : (Kind.Leaf, type);
+            return (Kind.Leaf, type);
         });
 
         // A type MessagePack serializes by key: [MessagePackObject] or [Union].
