@@ -80,6 +80,10 @@ public sealed class SpanStageTests
 
         public SpanNoise Ridged(SpanPath path) => span_ridged(path, S, Octaves, Lacunarity, Gain);
 
+        public SpanNoise Fbm(SpanPath path, int octaves) => span_fbm(path, S, octaves, Lacunarity, Gain);
+
+        public SpanNoise Ridged(SpanPath path, int octaves) => span_ridged(path, S, octaves, Lacunarity, Gain);
+
         // M = frequency (I + (1/stretch - 1) a a^T) in double, a the normalised axis (none for a zero axis).
         public double[,] Matrix()
         {
@@ -505,6 +509,82 @@ public sealed class SpanStageTests
         Assert.True(end > 10.5 && result.curvature >= end, $"the end-of-span norm is {end:R} and curvature {result.curvature:R}: the span no longer pins the local tier");
     }
 
+    // Octave o's amplitude-weighted value (n_o gain^o, or gain^o (1 - |n_o|) for ridged) at `point`, read from
+    // production: the difference of span_fbm's (span_ridged's) field at o + 1 and at o octaves.
+    private static double[] OctaveValues(Stage stage, float3 point, bool ridged)
+    {
+        var path = PathAt(point);
+        var values = new double[stage.Octaves];
+        var previous = 0.0;
+        for (var k = 1; k <= stage.Octaves; k++)
+        {
+            var total = ridged ? stage.Ridged(path, k).field.w : stage.Fbm(path, k).field.w;
+            values[k - 1] = total - previous;
+            previous = total;
+        }
+
+        return values;
+    }
+
+    // The departure of the octave sum from its midpoint branch, sum_o gain^o (s_o n_o - |n_o|) with s_o the
+    // sign of n_o at the midpoint, peaked over `samples` points of the span: Float for the field span_ridged
+    // and span_fbm themselves evaluate (read octave by octave through OctaveValues), Exact for the double
+    // kernel. Rounding bounds what the float differences of the accumulating sums can lose.
+    private static (double Float, double Exact, double Rounding) BranchDeparture(Stage stage, Span span, int samples)
+    {
+        var amplitudes = new float[stage.Octaves];
+        var weight = 1.0f;
+        var sum = 0.0;
+        for (var o = 0; o < stage.Octaves; o++)
+        {
+            amplitudes[o] = weight;
+            sum += Math.Abs(weight);
+            weight *= stage.Gain;
+        }
+
+        var middle = OctaveValues(stage, span.Path.midpoint, false);
+        var signs = Enumerable.Range(0, stage.Octaves).Select(o => Math.Sign(middle[o]) * Math.Sign(amplitudes[o])).ToArray();
+        var peakFloat = 0.0;
+        var peakExact = 0.0;
+        for (var s = 0; s < samples; s++)
+        {
+            var t = span.Path.halfLength * (2.0f * s / (samples - 1) - 1.0f);
+            var point = span.At(t);
+            var n = OctaveValues(stage, point, false);
+            var r = OctaveValues(stage, point, true);
+            var departureFloat = 0.0;
+            var departureExact = 0.0;
+            for (var o = 0; o < stage.Octaves; o++)
+            {
+                departureFloat += signs[o] * n[o] - (amplitudes[o] - r[o]);
+                var x = stage.PointD(point, o);
+                var exact = NoiseBoundTests.ValueDouble(x[0], x[1], x[2]);
+                departureExact += stage.Amplitude(o) * (signs[o] * exact - Math.Abs(exact));
+            }
+
+            peakFloat = Math.Max(peakFloat, Math.Abs(departureFloat));
+            peakExact = Math.Max(peakExact, Math.Abs(departureExact));
+        }
+
+        return (peakFloat, peakExact, stage.Octaves * Math.Pow(2.0, -22) * sum);
+    }
+
+    // Newton steps from q to the exact kernel's n = 0 (the float gradient steers, the double value decides).
+    private static float3 ProjectToZero(float3 q)
+    {
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            var n = snoise_grad(q);
+            var gg = (double)n.x * n.x + (double)n.y * n.y + (double)n.z * n.z;
+            if (gg < 1.0e-12)
+                break;
+            var v = NoiseBoundTests.ValueDouble(q.x, q.y, q.z);
+            q = new float3((float)(q.x - v * n.x / gg), (float)(q.y - v * n.y / gg), (float)(q.z - v * n.z / gg));
+        }
+
+        return q;
+    }
+
     /// <summary>
     /// span-bounds-enclose, fold: for span_ridged, the value's departure from the midpoint branch (each
     /// octave's gain^o (s n - |n|), s the sign of n at the midpoint, summed) never exceeds fold at 64 points of
@@ -548,32 +628,9 @@ public sealed class SpanStageTests
                 buckets[Bucket(stage.MaxMagnitude(span.Path))]++;
                 var fold = stage.Ridged(span.Path).fold;
                 Assert.Equal(0.0f, stage.Fbm(span.Path).fold);
-                var signs = Enumerable.Range(0, stage.Octaves).Select(o => Math.Sign(stage.OneOctave(o).Fbm(PathAt(q)).field.w)).ToArray();
-                var peakFloat = 0.0;
-                var peakExact = 0.0;
-                for (var s = 0; s < 64; s++)
-                {
-                    var t = halfLength * (2.0f * s / 63 - 1.0f);
-                    var point = span.At(t);
-                    var departureFloat = 0.0;
-                    var departureExact = 0.0;
-                    for (var o = 0; o < stage.Octaves; o++)
-                    {
-                        var octave = stage.OneOctave(o);
-                        var nFloat = (double)octave.Fbm(PathAt(point)).field.w;
-                        var absFloat = 1.0 - octave.Ridged(PathAt(point)).field.w;
-                        departureFloat += stage.Amplitude(o) * (signs[o] * nFloat - absFloat);
-                        var x = stage.PointD(point, o);
-                        var nExact = NoiseBoundTests.ValueDouble(x[0], x[1], x[2]);
-                        departureExact += stage.Amplitude(o) * (signs[o] * nExact - Math.Abs(nExact));
-                    }
-
-                    peakFloat = Math.Max(peakFloat, Math.Abs(departureFloat));
-                    peakExact = Math.Max(peakExact, Math.Abs(departureExact));
-                    Assert.True(Math.Abs(departureFloat) <= fold * (1.0 + 1.0e-3) + 1.0e-6, $"stage {stage}, span {span}: the float branch departure at t = {t:R} is {departureFloat:R}, above fold {fold:R}");
-                    Assert.True(Math.Abs(departureExact) <= fold * (1.0 + 1.0e-3) + 1.0e-6, $"stage {stage}, span {span}: the exact branch departure at t = {t:R} is {departureExact:R}, above fold {fold:R}");
-                }
-
+                var (peakFloat, peakExact, rounding) = BranchDeparture(stage, span, 64);
+                Assert.True(peakFloat <= fold * (1.0 + 1.0e-3) + 1.0e-6 + rounding, $"stage {stage}, span {span}: the float branch departure is {peakFloat:R}, above fold {fold:R}");
+                Assert.True(peakExact <= fold * (1.0 + 1.0e-3) + 1.0e-6, $"stage {stage}, span {span}: the exact branch departure is {peakExact:R}, above fold {fold:R}");
                 if (fold > 0.0)
                     crossing++;
                 largest = Math.Max(largest, Math.Max(peakFloat, peakExact));
@@ -601,6 +658,61 @@ public sealed class SpanStageTests
         }
 
         Assert.True(found >= 5, $"only {found} calm midpoints found");
+    }
+
+    /// <summary>
+    /// The Gl reach term over a long span: a straight path from rest along -s grad n (s the sign of n at the
+    /// midpoint), identity stage, one octave, half-length 6, found by an audit and kept. The path reaches
+    /// n = 0 and the branch departure (about 0.387) is covered only if the gradient bound grows by
+    /// Hl nu halfLength over the span; a reach that shrinks with halfLength (nu / halfLength) puts fold at
+    /// 0.384 and fails here, as does any reach right only for half-lengths up to sqrt 2.
+    /// </summary>
+    [Fact]
+    public void SpanFoldEnclosesTheLongPathFromRest()
+    {
+        var stage = new Stage(SpanStage.Identity, 1, 2.0f, 0.5f);
+        const float halfLength = 6.0f;
+        const float acceleration = 0.0055555557f;
+        var span = new Span(new SpanPath { midpoint = new float3(7.634474f, 24.228996f, -3.7595012f), velocity = None, speed = acceleration * halfLength, acceleration = acceleration, halfLength = halfLength }, new float3(-0.9375727f, -0.07116994f, 0.3404294f) * acceleration);
+        var fold = stage.Ridged(span.Path).fold;
+        var (departureFloat, departureExact, rounding) = BranchDeparture(stage, span, 129);
+        Assert.True(Math.Max(departureFloat, departureExact) > 0.3, $"the branch departure is {Math.Max(departureFloat, departureExact):R}: the span no longer crosses zero");
+        Assert.True(departureFloat <= fold * (1.0 + 1.0e-3) + 1.0e-6 + rounding, $"the float branch departure is {departureFloat:R}, above fold {fold:R}");
+        Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-6, $"the exact branch departure is {departureExact:R}, above fold {fold:R}");
+    }
+
+    /// <summary>
+    /// A midpoint within float noise of n = 0, on a path that does not move: halfLength 0 (a point), and
+    /// halfLength 1 under a speed bound far above the path's motion (speed is an upper bound, so that is a
+    /// legal SpanPath, and composed chains pass loose ones). The exact kernel's sign at such a midpoint is
+    /// opposite to the float one in about a fifth of the draws, so fold must still cover the exact
+    /// departure there: a fold forced to 0 at halfLength 0, or an S_o whose reach term drives e_n below
+    /// zero under the loose bound, leaves it 0 and fails. span_fbm's fold is 0 throughout.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SpanFoldEnclosesTheExactBranchAtANearZeroMidpoint(bool loose)
+    {
+        var random = new System.Random(loose ? 0x100E : 0x4A11);
+        var stage = new Stage(SpanStage.Identity, 1, 2.0f, 0.5f);
+        var crossing = 0;
+        foreach (var scale in new[] { 30.0f, 300.0f, 3000.0f })
+            for (var k = 0; k < 300; k++)
+            {
+                var q = ProjectToZero(Vector(random, -scale, scale));
+                var speed = loose ? 4.0f * (abs(q.x) + abs(q.y) + abs(q.z) + 20.0f) : 0.0f;
+                var span = new Span(new SpanPath { midpoint = q, velocity = None, speed = speed, acceleration = 0.0f, halfLength = loose ? 1.0f : 0.0f }, None);
+                var fold = stage.Ridged(span.Path).fold;
+                var (departureFloat, departureExact, _) = BranchDeparture(stage, span, 2);
+                Assert.Equal(0.0f, stage.Fbm(span.Path).fold);
+                Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"midpoint {q}, speed {speed:R}: the exact branch departure is {departureExact:R}, above fold {fold:R}");
+                Assert.True(departureFloat <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"midpoint {q}, speed {speed:R}: the float branch departure is {departureFloat:R}, above fold {fold:R}");
+                if (departureExact > 0.0)
+                    crossing++;
+            }
+
+        Assert.True(crossing >= 50, $"only {crossing} of 900 midpoints had an exact sign opposite to the float one: the check has no teeth");
     }
 
     /// <summary>
