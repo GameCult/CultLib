@@ -633,7 +633,7 @@ public sealed class NoiseBoundTests
     // gradient direction p_c, in double, with snoise_hessian's lattice, step() tie order and (float) hash,
     // so one corner table serves the Hessian and its derivative. Key names the lattice cell and traversal
     // order: two points with the same key are differentiated through the same corners.
-    private static (double[][] X, double[][] P, double[] Key) Corners(double vx, double vy, double vz)
+    internal static (double[][] X, double[][] P, double[] Key) Corners(double vx, double vy, double vz)
     {
         const double cx = 1.0 / 6.0;
         const double cy = 1.0 / 3.0;
@@ -686,7 +686,7 @@ public sealed class NoiseBoundTests
 
     // The Hessian of snoise at v in double, entry i * 3 + j: snoise_hessian's per-corner derivation, summed
     // over Corners. A corner with m = 0.5 - |x|^2 <= 0 contributes nothing.
-    private static double[] HessianDouble(double vx, double vy, double vz)
+    internal static double[] HessianDouble(double vx, double vy, double vz)
     {
         var (x, p, _) = Corners(vx, vy, vz);
         var hessian = new double[9];
@@ -703,6 +703,23 @@ public sealed class NoiseBoundTests
         }
 
         return hessian;
+    }
+
+    // The value of snoise at v in double: 105 sum m^4 s over Corners, the kernel's exact value (the tied
+    // kernel, as HessianDouble is its exact Hessian).
+    internal static double ValueDouble(double vx, double vy, double vz)
+    {
+        var (x, p, _) = Corners(vx, vy, vz);
+        var total = 0.0;
+        for (var c = 0; c < 4; c++)
+        {
+            var m = 0.5 - (x[c][0] * x[c][0] + x[c][1] * x[c][1] + x[c][2] * x[c][2]);
+            if (m <= 0.0)
+                continue;
+            total += 105.0 * m * m * m * m * (p[c][0] * x[c][0] + p[c][1] * x[c][1] + p[c][2] * x[c][2]);
+        }
+
+        return total;
     }
 
     private static double Delta(int a, int b) => a == b ? 1.0 : 0.0;
