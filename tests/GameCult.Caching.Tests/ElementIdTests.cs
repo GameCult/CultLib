@@ -385,7 +385,7 @@ namespace GameCult.Caching.Tests
             {
                 var replacement = ImmutableArray.Create(new IdReel { Label = "v", Id = "eeeeeeeeeeee" });
                 cache.Commit(batch => batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
-                    new[] { cache.Override<IdWholeHolder>(nameof(IdWholeHolder.Reels), replacement) }));
+                    new[] { cache.Override<IdWholeHolder>(nameof(IdWholeHolder.Name), "v"), cache.Override<IdWholeHolder>(nameof(IdWholeHolder.Reels), replacement) }));
                 Assert.That(cache.Get<IdWholeHolder>(new CultRecordKey("v"))!.Reels.Select(reel => reel.Id), Is.EqualTo(new[] { "eeeeeeeeeeee" }), "replaced whole");
                 Assert.That(cache.Get<IdWholeHolder>(new CultRecordKey("base"))!.Reels, Has.Length.EqualTo(2), "the base is untouched");
             }
@@ -395,7 +395,7 @@ namespace GameCult.Caching.Tests
             Assert.That(again.Get<IdWholeHolder>(new CultRecordKey("v"))!.Reels.Single().Id, Is.EqualTo("eeeeeeeeeeee"));
 
             var step = new CultVariantOverride(CultOverrideOp.Set, new[] { new CultPathStep(1, HexA) }, string.Empty, MessagePackSerializer.Serialize("x"));
-            var refused = Assert.Catch<Exception>(() => again.Commit(batch => batch.UpsertVariant(new CultRecordKey("p"), new CultRecordKey("base"), new[] { step })))!;
+            var refused = Assert.Catch<Exception>(() => again.Commit(batch => batch.UpsertVariant(new CultRecordKey("p"), new CultRecordKey("base"), new[] { again.Override<IdWholeHolder>(nameof(IdWholeHolder.Name), "p"), step })))!;
             Assert.That(refused.ToString(), Does.Contain("top-level Set overrides only"));
         }
 
