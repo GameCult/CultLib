@@ -2086,11 +2086,24 @@ nebula work picks it.
    comments and the README, not `design.md`, which `expr-ir` edits.
 2. Ruled `stage-functions` (`span-chain-shape-ruled`), split in three for size, on one
    branch `hands/cultmath-stage-functions`:
-   - `stage-functions` (spec `cut-stage-functions.r1`, base `2fd9431a`): the four
-     Lows of follow-up `span-pins-before-stage-functions` first, then C# only:
-     `SpanNoise` (field, curvature, fold), `span_fbm` and `span_ridged`.
-   - `stage-shaders`: their HLSL twins, the GLSL lowering and fixture families,
-     dxc and glslang. Merges with `stage-functions`.
+   - `stage-functions` (specs `cut-stage-functions.r1`-`r3`): r1 at `2fd9431a`; r2 batch A
+     (SpanPath/SpanStage inputs, float-rounding allowances) closed by verdict s3 at `98f4c441`;
+     r3 batch B (zero-length flat spans, infinite-bound and lo-normalise rules pinned in the
+     shader mirror, pins equal to their measurement, `tools/compile-hlsl.ps1`).
+   - `stage-shaders`: HLSL twins of `span_fbm`/`span_ridged` with SpanPath and SpanStage as
+     HLSL structs, the GLSL lowering and fixture families, dxc through `tools/compile-hlsl.ps1`
+     and glslang. The mirror harness learns struct arguments: `EveryMirrorFunctionMatchesCSharpMath`
+     builds a mirror struct input field by field from the case scalars, and finds the C#
+     counterpart by mapping the mirror's nested struct types to CultMath's by type and field
+     name (today the lookup keys on the mirror's own types, so a struct-taking function has no
+     counterpart; Body fact R2-4). Its verification carries follow-up `span-allowance-gpu-margin`.
+     Merges with `stage-functions`.
+     Open, decided when stage-shaders is mapped (a design call, not the operator's): the HLSL
+     form of SpanStage.Identity. (a) none: shader callers build the struct, and a mirror test
+     checks `span_fbm(path, identity, ...)` against `fbm_grad` with the identity built in C#;
+     (b) a `static const SpanStage` (the mirror transform and GLSL lowering would have to learn
+     struct constants); (c) a function, which needs a duplicating C# twin or a `MirrorOnly`
+     exemption. Recommended (a), moderate confidence.
    - `span-compose`: the composition helper (`span_compose`) and `span_range` for
      the empty and saturated proofs, in all three runtimes, with a two-stage chain
      enclosure test against dense sampling.
