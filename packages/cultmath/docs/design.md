@@ -850,10 +850,13 @@ halfLength` is the sum of the magnitudes the octave coordinate's roundings are r
 to, and `e_n = 2^-14 + L 2^-20 S_o` (value), `e_g = 2^-12 + H 2^-20 S_o` (gradient
 length) and `e_h = 2^-10 + T 2^-20 S_o` (Frobenius norm of the Hessian), with `L`, `H`,
 `T` the three pins; they add no pin. Measured against a double kernel with the float
-hash (6000 points per band, `|x|` from 2^-2 to 2^23), the error is at most 0.057 of
-`e_n`, 0.046 of `e_g` and 0.075 of `e_h` (the last at the smallest band, where the
-absolute Hessian error is 2.3e-5 and the absolute term carries it). Errors grow
-linearly in `|x|`: the value's is 2e-4 at 2^8, 1.5e-2 at 2^14 and 0.94 at 2^20.
+hash (6000 points per band, `|x|` from 2^-2 to 2^23), two samples observed the error's
+maxima as fractions of `e_n`, `e_g` and `e_h`: 0.057, 0.046 and 0.075 in the cut's own
+sample (seed not recorded; the 0.075 is against `T 2^-20 |x|_1` alone, at the smallest
+band, where the absolute Hessian error is 2.3e-5 and the absolute term carries it), and
+0.064, 0.0485 and 0.057 in an audit's (seed 0x501). They are samples, not bounds: a new
+seed moves them. They say the allowances enclose the error with a margin of about 15.
+Errors grow linearly in `|x|`: the value's is 2e-4 at 2^8, 1.5e-2 at 2^14 and 0.94 at 2^20.
 Rounding in the Frobenius-to-operator-norm step needs no allowance: the Frobenius norm
 exceeds the operator norm.
 

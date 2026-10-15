@@ -189,8 +189,12 @@ public static partial class math
     // gradient's own derivative's pin) and the Hessian's Frobenius norm's e_h = 2^-10 + T 2^-20 S_o (T is
     // the Hessian's derivative's pin): af_snoise's absolute terms for the first two, and 2^-10 for the
     // Hessian's, which the kernel's rounding at small coordinates (2.3e-5 absolute, measured against a
-    // double kernel) sits well under. The same probe (6000 points per band, |x| from 2^-2 to 2^23) puts
-    // the error at most 0.057, 0.046 and 0.075 of e_n, e_g and e_h. No new pin enters.
+    // double kernel) sits well under. Two samples of that probe (6000 points per band, |x| from 2^-2 to
+    // 2^23) observed the error's maxima, as fractions of e_n, e_g and e_h: 0.057, 0.046 and 0.075 in the
+    // cut's own sample (seed not recorded; the 0.075 is against T 2^-20 |x|_1 alone, at the smallest
+    // band), and 0.064, 0.0485 and 0.057 in an audit's (seed 0x501). They are samples, not bounds: a new
+    // seed moves them. What they say is that the allowances enclose the error with a margin of about 15.
+    // No new pin enters.
     //
     // Domain: no coordinate range is checked, clamped or refused. The allowances grow with S_o, so
     // curvature saturates at H (true everywhere) by S_o of about 1.1e5, and fold turns positive for every
