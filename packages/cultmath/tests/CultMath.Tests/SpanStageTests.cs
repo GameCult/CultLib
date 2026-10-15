@@ -371,8 +371,10 @@ public sealed class SpanStageTests
             var reference = plain.Ridged(span.Path);
             var isotropic = (plain with { S = plain.S with { axis = None } }).Ridged(span.Path);
             var viaNoAxis = noAxis.Ridged(span.Path);
+            var narrow = (stage with { S = stage.S with { axis = None, stretch = 0.25f } }).Ridged(span.Path);
             Assert.True(SameBits(reference.field, isotropic.field) && reference.curvature == isotropic.curvature && reference.fold == isotropic.fold, "stretch 1 with an axis differs from no axis");
             Assert.True(SameBits(isotropic.field, viaNoAxis.field) && isotropic.curvature == viaNoAxis.curvature && isotropic.fold == viaNoAxis.fold, "a zero axis with stretch 3 differs from the isotropic stage");
+            Assert.True(SameBits(isotropic.field, narrow.field) && isotropic.curvature == narrow.curvature && isotropic.fold == narrow.fold, "a zero axis with stretch 0.25 differs from the isotropic stage");
 
             var unit = stage with { S = stage.S with { axis = new float3(0.0f, 1.0f, 0.0f) } };
             var scaled = stage with { S = stage.S with { axis = new float3(0.0f, 2.0f, 0.0f) } };
@@ -390,11 +392,12 @@ public sealed class SpanStageTests
 
     private static int Bucket(double magnitude) => magnitude < 1.0e2 ? 0 : magnitude < 1.0e3 ? 1 : magnitude < 1.0e4 ? 2 : magnitude < 1.0e5 ? 3 : magnitude < 1.0e6 ? 4 : 5;
 
-    private static Stage Banded(System.Random random, float offsetScale, int octaves)
+    // byStep lifts the coordinate through octaveStep (octave o adds o octaveStep) instead of offset.
+    private static Stage Banded(System.Random random, float offsetScale, int octaves, bool byStep)
     {
         var stage = Stage.Draw(random, octaves);
         if (offsetScale > 0.0f)
-            stage = stage with { S = stage.S with { offset = Vector(random, -offsetScale, offsetScale) } };
+            stage = stage with { S = byStep ? stage.S with { octaveStep = Vector(random, -offsetScale, offsetScale) } : stage.S with { offset = Vector(random, -offsetScale, offsetScale) } };
         return stage;
     }
 
@@ -434,7 +437,7 @@ public sealed class SpanStageTests
             foreach (var halfLength in new[] { 0.02f, 0.5f, 8.0f })
                 for (var k = 0; k < 8; k++)
                 {
-                    var stage = Banded(random, offsetScale, 3);
+                    var stage = Banded(random, offsetScale, 3, k % 2 == 1);
                     var span = Span.Draw(random, Vector(random, -30.0f, 30.0f), halfLength, Uniform(random, 0.0f, 2.0f));
                     var result = ridged ? stage.Ridged(span.Path) : stage.Fbm(span.Path);
                     buckets[Bucket(stage.MaxMagnitude(span.Path))]++;
@@ -522,7 +525,7 @@ public sealed class SpanStageTests
         foreach (var offsetScale in OffsetScales)
             for (var k = 0; k < 60; k++)
             {
-                var stage = Banded(random, offsetScale, 3);
+                var stage = Banded(random, offsetScale, 3, k / 2 % 2 == 1);
                 var halfLength = new[] { 0.02f, 0.1f, 0.5f, 2.0f }[random.Next(4)];
                 // Draw midpoints with small noise values so spans cross zero, as well as arbitrary ones.
                 var q = Vector(random, -30.0f, 30.0f);
@@ -601,24 +604,31 @@ public sealed class SpanStageTests
     }
 
     /// <summary>
-    /// The fold's acceleration term, alone: the midpoint velocity is zero and the acceleration points along
-    /// the gradient, against the sign of n, so n reaches zero and crosses it on the way to the span's ends
-    /// by acceleration only. Without the acceleration term (or with the gradient bound under the gradient
-    /// the path reaches) the departure from the midpoint branch exceeds fold.
+    /// The fold's acceleration term, alone, at the identity stage and under a transform (frequency 2.5, stretch
+    /// 0.5, shift and offset): the midpoint velocity is zero and the acceleration points along the gradient
+    /// (in q), against the sign of n, so n reaches zero and crosses it on the way to the span's ends by
+    /// acceleration only. Without the acceleration term, with the gradient bound under the gradient the path
+    /// reaches, or with the transform's norm f_o |M| misplaced in it, the departure from the midpoint branch
+    /// exceeds fold.
     /// </summary>
-    [Fact]
-    public void SpanFoldCoversAccelerationAlone()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SpanFoldCoversAccelerationAlone(bool transformed)
     {
-        var random = new System.Random(0xACCE1);
-        var identity = new Stage(SpanStage.Identity, 1, 2.0f, 0.5f);
+        var random = new System.Random(transformed ? 0xACCE2 : 0xACCE1);
+        var stage = transformed
+            ? new Stage(new SpanStage { frequency = 2.5f, stretch = 0.5f, axis = new float3(0.0f, 1.0f, 0.0f), shift = new float3(0.3f, -1.2f, 2.1f), offset = new float3(5.0f, -3.0f, 7.0f), octaveStep = None }, 1, 2.0f, 0.5f)
+            : new Stage(SpanStage.Identity, 1, 2.0f, 0.5f);
+        var m = stage.Matrix();
         var cases = 0;
         var crossings = 0;
         var tightest = double.MaxValue;
-        for (var trial = 0; trial < 200_000 && cases < 150; trial++)
+        for (var trial = 0; trial < 400_000 && cases < 150; trial++)
         {
             var q = Vector(random, -60.0f, 60.0f);
-            var n = snoise_grad(q);
-            var gradient = new float3(n.x, n.y, n.z);
+            var n = snoise_grad(stage.Point(q, 0));
+            var gradient = new float3((float)(m[0, 0] * n.x + m[0, 1] * n.y + m[0, 2] * n.z), (float)(m[1, 0] * n.x + m[1, 1] * n.y + m[1, 2] * n.z), (float)(m[2, 0] * n.x + m[2, 1] * n.y + m[2, 2] * n.z));
             var halfLength = Uniform(random, 0.05f, 0.15f);
             var acceleration = Uniform(random, 4.0f, 12.0f);
             // n at the midpoint close enough to zero that the acceleration alone carries it across.
@@ -626,11 +636,11 @@ public sealed class SpanStageTests
                 continue;
             var c = -(float)Math.Sign(n.w) * acceleration * normalize(gradient);
             var span = new Span(new SpanPath { midpoint = q, velocity = None, speed = acceleration * halfLength, acceleration = acceleration, halfLength = halfLength }, c);
-            var fold = identity.Ridged(span.Path).fold;
+            var fold = stage.Ridged(span.Path).fold;
             var departure = 0.0;
             for (var s = 0; s < 64; s++)
             {
-                var value = (double)snoise(span.At(halfLength * (2.0f * s / 63 - 1.0f)));
+                var value = (double)snoise(stage.Point(span.At(halfLength * (2.0f * s / 63 - 1.0f)), 0));
                 departure = Math.Max(departure, Math.Abs(Math.Sign(n.w) * value - Math.Abs(value)));
             }
 
@@ -643,6 +653,92 @@ public sealed class SpanStageTests
         }
 
         Assert.True(crossings >= 100, $"only {crossings} of {cases} paths crossed zero by acceleration alone");
-        output.WriteLine($"IV-REPORT span fold, acceleration only: {crossings} of {cases} paths cross zero, tightest departure / fold {tightest:R}");
+        output.WriteLine($"IV-REPORT span fold, acceleration only ({(transformed ? "transformed" : "identity")}): {crossings} of {cases} paths cross zero, tightest departure / fold {tightest:R}");
+    }
+
+    /// <summary>
+    /// The fold's velocity term under a stretch: the velocity runs along the stretched axis (M scales it by
+    /// 1/stretch), the midpoint is where n reaches zero inside the span, so the departure is about twice
+    /// |grad n . w| halfLength and a velocity stretched the wrong way (or not at all) puts fold under it.
+    /// </summary>
+    [Theory]
+    [InlineData(0.25f)]
+    [InlineData(0.5f)]
+    [InlineData(4.0f)]
+    public void SpanFoldCoversTheStretchedVelocity(float stretch)
+    {
+        var random = new System.Random(0x57E1C + (int)(stretch * 8.0f));
+        var cases = 0;
+        var crossings = 0;
+        var tightest = double.MaxValue;
+        for (var trial = 0; trial < 400_000 && cases < 60; trial++)
+        {
+            var axis = UnitVector(random);
+            var stage = new Stage(new SpanStage { frequency = Uniform(random, 0.5f, 2.0f), stretch = stretch, axis = axis, shift = Vector(random, -4.0f, 4.0f), offset = Vector(random, -4.0f, 4.0f), octaveStep = None }, 1, 2.0f, 0.5f);
+            var q = Vector(random, -30.0f, 30.0f);
+            var velocity = axis * Uniform(random, 0.5f, 2.0f);
+            var halfLength = 0.05f;
+            var path = new SpanPath { midpoint = q, velocity = velocity, speed = length(velocity), acceleration = 0.0f, halfLength = halfLength };
+            var n = snoise_grad(stage.Point(q, 0));
+            var m = stage.Matrix();
+            var w = new double[3];
+            for (var i = 0; i < 3; i++)
+                w[i] = m[i, 0] * velocity.x + m[i, 1] * velocity.y + m[i, 2] * velocity.z;
+            var along = Math.Abs(n.x * w[0] + n.y * w[1] + n.z * w[2]);
+            if (along < 2.0 || Math.Abs(n.w) > 0.5 * along * halfLength)
+                continue;
+            var fold = stage.Ridged(path).fold;
+            var departure = 0.0;
+            for (var s = 0; s < 64; s++)
+            {
+                var t = halfLength * (2.0f * s / 63 - 1.0f);
+                var value = (double)snoise(stage.Point(q + velocity * t, 0));
+                departure = Math.Max(departure, Math.Abs(Math.Sign(n.w) * value - Math.Abs(value)));
+            }
+
+            if (departure > 0.0)
+                crossings++;
+            Assert.True(departure <= fold * (1.0 + 1.0e-3), $"stage {stage}, q {q}: the branch departure is {departure:R}, above fold {fold:R}");
+            if (departure > 0.0)
+                tightest = Math.Min(tightest, departure / fold);
+            cases++;
+        }
+
+        Assert.True(crossings >= 30, $"only {crossings} of {cases} paths crossed zero along the stretched velocity");
+        output.WriteLine($"IV-REPORT span fold, stretched velocity {stretch}: {crossings} of {cases} paths cross zero, tightest departure / fold {tightest:R}");
+    }
+
+    /// <summary>
+    /// Both bounds are sums over the octaves, weighted by |gain|^o: for a stage of several octaves,
+    /// curvature and fold equal the weighted sum of the bounds of each octave taken as a stage of its own,
+    /// to within the rounding of forming the octave's coordinate another way. A weight misplaced (gain
+    /// instead of |gain|, a division for a product), a dropped octave or a mis-scaled octave fails.
+    /// </summary>
+    [Fact]
+    public void SpanBoundsAreSumsOverTheOctaves()
+    {
+        var random = new System.Random(0x0C7A5);
+        var compared = 0;
+        for (var k = 0; k < 80; k++)
+        {
+            var stage = Stage.DrawSmooth(random, 300.0f, 90.0f, 5, 2);
+            var span = Span.Draw(random, Vector(random, -30.0f, 30.0f), new[] { 0.02f, 0.1f, 0.5f }[k % 3], Uniform(random, 0.0f, 2.0f));
+            var whole = stage.Ridged(span.Path);
+            double curvature = 0.0, fold = 0.0;
+            for (var o = 0; o < stage.Octaves; o++)
+            {
+                var one = stage.OneOctave(o).Ridged(span.Path);
+                var weight = Math.Abs(stage.Amplitude(o));
+                curvature += weight * one.curvature;
+                fold += weight * one.fold;
+            }
+
+            Assert.InRange(whole.curvature, curvature * (1.0 - 5.0e-3) - 1.0e-4, curvature * (1.0 + 5.0e-3) + 1.0e-4);
+            Assert.InRange(whole.fold, fold * (1.0 - 5.0e-3) - 1.0e-4, fold * (1.0 + 5.0e-3) + 1.0e-4);
+            if (fold > 1.0e-3)
+                compared++;
+        }
+
+        Assert.True(compared >= 20, $"only {compared} of 80 stages had a fold to compare");
     }
 }
