@@ -394,7 +394,7 @@ namespace GameCult.Caching.Tests
             })
             {
                 if (holder != typeof(G<FbArm>))
-                    Assert.That(CultElementIds.Inspect(holder).IdPath, Is.Not.Empty, holder.Name);
+                    Assert.That(CultElementIds.Inspect(holder).IdPath, Is.Not.Empty, holder.ToString());
                 Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString());
             }
         }
