@@ -112,7 +112,7 @@ public static partial class math
     {
         lo = min(lo, hi);
         if (b == 0.0f)
-            return clamp(a, lo, hi) * (t1 - t0);
+            return t1 != t0 ? clamp(a, lo, hi) * (t1 - t0) : 0.0f;
 
         var direction = t1 < t0 ? -1.0f : 1.0f;
         var start = min(t0, t1);

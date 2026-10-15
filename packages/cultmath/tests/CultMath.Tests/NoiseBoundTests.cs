@@ -469,8 +469,8 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// Pins SNOISE_LIPSCHITZ: no |snoise_grad| over 1e5 seeded points exceeds it, and the ascent from
-    /// MeasureLipschitz's witness reaches a maximum that, times 1.10, is the constant to within half a
-    /// percent, so a constant lowered (or raised) by 1% fails here.
+    /// MeasureLipschitz's witness reaches a maximum that, times 1.10, equals the constant bit for bit
+    /// (the expression MeasureLipschitz prints), so any moved constant fails here.
     /// </summary>
     [Fact]
     public void LipschitzConstantPinsSampledGradients()
@@ -479,8 +479,8 @@ public sealed class NoiseBoundTests
         Assert.True(sampled <= SNOISE_LIPSCHITZ, $"|snoise_grad| reaches {sampled:R}, above SNOISE_LIPSCHITZ {SNOISE_LIPSCHITZ:R}");
         var refined = AscendGradientNorm(LipschitzWitness);
         Assert.True(refined <= SNOISE_LIPSCHITZ, $"|snoise_grad| reaches {refined:R}, above SNOISE_LIPSCHITZ {SNOISE_LIPSCHITZ:R}");
-        var ratio = SNOISE_LIPSCHITZ / (1.10f * refined);
-        Assert.True(MathF.Abs(ratio - 1.0f) <= 0.005f, $"SNOISE_LIPSCHITZ is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureLipschitz and re-pin");
+        var measured = 1.10f * refined;
+        Assert.True(SNOISE_LIPSCHITZ == measured, $"SNOISE_LIPSCHITZ is {SNOISE_LIPSCHITZ:R}, the re-measured 1.10 x {refined:R} is {measured:R}; re-run MeasureLipschitz and re-pin");
     }
 
     // ---- The curvature and 2D Lipschitz constants (math.Affine.cs, math.Interval.cs) ----
@@ -609,8 +609,8 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// Pins SNOISE_HESSIAN: no Hessian norm over 1e5 seeded points exceeds it, and the ascent from
-    /// MeasureHessian's witness reaches a maximum that, times 1.10, is the constant to within half a
-    /// percent, so a constant moved by 1% fails here.
+    /// MeasureHessian's witness reaches a maximum that, times 1.10, equals the constant bit for bit
+    /// (the expression MeasureHessian prints), so any moved constant fails here.
     /// </summary>
     [Fact]
     public void HessianConstantPinsSampledCurvature()
@@ -619,8 +619,8 @@ public sealed class NoiseBoundTests
         Assert.True(sampled <= SNOISE_HESSIAN, $"the Hessian norm reaches {sampled:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
         var refined = Ascend(HessianNorm, HessianWitness);
         Assert.True(refined <= SNOISE_HESSIAN, $"the Hessian norm reaches {refined:R}, above SNOISE_HESSIAN {SNOISE_HESSIAN:R}");
-        var ratio = SNOISE_HESSIAN / (1.10 * refined);
-        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_HESSIAN is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureHessian and re-pin");
+        var measured = (float)(refined * 1.10);
+        Assert.True(SNOISE_HESSIAN == measured, $"SNOISE_HESSIAN is {SNOISE_HESSIAN:R}, the re-measured 1.10 x {refined:R} is {measured:R}; re-run MeasureHessian and re-pin");
     }
 
     // ---- The third-derivative constant (math.Span.cs) ----
@@ -947,8 +947,8 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// Pins SNOISE_THIRD: no third-derivative norm over 1e5 seeded points exceeds it, and the ascent from
-    /// MeasureThird's witness reaches a maximum that, times 1.10, is the constant to within half a
-    /// percent, so a constant moved by 1% fails here.
+    /// MeasureThird's witness reaches a maximum that, times 1.10, equals the constant bit for bit
+    /// (the expression MeasureThird prints), so any moved constant fails here.
     /// </summary>
     [Fact]
     public void ThirdConstantPinsSampled()
@@ -957,8 +957,8 @@ public sealed class NoiseBoundTests
         Assert.True(sampled <= SNOISE_THIRD, $"the third-derivative norm reaches {sampled:R}, above SNOISE_THIRD {SNOISE_THIRD:R}");
         var refined = Ascend(ThirdNorm, ThirdWitness);
         Assert.True(refined <= SNOISE_THIRD, $"the third-derivative norm reaches {refined:R}, above SNOISE_THIRD {SNOISE_THIRD:R}");
-        var ratio = SNOISE_THIRD / (1.10 * refined);
-        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE_THIRD is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureThird and re-pin");
+        var measured = (float)(refined * 1.10);
+        Assert.True(SNOISE_THIRD == measured, $"SNOISE_THIRD is {SNOISE_THIRD:R}, the re-measured 1.10 x {refined:R} is {measured:R}; re-run MeasureThird and re-pin");
     }
 
     /// <summary>
@@ -1019,7 +1019,7 @@ public sealed class NoiseBoundTests
 
     /// <summary>
     /// Pins SNOISE2_LIPSCHITZ as LipschitzConstantPinsSampledGradients pins SNOISE_LIPSCHITZ: 1e5 seeded
-    /// points under it, and the ascent from MeasureLipschitz2's witness within half a percent of it / 1.10.
+    /// points under it, and the ascent from MeasureLipschitz2's witness, times 1.10, equals it bit for bit (the expression MeasureLipschitz2 prints).
     /// </summary>
     [Fact]
     public void Lipschitz2ConstantPins()
@@ -1028,8 +1028,8 @@ public sealed class NoiseBoundTests
         Assert.True(sampled <= SNOISE2_LIPSCHITZ, $"|grad snoise2| reaches {sampled:R}, above SNOISE2_LIPSCHITZ {SNOISE2_LIPSCHITZ:R}");
         var refined = Ascend2(Gradient2Norm, Lipschitz2Witness);
         Assert.True(refined <= SNOISE2_LIPSCHITZ, $"|grad snoise2| reaches {refined:R}, above SNOISE2_LIPSCHITZ {SNOISE2_LIPSCHITZ:R}");
-        var ratio = SNOISE2_LIPSCHITZ / (1.10 * refined);
-        Assert.True(Math.Abs(ratio - 1.0) <= 0.005, $"SNOISE2_LIPSCHITZ is {ratio:R} times 1.10 x the re-measured {refined:R}; re-run MeasureLipschitz2 and re-pin");
+        var measured = (float)(refined * 1.10);
+        Assert.True(SNOISE2_LIPSCHITZ == measured, $"SNOISE2_LIPSCHITZ is {SNOISE2_LIPSCHITZ:R}, the re-measured 1.10 x {refined:R} is {measured:R}; re-run MeasureLipschitz2 and re-pin");
     }
 
     /// <summary>

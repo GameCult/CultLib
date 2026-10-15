@@ -304,7 +304,7 @@ float cultmath_integral_clamp_linear(float a, float b, float lo, float hi, float
 {
     lo = min(lo, hi);
     if (b == 0.0)
-        return clamp(a, lo, hi) * (t1 - t0);
+        return t1 != t0 ? clamp(a, lo, hi) * (t1 - t0) : 0.0;
 
     float direction = t1 < t0 ? -1.0 : 1.0;
     float start = min(t0, t1);

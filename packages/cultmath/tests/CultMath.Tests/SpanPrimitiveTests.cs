@@ -322,7 +322,7 @@ public sealed class SpanPrimitiveTests
     /// <summary>
     /// An infinite bound never reached by the line contributes nothing, not infinity times zero: relu
     /// (hi = +inf) and its mirror (lo = -inf) give the finite integral, whether the line crosses the finite
-    /// bound inside the span or not.
+    /// bound inside the span or not. The flat branch (b = 0) obeys the same zero-length rule.
     /// </summary>
     [Fact]
     public void IntegralClampLinearIsFiniteForInfiniteBounds()
@@ -343,6 +343,15 @@ public sealed class SpanPrimitiveTests
         Assert.Equal(-7.5f, integral_clamp_linear(0.0f, 1.0f, -inf, inf, 4.0f, 1.0f));
         // A line starting on the finite bound and rising into the infinite one: all ramp, the integral of t over [2, 4].
         Assert.Equal(6.0f, integral_clamp_linear(0.0f, 1.0f, 2.0f, inf, 2.0f, 4.0f));
+
+        // The flat branch obeys the same zero-length rule: a stretch of zero length contributes +0 however
+        // infinite the bound it would be clamped to, and a nonzero length of an infinite constant is infinite.
+        // The bit patterns are compared because Assert.Equal treats -0 as 0.
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(-2.3244874f, -0.0f, 0.0f, -inf, 1.429815f, 1.429815f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.5f, 0.0f, inf, inf, 2.0f, 2.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.5f, -0.0f, -inf, -inf, 0.0f, 0.0f)));
+        Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, inf, inf, 0.0f, 2.0f));
+        Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, -inf, -inf, 2.0f, 0.0f));
     }
 
     /// <summary>

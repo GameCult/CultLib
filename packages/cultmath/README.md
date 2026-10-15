@@ -167,6 +167,7 @@ CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
 
 ```powershell
 .\packages\cultmath\tools\get-dxc.ps1
+.\packages\cultmath\tools\compile-hlsl.ps1
 .\packages\cultmath\tools\get-spirv-cross.ps1
 .\packages\cultmath\tools\compile-hlsl-spirv.ps1 `
   -ShaderPath E:\Projects\Odin\crates\muninn-move-tracker\shaders\MoveSphereCandidate.comp.hlsl `
@@ -176,6 +177,8 @@ CultMath keeps portable DXC outside git under `packages/cultmath/.tools/`:
   -SpirvPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.spv `
   -OutputPath E:\Projects\Odin\crates\muninn-move-tracker\artifacts\shader\MoveSphereCandidate.comp.metal
 ```
+
+`compile-hlsl.ps1` compiles both `CultMath.hlsl` copies as a `lib_6_3` library with the x64 DXC.
 
 DXC emits Vulkan SPIR-V with `-spirv`. `-TargetEnv vulkan1.2` is exposed by the
 script, but the current Windows DXC release compiled this shader successfully

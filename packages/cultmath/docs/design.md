@@ -112,8 +112,9 @@ local) and writes through a swizzle component (`v.xy.x = s`, which C# rejects as
 modifying a temporary).
 
 The HLSL side is checked too: `tools/get-dxc.ps1` fetches Microsoft's
-DirectXShaderCompiler, and
-`dxc -T lib_6_3 -HV 2021 shaders/CultMath.hlsl` must compile cleanly.
+DirectXShaderCompiler (x64), and `tools/compile-hlsl.ps1` compiles both copies of
+`CultMath.hlsl` with it (`dxc -T lib_6_3 -HV 2021`); the script throws when dxc cannot
+launch or exits non-zero, so a stale exit code never reads as a pass.
 
 The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
 0). It proves the text of `CultMath.hlsl` computes the same float32 results as

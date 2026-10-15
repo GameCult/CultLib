@@ -84,12 +84,13 @@ public sealed class HlslSourceCompatibilityTests
         }
     }
 
-    private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN };
+    // Special values every mirror argument takes: zeros, ties, negatives, large values, NaN and both infinities.
+    private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN, float.PositiveInfinity, float.NegativeInfinity };
 
     /// <summary>
     /// Every mirror function with a C# math counterpart returns the same bits (any NaN equals any NaN;
     /// -0 differs from 0) over random inputs, every special value in every argument (ties, zeros,
-    /// negatives, NaN, large values, integer lattice points), special pairs, and vectors whose first two
+    /// negatives, NaN, infinities, large values, integer lattice points), special pairs, and vectors whose first two
     /// components tie (x0.x == x0.y in snoise). This proves the text of CultMath.hlsl computes the same
     /// float32 results as C# math on the CPU. It does not prove GPU agreement: driver sin precision alone
     /// makes cultmath_hash and value noise differ bit for bit on hardware. The mirror's intrinsics are C#
@@ -176,6 +177,56 @@ public sealed class HlslSourceCompatibilityTests
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
         Assert.Equal(120, compared.Count);
+    }
+
+    /// <summary>
+    /// The 1500 arguments (a, b, lo, hi, t0, t1) at which integral_clamp_linear's zero-length rule, its lo
+    /// normalisation and its infinite bounds all bite: a in {-2.5, 0, 1.5}, b in {-1.5, -0, 0, 2}, lo in
+    /// {-inf, -1, 0.5, 3, +inf}, hi in {-inf, -0.5, 1, 4, +inf}, and (t0, t1) in {(0, 0), (1.25, 1.25), (-1, 2),
+    /// (2, -1), (0, 1e-30)}. One spelling, read by the mirror grid test and by the GLSL clamp shadow test.
+    /// </summary>
+    internal static IReadOnlyList<float[]> IntegralClampLinearEdgeGrid { get; } = BuildIntegralClampLinearEdgeGrid();
+
+    private static List<float[]> BuildIntegralClampLinearEdgeGrid()
+    {
+        var inf = float.PositiveInfinity;
+        var grid = new List<float[]>();
+        foreach (var a in new[] { -2.5f, 0.0f, 1.5f })
+        foreach (var b in new[] { -1.5f, -0.0f, 0.0f, 2.0f })
+        foreach (var lo in new[] { -inf, -1.0f, 0.5f, 3.0f, inf })
+        foreach (var hi in new[] { -inf, -0.5f, 1.0f, 4.0f, inf })
+        foreach (var (t0, t1) in new[] { (0.0f, 0.0f), (1.25f, 1.25f), (-1.0f, 2.0f), (2.0f, -1.0f), (0.0f, 1.0e-30f) })
+            grid.Add(new[] { a, b, lo, hi, t0, t1 });
+        return grid;
+    }
+
+    /// <summary>
+    /// The compiled mirror's cultmath_integral_clamp_linear returns C#'s bits on every edge-grid case, and C#'s
+    /// result is never NaN there. The generic case set catches each of the function's guards (the held and
+    /// kept stretch guards, the flat branch's zero-length guard) only by its rotation: with the kept guard
+    /// removed it finds 0 mismatches, with the held guard removed 1 once infinities join the specials, and the
+    /// edge grid finds 246 for either every time.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearMirrorMatchesCSharpOnTheEdgeGrid()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var mirror = ShaderFunction(shaderType, "cultmath_integral_clamp_linear", Enumerable.Repeat(typeof(float), 6).ToArray())!;
+
+        var mismatches = new List<string>();
+        foreach (var c in IntegralClampLinearEdgeGrid)
+        {
+            var expected = integral_clamp_linear(c[0], c[1], c[2], c[3], c[4], c[5]);
+            var actual = (float)mirror.Invoke(shader, c.Cast<object>().ToArray())!;
+            Assert.False(float.IsNaN(expected), $"C# returns NaN at ({string.Join(", ", c)})");
+            if (BitConverter.SingleToInt32Bits(expected) != BitConverter.SingleToInt32Bits(actual))
+                mismatches.Add($"({string.Join(", ", c)}): C# {expected:R}, mirror {actual:R}");
+        }
+
+        Assert.True(mismatches.Count == 0, $"{mismatches.Count} of {IntegralClampLinearEdgeGrid.Count} cases differ:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
     }
 
     /// <summary>
@@ -448,8 +499,11 @@ public sealed class HlslSourceCompatibilityTests
                 : string.Empty);
     }
 
-    /// <summary>The documented HLSL-to-C# transformations, and nothing else.</summary>
-    internal static string TransformHlslToCSharp(string hlsl)
+    /// <summary>
+    /// The documented HLSL-to-C# transformations, and nothing else. <paramref name="members"/> is C# source a
+    /// test supplies, placed first in the class body: it is not a transformation of the HLSL.
+    /// </summary>
+    internal static string TransformHlslToCSharp(string hlsl, string members = "")
     {
         // 1. Include guards (#ifndef/#define/#endif) are dropped; C# has no textual include.
         var source = Regex.Replace(hlsl, @"(?m)^\s*#(ifndef|define|endif)\b.*$", string.Empty);
@@ -471,13 +525,13 @@ public sealed class HlslSourceCompatibilityTests
             m.Groups[1].Value + Regex.Replace(m.Groups[2].Value, @"(?m)^(\s*)(\w+\s+\w+;)", "$1public $2") + m.Groups[3].Value);
 
         // 6. The file body is wrapped in a class; C# has no free functions.
-        return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + source + "\n}\n";
+        return "using CultMath;\nusing static CultMath.math;\nnamespace CultMathHlsl;\npublic class HlslShader\n{\n" + members + source + "\n}\n";
     }
 
-    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror()
+    internal static (Assembly? Assembly, IReadOnlyList<string> Errors) CompileShaderMirror(string members = "")
     {
         var hlsl = ReadShaderSource(FindCultMathRoot());
-        var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl));
+        var tree = CSharpSyntaxTree.ParseText(TransformHlslToCSharp(hlsl, members));
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
             .Split(Path.PathSeparator)
             .Append(typeof(math).Assembly.Location)

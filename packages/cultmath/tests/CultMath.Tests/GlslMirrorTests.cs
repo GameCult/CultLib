@@ -45,24 +45,50 @@ public sealed class GlslMirrorTests
         }
     }
 
+    // Counting stand-ins for the mirror's clamp, one per overload, declared in the mirror's class so they
+    // hide math.clamp for every function in it. Each counts a call whose minimum exceeds its maximum in any
+    // component and forwards to math.clamp. (The int vector overloads only forward: no mirror function
+    // clamps integer vectors with swapped bounds, and counting them would be unreachable.)
+    private const string CountingClampShadows = @"
+public static int ClampMinAboveMax;
+static float clamp(float x, float a, float b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float2 clamp(float2 x, float2 a, float2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float3 clamp(float3 x, float3 a, float3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float4 clamp(float4 x, float4 a, float4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int clamp(int x, int a, int b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int2 clamp(int2 x, int2 a, int2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int3 clamp(int3 x, int3 a, int3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+";
+
     /// <summary>
-    /// The lowering keeps HLSL's statement order, and GLSL leaves clamp(x, minVal, maxVal) undefined for
-    /// minVal above maxVal, so integral_clamp_linear must normalise lo = min(lo, hi) before any clamp in
-    /// its body can see it: in the committed HLSL and the committed GLSL alike, the normalisation precedes
-    /// the first clamp.
+    /// The lowering keeps HLSL's statement order (CommittedGlslEqualsLowering pins the GLSL as that
+    /// lowering), and GLSL leaves clamp(x, minVal, maxVal) undefined for minVal above maxVal, so no clamp
+    /// reached by cultmath_integral_clamp_linear may see lo above hi, on any path and for any spelling of the
+    /// normalisation. The mirror is compiled with counting clamps and the function is run over the edge grid
+    /// (lo above hi, infinite bounds, zero-length spans, b = 0 and b != 0): the count of such clamp calls
+    /// stays 0 after every call.
     /// </summary>
     [Fact]
-    public void IntegralClampLinearNormalisesLoBeforeAnyClamp()
+    public void IntegralClampLinearNeverClampsWithMinAboveMax()
     {
-        foreach (var (file, text) in Lowered.Where(l => l.File == "CultMath.glsl").Concat(new[] { ("CultMath.hlsl", Hlsl) }))
+        var (assembly, errors) = HlslSourceCompatibilityTests.CompileShaderMirror(CountingClampShadows);
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var count = shaderType.GetField("ClampMinAboveMax")!;
+        var function = shaderType.GetMethod("cultmath_integral_clamp_linear", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var bad = new List<string>();
+        foreach (var c in HlslSourceCompatibilityTests.IntegralClampLinearEdgeGrid)
         {
-            var start = text.IndexOf("cultmath_integral_clamp_linear(float a", StringComparison.Ordinal);
-            Assert.True(start >= 0, $"{file} has no cultmath_integral_clamp_linear");
-            var body = text[start..text.IndexOf("}", start, StringComparison.Ordinal)];
-            var normalise = body.IndexOf("lo = min(lo, hi);", StringComparison.Ordinal);
-            var firstClamp = body.IndexOf("clamp(", StringComparison.Ordinal);
-            Assert.True(normalise >= 0 && normalise < firstClamp, $"{file}: lo = min(lo, hi) must come before the first clamp in cultmath_integral_clamp_linear");
+            count.SetValue(null, 0);
+            function.Invoke(shader, c.Cast<object>().ToArray());
+            if ((int)count.GetValue(null)! > 0)
+                bad.Add($"({string.Join(", ", c)})");
         }
+
+        Assert.True(bad.Count == 0, $"{bad.Count} cases clamp with the minimum above the maximum:{Environment.NewLine}{string.Join(Environment.NewLine, bad.Take(12))}");
     }
 
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
@@ -674,6 +700,19 @@ public sealed class GlslMirrorTests
                     3 => new object[] { a, slope, float.NegativeInfinity, Uniform(r, -1.0f, 2.0f), t0, t1 },
                     _ => new object[] { a, slope, float.NegativeInfinity, float.PositiveInfinity, t0, t1 },
                 };
+            }),
+        // Zero-length spans (t1 = t0 three times in four) with a flat or sloped line, and infinite clamp bounds
+        // on either side or both: an infinite bound times a zero length must give +0, and a flat line clamped
+        // to an infinite bound over a nonzero span is infinite, never NaN.
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, zero-length spans and flat infinite clamps",
+            r =>
+            {
+                float Line() => r.Next(3) switch { 0 => 0.0f, 1 => -0.0f, _ => Uniform(r, -4.0f, 4.0f) };
+                float Bound() => r.Next(3) switch { 0 => float.NegativeInfinity, 1 => float.PositiveInfinity, _ => Uniform(r, -2.0f, 2.0f) };
+                var (a, b, lo, hi) = (Line(), Line(), Bound(), Bound());
+                var t0 = Uniform(r, -3.0f, 3.0f);
+                var t1 = r.Next(4) != 0 ? t0 : Uniform(r, -3.0f, 3.0f);
+                return new object[] { a, b, lo, hi, t0, t1 };
             }),
     }).ToArray();
 
