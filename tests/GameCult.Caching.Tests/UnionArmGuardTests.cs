@@ -432,6 +432,7 @@ namespace GameCult.Caching.Tests
             {
                 var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString())!;
                 Assert.That(thrown.Message, Does.Contain(name).And.Contain("cannot build a formatter"));
+                Assert.That(thrown.Message, Does.Contain("StandardResolver has no formatter for it"), "a null formatter says so, without a thrown message");
             }
         }
 

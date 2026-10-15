@@ -544,7 +544,7 @@ namespace GameCult.Caching.Tests
             Assert.That(Problems(typeof(ApIgn)), Is.Empty, "an ignored private member is not written");
             Assert.That(Problems(typeof(PgHold)), Is.Empty, "a list behind a private getter is not written without AllowPrivate");
 
-            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix), typeof(HOptHidden), typeof(ApDerived), typeof(NoApDerived) })
+            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix), typeof(HOptHidden), typeof(ApDerived), typeof(NoApDerived), typeof(ApInheritor) })
             {
                 var allowPrivate = type.GetCustomAttribute<MessagePackObjectAttribute>(true)!.AllowPrivate;
                 Assert.That(CultElementIds.WrittenKeyedMembers(type).Select(member => member.Name),
@@ -637,6 +637,8 @@ namespace GameCult.Caching.Tests
                 (typeof(Whole<NkHold>), id => new Whole<NkHold> { Value = new NkHold { Items = { E(id) } } }),
                 (typeof(Whole<SkHold>), id => new Whole<SkHold> { Value = new SkHold { Items = { E(id) } } }),
                 (typeof(Whole<DcHold>), id => new Whole<DcHold> { Value = new DcHold { Items = { E(id) } } }),
+                (typeof(Whole<KpBase>), id => new Whole<KpBase> { Value = new KpBase { Items = { E(id) } } }),
+                (typeof(Whole<KpDerived>), id => new Whole<KpDerived> { Value = new KpDerived { Items = { E(id) } } }),
                 (typeof(HRoles), id => new HRoles { Items = { E(id) } }),
                 (typeof(HFormattedList), id => new HFormattedList { Items = { E(id) } }),
                 (typeof(HHiddenList), id => new HHiddenList()),
@@ -651,6 +653,9 @@ namespace GameCult.Caching.Tests
                 Assert.That(CultElementIds.Holds(type, make(Set)), Is.False, type.ToString());
             }
 
+            // A [DataContract] subclass of a [MessagePackObject] type is still read by key: the attribute it inherits keeps it an owner.
+            Assert.That(CultElementIds.Inspect(typeof(Whole<DcOverMp>)).IdPath, Does.Contain(typeof(List<EIded>)));
+
             // Elements of a string-keyed type carry no id either, and an owned list of a bare element is still refused.
             Assert.That(Problems(typeof(Whole<List<SkElem>>)), Is.Empty);
             RefusesBare(typeof(Whole<List<EBare>>));
@@ -663,6 +668,8 @@ namespace GameCult.Caching.Tests
         {
             Assert.That(CultElementIds.WrittenKeyedMembers(typeof(ApDerived)).Select(member => member.Name), Is.EquivalentTo(new[] { "baseStash", "own", "N", "Pg" }));
             Assert.That(CultElementIds.WrittenKeyedMembers(typeof(NoApDerived)).Select(member => member.Name), Is.EquivalentTo(new[] { "N" }));
+            Assert.That(CultElementIds.WrittenKeyedMembers(typeof(ApInheritor)).Select(member => member.Name), Is.EquivalentTo(new[] { "baseStash", "own", "N", "Pg" }),
+                "AllowPrivate is inherited by a subclass that declares no attribute of its own");
 
             var options = GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options;
             var held = new HOptHidden();
@@ -979,6 +986,11 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public class Whole<T> { [Key(0)] public T? Value { get; set; } }
         public class NkHold { public List<EIded> Items = new(); }
         [MessagePackObject] public class SkHold { [Key("items")] public List<EIded> Items = new(); }
+        [MessagePackObject(keyAsPropertyName: true)] public class KpBase { public List<EIded> Items = new(); }
+        public class KpDerived : KpBase { }
+        [MessagePackObject] public class MpBase { [Key(0)] public List<EIded> Items = new(); }
+        [System.Runtime.Serialization.DataContract] public class DcOverMp : MpBase { }
+        public class ApInheritor : ApDerived { }
         [MessagePackObject] public class SkElem { [Key("x")] public string X { get; set; } = ""; }
         [System.Runtime.Serialization.DataContract] public class DcHold { [System.Runtime.Serialization.DataMember(Order = 0)] public List<EIded> Items = new(); }
         [MessagePackObject(AllowPrivate = true)] public class EApPrivSet { [Key(0)] [CultElementId] public string? Id { get; private set; } }
