@@ -133,7 +133,13 @@ public sealed class SpanStageTests
                 + Math.Sqrt(3.0) * scale * Norm() * path.speed * path.halfLength;
         }
 
-        public double MaxMagnitude(SpanPath path) => Enumerable.Range(0, Octaves).Max(o => Magnitude(path, o));
+        public double MaxMagnitude(SpanPath path)
+        {
+            var largest = 0.0;
+            for (var o = 0; o < Octaves; o++)
+                largest = Math.Max(largest, Magnitude(path, o));
+            return largest;
+        }
 
         // Octave o as a stage of its own: one octave at the scaled frequency, shift and offset.
         public Stage OneOctave(int octave) => new(
