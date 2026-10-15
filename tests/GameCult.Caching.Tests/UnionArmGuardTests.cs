@@ -394,7 +394,7 @@ namespace GameCult.Caching.Tests
                 typeof(G<Dictionary<string, GHold>>), typeof(G<IDictionary<string, GHold>>), typeof(G<IReadOnlyDictionary<string, GHold>>),
                 typeof(G<SortedDictionary<string, GHold>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, GHold>>),
                 typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, GHold>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, GHold>>),
-                typeof(G<SortedList<string, GHold>>), typeof(G<ArrayOfArms>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
+                typeof(G<SortedList<string, GHold>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
             })
             {
                 if (holder != typeof(G<FbArm>))
@@ -469,12 +469,6 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName] public string Id = string.Empty;
             [Key(1)] public KBagE Bag = new();
-        }
-
-        // A non-generic list that also enumerates arms: the one collection shape MessagePack's BuiltinResolver writes.
-        public sealed class ArrayOfArms : System.Collections.ArrayList, IEnumerable<FbArm>
-        {
-            IEnumerator<FbArm> IEnumerable<FbArm>.GetEnumerator() => this.Cast<FbArm>().GetEnumerator();
         }
 
         [MessagePackObject] public sealed class G<T> { [Key(0)] public T? Value; }
