@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
 using System.Threading.Tasks;
 using GameCult.Caching;
 using GameCult.Caching.MessagePack;
@@ -380,7 +381,9 @@ namespace GameCult.Caching.Tests
             Assert.That(back.Bag.Items.Single().Id, Is.EqualTo("00000000000d"));
         }
 
-        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused.
+        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused. A
+        // [DataContract] list subclass is still written by the generic resolver; an object formatter the object resolver could also
+        // build (DcColl: a different instance) or fails to build (DcBad) is no mismatch.
         [Test]
         public void EveryCollectionShapeTheWalkReadsIsWrittenByACollectionFormatter()
         {
@@ -395,6 +398,7 @@ namespace GameCult.Caching.Tests
                 typeof(G<SortedDictionary<string, GHold>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, GHold>>),
                 typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, GHold>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, GHold>>),
                 typeof(G<SortedList<string, GHold>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
+                typeof(G<DcColl>), typeof(G<DcBad>),
             })
             {
                 if (holder != typeof(G<FbArm>))
@@ -403,12 +407,22 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // The walk reads a List subclass as a collection; a type MessagePack writes by an attribute formatter instead is a mismatch.
+        // The attribute formatter is of no known family, so the door passes it as it passes a source-generated one; registration
+        // owns the attribute.
         [Test]
-        public void ACollectionMessagePackWritesByAnotherFormatterIsRefused()
+        public void AFormatterOfNoKnownFamilyPassesTheDoor()
         {
-            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<FormattedRoles>)))!;
-            Assert.That(thrown.Message, Does.Contain($"writes {nameof(FormattedRoles)} by its [Key] layout, but the element-id walk reads it as a collection"));
+            Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<FormattedRoles>)));
+            var problems = CultElementIds.Inspect(typeof(G<FormattedRoles>)).Problems;
+            Assert.That(problems, Has.Count.EqualTo(1));
+            Assert.That(problems.Single(), Does.Contain("FormattedRoles").And.Contain("declares [MessagePackFormatter]"));
+        }
+
+        [Test]
+        public void ACollectionMessagePackWritesAsAnObjectIsRefused()
+        {
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<DcSeq>)))!;
+            Assert.That(thrown.Message, Does.Contain("MessagePack writes DcSeq as an object, but the element-id walk reads it as a collection"));
         }
 
         // A resolver that throws while asked about an id-path type is a typed refusal, whether it is the AllowPrivate formatter
@@ -498,6 +512,15 @@ namespace GameCult.Caching.Tests
             public void Serialize(ref MessagePackWriter writer, FormattedRoles value, MessagePackSerializerOptions options) => writer.WriteNil();
             public FormattedRoles Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.Skip(); return new FormattedRoles(); }
         }
+
+        [DataContract] public sealed class DcSeq : IEnumerable<FbArm>
+        {
+            [DataMember(Order = 0)] public List<FbArm> Items = new();
+            public IEnumerator<FbArm> GetEnumerator() => Items.GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [DataContract] public sealed class DcColl : List<FbArm> { [DataMember(Order = 0)] public int N; }
+        [DataContract] public sealed class DcBad : List<FbArm> { [DataMember(Order = 0)] public int A; [DataMember(Order = 0)] public int B; }
 
         public sealed class DkFormatter : IMessagePackFormatter<DkEl>
         {

@@ -8,7 +8,6 @@ using System.Reflection;
 using GameCult.Caching;
 using MessagePack;
 using MessagePack.Formatters;
-using MessagePack.ImmutableCollection;
 using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
@@ -97,10 +96,11 @@ public static class CultDocumentMessagePackSerialization
                 return $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}).";
             }
 
-            if (!WrittenAsWalked(type, generic, standard))
+            if (WrittenAgainstWalk(type, generic, standard))
             {
-                var owner = CultElementIds.WalksAsOwner(type);
-                return $"Cult document {documentType.Name}: MessagePack writes {type.Name} {(owner ? "as a collection" : "by its [Key] layout")}, but the element-id walk reads it {(owner ? "by its [Key] layout" : "as a collection")}, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other.";
+                return CultElementIds.WalksAsOwner(type)
+                    ? $"Cult document {documentType.Name}: MessagePack writes {type.Name} as a collection, but the element-id walk reads it by its [Key] layout, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other."
+                    : $"Cult document {documentType.Name}: MessagePack writes {type.Name} as an object, but the element-id walk reads it as a collection, so element ids would be lost or invented. A [DataContract] type that is also enumerable is written by its members; mark it [MessagePackObject] with integer [Key]s, or drop the contract.";
             }
 
             var allowPrivateAsked = false;
@@ -143,16 +143,15 @@ public static class CultDocumentMessagePackSerialization
         return null;
     }
 
-    // The walk's kind for a type on the id path, checked against the resolver MessagePack actually delegates to. The public
-    // singletons hand out the same cached formatter instances StandardResolver does, so a reference match names the family. A
-    // type the walk reads by key must be written by the object or union resolver, and one it reads as a collection by a
-    // collection resolver; a keyed class that is also an ICollection<T> is written as a collection and its [Key] layout dropped.
-    private static bool WrittenAsWalked(Type type, MethodInfo generic, object? standard)
+    // The door refuses only a proven mismatch: StandardResolver's formatter being the very instance the contrary resolver's
+    // public singleton hands out (one is cached per type). An owner is contradicted by the generic resolver (a keyed
+    // ICollection<T> or dictionary), a collection by the object resolver (a [DataContract] enumerable). Union types walk as
+    // owners and the immutable and builtin resolvers claim only framework types, so neither can contradict. Any other
+    // formatter, a source-generated one among them, passes: the walk owns which types carry ids and this door is its safety net.
+    private static bool WrittenAgainstWalk(Type type, MethodInfo generic, object? standard)
     {
-        var families = CultElementIds.WalksAsOwner(type)
-            ? new IFormatterResolver[] { DynamicUnionResolver.Instance, DynamicObjectResolver.Instance }
-            : new IFormatterResolver[] { DynamicGenericResolver.Instance, ImmutableCollectionResolver.Instance, BuiltinResolver.Instance };
-        return families.Any(family => ReferenceEquals(Formatter(family, generic), standard));
+        var contrary = CultElementIds.WalksAsOwner(type) ? (IFormatterResolver)DynamicGenericResolver.Instance : DynamicObjectResolver.Instance;
+        return standard != null && ReferenceEquals(Formatter(contrary, generic), standard);
     }
 
     private static object? Formatter(IFormatterResolver resolver, MethodInfo generic)
