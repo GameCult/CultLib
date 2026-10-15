@@ -322,7 +322,7 @@ public sealed class SpanPrimitiveTests
     /// <summary>
     /// An infinite bound never reached by the line contributes nothing, not infinity times zero: relu
     /// (hi = +inf) and its mirror (lo = -inf) give the finite integral, whether the line crosses the finite
-    /// bound inside the span or not. The flat branch (b = 0) obeys the same zero-length rule.
+    /// bound inside the span or not. Both branches give +0 for a zero-length span.
     /// </summary>
     [Fact]
     public void IntegralClampLinearIsFiniteForInfiniteBounds()
@@ -352,6 +352,12 @@ public sealed class SpanPrimitiveTests
         Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.5f, -0.0f, -inf, -inf, 0.0f, 0.0f)));
         Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, inf, inf, 0.0f, 2.0f));
         Assert.Equal(inf, integral_clamp_linear(1.5f, 0.0f, -inf, -inf, 2.0f, 0.0f));
+
+        // The sloped branch gives +0 for a zero-length span too, not -0: the direction sign never meets a
+        // zero total, whichever way the line leans and whatever the bounds.
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(1.0f, 2.0f, -inf, inf, 1.0f, 1.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(-3.0f, -2.0f, 0.0f, 5.0f, 1.0f, 1.0f)));
+        Assert.Equal(0, BitConverter.SingleToInt32Bits(integral_clamp_linear(0.5f, 1.0f, 0.0f, inf, 0.0f, 0.0f)));
     }
 
     /// <summary>
