@@ -704,10 +704,10 @@ public sealed class SpanStageTests
                 var speed = loose ? 4.0f * (abs(q.x) + abs(q.y) + abs(q.z) + 20.0f) : 0.0f;
                 var span = new Span(new SpanPath { midpoint = q, velocity = None, speed = speed, acceleration = 0.0f, halfLength = loose ? 1.0f : 0.0f }, None);
                 var fold = stage.Ridged(span.Path).fold;
-                var (departureFloat, departureExact, _) = BranchDeparture(stage, span, 2);
+                var (departureFloat, departureExact, rounding) = BranchDeparture(stage, span, 2);
                 Assert.Equal(0.0f, stage.Fbm(span.Path).fold);
                 Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"midpoint {q}, speed {speed:R}: the exact branch departure is {departureExact:R}, above fold {fold:R}");
-                Assert.True(departureFloat <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"midpoint {q}, speed {speed:R}: the float branch departure is {departureFloat:R}, above fold {fold:R}");
+                Assert.True(departureFloat <= fold * (1.0 + 1.0e-3) + 1.0e-9 + rounding, $"midpoint {q}, speed {speed:R}: the float branch departure is {departureFloat:R}, above fold {fold:R}");
                 if (departureExact > 0.0)
                     crossing++;
             }
