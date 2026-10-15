@@ -164,7 +164,7 @@ cadence and flushes changed state back through the typed cache. `update(...)`,
 wants a more explicit Rust shape.
 
 When a canonical document put arrives while local state is dirty,
-`apply_document_put_message(...)` or `apply_raw_document_put_message(...)`
+`apply_raw_document_put_message(...)`
 records a `CultNetReactiveDocumentReconciliation`: the canonical value, the
 predicted local value, and a delta that can be smoothed by the caller. CultCache
 payloads serialize by numeric field slot, so Rust tuple-backed deltas use slot

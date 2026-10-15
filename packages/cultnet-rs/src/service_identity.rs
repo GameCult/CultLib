@@ -285,11 +285,10 @@ pub fn open_service_identity_credential_reader<P: ServiceIdentityProfile>(
 pub fn open_service_identity_credential_bytes<P: ServiceIdentityProfile>(
     bytes: &[u8],
 ) -> Result<ServiceIdentitySigner<P>> {
-    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
-    let entries = Vec::<CultCacheEnvelope>::deserialize(&mut decoder)
+    let entries = cultcache_rs::decode_payload::<Vec<CultCacheEnvelope>>(bytes)
         .context("immutable service identity credential is malformed MessagePack")?;
-    if decoder.position() != bytes.len() as u64 {
-        bail!("immutable service identity credential contains trailing data");
+    if Zeroizing::new(rmp_serde::to_vec(&entries)?).as_slice() != bytes {
+        bail!("immutable service identity credential is not its canonical encoding");
     }
     open_service_identity_envelopes::<P>(&entries)
 }

@@ -4,7 +4,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::{Edge, RawDocumentHeader, Selection, SelectionDocumentRecord};
 
@@ -28,23 +27,6 @@ pub enum CultNetSchemaKind {
 #[serde(rename_all = "snake_case")]
 pub enum CultNetRawPayloadEncoding {
     Messagepack,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CultNetDocumentRecord<TPayload = Value> {
-    pub schema_id: String,
-    pub record_key: String,
-    pub stored_at: String,
-    pub payload: TPayload,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,7 +339,7 @@ pub enum CultNetMessage {
     // `cultnet.schema.v0` path (parse_raw_cultnet_schema_message/encode_raw_cultnet_schema_message)
     // like the other messages that need exact wire control, not through this derive - the derive
     // attributes below exist only so the enum as a whole still compiles and round-trips through the
-    // generic `serde_json::Value` path other tooling may still reach for.
+    // generic variants, which decode through the door from the message bytes.
     #[serde(rename = "cultnet.error.v0", rename_all = "camelCase")]
     Error {
         error: String,
@@ -370,11 +352,6 @@ pub enum CultNetMessage {
     SampleChangeName { name: String },
     #[serde(rename = "cultnet.sample.chat.v0", rename_all = "camelCase")]
     SampleChat { text: String },
-    #[serde(rename = "cultnet.document_put.v0", rename_all = "camelCase")]
-    DocumentPut {
-        message_id: String,
-        document: CultNetDocumentRecord<Value>,
-    },
     #[serde(rename = "cultnet.document_delete.v0", rename_all = "camelCase")]
     DocumentDelete {
         message_id: String,
@@ -393,11 +370,6 @@ pub enum CultNetMessage {
         schema_ids: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         record_keys: Option<Vec<String>>,
-    },
-    #[serde(rename = "cultnet.snapshot_response.v0", rename_all = "camelCase")]
-    SnapshotResponse {
-        message_id: String,
-        documents: Vec<CultNetDocumentRecord<Value>>,
     },
     #[serde(rename = "cultnet.snapshot_response_raw.v0", rename_all = "camelCase")]
     SnapshotResponseRaw {
@@ -544,33 +516,6 @@ fn true_default() -> bool {
     true
 }
 
-pub fn parse_cultnet_message(
-    wire_value: &rmpv::Value,
-    contract: CultNetWireContract,
-) -> Result<CultNetMessage> {
-    match contract {
-        CultNetWireContract::CultNetSchemaV0 => {
-            let message = match schema_version_from_wire_value(wire_value)? {
-                Some(
-                    "cultnet.document_put_raw.v0"
-                    | "cultnet.snapshot_response_raw.v0"
-                    | "cultnet.snapshot_response_raw.v1"
-                    | "cultmesh.content_chunk_request.v1"
-                    | "cultmesh.content_chunk_response.v1"
-                    | "cultnet.error.v0",
-                ) => parse_raw_cultnet_schema_message(wire_value)?,
-                _ => {
-                    let json_value: Value = rmp_serde::from_slice(&rmp_serde::to_vec(wire_value)?)?;
-                    serde_json::from_value(json_value)?
-                }
-            };
-            validate_message(&message)?;
-            Ok(message)
-        }
-        CultNetWireContract::GameCultNetworkingV0 => parse_gamecult_networking_message(wire_value),
-    }
-}
-
 pub fn encode_cultnet_message_for_wire(
     message: &CultNetMessage,
     contract: CultNetWireContract,
@@ -584,7 +529,7 @@ pub fn encode_cultnet_message_for_wire(
             | CultNetMessage::ContentChunkRequest { .. }
             | CultNetMessage::ContentChunkResponse { .. }
             | CultNetMessage::Error { .. } => encode_raw_cultnet_schema_message(message),
-            _ => Ok(rmp_serde::from_slice(&rmp_serde::to_vec(
+            _ => Ok(cultcache_rs::decode_payload(&rmp_serde::to_vec(
                 &serde_json::to_value(message)?,
             )?)?),
         },
@@ -605,7 +550,24 @@ pub fn decode_cultnet_message_from_slice(
     contract: CultNetWireContract,
 ) -> Result<CultNetMessage> {
     let wire_value: rmpv::Value = cultcache_rs::decode_payload(bytes)?;
-    parse_cultnet_message(&wire_value, contract)
+    match contract {
+        CultNetWireContract::CultNetSchemaV0 => {
+            let message = match schema_version_from_wire_value(&wire_value)? {
+                Some(
+                    "cultnet.document_put_raw.v0"
+                    | "cultnet.snapshot_response_raw.v0"
+                    | "cultnet.snapshot_response_raw.v1"
+                    | "cultmesh.content_chunk_request.v1"
+                    | "cultmesh.content_chunk_response.v1"
+                    | "cultnet.error.v0",
+                ) => parse_raw_cultnet_schema_message(bytes, &wire_value)?,
+                _ => cultcache_rs::decode_payload::<CultNetMessage>(bytes)?,
+            };
+            validate_message(&message)?;
+            Ok(message)
+        }
+        CultNetWireContract::GameCultNetworkingV0 => parse_gamecult_networking_message(&wire_value),
+    }
 }
 
 fn validate_message(message: &CultNetMessage) -> Result<()> {
@@ -669,13 +631,6 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
         CultNetMessage::Error { error, code: _, details: _ } => require_non_empty(error, "error")?,
         CultNetMessage::SampleChangeName { name } => require_non_empty(name, "name")?,
         CultNetMessage::SampleChat { text } => require_non_empty(text, "text")?,
-        CultNetMessage::DocumentPut {
-            message_id,
-            document,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            validate_document_record(document)?;
-        }
         CultNetMessage::DocumentDelete {
             message_id,
             schema_id,
@@ -700,15 +655,6 @@ fn validate_message(message: &CultNetMessage) -> Result<()> {
             require_non_empty(message_id, "messageId")?;
             require_optional_string_vec(schema_ids.as_deref(), "schemaIds")?;
             require_optional_string_vec(record_keys.as_deref(), "recordKeys")?;
-        }
-        CultNetMessage::SnapshotResponse {
-            message_id,
-            documents,
-        } => {
-            require_non_empty(message_id, "messageId")?;
-            for document in documents {
-                validate_document_record(document)?;
-            }
         }
         CultNetMessage::SnapshotResponseRaw {
             message_id,
@@ -874,17 +820,6 @@ fn validate_mutation_contract(contract: &CultNetDocumentMutationContract) -> Res
     Ok(())
 }
 
-fn validate_document_record(document: &CultNetDocumentRecord<Value>) -> Result<()> {
-    require_non_empty(&document.schema_id, "schemaId")?;
-    require_non_empty(&document.record_key, "recordKey")?;
-    require_non_empty(&document.stored_at, "storedAt")?;
-    require_optional_non_empty(document.source_runtime_id.as_deref(), "sourceRuntimeId")?;
-    require_optional_non_empty(document.source_agent_id.as_deref(), "sourceAgentId")?;
-    require_optional_non_empty(document.source_role.as_deref(), "sourceRole")?;
-    require_optional_string_vec(document.tags.as_deref(), "tags")?;
-    Ok(())
-}
-
 fn validate_raw_document_record(document: &CultNetRawDocumentRecord) -> Result<()> {
     require_non_empty(&document.schema_id, "schemaId")?;
     require_non_empty(&document.record_key, "recordKey")?;
@@ -976,7 +911,21 @@ fn schema_version_from_wire_value(input: &rmpv::Value) -> Result<Option<&str>> {
     }))
 }
 
-fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessage> {
+/// The row arrays of `cultnet.snapshot_response_raw.v1`, decoded from the original bytes so each
+/// row is typed in one pass through the door; nil and absent both read as `None`, other keys are
+/// ignored.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotResponseRawV1Rows {
+    #[serde(default)]
+    headers: Option<Vec<RawDocumentHeader>>,
+    #[serde(default)]
+    documents: Option<Vec<SelectionDocumentRecord>>,
+    #[serde(default)]
+    edges: Option<Vec<Edge>>,
+}
+
+fn parse_raw_cultnet_schema_message(bytes: &[u8], input: &rmpv::Value) -> Result<CultNetMessage> {
     let object = input
         .as_map()
         .ok_or_else(|| anyhow!("cultnet.schema.v0 raw messages must be objects"))?;
@@ -1012,51 +961,8 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
             })
         }
         "cultnet.snapshot_response_raw.v1" => {
-            let headers = get("headers")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("headers must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<RawDocumentHeader>(Some(value), &format!("headers[{index}]"))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let documents = get("documents")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("documents must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<SelectionDocumentRecord>(
-                                Some(value),
-                                &format!("documents[{index}]"),
-                            )
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
-            let edges = get("edges")
-                .filter(|value| !value.is_nil())
-                .map(|value| {
-                    value
-                        .as_array()
-                        .ok_or_else(|| anyhow!("edges must be an array"))?
-                        .iter()
-                        .enumerate()
-                        .map(|(index, value)| {
-                            require_typed::<Edge>(Some(value), &format!("edges[{index}]"))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?;
+            let SnapshotResponseRawV1Rows { headers, documents, edges } =
+                cultcache_rs::decode_payload(bytes).map_err(|err| anyhow!("rows: {err}"))?;
 
             Ok(CultNetMessage::SnapshotResponseRawV1 {
                 message_id: require_legacy_string(get("messageId"), "messageId")?,
@@ -1469,34 +1375,16 @@ fn encode_raw_document_record(document: &CultNetRawDocumentRecord) -> rmpv::Valu
     ])
 }
 
-// R-M: `SelectionDocumentRecord`, `RawDocumentHeader`, `Edge` and `RecordRef` already derive
-// `Serialize`/`Deserialize` (selection.rs) with the same camelCase field names this hand-written
-// codec used to spell out by hand - about 335 lines duplicating what those derives already do.
-//
-// `rmpv::ext::to_value`/`from_value` looked like the natural generic bridge, but they serialize a
-// struct positionally (`serialize_struct` as a MessagePack array, one slot per field in
-// declaration order, breaking as soon as a `skip_serializing_if` field is actually skipped) -
-// wrong for these types twice over: it is not the named-map encoding this wire always uses
-// (section 10's rule; `rmp_serde::to_vec_named` elsewhere in this crate), and it does not
-// round-trip at all once a field is omitted. These two helpers instead go through
-// `rmp_serde::to_vec_named`/`from_slice` (named-map bytes, proven both ways by
-// `tests/selection.rs`'s `snapshot_response_raw_v1_round_trips_*` tests) and hand the bytes to
-// `rmpv::Value`'s own `Serialize`/`Deserialize` (already used throughout this file, e.g. to decode
-// the outer message envelope) to shuttle to/from the `rmpv::Value` tree the rest of this codec
-// builds by hand.
-
-fn require_typed<T: serde::de::DeserializeOwned>(
-    value: Option<&rmpv::Value>,
-    field_name: &str,
-) -> Result<T> {
-    let value = value.ok_or_else(|| anyhow!("{field_name} is required"))?;
-    let bytes = rmp_serde::to_vec(value).map_err(|err| anyhow!("{field_name}: {err}"))?;
-    rmp_serde::from_slice(&bytes).map_err(|err| anyhow!("{field_name}: {err}"))
-}
+// R-M: `SelectionDocumentRecord`, `RawDocumentHeader`, `Edge` and `RecordRef` derive
+// `Serialize`/`Deserialize` (selection.rs) with the camelCase field names this wire uses.
+// `encode_typed` goes through `rmp_serde::to_vec_named` (the named-map encoding this wire always
+// uses; `rmpv::ext::to_value` would write a struct positionally) and reads the bytes back into the
+// `rmpv::Value` tree the rest of this codec builds by hand, through the decode door. Received rows
+// are never re-encoded to become typed: `SnapshotResponseRawV1Rows` reads them from the original bytes.
 
 fn encode_typed<T: Serialize>(value: &T) -> rmpv::Value {
     let bytes = rmp_serde::to_vec_named(value).expect("selection wire types always encode to MessagePack");
-    rmp_serde::from_slice(&bytes).expect("named-map MessagePack bytes always decode into rmpv::Value")
+    cultcache_rs::decode_payload(&bytes).expect("named-map MessagePack bytes always decode into rmpv::Value")
 }
 
 fn require_legacy_u32(value: Option<&rmpv::Value>, field_name: &str) -> Result<u32> {
