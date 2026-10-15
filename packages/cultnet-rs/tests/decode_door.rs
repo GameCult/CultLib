@@ -333,7 +333,10 @@ fn identity_credential_with_deep_key_is_refused_on_a_small_thread() {
         let path = temp.path().join("identity.cc");
         enroll_service_identity_at::<IdunnServiceIdentity>(&path).unwrap();
         let mut envelopes: rmpv::Value = rmp_serde::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let rmpv::Value::Map(envelope) = &mut envelopes.as_array_mut().unwrap()[0] else {
+        let rmpv::Value::Array(items) = &mut envelopes else {
+            panic!("credential is an array");
+        };
+        let rmpv::Value::Map(envelope) = &mut items[0] else {
             panic!("envelope is a map");
         };
         envelope.push(("zz".into(), "DEEP".into()));
