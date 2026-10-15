@@ -498,6 +498,10 @@ namespace GameCult.Caching.Tests
             Assert.That(Assign(root, "r", deterministic: true), Is.EqualTo(3));
             Assert.That(root.Nodes[0].Id, Has.Length.EqualTo(12));
             Assert.That(root.Nodes[0].Children[0].Children[0].Id, Has.Length.EqualTo(12));
+            var options = GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options;
+            var back = MessagePackSerializer.Deserialize<HKNode>(MessagePackSerializer.Serialize(root, options), options);
+            Assert.That(back.Nodes[0].Id, Is.EqualTo(root.Nodes[0].Id), "MessagePack writes the node by key, ids included");
+            Assert.That(back.Nodes[0].Children[0].Children[0].Id, Is.EqualTo(root.Nodes[0].Children[0].Children[0].Id));
 
             // An unkeyed type that enumerates itself holds no element list and ends the type walk.
             var unkeyed = CultElementIds.Inspect(typeof(HUNode));
