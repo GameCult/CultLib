@@ -437,9 +437,17 @@ elements retargets nothing.
   of keyed structs, since a struct is a value and never an element, but an object list
   inside a keyed struct is walked like any other. The walk follows declared member types:
   a member declared `object` is untyped on disk, and a subclass's extra members under a
-  non-union base-typed member are not written, so neither is walked. A non-public `[Key]`
-  member on the way to an object list is refused at registration, because MessagePack
-  writes it only under `AllowPrivate` and the element-id walk reads public members. For an
+  non-union base-typed member are not written, so neither is walked. The walk reads the
+  members MessagePack writes: an integer `[Key]`, no `[IgnoreMember]`, a public field or a
+  property whose getter is public. Any other `[Key]` member on the way to an object list
+  (non-public, or a property with a non-public getter) is refused at registration, because
+  MessagePack writes it only under `AllowPrivate` and the element-id walk reads public
+  members. An id member needs a public setter or `init`, so the id MessagePack writes is read
+  back; one with a non-public setter, or one MessagePack does not write, is refused. A
+  `[MessagePackObject]` type is read by key even when it is `IEnumerable<T>`; MessagePack
+  writes a keyed type that is also a collection (`ICollection<T>`, `IList`, `IDictionary`)
+  as a collection, so C# refuses such a type at the first encode or decode when it is on the
+  path to an object list. For an
   object list, C# refuses at registration a concrete element type that is not keyed and
   `[MessagePackFormatter]` on any type, collection type or member on the way to the list or on the id
   member, and refuses at the first encode or decode of the document a formatter
