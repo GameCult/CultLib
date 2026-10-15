@@ -168,6 +168,20 @@ fn generic_message_with_deep_unknown_key_decodes_on_a_small_thread() {
 }
 
 #[test]
+fn a_decoded_message_that_fails_validation_is_refused() {
+    let bytes = splice(
+        map_with_sentinel(vec![
+            ("schemaVersion".into(), "cultnet.hello.v0".into()),
+            ("runtimeId".into(), "".into()),
+            ("runtimeKind".into(), "test".into()),
+        ]),
+        &nested(0),
+    );
+    let error = decode_message(bytes, BIG).unwrap_err();
+    assert!(format!("{error:#}").contains("runtimeId"), "{error:#}");
+}
+
+#[test]
 fn message_past_the_bound_is_refused_typed() {
     in_child("message_past_the_bound_is_refused_typed", || {
         let error = decode_message(hello_with(&nested(MAX_PAYLOAD_DEPTH + 1)), SMALL).unwrap_err();

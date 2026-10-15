@@ -643,6 +643,11 @@ mod tests {
             rmp_serde::from_slice::<IdunnSignedDaemonHealthRecord>(&encoded)?,
             health
         );
+        let (decoded, unsigned) =
+            IdunnSignedDaemonHealthRecord::decode_canonical_signed_payload(&encoded)?;
+        assert_eq!(decoded, health);
+        assert_eq!(&unsigned[..3], &[0xdc, 0, 18]);
+        assert_ne!(unsigned, encoded, "the signed payload excludes the signature");
         assert_eq!(
             rmp_serde::from_slice::<GameCultServiceTrustAnchorRecord>(&rmp_serde::to_vec(
                 &anchor
