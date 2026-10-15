@@ -84,8 +84,8 @@ public static class CultDocumentMessagePackSerialization
             var generic = GetFormatterMethod.MakeGenericMethod(type);
             // A resolver that hands back MessagePack's own formatter for the type writes its [Key] layout: that is no claim, and the
             // composite stops there, so no later resolver is asked. StandardResolverAllowPrivate's formatter writes the same layout
-            // plus non-public [Key] members, and registration refuses a non-public member on the way to an object list, so it
-            // claims nothing either.
+            // plus non-public [Key] members; those extra members are whole values the walk does not own, so it claims nothing
+            // either.
             object? standard;
             try
             {
@@ -93,15 +93,14 @@ public static class CultDocumentMessagePackSerialization
             }
             catch (Exception exception)
             {
-                return $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}).";
+                return CannotBuild(documentType, type, (exception.InnerException ?? exception).Message);
             }
 
-            if (WrittenAgainstWalk(type, generic, standard))
-            {
-                return CultElementIds.WalksAsOwner(type)
-                    ? $"Cult document {documentType.Name}: MessagePack writes {type.Name} as a collection, but the element-id walk reads it by its [Key] layout, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other."
-                    : $"Cult document {documentType.Name}: MessagePack writes {type.Name} as an object, but the element-id walk reads it as a collection, so element ids would be lost or invented. A [DataContract] type that is also enumerable is written by its members; mark it [MessagePackObject] with integer [Key]s, or drop the contract.";
-            }
+            if (standard == null)
+                return CannotBuild(documentType, type, "StandardResolver has no formatter for it");
+
+            if (WrittenAsCollection(type, generic, standard))
+                return $"Cult document {documentType.Name}: MessagePack writes {type.Name} as a collection, but the element-id walk reads it by its [Key] layout, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other. Or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
 
             var allowPrivateAsked = false;
             object? allowPrivate = null;
@@ -136,23 +135,22 @@ public static class CultDocumentMessagePackSerialization
 
                 if (allowPrivate != null && ReferenceEquals(formatter, allowPrivate))
                     break;
-                return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout or keep it out of the document's lists.";
+                return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} formats {type.Name}, which is on the path to a list whose elements carry ids, so its element ids would never reach disk. A resolver may not claim such a type; write it by its [Key] layout, keep it out of the document's lists, or declare [MessagePackFormatter] on the type or member, which makes it one whole value with no element ids.";
             }
         }
 
         return null;
     }
 
-    // The door refuses only a proven mismatch: StandardResolver's formatter being the very instance the contrary resolver's
-    // public singleton hands out (one is cached per type). An owner is contradicted by the generic resolver (a keyed
-    // ICollection<T> or dictionary), a collection by the object resolver (a [DataContract] enumerable). Union types walk as
-    // owners and the immutable and builtin resolvers claim only framework types, so neither can contradict. Any other
-    // formatter, a source-generated one among them, passes: the walk owns which types carry ids and this door is its safety net.
-    private static bool WrittenAgainstWalk(Type type, MethodInfo generic, object? standard)
-    {
-        var contrary = CultElementIds.WalksAsOwner(type) ? (IFormatterResolver)DynamicGenericResolver.Instance : DynamicObjectResolver.Instance;
-        return standard != null && ReferenceEquals(Formatter(contrary, generic), standard);
-    }
+    private static string CannotBuild(Type documentType, Type type, string reason) =>
+        $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({reason}).";
+
+    // The door verifies the walk and never decides ownership. It refuses a proven mismatch: a type the walk reads by key
+    // (an owner) whose StandardResolver formatter is the very instance the generic resolver's singleton hands out (a keyed
+    // ICollection<T> or dictionary). Union types walk as owners and the immutable and builtin resolvers claim only framework
+    // types, so neither can contradict. Any other formatter, a source-generated one among them, passes.
+    private static bool WrittenAsCollection(Type type, MethodInfo generic, object? standard) =>
+        CultElementIds.WalksAsOwner(type) && ReferenceEquals(Formatter(DynamicGenericResolver.Instance, generic), standard);
 
     private static object? Formatter(IFormatterResolver resolver, MethodInfo generic)
     {

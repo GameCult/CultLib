@@ -1,6 +1,7 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -355,6 +356,48 @@ namespace GameCult.Caching.Tests
 
         private static byte[] OldShapedReels(string label) =>
             MessagePackSerializer.Serialize(new List<OldReel> { new() { Label = label, Marks = { new OldMark { Text = "x" }, new OldMark { Text = "y" } } } });
+
+        // A holder the walk does not own (ImmutableArray here) is one whole value: its elements carry no element ids, so it never
+        // marks the store, and a variant replaces it whole (q3 amended 2026-10-16).
+        [Test]
+        public void AWholeListHolderNeverMarksTheStoreAndAVariantReplacesItWhole()
+        {
+            Assert.That(CultElementIds.CanHoldIds(typeof(IdWholeHolder)), Is.False);
+            var path = PathOf("whole-holder.cc");
+            using (var cache = OpenWith(path, false, typeof(IdWholeHolder)))
+            {
+                cache.Commit(batch => batch.Upsert(typeof(IdWholeHolder),
+                    new IdWholeHolder { Name = "base", Reels = ImmutableArray.Create(new IdReel { Label = "set", Id = HexA }, new IdReel { Label = "unset" }) },
+                    new CultRecordKey("base")));
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"), "ids inside a whole value mark nothing");
+
+            using (var fresh = OpenWith(path, false, typeof(IdWholeHolder)))
+            {
+                fresh.Commit(batch => batch.Upsert(typeof(IdWholeHolder), new IdWholeHolder { Name = "other" }, new CultRecordKey("other")));
+                var back = fresh.Get<IdWholeHolder>(new CultRecordKey("base"))!;
+                Assert.That(back.Reels.Select(reel => reel.Id), Is.EqualTo(new[] { HexA, "" }), "set ids are plain values, unset ids stay unset");
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v1"));
+            using (var cache = OpenWith(path, false, typeof(IdWholeHolder)))
+            {
+                var replacement = ImmutableArray.Create(new IdReel { Label = "v", Id = "eeeeeeeeeeee" });
+                cache.Commit(batch => batch.UpsertVariant(new CultRecordKey("v"), new CultRecordKey("base"),
+                    new[] { cache.Override<IdWholeHolder>(nameof(IdWholeHolder.Reels), replacement) }));
+                Assert.That(cache.Get<IdWholeHolder>(new CultRecordKey("v"))!.Reels.Select(reel => reel.Id), Is.EqualTo(new[] { "eeeeeeeeeeee" }), "replaced whole");
+                Assert.That(cache.Get<IdWholeHolder>(new CultRecordKey("base"))!.Reels, Has.Length.EqualTo(2), "the base is untouched");
+            }
+
+            Assert.That(HeaderOf(path), Is.EqualTo("cultcache.store.v2"), "a variant makes v2, and nothing in it holds element ids");
+            using var again = OpenWith(path, false, typeof(IdWholeHolder));
+            Assert.That(again.Get<IdWholeHolder>(new CultRecordKey("v"))!.Reels.Single().Id, Is.EqualTo("eeeeeeeeeeee"));
+
+            var step = new CultVariantOverride(CultOverrideOp.Set, new[] { new CultPathStep(1, HexA) }, string.Empty, MessagePackSerializer.Serialize("x"));
+            var refused = Assert.Catch<Exception>(() => again.Commit(batch => batch.UpsertVariant(new CultRecordKey("p"), new CultRecordKey("base"), new[] { step })))!;
+            Assert.That(refused.ToString(), Does.Contain("top-level Set overrides only"));
+        }
 
         [Test]
         public void AStoreThatCanHoldElementIdsCarriesTheV3MarkerAndOneThatCannotStaysV1()
@@ -1285,6 +1328,14 @@ namespace GameCult.Caching.Tests
         public sealed class IdStab : IdMove
         {
             [Key(1)] public int Depth { get; set; }
+        }
+
+        [CultDocument("tests.element_id_whole_holder", "tests.element_id_whole_holder.v1")]
+        [MessagePackObject]
+        public sealed class IdWholeHolder
+        {
+            [Key(0)] [CultName] public string Name { get; set; } = "";
+            [Key(1)] public ImmutableArray<IdReel> Reels { get; set; } = ImmutableArray<IdReel>.Empty;
         }
 
         [CultDocument("tests.element_id_deck", "tests.element_id_deck.v1")]

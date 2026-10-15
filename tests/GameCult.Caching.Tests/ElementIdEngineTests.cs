@@ -1,7 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using GameCult.Caching;
 using MessagePack;
@@ -302,16 +304,27 @@ namespace GameCult.Caching.Tests
             Assert.That(Problems(typeof(HValueList)), Is.Empty, "a list of a non-keyed type is a value list");
         }
 
+        // [MessagePackFormatter] on an element type, an owner, a collection class or a member makes that value one whole value: it
+        // has no element ids and is off the id path. The attribute on the id member itself is the one refusal that stays.
         [Test]
-        public void AFormatterAttributeOnTheIdPathIsRefused()
+        public void AFormatterAttributeMakesAWholeValueExceptOnTheId()
         {
-            Assert.That(Problems(typeof(HFormattedElement)).Single(), Does.Contain("FormattedElement").And.Contain("[MessagePackFormatter]"));
-            Assert.That(Problems(typeof(HFormattedList)).Single(), Does.Contain("Items").And.Contain("[MessagePackFormatter]"));
             Assert.That(Problems(typeof(HFormattedId)).Single(), Does.Contain("Id").And.Contain("[MessagePackFormatter]"));
-            Assert.That(Problems(typeof(HFormattedOwner)).Single(), Does.Contain("FormattedOwner").And.Contain("[MessagePackFormatter]"));
-            Assert.That(Problems(typeof(HFormattedMember)).Single(), Does.Contain("Inner").And.Contain("[MessagePackFormatter]"));
+            foreach (var (type, holder) in new (Type, object)[]
+            {
+                (typeof(HFormattedElement), new HFormattedElement { Items = { new FormattedElement() } }),
+                (typeof(HFormattedList), new HFormattedList { Items = { new EIded() } }),
+                (typeof(HFormattedOwner), new HFormattedOwner { Owner = { Items = { new EIded() } } }),
+                (typeof(HFormattedMember), new HFormattedMember { Inner = { Items = { new EIded() } } }),
+                (typeof(HFormattedDerived), new HFormattedDerived { Items = { new FormattedDerived() } }),
+            })
+            {
+                Assert.That(Problems(type), Is.Empty, type.Name);
+                Assert.That(CultElementIds.Inspect(type).IdPath, Is.Empty, type.Name);
+                Assert.That(Assign(holder, "r", deterministic: false), Is.EqualTo(0), type.Name);
+            }
+
             Assert.That(Problems(typeof(HFormattedField)), Is.Empty, "a formatted type with no list below it is a field");
-            Assert.That(Problems(typeof(HFormattedDerived)).Single(), Does.Contain("FormattedDerived").And.Contain("[MessagePackFormatter]"), "the attribute is inherited");
         }
 
         // The collection types between a member and its object list are written by some formatter too, so they sit on the id path.
@@ -331,18 +344,19 @@ namespace GameCult.Caching.Tests
         }
 
         [Test]
-        public void AFormatterOnACollectionClassOfAnObjectListIsRefused()
+        public void AFormatterOnACollectionClassOfAnObjectListIsAWholeValue()
         {
-            Assert.That(Problems(typeof(HRoles)).Single(), Does.Contain("Roles").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(HRoles)), Is.Empty);
+            Assert.That(Assign(new HRoles { Items = { new EIded() } }, "r", deterministic: false), Is.EqualTo(0), "its elements carry no ids and are never minted");
             Assert.That(Problems(typeof(HFormattedValueCollection)), Is.Empty, "a collection class of a non-keyed element is a value list");
         }
 
         // MemberInfo.IsDefined ignores inherit for properties: an override sees its base's attribute only through Declares.
         [Test]
-        public void AnInheritedFormatterOnAnOverriddenMemberIsRefused()
+        public void AnInheritedFormatterOnAnOverriddenMemberIsHonoured()
         {
             Assert.That(Problems(typeof(HOverFormattedId)).Single(), Does.Contain("Id").And.Contain("[MessagePackFormatter]"));
-            Assert.That(Problems(typeof(OwnerOverFormatted)).Single(), Does.Contain("Items").And.Contain("[MessagePackFormatter]"));
+            Assert.That(Problems(typeof(OwnerOverFormatted)), Is.Empty, "the override inherits its base's formatter, so the member is a whole value");
 
             Assert.That(Problems(typeof(HIdOverride)), Is.Empty, "a base [CultElementId] is the override's id");
             var root = new HIdOverride { Items = { new IdOverride() } };
@@ -467,22 +481,28 @@ namespace GameCult.Caching.Tests
             Assert.That(Assign(arm, "r", deterministic: false), Is.EqualTo(1));
         }
 
-        // MessagePack writes a non-public [Key] member only under AllowPrivate, and the element-id walk reads public members, so
-        // an object list a non-public member leads to could never be checked. It is refused; a non-public member that reaches no
-        // object list is nobody's business.
+        // MessagePack writes a non-public [Key] member only under AllowPrivate, so a non-public member of a type without it is nobody's
+        // id business; under AllowPrivate it is written, read and minted like any other member.
         [Test]
-        public void ANonPublicKeyedMemberOnTheWayToAnObjectListIsRefused()
+        public void ANonPublicMemberIsWalkedOnlyUnderAllowPrivate()
         {
-            foreach (var (type, member) in new[]
+            foreach (var type in new[] { typeof(HHiddenList), typeof(HHiddenOwner), typeof(HHiddenFromBase) })
             {
-                (typeof(HHiddenList), "Stash"), (typeof(HHiddenOwner), "stash"), (typeof(HOptHidden), "stash"), (typeof(HHiddenFromBase), "stash"),
-            })
-                Assert.That(Problems(type).Single(), Does.Contain(member).And.Contain("non-public"), type.Name);
+                Assert.That(Problems(type), Is.Empty, type.Name);
+                Assert.That(CultElementIds.Inspect(type).IdPath, Is.Empty, type.Name);
+            }
+
+            Assert.That(Problems(typeof(HOptHidden)), Is.Empty);
+            Assert.That(CultElementIds.Inspect(typeof(HOptHidden)).IdPath, Is.EquivalentTo(new[] { typeof(HOptHidden), typeof(List<EIded>), typeof(EIded) }));
+            var opt = new HOptHidden();
+            opt.Peek.Add(new EIded());
+            opt.Peek.Add(new EIded());
+            Assert.That(Assign(opt, "r", deterministic: false), Is.EqualTo(2));
+            Assert.That(opt.Peek.Select(item => item.Id), Has.All.Match("^[0-9a-f]{12}$"));
 
             Assert.That(Problems(typeof(HHiddenLeaf)), Is.Empty);
             Assert.That(CultElementIds.Inspect(typeof(HHiddenLeaf)).IdPath, Is.EquivalentTo(new[] { typeof(HHiddenLeaf), typeof(List<EIded>), typeof(EIded) }),
-                "a hidden member adds nothing to the id path");
-            Assert.That(CultElementIds.Inspect(typeof(HHiddenList)).IdPath, Is.Empty);
+                "a non-public member adds nothing to the id path");
         }
 
         // MessagePack writes a [MessagePackObject] class that is only IEnumerable<T> by its keys, so the walk reads it by key. A
@@ -515,26 +535,24 @@ namespace GameCult.Caching.Tests
             Assert.That(CultElementIds.Holds(typeof(KBagIded), bag), Is.True);
         }
 
-        // The walk reads the members MessagePack writes: a public field or a property with a public getter, no [IgnoreMember].
-        // Anything else that carries a [Key] is MessagePack's AllowPrivate business and, on the way to an object list, is refused.
+        // The walk reads the members MessagePack writes: without AllowPrivate a public field or a property with a public getter, with
+        // it every member up the base chain, the most derived [MessagePackObject] declaration deciding; no [IgnoreMember].
         [Test]
         public void TheWalkReadsTheMembersMessagePackWrites()
         {
             Assert.That(Problems(typeof(PubIgn)), Is.Empty, "an ignored member is never written, so its list is nobody's business");
-            Assert.That(Problems(typeof(ApIgn)), Is.Empty, "an ignored private member is not a hidden list");
-            var held = Problems(typeof(PgHold)).Single();
-            Assert.That(held, Does.Contain("Items").And.Contain("non-public"));
+            Assert.That(Problems(typeof(ApIgn)), Is.Empty, "an ignored private member is not written");
+            Assert.That(Problems(typeof(PgHold)), Is.Empty, "a list behind a private getter is not written without AllowPrivate");
 
-            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix) })
+            foreach (var type in new[] { typeof(EIded), typeof(HHiddenLeaf), typeof(PubIgn), typeof(ApIgn), typeof(PgHold), typeof(MemberMix), typeof(HOptHidden), typeof(ApDerived), typeof(NoApDerived) })
             {
-                var written = MessagePackMembers(type, allowPrivate: false);
-                Assert.That(CultElementIds.WrittenKeyedMembers(type).Select(member => member.Name), Is.EquivalentTo(written), type.Name);
-                var readable = MessagePackMembers(type, allowPrivate: true);
-                Assert.That(CultElementIds.UnreadMembers(type).Select(member => member.Name), Is.EquivalentTo(readable.Except(written)), type.Name);
+                var allowPrivate = type.GetCustomAttribute<MessagePackObjectAttribute>(true)!.AllowPrivate;
+                Assert.That(CultElementIds.WrittenKeyedMembers(type).Select(member => member.Name),
+                    Is.EquivalentTo(MessagePackMembers(type, allowPrivate)), type.Name);
             }
 
-            Assert.That(CultElementIds.UnreadMembers(typeof(MemberMix)).Select(member => member.Name), Is.EquivalentTo(new[] { "priv" }));
-            Assert.That(CultElementIds.UnreadMembers(typeof(PgHold)).Select(member => member.Name), Is.EquivalentTo(new[] { "Items" }));
+            Assert.That(CultElementIds.WrittenKeyedMembers(typeof(NoApDerived)).Select(member => member.Name), Is.EquivalentTo(new[] { "N" }),
+                "the derived declaration decides, so an AllowPrivate base adds nothing");
         }
 
         // The names of the members MessagePack's own discovery reads for a type, by reflection into its internal type: the
@@ -597,6 +615,69 @@ namespace GameCult.Caching.Tests
                 Assert.That(Ids(back), Is.EqualTo(Ids(holder)), holder.GetType().Name);
                 Assert.That(Ids(back), Has.All.Match("^[0-9a-f]{12}$"), holder.GetType().Name);
             }
+        }
+
+        // Every shape the walk does not own is one whole value: no problem, off the id path, never minted into and never counted.
+        [Test]
+        public void AShapeTheWalkDoesNotOwnIsOneWholeValue()
+        {
+            const string Set = "aaaaaaaaaaaa";
+            EIded E(string id) => new() { Id = id };
+            var holders = new (Type Type, Func<string, object> Make)[]
+            {
+                (typeof(Whole<ImmutableArray<EIded>>), id => new Whole<ImmutableArray<EIded>> { Value = ImmutableArray.Create(E(id)) }),
+                (typeof(Whole<ImmutableArray<EIded>?>), id => new Whole<ImmutableArray<EIded>?> { Value = ImmutableArray.Create(E(id)) }),
+                (typeof(Whole<ArraySegment<EIded>>), id => new Whole<ArraySegment<EIded>> { Value = new ArraySegment<EIded>(new[] { E(id) }) }),
+                (typeof(Whole<Memory<EIded>>), id => new Whole<Memory<EIded>> { Value = new[] { E(id) } }),
+                (typeof(Whole<ReadOnlyMemory<EIded>>), id => new Whole<ReadOnlyMemory<EIded>> { Value = new[] { E(id) } }),
+                (typeof(Whole<KeyValuePair<string, List<EIded>>>), id => new Whole<KeyValuePair<string, List<EIded>>> { Value = new("k", new List<EIded> { E(id) }) }),
+                (typeof(Whole<(List<EIded>, int)>), id => new Whole<(List<EIded>, int)> { Value = (new List<EIded> { E(id) }, 1) }),
+                (typeof(Whole<Tuple<List<EIded>, int>>), id => new Whole<Tuple<List<EIded>, int>> { Value = Tuple.Create(new List<EIded> { E(id) }, 1) }),
+                (typeof(Whole<Lazy<List<EIded>>>), id => new Whole<Lazy<List<EIded>>> { Value = new Lazy<List<EIded>>(() => new List<EIded> { E(id) }) }),
+                (typeof(Whole<NkHold>), id => new Whole<NkHold> { Value = new NkHold { Items = { E(id) } } }),
+                (typeof(Whole<SkHold>), id => new Whole<SkHold> { Value = new SkHold { Items = { E(id) } } }),
+                (typeof(Whole<DcHold>), id => new Whole<DcHold> { Value = new DcHold { Items = { E(id) } } }),
+                (typeof(HRoles), id => new HRoles { Items = { E(id) } }),
+                (typeof(HFormattedList), id => new HFormattedList { Items = { E(id) } }),
+                (typeof(HHiddenList), id => new HHiddenList()),
+            };
+            foreach (var (type, make) in holders)
+            {
+                Assert.That(Problems(type), Is.Empty, type.ToString());
+                Assert.That(CultElementIds.Inspect(type).IdPath, Is.Empty, type.ToString());
+                Assert.That(CultElementIds.CanHoldIds(type), Is.False, type.ToString());
+                Assert.That(Assign(make(string.Empty), "r", deterministic: false), Is.EqualTo(0), type.ToString());
+                Assert.That(Assign(make(string.Empty), "r", deterministic: true), Is.EqualTo(0), type.ToString());
+                Assert.That(CultElementIds.Holds(type, make(Set)), Is.False, type.ToString());
+            }
+
+            // Elements of a string-keyed type carry no id either, and an owned list of a bare element is still refused.
+            Assert.That(Problems(typeof(Whole<List<SkElem>>)), Is.Empty);
+            RefusesBare(typeof(Whole<List<EBare>>));
+        }
+
+        // MessagePack writes an AllowPrivate type with every member up its base chain, and the most derived [MessagePackObject]
+        // declaration decides whether that is so.
+        [Test]
+        public void AnAllowPrivateTypeIsWalkedByTheMembersMessagePackWrites()
+        {
+            Assert.That(CultElementIds.WrittenKeyedMembers(typeof(ApDerived)).Select(member => member.Name), Is.EquivalentTo(new[] { "baseStash", "own", "N", "Pg" }));
+            Assert.That(CultElementIds.WrittenKeyedMembers(typeof(NoApDerived)).Select(member => member.Name), Is.EquivalentTo(new[] { "N" }));
+
+            var options = GameCult.Caching.MessagePack.CultDocumentMessagePackSerialization.Options;
+            var held = new HOptHidden();
+            held.Peek.Add(new EIded());
+            Assert.That(Assign(held, "r", deterministic: false), Is.EqualTo(1));
+            var back = MessagePackSerializer.Deserialize<HOptHidden>(MessagePackSerializer.Serialize(held, options), options);
+            Assert.That(back.Peek.Single().Id, Is.EqualTo(held.Peek.Single().Id), "the minted id of a private list survives a round trip");
+
+            Assert.That(Problems(typeof(HApPrivSet)), Is.Empty, "MessagePack reads an AllowPrivate type's private setter back");
+            var privSet = new HApPrivSet { Items = { new EApPrivSet(), new EApPrivSet() } };
+            Assert.That(Assign(privSet, "r", deterministic: false), Is.EqualTo(2));
+            var round = MessagePackSerializer.Deserialize<HApPrivSet>(MessagePackSerializer.Serialize(privSet, options), options);
+            Assert.That(round.Items.Select(item => item.Id), Is.EqualTo(privSet.Items.Select(item => item.Id)));
+            Assert.That(round.Items.Select(item => item.Id), Has.All.Match("^[0-9a-f]{12}$"));
+            Assert.That(Problems(typeof(HPrivSet)).Single(), Does.Contain("setter is not public"), "without AllowPrivate it is still refused");
         }
 
         private static string?[] Ids(object holder) => holder switch
@@ -885,11 +966,23 @@ namespace GameCult.Caching.Tests
 #pragma warning disable CS0169, CS0414, CS0649
         [MessagePackObject] public class HHiddenList { [Key(0)] private List<EIded> Stash { get; set; } = new(); }
         [MessagePackObject] public class HHiddenOwner { [Key(0)] private HHasIds stash = new(); }
-        [MessagePackObject(AllowPrivate = true)] public class HOptHidden { [Key(0)] private List<EIded> stash = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class HOptHidden { [Key(0)] private List<EIded> stash = new(); [IgnoreMember] public List<EIded> Peek => stash; }
         [MessagePackObject] public class HHiddenBase { [Key(0)] private List<EIded> stash = new(); }
         [MessagePackObject] public class HHiddenFromBase : HHiddenBase { [Key(1)] public int N { get; set; } }
         [MessagePackObject] public class HHiddenLeaf { [Key(0)] public List<EIded> Items { get; set; } = new(); [Key(1)] private int secret = 7; }
+        [MessagePackObject] public class ApBase { [Key(0)] private List<EIded> baseStash = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class ApDerived : ApBase { [Key(1)] private List<EIded> own = new(); [Key(2)] public int N { get; set; } [Key(3)] public List<EIded> Pg { private get; set; } = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class ApBase2 { [Key(0)] private List<EIded> baseStash = new(); }
+        [MessagePackObject] public class NoApDerived : ApBase2 { [Key(1)] public int N { get; set; } }
 #pragma warning restore CS0169, CS0414, CS0649
+
+        [MessagePackObject] public class Whole<T> { [Key(0)] public T? Value { get; set; } }
+        public class NkHold { public List<EIded> Items = new(); }
+        [MessagePackObject] public class SkHold { [Key("items")] public List<EIded> Items = new(); }
+        [MessagePackObject] public class SkElem { [Key("x")] public string X { get; set; } = ""; }
+        [System.Runtime.Serialization.DataContract] public class DcHold { [System.Runtime.Serialization.DataMember(Order = 0)] public List<EIded> Items = new(); }
+        [MessagePackObject(AllowPrivate = true)] public class EApPrivSet { [Key(0)] [CultElementId] public string? Id { get; private set; } }
+        [MessagePackObject] public class HApPrivSet { [Key(0)] public List<EApPrivSet> Items { get; set; } = new(); }
 
         [MessagePackObject] public class EDerivedText { [Key(0)] public string? Name { get; set; } [Key(1)] [CultElementId(nameof(Name))] public string Id { get; set; } = ""; }
         [MessagePackObject] public class HDerivedText { [Key(0)] public List<EDerivedText> Items { get; set; } = new(); }

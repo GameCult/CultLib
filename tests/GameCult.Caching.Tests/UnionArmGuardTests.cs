@@ -381,9 +381,7 @@ namespace GameCult.Caching.Tests
             Assert.That(back.Bag.Items.Single().Id, Is.EqualTo("00000000000d"));
         }
 
-        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused. A
-        // [DataContract] list subclass is still written by the generic resolver; an object formatter the object resolver could also
-        // build (DcColl: a different instance) or fails to build (DcBad) is no mismatch.
+        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused.
         [Test]
         public void EveryCollectionShapeTheWalkReadsIsWrittenByACollectionFormatter()
         {
@@ -398,7 +396,6 @@ namespace GameCult.Caching.Tests
                 typeof(G<SortedDictionary<string, GHold>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, GHold>>),
                 typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, GHold>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, GHold>>),
                 typeof(G<SortedList<string, GHold>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
-                typeof(G<DcColl>), typeof(G<DcBad>),
             })
             {
                 if (holder != typeof(G<FbArm>))
@@ -407,22 +404,45 @@ namespace GameCult.Caching.Tests
             }
         }
 
-        // The attribute formatter is of no known family, so the door passes it as it passes a source-generated one; registration
-        // owns the attribute.
+        // One recogniser decides what the walk owns and the door only verifies it: the same types give no registration problem and a
+        // passing door. A type formatted by attribute or written by the object resolver is one whole value, off the id path.
         [Test]
-        public void AFormatterOfNoKnownFamilyPassesTheDoor()
+        public void OneRecogniserDecidesAndTheDoorAgrees()
         {
-            Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<FormattedRoles>)));
-            var problems = CultElementIds.Inspect(typeof(G<FormattedRoles>)).Problems;
-            Assert.That(problems, Has.Count.EqualTo(1));
-            Assert.That(problems.Single(), Does.Contain("FormattedRoles").And.Contain("declares [MessagePackFormatter]"));
+            foreach (var holder in new[] { typeof(G<FormattedRoles>), typeof(G<ApTrueHold>), typeof(G<DcSeq>), typeof(G<DcColl>), typeof(G<DcBad>) })
+            {
+                Assert.That(CultElementIds.Inspect(holder).Problems, Is.Empty, holder.ToString());
+                Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString());
+            }
+
+            foreach (var whole in new[] { typeof(G<FormattedRoles>), typeof(G<DcSeq>), typeof(G<DcColl>), typeof(G<DcBad>) })
+                Assert.That(CultElementIds.Inspect(whole).IdPath, Is.Empty, whole.ToString());
+            var ap = CultElementIds.Inspect(typeof(G<ApTrueHold>)).IdPath;
+            Assert.That(ap, Does.Contain(typeof(ApTrueHold)).And.Contain(typeof(List<FbArm>)));
+            var seq = new G<DcSeq> { Value = new DcSeq { Items = { new FbArm() } } };
+            Assert.That(CultElementIds.Plan(seq.GetType(), seq, "r", deterministic: false).Count, Is.EqualTo(0));
         }
 
+        // MessagePack throws for a type, or StandardResolver has no formatter for it (an interface or abstract class that is only
+        // IEnumerable<T>): such a type cannot be persisted, so the door refuses it with the same typed text as a throwing build.
         [Test]
-        public void ACollectionMessagePackWritesAsAnObjectIsRefused()
+        public void ATypeMessagePackCannotBuildIsATypedRefusal()
         {
-            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<DcSeq>)))!;
-            Assert.That(thrown.Message, Does.Contain("MessagePack writes DcSeq as an object, but the element-id walk reads it as a collection"));
+            foreach (var (holder, name) in new[] { (typeof(G<IArms>), nameof(IArms)), (typeof(G<AbsArms>), nameof(AbsArms)) })
+            {
+                var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString())!;
+                Assert.That(thrown.Message, Does.Contain(name).And.Contain("cannot build a formatter"));
+            }
+        }
+
+        // A keyed type that enumerates lists is read by key and is on the id path, so the door checks it: MessagePack writes it as a
+        // collection, which loses the ids the walk would mint.
+        [Test]
+        public void AKeyedTypeThatEnumeratesListsIsCheckedByTheDoor()
+        {
+            Assert.That(CultElementIds.Inspect(typeof(G<KLL>)).IdPath, Does.Contain(typeof(KLL)));
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<KLL>)))!;
+            Assert.That(thrown.Message, Does.Contain($"writes {nameof(KLL)} as a collection"));
         }
 
         // A resolver that throws while asked about an id-path type is a typed refusal, whether it is the AllowPrivate formatter
@@ -519,6 +539,16 @@ namespace GameCult.Caching.Tests
             public IEnumerator<FbArm> GetEnumerator() => Items.GetEnumerator();
             System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
         }
+        public interface IArms : IEnumerable<FbArm> { }
+        public abstract class AbsArms : IEnumerable<FbArm>
+        {
+            public abstract IEnumerator<FbArm> GetEnumerator();
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+        [MessagePackObject] public sealed class KLL : List<List<FbArm>> { [Key(0)] public int N; }
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject(AllowPrivate = true)] public sealed class ApTrueHold { [Key(0)] private List<FbArm> items = new(); }
+#pragma warning restore CS0169, CS0414, CS0649
         [DataContract] public sealed class DcColl : List<FbArm> { [DataMember(Order = 0)] public int N; }
         [DataContract] public sealed class DcBad : List<FbArm> { [DataMember(Order = 0)] public int A; [DataMember(Order = 0)] public int B; }
 

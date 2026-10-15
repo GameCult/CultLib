@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Security.Cryptography;
 using System.Text;
 using MessagePack;
@@ -109,10 +110,8 @@ namespace GameCult.Caching
         // can sit in a cycle, so the path is a fixed point over these edges and not a stack.
         private sealed class Graph
         {
-            // Hidden is true when the member that starts the entry is non-public: MessagePack writes it only under AllowPrivate,
-            // and the walk reads public members only.
-            public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through, bool Hidden)> Edges { get; } = new();
-            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through, bool Hidden)> Lists { get; } = new();
+            public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through)> Edges { get; } = new();
+            public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through)> Lists { get; } = new();
 
             // Keyed types that also enumerate objects: the walk reads them by key, so the codec must confirm MessagePack does too.
             public List<Type> Enumerating { get; } = new();
@@ -140,17 +139,15 @@ namespace GameCult.Caching
             if (EnumeratesObjects(type))
                 graph.Enumerating.Add(type);
             foreach (var (member, memberType) in KeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), false, seen, survey, graph);
-            foreach (var (member, memberType) in UnreadKeyedMembers(type))
-                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), true, seen, survey, graph);
+                VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), seen, survey, graph);
             foreach (var union in type.GetCustomAttributes<UnionAttribute>(true))
             {
-                graph.Edges.Add((type, null, union.SubType, Array.Empty<Type>(), false));
+                graph.Edges.Add((type, null, union.SubType, Array.Empty<Type>()));
                 VisitObject(documentType, union.SubType, seen, survey, graph);
             }
         }
 
-        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, bool hidden, HashSet<Type> seen, Survey survey, Graph graph)
+        private static void VisitMemberType(Type documentType, Type owner, MemberInfo member, Type memberType, Type[] through, HashSet<Type> seen, Survey survey, Graph graph)
         {
             memberType = Nullable.GetUnderlyingType(memberType) ?? memberType;
             // A sequence or map whose element is itself (an unkeyed Node : IEnumerable<Node>) ends the type walk here; without
@@ -161,17 +158,17 @@ namespace GameCult.Caching
             switch (kind)
             {
                 case Kind.Leaf:
+                    // A shape the walk does not own is one whole value, never refused (q3 amended).
                     return;
                 case Kind.Map:
-                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), hidden, seen, survey, graph);
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
                     return;
                 case Kind.Sequence when IsElement(inner):
                     var concretes = ConcreteTypes(inner).ToList();
-                    graph.Lists.Add((owner, member, inner, concretes, through.Append(memberType).ToArray(), hidden));
+                    graph.Lists.Add((owner, member, inner, concretes, through.Append(memberType).ToArray()));
                     foreach (var concrete in concretes)
                     {
-                        // A hidden list is refused as a member (Settle), not once per element type.
-                        if (hidden || !survey.Judged.Add(concrete))
+                        if (!survey.Judged.Add(concrete))
                             continue;
                         var problem = IsElement(concrete) ? IdProblem(concrete) : UnkeyedElementProblem;
                         if (problem != null)
@@ -181,10 +178,10 @@ namespace GameCult.Caching
                     VisitObject(documentType, inner, seen, survey, graph);
                     return;
                 case Kind.Sequence:
-                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), hidden, seen, survey, graph);
+                    VisitMemberType(documentType, owner, member, inner, through.Append(memberType).ToArray(), seen, survey, graph);
                     return;
                 default:
-                    graph.Edges.Add((owner, member, memberType, through, hidden));
+                    graph.Edges.Add((owner, member, memberType, through));
                     VisitObject(documentType, memberType, seen, survey, graph);
                     return;
             }
@@ -193,24 +190,21 @@ namespace GameCult.Caching
         private const string UnkeyedElementProblem =
             "is written by a formatter the cache does not own, so its element id would never reach disk; mark it [MessagePackObject] with [Key] members, or keep it out of lists.";
 
-        // The id path: every type that reaches an object list, the list's element types and the concrete types under them.
-        // [MessagePackFormatter] on any of them, or on a member the walk descends through, would hand the bytes to a formatter
-        // that does not write the [Key] layout the id lives in.
+        // The id path: every type that reaches an object list through members MessagePack writes by key, the lists' element and
+        // concrete types, and the keyed types that enumerate objects. The codec verifies that MessagePack writes each of them the
+        // way Classify reads it; it never decides ownership.
         private static void Settle(Type documentType, Survey survey, Graph graph)
         {
-            var lists = graph.Lists.Where(list => !list.Hidden).ToArray();
+            var lists = graph.Lists;
             var reaching = new HashSet<Type>(lists.Select(list => list.Owner));
-            var members = new List<MemberInfo>(lists.Select(list => list.Member));
             var through = new List<Type>(lists.SelectMany(list => list.Through));
             for (var grew = true; grew;)
             {
                 grew = false;
-                foreach (var (owner, member, child, via, hidden) in graph.Edges)
+                foreach (var (owner, _, child, via) in graph.Edges)
                 {
-                    if (hidden || !reaching.Contains(child))
+                    if (!reaching.Contains(child))
                         continue;
-                    if (member != null && !members.Contains(member))
-                        members.Add(member);
                     through.AddRange(via);
                     grew |= reaching.Add(owner);
                 }
@@ -239,29 +233,8 @@ namespace GameCult.Caching
             foreach (var type in graph.Enumerating)
                 Add(type);
 
-            foreach (var type in path)
-            {
-                survey.IdPath.Add(type);
-                if (type.IsDefined(typeof(MessagePackFormatterAttribute), true))
-                    survey.Problems.Add($"Cult document {documentType.Name}: {type.Name} is on the path to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute or keep this type out of the document's lists.");
-            }
-
-            foreach (var member in members)
-            {
-                if (Declares(member, typeof(MessagePackFormatterAttribute)))
-                    survey.Problems.Add($"Cult document {documentType.Name}: {member.DeclaringType!.Name}.{member.Name} leads to a list whose elements carry ids and declares [MessagePackFormatter], so its element ids would never reach disk; remove the attribute.");
-            }
-
-            // The fixed point has settled which types reach a list through public members. A non-public [Key] member that starts
-            // a list, or leads to a type that reaches one, is refused: nothing reads or checks the ids it holds.
-            foreach (var list in graph.Lists.Where(list => list.Hidden))
-                survey.Problems.Add(HiddenProblem(documentType, list.Owner, list.Member));
-            foreach (var edge in graph.Edges.Where(edge => edge.Hidden && reaching.Contains(edge.Child)))
-                survey.Problems.Add(HiddenProblem(documentType, edge.Owner, edge.Member!));
+            survey.IdPath.AddRange(path);
         }
-
-        private static string HiddenProblem(Type documentType, Type owner, MemberInfo member) =>
-            $"Cult document {documentType.Name}: {owner.Name}.{member.Name} is a non-public [Key] member on the way to a list whose elements carry ids; MessagePack writes it only under AllowPrivate and the element-id walk reads public members, so its ids could never be checked. Make it public, or keep lists out of it.";
 
         // The types an element can actually be: the element type itself when it can be instantiated, and every union subtype
         // under it. Shapes are built from these, so registration judges exactly what minting will meet.
@@ -302,14 +275,14 @@ namespace GameCult.Caching
             if (KeyOf(id) is not { } idKey)
                 return $"declares [CultElementId] on {id.Name}, which has no integer [Key], so it is never persisted.";
             if (MembersOf(element).FirstOrDefault(member => member.Name == id.Name && member.MemberType == id.MemberType) is not { } written)
-                return $"declares [CultElementId] on {id.Name}, which MessagePack does not write ([IgnoreMember], non-public, or a property whose getter is not public); the id would never reach disk.";
+                return $"declares [CultElementId] on {id.Name}, which MessagePack does not write ([IgnoreMember], or non-public on a type without [MessagePackObject(AllowPrivate = true)]); the id would never reach disk.";
             id = written;
             var sharing = KeyedMembers(element).FirstOrDefault(entry => entry.Member != id && KeyOf(entry.Member) == idKey);
             if (sharing.Member != null)
                 return $"declares [CultElementId] on {id.Name} with [Key({idKey})], which {sharing.Member.Name} also uses; an id needs a key of its own.";
             if (id is PropertyInfo { SetMethod: null } or FieldInfo { IsInitOnly: true })
                 return $"declares [CultElementId] on {id.Name}, which cannot be assigned; the cache mints into it.";
-            if (id is PropertyInfo { SetMethod.IsPublic: false })
+            if (id is PropertyInfo { SetMethod.IsPublic: false } && !AllowsPrivate(element))
                 return $"declares [CultElementId] on {id.Name}, whose setter is not public: MessagePack writes the id but does not read it back, so every load would mint a different one. Make the setter public (init is fine).";
             var source = id.GetCustomAttribute<CultElementIdAttribute>(true)!.DerivedFrom;
             if (source != null)
@@ -551,10 +524,20 @@ namespace GameCult.Caching
             return shape;
         }
 
-        // The members MessagePack's StandardResolver writes for an integer-keyed type: public instance fields, and public
-        // instance properties with a public getter, none of them [IgnoreMember]. TheWalkReadsTheMembersMessagePackWrites checks
-        // this set against MessagePack's own member discovery.
+        // The members MessagePack's StandardResolver writes for an integer-keyed type, none of them [IgnoreMember]. Without
+        // AllowPrivate: public instance fields, and public instance properties with a public getter. With it, read from the most
+        // derived [MessagePackObject] declaration (a derived type without it is written without it, probe NoApDerived): every
+        // instance field and indexer-free property up the base chain at any visibility, the most derived of a name.
+        // TheWalkReadsTheMembersMessagePackWrites checks this set against MessagePack's own member discovery.
         private static IEnumerable<MemberInfo> MembersOf(Type type) =>
+            AllowsPrivate(type)
+                ? AllInstanceMembers(type).Where(member => !Declares(member, typeof(IgnoreMemberAttribute)))
+                    .GroupBy(member => member.Name).Select(group => group.First())
+                : PublicMembersOf(type);
+
+        private static bool AllowsPrivate(Type type) => type.GetCustomAttribute<MessagePackObjectAttribute>(true)?.AllowPrivate == true;
+
+        private static IEnumerable<MemberInfo> PublicMembersOf(Type type) =>
             type.GetFields(BindingFlags.Instance | BindingFlags.Public).Cast<MemberInfo>()
                 .Concat(type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
                     .Where(property => property.GetIndexParameters().Length == 0 && property.GetMethod is { IsPublic: true }))
@@ -573,35 +556,16 @@ namespace GameCult.Caching
             }
         }
 
-        // The members the walk reads, as MessagePack writes them, for the oracle test that checks both against MessagePack.
-        internal static IEnumerable<MemberInfo> WrittenKeyedMembers(Type type) => KeyedMembers(type).Select(entry => entry.Member);
-
-        // The [Key] members MessagePack writes only under AllowPrivate, for the same test.
-        internal static IEnumerable<MemberInfo> UnreadMembers(Type type) => UnreadKeyedMembers(type).Select(entry => entry.Member);
+        // The [Key] members MessagePack writes, for the oracle test that checks them against MessagePack.
+        internal static IEnumerable<MemberInfo> WrittenKeyedMembers(Type type) => MembersOf(type).Where(member => KeyOf(member) != null);
 
         private static IEnumerable<(MemberInfo Member, Type Type)> KeyedMembers(Type type) =>
-            MembersOf(type).Where(member => KeyOf(member) != null).Select(member => (member, TypeOf(member)));
+            WrittenKeyedMembers(type).Where(member => !Declares(member, typeof(MessagePackFormatterAttribute)))
+                .Select(member => (member, TypeOf(member)));
 
         // An attribute a member declares, or inherits through an override: MemberInfo.IsDefined ignores inherit for properties, so an
         // override of a base virtual member would not see its base's attribute.
         private static bool Declares(MemberInfo member, Type attribute) => Attribute.IsDefined(member, attribute, inherit: true);
-
-        // [Key] members MessagePack writes only under AllowPrivate: non-public fields and properties, and public properties whose
-        // getter is not public, up the base chain. An [IgnoreMember] member is never written, so it is not one of them.
-        private static IEnumerable<(MemberInfo Member, Type Type)> UnreadKeyedMembers(Type type)
-        {
-            for (var level = type; level != null && level != typeof(object); level = level.BaseType)
-            {
-                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-                foreach (var member in level.GetFields(flags).Where(field => !field.IsPublic).Cast<MemberInfo>()
-                             .Concat(level.GetProperties(flags).Where(property =>
-                                 property.GetIndexParameters().Length == 0 && property.GetMethod is { IsPublic: false })))
-                {
-                    if (KeyOf(member) != null && !Declares(member, typeof(IgnoreMemberAttribute)))
-                        yield return (member, TypeOf(member));
-                }
-            }
-        }
 
         // True when the walk reads the type by its [Key] members: the codec compares this with how MessagePack writes it.
         internal static bool WalksAsOwner(Type type) => Classify(Nullable.GetUnderlyingType(type) ?? type).Kind == Kind.Owner;
@@ -623,17 +587,22 @@ namespace GameCult.Caching
         // [MessagePackObject] or [Union] type is read by key even when it is also IEnumerable<T>; the codec checks, for every type
         // on the id path, that MessagePack writes it the way this model reads it, and refuses the document when it does not.
         // Inner is a map's value type, a sequence's element type, or the type itself for an owner.
-        //   Leaf      a value written whole that holds no element list: strings (an IEnumerable<char> MessagePack writes whole),
-        //             a struct, class or interface with no [MessagePackObject] or [Union] (primitives, enums, float2, DateTime,
-        //             and object, which is untyped on disk).
+        // The owned shapes are a closed list (Owner, Sequence, Map); every other shape is Leaf: one whole value with no element
+        // ids, replaced whole by a variant (q3 amended 2026-10-16). When in doubt the answer is Leaf.
+        //   Leaf      strings (an IEnumerable<char> MessagePack writes whole), a type written whole (IsWrittenWhole: attribute-
+        //             formatted, [DataContract], string-keyed), a struct or a class or interface with no [MessagePackObject] or
+        //             [Union] and no collection shape (primitives, enums, float2, DateTime, ImmutableArray, ArraySegment, Memory,
+        //             KeyValuePair, tuples, Lazy, unkeyed classes), and object, which is untyped on disk.
         //   Map       a class or interface implementing IDictionary<,> or IReadOnlyDictionary<,>.
-        //   Sequence  an array or an IEnumerable<T>.
-        //   Owner     a class, interface or struct MessagePack serializes by key. A keyed struct is walked as an owner; it is
-        //             never an element (IsElement), since a boxed copy cannot carry a minted id.
+        //   Sequence  an array or an IEnumerable<T> class or interface.
+        //   Owner     a class, interface or struct MessagePack serializes by integer key. A keyed struct is walked as an owner;
+        //             it is never an element (IsElement), since a boxed copy cannot carry a minted id.
         private static (Kind Kind, Type Inner) Classify(Type declared) => Classes.GetOrAdd(declared, static type =>
         {
             type = Nullable.GetUnderlyingType(type) ?? type;
             if (type == typeof(string))
+                return (Kind.Leaf, type);
+            if (IsWrittenWhole(type))
                 return (Kind.Leaf, type);
             if (IsKeyed(type))
                 return (Kind.Owner, type);
@@ -645,6 +614,15 @@ namespace GameCult.Caching
                 return (Kind.Sequence, element);
             return (Kind.Leaf, type);
         });
+
+        // A type MessagePack writes as one value the walk cannot look into: its own formatter ([MessagePackFormatter] on the type,
+        // inherited), [DataContract] on a type that is not [MessagePackObject] (the object resolver writes its members), or string
+        // keys (KeyAsPropertyName, or any [Key] with a string key). Such a type is Leaf, even when it is also enumerable.
+        private static bool IsWrittenWhole(Type type) =>
+            type.IsDefined(typeof(MessagePackFormatterAttribute), true) ||
+            (type.IsDefined(typeof(DataContractAttribute), true) && !type.IsDefined(typeof(MessagePackObjectAttribute), true)) ||
+            type.GetCustomAttribute<MessagePackObjectAttribute>(true)?.KeyAsPropertyName == true ||
+            AllInstanceMembers(type).Any(member => member.GetCustomAttribute<KeyAttribute>(true)?.StringKey != null);
 
         // A type MessagePack serializes by key: [MessagePackObject] or [Union].
         private static bool IsKeyed(Type type) =>
