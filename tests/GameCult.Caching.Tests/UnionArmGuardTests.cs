@@ -408,6 +408,10 @@ namespace GameCult.Caching.Tests
             Assert.That(first.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl)));
             var second = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc2)))!;
             Assert.That(second.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl2)).And.Contain("failed to build"));
+
+            // A type MessagePack itself cannot build a formatter for (two public members on one key) is refused, naming the type.
+            var third = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc3)))!;
+            Assert.That(third.Message, Does.Contain(nameof(DkEl3)).And.Contain("cannot build a formatter"));
         }
 
         [MessagePackObject]
@@ -450,6 +454,10 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class DkEl { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
         [MessagePackObject] public sealed class DkEl2 { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
 #pragma warning restore CS0169, CS0414, CS0649
+        [MessagePackObject] public sealed class DkEl3 { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] public int M; }
+        [CultDocument("tests.dk_doc3", "tests.dk_doc3.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc3 { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl3> Items = new(); }
         [CultDocument("tests.dk_doc", "tests.dk_doc.v1")]
         [MessagePackObject]
         public sealed class DkDoc { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl> Items = new(); }
