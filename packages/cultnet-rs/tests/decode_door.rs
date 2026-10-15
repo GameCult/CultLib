@@ -336,11 +336,18 @@ fn identity_credential_with_deep_key_is_refused_on_a_small_thread() {
         let rmpv::Value::Array(items) = &mut envelopes else {
             panic!("credential is an array");
         };
-        // The writer encodes an envelope positionally; one slot more is the unknown one.
-        let rmpv::Value::Array(envelope) = &mut items[0] else {
+        // The writer encodes an envelope positionally; the reader also takes the named map form,
+        // where an unknown key is skipped, so the test spells the envelope that way plus one key.
+        let rmpv::Value::Array(slots) = std::mem::replace(&mut items[0], rmpv::Value::Nil) else {
             panic!("envelope is a positional array");
         };
-        envelope.push("DEEP".into());
+        let mut named: Vec<(rmpv::Value, rmpv::Value)> = ["key", "type", "payload", "storedAt", "schemaId"]
+            .into_iter()
+            .map(rmpv::Value::from)
+            .zip(slots)
+            .collect();
+        named.push(("zz".into(), "DEEP".into()));
+        items[0] = rmpv::Value::Map(named);
         let credential = rmp_serde::to_vec(&envelopes).unwrap();
         for levels in [1000, 250] {
             let bytes = splice(credential.clone(), &nested(levels));
