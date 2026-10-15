@@ -387,10 +387,10 @@ namespace GameCult.Caching.Tests
                 typeof(G<Queue<FbArm>>), typeof(G<Stack<FbArm>>), typeof(G<LinkedList<FbArm>>),
                 typeof(G<System.Collections.ObjectModel.ReadOnlyCollection<FbArm>>), typeof(G<System.Collections.ObjectModel.ObservableCollection<FbArm>>),
                 typeof(G<System.Collections.Immutable.ImmutableList<FbArm>>), typeof(G<ILookup<string, FbArm>>), typeof(G<List<List<FbArm>>>),
-                typeof(G<Dictionary<string, FbArm>>), typeof(G<IDictionary<string, FbArm>>), typeof(G<IReadOnlyDictionary<string, FbArm>>),
-                typeof(G<SortedDictionary<string, FbArm>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, FbArm>>),
-                typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, FbArm>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, FbArm>>),
-                typeof(G<SortedList<string, FbArm>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
+                typeof(G<Dictionary<string, GHold>>), typeof(G<IDictionary<string, GHold>>), typeof(G<IReadOnlyDictionary<string, GHold>>),
+                typeof(G<SortedDictionary<string, GHold>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, GHold>>),
+                typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, GHold>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, GHold>>),
+                typeof(G<SortedList<string, GHold>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
             })
             {
                 if (holder != typeof(G<FbArm>))
@@ -443,6 +443,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public sealed class G<T> { [Key(0)] public T? Value; }
         [Union(0, typeof(GuArm))] public interface IGu { }
         [MessagePackObject] public sealed class GuArm : IGu { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public List<FbArm> Items = new(); }
+        [MessagePackObject] public sealed class GHold { [Key(0)] public List<FbArm> Items = new(); }
         [MessagePackObject] public struct GStruct { [Key(0)] public List<FbArm> Items; }
 
 #pragma warning disable CS0169, CS0414, CS0649
