@@ -303,11 +303,13 @@ exclusive open of the same lock file exclude each other is not established.
   type does not claim it (registration refuses a non-public `[Key]` member on the way to
   an object list, so the private-member formatter writes every id). A value list (`List<float2>`, a list of a non-keyed class) is not on the
   path, so a resolver may claim it.
-- The codec also checks, for every type on that path, that `StandardResolver` writes it
-  the way the walk reads it. A type read by key must be written by the object or union
-  resolver; a collection must be written by a collection resolver (generic, immutable or
-  builtin). Otherwise the codec refuses the document on first encode or decode, naming the
-  type. It also refuses, typed, a type MessagePack cannot build a formatter for, and a
+- The codec also checks, for every type on that path, that `StandardResolver` does not write it
+  against the walk. A type read by key may not be written by the generic collection resolver
+  (a `[MessagePackObject]` class that is also an `ICollection<T>` or dictionary), and a type
+  read as a collection may not be written by the object resolver (a `[DataContract]`
+  enumerable); either is refused on first encode or decode, naming the type. Any other
+  formatter, such as one MessagePack's source generator emits, passes: the walk decides which
+  types carry ids. It also refuses, typed, a type MessagePack cannot build a formatter for, and a
   resolver that throws while asked about one.
 - Deserialization runs under untrusted-data security. `CultRecordRef<T>` is a
   permitted dictionary key, compared by its key string.

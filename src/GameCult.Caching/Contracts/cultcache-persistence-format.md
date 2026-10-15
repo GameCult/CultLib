@@ -447,7 +447,9 @@ elements retargets nothing.
   `[MessagePackObject]` type is read by key even when it is `IEnumerable<T>`; MessagePack
   writes a keyed type that is also a collection (`ICollection<T>`, `IList`, `IDictionary`)
   as a collection, so C# refuses such a type at the first encode or decode when it is on the
-  path to an object list. For an
+  path to an object list. A `[DataContract]` type the walk reads as a collection, which
+  MessagePack writes by its members, is refused the same way. A formatter MessagePack's
+  source generator emits is not refused. For an
   object list, C# refuses at registration a concrete element type that is not keyed and
   `[MessagePackFormatter]` on any type, collection type or member on the way to the list or on the id
   member, and refuses at the first encode or decode of the document a formatter
