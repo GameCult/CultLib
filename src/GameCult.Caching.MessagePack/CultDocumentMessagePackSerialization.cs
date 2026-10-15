@@ -8,6 +8,7 @@ using System.Reflection;
 using GameCult.Caching;
 using MessagePack;
 using MessagePack.Formatters;
+using MessagePack.ImmutableCollection;
 using MessagePack.Resolvers;
 
 namespace GameCult.Caching.MessagePack;
@@ -86,12 +87,36 @@ public static class CultDocumentMessagePackSerialization
             // composite stops there, so no later resolver is asked. StandardResolverAllowPrivate's formatter writes the same layout
             // plus non-public [Key] members, and registration refuses a non-public member on the way to an object list, so it
             // claims nothing either.
-            var standard = generic.Invoke(StandardResolver.Instance, null);
+            object? standard;
+            try
+            {
+                standard = generic.Invoke(StandardResolver.Instance, null);
+            }
+            catch (Exception exception)
+            {
+                return $"Cult document {documentType.Name}: MessagePack cannot build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}).";
+            }
+
+            if (!WrittenAsWalked(type, generic, standard))
+            {
+                var owner = CultElementIds.WalksAsOwner(type);
+                return $"Cult document {documentType.Name}: MessagePack writes {type.Name} {(owner ? "as a collection" : "by its [Key] layout")}, but the element-id walk reads it {(owner ? "by its [Key] layout" : "as a collection")}, so element ids would be lost or invented. A [MessagePackObject] type that is also a collection (ICollection<T>, IList, IDictionary) is written as a collection; make it one or the other.";
+            }
+
             var allowPrivateAsked = false;
             object? allowPrivate = null;
             foreach (var resolver in ahead)
             {
-                var formatter = generic.Invoke(resolver, null);
+                object? formatter;
+                try
+                {
+                    formatter = generic.Invoke(resolver, null);
+                }
+                catch (Exception exception)
+                {
+                    return $"Cult document {documentType.Name}: formatter resolver {resolver.GetType().FullName} failed to build a formatter for {type.Name}, which is on the path to a list whose elements carry ids ({(exception.InnerException ?? exception).Message}); a resolver may not throw for such a type.";
+                }
+
                 if (formatter == null)
                     continue;
                 if (ReferenceEquals(formatter, standard))
@@ -116,6 +141,32 @@ public static class CultDocumentMessagePackSerialization
         }
 
         return null;
+    }
+
+    // The walk's kind for a type on the id path, checked against the resolver MessagePack actually delegates to. The public
+    // singletons hand out the same cached formatter instances StandardResolver does, so a reference match names the family. A
+    // type the walk reads by key must be written by the object or union resolver, and one it reads as a collection by a
+    // collection resolver; a keyed class that is also an ICollection<T> is written as a collection and its [Key] layout dropped.
+    private static bool WrittenAsWalked(Type type, MethodInfo generic, object? standard)
+    {
+        if (standard == null)
+            return true;
+        var families = CultElementIds.WalksAsOwner(type)
+            ? new IFormatterResolver[] { DynamicUnionResolver.Instance, DynamicObjectResolver.Instance }
+            : new IFormatterResolver[] { DynamicGenericResolver.Instance, ImmutableCollectionResolver.Instance, BuiltinResolver.Instance };
+        return families.Any(family => ReferenceEquals(Formatter(family, generic), standard));
+    }
+
+    private static object? Formatter(IFormatterResolver resolver, MethodInfo generic)
+    {
+        try
+        {
+            return generic.Invoke(resolver, null);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static (MessagePackSerializerOptions Options, IFormatterResolver[] Ahead) Compose(IFormatterResolver[] consumerResolvers)

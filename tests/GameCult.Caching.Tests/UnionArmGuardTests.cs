@@ -357,6 +357,111 @@ namespace GameCult.Caching.Tests
             Assert.That(Convert.ToHexString(plainBytes), Is.EqualTo(Convert.ToHexString(MessagePackSerializer.Serialize(plain, CultDocumentMessagePackSerialization.Options))));
         }
 
+        // The walk reads a [MessagePackObject] type by its keys, but MessagePack writes one that is also an ICollection<T> as a
+        // collection and drops the keys. The codec compares the two for every type on the id path and refuses the document.
+        [Test]
+        public void AKeyedTypeMessagePackWritesAsACollectionIsRefused()
+        {
+            var registry = CultDocumentRegistry.ForTypes(new[] { typeof(KCollDoc), typeof(KBagDoc) });
+            Assert.That(CultElementIds.Inspect(typeof(KCollDoc)).IdPath, Does.Contain(typeof(KColl)));
+
+            var coll = new KCollDoc { Id = "k1" };
+            coll.Items.Add(new FbArm { Id = "00000000000c" });
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.SerializeUntyped(coll, typeof(KCollDoc), registry))!;
+            Assert.That(thrown.Message, Does.Contain(nameof(KColl)).And.Contain("as a collection"));
+
+            var bag = new KBagDoc { Id = "b1", Bag = new KBagE { Items = { new FbArm { Id = "00000000000d" } } } };
+            var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(bag, typeof(KBagDoc), registry);
+            var back = (KBagDoc)CultDocumentMessagePackSerialization.DeserializeUntyped(typeof(KBagDoc), bytes, registry);
+            Assert.That(back.Bag.Items.Single().Id, Is.EqualTo("00000000000d"));
+        }
+
+        // Every collection shape the walk reads is one MessagePack writes through a collection formatter, so none is refused.
+        [Test]
+        public void EveryCollectionShapeTheWalkReadsIsWrittenByACollectionFormatter()
+        {
+            foreach (var holder in new[]
+            {
+                typeof(G<List<FbArm>>), typeof(G<FbArm[]>), typeof(G<FbArm[,]>), typeof(G<IList<FbArm>>), typeof(G<IReadOnlyList<FbArm>>),
+                typeof(G<ICollection<FbArm>>), typeof(G<IReadOnlyCollection<FbArm>>), typeof(G<IEnumerable<FbArm>>), typeof(G<HashSet<FbArm>>),
+                typeof(G<Queue<FbArm>>), typeof(G<Stack<FbArm>>), typeof(G<LinkedList<FbArm>>),
+                typeof(G<System.Collections.ObjectModel.ReadOnlyCollection<FbArm>>), typeof(G<System.Collections.ObjectModel.ObservableCollection<FbArm>>),
+                typeof(G<System.Collections.Immutable.ImmutableList<FbArm>>), typeof(G<ILookup<string, FbArm>>), typeof(G<List<List<FbArm>>>),
+                typeof(G<Dictionary<string, FbArm>>), typeof(G<IDictionary<string, FbArm>>), typeof(G<IReadOnlyDictionary<string, FbArm>>),
+                typeof(G<SortedDictionary<string, FbArm>>), typeof(G<System.Collections.Concurrent.ConcurrentDictionary<string, FbArm>>),
+                typeof(G<System.Collections.ObjectModel.ReadOnlyDictionary<string, FbArm>>), typeof(G<System.Collections.Immutable.ImmutableDictionary<string, FbArm>>),
+                typeof(G<SortedList<string, FbArm>>), typeof(G<FbArm>), typeof(G<IGu>), typeof(G<GStruct>),
+            })
+            {
+                if (holder != typeof(G<FbArm>))
+                    Assert.That(CultElementIds.Inspect(holder).IdPath, Is.Not.Empty, holder.Name);
+                Assert.DoesNotThrow(() => CultDocumentMessagePackSerialization.OptionsForDocument(holder), holder.ToString());
+            }
+        }
+
+        // A resolver that throws while asked about an id-path type is a typed refusal, whether it is the AllowPrivate formatter
+        // the claim check asks about (the claim stands) or a resolver ahead (it fails to build).
+        [Test]
+        public void AResolverThatThrowsIsATypedRefusal()
+        {
+            var first = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc)))!;
+            Assert.That(first.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl)));
+            var second = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc2)))!;
+            Assert.That(second.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl2)).And.Contain("failed to build"));
+        }
+
+        [MessagePackObject]
+        public sealed class KColl : List<FbArm>
+        {
+            [Key(0)] public int N;
+        }
+
+        [CultDocument("tests.kcoll_doc", "tests.kcoll_doc.v1")]
+        [MessagePackObject]
+        public sealed class KCollDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KColl Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class KBagE : IEnumerable<FbArm>
+        {
+            [Key(0)] public List<FbArm> Items = new();
+            public IEnumerator<FbArm> GetEnumerator() { yield break; }
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
+        [CultDocument("tests.kbag_doc", "tests.kbag_doc.v1")]
+        [MessagePackObject]
+        public sealed class KBagDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KBagE Bag = new();
+        }
+
+        [MessagePackObject] public sealed class G<T> { [Key(0)] public T? Value; }
+        [Union(0, typeof(GuArm))] public interface IGu { }
+        [MessagePackObject] public sealed class GuArm : IGu { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public List<FbArm> Items = new(); }
+        [MessagePackObject] public struct GStruct { [Key(0)] public List<FbArm> Items; }
+
+#pragma warning disable CS0169, CS0414, CS0649
+        [MessagePackObject] public sealed class DkEl { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
+        [MessagePackObject] public sealed class DkEl2 { [Key(0)] [CultElementId] public string Id = string.Empty; [Key(1)] public int N; [Key(1)] private int shadow; }
+#pragma warning restore CS0169, CS0414, CS0649
+        [CultDocument("tests.dk_doc", "tests.dk_doc.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl> Items = new(); }
+        [CultDocument("tests.dk_doc2", "tests.dk_doc2.v1")]
+        [MessagePackObject]
+        public sealed class DkDoc2 { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl2> Items = new(); }
+
+        public sealed class DkFormatter : IMessagePackFormatter<DkEl>
+        {
+            public void Serialize(ref MessagePackWriter writer, DkEl value, MessagePackSerializerOptions options) => writer.Write(value.N);
+            public DkEl Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) => new DkEl { N = reader.ReadInt32() };
+        }
+
         [MessagePackObject]
         public sealed class ApArm
         {
@@ -457,6 +562,8 @@ namespace GameCult.Caching.Tests
                 if (typeof(T) == typeof(List<LcValue>)) return (IMessagePackFormatter<T>)(object)new ValuesFormatter();
                 if (typeof(T) == typeof(List<Pair>)) return (IMessagePackFormatter<T>)(object)new PointsFormatter();
                 if (typeof(T) == typeof(FbArm)) return global::MessagePack.Resolvers.StandardResolver.Instance.GetFormatter<T>();
+                if (typeof(T) == typeof(DkEl)) return (IMessagePackFormatter<T>)(object)new DkFormatter();
+                if (typeof(T) == typeof(DkEl2)) return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();
                 if (typeof(T) == typeof(ApArm) || typeof(T) == typeof(ApDoc) || typeof(T) == typeof(List<ApArm>) ||
                     typeof(T) == typeof(ApPlainArm) || typeof(T) == typeof(ApPlainDoc) || typeof(T) == typeof(List<ApPlainArm>))
                     return global::MessagePack.Resolvers.StandardResolverAllowPrivate.Instance.GetFormatter<T>();

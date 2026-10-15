@@ -113,6 +113,9 @@ namespace GameCult.Caching
             // and the walk reads public members only.
             public List<(Type Owner, MemberInfo? Member, Type Child, Type[] Through, bool Hidden)> Edges { get; } = new();
             public List<(Type Owner, MemberInfo Member, Type Element, List<Type> Concrete, Type[] Through, bool Hidden)> Lists { get; } = new();
+
+            // Keyed types that also enumerate objects: the walk reads them by key, so the codec must confirm MessagePack does too.
+            public List<Type> Enumerating { get; } = new();
         }
 
         private static readonly ConcurrentDictionary<Type, bool> IdCapable = new();
@@ -134,6 +137,8 @@ namespace GameCult.Caching
         {
             if (!seen.Add(type))
                 return;
+            if (EnumeratesObjects(type))
+                graph.Enumerating.Add(type);
             foreach (var (member, memberType) in KeyedMembers(type))
                 VisitMemberType(documentType, type, member, memberType, Array.Empty<Type>(), false, seen, survey, graph);
             foreach (var (member, memberType) in UnreadKeyedMembers(type))
@@ -228,6 +233,11 @@ namespace GameCult.Caching
                 foreach (var concrete in list.Concrete)
                     Add(concrete);
             }
+
+            // A keyed type the walk reads by key but whose enumeration holds objects is on the path: the codec asks whether
+            // MessagePack writes it by key too.
+            foreach (var type in graph.Enumerating)
+                Add(type);
 
             foreach (var type in path)
             {
@@ -592,6 +602,12 @@ namespace GameCult.Caching
                 }
             }
         }
+
+        // True when the walk reads the type by its [Key] members: the codec compares this with how MessagePack writes it.
+        internal static bool WalksAsOwner(Type type) => Classify(Nullable.GetUnderlyingType(type) ?? type).Kind == Kind.Owner;
+
+        private static bool EnumeratesObjects(Type type) =>
+            (ElementTypeOf(type) ?? MapTypes(type)?.Value) is { } inner && Classify(inner).Kind != Kind.Leaf;
 
         private static int? KeyOf(MemberInfo member) => member.GetCustomAttribute<KeyAttribute>(true)?.IntKey;
 
