@@ -47,6 +47,10 @@ namespace GameCult.Caching.Tests
                 """{"cos":{"x":1,"y":2,"z":3,"w":4},"sin":{"x":5,"y":6,"z":7,"w":8}}""");
             Json(new SpanNoise(new float4(1f, 2f, 3f, 4f), 0.25f, 0.5f)).Should().Be(
                 """{"field":{"x":1,"y":2,"z":3,"w":4},"curvature":0.25,"fold":0.5}""");
+            Json(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f }).Should().Be(
+                """{"midpoint":{"x":1,"y":2,"z":3},"velocity":{"x":4,"y":5,"z":6},"speed":7,"acceleration":8,"halfLength":9}""");
+            Json(new SpanStage { frequency = 1f, stretch = 2f, axis = new float3(3f, 4f, 5f), shift = new float3(6f, 7f, 8f), offset = new float3(9f, 10f, 11f), octaveStep = new float3(12f, 13f, 14f) }).Should().Be(
+                """{"frequency":1,"stretch":2,"axis":{"x":3,"y":4,"z":5},"shift":{"x":6,"y":7,"z":8},"offset":{"x":9,"y":10,"z":11},"octaveStep":{"x":12,"y":13,"z":14}}""");
         }
 
         [Test]
@@ -72,6 +76,8 @@ namespace GameCult.Caching.Tests
             RoundTrip(new CultCellular(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8), 0.25f));
             RoundTrip(new CultPhasor(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8)));
             RoundTrip(new SpanNoise(new float4(1, 2, 3, 4), 0.25f, 0.5f));
+            RoundTrip(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f });
+            RoundTrip(new SpanStage { frequency = 1f, stretch = 2f, axis = new float3(3f, 4f, 5f), shift = new float3(6f, 7f, 8f), offset = new float3(9f, 10f, 11f), octaveStep = new float3(12f, 13f, 14f) });
         }
 
         [Test]

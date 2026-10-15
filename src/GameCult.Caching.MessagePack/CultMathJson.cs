@@ -14,7 +14,7 @@ namespace GameCult.Caching.MessagePack;
 /// The canonical System.Text.Json shape of every public CultMath value type, the JSON twin of
 /// <see cref="CultMathResolver"/>. Vectors, quaternions and colors are objects keyed by their
 /// field names (<c>{"x":1,"y":2}</c>), matrices are arrays of row objects, <c>rect</c> is
-/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>, and <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>.
+/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>, <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>, <c>SpanPath</c> is <c>{"midpoint":..,"velocity":..,"speed":..,"acceleration":..,"halfLength":..}</c>, and <c>SpanStage</c> is <c>{"frequency":..,"stretch":..,"axis":..,"shift":..,"offset":..,"octaveStep":..}</c>.
 /// Property names are fixed: <c>PropertyNamingPolicy</c> does not rename them, and
 /// <c>PropertyNameCaseInsensitive</c> makes reading case-insensitive.
 /// <para>
@@ -481,7 +481,7 @@ public static class CultMathJson
             Add<Random, uint>(UIntScalar.Instance, new Fields<uint>(("state", Val<uint>())),
                 a => new Random { state = a[0] }, (v, a) => a[0] = v.state),
 
-            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}, SpanNoise is {field, curvature, fold}.
+            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}, SpanNoise is {field, curvature, fold}, SpanPath is {midpoint, velocity, speed, acceleration, halfLength}, SpanStage is {frequency, stretch, axis, shift, offset, octaveStep}.
             Add<float2x2, float>(f, new Rows<float>(2, Xy<float>()),
                 a => new float2x2(a[0], a[1], a[2], a[3]),
                 (v, a) => { a[0] = v[0].x; a[1] = v[0].y; a[2] = v[1].x; a[3] = v[1].y; }),
@@ -520,6 +520,24 @@ public static class CultMathJson
                 {
                     a[0] = v.field.x; a[1] = v.field.y; a[2] = v.field.z; a[3] = v.field.w;
                     a[4] = v.curvature; a[5] = v.fold;
+                }),
+            Add<SpanPath, float>(f, new Fields<float>(("midpoint", Xyz<float>()), ("velocity", Xyz<float>()), ("speed", Val<float>()), ("acceleration", Val<float>()), ("halfLength", Val<float>())),
+                a => new SpanPath { midpoint = new float3(a[0], a[1], a[2]), velocity = new float3(a[3], a[4], a[5]), speed = a[6], acceleration = a[7], halfLength = a[8] },
+                (v, a) =>
+                {
+                    a[0] = v.midpoint.x; a[1] = v.midpoint.y; a[2] = v.midpoint.z;
+                    a[3] = v.velocity.x; a[4] = v.velocity.y; a[5] = v.velocity.z;
+                    a[6] = v.speed; a[7] = v.acceleration; a[8] = v.halfLength;
+                }),
+            Add<SpanStage, float>(f, new Fields<float>(("frequency", Val<float>()), ("stretch", Val<float>()), ("axis", Xyz<float>()), ("shift", Xyz<float>()), ("offset", Xyz<float>()), ("octaveStep", Xyz<float>())),
+                a => new SpanStage { frequency = a[0], stretch = a[1], axis = new float3(a[2], a[3], a[4]), shift = new float3(a[5], a[6], a[7]), offset = new float3(a[8], a[9], a[10]), octaveStep = new float3(a[11], a[12], a[13]) },
+                (v, a) =>
+                {
+                    a[0] = v.frequency; a[1] = v.stretch;
+                    a[2] = v.axis.x; a[3] = v.axis.y; a[4] = v.axis.z;
+                    a[5] = v.shift.x; a[6] = v.shift.y; a[7] = v.shift.z;
+                    a[8] = v.offset.x; a[9] = v.offset.y; a[10] = v.offset.z;
+                    a[11] = v.octaveStep.x; a[12] = v.octaveStep.y; a[13] = v.octaveStep.z;
                 }),
         };
 
