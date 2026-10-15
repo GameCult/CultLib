@@ -607,7 +607,7 @@ namespace GameCult.Caching
         internal static bool WalksAsOwner(Type type) => Classify(Nullable.GetUnderlyingType(type) ?? type).Kind == Kind.Owner;
 
         private static bool EnumeratesObjects(Type type) =>
-            (ElementTypeOf(type) ?? MapTypes(type)?.Value) is { } inner && Classify(inner).Kind != Kind.Leaf;
+            (MapTypes(type)?.Value ?? ElementTypeOf(type)) is { } inner && Classify(inner).Kind != Kind.Leaf;
 
         private static int? KeyOf(MemberInfo member) => member.GetCustomAttribute<KeyAttribute>(true)?.IntKey;
 

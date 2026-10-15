@@ -149,8 +149,6 @@ public static class CultDocumentMessagePackSerialization
     // collection resolver; a keyed class that is also an ICollection<T> is written as a collection and its [Key] layout dropped.
     private static bool WrittenAsWalked(Type type, MethodInfo generic, object? standard)
     {
-        if (standard == null)
-            return true;
         var families = CultElementIds.WalksAsOwner(type)
             ? new IFormatterResolver[] { DynamicUnionResolver.Instance, DynamicObjectResolver.Instance }
             : new IFormatterResolver[] { DynamicGenericResolver.Instance, ImmutableCollectionResolver.Instance, BuiltinResolver.Instance };

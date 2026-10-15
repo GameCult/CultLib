@@ -368,7 +368,11 @@ namespace GameCult.Caching.Tests
             var coll = new KCollDoc { Id = "k1" };
             coll.Items.Add(new FbArm { Id = "00000000000c" });
             var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.SerializeUntyped(coll, typeof(KCollDoc), registry))!;
-            Assert.That(thrown.Message, Does.Contain(nameof(KColl)).And.Contain("as a collection"));
+            Assert.That(thrown.Message, Does.Contain($"writes {nameof(KColl)} as a collection, but the element-id walk reads it by its [Key] layout"));
+
+            // A keyed map is read by key too, so a keyed Dictionary subclass is on the path and refused the same way.
+            var map = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(KDictDoc)))!;
+            Assert.That(map.Message, Does.Contain($"writes {nameof(KDict)} as a collection"));
 
             var bag = new KBagDoc { Id = "b1", Bag = new KBagE { Items = { new FbArm { Id = "00000000000d" } } } };
             var bytes = CultDocumentMessagePackSerialization.SerializeUntyped(bag, typeof(KBagDoc), registry);
@@ -399,6 +403,14 @@ namespace GameCult.Caching.Tests
             }
         }
 
+        // The walk reads a List subclass as a collection; a type MessagePack writes by an attribute formatter instead is a mismatch.
+        [Test]
+        public void ACollectionMessagePackWritesByAnotherFormatterIsRefused()
+        {
+            var thrown = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(G<FormattedRoles>)))!;
+            Assert.That(thrown.Message, Does.Contain($"writes {nameof(FormattedRoles)} by its [Key] layout, but the element-id walk reads it as a collection"));
+        }
+
         // A resolver that throws while asked about an id-path type is a typed refusal, whether it is the AllowPrivate formatter
         // the claim check asks about (the claim stands) or a resolver ahead (it fails to build).
         [Test]
@@ -407,11 +419,12 @@ namespace GameCult.Caching.Tests
             var first = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc)))!;
             Assert.That(first.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl)));
             var second = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc2)))!;
-            Assert.That(second.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl2)).And.Contain("failed to build"));
+            Assert.That(second.Message, Does.Contain(nameof(ListClaimResolver)).And.Contain(nameof(DkEl2)).And.Contain("failed to build").And.Not.Contain("target of an invocation"),
+                "the resolver's own exception is named, not the reflection wrapper");
 
             // A type MessagePack itself cannot build a formatter for (two public members on one key) is refused, naming the type.
             var third = Assert.Throws<InvalidOperationException>(() => CultDocumentMessagePackSerialization.OptionsForDocument(typeof(DkDoc3)))!;
-            Assert.That(third.Message, Does.Contain(nameof(DkEl3)).And.Contain("cannot build a formatter"));
+            Assert.That(third.Message, Does.Contain(nameof(DkEl3)).And.Contain("cannot build a formatter").And.Not.Contain("target of an invocation"));
         }
 
         [MessagePackObject]
@@ -426,6 +439,20 @@ namespace GameCult.Caching.Tests
         {
             [Key(0)] [CultName] public string Id = string.Empty;
             [Key(1)] public KColl Items = new();
+        }
+
+        [MessagePackObject]
+        public sealed class KDict : Dictionary<string, GHold>
+        {
+            [Key(0)] public int N;
+        }
+
+        [CultDocument("tests.kdict_doc", "tests.kdict_doc.v1")]
+        [MessagePackObject]
+        public sealed class KDictDoc
+        {
+            [Key(0)] [CultName] public string Id = string.Empty;
+            [Key(1)] public KDict Items = new();
         }
 
         [MessagePackObject]
@@ -464,6 +491,13 @@ namespace GameCult.Caching.Tests
         [CultDocument("tests.dk_doc2", "tests.dk_doc2.v1")]
         [MessagePackObject]
         public sealed class DkDoc2 { [Key(0)] [CultName] public string Id = string.Empty; [Key(1)] public List<DkEl2> Items = new(); }
+
+        [MessagePackFormatter(typeof(FormattedRolesFormatter))] public sealed class FormattedRoles : List<FbArm> { }
+        public sealed class FormattedRolesFormatter : IMessagePackFormatter<FormattedRoles>
+        {
+            public void Serialize(ref MessagePackWriter writer, FormattedRoles value, MessagePackSerializerOptions options) => writer.WriteNil();
+            public FormattedRoles Deserialize(ref MessagePackReader reader, MessagePackSerializerOptions options) { reader.Skip(); return new FormattedRoles(); }
+        }
 
         public sealed class DkFormatter : IMessagePackFormatter<DkEl>
         {
