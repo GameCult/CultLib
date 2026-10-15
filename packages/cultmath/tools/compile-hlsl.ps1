@@ -4,7 +4,7 @@ param(
     # tools\compile-hlsl.ps1 -ShaderPath <a file holding 'float f( { return 0; }'> is the negative control.
     [string[]]$ShaderPath = @(),
     # The dxc to run. Default: the x64 install get-dxc.ps1 makes; it is never searched for, so a dxc
-    # that cannot launch (the arm64 one on x64) is an error, not a skipped check.
+    # that cannot launch (one built for another architecture) is an error, not a skipped check.
     [string]$DxcPath = ""
 )
 
