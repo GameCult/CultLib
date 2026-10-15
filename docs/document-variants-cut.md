@@ -91,6 +91,99 @@ Probes run 2026-10-12 from `F:\Projects\CultLib-c2afix` with git only (no builds
   `unstored-same-tick-unpinned`) caught at head. `git grep RawBytes de401056 -- src tests`: no
   match. Those findings were never closed in the mind.
 
+### Body at 2026-10-15: element ids and the MessagePack walk (Modeling, from the Imagination and Soul passes)
+
+Probes ran on Yggdrasil (`mcr.microsoft.com/dotnet/sdk:10.0`, MessagePack 3.1.7 in every csproj) as probe
+tests that were never committed: at `6afa8ed9` for I1 to I4, at `494ad9ab` for r4 and r5, at `6e70626b` for r6.
+Logs and sources are under `F:\Projects\eureka-handoff-aux-2026-10-15\scratchpad-self-2026-10-14b-eureka\`
+(`imag\`, `imag-r4\`, `imag-r5\`; Soul's `soul-c2a-id-holes-s5\` is in that session's scratchpad). The typed
+record of each fact is in the mind: `variants:cut_spec:cut-c2a-element-id-holes.r5` and `.r6` (`first`),
+verdicts `cut-c2a-element-id-holes.s5` and `.s6`, spec `cut-c2a-ids-header.r1` (`first`). This section keeps
+what was run and what it showed.
+
+**What an id is on disk and in memory.**
+- An id is an ordinary keyed string in the payload. A list element whose `[CultElementId]` member holds
+  `a1b2c3d4e5f6` and one whose plain `Tag` holds the same value encode to identical bytes
+  (`92A1649192AC61316232633364346535663607`; `c2a-ids-header` r1 probe, base `2774a7fe`). No reader can tell
+  from a record's bytes that it holds ids; only the store header says so.
+- `StubArm`, a union arm that is not an object type, is never minted (`imag\imag1.log`, I1): for a document of
+  `StubArm` and `Unit8`, `Plan` counts 1, `StubArm.Id` stays `''`, `Unit8.Id` is minted, `Inspect` reports 0
+  problems.
+- Resolver over-mark (I2): a consumer `[assembly: CultCacheFormatterResolver]` claims a keyed arm with a
+  formatter that writes only `N`. The cache mints an id in memory, `Holds` is true and the header is stamped
+  `v3`, but the payload (`92A263319192009104`) carries no id, and a reopen mints a different one (`8f5e929888ca`
+  in memory, `a1ea2b683d98` after reload). The header claims ids the disk lacks.
+- `[MessagePackFormatter]` on an element type is honoured (I3): the attribute formatter wrote
+  `92A26131919104`, no id, and `Inspect` reported 0 problems at that base. Registration refuses it from r5 on
+  (`declares [MessagePackFormatter]`).
+- Python store (I4): `py-store/leaf-record.cc` (header `v1`, ids `000000000021/22`) loads in C# with
+  `HoldsIds = true`, `IdsInMemoryOnly = false`. A C# write that adds an unrelated record copies it forward,
+  the header stays `v1`, and the ids survive reload. cultcache-py, -ts and -rs have no declaration of which
+  member is an id, so they keep a `v3` they found and never decide one.
+- Header narrowing (`c2a-ids-header` r1): per-record `StoredHoldsIds`, set from the type that decoded a
+  record, is falsified by the identical-bytes probe above. The durable header owns "these stored bytes hold
+  ids" at store granularity. A write that copies any record forward keeps a marked header; only a write that
+  encodes every record decides by content. `StoredHoldsIds` and `KnownIdFree` are deleted.
+- Object list versus value list (r4, `imag-r4\probe1.log`, `probe2.log`): ids sit on object-list elements only
+  (ruling `q7-object-list-elements-only`). `Dictionary`, `ConcurrentDictionary`, `SortedDictionary`,
+  `IReadOnlyDictionary`, and `ILookup` of keyed arms round-trip with the id at
+  the element's own slot (e.g. `ConcDict` `81A16B92AC30313233343536373839616200`: key, then `[id, 0]`). A list
+  or map of scalars has no element to carry one and never enters the id path.
+
+**How MessagePack decides what it writes** (r5 `imag-r5\probe1.log`, `probe3.log`; Soul s5 `job2.log`).
+- Member discovery, `MessagePack.Internal.ObjectSerializationInfo.CreateOrNull(Type, bool forceStringKey,
+  bool contractless, bool allowPrivate)`, is internal, and so is `StandardResolver.Resolvers`. The public
+  surface allows one test: `StandardResolver`'s formatter for `T` is reference-equal to the formatter one
+  public singleton hands out for `T`, each caching one instance per type. `DynamicObjectResolver.Instance`
+  matches keyed classes and structs, `DynamicUnionResolver.Instance` `[Union]` types,
+  `DynamicGenericResolver.Instance` List, arrays, maps, KeyValuePair, tuples, Lazy, Memory, ArraySegment and
+  Nullable, and `ImmutableCollectionResolver.Instance` (namespace `MessagePack.ImmutableCollection`)
+  `ImmutableArray` and `ImmutableList`. Asking `DynamicObjectResolver` for a collection type throws
+  `TypeInitializationException`, so a family probe swallows exceptions.
+- Kind facts (`probe3`): a `[MessagePackObject]` class implementing only `IEnumerable<T>` or
+  `IReadOnlyList<T>` (`KBag`, `KNode`, `KRo`) is written by key (object resolver). One that is also
+  `ICollection<T>`, a `List<T>` subclass or a `Dictionary` subclass (`KC2`, `KColl`, `KList2<T>`, `KDict`) is
+  written as a collection (generic resolver) and its `[Key]` members are dropped.
+- Member facts (`probe3`; `ap` is `AllowPrivate`, `R` written, `W` read back). A member is written when it
+  has an integer `[Key]`, no `[IgnoreMember]`, and is a public field or a property with a public getter. It is
+  read back when it is a public non-readonly field, a property with a public setter (`init` counts), or a
+  `[SerializationConstructor]` parameter. At `ap=False`: `PG` (private getter) `R=False W=True`, `PS`
+  (private setter) `R=True W=False`, `GetOnly` `R=True W=False`, `InitOnly` both. `IdPriv`
+  (`Id { get; private set; }`) is written and not read back (wire `91AC62...`, back `<null>`), and `IdCtor` is
+  `W=False`. At `ap=True` every one of these, `priv` included, is `R=True W=True`, except `GetOnly`
+  (`W=False`).
+- AllowPrivate attribute form (Soul s5 `SoulS5Probe.C`, `ApTrueArm`): on a type declared
+  `[MessagePackObject(AllowPrivate = true)]`, `StandardResolver` writes private `[Key]` members and a
+  private-setter id round-trips. The oracle test calls `CreateOrNull(type, false, false, false)` and reports
+  none of them, so the walk's member set misses that form.
+- Collection written as object (r6 `probe2.log`): a `[DataContract]` class implementing only `IEnumerable<T>`
+  over an id-carrying arm (`DcSeq`) is a collection in the walk, yet `StandardResolver`'s formatter is
+  `DynamicObjectResolver`'s (wire `91 91 91 92 AC..`, written as an object). A `[DataContract]` `List<T>`
+  subclass (`DcColl`) is written by the generic resolver, and the object resolver hands out a different
+  instance for it. For `DcBad` (two members on one `Order`) `StandardResolver` uses the generic resolver, and
+  Soul s5 measured both `DcColl` and `DcBad` passing the door.
+- Geometry (r6 `probe2.log`, `probe3.log`): Geometry has a direct MessagePack 3.1.7 `PackageReference`, so the
+  source generator runs, and its assembly carries `[GeneratedAssemblyMessagePackResolverAttribute(
+  typeof(GeneratedMessagePackResolver), 3, 1)]`. For `CultGeometryDomainNode`, `DomainDocument` and
+  `FeatureClaim`, `StandardResolver` returns `GeneratedMessagePackResolver`'s formatter and every public
+  singleton returns a different instance or null. For `CultGeometryDomainNode[]` and `FeatureClaim[]` it is
+  the generated resolver's `ArrayFormatter`, not `DynamicGenericResolver`'s. No Geometry id-path type matches
+  a family singleton. Caching.Tests has no generator (analyzers do not flow through a `ProjectReference`), so
+  its keyed types match `DynamicObjectResolver`.
+- Generated assemblies (Soul s5, fresh generator-enabled assembly `SoulGen`, `job2.log` GEN rows): a keyed
+  `List` or `Dictionary` subclass (`GKColl`, `GKDict`) is written by key, wire `["c",[7]]`, with its elements
+  dropped by MessagePack; the walk reads it by key too (Plan 0). A generated-assembly `[DataContract]`
+  enumerable (`GDcSeq`) is still written by `DynamicObjectResolver`, because the generator emits no
+  DataContract formatters.
+- Null standard (Soul s6 finding `null-standard-untyped`): for a non-generic interface or abstract class that
+  enumerates arms, `StandardResolver` returns null instead of throwing, and the door neither refuses nor
+  types it.
+- Wire pin (Soul s5, s6 `SoulS5Pin`): a deterministic document with 12 minted ids, encoded by the codec and
+  decoded independently with `MessagePackSerializer.ConvertToJson`, carries every id. The ids are
+  byte-identical at `494ad9ab` and `57fdf70c`, `0f8964b58a08` and `7eb4fb13d530` among them.
+- Not measured: Unity/IL2CPP, where the package bundles its own `MessagePack.dll` (version not read) and the
+  dynamic resolvers cannot emit, and MessagePack versions other than 3.1.7.
+
 ## 2. Model page (step 0b)
 
 | Kind | Named by | Over time | Decided by |
@@ -99,12 +192,12 @@ Probes run 2026-10-12 from `F:\Projects\CultLib-c2afix` with git only (no builds
 | Base reference | the base's key, in the record's variant slot | changed only by an explicit rebase; a base cannot be deleted while it has variants, unless the same batch rebases or removes them | author; the cache refuses a cycle, a missing base, a different concrete type, a global type |
 | Override entry | `(op, path, id, value)`; op is Set, Insert or Remove | added by editing; removed by clearing; survives base edits while its path resolves | author; the cache refuses entries a base edit strands (Q2); an entry whose member left the type soft-drifts with a warning (Q4 c) |
 | Member path | a sequence of `(slot, elementId)` steps; `slot` is the MessagePack `[Key]`; `elementId` is `""` unless the step enters an object-list element | a type change can invalidate it | the type's owner (slot authority); ids by the element's creator |
-| Element id | a `[CultElementId]` string member on an object-list element type; `""` means unset | minted by the cache on write when unset; copied unchanged into variants; a moved element is a new element | cache mints it; it is never retargeted |
+| Element id | a `[CultElementId]` string member on an object-list element type, one MessagePack writes and reads back (integer `[Key]`, no `[IgnoreMember]`, public getter, public setter or `init`); `""` means unset | minted by the cache on write when unset; copied unchanged into variants; a moved element is a new element | cache mints it; it is never retargeted |
 | Resolved view | `CultStoredDocument.Document` for a variant key | recomputed inside the hold that admits the variant, or any base on its chain | the cache only; never persisted, never written back (Q1) |
 | Index and name entries | as today, from the resolved view | a dependent's entries are dropped and re-added in the same `Apply` as its base change | the cache; a variant must override the `[CultName]` member (rule R6) |
 | Watches | as today; each re-resolved dependent emits `Updated` with its own `Sequence` | published in the same hold as the base change | the cache |
 | Compare-exchange | `(schemaId, storedAt)` of the stored delta (ruling 2) | a base change does not stamp its variants | the cache; the resolved view is not an identity |
-| Persisted format version | store header `formatVersion` | `cultcache.store.v2` when the store holds at least one variant; `v1` otherwise (Q5) | the writing store, from content |
+| Persisted format version | store header `formatVersion` | `cultcache.store.v2` when the store holds at least one variant; `v1` otherwise (Q5); a marked `v3` (`v5` directory) stays while a write copies any record forward, and only a write that encodes every record drops it by content | the writing store, from content; the durable header alone says the bytes hold element ids |
 | Single-file store file | the path; one MessagePack array `[header, catalog, records]` | replaced whole and atomically; refused when unreadable; see "Store authorities" | each runtime's one reader decides what is a store; the writer derives the header from it |
 | Store lock and staging files | `<file>.lock`; a unique temp beside the store | the lock is taken by C# and Rust writers (CultMesh included, through `ReplaceDurable`); staging is removed on a failed write | the store, never CultMesh or a consumer |
 | Variant slot on the wire (CultNet) | **empty cell**: no CultNet message carries a delta today | C5 | ruling 4 decides deltas; the message shape is C5's design |
@@ -220,20 +313,20 @@ Dictionary entries, scalar lists and arrays are replaced whole.
 - **Recommend yes.** Aetheria's cases (`Hardpoints` whole; `Behaviors[id]...Max`) fit. Keyed
   dictionary addressing can be added later without a format change. Affects C2.
 
-## Cut sequence (2026-10-12)
+## Cut sequence (2026-10-15)
 
-Mapped now (specs in the mind): `c2a-declared-apply` r2, the C# commit-time fix batch on
-`hands/variants-c2a` (the stash, finished, with tests and contract text), and its sibling
-`main-into-c2a` r2, main merged into C2a on `hands/variants-c2a-main` in its own worktree. Later
-cuts, one line each, mapped only when Self is about to dispatch them:
+Landed since 2026-10-12: `c2a-declared-apply` (r3, Soul s5) and `main-into-c2a` (r2, Soul s2); the
+reconcile step is done, `hands/variants-c2a` is at the reconciled head `6afa8ed9`. Element ids part 1,
+`c2a-element-id-holes` (r6), is held by Soul s5/s6 on `hands/variants-c2a-element-id-holes`. Mapped
+now: part 2, `c2a-id-closed-world` r1, blocked on `variants:question:c2a-unowned-holders` and owed a
+revision (below). Later cuts, one line each, mapped only when Self is about to dispatch them:
 
-1. **reconcile**: merge `hands/variants-c2a` into `hands/variants-c2a-main` after both Soul passes
-   hold; Self moves `hands/variants-c2a` there. Waits on both mapped cuts.
+1. **reconcile**: done at `6afa8ed9`.
 2. **parity-ts**: TypeScript write set, one record per key, undeclared records carried and refused,
-   unheld removals judged at commit. Waits on reconcile.
+   unheld removals judged at commit. Waits on element ids parts 1 and 2 merged into C2a.
 3. **parity-rs**: Rust `push_all` and `put_prepared_batch` apply a write set, ownership by
-   declaration, the same commit-time checks. Waits on reconcile; can run beside parity-ts.
-4. **parity-py**: Python write-set apply. Waits on reconcile and on `cultlib-gaps` cut
+   declaration, the same commit-time checks. Waits as parity-ts; can run beside it.
+4. **parity-py**: Python write-set apply. Waits as parity-ts, and on `cultlib-gaps` cut
    `py-msgpack-default` landing on main (then a main merge into C2a first).
 5. **write-set-vectors**: one cross-runtime manifest, read and acted on by all four runtimes;
    carries follow-ups `c0-bad-canonical-in-manifest`, `legacy-vectors-all-runtimes`,
@@ -241,6 +334,8 @@ cuts, one line each, mapped only when Self is about to dispatch them:
 6. **land-c2a**: final main merge, full verification, Soul, then `git merge --no-ff` onto main
    with an empty diff against the verified head; no tag. Waits on write-set-vectors, Soul holding,
    and `asura:cut_spec:cut-semver-measured` landed. Asura Cut 3 bases on its merge commit.
+
+Element-id part 2: `c2a-id-closed-world` absorbs deferred findings `s5.member-set-misses-allowprivate`, `s5.enumerating-rule-unpinned`, `s6.null-standard-untyped`, `s6.two-recognisers-one-rule`, `s4.unrecognised-holders-fail-open` and follow-up `c2a-datacontract-holder-unwalked`.
 
 Rationale. The 2026-10-02 order (parity, vectors, then merge main) was right when main was close.
 Main has since moved 453 commits and rebuilt exactly what the parity cuts change: cultcache-ts
