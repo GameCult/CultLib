@@ -986,7 +986,7 @@ namespace GameCult.Caching.Tests
         [MessagePackObject] public class Whole<T> { [Key(0)] public T? Value { get; set; } }
         public class NkHold { public List<EIded> Items = new(); }
         [MessagePackObject] public class SkHold { [Key("items")] public List<EIded> Items = new(); }
-        [MessagePackObject(keyAsPropertyName: true)] public class KpBase { public List<EIded> Items = new(); }
+        [MessagePackObject(keyAsPropertyName: true)] public class KpBase { [Key(0)] public List<EIded> Items = new(); }
         public class KpDerived : KpBase { }
         [MessagePackObject] public class MpBase { [Key(0)] public List<EIded> Items = new(); }
         [System.Runtime.Serialization.DataContract] public class DcOverMp : MpBase { }
