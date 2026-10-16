@@ -748,6 +748,12 @@ vec4 cultmath_iv_frustum_ball(vec2 centreSlope, float z0, float z1, float footpr
 // math.Affine.cs (SNOISE_HESSIAN).
 const float CULTMATH_SNOISE_HESSIAN = 55.642143;
 
+// The absolute rounding of one float32 read of cultmath_snoise_grad, value and gradient; the owner is
+// math.Affine.cs (SNOISE_READ_VALUE, SNOISE_READ_GRADIENT), read here by cultmath_af_snoise and in
+// CultMath.hlsl by cultmath_span_slack.
+const float CULTMATH_SNOISE_READ_VALUE = 6.103515625e-5;
+const float CULTMATH_SNOISE_READ_GRADIENT = 2.44140625e-4;
+
 // An upper bound on the operator norm of the third-derivative tensor of cultmath_snoise(vec3), the
 // next order after CULTMATH_SNOISE_HESSIAN; provenance in math.Span.cs (SNOISE_THIRD).
 const float CULTMATH_SNOISE_THIRD = 535.8009;
@@ -823,7 +829,7 @@ vec3 cultmath_af_snoise(vec3 centre, vec3 axis, float radius)
     float lipschitz = CULTMATH_SNOISE_LIPSCHITZ * reach;
     float a = dot(gradient, axis);
     float remainder = length(gradient) * radius + 0.5 * CULTMATH_SNOISE_HESSIAN * reach * reach;
-    float allowance = 6.103515625e-5 + 2.44140625e-4 * reach
+    float allowance = CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_READ_GRADIENT * reach
         + CULTMATH_SNOISE_LIPSCHITZ * 9.5367431640625e-7 * (abs(centre.x) + abs(centre.y) + abs(centre.z) + reach);
     bool centred = abs(a) + remainder < lipschitz;
     float slope = centred ? a : 0.0;
@@ -912,8 +918,8 @@ float cultmath_span_rounding(float scale, vec3 mq, SpanStage stage, vec3 octaveS
 
 vec3 cultmath_span_slack(float rounding)
 {
-    return vec3(6.103515625e-5 + CULTMATH_SNOISE_LIPSCHITZ * rounding,
-        2.44140625e-4 + CULTMATH_SNOISE_HESSIAN * rounding,
+    return vec3(CULTMATH_SNOISE_READ_VALUE + CULTMATH_SNOISE_LIPSCHITZ * rounding,
+        CULTMATH_SNOISE_READ_GRADIENT + CULTMATH_SNOISE_HESSIAN * rounding,
         9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding);
 }
 
