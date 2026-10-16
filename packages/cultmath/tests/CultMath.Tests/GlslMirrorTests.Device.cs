@@ -685,4 +685,17 @@ public sealed partial class GlslMirrorTests
         var failures = Judge(device, device).Failures;
         Assert.Equal(holds ? 0 : DeviceRoutes.Length, failures.Count);
     }
+
+    [Fact]
+    public void AChangeInTheReferenceBitsOfASampledFormFailsItsFamily()
+    {
+        // One ulp in one reference value stays inside the form's enclosure, so only the recorded bits can see it.
+        var sampled = Array.FindIndex(Families, IsSampledForm);
+        using var faithful = Simulate();
+        Record(faithful);
+        using var moved = Simulate((_, item, words) => item.Index == "ref:" + sampled ? Alter(item, words, w => w + 1u, 1) : words);
+        var failures = Judge(moved, faithful).Failures;
+        Assert.Equal(DeviceRoutes.Length, failures.Count);
+        Assert.All(failures, line => { Assert.Contains($"#{sampled} ", line); Assert.Contains("result bits differ", line); });
+    }
 }
