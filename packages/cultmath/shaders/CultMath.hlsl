@@ -600,6 +600,112 @@ CultCellular cultmath_cellular(float3 p)
     return result;
 }
 
+// Sites: a site is float4(position.xyz, weight). A span is a loop over a per-site step, because a shader
+// function cannot take a span in the mirror (design.md, "Sites"). The consumer's loop, over its own buffer:
+//   CultSiteCells cells = cultmath_site_cells_empty();
+//   for (int i = 0; i < count; i++)
+//       cells = cultmath_site_cells_insert(cells, cultmath_power_score(p, sites[i]), i);
+// Statement for statement with math.Sites.cs (power_score, multiplicative_score, site_cells_*, gabriel_margin).
+struct CultSiteCells
+{
+    float4 nearest;
+    float4 second;
+    float nearestSite;
+    float secondSite;
+};
+
+float4 cultmath_power_score(float3 p, float4 site)
+{
+    float3 offset = p - site.xyz;
+    return float4(offset * 2.0, dot(offset, offset) - site.w * site.w);
+}
+
+float4 cultmath_multiplicative_score(float3 p, float4 site)
+{
+    float3 offset = p - site.xyz;
+    float r = length(offset);
+    float3 gradient = r > 0.0 ? offset / (r * site.w) : float3(0.0, 0.0, 0.0);
+    return float4(gradient, r / site.w);
+}
+
+CultSiteCells cultmath_site_cells_empty()
+{
+    CultSiteCells result;
+    result.nearest = float4(0.0, 0.0, 0.0, 1.0e30);
+    result.second = float4(0.0, 0.0, 0.0, 1.0e30);
+    result.nearestSite = -1.0;
+    result.secondSite = -1.0;
+    return result;
+}
+
+CultSiteCells cultmath_site_cells_insert(CultSiteCells cells, float4 score, int index)
+{
+    CultSiteCells result = cells;
+    if (score.w < cells.nearest.w)
+    {
+        result.second = cells.nearest;
+        result.secondSite = cells.nearestSite;
+        result.nearest = score;
+        result.nearestSite = (float)index;
+    }
+    else if (score.w < cells.second.w)
+    {
+        result.second = score;
+        result.secondSite = (float)index;
+    }
+
+    return result;
+}
+
+float4 cultmath_site_cells_border(CultSiteCells cells)
+{
+    float3 n = cells.second.xyz - cells.nearest.xyz;
+    float len = length(n);
+    if (cells.secondSite < 0.0 || len <= 0.0)
+        return float4(0.0, 0.0, 0.0, 1.0e30);
+    return float4(n / len, (cells.second.w - cells.nearest.w) / len);
+}
+
+float cultmath_gabriel_margin(float3 a, float3 b, float3 other)
+{
+    float r = cultmath_distance(a, b) * 0.5;
+    if (r <= 0.0)
+        return -1.0;
+    return (cultmath_distance(other, (a + b) * 0.5) - r) / r;
+}
+
+float2 cultmath_segment_closest(float2 point_value, float2 start, float2 end)
+{
+    float2 segment = end - start;
+    float segmentLengthSq = cultmath_lengthsq(segment);
+    if (segmentLengthSq <= 0.0)
+        return start;
+
+    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
+    return start + segment * t;
+}
+
+float3 cultmath_segment_closest(float3 point_value, float3 start, float3 end)
+{
+    float3 segment = end - start;
+    float segmentLengthSq = cultmath_lengthsq(segment);
+    if (segmentLengthSq <= 0.0)
+        return start;
+
+    float t = cultmath_saturate(dot(point_value - start, segment) / segmentLengthSq);
+    return start + segment * t;
+}
+
+float cultmath_distance_to_segment(float2 point_value, float2 start, float2 end)
+{
+    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
+}
+
+float cultmath_distance_to_segment(float3 point_value, float3 start, float3 end)
+{
+    return cultmath_distance(point_value, cultmath_segment_closest(point_value, start, end));
+}
+
 #include "CultMath.Phacelle.hlsl"
 #include "CultMath.Interval.hlsl"
 #include "CultMath.Cycles.hlsl"

@@ -27,6 +27,15 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_value_noise_bicubic", typeof(float2)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_smin_grad", typeof(float4), typeof(float4), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_cellular", typeof(float3)));
+        var siteCells = shader.GetNestedType("CultSiteCells", BindingFlags.Public | BindingFlags.NonPublic)!;
+        Assert.NotNull(ShaderFunction(shader, "cultmath_power_score", typeof(float3), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_multiplicative_score", typeof(float3), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_empty"));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_insert", siteCells, typeof(float4), typeof(int)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_border", siteCells));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_gabriel_margin", typeof(float3), typeof(float3), typeof(float3)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float2), typeof(float2), typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float3), typeof(float3), typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_grad", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_hessian", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_integral_clamp_linear", typeof(float), typeof(float), typeof(float), typeof(float), typeof(float), typeof(float)));
@@ -178,7 +187,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(127, compared.Count);
+        Assert.Equal(135, compared.Count);
     }
 
     /// <summary>
