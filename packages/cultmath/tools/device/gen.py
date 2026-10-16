@@ -79,15 +79,14 @@ def body(sig, n, win, wout, defs, glsl):
     ret, name, params = m.group(1), m.group(2), [p.strip() for p in m.group(3).split(',') if p.strip()]
     lines, offset, args = [], 0, []
     for j, p in enumerate(params):
-        ptype = p if glsl else re.sub(r'\bvec([234])\b', r'float\1', re.sub(r'\bmat3\b', 'float3x3', p))
-        ptype = ptype if glsl else re.sub(r'\bivec([234])\b', r'int\1', ptype)
+        ptype = p if glsl else hlsl_type(p)
         lines.append('    %s a%d;' % (ptype, j))
         for leaf in leaves(p, defs):
             word = ('In.a[b + %du]' if glsl else 'In[b + %d]') % offset
             lines.append('    a%d%s = %s;' % (j, access(leaf, glsl), read(leaf[1], glsl, word)))
             offset += 1
         args.append('a%d' % j)
-    rtype = ret if glsl else re.sub(r'\bvec([234])\b', r'float\1', re.sub(r'\bmat3\b', 'float3x3', ret))
+    rtype = ret if glsl else hlsl_type(ret)
     lines.append('    %s r = %s(%s);' % (rtype, name, ', '.join(args)))
     produced = leaves(ret, defs)
     for k, leaf in enumerate(produced):
