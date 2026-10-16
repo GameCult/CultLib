@@ -105,6 +105,8 @@ namespace GameCult.Caching.Tests
             RoundTrip(new SpanNoise(new float4(1, 2, 3, 4), 0.25f, 0.5f));
             RoundTrip(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f });
             RoundTrip(new SpanStage { frequency = 1f, stretch = 2f, axis = new float3(3f, 4f, 5f), shift = new float3(6f, 7f, 8f), offset = new float3(9f, 10f, 11f), octaveStep = new float3(12f, 13f, 14f) });
+            RoundTrip(new CultSiteCells(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8), 9f, 10f));
+            RoundTrip(new CultSiteCells(new float4(0, 0, 0, 1.0e30f), new float4(0, 0, 0, 1.0e30f), -1f, -1f));
         }
 
         [Test]
@@ -158,6 +160,12 @@ namespace GameCult.Caching.Tests
                 "93CA40C00000CA40E00000CA41000000" +
                 "93CA41100000CA41200000CA41300000" +
                 "93CA41400000CA41500000CA41600000");
+            Hex(new CultSiteCells(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8), 9f, 10f)).Should().Be(
+                "94" +
+                "94CA3F800000CA40000000CA40400000CA40800000" +
+                "94CA40A00000CA40C00000CA40E00000CA41000000" +
+                "CA41100000" +
+                "CA41200000");
         }
 
         [Test]

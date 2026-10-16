@@ -138,7 +138,8 @@ fields is compared to its C# counterpart field by field, recursing into each
 field's own components, down to bit-for-bit scalars, matching each leaf's
 declaration path (field names, not just position) and declared type as well
 as its value. `CultCellular` (`math.cs`, `cellular`), `CultPhasor`
-(`math.Phacelle.cs`, `phacelle`) and `SpanNoise` (`math.Span.cs`, `span_fbm`) are its consumers. A struct return with a mismatched, reordered-by-name, or
+(`math.Phacelle.cs`, `phacelle`), `SpanNoise` (`math.Span.cs`, `span_fbm`) and `CultSiteCells`
+(`math.Sites.cs`, `site_cells_insert`) are its consumers. `CultSiteCells` is also a struct parameter (`site_cells_insert`, `site_cells_border`). A struct return with a mismatched, reordered-by-name, or
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
@@ -487,6 +488,41 @@ code.
 Known C# friction: under `using static CultMath.math;` the constructor
 functions (`float3(...)`, `float3x3(...)`) hide the type names in member access,
 so static members need a qualified type (`CultMath.float3x3.Euler(...)`).
+
+## Sites
+
+A site is `float4(position.xyz, weight)`; a 2D consumer uses z = 0. `math.Sites.cs` scores a query point
+against a site two ways and keeps the two best:
+
+- `power_score(p, site)`: value `|p - s|^2 - w^2`, gradient `2 (p - s)`. A power cell is the intersection of the
+  half-spaces bounded by the radical planes against every other site, so `power_border` is exact.
+- `multiplicative_score(p, site)`: value `|p - s| / w`, gradient `(p - s) / (|p - s| w)`, zero at `p = s`
+  (cellular's degenerate convention). Its borders are Apollonius circles, and the border distance is first order.
+
+A span function is a C# loop over a per-site step that has a shader twin, because the HLSL mirror cannot take a
+span or a buffer. `site_cells_empty()` starts the fold, `site_cells_insert(cells, score, index)` folds one score
+in (strict `<` against F1, the old F1 moving to second, else strict `<` against F2, so an exact tie keeps the
+earlier index first), and `site_cells_border(cells)` reads `float4(unit normal, distance)`, with `n = grad F2 -
+grad F1` pointing toward the nearest site and `(0, 0, 0, 1.0e30)` when there is no second site. That border is
+the distance to the bisector of the two lowest scores, first order and for either metric; it is not the distance
+to the nearest site's cell boundary (the F2 - F1 edge error: the second-lowest score is not the nearest plane in
+general). The exact power cell border is a second pass: `power_border_step(p, owner, other, border)` takes the
+running `float4(unit normal toward the owner, distance)` and the radical plane of `owner` against `other`, with
+the distance built from the offset `owner - p` and the weight difference `(w1 - w2)(w1 + w2)` so it does not
+cancel for close sites seen from far; the cell boundary distance is the least over every site except the owner
+(the fold's nearest), and a site coincident with the owner has no plane. The step trusts the caller's owner: a
+query outside the owner's cell reports distance 0 with that plane's normal, not an error. `power_border(p, sites)` is that loop.
+Cell spans refuse a non-finite query, site position or weight, and more than 2^24 sites (indices are floats).
+`power_cells` and
+`multiplicative_cells` are that loop over a `ReadOnlySpan<float4>` and nothing else; a shader caller writes the
+same loop over its own buffer. Every site of an explicit span is visited, so no window and no weight-ratio range
+apply. `CultSiteCells` holds the two score fields and the two site indices (floats, -1 for none).
+
+`gabriel_margin(a, b, other)` is `(|other - (a + b) / 2| - r) / r` with `r = |a - b| / 2`: zero on the diameter
+circle, negative inside it, -1 when `a` and `b` coincide. `soft_gabriel_gate(sites, first, second, softness)`
+is `smoothstep(-softness, softness, least margin over every other site)` on positions alone, 1 when no other site
+exists; it is C# only. `distance_to_segment(point, start, end)` has out-free 2D and 3D forms beside the `out`
+form, all over one public `segment_closest` per dimension, each with its 2D and 3D shader overload.
 
 ## Intervals
 

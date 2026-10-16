@@ -102,6 +102,7 @@ broken graph whole (an `ExprGraphException` naming the rule), so a consumer
 | `rect` | `[min, max]` of `float2` | `{"min":{..},"max":{..}}` |
 | `CultCellular` | `[nearest, edge, id]` | `{"nearest":{..},"edge":{..},"id":..}` |
 | `CultPhasor` | `[cos, sin]` of `float4` | `{"cos":{..},"sin":{..}}` |
+| `CultSiteCells` | `[nearest, second, nearestSite, secondSite]` | `{"nearest":{..},"second":{..},"nearestSite":..,"secondSite":..}` |
 
 Floats are MessagePack float32 (`0xCA`), doubles float64 (`0xCB`), integers the
 shortest MessagePack integer.

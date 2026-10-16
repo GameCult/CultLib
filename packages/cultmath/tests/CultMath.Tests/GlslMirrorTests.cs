@@ -522,6 +522,8 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
     private sealed record Family(string Glsl, string Tolerance, Func<System.Random, object[]> Arguments, string? Check = null, Platform Platform = Platform.None, Func<JsonArray, string>? Verify = null);
 
     private static float Uniform(System.Random r, float lo, float hi) => lo + (hi - lo) * r.NextSingle();
+    private static float2 Point2(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
+
     private static float3 Point3(System.Random r) => new(Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f), Uniform(r, -50.0f, 50.0f));
 
     // A point on the simplex tie set, where snoise's x0 has equal components (NoiseGradTests.SnoiseIsContinuousOnTheSimplexDiagonal):
@@ -795,6 +797,57 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         new Family("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: false, small: false)),
         new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e-4 to 1e2", r => new object[] { BandPoint3(r, 1.0e-4, 1.0e2) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: true)),
         new Family("mat3 cultmath_snoise_hessian(vec3)", "ulp-bounded, coordinate bands 1e2 to 4e6", r => new object[] { BandPoint3(r, 1.0e2, 4.0e6) }, SpanAllowanceRead, Verify: cases => AssertSpanAllowance(cases, hessian: true, small: false)),
+        // Segment distance in 2D and 3D (one segment in eight degenerate), then the site cells: scores, fold step
+        // over states built by inserting 0-3 random scores (one in four with an exactly tied score), border, margin.
+        new Family("float cultmath_distance_to_segment(vec2, vec2, vec2)", "ulp-bounded", r =>
+        {
+            var start = Point2(r);
+            return new object[] { Point2(r), start, r.Next(8) == 0 ? start : Point2(r) };
+        }),
+        new Family("vec2 cultmath_segment_closest(vec2, vec2, vec2)", "ulp-bounded", r =>
+        {
+            var start = Point2(r);
+            return new object[] { Point2(r), start, r.Next(8) == 0 ? start : Point2(r) };
+        }),
+        new Family("float cultmath_distance_to_segment(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var start = Point3(r);
+            return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        new Family("vec3 cultmath_segment_closest(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var start = Point3(r);
+            return new object[] { Point3(r), start, r.Next(8) == 0 ? start : Point3(r) };
+        }),
+        // The border step: owner and other random (one in six coincident), a running border either empty or a
+        // random (normal, distance); one in six other is a distinct site within 1e-3 of the owner (inside the 1e-2 guard a
+        // changed length test would trip), one in six coincident.
+        new Family("vec4 cultmath_power_border_step(vec3, vec4, vec4, vec4)", "ulp-bounded", r =>
+        {
+            var owner = Site(r, 0.1f, 20.0f);
+            var border = r.Next(2) == 0 ? new float4(0.0f, 0.0f, 0.0f, 1.0e30f) : new float4(Point3(r), Uniform(r, 0.0f, 50.0f));
+            var pick = r.Next(6);
+            var near = new float4(owner.xyz + new float3(Uniform(r, 1.0e-4f, 1.0e-3f), Uniform(r, -1.0e-3f, 1.0e-3f), Uniform(r, -1.0e-3f, 1.0e-3f)), Uniform(r, 0.1f, 20.0f));
+            return new object[] { Point3(r), owner, pick == 0 ? owner : pick == 1 ? near : Site(r, 0.1f, 20.0f), border };
+        }),
+        new Family("vec4 cultmath_power_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 20.0f) }),
+        new Family("vec4 cultmath_multiplicative_score(vec3, vec4)", "ulp-bounded", r => new object[] { Point3(r), Site(r, 0.1f, 100.0f, logWeight: true) }),
+        new Family("CultSiteCells cultmath_site_cells_insert(CultSiteCells, vec4, int)", "ulp-bounded", r =>
+        {
+            var (cells, scores) = CellsState(r);
+            var score = r.Next(4) == 0 && scores.Count > 0 ? scores[r.Next(scores.Count)] : PowerOrMultiplicative(r);
+            return new object[] { cells, score, scores.Count };
+        }),
+        new Family("vec4 cultmath_site_cells_border(CultSiteCells)", "ulp-bounded", r =>
+        {
+            var (cells, _) = CellsState(r, minimum: r.Next(8) == 0 ? 0 : 2);
+            return new object[] { cells };
+        }),
+        new Family("float cultmath_gabriel_margin(vec3, vec3, vec3)", "ulp-bounded", r =>
+        {
+            var a = Point3(r);
+            return new object[] { a, r.Next(8) == 0 ? a : Point3(r), Point3(r) };
+        }),
     }).ToArray();
 
     // A point of magnitude m, m log-uniform in [lo, hi]: one component at +-m, the other two uniform in [-m, m],
@@ -805,6 +858,32 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         var v = new double[] { (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m, (r.NextDouble() * 2.0 - 1.0) * m };
         v[r.Next(3)] = r.Next(2) == 0 ? m : -m;
         return new float3((float)v[0], (float)v[1], (float)v[2]);
+    }
+
+
+    // A site float4(position.xyz, weight): the weight uniform in [lo, hi], or log-uniform when logWeight.
+    private static float4 Site(System.Random r, float lo, float hi, bool logWeight = false)
+    {
+        var p = Point3(r);
+        return new float4(p.x, p.y, p.z, logWeight ? lo * MathF.Pow(hi / lo, r.NextSingle()) : Uniform(r, lo, hi));
+    }
+
+    private static float4 PowerOrMultiplicative(System.Random r) =>
+        r.Next(2) == 0 ? math.power_score(Point3(r), Site(r, 0.1f, 20.0f)) : math.multiplicative_score(Point3(r), Site(r, 0.1f, 100.0f, logWeight: true));
+
+    // A fold state made by the production path: site_cells_insert over a few random scores (at least minimum).
+    private static (CultSiteCells Cells, List<float4> Scores) CellsState(System.Random r, int minimum = 0)
+    {
+        var scores = new List<float4>();
+        var cells = math.site_cells_empty();
+        for (var i = minimum + r.Next(4 - minimum); i > 0; i--)
+        {
+            var score = r.Next(4) == 0 && scores.Count > 0 ? scores[^1] : PowerOrMultiplicative(r);
+            cells = math.site_cells_insert(cells, score, scores.Count);
+            scores.Add(score);
+        }
+
+        return (cells, scores);
     }
 
     private static object[] SpanArguments(System.Random r)
@@ -876,6 +955,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         ["float"] = typeof(float), ["int"] = typeof(int), ["vec2"] = typeof(float2), ["vec3"] = typeof(float3),
         ["vec4"] = typeof(float4), ["ivec3"] = typeof(int3), ["ivec4"] = typeof(int4),
         ["SpanPath"] = typeof(SpanPath), ["SpanStage"] = typeof(SpanStage),
+        ["CultSiteCells"] = typeof(CultSiteCells),
     };
 
     // The C# math method a GLSL signature names: cultmath_ dropped, parameter types mapped.

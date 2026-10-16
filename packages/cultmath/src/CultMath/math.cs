@@ -318,17 +318,40 @@ public static partial class math
 
     public static float distance_to_segment(float2 point, float2 start, float2 end, out float2 closest)
     {
+        closest = segment_closest(point, start, end);
+        return distance(point, closest);
+    }
+
+    /// <summary>The distance from <paramref name="point"/> to the segment <paramref name="start"/>-<paramref name="end"/>; a degenerate segment is its start.</summary>
+    public static float distance_to_segment(float2 point, float2 start, float2 end) =>
+        distance(point, segment_closest(point, start, end));
+
+    /// <summary>The distance from <paramref name="point"/> to the segment <paramref name="start"/>-<paramref name="end"/>; a degenerate segment is its start.</summary>
+    public static float distance_to_segment(float3 point, float3 start, float3 end) =>
+        distance(point, segment_closest(point, start, end));
+
+    /// <summary>The point of the segment <paramref name="start"/>-<paramref name="end"/> nearest <paramref name="point_value"/>; a degenerate segment is its start.</summary>
+    public static float2 segment_closest(float2 point_value, float2 start, float2 end)
+    {
         var segment = end - start;
         var segmentLengthSq = lengthsq(segment);
         if (segmentLengthSq <= 0.0f)
-        {
-            closest = start;
-            return distance(point, start);
-        }
+            return start;
 
-        var t = saturate(dot(point - start, segment) / segmentLengthSq);
-        closest = start + segment * t;
-        return distance(point, closest);
+        var t = saturate(dot(point_value - start, segment) / segmentLengthSq);
+        return start + segment * t;
+    }
+
+    /// <summary>The point of the segment <paramref name="start"/>-<paramref name="end"/> nearest <paramref name="point_value"/>; a degenerate segment is its start.</summary>
+    public static float3 segment_closest(float3 point_value, float3 start, float3 end)
+    {
+        var segment = end - start;
+        var segmentLengthSq = lengthsq(segment);
+        if (segmentLengthSq <= 0.0f)
+            return start;
+
+        var t = saturate(dot(point_value - start, segment) / segmentLengthSq);
+        return start + segment * t;
     }
 
     public static float catmullrom(float p0, float p1, float p2, float p3, float t)

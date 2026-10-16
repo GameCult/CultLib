@@ -27,6 +27,18 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_value_noise_bicubic", typeof(float2)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_smin_grad", typeof(float4), typeof(float4), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_cellular", typeof(float3)));
+        var siteCells = shader.GetNestedType("CultSiteCells", BindingFlags.Public | BindingFlags.NonPublic)!;
+        Assert.NotNull(ShaderFunction(shader, "cultmath_power_score", typeof(float3), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_multiplicative_score", typeof(float3), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_empty"));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_insert", siteCells, typeof(float4), typeof(int)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_site_cells_border", siteCells));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_gabriel_margin", typeof(float3), typeof(float3), typeof(float3)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_power_border_step", typeof(float3), typeof(float4), typeof(float4), typeof(float4)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_segment_closest", typeof(float2), typeof(float2), typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float2), typeof(float2), typeof(float2)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_segment_closest", typeof(float3), typeof(float3), typeof(float3)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_distance_to_segment", typeof(float3), typeof(float3), typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_grad", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_snoise_hessian", typeof(float3)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_integral_clamp_linear", typeof(float), typeof(float), typeof(float), typeof(float), typeof(float), typeof(float)));
@@ -120,6 +132,16 @@ public sealed class HlslSourceCompatibilityTests
         for (var k = 0; k < 64; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i]); }
         for (var k = 0; k < 16; k++) { var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray(); cases.Add(i => values[i & ~1]); }
 
+        // Distinct sites closer than 1e-2 (slots 3-6 are the owner and 7-10 the other site of
+        // cultmath_power_border_step): a length guard wider than "coincident" changes the result for these only.
+        for (var k = 0; k < 16; k++)
+        {
+            var values = Enumerable.Range(0, 32).Select(_ => Next()).ToArray();
+            for (var c = 0; c < 3; c++) values[7 + c] = values[3 + c] + (random.NextSingle() * 2.0f - 1.0f) * 1.0e-3f;
+            values[7] += 2.0e-4f;
+            cases.Add(i => values[i]);
+        }
+
         // Points aimed squarely at cellular's HLSL mirror (F6/F3 Soul findings): the generic random
         // and special-value cases above pass ~92 inputs through cultmath_cellular and never happen to
         // hit a point where a radius-2 cell wins (about 3.5e-5 of points, Soul measured) or an
@@ -178,7 +200,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(127, compared.Count);
+        Assert.Equal(136, compared.Count);
     }
 
     /// <summary>

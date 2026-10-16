@@ -14,7 +14,7 @@ namespace GameCult.Caching.MessagePack;
 /// The canonical System.Text.Json shape of every public CultMath value type, the JSON twin of
 /// <see cref="CultMathResolver"/>. Vectors, quaternions and colors are objects keyed by their
 /// field names (<c>{"x":1,"y":2}</c>), matrices are arrays of row objects, <c>rect</c> is
-/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>, <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>, <c>SpanPath</c> is <c>{"midpoint":..,"velocity":..,"speed":..,"acceleration":..,"halfLength":..}</c>, and <c>SpanStage</c> is <c>{"frequency":..,"stretch":..,"axis":..,"shift":..,"offset":..,"octaveStep":..}</c>.
+/// <c>{"min":..,"max":..}</c>, <c>CultCellular</c> is <c>{"nearest":..,"edge":..,"id":..}</c>, <c>CultPhasor</c> is <c>{"cos":..,"sin":..}</c>, <c>SpanNoise</c> is <c>{"field":..,"curvature":..,"fold":..}</c>, <c>SpanPath</c> is <c>{"midpoint":..,"velocity":..,"speed":..,"acceleration":..,"halfLength":..}</c>, <c>SpanStage</c> is <c>{"frequency":..,"stretch":..,"axis":..,"shift":..,"offset":..,"octaveStep":..}</c>, and <c>CultSiteCells</c> is <c>{"nearest":..,"second":..,"nearestSite":..,"secondSite":..}</c>.
 /// Property names are fixed: <c>PropertyNamingPolicy</c> does not rename them, and
 /// <c>PropertyNameCaseInsensitive</c> makes reading case-insensitive.
 /// <para>
@@ -481,7 +481,7 @@ public static class CultMathJson
             Add<Random, uint>(UIntScalar.Instance, new Fields<uint>(("state", Val<uint>())),
                 a => new Random { state = a[0] }, (v, a) => a[0] = v.state),
 
-            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}, SpanNoise is {field, curvature, fold}, SpanPath is {midpoint, velocity, speed, acceleration, halfLength}, SpanStage is {frequency, stretch, axis, shift, offset, octaveStep}.
+            // Compositions: matrices are arrays of row objects, rect is {min, max}, CultCellular is {nearest, edge, id}, CultPhasor is {cos, sin}, SpanNoise is {field, curvature, fold}, SpanPath is {midpoint, velocity, speed, acceleration, halfLength}, SpanStage is {frequency, stretch, axis, shift, offset, octaveStep}, CultSiteCells is {nearest, second, nearestSite, secondSite}.
             Add<float2x2, float>(f, new Rows<float>(2, Xy<float>()),
                 a => new float2x2(a[0], a[1], a[2], a[3]),
                 (v, a) => { a[0] = v[0].x; a[1] = v[0].y; a[2] = v[1].x; a[3] = v[1].y; }),
@@ -538,6 +538,14 @@ public static class CultMathJson
                     a[5] = v.shift.x; a[6] = v.shift.y; a[7] = v.shift.z;
                     a[8] = v.offset.x; a[9] = v.offset.y; a[10] = v.offset.z;
                     a[11] = v.octaveStep.x; a[12] = v.octaveStep.y; a[13] = v.octaveStep.z;
+                }),
+            Add<CultSiteCells, float>(f, new Fields<float>(("nearest", Xyzw<float>()), ("second", Xyzw<float>()), ("nearestSite", Val<float>()), ("secondSite", Val<float>())),
+                a => new CultSiteCells(new float4(a[0], a[1], a[2], a[3]), new float4(a[4], a[5], a[6], a[7]), a[8], a[9]),
+                (v, a) =>
+                {
+                    a[0] = v.nearest.x; a[1] = v.nearest.y; a[2] = v.nearest.z; a[3] = v.nearest.w;
+                    a[4] = v.second.x; a[5] = v.second.y; a[6] = v.second.z; a[7] = v.second.w;
+                    a[8] = v.nearestSite; a[9] = v.secondSite;
                 }),
         };
 
