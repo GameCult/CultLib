@@ -675,6 +675,8 @@ namespace GameCult.Caching.Tests
                 Assert.That(CultElementIds.Holds(holder.GetType(), holder), Is.True, holder.GetType().Name);
             }
 
+            Assert.That(CultElementIds.WalksAsOwner(typeof(SkOver)), Is.False, "a string key inherited by an override still makes the type one whole value");
+            Assert.That(CultElementIds.WalksAsOwner(typeof(PSkH)), Is.True);
             Assert.That(Problems(typeof(Whole<List<NoIdPlain>>)).Single(), Does.Contain("[CultElementId]"));
             Assert.That(Problems(typeof(Whole<List<NoIdEl>>)).Single(), Does.Contain("[CultElementId]"), "an element whose only string key is ignored is as bare as its twin");
         }
@@ -1025,6 +1027,8 @@ namespace GameCult.Caching.Tests
         [MessagePackObject(AllowPrivate = true)] public class ApIgnAp { [Key(0)] [IgnoreMember] private List<EIded> l = new(); }
         [MessagePackObject] public class PSkH { [Key(0)] public List<EIded> Items = new(); [Key("x")] private int x = 1; }
         [MessagePackObject] public class ISkH { [Key(0)] public List<EIded> Items = new(); [IgnoreMember] [Key("x")] public int X { get; set; } }
+        [MessagePackObject] public class SkOverBase { [Key("items")] public virtual List<EIded> Items { get; set; } = new(); }
+        [MessagePackObject] public class SkOver : SkOverBase { public override List<EIded> Items { get; set; } = new(); }
         [MessagePackObject] public class NoIdEl { [Key(0)] public int N { get; set; } [IgnoreMember] [Key("x")] public int X { get; set; } }
         [MessagePackObject] public class NoIdPlain { [Key(0)] public int N { get; set; } }
         [MessagePackObject(AllowPrivate = true)] public class EApIgnId { [Key(0)] public int N { get; set; } [Key(1)] [IgnoreMember] [CultElementId] public string Id { get; set; } = ""; }
