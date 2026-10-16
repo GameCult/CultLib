@@ -622,7 +622,16 @@ fn receive_errors_name_schema_never_values() {
             pairs(&[
                 sv("cultnet.document_put_raw.v0"),
                 ("messageId", "m".into()),
-                ("document", wire_record(&[("payloadEncoding", canary.into())])),
+                (
+                    "document",
+                    rmpv::Value::Map(pairs(&[
+                        ("schemaId", "s".into()),
+                        ("recordKey", "k".into()),
+                        ("storedAt", "2026-10-16T00:00:00Z".into()),
+                        ("payloadEncoding", canary.into()),
+                        ("payload", rmpv::Value::Binary(vec![0x90])),
+                    ])),
+                ),
             ]),
             "payloadEncoding",
         ),
