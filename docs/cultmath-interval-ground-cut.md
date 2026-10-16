@@ -2174,3 +2174,99 @@ nebula work picks it.
    The marched option carries all three site follow-ups; the other options
    withdraw the two marched-only ones.
 5. The kernel cascade, if picked.
+
+## Pass 9: the shader pipeline (rulings `glsl-es-via-dxc-spirv-cross`, `conforming-run-lavapipe`, `real-device-native-angle`)
+
+Imagination `imagination-ag4-shader-pipeline`, session self-2026-10-16-ag4, 2026-10-16, on
+`origin/main` f65bde6f. The evidence the operator ruled on is `docs/research/native-shader-testing.md`
+(f697e03f) and `docs/research/native-shader-probes.md` with its scripts (e598c443). This pass adds
+the body facts below, then sequences the three rulings.
+
+### Body facts (Pass 9)
+
+Every probe ran through `ygg-verify.sh` on Yggdrasil at f65bde6f, 2026-10-16 between about 16:30
+and 16:50 UTC (18:30 to 18:50 CEST). Logs are in the Imagination scratchpad
+(`imagination-ag4-shader-pipeline/split-run1.log`, `img-run1.log`, `snap-run1.log`).
+
+- **SPIRV-Cross pin.** The newest SDK tag is `vulkan-sdk-1.4.363.0` (commit f11ba9f0, 2026-09-16).
+  Built from that tag (`-DSPIRV_CROSS_CLI=ON`, Release, 4 cores), it takes 70 s and gives the same
+  result as the HEAD build the earlier probe used. `tools/get-spirv-cross.ps1` clones HEAD unpinned.
+- **dxc pin (Linux).** The asset is
+  `.../v1.9.2607/linux_dxc_2026_07_29.x86_x64.tar.gz`, sha256
+  `55665c87824051ed4774ff3280a79ccbbb7d39243b9736ca5e98222134112d54`, and it reports libdxcompiler 1.9.0.1.
+  `get-dxc.ps1` pins the Windows zip of the same release.
+- **Overloads collapse in dxc, not in SPIRV-Cross.** With `export` on the 173 non-texture definitions,
+  the library has 127 `OpFunction`s and 127 exports: one per name. Today's source has 22 overloaded
+  names, 68 definitions and 46 lost. Trophic-nodes (branch `hands/cultmath-trophic-nodes`, unmerged) adds
+  `cultmath_segment_closest` and `cultmath_distance_to_segment` in 2D and 3D. After it merges there are
+  24 names, 72 definitions and 48 to rename.
+- **Capability strip.** `spirv-opt --trim-capabilities` (spirv-tools 2025.1~rc1) leaves all 14
+  capabilities and both extensions in place, and SPIRV-Cross still refuses ("RayQuery requires Vulkan
+  GLSL 460"). Stripping every capability except Shader and Linkage and every OpExtension in the
+  disassembly, then running `spirv-as`, gives a module that `spirv-val --target-env spv1.5` accepts.
+  SPIRV-Cross `--es --version 310` lowers it in 54 ms, and dxc takes 322 ms.
+- **Named constants vanish.** The SPIR-V has no `OpName` for any `CULTMATH_` constant, so the output
+  has none. Today's GLSL has 13: 9 in CultMath.glsl and 4 in CultMath.Cycles.glsl. The HLSL source of
+  every one of them is a `static const float NAME = <literal>;` line, so a build can emit them
+  from the source lines and should refuse any `static const` line of another form.
+- **Per-file split works.** The SPIRV-Cross output was partitioned by the HLSL file that defines each
+  function and struct (CultMath, Interval and Affine go to core, plus Cycles and Phacelle). That gives
+  132 chunks: 79 core, 51 Cycles and 2 Phacelle. No chunk's origin is unknown, no chunk is duplicated,
+  and no Cycles or Phacelle function calls a function outside core. The output has no `spv*` helper
+  functions. Its prologue is 3 lines: `#ifdef SPIRV_CROSS_LIBRARY_HEADER`, `#version 310 es` and
+  `#endif`. glslang compiles core, core+Cycles, core+Phacelle and core+Cycles+Phacelle as `#version 300 es`
+  fragment shaders. So the licence split survives the switch as a partition step of about 40 lines in the build.
+- **One image runs the whole conforming job.** `mcr.microsoft.com/dotnet/sdk:10.0` is Ubuntu 24.04.5
+  (noble), dotnet 10.0.401. Its apt has mesa-vulkan-drivers 25.2.8-0ubuntu0.24.04.4 (lavapipe, the
+  probe's device), glslang-tools 15.1.0, spirv-tools 2025.1~rc1, libvulkan-dev 1.3.275 and gcc 13.2.
+  `apt-get update --snapshot 20261016T000000Z` (apt 2.8.3) then installs the same versions. That pins
+  the package set to a date and lets the C# judge run in the same container as the device.
+- **Consumer audit for the renames.** It covers `origin` of Aetheria (master a8586d08 and all of its
+  remote branches), Asura (60fbd19), Odin (8e1de66) and gamecult-site (af6e206), and HEAD of every
+  other git repo under F:\Projects except the CultLib worktrees, the archived AetheriaEve and the
+  retired CultMath history repo. The search was for `cultmath_[a-z]` outside docs. Only one shader
+  calls CultMath: `Muninn` (1d0ea0b, and its
+  worktree `Muninn-next`) `crates/muninn-move-tracker/shaders/MoveSphereCandidate.comp.hlsl:88`, one
+  call to `cultmath_saturate(float)`. Aetheria uses CultMath only from C#. The operator's Span Lab
+  artifact (be6a9e31) embeds its own copy of the GLSL (follow-up `span-lab-pre-tie-kernel`) rather
+  than including the file.
+
+### Decisions (defaults, not forks)
+
+- **The fixture owner owns the work list and the verdict.** `GlslMirrorTests` writes what a device
+  must compute: the fixture's families, plus reference families for the four sampled-form checks,
+  whose reference is the device's own `snoise` or fBm at 75 points of each case. It also judges
+  what the device returns. The generator only spells shaders, the host only dispatches, and neither
+  compares anything. The lavapipe job and the later ANGLE tool share this one work list and this one judge.
+- **Each device has a recorded bound.** Under `cycles-kernel-reference-ruled`'s stance, a device's
+  ulp-bounded and platform families are held to a bound measured on that device and committed with
+  the device's identity. lavapipe re-runs bit-identically, so the bound is a regression gate, and an
+  identity change refuses until it is re-recorded. Exact and integer families must match bit for
+  bit, and `check` families must pass their `Verify`.
+- **The renames come before the switch.** dxc drops overloads, so the switch cannot run on today's
+  names. The renames are their own cut under today's `GlslLowering`, and the switch then replaces the
+  owner of a GLSL text whose names already match.
+
+### Cut sequence (Pass 9; one line each, mapped when about to run)
+
+1. `shader-conforming-run`: spec admitted. The lavapipe job with the C# device judge, run against
+   today's committed HLSL and GLSL, so the next two cuts are verified against a running check.
+2. `overload-renames`: waits on question `overload-rename-scheme` and on `trophic-nodes` merging.
+   48 overloads get unique names in both HLSL copies, the C# mirror's name maps, the fixture's family
+   names and the lavapipe bounds rows. The GLSL is regenerated under today's lowering. Muninn's
+   `cultmath_saturate(float)` keeps its name under the recommended scheme. Any other option makes Muninn a named follow-up.
+3. `glsl-build-dxc`: the switch. `tools/build-glsl.sh` pins dxc v1.9.2607 (the sha above) and SPIRV-Cross
+   `vulkan-sdk-1.4.363.0`, and takes a `CULTMATH_EXPORT` macro (empty by default, `export` under the
+   build's `-D`). The build strips capabilities and extensions and runs `spirv-val`, emits ES 3.10 with
+   the guarded `#version` and no placeholder `main`, and partitions the output by origin file into the
+   three committed files with their licence lines and guards. It emits the 13 constants from their
+   source lines. `GlslLowering.cs` and its lowering contract tests are deleted. The lavapipe job also
+   checks that the committed files are the build's output, then re-records `lavapipe-glsl`.
+   `get-spirv-cross.ps1` is pinned to the same tag. Waits on 1 and 2.
+4. `angle-capture` (stage-shaders-device part 2): the Starfire native-ANGLE tool on the shared work
+   list (ES 3.00 fragment flavour, RGBA32UI readback), loading a pinned ANGLE build rather than Docker
+   Desktop's copy. Captures carry the renderer, ANGLE version and revision, the shader sha and per-family
+   argument hashes and bits, and the ordinary test run judges them. A shader-sha change marks them stale.
+   It settles `span-allowance-gpu-margin`'s six CPU survivors, `iv-exp-gpu-widening`'s measurement and
+   `device-p2-pin-notes`, and closes `glsl-browser-parity-run` and `affine-device-runner-seed`. It waits
+   on 3, because a capture of the old lowering goes stale at the switch.
