@@ -323,6 +323,43 @@ fn a_missing_or_duplicate_field_is_named_and_a_mistyped_value_is_not() {
     assert!(message.contains("MessagePack type"), "{message}");
 }
 
+// A decoder whose error text is the string it reads, standing for any serde message.
+struct Raises;
+
+impl<'de> serde::Deserialize<'de> for Raises {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let message = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Err(serde::de::Error::custom(message))
+    }
+}
+
+#[test]
+fn a_field_name_is_kept_only_when_it_looks_like_a_field_name() {
+    let refusal = |message: &str| {
+        let bytes = rmp_serde::to_vec(message).unwrap();
+        match cultcache_rs::decode_payload::<Raises>(&bytes) {
+            Ok(_) => panic!("Raises never decodes"),
+            Err(error) => error.to_string(),
+        }
+    };
+    assert_eq!(refusal("missing field `a_1`"), "missing field `a_1`");
+    assert_eq!(refusal("duplicate field `Z9`"), "duplicate field `Z9`");
+    let long = format!("missing field `{}`", "a".repeat(64));
+    assert_eq!(refusal(&long), long);
+    for message in [
+        "missing field `has space CANARY`".to_string(),
+        "missing field `x-CANARY`".to_string(),
+        "missing field ``".to_string(),
+        format!("duplicate field `{}`", "a".repeat(65)),
+        "unknown field `CANARY`, expected `a`".to_string(),
+    ] {
+        let text = refusal(&message);
+        assert_eq!(text, "a value does not fit the store format", "{message}");
+    }
+    assert_eq!(refusal("unknown variant `CANARY`, expected `a`"), "a tag names no variant this type knows");
+    assert!(!refusal("invalid type: string \"CANARY\", expected a bool").contains("CANARY"));
+}
+
 #[test]
 fn the_key_decides_the_arm() {
     // Tool and Part carry different slots under different keys in the two unions.
