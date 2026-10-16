@@ -16,7 +16,7 @@ namespace CultMath.Tests;
 /// CULTMATH_WRITE_GLSL=1 set, the first and last tests write the committed files before comparing, which
 /// is the one regeneration path.
 /// </summary>
-public sealed class GlslMirrorTests
+public sealed partial class GlslMirrorTests
 {
     private readonly ITestOutputHelper output;
 
@@ -361,13 +361,17 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         return sum;
     }
 
-    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false) =>
-        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
+    private static float SnoiseReference(string[] tokens, float3 p) => math.snoise(p);
+
+    private static float FbmReference(string[] t, float3 p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w;
+
+    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
+        AssertSampledForm(cases, "af_snoise", reference ?? SnoiseReference,
             (_, a) => SnoiseOctave(SnoiseWidthBound, a, 1.0), (_, a) => SnoiseOctave(SnoiseAllowance, a, 1.0), allowanceDecides);
 
-    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false) =>
+    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
         AssertSampledForm(cases, "af_fbm",
-            (t, p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w,
+            reference ?? FbmReference,
             (t, a) => FbmOctaves(t, a, SnoiseWidthBound), (t, a) => FbmOctaves(t, a, SnoiseAllowance), allowanceDecides);
 
     // AffineFrustumBall applied to C#'s own results.
@@ -682,7 +686,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
             return new object[] { slope, z0, z0 + Uniform(r, 0.01f, 50.0f), Uniform(r, 0.0001f, 0.05f), Uniform(r, 0.0f, 2.0f) };
         }, FrustumBall, Verify: AssertFrustumBall),
         new("vec2 cultmath_iv_exp(vec2)", "ulp-bounded, platform exp", r => new object[] { Interval(r) }, Platform: Platform.Ulp),
-        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
+        new("CultPhasor cultmath_phacelle(vec3, vec3, float, float)", "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)",
             r => new object[] { Point3(r), Side(r), Uniform(r, 0.0f, 1.0f), 0.5f }, Platform: Platform.Scaled),
         new("float cultmath_snoise(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),
         new("vec4 cultmath_snoise_grad(vec3)", "ulp-bounded, on the simplex tie set", r => new object[] { TiePoint3(r) }),

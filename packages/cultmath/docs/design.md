@@ -214,6 +214,12 @@ test, bit for bit; GLSL against C# by the golden fixture, which records 256
 seeded cases per function family as float32 bit patterns, evaluated by the
 consumer on WebGL2 and read back. The families `pcg3d` and `pcg4d` are marked
 exact; the float families are ulp-bounded, the bound measured on the device.
+A conforming leg runs every fixture family through both routes on a device: `tools/device/run-lavapipe.sh`
+compiles the HLSL with dxc and the committed GLSL with glslang, dispatches each family on Mesa lavapipe, and
+`GlslMirrorTests.DeviceResultsHoldFixture` judges the results. Exact and integer families must match bit for bit,
+families with a check pass their `Verify`, the sampled-form families are checked on the device's own noise values,
+and every other family is held to the worst error recorded for that device in
+`tests/CultMath.Tests/fixtures/device-bounds-lavapipe.txt`.
 
 `iv_frustum_ball` is ulp-bounded, not exact: it calls `sqrt`, which GLSL ES
 3.00 does not require to be correctly rounded, and WebGL2 compilers may
@@ -260,17 +266,19 @@ name the platform that generated them and the test compares them case by case
 against the running platform, printing the largest distance. `iv_exp`
 ("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
 ("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
-max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)") must agree across
+platforms within `2^-20 max(|v|, 1)` per component, `v` being
 the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
 ulps mean nothing, and Windows differs from the Linux fixture by up to
-`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`3.6e-7 max(|v|, 1)`. The device clause is `2^-18` because the devices measured
+are farther: lavapipe is `2.2e-6 max(|v|, 1)` and the GTX 1070 `3.1e-6`; the conforming
+run judges it. Every other family is compared as text. `phacelle` is in
 `CultMath.Phacelle.glsl`, so the evaluator concatenates
 `CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
 normalization 0.5. The site does not vendor the MPL file and skips the family.
-Its evaluator is the cultmath-tapes follow-up `glsl-browser-parity-run`, owned
-by the next CultMath parity cut: a repeatable CultLib WebGL2 run of every
-fixture family, `phacelle` included. Until it lands, the one GLSL evaluation of
-`phacelle` is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
+Its evaluator is the lavapipe GLSL route of the conforming run above, which covers
+every fixture family, `phacelle` included. The real-device leg (ANGLE D3D11 on the GTX 1070)
+is the later cut `angle-capture`; the one GLSL evaluation of `phacelle` on that device is a single probe (GTX 1070, ANGLE D3D11: within `3.1e-6 max(|v|, 1)`
 of C#). Asura's `gpu-snoise-parity` is a different check, an FXC and Unity
 readback of `snoise`, and evaluates no GLSL.
 

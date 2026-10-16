@@ -7082,7 +7082,7 @@
     },
     {
       "glsl": "CultPhasor cultmath_phacelle(vec3, vec3, float, float)",
-      "tolerance": "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)",
+      "tolerance": "ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)",
       "platform": "Ubuntu 24.04.5 LTS; .NET 10.0.12",
       "cases": [
         "c01d8630 41b2cd8c 41ea274c bfa19894 40aeb6ce 40918978 3e9be843 3f000000 -> bf74d9fb 3fb71956 bf35fe4e 3f21280a c01277e2 403b5fe4 40464bbd bd5b4455",

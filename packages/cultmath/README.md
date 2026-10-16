@@ -194,6 +194,12 @@ class. SPIRV-Cross emits Metal Shading Language from SPIR-V on Windows; building
 an iPad-ready `.metallib` still belongs to Apple's Metal compiler on an Apple
 toolchain.
 
+The lavapipe conforming run executes every fixture family through the HLSL (dxc) and the committed GLSL
+(glslang) on Mesa lavapipe and judges the results in `GlslMirrorTests.DeviceResultsHoldFixture`. It needs a Linux
+container with apt: from the repo root, `tools/stopgap/ygg-verify.sh <repo> <rev> mcr.microsoft.com/dotnet/sdk:10.0
+'bash packages/cultmath/tools/device/run-lavapipe.sh'`. `WRITE_BOUNDS=1` in front of the script re-records the
+device's bounds file and prints it between `BOUNDS-BEGIN` and `BOUNDS-END`.
+
 ## Doctrine
 
 The goal is mechanical sympathy between CPU-side authoring, native kernels, and
