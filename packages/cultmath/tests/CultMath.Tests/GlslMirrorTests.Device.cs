@@ -379,10 +379,10 @@ public sealed partial class GlslMirrorTests
         JudgeDevice(device.Work, device.Results, renderer, identity, recordedOn.Bounds, false);
 
     // Every case's first result word, altered.
-    private static uint[] Alter(WorkItem item, uint[] words, Func<uint, uint> change)
+    private static uint[] Alter(WorkItem item, uint[] words, Func<uint, uint> change, int cases = int.MaxValue)
     {
         var altered = (uint[])words.Clone();
-        for (var c = 0; c < item.N; c++)
+        for (var c = 0; c < Math.Min(item.N, cases); c++)
             altered[c * item.WordsOut] = change(altered[c * item.WordsOut]);
         return altered;
     }
@@ -407,23 +407,28 @@ public sealed partial class GlslMirrorTests
     [Fact]
     public void AnExactFamilyAllowsNoDifferenceAtAll()
     {
+        // Bounds recorded on the very device that is off by one ulp: a bound would pass it, the exact rule must not.
         var exact = Array.FindIndex(Families, f => f.Tolerance == "exact");
-        using var faithful = Simulate();
-        Record(faithful);
         using var off = Simulate((route, item, words) => route == "lavapipe-glsl" && item.Index == exact.ToString() ? Alter(item, words, w => w ^ 1u) : words);
-        var failures = Judge(off, faithful).Failures;
+        Record(off);
+        var failures = Judge(off, off).Failures;
         Assert.Single(failures);
         Assert.Contains($"lavapipe-glsl #{exact} ", failures[0]);
+
+        // One case in 256 is enough.
+        using var oneCase = Simulate((_, item, words) => item.Index == exact.ToString() ? Alter(item, words, w => w ^ 1u, 1) : words);
+        Record(oneCase);
+        Assert.Equal(DeviceRoutes.Length, Judge(oneCase, oneCase).Failures.Count);
     }
 
     [Fact]
     public void AFamilyIsHeldToItsRecordedWorstAndNotBeyond()
     {
         var f = BoundFamily();
-        using var near = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 1u) : words);
+        using var near = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 4u) : words);
         Record(near);
         Assert.Empty(Judge(near, near).Failures);
-        using var farther = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 8u) : words);
+        using var farther = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 7u) : words);
         var failures = Judge(farther, near).Failures;
         Assert.Equal(DeviceRoutes.Length, failures.Count);
         Assert.All(failures, line => Assert.Contains($"#{f} ", line));
@@ -509,29 +514,83 @@ public sealed partial class GlslMirrorTests
         }
     }
 
-    [Fact]
-    public void ASampledFormIsJudgedOnTheDevicesOwnReferenceAtTheRecordedPoints()
+    [Theory]
+    [InlineData("cultmath_af_snoise(")]
+    [InlineData("cultmath_af_fbm(")]
+    public void ASampledFormIsJudgedOnTheDevicesOwnReferenceAtTheRecordedPoints(string function)
     {
-        var snoise = Array.FindIndex(Families, f => IsSampledForm(f) && f.Glsl.Contains("cultmath_af_snoise("));
+        var sampled = Array.FindIndex(Families, f => IsSampledForm(f) && f.Glsl.Contains(function));
         using var faithful = Simulate();
         Record(faithful);
 
         // A reference that answers wrongly puts the form's enclosure out of reach.
-        using var wrong = Simulate((_, item, words) => item.Index == "ref:" + snoise
+        using var wrong = Simulate((_, item, words) => item.Index == "ref:" + sampled
             ? words.Select(w => BitConverter.SingleToUInt32Bits(BitConverter.UInt32BitsToSingle(w) + 100.0f)).ToArray() : words);
         var failures = Judge(wrong, faithful).Failures;
         Assert.Equal(DeviceRoutes.Length, failures.Count);
-        Assert.All(failures, line => Assert.Contains($"#{snoise} ", line));
+        Assert.All(failures, line => Assert.Contains($"#{sampled} ", line));
 
         // Two points in the other order: the device's i-th answer is not for the point the check asks about.
         using var swapped = Simulate();
-        var path = Path.Combine(swapped.Work, RefTag(snoise) + ".in");
+        var path = Path.Combine(swapped.Work, RefTag(sampled) + ".in");
+        var stride = function.Contains("fbm") ? 6 : 3;
         var points = ReadWords(path);
-        (points[0], points[3]) = (points[3], points[0]);
+        (points[0], points[stride]) = (points[stride], points[0]);
         WriteWords(path, points);
         var order = Judge(swapped, faithful).Failures;
         Assert.Equal(DeviceRoutes.Length, order.Count);
         Assert.All(order, line => Assert.Contains("not the point the device was given", line));
+    }
+
+    [Fact]
+    public void AnInfinityWhereTheFixtureHasAnotherValueIsAMismatchOfClass()
+    {
+        var fixture = FixtureFamilies();
+        int f = -1, c = 0, w = 0;
+        for (var g = 0; g < Families.Length && f < 0; g++)
+        {
+            if (Families[g].Tolerance == "exact" || Families[g].Verify is not null)
+                continue;
+            var floatWord = FloatWords(Resolve(Families[g].Glsl).ReturnType).ToArray();
+            for (var k = 0; k < Points && f < 0; k++)
+            {
+                var want = DevWords(Sides(fixture[g]!["cases"]![k])[1]);
+                for (var at = 0; at < want.Length && f < 0; at++)
+                    if (floatWord[at] && float.IsInfinity(BitConverter.UInt32BitsToSingle(want[at])))
+                        (f, c, w) = (g, k, at);
+            }
+        }
+
+        Assert.True(f >= 0, "no fixture family holds an infinite result");
+        using var faithful = Simulate();
+        Record(faithful);
+        using var finite = Simulate((_, item, words) =>
+        {
+            if (item.Index != f.ToString())
+                return words;
+            var altered = (uint[])words.Clone();
+            altered[c * item.WordsOut + w] = BitConverter.SingleToUInt32Bits(1.0f);
+            return altered;
+        });
+        var failures = Judge(finite, faithful).Failures;
+        Assert.Equal(DeviceRoutes.Length, failures.Count);
+        Assert.All(failures, line => Assert.Contains("NaN-class", line));
+    }
+
+    [Fact]
+    public void ARecordedRowForAnotherFamilyIsRefused()
+    {
+        using var device = Simulate();
+        Record(device);
+        var lines = File.ReadAllLines(device.Bounds).ToList();
+        var at = lines.FindIndex(l => l.StartsWith("lavapipe-glsl	5	"));
+        var row = lines[at].Split('	');
+        row[2] = "float cultmath_other(float)";
+        lines[at] = string.Join('	', row);
+        File.WriteAllLines(device.Bounds, lines);
+        var failures = Judge(device, device).Failures;
+        Assert.Single(failures);
+        Assert.Contains("another family", failures[0]);
     }
 
     [Fact]
