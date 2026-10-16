@@ -11,9 +11,8 @@ The contract is intentionally boring:
 - `gamecult.networking.v0` maps the legacy C# union shape explicitly.
 - schema discovery uses explicit catalog request/response messages; no inbound
   auto-detect sludge.
-- document put/delete/snapshot messages move typed CultCache entries.
-- raw document put/snapshot messages preserve canonical MessagePack payload
-  bytes for bit-compatible neighbors.
+- put/delete/snapshot travel only as raw messages that carry the canonical
+  MessagePack payload bytes; the receiver decodes them through registered types.
 - hello messages advertise `supportedMutationContracts`, so callers discover
   which document types are read-only, which accept typed intents, which
   authority owns the mutation, and which receipt documents prove the outcome.
@@ -41,7 +40,6 @@ The initial tests prove:
 - legacy `gamecult.networking.v0` login mapping
 - schema discovery catalog responses with canonical JSON schema hashes
 - shard catalog request/response filtering and response application
-- CultCache snapshot replication through registered typed documents
 - raw snapshot replication that preserves the original payload bytes
 - raw snapshot replication into a local same-schema Rust alias type
 - document mutation contract advertisement through hello frames and registries
