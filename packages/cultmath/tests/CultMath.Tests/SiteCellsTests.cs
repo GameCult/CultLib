@@ -293,6 +293,10 @@ public sealed class SiteCellsTests
             var outForm = distance_to_segment(p, start, end, out var closest);
             Assert.Equal(BitConverter.SingleToInt32Bits(outForm), BitConverter.SingleToInt32Bits(distance_to_segment(p, start, end)));
             Assert.Equal(distance(p, closest), outForm);
+            double sx = (double)end.x - start.x, sy = (double)end.y - start.y, qx = (double)p.x - start.x, qy = (double)p.y - start.y;
+            var t2 = sx * sx + sy * sy > 0.0 ? Math.Clamp((qx * sx + qy * sy) / (sx * sx + sy * sy), 0.0, 1.0) : 0.0;
+            var expected2 = Math.Sqrt(Math.Pow(qx - t2 * sx, 2) + Math.Pow(qy - t2 * sy, 2));
+            Assert.Equal(expected2, outForm, 1.0e-4 * (1.0 + expected2));
 
             var p3 = new float3(Span(r, 5.0f), Span(r, 5.0f), Span(r, 5.0f));
             var a3 = new float3(Span(r, 5.0f), Span(r, 5.0f), Span(r, 5.0f));
