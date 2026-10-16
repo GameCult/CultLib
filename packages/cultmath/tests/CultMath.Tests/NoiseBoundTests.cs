@@ -18,7 +18,8 @@ namespace CultMath.Tests;
 /// mutations of the test's own fields and marches: w(z0) for w(z1) in VoidField.WeightBound must fail
 /// WeightBoundEnclosesOneSignedNoise; CarveRadius for HollowRadius in the lo test of VoidField.Compose
 /// and BodyDepth without |dir| must fail AnalyticBodyMatchesFineMarch; the footprint march's pre-body
-/// integration dropped, or LodStep doubled, must fail IntervalSkipHalvesEvaluations's depth agreement.
+/// integration dropped, or LodStep doubled, must fail IntervalSkipHalvesEvaluations's depth agreement; LodStep's
+/// footprint z theta scaled x2 (or x4) must fail it at LOD-far.
 /// </summary>
 public sealed class NoiseBoundTests
 {
@@ -2982,7 +2983,9 @@ public sealed class NoiseBoundTests
         }
 
         var lodFar = VoidField.LodFar();
-        ReportVoid($"{lodFar.Name} N=8 (LOD far)", Run(lodFar, 8, 32, 0x701D, lod: true));
+        var far = Run(lodFar, 8, 32, 0x701D, lod: true);
+        ReportVoid($"{lodFar.Name} N=8 (LOD far)", far);
+        Assert.True(far.MaxLodDepthError <= 2.0 * far.MaxRefDepthError, $"at LOD-far, the one field where LodStep's footprint branch bites, the footprint-aware march's optical depth is off the converged march's by {far.MaxLodDepthError:G6} relative, more than twice the fixed-step march's {far.MaxRefDepthError:G6}");
 
         var shipped = VoidField.Shipped();
         var headline = Run(shipped, 8, 200, 0x5417, lod: true);
