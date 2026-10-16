@@ -102,6 +102,9 @@ namespace GameCult.Caching.Tests
             RoundTrip(new rect(-1f, -2f, 5f, 7f));
             RoundTrip(new CultCellular(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8), 0.25f));
             RoundTrip(new CultPhasor(new float4(1, 2, 3, 4), new float4(5, 6, 7, 8)));
+            RoundTrip(new SpanNoise(new float4(1, 2, 3, 4), 0.25f, 0.5f));
+            RoundTrip(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f });
+            RoundTrip(new SpanStage { frequency = 1f, stretch = 2f, axis = new float3(3f, 4f, 5f), shift = new float3(6f, 7f, 8f), offset = new float3(9f, 10f, 11f), octaveStep = new float3(12f, 13f, 14f) });
         }
 
         [Test]
@@ -137,6 +140,24 @@ namespace GameCult.Caching.Tests
                 "92" +
                 "94CA3F800000CA40000000CA40400000CA40800000" +
                 "94CA40A00000CA40C00000CA40E00000CA41000000");
+            Hex(new SpanNoise(new float4(1f, 2f, 3f, 4f), 0.25f, 0.5f)).Should().Be(
+                "93" +
+                "94CA3F800000CA40000000CA40400000CA40800000" +
+                "CA3E800000" +
+                "CA3F000000");
+            Hex(new SpanPath { midpoint = new float3(1f, 2f, 3f), velocity = new float3(4f, 5f, 6f), speed = 7f, acceleration = 8f, halfLength = 9f }).Should().Be(
+                "95" +
+                "93CA3F800000CA40000000CA40400000" +
+                "93CA40800000CA40A00000CA40C00000" +
+                "CA40E00000CA41000000CA41100000");
+            Hex(new SpanStage { frequency = 1f, stretch = 2f, axis = new float3(3f, 4f, 5f), shift = new float3(6f, 7f, 8f), offset = new float3(9f, 10f, 11f), octaveStep = new float3(12f, 13f, 14f) }).Should().Be(
+                "96" +
+                "CA3F800000" +
+                "CA40000000" +
+                "93CA40400000CA40800000CA40A00000" +
+                "93CA40C00000CA40E00000CA41000000" +
+                "93CA41100000CA41200000CA41300000" +
+                "93CA41400000CA41500000CA41600000");
         }
 
         [Test]

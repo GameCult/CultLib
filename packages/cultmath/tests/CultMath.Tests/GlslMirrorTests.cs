@@ -45,6 +45,54 @@ public sealed class GlslMirrorTests
         }
     }
 
+    // Counting stand-ins for the mirror's clamp, one per overload, declared in the mirror's class so they
+    // hide math.clamp for every function in it. Each counts a call whose minimum exceeds its maximum in any
+    // component and forwards to math.clamp. (The int vector overloads only forward: no mirror function
+    // clamps integer vectors with swapped bounds, and counting them would be unreachable.)
+    private const string CountingClampShadows = @"
+public static int ClampMinAboveMax;
+static float clamp(float x, float a, float b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float2 clamp(float2 x, float2 a, float2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float3 clamp(float3 x, float3 a, float3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static float4 clamp(float4 x, float4 a, float4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int clamp(int x, int a, int b) { if (a > b) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int2 clamp(int2 x, int2 a, int2 b) { if (a.x > b.x || a.y > b.y) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int3 clamp(int3 x, int3 a, int3 b) { if (a.x > b.x || a.y > b.y || a.z > b.z) ClampMinAboveMax++; return math.clamp(x, a, b); }
+static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > b.z || a.w > b.w) ClampMinAboveMax++; return math.clamp(x, a, b); }
+";
+
+    /// <summary>
+    /// The lowering keeps HLSL's statement order (CommittedGlslEqualsLowering pins the GLSL as that
+    /// lowering), and GLSL leaves clamp(x, minVal, maxVal) undefined for minVal above maxVal, so no clamp
+    /// reached by cultmath_integral_clamp_linear may see lo above hi, on any path and for any spelling of the
+    /// normalisation. The mirror is compiled with counting clamps and the function is run over the edge grid
+    /// (lo above hi, infinite bounds, zero-length spans, b = 0 and b != 0): the count of such clamp calls
+    /// stays 0 after every call. The cases are HlslSourceCompatibilityTests.IntegralClampLinearCases: the grid fixes
+    /// a in {-2.5, 0, 1.5}, so a normalisation keyed on a past 1.75 never clamps wrongly there; the committed
+    /// fixture's random cases reach it.
+    /// </summary>
+    [Fact]
+    public void IntegralClampLinearNeverClampsWithMinAboveMax()
+    {
+        var (assembly, errors) = HlslSourceCompatibilityTests.CompileShaderMirror(CountingClampShadows);
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var count = shaderType.GetField("ClampMinAboveMax")!;
+        var function = shaderType.GetMethod("cultmath_integral_clamp_linear", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var bad = new List<string>();
+        foreach (var c in HlslSourceCompatibilityTests.IntegralClampLinearCases)
+        {
+            count.SetValue(null, 0);
+            function.Invoke(shader, c.Cast<object>().ToArray());
+            if ((int)count.GetValue(null)! > 0)
+                bad.Add($"({string.Join(", ", c)})");
+        }
+
+        Assert.True(bad.Count == 0, $"{bad.Count} cases clamp with the minimum above the maximum:{Environment.NewLine}{string.Join(Environment.NewLine, bad.Take(12))}");
+    }
+
     // Identifier boundaries: cultmath_lerp is a CultMath function, lerp( is HLSL.
     private static readonly Regex HlslOnly = new(
         @"\b(float|u?int|bool)[234]\b|\bfloat3x3\b|\blerp\(|\bfrac\(|\bsaturate\(|\brsqrt\(|\basuint\(|\basfloat\(|\batan2\(|static const|\((float|int|uint)\)|Texture2D|SamplerState|#include|precision (high|medium|low)p");
@@ -638,7 +686,67 @@ public sealed class GlslMirrorTests
                 var lo = Uniform(r, -2.0f, 0.5f);
                 return new object[] { Uniform(r, -4.0f, 4.0f), r.Next(8) == 0 ? 0.0f : Uniform(r, -4.0f, 4.0f), lo, lo + Uniform(r, 0.0f, 3.0f), Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f) };
             }),
+        // The edge cases the family above never draws: lo above hi (b = 0 and b != 0; the lowering must
+        // normalise before any clamp sees it) and infinite bounds (hi = +inf, lo = -inf, both).
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, lo above hi and infinite bounds",
+            r =>
+            {
+                var a = Uniform(r, -4.0f, 4.0f);
+                var slope = Uniform(r, -4.0f, 4.0f);
+                var (t0, t1) = (Uniform(r, -3.0f, 3.0f), Uniform(r, -3.0f, 3.0f));
+                return r.Next(5) switch
+                {
+                    0 => new object[] { a, 0.0f, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    1 => new object[] { a, slope, Uniform(r, 0.5f, 2.0f), Uniform(r, -2.0f, 0.4f), t0, t1 },
+                    2 => new object[] { a, slope, Uniform(r, -2.0f, 1.0f), float.PositiveInfinity, t0, t1 },
+                    3 => new object[] { a, slope, float.NegativeInfinity, Uniform(r, -1.0f, 2.0f), t0, t1 },
+                    _ => new object[] { a, slope, float.NegativeInfinity, float.PositiveInfinity, t0, t1 },
+                };
+            }),
+        // Zero-length spans (t1 = t0 three times in four) with a flat or sloped line, and infinite clamp bounds
+        // on either side or both: an infinite bound times a zero length must give +0, and a flat line clamped
+        // to an infinite bound over a nonzero span is infinite, never NaN.
+        new Family("float cultmath_integral_clamp_linear(float, float, float, float, float, float)", "ulp-bounded, zero-length spans and flat infinite clamps",
+            r =>
+            {
+                float Line() => r.Next(3) switch { 0 => 0.0f, 1 => -0.0f, _ => Uniform(r, -4.0f, 4.0f) };
+                float Bound() => r.Next(3) switch { 0 => float.NegativeInfinity, 1 => float.PositiveInfinity, _ => Uniform(r, -2.0f, 2.0f) };
+                var (a, b, lo, hi) = (Line(), Line(), Bound(), Bound());
+                var t0 = Uniform(r, -3.0f, 3.0f);
+                var t1 = r.Next(4) != 0 ? t0 : Uniform(r, -3.0f, 3.0f);
+                return new object[] { a, b, lo, hi, t0, t1 };
+            }),
+        // The span stages over their struct arguments: realistic stages and spans (SpanStageTests' own draw), the
+        // midpoint a Point3, one span in four a point.
+        new Family("SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
+        new Family("SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
     }).ToArray();
+
+    private static object[] SpanArguments(System.Random r)
+    {
+        var stage = SpanStageTests.Stage.Draw(r);
+        var halfLength = r.Next(4) == 0 ? 0.0f : new[] { 0.02f, 0.1f, 0.5f }[r.Next(3)];
+        var span = SpanStageTests.Span.Draw(r, Point3(r), halfLength, Uniform(r, 0.0f, 2.0f));
+        return new object[] { span.Path, stage.S, stage.Octaves, stage.Lacunarity, stage.Gain };
+    }
+
+    /// <summary>
+    /// The committed fixture's cases of the three cultmath_integral_clamp_linear families, decoded into the
+    /// C# arguments (a, b, lo, hi, t0, t1): the random cases the clamp-normalisation tests also run.
+    /// </summary>
+    internal static IReadOnlyList<float[]> IntegralClampLinearFixtureCases
+    {
+        get
+        {
+            const string clamp = "float cultmath_integral_clamp_linear(float, float, float, float, float, float)";
+            var method = Resolve(clamp);
+            return JsonNode.Parse(File.ReadAllText(FixturePath))!["functions"]!.AsArray()
+                .Where(family => (string)family!["glsl"]! == clamp)
+                .SelectMany(family => family!["cases"]!.AsArray())
+                .Select(entry => Arguments(method, ((string)entry!).Split(" -> ")[0]).Select(a => (float)a).ToArray())
+                .ToArray();
+        }
+    }
 
     // The fixture text, each case's arguments given by family and point index.
     private static string GoldenFixture(Func<int, int, object[]> arguments)
@@ -682,6 +790,7 @@ public sealed class GlslMirrorTests
     {
         ["float"] = typeof(float), ["int"] = typeof(int), ["vec2"] = typeof(float2), ["vec3"] = typeof(float3),
         ["vec4"] = typeof(float4), ["ivec3"] = typeof(int3), ["ivec4"] = typeof(int4),
+        ["SpanPath"] = typeof(SpanPath), ["SpanStage"] = typeof(SpanStage),
     };
 
     // The C# math method a GLSL signature names: cultmath_ dropped, parameter types mapped.

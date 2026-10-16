@@ -112,8 +112,10 @@ local) and writes through a swizzle component (`v.xy.x = s`, which C# rejects as
 modifying a temporary).
 
 The HLSL side is checked too: `tools/get-dxc.ps1` fetches Microsoft's
-DirectXShaderCompiler, and
-`dxc -T lib_6_3 -HV 2021 shaders/CultMath.hlsl` must compile cleanly.
+DirectXShaderCompiler (x64), and `tools/compile-hlsl.ps1` compiles both copies of
+`CultMath.hlsl` with it (`dxc -T lib_6_3 -HV 2021 -WX`, so a warning fails like an error and the
+text must compile cleanly); the script throws when a shader file is missing, when dxc cannot
+launch or when it exits non-zero, so a stale exit code never reads as a pass.
 
 The mirror test compares bit patterns (any NaN equals any NaN; -0 differs from
 0). It proves the text of `CultMath.hlsl` computes the same float32 results as
@@ -123,13 +125,20 @@ compiled under `using static CultMath.math;`, so its intrinsics are C# `math`
 itself: the test proves the composition in the text, not the intrinsic rules,
 which only `HlslSemanticsTests` pins.
 
+Every mirror function is compared, internals included: its counterpart is the `math`
+function of the same name, public or private (`snoise_mod289` and `snoise_permute` are
+private), and a function with no counterpart fails by name. A struct parameter maps to the
+CultMath type of the same name, and only if both have the same instance fields by name, type
+and order (`SpanPath`, `SpanStage`); the argument is built from the case's scalars field by
+field and copied to its C# twin by field name.
+
 The comparison also allows exactly one struct return shape: a mirror function
 whose HLSL return type is a plain struct of `float`/`floatN`/`int`/`intN`
 fields is compared to its C# counterpart field by field, recursing into each
 field's own components, down to bit-for-bit scalars, matching each leaf's
 declaration path (field names, not just position) and declared type as well
-as its value. `CultCellular` (`math.cs`, `cellular`) and `CultPhasor`
-(`math.Phacelle.cs`, `phacelle`) are its consumers. A struct return with a mismatched, reordered-by-name, or
+as its value. `CultCellular` (`math.cs`, `cellular`), `CultPhasor`
+(`math.Phacelle.cs`, `phacelle`) and `SpanNoise` (`math.Span.cs`, `span_fbm`) are its consumers. A struct return with a mismatched, reordered-by-name, or
 retyped field does not get a second comparison path or a shape of its own;
 it fails the same walk that already handles a bare vector return.
 
@@ -777,11 +786,18 @@ differentiating each corner's gradient `-8 m^3 s x + m^4 p` once more. Each
 off-diagonal entry is computed once and placed twice, so the matrix equals its
 transpose bit for bit, and a clamped corner (`m = 0`) contributes nothing. Built
 from nine scalars, the matrix reads as columns in GLSL (`mat3`) and rows in HLSL,
-which is the same matrix because it is symmetric. `SNOISE_THIRD = 536.9152`
+which is the same matrix because it is symmetric. `SNOISE_THIRD = 535.8009`
 (`math.Span.cs`) is the next order: 1.10 times the maximum, over 1e6 seeded points,
-of the operator norm of the third-derivative tensor of `snoise` (central
-differences of `snoise_hessian` at h = 1e-3, then an ascent over unit vectors),
-refined from the 1e4 largest; measured 488.1047 on the tied kernel.
+of the operator norm of the third-derivative tensor of `snoise`, refined from the
+1e4 largest; measured 487.0917 on the tied kernel. The tensor is closed form, in
+double: `snoise_hessian`'s per-corner entry differentiated once more, on the
+kernel's lattice, tie order and hash, and the test
+`ThirdTensorMatchesDifferencesOfTheHessian` holds it against Richardson-extrapolated
+differences of the double Hessian. The operator norm is a local ascent over unit
+vectors (a dense sweep of 20,000 directions at the witness finds 99.9987% of it) and
+the outer maximum a sampled search refined by ascent, so the constant is empirical
+with a 10% margin, not a proof; an earlier pin from central differences of the
+float Hessian read 488.1047, its roundoff.
 `MeasureThird` takes the measurement and `ThirdConstantPinsSampled` pins it.
 `integral_clamp_linear(a, b, lo, hi, t0, t1)` is the closed-form integral over
 `[t0, t1]` of `clamp(a + b t, lo, hi)`. All three have HLSL and GLSL lowerings and
@@ -798,6 +814,76 @@ constant of 40 misses there). The margin over the function itself: a scan of the
 289^3 hash period found a realised maximum of 50.58, and bounding each corner's gradient
 independently over every hash configuration gives 52.22, so 55.64 sits 7% above the
 configuration bound. A change to the kernels must re-run the measurements.
+
+### Span stages
+
+`span_fbm` and `span_ridged` (`math.Span.cs`; `cultmath_span_fbm` and `cultmath_span_ridged` in HLSL over
+the same struct types, `cultmath_span_stage` behind both, and GLSL derived) are the octave stages
+of a warp chain, `span_fbm(path, stage, octaves, lacunarity, gain)`, each returning
+one `SpanNoise { float4 field; float curvature; float fold; }`. The inputs are two
+structs with named public fields and no positional constructor, so the three floats
+of the span and the six fields of the transform cannot be swapped silently.
+`SpanPath { midpoint, velocity, speed, acceleration, halfLength }` is the path
+`q(t)`, `|t| <= halfLength`, through `midpoint` with `velocity` at `t = 0`,
+`|q'| <= speed` and `|q''| <= acceleration` along it. `SpanStage { frequency,
+stretch, axis, shift, offset, octaveStep }` makes octave `o` sample `snoise_grad`
+at `x_o(q) = f_o (M q + shift) + offset + o octaveStep`, with `f_o =
+lacunarity^o`, amplitude `gain^o`, and `M = frequency (I + (1/stretch - 1) a a^T)`,
+`a = normalize(axis)`; a zero axis or `stretch` 1 means no stretch, and `stretch`
+must be positive and finite (unguarded, like `lacunarity`). `default(SpanStage)`
+has frequency 0; `SpanStage.Identity` is the stage whose field equals `fbm_grad`
+and `ridged_grad` bit for bit. `octaves`, `lacunarity` and `gain` stay positional:
+they are `fbm_grad`'s own trailing triple, and `octaves` is the one int among the
+scalars. `field` is the octave sum and its gradient in `q` (`f_o M grad n_o`).
+`span_ridged` sums `gain^o (1 - |n_o|)`, `ridged_grad`'s convention. The Span
+Lab's stage is `1 - 2|n|` per octave: with `G` the sum of `gain^o` over the
+octaves (signed, so the alternating sum for a negative gain), its value is `2 value
+- G`, and its gradient, curvature and fold are twice `span_ridged`'s.
+
+The shaders have no `SpanStage.Identity`: a shader caller builds every stage field itself (in GLSL,
+`SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))` is the identity). A constant would
+need a second transformation rule (C# has no const structs, GLSL wants a constructor) and a mirror
+exemption, for one value; the mirror test proves instead that the shader text at a C#-built identity
+returns `cultmath_fbm_grad` and `cultmath_ridged_grad`'s field bit for bit.
+
+Bounds come from the three pins only. With `|M| = |frequency| max(1, 1/stretch)` and
+`nu = f_o |M| speed` the noise-space speed, the Hessian of the noise on the span has
+operator norm at most `Hl = min(SNOISE_HESSIAN, ||snoise_hessian(x_mid)||_F + e_h +
+SNOISE_THIRD nu halfLength)`, so `curvature = sum gain^o f_o^2 |M|^2 Hl` bounds the
+operator norm of the field's Hessian in `q` at every point of the span (the pin takes
+over once the third-derivative term exceeds it, and at `halfLength` 0 the local tier
+alone remains). For `span_ridged`, an octave leaves the branch it is on at the
+midpoint (`1 - s n`, `s` the midpoint's sign of `n`) only where `n` changes sign, and
+there `|n| <= V - |n_mid|`, with `V = (|grad n_mid . w| + e_g |w|) halfLength + (Hl nu |w|
++ Gl f_o |M| acceleration) halfLength^2 / 2 + 2 e_n`, `w = f_o M velocity` and `Gl =
+min(SNOISE_LIPSCHITZ, |grad n_mid| + e_g + Hl nu halfLength)`; `fold = sum 2 gain^o
+max(V - |n_mid|, 0)`, exactly 0 for `span_fbm` and for an octave that cannot reach zero.
+
+The float32 `snoise`, `snoise_grad` and `snoise_hessian` are not the exact functions, so
+the quantities read at the midpoint carry allowances, by the derivation of `af_snoise`'s
+comment. `S_o = |f_o| (|M q|_1 + |shift|_1) + |offset|_1 + |o octaveStep|_1 + sqrt(3) nu
+halfLength` is the sum of the magnitudes the octave coordinate's roundings are relative
+to, and `e_n = 2^-14 + L 2^-20 S_o` (value), `e_g = 2^-12 + H 2^-20 S_o` (gradient
+length) and `e_h = 2^-10 + T 2^-20 S_o` (Frobenius norm of the Hessian), with `L`, `H`,
+`T` the three pins; they add no pin. Measured against a double kernel with the float
+hash (6000 points per band, `|x|` from 2^-2 to 2^23), two samples observed the error's
+maxima as fractions of `e_n`, `e_g` and `e_h`: 0.057, 0.046 and 0.075 in the cut's own
+sample (seed not recorded; the 0.075 is against `T 2^-20 |x|_1` alone, at the smallest
+band, where the absolute Hessian error is 2.3e-5 and the absolute term carries it), and
+0.064, 0.0485 and 0.057 in an audit's (seed 0x501). They are samples, not bounds: a new
+seed moves them. They say the allowances enclose the error with a margin of about 15.
+Errors grow linearly in `|x|`: the value's is 2e-4 at 2^8, 1.5e-2 at 2^14 and 0.94 at 2^20.
+Rounding in the Frobenius-to-operator-norm step needs no allowance: the Frobenius norm
+exceeds the operator norm.
+
+Domain. No coordinate range is checked, clamped or refused. The allowances grow with
+`S_o`, so `curvature` saturates at `SNOISE_HESSIAN` (true everywhere) by `S_o` of about
+1.1e5, and `fold` turns positive for every octave whose `V + 2 e_n` reaches `|n_mid|`:
+the bounds stay sound at every magnitude and stop being informative where float32 noise
+is (see "Precision domain" above). `SpanStageTests` encloses the exact (double) Hessian
+norm and both the float and the exact branch departure at 64 points of seeded spans in
+bands of `S_o` from under 1e2 to over 1e6, and in a fixed span where the local tier
+with its third-derivative term halved fails.
 
 The slice. `af_frustum_ball(centreSlope, z0, z1, footprintPerDepth,
 warpVariation)` returns the centre `(m_c z_m, z_m)` and a radius `z1

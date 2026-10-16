@@ -180,7 +180,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     return value;
                 }),
 
-            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin].
+            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin], SpanNoise is [field, curvature, fold], SpanPath is [midpoint, velocity, speed, acceleration, halfLength], SpanStage is [frequency, stretch, axis, shift, offset, octaveStep].
             Shape<float2x2>((ref MessagePackWriter w, float2x2 v) => { w.WriteArrayHeader(2); PutFloat2(ref w, v[0]); PutFloat2(ref w, v[1]); },
                 (ref MessagePackReader r) =>
                 {
@@ -231,6 +231,59 @@ public sealed class CultMathResolver : IFormatterResolver
                         {
                             case 0: value.cos = GetFloat4(ref r); break;
                             case 1: value.sin = GetFloat4(ref r); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<SpanNoise>((ref MessagePackWriter w, SpanNoise v) => { w.WriteArrayHeader(3); PutFloat4(ref w, v.field); w.Write(v.curvature); w.Write(v.fold); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(SpanNoise);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.field = GetFloat4(ref r); break;
+                            case 1: value.curvature = r.ReadSingle(); break;
+                            case 2: value.fold = r.ReadSingle(); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<SpanPath>((ref MessagePackWriter w, SpanPath v) => { w.WriteArrayHeader(5); PutFloat3(ref w, v.midpoint); PutFloat3(ref w, v.velocity); w.Write(v.speed); w.Write(v.acceleration); w.Write(v.halfLength); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(SpanPath);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.midpoint = GetFloat3(ref r); break;
+                            case 1: value.velocity = GetFloat3(ref r); break;
+                            case 2: value.speed = r.ReadSingle(); break;
+                            case 3: value.acceleration = r.ReadSingle(); break;
+                            case 4: value.halfLength = r.ReadSingle(); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<SpanStage>((ref MessagePackWriter w, SpanStage v) => { w.WriteArrayHeader(6); w.Write(v.frequency); w.Write(v.stretch); PutFloat3(ref w, v.axis); PutFloat3(ref w, v.shift); PutFloat3(ref w, v.offset); PutFloat3(ref w, v.octaveStep); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(SpanStage);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.frequency = r.ReadSingle(); break;
+                            case 1: value.stretch = r.ReadSingle(); break;
+                            case 2: value.axis = GetFloat3(ref r); break;
+                            case 3: value.shift = GetFloat3(ref r); break;
+                            case 4: value.offset = GetFloat3(ref r); break;
+                            case 5: value.octaveStep = GetFloat3(ref r); break;
                             default: r.Skip(); break;
                         }
                     }
