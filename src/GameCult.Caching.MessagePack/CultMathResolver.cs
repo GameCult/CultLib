@@ -180,7 +180,7 @@ public sealed class CultMathResolver : IFormatterResolver
                     return value;
                 }),
 
-            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin], SpanNoise is [field, curvature, fold], SpanPath is [midpoint, velocity, speed, acceleration, halfLength], SpanStage is [frequency, stretch, axis, shift, offset, octaveStep].
+            // Compositions: matrices are rows, rect is [min, max], CultCellular is [nearest, edge, id], CultPhasor is [cos, sin], SpanNoise is [field, curvature, fold], SpanPath is [midpoint, velocity, speed, acceleration, halfLength], SpanStage is [frequency, stretch, axis, shift, offset, octaveStep], CultSiteCells is [nearest, second, nearestSite, secondSite].
             Shape<float2x2>((ref MessagePackWriter w, float2x2 v) => { w.WriteArrayHeader(2); PutFloat2(ref w, v[0]); PutFloat2(ref w, v[1]); },
                 (ref MessagePackReader r) =>
                 {
@@ -284,6 +284,23 @@ public sealed class CultMathResolver : IFormatterResolver
                             case 3: value.shift = GetFloat3(ref r); break;
                             case 4: value.offset = GetFloat3(ref r); break;
                             case 5: value.octaveStep = GetFloat3(ref r); break;
+                            default: r.Skip(); break;
+                        }
+                    }
+                    return value;
+                }),
+            Shape<CultSiteCells>((ref MessagePackWriter w, CultSiteCells v) => { w.WriteArrayHeader(4); PutFloat4(ref w, v.nearest); PutFloat4(ref w, v.second); w.Write(v.nearestSite); w.Write(v.secondSite); },
+                (ref MessagePackReader r) =>
+                {
+                    var value = default(CultSiteCells);
+                    for (int i = 0, n = r.ReadArrayHeader(); i < n; i++)
+                    {
+                        switch (i)
+                        {
+                            case 0: value.nearest = GetFloat4(ref r); break;
+                            case 1: value.second = GetFloat4(ref r); break;
+                            case 2: value.nearestSite = r.ReadSingle(); break;
+                            case 3: value.secondSite = r.ReadSingle(); break;
                             default: r.Skip(); break;
                         }
                     }
