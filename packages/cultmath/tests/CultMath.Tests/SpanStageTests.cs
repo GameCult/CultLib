@@ -688,6 +688,10 @@ public sealed class SpanStageTests
     /// opposite to the float one in about a fifth of the draws, so fold must still cover the exact
     /// departure there: a fold forced to 0 at halfLength 0, or an S_o whose reach term drives e_n below
     /// zero under the loose bound, leaves it 0 and fails. span_fbm's fold is 0 throughout.
+    /// Near the origin S_o is tiny (scales 1e-4 and 1e-2 of the coordinate), and only the value allowance's
+    /// absolute term 2^-14 carries the kernel's own rounding: the exact departure there is the coordinate's
+    /// rounding times the gradient (1e-11 to 1e-9), so the exact check's additive tolerance is 1e-13, under it.
+    /// A larger tolerance absorbs a dropped absolute term whole.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -706,7 +710,7 @@ public sealed class SpanStageTests
                 var fold = stage.Ridged(span.Path).fold;
                 var (departureFloat, departureExact, rounding) = BranchDeparture(stage, span, 2);
                 Assert.Equal(0.0f, stage.Fbm(span.Path).fold);
-                Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"midpoint {q}, speed {speed:R}: the exact branch departure is {departureExact:R}, above fold {fold:R}");
+                Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-13, $"midpoint {q}, speed {speed:R}: the exact branch departure is {departureExact:R}, above fold {fold:R}");
                 Assert.True(departureFloat <= fold * (1.0 + 1.0e-3) + 1.0e-9 + rounding, $"midpoint {q}, speed {speed:R}: the float branch departure is {departureFloat:R}, above fold {fold:R}");
                 if (departureExact > 0.0)
                     crossing++;
