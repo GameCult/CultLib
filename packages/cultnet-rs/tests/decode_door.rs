@@ -674,3 +674,24 @@ fn a_networking_schema_descriptor_with_a_repeated_key_is_refused_and_a_bad_kind_
     let text = decode(response(bad_kind)).unwrap_err();
     assert!(text.contains("Kind") && !text.contains("CANARY"), "{text}");
 }
+
+#[test]
+fn a_schema_version_that_is_not_shaped_like_a_schema_name_is_described_by_length() {
+    let long = format!("cultnet.{}.v0", "a".repeat(100));
+    for version in [
+        "CANARY-5e1f",
+        "1canary.v0",
+        "cultnet.CANARY.v0",
+        "cultnet..v0",
+        "canary",
+        "cultnet.canary-x.v0",
+        long.as_str(),
+    ] {
+        let text = refusal(pairs(&[sv(version), ("messageId", "m".into())]));
+        assert!(text.contains(&format!("is not a schema name ({} bytes)", version.len())), "{version}: {text}");
+        assert!(!text.contains(version), "{version}: {text}");
+    }
+    // Shaped like a schema name, it is named (the sender spelled a schema, not data).
+    let text = refusal(pairs(&[sv("cultnet.x_y9.v10"), ("messageId", "m".into())]));
+    assert!(text.contains("cultnet.x_y9.v10 refused"), "{text}");
+}
