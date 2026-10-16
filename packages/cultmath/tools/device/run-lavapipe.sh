@@ -57,4 +57,4 @@ if [ "${WRITE_BOUNDS:-0}" = 1 ]; then
   export CULTMATH_WRITE_DEVICE_BOUNDS=1
   trap 'echo BOUNDS-BEGIN; cat "$TESTS/fixtures/device-bounds-lavapipe.txt"; echo BOUNDS-END' EXIT
 fi
-dotnet test "$TESTS" --no-build --filter "FullyQualifiedName~GlslMirrorTests.DeviceResultsHoldFixture" --logger "console;verbosity=detailed"
+dotnet test "$TESTS" --no-build --filter "FullyQualifiedName~GlslMirrorTests.DeviceResultsHoldFixture|FullyQualifiedName~GlslMirrorTests.CommittedShadersCarryNoReducedPrecisionQualifier" --logger "console;verbosity=detailed"

@@ -112,7 +112,7 @@ public sealed partial class GlslMirrorTests
 
     // ---- Whether a device's results hold ----
 
-    private sealed record BoundRow(string Route, int Index, string Glsl, string Tolerance, int Exact, double Worst, int NanClass);
+    private sealed record BoundRow(string Route, int Index, string Glsl, string Tolerance, int Exact, double Worst, int NanClass, string Bits);
 
     private sealed record Measured(BoundRow Row, string Class);
 
@@ -183,6 +183,23 @@ public sealed partial class GlslMirrorTests
         };
     }
 
+    // sha256 of the family's result bytes, and of its reference result when it is judged on one.
+    private static string ResultBits(string path, string? reference)
+    {
+        var bytes = File.ReadAllBytes(path);
+        if (reference is not null)
+            bytes = bytes.Concat(File.ReadAllBytes(reference)).ToArray();
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    // A tolerance text may state what a device is allowed: "on a device |diff| <= 2^-N max(|v|, 1)", which in
+    // u1 units (2^-23) is 2^(23-N). The judge reads it here and nowhere else.
+    private static double? StatedDeviceLimit(string tolerance)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(tolerance, @"on a device \|diff\| <= 2\^-(\d+) max\(\|v\|, 1\)");
+        return m.Success ? Math.ScaleB(1.0, 23 - int.Parse(m.Groups[1].Value)) : null;
+    }
+
     private static string FirstLine(Exception e)
     {
         var line = e.Message.Split('\n')[0];
@@ -229,9 +246,10 @@ public sealed partial class GlslMirrorTests
             }
 
             var (exact, worst, nanClass) = Measure(cases, floatWord, got);
+            var bits = ResultBits(path, IsSampledForm(family) ? Path.Combine(results, route, RefTag(f) + ".out") : null);
             var exactClass = family.Tolerance == "exact" || !floatWord.Any(w => w);
             var kind = exactClass ? "exact" : IsSampledForm(family) ? "sampled" : family.Verify is not null ? "check" : "bound";
-            measured.Add(new Measured(new BoundRow(route, f, family.Glsl, family.Tolerance, exact, worst, nanClass), kind));
+            measured.Add(new Measured(new BoundRow(route, f, family.Glsl, family.Tolerance, exact, worst, nanClass, bits), kind));
             try
             {
                 if (exactClass)
@@ -268,6 +286,10 @@ public sealed partial class GlslMirrorTests
                 failures.Add($"{name}: the recorded row is for another family; re-record with CULTMATH_WRITE_DEVICE_BOUNDS=1");
             else if (m.Class == "bound" && (m.Row.Worst > bound.Worst || m.Row.NanClass > bound.NanClass))
                 failures.Add($"{name}: worst u1 {m.Row.Worst:R} and {m.Row.NanClass} NaN-class mismatches, past the recorded {bound.Worst:R} and {bound.NanClass}");
+            else if (m.Class == "bound" && StatedDeviceLimit(m.Row.Tolerance) is { } limit && m.Row.Worst > limit)
+                failures.Add($"{name}: worst u1 {m.Row.Worst:R}, past the {limit:R} its stated tolerance allows a device");
+            else if (m.Row.Bits != bound.Bits && !failures.Any(x => x.StartsWith(name + ":")))
+                failures.Add($"{name}: the result bits differ from the recorded run's; if the change is meant, re-record with CULTMATH_WRITE_DEVICE_BOUNDS=1");
         }
 
         return new Judgement(failures, measured);
@@ -281,10 +303,10 @@ public sealed partial class GlslMirrorTests
         {
             "# renderer\t" + renderer,
             "# identity\t" + identity,
-            "# route\tindex\tglsl\ttolerance\texact cases\tworst u1\tNaN-class mismatches; written only by CULTMATH_WRITE_DEVICE_BOUNDS=1",
+            "# route\tindex\tglsl\ttolerance\texact cases\tworst u1\tNaN-class mismatches	result sha256; written only by CULTMATH_WRITE_DEVICE_BOUNDS=1",
         };
         lines.AddRange(rows.OrderBy(r => r.Route, StringComparer.Ordinal).ThenBy(r => r.Index)
-            .Select(r => string.Join('\t', r.Route, r.Index, r.Glsl, r.Tolerance, r.Exact, r.Worst.ToString("R", CultureInfo.InvariantCulture), r.NanClass)));
+            .Select(r => string.Join('\t', r.Route, r.Index, r.Glsl, r.Tolerance, r.Exact, r.Worst.ToString("R", CultureInfo.InvariantCulture), r.NanClass, r.Bits)));
         File.WriteAllText(path, string.Join('\n', lines) + "\n");
     }
 
@@ -298,7 +320,7 @@ public sealed partial class GlslMirrorTests
             if (line.StartsWith("# renderer\t") || line.StartsWith("# identity\t"))
                 header[c[0][2..]] = c[1];
             else if (!line.StartsWith('#') && line.Length > 0)
-                rows[(c[0], int.Parse(c[1]))] = new BoundRow(c[0], int.Parse(c[1]), c[2], c[3], int.Parse(c[4]), double.Parse(c[5], CultureInfo.InvariantCulture), int.Parse(c[6]));
+                rows[(c[0], int.Parse(c[1]))] = new BoundRow(c[0], int.Parse(c[1]), c[2], c[3], int.Parse(c[4]), double.Parse(c[5], CultureInfo.InvariantCulture), int.Parse(c[6]), c[7]);
         }
 
         return (header, rows);
@@ -603,5 +625,31 @@ public sealed partial class GlslMirrorTests
         var failures = Judge(broken, faithful).Failures;
         Assert.Equal(DeviceRoutes.Length, failures.Count);
         Assert.All(failures, line => Assert.Contains($"#{f} ", line));
+    }
+
+    [Fact]
+    public void AChangeInResultBitsFailsEvenWithinTheRecordedBound()
+    {
+        // Recorded on a device off in every case; judged on one off in a single case. The bound holds, the bits do not.
+        var f = BoundFamily();
+        using var recorded = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 4u) : words);
+        Record(recorded);
+        using var fewer = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 4u, 1) : words);
+        var failures = Judge(fewer, recorded).Failures;
+        Assert.Equal(DeviceRoutes.Length, failures.Count);
+        Assert.All(failures, line => { Assert.Contains($"#{f} ", line); Assert.Contains("result bits differ", line); });
+    }
+
+    [Fact]
+    public void AFamilyIsHeldToTheDeviceToleranceItsOwnTextStates()
+    {
+        // Recorded on the very device that violates it: only the stated tolerance can fail the family.
+        var f = Array.FindIndex(Families, fam => StatedDeviceLimit(fam.Tolerance) is not null);
+        Assert.True(f >= 0, "no family states a device tolerance");
+        using var far = Simulate((_, item, words) => item.Index == f.ToString() ? Alter(item, words, w => w ^ 0x00100000u) : words);
+        Record(far);
+        var failures = Judge(far, far).Failures;
+        Assert.Equal(DeviceRoutes.Length, failures.Count);
+        Assert.All(failures, line => Assert.Contains("stated tolerance", line));
     }
 }

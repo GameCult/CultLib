@@ -265,10 +265,13 @@ name the platform that generated them and the test compares them case by case
 against the running platform, printing the largest distance. `iv_exp`
 ("ulp-bounded, platform exp") must agree within one ulp. `phacelle`
 ("ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20
-max(|v|, 1)") must agree within `2^-20 max(|v|, 1)` per component, `v` being
+max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)") must agree across
+platforms within `2^-20 max(|v|, 1)` per component, `v` being
 the fixture's value: its sums of `exp`, `sin` and `cos` cancel near zero, where
 ulps mean nothing, and Windows differs from the Linux fixture by up to
-`3.6e-7 max(|v|, 1)`. Every other family is compared as text. `phacelle` is in
+`3.6e-7 max(|v|, 1)`. The device clause is `2^-18` because the devices measured
+are farther: lavapipe is `2.2e-6 max(|v|, 1)` and the GTX 1070 `3.1e-6`; the conforming
+run judges it. Every other family is compared as text. `phacelle` is in
 `CultMath.Phacelle.glsl`, so the evaluator concatenates
 `CultMath.Phacelle.glsl` after `CultMath.glsl` for that family, with
 normalization 0.5. The site does not vendor the MPL file and skips the family.

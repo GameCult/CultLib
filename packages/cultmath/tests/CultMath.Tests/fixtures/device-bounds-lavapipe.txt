@@ -28,7 +28,7 @@ lavapipe-glsl	23	vec2 cultmath_iv_snoise_ball(vec3, float)	ulp-bounded	242	54	0
 lavapipe-glsl	24	vec2 cultmath_iv_fbm_ball(vec3, float, int, float, float)	ulp-bounded	250	56	0
 lavapipe-glsl	25	vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)	ulp-bounded	198	1.6457063576593662	0
 lavapipe-glsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0
-lavapipe-glsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)	0	18.5	0
+lavapipe-glsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)	0	18.5	0
 lavapipe-glsl	28	float cultmath_snoise(vec3)	ulp-bounded, on the simplex tie set	127	112	0
 lavapipe-glsl	29	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, on the simplex tie set	102	546.5	0
 lavapipe-glsl	30	vec3 cultmath_af_point(float)	ulp-bounded	256	0	0
@@ -137,7 +137,7 @@ lavapipe-hlsl	23	vec2 cultmath_iv_snoise_ball(vec3, float)	ulp-bounded	244	54	0
 lavapipe-hlsl	24	vec2 cultmath_iv_fbm_ball(vec3, float, int, float, float)	ulp-bounded	252	75	0
 lavapipe-hlsl	25	vec4 cultmath_iv_frustum_ball(vec2, float, float, float, float)	ulp-bounded	198	1.6457063576593662	0
 lavapipe-hlsl	26	vec2 cultmath_iv_exp(vec2)	ulp-bounded, platform exp	7	7.526057804152758	0
-lavapipe-hlsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1)	0	18.5	0
+lavapipe-hlsl	27	CultPhasor cultmath_phacelle(vec3, vec3, float, float)	ulp-bounded, platform exp, sin, cos; across platforms |diff| <= 2^-20 max(|v|, 1); on a device |diff| <= 2^-18 max(|v|, 1)	0	18.5	0
 lavapipe-hlsl	28	float cultmath_snoise(vec3)	ulp-bounded, on the simplex tie set	144	99	0
 lavapipe-hlsl	29	vec4 cultmath_snoise_grad(vec3)	ulp-bounded, on the simplex tie set	111	546.5	0
 lavapipe-hlsl	30	vec3 cultmath_af_point(float)	ulp-bounded	256	0	0
