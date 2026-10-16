@@ -1030,7 +1030,7 @@ fn parse_raw_cultnet_schema_message(input: &rmpv::Value) -> Result<CultNetMessag
             })
         }
         _ => Err(anyhow!(
-            "Unsupported raw cultnet.schema.v0 schemaVersion {schema_version}"
+            "Unsupported raw cultnet.schema.v0 message"
         )),
     }
 }
@@ -1489,7 +1489,7 @@ fn parse_gamecult_networking_message(input: &rmpv::Value) -> Result<CultNetMessa
             )?,
         }),
         _ => Err(anyhow!(
-            "Unsupported gamecult.networking.v0 union tag {tag}"
+            "Unsupported gamecult.networking.v0 union tag"
         )),
     }
 }
@@ -1721,7 +1721,7 @@ fn require_legacy_schema_descriptor(
         "shared_contract" => CultNetSchemaKind::SharedContract,
         _ => {
             return Err(anyhow!(
-                "{field_name}.Kind has unsupported schema kind {kind}"
+                "{field_name}.Kind is not a supported schema kind"
             ));
         }
     };

@@ -645,3 +645,32 @@ fn receive_errors_name_schema_never_values() {
     // A message with no schemaVersion at all says so.
     assert!(refusal(pairs(&[("messageId", "m".into())])).contains("no schemaVersion"));
 }
+
+#[test]
+fn a_networking_schema_descriptor_with_a_repeated_key_is_refused_and_a_bad_kind_is_not_quoted() {
+    let canary = "CANARY-8c2d";
+    let descriptor = |extra: &[(&str, rmpv::Value)]| {
+        let mut entries = pairs(&[("schemaId", "s".into()), ("kind", "wire_message".into()), ("contentHash", "h".into())]);
+        entries.extend(pairs(extra));
+        rmpv::Value::Map(entries)
+    };
+    let response = |descriptor: rmpv::Value| {
+        let union = rmpv::Value::Array(vec![
+            8.into(),
+            rmpv::Value::Array(vec!["m".into(), rmpv::Value::Array(vec![descriptor])]),
+        ]);
+        rmp_serde::to_vec(&union).unwrap()
+    };
+    let decode = |bytes: Vec<u8>| {
+        on_stack(BIG, move || {
+            decode_cultnet_message_from_slice(&bytes, CultNetWireContract::GameCultNetworkingV0)
+                .map_err(|error| format!("{error:#}"))
+        })
+    };
+    decode(response(descriptor(&[]))).expect("the control decodes");
+    let text = decode(response(descriptor(&[("schemaId", "t".into())]))).unwrap_err();
+    assert!(text.contains("twice"), "{text}");
+    let bad_kind = rmpv::Value::Map(pairs(&[("schemaId", "s".into()), ("kind", canary.into()), ("contentHash", "h".into())]));
+    let text = decode(response(bad_kind)).unwrap_err();
+    assert!(text.contains("Kind") && !text.contains("CANARY"), "{text}");
+}
