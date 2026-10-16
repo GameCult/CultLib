@@ -16,7 +16,7 @@ namespace CultMath.Tests;
 /// CULTMATH_WRITE_GLSL=1 set, the first and last tests write the committed files before comparing, which
 /// is the one regeneration path.
 /// </summary>
-public sealed class GlslMirrorTests
+public sealed partial class GlslMirrorTests
 {
     private readonly ITestOutputHelper output;
 
@@ -361,13 +361,17 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         return sum;
     }
 
-    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false) =>
-        AssertSampledForm(cases, "af_snoise", (_, p) => math.snoise(p),
+    private static float SnoiseReference(string[] tokens, float3 p) => math.snoise(p);
+
+    private static float FbmReference(string[] t, float3 p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w;
+
+    private static string AssertSnoiseForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
+        AssertSampledForm(cases, "af_snoise", reference ?? SnoiseReference,
             (_, a) => SnoiseOctave(SnoiseWidthBound, a, 1.0), (_, a) => SnoiseOctave(SnoiseAllowance, a, 1.0), allowanceDecides);
 
-    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false) =>
+    private static string AssertFbmForm(JsonArray cases, bool allowanceDecides = false, Func<string[], float3, float>? reference = null) =>
         AssertSampledForm(cases, "af_fbm",
-            (t, p) => math.fbm_grad(p, (int)Convert.ToUInt32(t[7], 16), (float)Floats(t[8])[0], (float)Floats(t[9])[0]).w,
+            reference ?? FbmReference,
             (t, a) => FbmOctaves(t, a, SnoiseWidthBound), (t, a) => FbmOctaves(t, a, SnoiseAllowance), allowanceDecides);
 
     // AffineFrustumBall applied to C#'s own results.
