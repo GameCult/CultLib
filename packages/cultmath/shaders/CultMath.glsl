@@ -872,6 +872,119 @@ vec4 cultmath_af_frustum_ball(vec2 centreSlope, float z0, float z1, float footpr
 
 
 
+// Span stages (invariant 8): the SpanPath, SpanStage and SpanNoise of math.Span.cs, field for field in
+// C#'s order, and cultmath_span_stage, its octave stage, statement for statement so the text is a bit-for-bit
+// mirror. They follow the includes because the bounds read CULTMATH_SNOISE_LIPSCHITZ, _HESSIAN and _THIRD.
+// A shader caller builds a SpanStage itself (SpanStage(1.0, 1.0, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0))
+// is the identity of math.SpanStage.Identity, which has no shader form); see math.span_stage's comments for
+// the span, the transform, the bounds and the allowances.
+struct SpanPath
+{
+    vec3 midpoint;
+    vec3 velocity;
+    float speed;
+    float acceleration;
+    float halfLength;
+};
+
+struct SpanStage
+{
+    float frequency;
+    float stretch;
+    vec3 axis;
+    vec3 shift;
+    vec3 offset;
+    vec3 octaveStep;
+};
+
+struct SpanNoise
+{
+    vec4 field;
+    float curvature;
+    float fold;
+};
+
+// The octave stage behind cultmath_span_fbm and cultmath_span_ridged, as math.span_stage is behind span_fbm
+// and span_ridged. The Frobenius norm of the Hessian is written out in C#'s order (GLSL has no _mRC member
+// access); the C# local named step is octaveShift here (it would shadow GLSL's step()).
+SpanNoise cultmath_span_stage(bool ridged, SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    vec3 q = path.midpoint;
+    float halfLength = path.halfLength;
+    octaves = clamp(octaves, 0, 16);
+    bool stretched = dot(stage.axis, stage.axis) > 0.0 && stage.stretch != 1.0;
+    vec3 direction = stretched ? normalize(stage.axis) : vec3(0.0, 0.0, 0.0);
+    float squeeze = stretched ? 1.0 / stage.stretch - 1.0 : 0.0;
+    float norm = abs(stage.frequency) * (stretched ? max(1.0, 1.0 / stage.stretch) : 1.0);
+    vec3 mq = stretched ? stage.frequency * (q + squeeze * dot(direction, q) * direction) : stage.frequency * q;
+    vec3 mv = stretched ? stage.frequency * (path.velocity + squeeze * dot(direction, path.velocity) * direction) : stage.frequency * path.velocity;
+    float amplitude = 1.0;
+    float scale = 1.0;
+    float value = 0.0;
+    vec3 gradient = vec3(0.0, 0.0, 0.0);
+    float curvature = 0.0;
+    float fold = 0.0;
+    for (int i = 0; i < octaves; i++)
+    {
+        vec3 octaveShift = float(i) * stage.octaveStep;
+        vec3 x = scale * (mq + stage.shift) + (stage.offset + octaveShift);
+        vec4 n = cultmath_snoise_grad(x);
+        vec3 g = vec3(n.x, n.y, n.z);
+        vec3 mg = stretched ? stage.frequency * (g + squeeze * dot(direction, g) * direction) : stage.frequency * g;
+        if (ridged)
+        {
+            float s = sign(n.w);
+            value += amplitude * (1.0 - abs(n.w));
+            gradient += -amplitude * scale * s * mg;
+        }
+        else
+        {
+            value += amplitude * n.w;
+            gradient += amplitude * scale * mg;
+        }
+
+        float weight = abs(amplitude);
+        float factor = abs(scale) * norm;
+        float nu = factor * path.speed;
+        float rounding = 9.5367431640625e-7 * (abs(scale) * (cultmath_csum(abs(mq)) + cultmath_csum(abs(stage.shift))) + cultmath_csum(abs(stage.offset)) + cultmath_csum(abs(octaveShift)) + 1.7320508 * nu * halfLength);
+        float valueSlack = 6.103515625e-5 + CULTMATH_SNOISE_LIPSCHITZ * rounding;
+        float gradientSlack = 2.44140625e-4 + CULTMATH_SNOISE_HESSIAN * rounding;
+        float hessianSlack = 9.765625e-4 + CULTMATH_SNOISE_THIRD * rounding;
+        mat3 hm = cultmath_snoise_hessian(x);
+        float frobenius = sqrt(hm[0][0] * hm[0][0] + hm[0][1] * hm[0][1] + hm[0][2] * hm[0][2] + hm[1][0] * hm[1][0] + hm[1][1] * hm[1][1] + hm[1][2] * hm[1][2]
+            + hm[2][0] * hm[2][0] + hm[2][1] * hm[2][1] + hm[2][2] * hm[2][2]);
+        float hessianBound = min(CULTMATH_SNOISE_HESSIAN, frobenius + hessianSlack + CULTMATH_SNOISE_THIRD * nu * halfLength);
+        curvature += weight * factor * factor * hessianBound;
+        if (ridged)
+        {
+            vec3 w = scale * mv;
+            float reach = hessianBound * nu * halfLength;
+            float gl = min(CULTMATH_SNOISE_LIPSCHITZ, length(g) + gradientSlack + reach);
+            float travel = (abs(dot(g, w)) + gradientSlack * length(w)) * halfLength + (hessianBound * nu * length(w) + gl * factor * path.acceleration) * (0.5 * halfLength * halfLength) + 2.0 * valueSlack;
+            fold += 2.0 * weight * max(travel - abs(n.w), 0.0);
+        }
+
+        scale *= lacunarity;
+        amplitude *= gain;
+    }
+
+    SpanNoise result;
+    result.field = vec4(gradient, value);
+    result.curvature = curvature;
+    result.fold = fold;
+    return result;
+}
+
+SpanNoise cultmath_span_fbm(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    return cultmath_span_stage(false, path, stage, octaves, lacunarity, gain);
+}
+
+SpanNoise cultmath_span_ridged(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain)
+{
+    return cultmath_span_stage(true, path, stage, octaves, lacunarity, gain);
+}
+
 float cultmath_value_noise(vec2 position)
 {
     vec2 cell = floor(position);
