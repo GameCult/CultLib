@@ -44,7 +44,7 @@ public sealed class SpanStageTests
     // takes in use (stage-parameter-range): |frequency| 1e-3..10, stretch 1e-2..1e2, |lacunarity| 0.5..3,
     // |gain| 0.1..1.2, the last three and frequency with random signs where a sign is meaningful,
     // octaveStep nonzero in every component.
-    private readonly record struct Stage(SpanStage S, int Octaves, float Lacunarity, float Gain)
+    internal readonly record struct Stage(SpanStage S, int Octaves, float Lacunarity, float Gain)
     {
         public static Stage Draw(System.Random random, int maxOctaves = 8, int minOctaves = 1) => new(
             new SpanStage
@@ -164,7 +164,7 @@ public sealed class SpanStageTests
 
     // A span through q: velocity v, constant acceleration c of norm `acceleration`, so q(t) = q + v t + c t^2 / 2;
     // the speed bound is |v| plus what c can add over halfLength.
-    private readonly record struct Span(SpanPath Path, float3 Acceleration)
+    internal readonly record struct Span(SpanPath Path, float3 Acceleration)
     {
         public static Span Draw(System.Random random, float3 q, float halfLength, float acceleration)
         {
@@ -220,7 +220,7 @@ public sealed class SpanStageTests
         BitConverter.SingleToInt32Bits(a.x) == BitConverter.SingleToInt32Bits(b.x) && BitConverter.SingleToInt32Bits(a.y) == BitConverter.SingleToInt32Bits(b.y)
         && BitConverter.SingleToInt32Bits(a.z) == BitConverter.SingleToInt32Bits(b.z) && BitConverter.SingleToInt32Bits(a.w) == BitConverter.SingleToInt32Bits(b.w);
 
-    private static IEnumerable<float3> Points(System.Random random)
+    internal static IEnumerable<float3> Points(System.Random random)
     {
         for (var k = 0; k < 200; k++)
             yield return Vector(random, -60.0f, 60.0f);
@@ -697,7 +697,7 @@ public sealed class SpanStageTests
         var random = new System.Random(loose ? 0x100E : 0x4A11);
         var stage = new Stage(SpanStage.Identity, 1, 2.0f, 0.5f);
         var crossing = 0;
-        foreach (var scale in new[] { 30.0f, 300.0f, 3000.0f })
+        foreach (var scale in new[] { 1.0e-4f, 1.0e-2f, 30.0f, 300.0f, 3000.0f })
             for (var k = 0; k < 300; k++)
             {
                 var q = ProjectToZero(Vector(random, -scale, scale));
@@ -712,7 +712,40 @@ public sealed class SpanStageTests
                     crossing++;
             }
 
-        Assert.True(crossing >= 50, $"only {crossing} of 900 midpoints had an exact sign opposite to the float one: the check has no teeth");
+        Assert.True(crossing >= 80, $"only {crossing} of 1500 midpoints had an exact sign opposite to the float one: the check has no teeth");
+    }
+
+    /// <summary>
+    /// The step term of S_o, alone: an octaveStep of random direction and magnitude 1e3 to 1e5 (log-uniform) at
+    /// the identity stage, two octaves, the midpoint moved until octave 1's coordinate (2 q + step) sits on
+    /// the kernel's n = 0 (a Newton projection of that coordinate, then q = (x - step) / 2). There the
+    /// coordinate's float rounding (ulp 0.004 to 0.008) is what separates the float kernel from the exact one,
+    /// and only |o octaveStep|_1 in S_o carries it: the exact branch departure stays within fold, span_fbm's
+    /// fold is 0, and at least 100 draws have an exact sign opposite to the float one. Without the step term
+    /// fold is the 2^-14 and the small-coordinate rounding alone, and the departure passes it.
+    /// </summary>
+    [Fact]
+    public void SpanFoldEnclosesTheExactBranchAtLargeOctaveSteps()
+    {
+        var random = new System.Random(0x57E9);
+        var crossing = 0;
+        for (var k = 0; k < 600; k++)
+        {
+            var step = UnitVector(random) * LogUniform(random, 1.0e3f, 1.0e5f);
+            var transform = SpanStage.Identity;
+            transform.octaveStep = step;
+            var stage = new Stage(transform, 2, 2.0f, 0.5f);
+            var q = (ProjectToZero(Vector(random, -30.0f, 30.0f) + step) - step) * 0.5f;
+            var span = new Span(new SpanPath { midpoint = q, velocity = None, speed = 0.0f, acceleration = 0.0f, halfLength = 0.0f }, None);
+            var fold = stage.Ridged(span.Path).fold;
+            var (_, departureExact, _) = BranchDeparture(stage, span, 2);
+            Assert.Equal(0.0f, stage.Fbm(span.Path).fold);
+            Assert.True(departureExact <= fold * (1.0 + 1.0e-3) + 1.0e-9, $"octaveStep {step}, midpoint {q}: the exact branch departure is {departureExact:R}, above fold {fold:R}");
+            if (departureExact > 0.0)
+                crossing++;
+        }
+
+        Assert.True(crossing >= 100, $"only {crossing} of 600 midpoints had an exact sign opposite to the float one: the check has no teeth");
     }
 
     /// <summary>

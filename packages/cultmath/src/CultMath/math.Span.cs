@@ -151,8 +151,6 @@ public static partial class math
     public static SpanNoise span_ridged(SpanPath path, SpanStage stage, int octaves, float lacunarity, float gain) =>
         span_stage(true, path, stage, octaves, lacunarity, gain);
 
-    private static float span_l1(float3 v) => abs(v.x) + abs(v.y) + abs(v.z);
-
     // The span is SpanPath: q(t), |t| <= halfLength, through midpoint with velocity at t = 0, |q'| <= speed
     // and |q''| <= acceleration along it (speed at least |velocity|; all three and halfLength non-negative).
     // The transform is SpanStage: octave o samples snoise_grad at x_o(q) = f_o (M q + shift) + offset +
@@ -239,7 +237,7 @@ public static partial class math
             var weight = abs(amplitude);
             var factor = abs(scale) * norm;
             var nu = factor * path.speed;
-            var rounding = 9.5367431640625e-7f * (abs(scale) * (span_l1(mq) + span_l1(stage.shift)) + span_l1(stage.offset) + span_l1(step) + 1.7320508f * nu * halfLength);
+            var rounding = 9.5367431640625e-7f * (abs(scale) * (csum(abs(mq)) + csum(abs(stage.shift))) + csum(abs(stage.offset)) + csum(abs(step)) + 1.7320508f * nu * halfLength);
             var valueSlack = 6.103515625e-5f + SNOISE_LIPSCHITZ * rounding;
             var gradientSlack = 2.44140625e-4f + SNOISE_HESSIAN * rounding;
             var hessianSlack = 9.765625e-4f + SNOISE_THIRD * rounding;

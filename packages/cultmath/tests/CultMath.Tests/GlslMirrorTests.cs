@@ -67,7 +67,9 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
     /// reached by cultmath_integral_clamp_linear may see lo above hi, on any path and for any spelling of the
     /// normalisation. The mirror is compiled with counting clamps and the function is run over the edge grid
     /// (lo above hi, infinite bounds, zero-length spans, b = 0 and b != 0): the count of such clamp calls
-    /// stays 0 after every call.
+    /// stays 0 after every call. The cases are HlslSourceCompatibilityTests.IntegralClampLinearCases: the grid fixes
+    /// a in {-2.5, 0, 1.5}, so a normalisation keyed on a past 1.75 never clamps wrongly there; the committed
+    /// fixture's random cases reach it.
     /// </summary>
     [Fact]
     public void IntegralClampLinearNeverClampsWithMinAboveMax()
@@ -80,7 +82,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
         var function = shaderType.GetMethod("cultmath_integral_clamp_linear", BindingFlags.Instance | BindingFlags.NonPublic)!;
 
         var bad = new List<string>();
-        foreach (var c in HlslSourceCompatibilityTests.IntegralClampLinearEdgeGrid)
+        foreach (var c in HlslSourceCompatibilityTests.IntegralClampLinearCases)
         {
             count.SetValue(null, 0);
             function.Invoke(shader, c.Cast<object>().ToArray());
@@ -714,7 +716,37 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
                 var t1 = r.Next(4) != 0 ? t0 : Uniform(r, -3.0f, 3.0f);
                 return new object[] { a, b, lo, hi, t0, t1 };
             }),
+        // The span stages over their struct arguments: realistic stages and spans (SpanStageTests' own draw), the
+        // midpoint a Point3, one span in four a point.
+        new Family("SpanNoise cultmath_span_fbm(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
+        new Family("SpanNoise cultmath_span_ridged(SpanPath, SpanStage, int, float, float)", "ulp-bounded", SpanArguments),
     }).ToArray();
+
+    private static object[] SpanArguments(System.Random r)
+    {
+        var stage = SpanStageTests.Stage.Draw(r);
+        var halfLength = r.Next(4) == 0 ? 0.0f : new[] { 0.02f, 0.1f, 0.5f }[r.Next(3)];
+        var span = SpanStageTests.Span.Draw(r, Point3(r), halfLength, Uniform(r, 0.0f, 2.0f));
+        return new object[] { span.Path, stage.S, stage.Octaves, stage.Lacunarity, stage.Gain };
+    }
+
+    /// <summary>
+    /// The committed fixture's cases of the three cultmath_integral_clamp_linear families, decoded into the
+    /// C# arguments (a, b, lo, hi, t0, t1): the random cases the clamp-normalisation tests also run.
+    /// </summary>
+    internal static IReadOnlyList<float[]> IntegralClampLinearFixtureCases
+    {
+        get
+        {
+            const string clamp = "float cultmath_integral_clamp_linear(float, float, float, float, float, float)";
+            var method = Resolve(clamp);
+            return JsonNode.Parse(File.ReadAllText(FixturePath))!["functions"]!.AsArray()
+                .Where(family => (string)family!["glsl"]! == clamp)
+                .SelectMany(family => family!["cases"]!.AsArray())
+                .Select(entry => Arguments(method, ((string)entry!).Split(" -> ")[0]).Select(a => (float)a).ToArray())
+                .ToArray();
+        }
+    }
 
     // The fixture text, each case's arguments given by family and point index.
     private static string GoldenFixture(Func<int, int, object[]> arguments)
@@ -758,6 +790,7 @@ static int4 clamp(int4 x, int4 a, int4 b) { if (a.x > b.x || a.y > b.y || a.z > 
     {
         ["float"] = typeof(float), ["int"] = typeof(int), ["vec2"] = typeof(float2), ["vec3"] = typeof(float3),
         ["vec4"] = typeof(float4), ["ivec3"] = typeof(int3), ["ivec4"] = typeof(int4),
+        ["SpanPath"] = typeof(SpanPath), ["SpanStage"] = typeof(SpanStage),
     };
 
     // The C# math method a GLSL signature names: cultmath_ dropped, parameter types mapped.

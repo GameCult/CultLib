@@ -39,14 +39,19 @@ public sealed class HlslSourceCompatibilityTests
         Assert.NotNull(ShaderFunction(shader, "cultmath_af_snoise", typeof(float3), typeof(float3), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_af_fbm", typeof(float3), typeof(float3), typeof(float), typeof(int), typeof(float), typeof(float)));
         Assert.NotNull(ShaderFunction(shader, "cultmath_af_frustum_ball", typeof(float2), typeof(float), typeof(float), typeof(float), typeof(float)));
+        var (spanPath, spanStage) = SpanTypes(shader);
+        Assert.NotNull(ShaderFunction(shader, "cultmath_span_fbm", spanPath, spanStage, typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_span_ridged", spanPath, spanStage, typeof(int), typeof(float), typeof(float)));
+        Assert.NotNull(ShaderFunction(shader, "cultmath_span_stage", typeof(bool), spanPath, spanStage, typeof(int), typeof(float), typeof(float)));
     }
+
+    // The mirror's struct types are private nested types of HlslShader (a struct without a modifier).
+    private static (Type Path, Type Stage) SpanTypes(Type shader) =>
+        (shader.GetNestedType("SpanPath", BindingFlags.Public | BindingFlags.NonPublic)!, shader.GetNestedType("SpanStage", BindingFlags.Public | BindingFlags.NonPublic)!);
 
     // HLSL functions carry no access modifier, so they compile as private instance methods.
     private static MethodInfo? ShaderFunction(Type shader, string name, params Type[] parameters) =>
         shader.GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic, null, parameters, null);
-
-    // Mirror internals with no public C# math counterpart. Any other cultmath_* function must match one.
-    private static readonly string[] MirrorOnly = { "cultmath_snoise_mod289", "cultmath_snoise_permute" };
 
     // Shader constants with no C# twin of the same name (empty when every constant has one).
     private static readonly string[] ConstantsWithoutTwin = Array.Empty<string>();
@@ -88,7 +93,9 @@ public sealed class HlslSourceCompatibilityTests
     private static readonly float[] Specials = { 0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -2.75f, 3.0f, 1.0e-7f, 1.0e4f, -1.0e4f, 1.0e7f, float.NaN, float.PositiveInfinity, float.NegativeInfinity };
 
     /// <summary>
-    /// Every mirror function with a C# math counterpart returns the same bits (any NaN equals any NaN;
+    /// Every mirror function matches the math function of the same name, public or private (a function with no
+    /// twin fails, and nothing is exempt), with a struct parameter mapped by name and fields to the CultMath
+    /// type of the same name, and returns the same bits (any NaN equals any NaN;
     /// -0 differs from 0) over random inputs, every special value in every argument (ties, zeros,
     /// negatives, NaN, infinities, large values, integer lattice points), special pairs, and vectors whose first two
     /// components tie (x0.x == x0.y in snoise). This proves the text of CultMath.hlsl computes the same
@@ -153,20 +160,15 @@ public sealed class HlslSourceCompatibilityTests
         foreach (var mirror in shaderType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic).Where(m => m.Name.StartsWith("cultmath_")))
         {
             var types = mirror.GetParameters().Select(p => p.ParameterType).ToArray();
-            var counterpart = typeof(math).GetMethod(mirror.Name["cultmath_".Length..], BindingFlags.Public | BindingFlags.Static, null, types, null);
-            if (counterpart is null)
-            {
-                Assert.Contains(mirror.Name, MirrorOnly);
-                continue;
-            }
+            var counterpart = Twin(shaderType, mirror.Name["cultmath_".Length..], types);
+            Assert.True(counterpart is not null, $"{mirror.Name} has no C# math function of the same name and parameter types, public or private");
 
             compared.Add(mirror.Name);
             foreach (var input in cases)
             {
                 var slot = 0;
-                var args = types.Select(t => Scalars.Contains(t) ? Scalar(t, input(slot++))
-                    : Activator.CreateInstance(t, Components(t).Select(f => Scalar(f.FieldType, input(slot++))).ToArray())!).ToArray();
-                var expected = Values(counterpart.Invoke(null, args)!);
+                var args = types.Select(t => Build(t, () => input(slot++))).ToArray();
+                var expected = Values(counterpart!.Invoke(null, args.Select(a => CopyFields(a, TwinType(shaderType, a.GetType())!)).ToArray())!);
                 var actual = Values(mirror.Invoke(shader, args)!);
                 if (!BitwiseEqual(expected, actual))
                 {
@@ -176,7 +178,7 @@ public sealed class HlslSourceCompatibilityTests
         }
 
         Assert.True(mismatches.Count == 0, $"{mismatches.Count} mismatches:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
-        Assert.Equal(120, compared.Count);
+        Assert.Equal(125, compared.Count);
     }
 
     /// <summary>
@@ -201,14 +203,22 @@ public sealed class HlslSourceCompatibilityTests
     }
 
     /// <summary>
-    /// The compiled mirror's cultmath_integral_clamp_linear returns C#'s bits on every edge-grid case, and C#'s
-    /// result is never NaN there. The generic case set catches each of the function's guards (the held and
+    /// The edge grid followed by the committed GLSL fixture's cases of the three integral_clamp_linear families
+    /// (GlslMirrorTests.IntegralClampLinearFixtureCases, decoded): one list, read by the mirror test and by the
+    /// clamp-shadow test. The grid fixes a in {-2.5, 0, 1.5}, so a guard keyed on a past 1.75 hides from it
+    /// (Soul s4); the fixture's random a in [-4, 4] closes that.
+    /// </summary>
+    internal static IReadOnlyList<float[]> IntegralClampLinearCases => IntegralClampLinearEdgeGrid.Concat(GlslMirrorTests.IntegralClampLinearFixtureCases).ToArray();
+
+    /// <summary>
+    /// The compiled mirror's cultmath_integral_clamp_linear returns C#'s bits on every edge case (the grid and
+    /// the fixture's cases), and C#'s result is never NaN there. The generic case set catches each of the function's guards (the held and
     /// kept stretch guards, the flat branch's zero-length guard) only by its rotation: with the kept guard
     /// removed it finds 0 mismatches, with the held guard removed 1 once infinities join the specials, and the
     /// edge grid finds 246 for either every time.
     /// </summary>
     [Fact]
-    public void IntegralClampLinearMirrorMatchesCSharpOnTheEdgeGrid()
+    public void IntegralClampLinearMirrorMatchesCSharpOnTheEdgeCases()
     {
         var (assembly, errors) = CompileShaderMirror();
         Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
@@ -217,7 +227,8 @@ public sealed class HlslSourceCompatibilityTests
         var mirror = ShaderFunction(shaderType, "cultmath_integral_clamp_linear", Enumerable.Repeat(typeof(float), 6).ToArray())!;
 
         var mismatches = new List<string>();
-        foreach (var c in IntegralClampLinearEdgeGrid)
+        var cases = IntegralClampLinearCases;
+        foreach (var c in cases)
         {
             var expected = integral_clamp_linear(c[0], c[1], c[2], c[3], c[4], c[5]);
             var actual = (float)mirror.Invoke(shader, c.Cast<object>().ToArray())!;
@@ -226,7 +237,101 @@ public sealed class HlslSourceCompatibilityTests
                 mismatches.Add($"({string.Join(", ", c)}): C# {expected:R}, mirror {actual:R}");
         }
 
-        Assert.True(mismatches.Count == 0, $"{mismatches.Count} of {IntegralClampLinearEdgeGrid.Count} cases differ:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
+        Assert.True(mismatches.Count == 0, $"{mismatches.Count} of {cases.Count} cases differ:{Environment.NewLine}{string.Join(Environment.NewLine, mismatches.Take(12))}");
+    }
+
+    /// <summary>
+    /// At a SpanStage the shader has no identity constant for, so C#'s identity (copied field by field) is the
+    /// argument: the mirror's cultmath_span_fbm and cultmath_span_ridged return the field of the mirror's own
+    /// cultmath_fbm_grad and cultmath_ridged_grad, bit for bit, for 0 to 20 octaves over random and simplex-tie
+    /// points. The shader-side statement of math.SpanStage.Identity (design decision a: no shader identity).
+    /// </summary>
+    [Fact]
+    public void SpanStagesAtIdentityAreFbmAndRidgedInTheMirror()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var (pathType, stageType) = SpanTypes(shaderType);
+        var spanArguments = new[] { pathType, stageType, typeof(int), typeof(float), typeof(float) };
+        var pairs = new[]
+        {
+            (Span: ShaderFunction(shaderType, "cultmath_span_fbm", spanArguments)!, Plain: ShaderFunction(shaderType, "cultmath_fbm_grad", typeof(float3), typeof(int), typeof(float), typeof(float))!),
+            (Span: ShaderFunction(shaderType, "cultmath_span_ridged", spanArguments)!, Plain: ShaderFunction(shaderType, "cultmath_ridged_grad", typeof(float3), typeof(int), typeof(float), typeof(float))!),
+        };
+        var identity = CopyFields(SpanStage.Identity, stageType);
+
+        var random = new System.Random(0x57A6E2);
+        var compared = 0;
+        foreach (var p in SpanStageTests.Points(random))
+        {
+            var octaves = random.Next(0, 21);
+            var lacunarity = 1.4f + 1.2f * random.NextSingle();
+            var gain = 0.3f + 0.5f * random.NextSingle();
+            var path = CopyFields(new SpanPath { midpoint = p, velocity = new float3(0.6f, 0.0f, 0.8f), speed = 1.0f, acceleration = 0.5f, halfLength = 0.25f }, pathType);
+            foreach (var (span, plain) in pairs)
+            {
+                var field = FieldOf(span.Invoke(shader, new object[] { path, identity, octaves, lacunarity, gain })!, "field");
+                var expected = plain.Invoke(shader, new object[] { p, octaves, lacunarity, gain })!;
+                Assert.True(BitwiseEqual(Values(expected), Values(field)), $"{span.Name} at {p}, {octaves} octaves: {string.Join(" ", Values(field).Select(v => v.Value))} is not {plain.Name} {string.Join(" ", Values(expected).Select(v => v.Value))}");
+                compared++;
+            }
+        }
+
+        Assert.True(compared >= 460, $"only {compared} identity comparisons ran");
+    }
+
+    /// <summary>
+    /// The generic comparison draws every argument from [-100, 100] (and specials), where the octave loop's
+    /// frequency, stretch and span terms saturate: 0 or 16 octaves, a Hessian bound pinned at its global value.
+    /// This sweep draws SpanStageTests' realistic stages and spans (4000, one in four with a zero axis, one in
+    /// four with a point span, halfLength 0), both stages, and the mirror must return C#'s bits for the whole
+    /// SpanNoise. Each of stretched and unstretched stages, and of positive and zero fold, must be met at least
+    /// 500 times, or the sweep proves nothing about that branch.
+    /// </summary>
+    [Fact]
+    public void SpanStageMirrorMatchesCSharpBitForBitOnRealisticSpans()
+    {
+        var (assembly, errors) = CompileShaderMirror();
+        Assert.True(assembly is not null, string.Join(Environment.NewLine, errors));
+        var shaderType = assembly!.GetType("CultMathHlsl.HlslShader")!;
+        var shader = Activator.CreateInstance(shaderType);
+        var (pathType, stageType) = SpanTypes(shaderType);
+        var spanArguments = new[] { pathType, stageType, typeof(int), typeof(float), typeof(float) };
+        var mirrors = new[] { ShaderFunction(shaderType, "cultmath_span_fbm", spanArguments)!, ShaderFunction(shaderType, "cultmath_span_ridged", spanArguments)! };
+
+        var random = new System.Random(0x5EED4);
+        float Next(float extent) => (random.NextSingle() * 2.0f - 1.0f) * extent;
+        int stretched = 0, unstretched = 0, folded = 0, flat = 0;
+        for (var i = 0; i < 4000; i++)
+        {
+            var drawn = SpanStageTests.Stage.Draw(random);
+            var stage = drawn.S;
+            if (i % 4 == 1)
+                stage.axis = new float3(0.0f, 0.0f, 0.0f);
+            var halfLength = i % 4 == 2 ? 0.0f : new[] { 0.02f, 0.1f, 0.5f, 2.0f }[random.Next(4)];
+            var span = SpanStageTests.Span.Draw(random, new float3(Next(30.0f), Next(30.0f), Next(30.0f)), halfLength, random.NextSingle() * 2.0f);
+            var arguments = new object[] { CopyFields(span.Path, pathType), CopyFields(stage, stageType), drawn.Octaves, drawn.Lacunarity, drawn.Gain };
+            if (dot(stage.axis, stage.axis) > 0.0f && stage.stretch != 1.0f)
+                stretched++;
+            else
+                unstretched++;
+            for (var m = 0; m < 2; m++)
+            {
+                var expected = m == 0 ? span_fbm(span.Path, stage, drawn.Octaves, drawn.Lacunarity, drawn.Gain) : span_ridged(span.Path, stage, drawn.Octaves, drawn.Lacunarity, drawn.Gain);
+                var actual = mirrors[m].Invoke(shader, arguments)!;
+                Assert.True(BitwiseEqual(Values(expected), Values(actual)),
+                    $"{mirrors[m].Name} differs from C# at midpoint {span.Path.midpoint}, halfLength {halfLength:R}, {drawn.Octaves} octaves: C# {string.Join(" ", Values(expected).Select(v => v.Value))}, mirror {string.Join(" ", Values(actual).Select(v => v.Value))}");
+                if (m == 1 && expected.fold > 0.0f)
+                    folded++;
+                else if (m == 1)
+                    flat++;
+            }
+        }
+
+        Assert.True(stretched >= 500 && unstretched >= 500 && folded >= 500 && flat >= 500,
+            $"the sweep meets a branch too rarely: stretched {stretched}, unstretched {unstretched}, fold > 0 {folded}, fold = 0 {flat} of 4000");
     }
 
     /// <summary>
@@ -439,14 +544,66 @@ public sealed class HlslSourceCompatibilityTests
     }
 
     // Integer arguments take the bit pattern of the float input, so specials become 0, 0x80000000, NaN bits, ...
-    private static readonly Type[] Scalars = { typeof(float), typeof(int), typeof(uint) };
+    // A bool argument is true when its float input is positive.
+    private static readonly Type[] Scalars = { typeof(float), typeof(int), typeof(uint), typeof(bool) };
 
     private static object Scalar(Type t, float f) => t == typeof(float) ? f
+        : t == typeof(bool) ? f > 0.0f
         : t == typeof(int) ? BitConverter.SingleToInt32Bits(f) : (object)(uint)BitConverter.SingleToInt32Bits(f);
 
-    // Scoped to scalar-typed fields: this only ever builds function ARGUMENTS (float2/3/4, int2/3/4, ...),
-    // never a struct-of-struct return, so it must not recurse.
-    private static FieldInfo[] Components(Type t) => t.GetFields().Where(f => !f.IsStatic && Scalars.Contains(f.FieldType)).ToArray();
+    private static FieldInfo[] InstanceFields(Type t) => t.GetFields(BindingFlags.Public | BindingFlags.Instance);
+
+    // One function ARGUMENT from the case's scalars, in field order: a scalar from its float, a vector by the
+    // constructor taking its scalar fields, a struct field by field, recursively.
+    private static object Build(Type t, Func<float> next)
+    {
+        if (Scalars.Contains(t))
+            return Scalar(t, next());
+        var fields = InstanceFields(t);
+        var constructor = t.GetConstructor(fields.Select(f => f.FieldType).ToArray());
+        if (constructor is not null)
+            return constructor.Invoke(fields.Select(f => Build(f.FieldType, next)).ToArray());
+        var value = Activator.CreateInstance(t)!;
+        foreach (var field in fields)
+            field.SetValue(value, Build(field.FieldType, next));
+        return value;
+    }
+
+    // The CultMath type a mirror parameter type stands for: itself, or for a type nested in HlslShader the
+    // CultMath type of the same name, only if both have the same instance fields by name, type (mapped
+    // likewise) and order. Null when there is no such twin.
+    private static Type? TwinType(Type shaderType, Type mirror)
+    {
+        if (mirror.DeclaringType != shaderType)
+            return mirror;
+        var twin = typeof(math).Assembly.GetType("CultMath." + mirror.Name);
+        if (twin is null)
+            return null;
+        var mine = InstanceFields(mirror);
+        var theirs = InstanceFields(twin);
+        return mine.Length == theirs.Length && mine.Zip(theirs).All(p => p.First.Name == p.Second.Name && TwinType(shaderType, p.First.FieldType) == p.Second.FieldType) ? twin : null;
+    }
+
+    // The math function of the mirror function's name, with its parameter types mapped, public or private.
+    private static MethodInfo? Twin(Type shaderType, string name, Type[] mirrorTypes)
+    {
+        var types = mirrorTypes.Select(t => TwinType(shaderType, t)).ToArray();
+        return types.Any(t => t is null) ? null
+            : typeof(math).GetMethod(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, null, types!, null);
+    }
+
+    // A struct value as another struct type of the same fields by name: itself when the type is the same.
+    private static object CopyFields(object source, Type target)
+    {
+        if (source.GetType() == target)
+            return source;
+        var copy = Activator.CreateInstance(target)!;
+        foreach (var field in InstanceFields(target))
+            field.SetValue(copy, CopyFields(source.GetType().GetField(field.Name)!.GetValue(source)!, field.FieldType));
+        return copy;
+    }
+
+    private static object FieldOf(object value, string name) => value.GetType().GetField(name)!.GetValue(value)!;
 
     /// <summary>
     /// One flattened scalar leaf of a (possibly nested) return value: its declaration path (field
@@ -520,7 +677,8 @@ public sealed class HlslSourceCompatibilityTests
 
         // 5. Struct fields gain `public`; HLSL has no field access-modifier concept, and a C# struct's
         //    fields default to private, which would hide them from the mirror test's reflection-based
-        //    field comparison (invariant 8's one struct return shape, e.g. CultCellular).
+        //    field comparison (invariant 8's one struct return shape, e.g. CultCellular) and the struct
+        //    arguments' copies (SpanPath, SpanStage), which reflection reads and writes by field name.
         source = Regex.Replace(source, @"(?ms)(struct\s+\w+\s*\{)(.*?)(\};)", m =>
             m.Groups[1].Value + Regex.Replace(m.Groups[2].Value, @"(?m)^(\s*)(\w+\s+\w+;)", "$1public $2") + m.Groups[3].Value);
 
