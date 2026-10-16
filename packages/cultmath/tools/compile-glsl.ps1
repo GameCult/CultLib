@@ -42,7 +42,7 @@ function Get-Zero([string]$type) {
     return "$type(0.0)"
 }
 $calls = foreach ($match in [regex]::Matches($library, '(?m)^\w+\s+(cultmath_\w+)\s*\(([^)]*)\)')) {
-    $arguments = foreach ($parameter in ($match.Groups[2].Value -split ',')) {
+    $arguments = foreach ($parameter in ($match.Groups[2].Value -split ',' | Where-Object { $_.Trim() })) {
         Get-Zero (($parameter.Trim() -split '\s+')[0])
     }
     "    $($match.Groups[1].Value)($($arguments -join ', '));"
