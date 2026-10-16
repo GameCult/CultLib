@@ -10,6 +10,7 @@ public sealed partial class GlslMirrorTests
     // Stated limits: a syntax guardrail only. It reads whole words in the committed .glsl and .hlsl under shaders/
     // with comments removed; it does not see a qualifier spelled through a macro, an include or a generated
     // shader, and it says nothing about a driver that relaxes highp itself. It names file and line, never text.
+    // Recorded limit (s2.tripwire-slashslash-star-hides): block comments are cut before line comments, so a qualifier between `// x /*` and `// */` passes.
     private static readonly Regex ReducedPrecision = new(
         @"\b(mediump|lowp|min(10|12|16)(float|int|uint)[1-4]?(x[1-4])?|half[1-4]?(x[1-4])?)\b|\bprecision\s+(?!highp\b)\w+", RegexOptions.Compiled);
 
