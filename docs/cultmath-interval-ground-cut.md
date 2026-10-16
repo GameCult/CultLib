@@ -2086,24 +2086,24 @@ nebula work picks it.
    comments and the README, not `design.md`, which `expr-ir` edits.
 2. Ruled `stage-functions` (`span-chain-shape-ruled`), split in three for size, on one
    branch `hands/cultmath-stage-functions`:
-   - `stage-functions` (specs `cut-stage-functions.r1`-`r3`): r1 at `2fd9431a`; r2 batch A
-     (SpanPath/SpanStage inputs, float-rounding allowances) closed by verdict s3 at `98f4c441`;
-     r3 batch B (zero-length flat spans, infinite-bound and lo-normalise rules pinned in the
-     shader mirror, pins equal to their measurement, `tools/compile-hlsl.ps1`).
-   - `stage-shaders`: HLSL twins of `span_fbm`/`span_ridged` with SpanPath and SpanStage as
-     HLSL structs, the GLSL lowering and fixture families, dxc through `tools/compile-hlsl.ps1`
-     and glslang. The mirror harness learns struct arguments: `EveryMirrorFunctionMatchesCSharpMath`
-     builds a mirror struct input field by field from the case scalars, and finds the C#
-     counterpart by mapping the mirror's nested struct types to CultMath's by type and field
-     name (today the lookup keys on the mirror's own types, so a struct-taking function has no
-     counterpart; Body fact R2-4). Its verification carries follow-up `span-allowance-gpu-margin`.
-     Merges with `stage-functions`.
-     Open, decided when stage-shaders is mapped (a design call, not the operator's): the HLSL
-     form of SpanStage.Identity. (a) none: shader callers build the struct, and a mirror test
-     checks `span_fbm(path, identity, ...)` against `fbm_grad` with the identity built in C#;
-     (b) a `static const SpanStage` (the mirror transform and GLSL lowering would have to learn
-     struct constants); (c) a function, which needs a duplicating C# twin or a `MirrorOnly`
-     exemption. Recommended (a), moderate confidence.
+   - `stage-functions` (specs `cut-stage-functions.r1`-`r3`) and `stage-shaders` (spec
+     `cut-stage-shaders.r1`): merged to main 2026-10-16 (verdicts cut-stage-functions.s2-s4,
+     cut-stage-shaders.s1). SpanPath/SpanStage inputs, float-rounding allowances, HLSL and GLSL
+     twins with SpanPath/SpanStage/SpanNoise as shader structs, a struct-aware mirror with no
+     `MirrorOnly` list (125 functions compared), `tools/compile-hlsl.ps1` (x64 dxc, `-WX`).
+     SpanStage.Identity has no shader form (decided in the spec: callers build the struct; a
+     mirror test proves the shader at a C#-built identity equals fbm_grad/ridged_grad).
+   - `stage-shaders-device`: a committed WebGL2 runner on Starfire (ANGLE to D3D11, Unity's
+     driver path; also runnable on a phone) from follow-ups `glsl-browser-parity-run` and
+     `affine-device-runner-seed`; fixture families across coordinate bands 1e2..1e6; a C# test
+     reading the device readback against the double kernel; settles follow-up
+     `span-allowance-gpu-margin`'s four CPU survivors (eg-abs, eh-abs, So-reach, two-en-to-one)
+     and the size of the 2^-14 absolute term (en-abs-halved survives every CPU test). `fold`
+     and the ridged sign jump at zero, so their device check is one-sided enclosure, not ulps.
+   - `cultmath-unity` span release: after `stage-shaders-device`; the smoke shader calls both
+     span twins; its own Soul pass; then Aetheria's pin bump and its spans-option lowering
+     (ruling aetheria-nebula-spans-as-option; a moving nebula also waits on
+     `span-bounds-under-flow`).
    - `span-compose`: the composition helper (`span_compose`) and `span_range` for
      the empty and saturated proofs, in all three runtimes, with a two-stage chain
      enclosure test against dense sampling.
